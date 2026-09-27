@@ -100,7 +100,15 @@ func reportInputAccounting(w io.Writer, input reflection.ReflectionInput, result
 		if d.Guarded {
 			outcome = "nothing in the result carries it"
 		}
-		_, _ = fmt.Fprintf(w, "  %s reason: %s — %s%s\n", d.ID, d.Reason, outcome, guardClause(boolCount(d.Guarded), allowDrops, "row"))
+		// The reason and its successor are rendered from the structured fields, so
+		// the id on the line is the resolved one: the response's own spelling of a
+		// supersession target is upper-cased by the parser, and a stored id is
+		// 32 lower-case hex digits.
+		reason := d.Reason
+		if d.Successor != "" {
+			reason += " " + d.Successor
+		}
+		_, _ = fmt.Fprintf(w, "  %s reason: %s — %s%s\n", d.ID, reason, outcome, guardClause(boolCount(d.Guarded), allowDrops, "row"))
 	}
 
 	// The only bucket that is not an operation and not a count of untouched

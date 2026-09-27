@@ -53,12 +53,16 @@ type AccountRewrite struct {
 }
 
 // AccountDrop is one drop line: the id the response disposed of, the reason it
-// gave, and whether the drop guard found anything in the result carrying the
-// row.
+// gave, the id it named as the replacement, and whether the drop guard found
+// anything in the result carrying the row.
 type AccountDrop struct {
-	ID      string
-	Reason  string
-	Guarded bool
+	ID     string
+	Reason string
+	// Successor is empty for an `obsolete` drop, and otherwise the stored
+	// spelling of the id that takes over — resolved here for the reason Drop
+	// documents: the raw one is the response's, and upper-cased by the parser.
+	Successor string
+	Guarded   bool
 }
 
 // InputAccounting is every input id of one consolidation, in the buckets the
@@ -159,7 +163,12 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 	// the rewrites it is after that.
 	dropOf := make(map[string]AccountDrop, len(result.Drops))
 	for _, d := range result.Drops {
-		dropOf[memIDKey(d.ID)] = AccountDrop{ID: storedID(d.ID), Reason: d.Reason, Guarded: flagged[memIDKey(d.ID)]}
+		dropOf[memIDKey(d.ID)] = AccountDrop{
+			ID:        storedID(d.ID),
+			Reason:    d.Reason,
+			Successor: storedID(d.Successor),
+			Guarded:   flagged[memIDKey(d.ID)],
+		}
 	}
 	rewriteOf := make(map[string]AccountRewrite, len(result.Replacements))
 	for _, r := range result.Replacements {

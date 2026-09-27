@@ -18,11 +18,18 @@ import (
 // section that replaces it: every input id appears in exactly one line or one
 // count, and a line kind that stops being printed fails the accounting.
 
-var storedIDPattern = regexp.MustCompile(`[0-9A-Z]{26}`)
+var storedIDPattern = regexp.MustCompile(`\b[0-9a-f]{32}\b`)
 
-// testID is a stored-id-shaped name for a fixture memory, so a report that
-// quotes an id is quoted in the shape an operator would see in the database.
-func accountingID(n int) string { return fmt.Sprintf("01J8Z%021d", n) }
+// accountingID is a stored-id-shaped name for a fixture memory, and the shape is
+// load-bearing rather than cosmetic: Ghost's ids are `hex(randomblob(16))`, so
+// they are 32 LOWER-CASE hex digits. A fixture spelled in ULID-shaped upper case
+// hides every case defect in the report — the op parser upper-cases a
+// supersession's target before comparing it, and against an upper-case fixture
+// that rewrite is a no-op, so the one place a line could quote a key the
+// database does not hold would print the right thing by accident. The `cafe`
+// prefix is here for the same reason one notch down: an all-digit id is
+// unchanged by a case conversion too.
+func accountingID(n int) string { return fmt.Sprintf("cafe%028x", n) }
 
 // reflectRoundForTest runs the real LLM tier — prompt, op parser, grounding
 // check, post-filters — and then the drop guard, returning the result and the
@@ -433,12 +440,12 @@ func resultCarries(result reflection.ReflectionResult, content string) bool {
 }
 
 // TestReflectSummaryPrintsTheStoredIDSpelling pins the id the report quotes to
-// the spelling the DATABASE holds. The op parser strips the prompt's `id:`
-// label and trims but does not upper-case, and the drop's successor target is
-// upper-cased while the dropped id is not, so a model that lower-cases an id —
-// which `memIDKey` exists to tolerate — would otherwise have its operation line
-// print `01j8z…02` where a count line prints `01J8Z…02`. These ids are the keys
-// the report asks an operator to look rows up by, and a copied id that does not
+// the spelling the DATABASE holds. The op parser strips the prompt's `id:` label
+// and trims, and `memIDKey` compares case-insensitively, so a response may spell
+// an id any way it likes — but the drop's successor target is upper-cased on the
+// way in, so a model that shouts an id would otherwise have its operation line
+// print `ABCDEF…` where the store holds `abcdef…`. These ids are the keys the
+// report asks an operator to look rows up by, and a copied id that does not
 // match the store is the one kind of typo this section cannot afford.
 func TestReflectSummaryPrintsTheStoredIDSpelling(t *testing.T) {
 	source := accountFixture{accountingID(91), "the ledger syncs from the relay export directory"}
@@ -446,12 +453,12 @@ func TestReflectSummaryPrintsTheStoredIDSpelling(t *testing.T) {
 	fixtures := []accountFixture{source, unnamed}
 	input := accountingInput(t, fixtures...)
 
-	// The harness answers in the case the parser accepts and a stored row does
-	// not spell: the id lower-cased. One id takes exactly one operation, so this
-	// is the rewrite alone and the other fixture is the pass-through.
-	lower := strings.ToLower(source.id)
+	// The harness answers with the id shouted, which the parser accepts. One id
+	// takes exactly one operation, so this is the rewrite alone and the other
+	// fixture is the pass-through.
+	shouted := strings.ToUpper(source.id)
 	result, guarded := reflectRoundForTest(t, input, func() string {
-		return fmt.Sprintf(`{"learned_context":"ctx","ops":["rewrite %s -> the ledger syncs from the relay export directory nightly"]}`, lower)
+		return fmt.Sprintf(`{"learned_context":"ctx","ops":["rewrite %s -> the ledger syncs from the relay export directory nightly"]}`, shouted)
 	}, false)
 	if len(guarded) != 0 {
 		t.Fatalf("the guard flagged %d rows, so this fixture is not the clean case it claims to be: %+v", len(guarded), guarded)
@@ -464,8 +471,8 @@ func TestReflectSummaryPrintsTheStoredIDSpelling(t *testing.T) {
 	if !strings.Contains(section, source.id+" ->") {
 		t.Errorf("the rewrite line does not quote the stored spelling of the id:\n%s", section)
 	}
-	if strings.Contains(section, lower) {
-		t.Errorf("the report quotes the model's spelling of the id, which the database does not hold:\n%s", section)
+	if strings.Contains(section, shouted) {
+		t.Errorf("the report quotes the response's spelling of the id, which the database does not hold:\n%s", section)
 	}
 }
 

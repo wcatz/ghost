@@ -97,17 +97,27 @@ type Replacement struct {
 	Text string
 }
 
-// Drop is one explicit `drop` operation: the input id it names and the reason
-// the response gave for removing it — "obsolete", or "superseded by <id>" with
-// the id already uppercased.
+// Drop is one explicit `drop` operation: the input id it names, the reason the
+// response gave, and — for a supersession, and only then — the input id it named
+// as the replacement.
 //
 // It is a record, not a permission, exactly as Replacement is. The drop guard
 // audits the row on its own evidence and `ghost reflect --allow-drops` is the
 // only thing that accepts a deletion; this exists so a reader of the result can
 // see the claim at all, which an obsolete drop otherwise never did.
+//
+// Successor is a FIELD rather than part of Reason, and that is load-bearing
+// rather than tidier: the id inside a formatted reason is the one the response
+// wrote, and the op parser upper-cases a supersession's target before it can
+// compare it — while a stored id is `hex(randomblob(16))`, 32 lower-case hex
+// digits. A report that printed the reason verbatim would therefore quote a key
+// the database does not hold, on every real store and not only when a model
+// mistypes one. AccountInputs resolves this field to the stored spelling.
 type Drop struct {
 	ID     string
 	Reason string
+	// Successor is empty for an `obsolete` drop, which names no replacement.
+	Successor string
 }
 
 // Refusal is a merge or rewrite the grounding check rejected.

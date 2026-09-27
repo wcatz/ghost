@@ -382,12 +382,14 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 			// disposed of — and an input id nothing accounts for is the hole this
 			// record closes: the report could not show a disposal the model had
 			// asked for. The reason travels with it for the same reason, since
-			// "obsolete" and "superseded by <id>" are different claims.
-			reason := "obsolete"
+			// "obsolete" and "superseded by" are different claims, and the named
+			// successor is its own field so a reader can resolve it to the stored
+			// id rather than parsing it out of a sentence.
+			drop := Drop{ID: op.ids[0], Reason: "obsolete"}
 			if !op.obsolete {
-				reason = "superseded by " + op.target
+				drop.Reason, drop.Successor = "superseded by", op.target
 			}
-			result.Drops = append(result.Drops, Drop{ID: op.ids[0], Reason: reason})
+			result.Drops = append(result.Drops, drop)
 		}
 	}
 	for _, op := range dropped {
