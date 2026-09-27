@@ -86,6 +86,23 @@ func TestRewrittenRowIsNotReAddedWhenTheRewriteKeepsTheSubstance(t *testing.T) {
 	}
 }
 
+// bullet returns the single prompt line beginning at marker, so a contract can be
+// asserted on the bullet that carries it rather than on the prompt as a whole.
+// A shared literal across two bullets would pin neither: a change that put the
+// wrong wording on one while the other stayed right would pass.
+func bullet(t *testing.T, prompt, marker string) string {
+	t.Helper()
+	_, after, ok := strings.Cut(prompt, marker)
+	if !ok {
+		t.Fatalf("the prompt has no %s bullet at all", marker)
+	}
+	line, _, ok := strings.Cut(after, "\n")
+	if !ok {
+		t.Fatalf("the %s bullet is the last line, so it cannot be delimited", marker)
+	}
+	return line
+}
+
 // TestPromptTellsTheModelARewriteMayComeBack is the prompt half of the KEEP rule,
 // and it is a test because the drift is silent: the guard changed and the prompt
 // did not, so on the unattended path the model was told a rewrite or a
@@ -114,17 +131,17 @@ func TestPromptTellsTheModelARewriteMayComeBack(t *testing.T) {
 
 	// The supersession bullet is the one the hole was reached through, so it must
 	// carry the signal too and not only inherit it from the rewrite bullet.
-	const marker = `"drop <id> reason: superseded by <id>"`
-	_, sup, ok := strings.Cut(prompt, marker)
-	if !ok {
-		t.Fatalf("the prompt has no %s bullet at all", marker)
-	}
-	bullet, _, ok := strings.Cut(sup, "\n")
-	if !ok {
-		t.Fatalf("the %s bullet is the last line, so it cannot be delimited; check the test", marker)
-	}
-	if !strings.Contains(bullet, "puts that row back verbatim") {
+	sup := bullet(t, prompt, `"drop <id> reason: superseded by <id>"`)
+	if !strings.Contains(sup, "puts that row back verbatim") {
 		t.Errorf("the supersession bullet still reads as final; it needs the same warning as a rewrite")
+	}
+	// The two spliced clauses must be separated by a real sentence boundary.
+	// This one is here because the comment on staleTail claims the full stop
+	// matters and nothing else checked it: without it the harness is handed
+	// "…is undone by the verbatim re-add State an obsolete drop only when…".
+	obsolete := bullet(t, prompt, `"drop <id> reason: obsolete"`)
+	if !strings.Contains(obsolete, "verbatim re-add. State an obsolete drop") {
+		t.Errorf("the obsolete bullet runs its two spliced clauses together: %q", obsolete)
 	}
 }
 
@@ -135,17 +152,35 @@ func TestPromptTellsTheModelARewriteMayComeBack(t *testing.T) {
 // makes — on the path eval/cycle measures, which passes --apply --allow-drops
 // for every reflect. The grader would be told a rewrite is free when the row is
 // in fact deleted.
+//
+// Each case is checked on the BULLET that carries it rather than on the prompt
+// as a whole, so a re-add leaking into the obsolete bullet cannot be masked by
+// replaceTail's wording and vice versa. A shared literal across the two would
+// pin neither: a change that put the default tail back on one bullet while the
+// other still carried the right one would pass.
 func TestPromptDoesNotPromiseAReAddUnderAllowDrops(t *testing.T) {
 	memories := []memory.Memory{{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "the bastion is reached on port 2222"}}
 	dropping := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: memories, AllowDrops: true})
 
-	for _, unwanted := range []string{"puts that row back verbatim", "is put back verbatim, so state one only"} {
-		if strings.Contains(dropping, unwanted) {
-			t.Errorf("--allow-drops prompt promises a re-add the apply skips: %q", unwanted)
-		}
+	rewrite := bullet(t, dropping, `"rewrite <id> -> <text>"`)
+	if strings.Contains(rewrite, "back verbatim") {
+		t.Errorf("the rewrite bullet promises a re-add the apply skips: %q", rewrite)
 	}
-	if !strings.Contains(dropping, "the input is DELETED, and yours is the last version of it") {
-		t.Error("--allow-drops prompt does not tell the model the replaced row is deleted when nothing accounts for it")
+	if !strings.Contains(rewrite, "the input is DELETED, and yours is the last version of it") {
+		t.Errorf("the rewrite bullet does not say the replaced row is deleted: %q", rewrite)
+	}
+
+	supersede := bullet(t, dropping, `"drop <id> reason: superseded by <id>"`)
+	if strings.Contains(supersede, "back verbatim") {
+		t.Errorf("the supersession bullet promises a re-add the apply skips: %q", supersede)
+	}
+
+	obsolete := bullet(t, dropping, `"drop <id> reason: obsolete"`)
+	if strings.Contains(obsolete, "back verbatim") {
+		t.Errorf("the obsolete bullet promises a re-add the apply skips: %q", obsolete)
+	}
+	if !strings.Contains(obsolete, "since a drop nothing explains is a real deletion.") {
+		t.Errorf("the obsolete bullet does not carry the mode's own staleTail: %q", obsolete)
 	}
 }
 

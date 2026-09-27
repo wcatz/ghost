@@ -136,9 +136,13 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	// existing memories to list.
 	foldToKeep := "Dropping is not deletion: a memory you do not name is carried through unchanged, and a memory you do not want is folded into a survivor rather than dropped. What the apply can still add back is what no surviving memory explains — an \"obsolete\" drop nothing replaced, a merge that lost one of its sources, and a rewrite or a supersession whose replacement does not carry the old memory's substance. EVERY category is protected that way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
 	mergeTail := "a loose summary is not recognized as a merge, and the input is kept verbatim beside it"
-	// The tails carry their own terminal punctuation because they are spliced into
-	// the middle of a bullet, and two of them now meet: without the full stop the
-	// harness is handed two sentences welded into one clause.
+	// staleTail and obsoleteTail are the two tails that MEET inside one bullet,
+	// so those are the two that must carry their own terminal punctuation: a
+	// template cannot supply a full stop between two spliced clauses, and without
+	// one the harness is handed two sentences welded into a single clause. The
+	// other tails are each the last thing in their own template line, so the
+	// template's punctuation closes them — which is why omissionCost and
+	// mergeTail deliberately carry none.
 	staleTail := "since a drop nothing explains is undone by the verbatim re-add."
 	// replaceTail is the same warning for the two operations that REPLACE a row
 	// rather than fold it. The guard exempts nothing, so a rewrite or a

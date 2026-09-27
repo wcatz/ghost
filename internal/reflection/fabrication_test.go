@@ -288,7 +288,10 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"EVERY category is protected",
 		"undone by that re-add",
 		"puts that row back verbatim",
-		"is put back verbatim, so state one only",
+		// The phrase a leaked DEFAULT obsoleteTail would contain. The longer
+		// literal this replaced could not match anything once obsoleteTail was
+		// reworded, so the assertion passed unconditionally and pinned nothing.
+		"is put back verbatim",
 	} {
 		if strings.Contains(dropping, unwanted) {
 			t.Errorf("--allow-drops prompt still promises retention: %q", unwanted)
