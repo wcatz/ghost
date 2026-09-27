@@ -1139,6 +1139,38 @@ CGO_ENABLED=0 go build -o ghost ./cmd/ghost
 
 GoReleaser produces Linux, macOS, and Windows binaries for amd64 and arm64, with checksums. The Docker build uses a Go Alpine builder and an Alpine runtime, also with `CGO_ENABLED=0`. CI runs tests, race tests, vetting, linting, vulnerability scanning, and workflow validation.
 
+## Testing
+
+Three layers, and the third is about the artifact rather than the packages.
+
+**In-process tests** call into `internal/...` directly. That is where logic is tested, and it is the overwhelming majority of the tree: the store, the assembler, the consolidation tiers, the migration steps, the hook parsers. `go test ./...` runs them, and they run in CI on every leg.
+
+**Contract guards** pin the properties a change could quietly undo. `TestConcurrentProcessesMixedReadWrite` and `TestMultiProcessSharedDatabase` (see [the concurrency contract](#concurrency-contract)) are the largest; there are others for permission tightening, the credential guard's reach, and the prompt contracts. They are named for the property, not the function, and each one fails if the setting or rule it depends on is removed.
+
+**End-to-end tests** exercise the BUILT binary, and they live in `e2e/` behind the `e2e` build tag:
+
+```bash
+make test-e2e          # or: go test -tags e2e ./e2e/ -count=1
+```
+
+The tag is the whole mechanism for keeping `go test ./...` and CI unchanged: with it absent every file in `e2e/` is excluded, and the `./...` pattern skips a directory whose files are all build-constrained out — silently, and verified rather than assumed. There is no second `go test` line in CI, so the layer runs on demand and locally, not on every push.
+
+What it covers, and why it cannot be in-process:
+
+- **The MCP surface**, read from the server's own `tools/list` and checked in both directions against a table of subtests: a tool added to the product with no subtest fails the suite. Every resource, resource template and prompt too, driven over the real stdio transport with the go-sdk client.
+- **Every CLI subcommand** in `cmd/ghost/help.go`'s table, its help flag checked for having no side effects (the store must be unchanged and no harness spawned), plus one real invocation each.
+- **The lifecycle hooks** for all four hosts and all three events, with per-host transcript fixtures in each host's own native format, the fail-open contract for eleven malformed payloads, and the Stop hook's spawn behind its pid lock and `min_interval` cooldown.
+- **The upgrade path**: a store downgraded to the previous schema version is migrated by an ordinary read-write open, and the pre-migration backup, the version stamp, the surviving rows and the first post-migration history baseline are all asserted. A store stamped NEWER is refused, and the assertion is that the refusal wrote nothing.
+- **Concurrency across processes**: two `ghost mcp` servers and a CLI writer against one store for a few seconds, asserting no `SQLITE_BUSY` reaches a caller and every reported id is in the store exactly once afterwards.
+
+Three things make it safe to run, and each is enforced rather than hoped for:
+
+- **One build, the real program.** `TestMain` runs `go build` once into a temp dir; every test executes that file. Nothing re-execs `os.Args[0]`, because under `go test` the test binary IS the suite.
+- **A sandbox per test.** Temp `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`, and a child environment BUILT from an allowlist rather than filtered from `os.Environ()` — a filter cannot answer "is there a variable here nobody thought of". Nothing reaches the developer's own `~/.local/share/ghost`, `~/.claude`, `~/.codex`, `~/.config/opencode` or `~/.config/goose`. The one layer a sandbox cannot redirect is the system-wide `/etc/ghost/config.yaml`.
+- **No real model call, ever.** The four CLI harnesses are shell fakes first on `PATH`, answering from the prompt they were handed rather than from a table of test names: the reflect answer is a `keep` per id in the prompt, the resolve and supersede answers are the files a test writes. The embedding endpoint is an in-process HTTP server producing a deterministic hashed bag-of-words vector, so hybrid search and the supersede candidate scan have a real vector space and no model is loaded.
+
+Two properties of the fakes are load-bearing and easy to get wrong, so they are stated here. A backend's answer shape is not uniform: `opencode` requires JSONL on stdout (`{"type":"text","part":{"type":"text","text":…}}`) and any non-JSON line is a hard error there, while `claude`, `codex` and `goose` take bare text. And the operation is decided by scanning BOTH stdin and argv, because the `claude` backend is invoked with the system prompt as a real `--system-prompt` argument and only the user content on stdin.
+
 ## Historical design records
 
 The `docs/superpowers/` tree contains archived specifications, plans, and reports. It explains how the architecture reached its current shape but is not the canonical source for current behavior. Start with this page, the source, and the current user documentation.
