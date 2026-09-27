@@ -1472,41 +1472,80 @@ func TestABudgetWithoutAnItemBoundStillGetsAWindow(t *testing.T) {
 	for i := range 20 {
 		rows = append(rows, candidate(string(rune('a'+i)), "proj", "fact", "row", 0.5))
 	}
-	tests := []struct {
-		name   string
-		budget Budget
-	}{
-		{"a byte cap alone", Budget{MaxBytes: 40_000}},
-		{"a slice byte clamp alone", Budget{Slices: []Slice{{Bucket: "proj", ClampBytes: 200}}}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			req := baseRequest()
-			req.Budget = tc.budget
+	req := baseRequest()
+	req.Budget = Budget{MaxBytes: 40_000}
 
-			if got := RetrievalWindow(req); got != maxRetrievalWindow {
-				t.Errorf("RetrievalWindow = %d, want %d: a request with no item bound still needs a "+
-					"window, and %d is the documented ceiling", got, maxRetrievalWindow, maxRetrievalWindow)
-			}
-			// And the limit the store is handed: a fetch limit of 0 is what
-			// memory.validateCandidateRequest refuses, with a message about a
-			// limit rather than about the budget that produced it.
-			r := &fakeRetriever{set: setOf(rows...)}
-			if _, err := Run(context.Background(), r, req); err != nil {
-				t.Errorf("Run rejected a budget the request validation accepts: %v", err)
-			}
-			if r.req.Fetch.Limit <= 0 {
-				t.Errorf("the retriever was asked for %d rows, which the store refuses: a byte-only "+
-					"budget has no item bound to size a window from", r.req.Fetch.Limit)
-			}
-		})
+	if got := RetrievalWindow(req); got != maxRetrievalWindow {
+		t.Errorf("RetrievalWindow = %d, want %d: a request with no item bound still needs a "+
+			"window, and %d is the documented ceiling", got, maxRetrievalWindow, maxRetrievalWindow)
+	}
+	// And the limit the store is handed: a fetch limit of 0 is what
+	// memory.validateCandidateRequest refuses, with a message about a limit
+	// rather than about the budget that produced it.
+	r := &fakeRetriever{set: setOf(rows...)}
+	if _, err := Run(context.Background(), r, req); err != nil {
+		t.Errorf("Run rejected a budget the request validation accepts: %v", err)
+	}
+	if r.req.Fetch.Limit <= 0 {
+		t.Errorf("the retriever was asked for %d rows, which the store refuses: a byte-only "+
+			"budget has no item bound to size a window from", r.req.Fetch.Limit)
+	}
+
+	// The ceiling is the pipeline's, not the caller's, so it has to be visible:
+	// a block closed at 100 rows when the budget named no row count is otherwise
+	// indistinguishable from a complete answer, which is the guess the
+	// all-zero check exists to prevent.
+	many := make([]memory.Candidate, 0, 200)
+	for i := range 200 {
+		many = append(many, candidate(string(rune('a'+i%26))+string(rune('a'+i/26)), "proj", "fact", "row", 0.5))
+	}
+	full := baseRequest()
+	full.Budget = Budget{MaxBytes: 40_000}
+	res := run(t, &fakeRetriever{set: setOf(many...)}, full)
+	if res.Trace.Limit != maxRetrievalWindow {
+		t.Errorf("trace limit = %d, want %d: the trace has to report the window the retriever was "+
+			"asked for, or it reports the caller's 0 beside a real window of %d",
+			res.Trace.Limit, maxRetrievalWindow, maxRetrievalWindow)
+	}
+	if !hasNote(res.Notes, "states no item bound") {
+		t.Errorf("nothing tells the caller the window was a ceiling: %v", res.Notes)
+	}
+	// The window is a retrieval width, not a membership cap: stage 8 trims by
+	// the caller's bytes, so a byte-only budget can legitimately admit rows from
+	// beyond the window (the retriever hands back the window plus its discarded
+	// tail). The note has to say what actually bounds the block, or a reader
+	// would take the ceiling for the block's size.
+	if !hasNote(res.Notes, "byte") {
+		t.Errorf("the note does not say what bounds the block: %v", res.Notes)
+	}
+}
+
+// TestASliceClampOnlyBudgetIsAnOmission: Slice.ClampBytes is a per-item
+// presentation cap — runBudget shortens each item's content and recomputes its
+// bytes, and the per-bucket loop drops a row only for a slice item or byte bound.
+// So a budget naming nothing but a clamp bounds neither the row count nor the
+// bytes, and clamping can only let more rows fit. It is an omission in the exact
+// sense the all-zero check refuses, and admitting it would leave the only bound on
+// the block a ceiling the caller never asked for.
+func TestASliceClampOnlyBudgetIsAnOmission(t *testing.T) {
+	req := baseRequest()
+	req.Budget = Budget{Slices: []Slice{{Bucket: "proj", ClampBytes: 200}}}
+
+	_, err := Run(context.Background(), &fakeRetriever{set: setOf()}, req)
+	if err == nil {
+		t.Fatal("a clamp-only budget was accepted, so a caller that bounded nothing got a block sized by a ceiling it never stated")
+	}
+	if !strings.Contains(err.Error(), "item") {
+		t.Errorf("error = %q, want it to name what is missing: a clamp is not a bound on the block", err)
 	}
 }
 
 // TestTheAllZeroBudgetIsStillRejected: the fallback above must not turn an
-// omission into a request. An all-zero budget means the caller did not say how
-// large a block it wants, and guessing the ceiling for it would be inventing the
-// answer the check exists to ask for.
+// omission into a request. A budget that bounds neither rows nor bytes means the
+// caller did not say how large a block it wants, and guessing the ceiling for it
+// would be inventing the answer the check exists to ask for. That covers an
+// all-zero budget and a clamp-only one, which is the second shape the check now
+// refuses.
 func TestTheAllZeroBudgetIsStillRejected(t *testing.T) {
 	req := baseRequest()
 	req.Budget = Budget{}

@@ -96,9 +96,14 @@ const (
 // starts here and is unconditional.
 func newTrace(req Request, set *memory.CandidateSet) *Trace {
 	return &Trace{
-		ProjectID:       req.ProjectID,
-		Query:           req.Query,
-		Limit:           req.Budget.MaxItems,
+		ProjectID: req.ProjectID,
+		Query:     req.Query,
+		// The window the retriever is asked for, not the caller's item budget:
+		// they differ for a category predicate (the window is widened) and for a
+		// budget that names no item bound at all (the window falls back to the
+		// ceiling), and a trace that reported the budget beside the real window
+		// would explain neither.
+		Limit:           retrievalWindow(req),
 		VectorAvailable: len(req.QueryVec) > 0,
 		Mode:            string(projectMode(req)),
 		Legs:            set.Legs,

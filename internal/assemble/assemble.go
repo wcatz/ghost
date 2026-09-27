@@ -57,8 +57,10 @@ type Slice struct {
 
 // Budget is what a caller will accept. MaxItems is the total across buckets;
 // Slices are the per-bucket caps, so search applies one limit across project
-// and `_global` while injection applies independent caps. An all-zero budget is
-// rejected: an unbounded block is not a request, it is an omission.
+// and `_global` while injection applies independent caps. A budget that bounds
+// neither rows nor bytes is rejected: an unbounded block is not a request, it is
+// an omission. A MaxBytes cap alone is bounded and is honoured — the retrieval
+// window falls back to its documented ceiling and stage 8 still trims by bytes.
 type Budget struct {
 	MaxItems      int // 0 = unbounded total
 	MaxBytes      int // complete response bytes; 0 = unbounded total
@@ -174,6 +176,16 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 		droppedBy: map[string]int{},
 		dropped:   map[string]string{},
 	}
+	// A window that had to fall back to the ceiling is disclosed, because the
+	// block's size is then decided by a number the caller did not state. The
+	// request still names what bounds the block — its bytes — so the note says
+	// both, and a reader is not left taking the window for the block's size.
+	if req.Budget.MaxItems <= 0 && RetrievalWindow(req) >= maxRetrievalWindow {
+		p.retrievalFailures = append(p.retrievalFailures, formatNote(
+			"retrieval_window_capped: this budget states no item bound, so the retrieval window is the documented ceiling of %d rows; the block's own size is bounded by the byte cap, not by a row count",
+			maxRetrievalWindow))
+	}
+
 	// A leg that errored is named before the stages run, so every later
 	// statement about the result carries the reason it is partial. `retrieval_
 	// <leg> failed` is the note form Decision 3's reasons are drawn from.
@@ -325,7 +337,7 @@ func validateRequest(req Request) error {
 		}
 	}
 	if req.Budget.MaxItems == 0 && req.Budget.MaxBytes == 0 && !anySliceBound(req.Budget.Slices) {
-		return errors.New("assemble: an all-zero budget is rejected: state how large a block you want")
+		return errors.New("assemble: this budget states no bound on the block: set MaxItems or MaxBytes, or give a slice an item or byte cap — a ClampBytes clamp alone bounds neither, since a clamped item is shorter")
 	}
 	if req.Query == "" {
 		// An empty query selects passive retrieval, whose bucket policies are
@@ -337,9 +349,15 @@ func validateRequest(req Request) error {
 	return nil
 }
 
+// anySliceBound reports whether a slice list bounds the block at all. ClampBytes
+// does not: it is a per-item presentation cap, and a clamped item is shorter, so
+// it can only let more rows fit. A budget whose slices name only clamps therefore
+// bounds neither the row count nor the bytes, which is the omission the
+// all-zero check refuses — treating it as a bound would leave the block's size
+// decided by a ceiling the caller never asked for.
 func anySliceBound(slices []Slice) bool {
 	for _, s := range slices {
-		if s.MaxItems > 0 || s.MaxBytes > 0 || s.ClampBytes > 0 {
+		if s.MaxItems > 0 || s.MaxBytes > 0 {
 			return true
 		}
 	}
