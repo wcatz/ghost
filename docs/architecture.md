@@ -502,13 +502,30 @@ Both questions are asked in **one** statement, and each `DELETE` behind them run
 only when the answer says a cap is actually exceeded (`pruneHistoryTx`). That is
 not tidiness. This runs inside the caller's write transaction, so everything it
 adds is time the write lock is held, and the write lock is the one resource
-concurrent writers queue for — see the concurrency contract above. A first version
-that ran the windowed `DELETE` and a separate `max(rowid)` probe on every append
-added three statements to every save, and `TestConcurrentProcessesMixedReadWrite`
-began failing with `SQLITE_BUSY` at `BEGIN IMMEDIATE`: it is a bound, not a
-guarantee, and a per-upsert statement that looks free in a one-process test is
-what reaches it. A memory under the cap and a table under the global cap are the
-normal state, and then the only statement is the probe.
+concurrent writers queue for — see the concurrency contract above. A first
+version that ran the windowed `DELETE` and a separate `max(rowid)` probe on every
+append added three statements to every save, and `TestConcurrentProcessesMixedReadWrite`
+began failing with `SQLITE_BUSY` at `BEGIN IMMEDIATE`: `busy_timeout(5000)` is a
+bound, not a guarantee, and a per-upsert statement that looks free in a
+one-process test is what reaches it. A memory under the cap and a table under the
+global cap are the normal state, and then the only statement is the probe.
+
+Two more decisions on that same critical section, both measured rather than
+assumed:
+
+- **One index, not two.** `idx_provenance_memory(memory_id, recorded_at)` is the
+  only one, and it serves every reader this build has: the per-memory cap ranks
+  by rowid (the implicit index, free), `MemoryHistory` filters on `memory_id`, and
+  an `as_of` read (#647) — "the newest row for this memory at or before T" — is
+  the same index with a bound. A standalone `recorded_at` index would have no
+  reader, and every append would pay a second b-tree insert to keep it current.
+  The migration test asserts the *absence*, so adding one back "just in case"
+  takes an edit rather than happening quietly.
+- **The content filter is called only when one is installed.**
+  `ghost_history_content` is a Go function reached through the driver, so calling
+  it unconditionally means a cross-language call per appended row to do nothing
+  while #656 — the redactor it exists for — is not on main. With a redactor
+  installed the call is back, and that is the only case that pays.
 
 `Store.MemoryHistory` reads one memory's history oldest first — a changelog, not
 a log tail — and `ghost history <memory-id>` prints it.

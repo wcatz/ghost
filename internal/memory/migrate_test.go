@@ -1378,7 +1378,6 @@ func TestMigrateV17AddsMemoryProvenance(t *testing.T) {
 	}
 	for _, drop := range []string{
 		`DROP INDEX idx_provenance_memory`,
-		`DROP INDEX idx_provenance_recorded`,
 		`DROP TABLE memory_provenance`,
 	} {
 		if _, err := db.Exec(drop); err != nil {
@@ -1406,7 +1405,6 @@ func TestMigrateV17AddsMemoryProvenance(t *testing.T) {
 	for _, obj := range []struct{ typ, name string }{
 		{"table", "memory_provenance"},
 		{"index", "idx_provenance_memory"},
-		{"index", "idx_provenance_recorded"},
 	} {
 		var n int
 		if err := db.QueryRow(
@@ -1458,12 +1456,28 @@ func TestMigrateFreshDBHasMemoryProvenance(t *testing.T) {
 		importance, resolved_at, source FROM memory_provenance LIMIT 0`); err != nil {
 		t.Fatalf("memory_provenance columns missing on fresh db: %v", err)
 	}
-	for _, name := range []string{"idx_provenance_memory", "idx_provenance_recorded"} {
+	// One index, deliberately. The per-memory cap ranks by rowid, which the
+	// implicit index serves for free, and an as_of read (#647) filters on
+	// memory_id — so a standalone recorded_at index would have no reader while
+	// every append paid a second b-tree insert to keep it current, on the write
+	// path's critical section. Asserted as an absence: an index added back
+	// "just in case" is a cost this test should have to be edited to accept.
+	for _, name := range []string{"idx_provenance_memory"} {
 		var idx string
 		if err := db.QueryRow(
 			`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name,
 		).Scan(&idx); err != nil {
 			t.Errorf("%s index missing on fresh db: %v", name, err)
 		}
+	}
+	var stray int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='memory_provenance'
+		 AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_provenance_memory'`,
+	).Scan(&stray); err != nil {
+		t.Fatalf("count provenance indexes: %v", err)
+	}
+	if stray != 0 {
+		t.Errorf("memory_provenance carries %d index(es) nothing reads; each is a b-tree insert on every write", stray)
 	}
 }

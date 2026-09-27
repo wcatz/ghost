@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	sqlite "modernc.org/sqlite"
 )
@@ -120,6 +121,12 @@ var redactHistoryContent = func(content string) string { return content }
 // the whole thing back".
 const historyContentFunc = "ghost_history_content"
 
+// TEMPORARY measurement switch.
+var historyBenchmarkOff bool
+
+// TEMPORARY measurement switch.
+var historyProbeOff bool
+
 func init() {
 	// Registered per process rather than per connection: modernc.org/sqlite keeps
 	// one global function table, and the callback reads the current filter through
@@ -142,15 +149,29 @@ func init() {
 	}
 }
 
+// historyRedactorInstalled reports whether a filter is installed, so the append
+// statement can skip the call into Go when there is nothing for it to do.
+func historyRedactorInstalled() bool {
+	return redactorInstalled.Load()
+}
+
+// redactorInstalled is set by setHistoryRedactor and read by the append path.
+var redactorInstalled atomic.Bool
+
 // setHistoryRedactor installs the filter history rows are written through and
 // returns a function that restores the previous one. It exists for the seam's own
 // tests and for the wiring #656 will add; nothing in production calls it.
 func setHistoryRedactor(fn func(string) string) func() {
 	prev := redactHistoryContent
+	prevInstalled := redactorInstalled.Load()
 	if fn != nil {
 		redactHistoryContent = fn
+		redactorInstalled.Store(true)
 	}
-	return func() { redactHistoryContent = prev }
+	return func() {
+		redactHistoryContent = prev
+		redactorInstalled.Store(prevInstalled)
+	}
 }
 
 // selectIDs runs a single-column id query in tx and returns its rows. args is
@@ -262,6 +283,9 @@ func appendHistoryForIDsTx(ctx context.Context, tx *sql.Tx, ids []string, phase 
 // replace by three, and the batch is also the granularity the per-memory trim
 // runs at.
 func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEvent, ids []string) error {
+	if historyBenchmarkOff {
+		return nil
+	}
 	for len(ids) > 0 {
 		batch := ids
 		if len(batch) > historyBatchSize {
@@ -299,6 +323,15 @@ func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEven
 // statement, at the moment it runs, rather than passed in by a caller that could
 // disagree with it.
 func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids []string) error {
+	// The content column goes through the filter only when one is installed.
+	// Calling the SQL function unconditionally would cross into Go through the
+	// driver for every appended row to do nothing, which is measurable on the
+	// write path's critical section, and #656 — the redactor it exists for — is
+	// not on main yet.
+	contentExpr := "content"
+	if historyRedactorInstalled() {
+		contentExpr = historyContentFunc + "(content)"
+	}
 	placeholders := make([]string, 0, len(ids))
 	args := make([]interface{}, 0, len(ids)+5)
 	args = append(args, e.phase, nullIfEmpty(e.prov.Agent), nullIfEmpty(e.prov.SessionID),
@@ -311,7 +344,7 @@ func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids [
 		INSERT INTO memory_provenance
 			(memory_id, project_id, phase, agent, session_id, related_id, merged_content,
 			 content, category, importance, resolved_at, source)
-		SELECT id, project_id, ?, ?, ?, ?, ?, ghost_history_content(content),
+		SELECT id, project_id, ?, ?, ?, ?, ?, `+contentExpr+`,
 		       category, importance, resolved_at, source
 		FROM memories WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
@@ -349,16 +382,31 @@ func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids [
 // written by this build: one indexed existence check on the edit path, nothing
 // elsewhere.
 func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase string, prov Provenance) error {
-	var rows int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT count(*) FROM memory_provenance WHERE memory_id = ?`, memoryID,
-	).Scan(&rows); err != nil {
-		return fmt.Errorf("check for existing history: %w", err)
+	// The check and the append are ONE statement, `WHERE NOT EXISTS`, rather than
+	// a count followed by an insert. Two reasons, and the second is the load
+	// bearing: the pair is atomic without relying on anything else in this
+	// transaction, and it is one statement on the edit path instead of two —
+	// which matters because every statement here runs while the write lock is
+	// held, and the edit path is one of the busiest.
+	//
+	// A statement that inserts nothing reports zero rows affected, which is the
+	// answer, not a failure: a memory this build wrote has history and keeps it.
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_provenance
+			(memory_id, project_id, phase, agent, session_id, content, category,
+			 importance, resolved_at, source)
+		SELECT id, project_id, ?, ?, ?, content, category, importance, resolved_at, source
+		FROM memories
+		WHERE id = ?
+		  AND NOT EXISTS (SELECT 1 FROM memory_provenance p WHERE p.memory_id = memories.id)
+	`, phase, nullIfEmpty(prov.Agent), nullIfEmpty(prov.SessionID), memoryID)
+	if err != nil {
+		return fmt.Errorf("record baseline history: %w", err)
 	}
-	if rows > 0 {
-		return nil
+	if _, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("record baseline history rows: %w", err)
 	}
-	return appendHistoryTx(ctx, tx, memoryID, phase, prov)
+	return nil
 }
 
 // purgeHistoryTx erases the text this database recorded about a memory, and
@@ -526,6 +574,9 @@ func linkSuccessorTx(ctx context.Context, tx *sql.Tx, oldID, successorID string)
 // memory under the cap and a table under the global cap are the normal state, and
 // then nothing is deleted.
 func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
+	if historyProbeOff {
+		return nil
+	}
 	for len(ids) > 0 {
 		batch := ids
 		if len(batch) > historyBatchSize {

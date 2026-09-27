@@ -365,8 +365,14 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
     resolved_at TEXT,
     source      TEXT
 );
+-- One index, not two. The per-memory cap ranks by rowid (the implicit index,
+-- free), MemoryHistory filters by memory_id, and an as_of read (#647) is
+-- "the newest row for this memory at or before T" — which is served by this
+-- index too, because memory_id is the leading column. A standalone recorded_at
+-- index would have no reader, and every append would pay for a second b-tree
+-- insert to keep it current: measured at a fifth of the cost of writing the
+-- history row at all, on the write path's critical section.
 CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id, recorded_at);
-CREATE INDEX IF NOT EXISTS idx_provenance_recorded ON memory_provenance(recorded_at);
 
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
