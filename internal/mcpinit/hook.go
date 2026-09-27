@@ -392,10 +392,10 @@ const globalsDemotionThreshold = 0.85
 const sessionMemoriesCap = 15
 
 func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil, 0, false // no store yet — never create a phantom empty DB
-	}
-	db, err := sql.Open("sqlite", roDSN(dbPath))
+	// memory.OpenReadDB is the tree's read-only constructor: it refuses a
+	// missing database rather than creating a phantom empty one, and it is the
+	// same handle a Store takes for snapshot reads.
+	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		return nil, 0, false
 	}
@@ -501,19 +501,20 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		return
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")
-	if _, err := os.Stat(dbPath); err != nil {
-		return // no store yet — never create a phantom empty DB
-	}
-	db, err := sql.Open("sqlite", roDSN(dbPath))
+	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
-		return
+		return // no store yet — OpenReadDB refuses to create one
 	}
 	defer db.Close() //nolint:errcheck
 
 	// Resolve cwd to a project: id, name, path-prefix, then basename fallback
 	// (see Store.ResolveProject); home-dir/root sessions additionally fall
 	// back to routing.default_project when configured (issue #391).
-	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	//
+	// The read-only handle is both the store's own handle and its snapshot
+	// handle: this is a read-only store, and a candidate transaction on the
+	// read DSN is a plain deferred read rather than a BEGIN IMMEDIATE write lock.
+	store := memory.NewStoreWithRead(db, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	projectID, project = resolveSessionProject(context.Background(), store, cwd)
 	if projectID == "" {
 		return

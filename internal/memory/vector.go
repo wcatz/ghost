@@ -254,7 +254,8 @@ func (s *Store) GetMemoryContent(ctx context.Context, id string) (string, error)
 // SearchVector performs brute-force cosine similarity search against stored embeddings.
 // Returns memory IDs sorted by descending similarity.
 func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]ScoredMemory, error) {
-	return s.searchVector(ctx, projectID, queryVec, limit, nil)
+	rows, _, err := s.searchVectorLeg(ctx, projectID, queryVec, limit, nil)
+	return rows, err
 }
 
 // SearchVectorScoped is SearchVector with a scope constraint applied *before*
@@ -270,13 +271,32 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 // project's embeddings either way, so deciding per row during the scan costs
 // nothing that deciding on the results would not have cost either.
 func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
-	return s.searchVector(ctx, projectID, queryVec, limit, scope)
+	rows, _, err := s.searchVectorLeg(ctx, projectID, queryVec, limit, scope)
+	return rows, err
 }
 
-func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
-	// Read the identity before taking the lock: the copy below runs with the
+// vectorLegFacts is what a vector leg learned about the rows it could not use.
+// It is reported rather than only logged because it decides whether the leg's
+// silence means "nothing matched" or "rows were skipped": a vector written by
+// another model, or one whose dimensions differ, is invisible to the scan, and
+// treating those rows as absent is how a changed-model setup looks like an empty
+// store.
+//
+// It carries the two counts and nothing else. The stored identities behind the
+// foreign count stay local to the scan, where the warning log names them one per
+// identity; a model name cannot reach a caller anyway, because LegStatus has no
+// field to carry it, and a field no consumer can read is a claim nothing checks.
+type vectorLegFacts struct {
+	mismatched, foreign int
+}
+
+// searchVectorLeg is the project's vector leg, with its facts. Every exported
+// wrapper delegates here, so the facts are computed once on the one scan rather
+// than re-derived by a second pass over the embeddings.
+func (s *Store) searchVectorLeg(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, vectorLegFacts, error) {
+	// Read the identity before taking the lock: the helper below runs with the
 	// read lock held, and a second RLock on a RWMutex that has a writer waiting
-	// blocks that writer's readers — including this one, forever.
+	// blocks that writer's readers — including this one — forever.
 	identity := s.configuredEmbeddingIdentity()
 
 	rows := s.borrowVectorRows()
@@ -295,9 +315,12 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	if err := s.snapshotVectors(ctx, vectorScanColumns+`
 		WHERE m.project_id = ? OR m.project_id = '_global'
 	`, []any{projectID}, queryVec, identity, rows); err != nil {
-		return nil, err
+		return nil, vectorLegFacts{}, err
 	}
-	return rows.search(queryVec, limit, scope), nil
+	// rows.facts is what the copy pass could not use; the scoring pass below is
+	// the same bounded window as every other vector search, so the facts and the
+	// results come off one scan.
+	return rows.search(queryVec, limit, scope), rows.facts, nil
 }
 
 // warnForeignOnce claims the store's foreign-vector warning for storedIdentity
@@ -1052,7 +1075,7 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 	query := fmt.Sprintf(`
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope
+		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
 		FROM memories
 		WHERE id IN (%s)
 	`, strings.Join(placeholders, ","))
@@ -1065,8 +1088,10 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 	return scanMemories(rows)
 }
 
-// SearchVectorAll performs brute-force cosine similarity search across ALL projects.
-func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit int) ([]ScoredMemory, error) {
+// searchVectorAllLeg is the cross-project vector leg, with its facts, mirroring
+// searchVectorLeg without the project predicate.
+func (s *Store) searchVectorAllLeg(ctx context.Context, queryVec []float32, limit int) ([]ScoredMemory, vectorLegFacts, error) {
+	// Read the identity before taking the lock, as searchVectorLeg does.
 	identity := s.configuredEmbeddingIdentity()
 
 	rows := s.borrowVectorRows()
@@ -1076,9 +1101,15 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	// the project leg — the only difference is the query, which here has no
 	// WHERE clause at all.
 	if err := s.snapshotVectors(ctx, vectorScanColumns, nil, queryVec, identity, rows); err != nil {
-		return nil, err
+		return nil, vectorLegFacts{}, err
 	}
-	return rows.search(queryVec, limit, nil), nil
+	return rows.search(queryVec, limit, nil), rows.facts, nil
+}
+
+// SearchVectorAll performs brute-force cosine similarity search across ALL projects.
+func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit int) ([]ScoredMemory, error) {
+	rows, _, err := s.searchVectorAllLeg(ctx, queryVec, limit)
+	return rows, err
 }
 
 // SearchHybridAll combines FTS5 and vector search across ALL projects using RRF.

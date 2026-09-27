@@ -87,7 +87,17 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level, onBadConfig configHandl
 		os.Exit(1)
 	}
 
-	store := memory.NewStore(db, logger)
+	// A second, read-only handle exists so candidate retrieval can take its
+	// snapshot transaction without the write lock the primary handle's
+	// BEGIN IMMEDIATE would take. Its absence is not fatal — a store without one
+	// still works and logs what the snapshot costs — so a failed read open must
+	// not stop the server from starting.
+	readDB, readErr := memory.OpenReadDB(dbPath)
+	if readErr != nil {
+		logger.Warn("read-only handle unavailable; retrieval will take its snapshot on the primary connection", "error", readErr)
+	}
+
+	store := memory.NewStoreWithRead(db, readDB, logger)
 	store.SetDemotionThreshold(cfg.Linking.DemotionThreshold)
 	store.SetVectorMinSimilarity(float32(cfg.Search.MinSimilarity))
 	// Declared unconditionally, not only under cfg.Embedding.Enabled: the

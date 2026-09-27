@@ -81,9 +81,9 @@ func TestOpenDBRefusesANewerSchemaWithoutWritingToIt(t *testing.T) {
 		t.Fatalf("OpenDB error = %v, want the newer-schema refusal", err)
 	}
 
-	readBack, err := OpenDBReadOnly(dbPath)
+	readBack, err := OpenReadDB(dbPath)
 	if err != nil {
-		t.Fatalf("OpenDBReadOnly: %v", err)
+		t.Fatalf("OpenReadDB: %v", err)
 	}
 	defer func() { _ = readBack.Close() }()
 	after := schemaObjects(t, readBack)

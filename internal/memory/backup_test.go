@@ -116,9 +116,9 @@ func TestStoreBackupSnapshotIsReadableAndComplete(t *testing.T) {
 	// The snapshot is a database, not a byte copy: it opens on its own and
 	// holds the same rows, including the provenance and resolved_at a restore
 	// depends on.
-	bdb, err := OpenDBReadOnly(dest)
+	bdb, err := OpenReadDB(dest)
 	if err != nil {
-		t.Fatalf("OpenDBReadOnly(%s): %v", dest, err)
+		t.Fatalf("OpenReadDB(%s): %v", dest, err)
 	}
 	defer func() { _ = bdb.Close() }()
 
@@ -206,11 +206,11 @@ func TestStoreBackupIsConsistentUnderWrites(t *testing.T) {
 	// The report must describe the file that was written, not the live store.
 	// The snapshot is immutable, so the comparison below is exact, and the
 	// writer is still running so the live count is free to diverge.
-	bdb, openErr := OpenDBReadOnly(dest)
+	bdb, openErr := OpenReadDB(dest)
 	if openErr != nil {
 		close(stop)
 		<-done
-		t.Fatalf("OpenDBReadOnly after concurrent writes: %v", openErr)
+		t.Fatalf("OpenReadDB after concurrent writes: %v", openErr)
 	}
 	var snapshotRows int
 	countErr := bdb.QueryRow(`SELECT count(*) FROM memories`).Scan(&snapshotRows)

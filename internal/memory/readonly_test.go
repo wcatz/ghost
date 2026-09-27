@@ -7,15 +7,15 @@ import (
 	"testing"
 )
 
-// TestOpenDBReadOnlyNeverCreates — `ghost mcp status` reads the projects table
+// TestOpenReadDBNeverCreates — `ghost mcp status` reads the projects table
 // through this opener. If it created the file, the first status run on a fresh
 // install would leave a store behind and the next run would report a healthy
 // database instead of "no Ghost database (run ghost first)": the diagnostic
 // would make its own result untrue.
-func TestOpenDBReadOnlyNeverCreates(t *testing.T) {
+func TestOpenReadDBNeverCreates(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
 
-	if _, err := OpenDBReadOnly(dbPath); !errors.Is(err, ErrNoDatabase) {
+	if _, err := OpenReadDB(dbPath); !errors.Is(err, ErrNoDatabase) {
 		t.Fatalf("err = %v, want ErrNoDatabase for a path that does not exist", err)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
@@ -34,9 +34,9 @@ func TestOpenDBReadOnlyNeverCreates(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	ro, err := OpenDBReadOnly(dbPath)
+	ro, err := OpenReadDB(dbPath)
 	if err != nil {
-		t.Fatalf("OpenDBReadOnly: %v", err)
+		t.Fatalf("OpenReadDB: %v", err)
 	}
 	defer ro.Close() //nolint:errcheck
 

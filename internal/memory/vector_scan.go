@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"sync"
 	"sync/atomic"
 )
 
@@ -158,6 +159,14 @@ type vectorRows struct {
 	// any, which moves a loop-local to the heap — six allocations for every row
 	// of the corpus, which is a sixth of the whole per-query cost.
 	dest vectorScanDest
+	// facts is what this scan could not use: rows it skipped for a recorded
+	// identity from another vector space, and rows whose width does not match the
+	// query. It lives on the snapshot rather than in a return value because the
+	// snapshot is already the thing every vector leg borrows, and a caller that
+	// wants the facts (a leg deciding whether its silence means "nothing matched"
+	// or "rows were skipped") reads them from the one scan rather than paying
+	// for a second pass over the embeddings.
+	facts vectorLegFacts
 }
 
 // vectorScanDest holds one row as the driver delivered it. The values are only
@@ -174,6 +183,9 @@ func (v *vectorRows) reset() {
 	v.embeds = v.embeds[:0]
 	v.rows = v.rows[:0]
 	v.cands = v.cands[:0]
+	// The counts belong to the scan that set them, and the snapshot is pooled
+	// across queries, so a stale one would be read as this query's.
+	v.facts = vectorLegFacts{}
 }
 
 func (v *vectorRows) column(buf []byte, sp vecSpan) []byte { return buf[sp.off : sp.off+sp.n] }
@@ -298,6 +310,16 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 	}
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	// The facts are counted beside the warning rather than inside it, so a count
+	// cannot depend on a diagnostic channel being present. Every store NewStore
+	// builds has a logger — a nil one becomes a discard handler — so no caller
+	// reaches the difference today; it is stated because the coupling is wrong on
+	// its face, and a count gated on a log call is one refactor away from being
+	// gated on it for real.
+	v.facts.mismatched = mismatched
+	for m := range foreign {
+		v.facts.foreign += foreign[m]
 	}
 	if s.logger != nil && len(foreign) > 0 {
 		// Sorted so a log is deterministic whichever row order the planner
@@ -488,20 +510,23 @@ const maxRetainedVectorBytes = 32 << 20
 // A store built as a literal (ExplainSearch's trace store) has no pool
 // function, so the nil case is a real one rather than a bug to assert away.
 func (s *Store) borrowVectorRows() *vectorRows {
-	v, _ := s.vectorRowsPool.Get().(*vectorRows)
-	if v == nil {
-		v = &vectorRows{}
+	// A store literal built without scratch gets a fresh snapshot rather than a nil
+	// dereference. That is the pre-#556 behaviour and the expensive one, so the
+	// literals that stand in for a store share the real store's scratch instead
+	// (see the field comment); this branch is what a store nobody wired up gets,
+	// and it is correct rather than fast.
+	if s.scratch == nil {
+		return &vectorRows{}
 	}
-	v.reset()
-	return v
+	return s.scratch.borrow()
 }
 
 // returnVectorRows hands the scratch back for the next search to reuse.
 func (s *Store) returnVectorRows(v *vectorRows) {
-	if cap(v.embeds) > maxRetainedVectorBytes {
-		v.embeds = nil
+	if s.scratch == nil {
+		return
 	}
-	s.vectorRowsPool.Put(v)
+	s.scratch.put(v)
 }
 
 // scopeProbe answers "may this row be compared against a scope request" without
@@ -578,4 +603,60 @@ func quoteScopeKey(key string) []byte {
 	quoted = append(quoted, '"')
 	quoted = append(quoted, key...)
 	return append(quoted, '"')
+}
+
+// vectorScratch is the pool of per-search corpus snapshots, plus the one number
+// worth watching: how many snapshots had to be allocated rather than recycled.
+//
+// The counter is the point. A sync.Pool's contents are per-processor and are
+// dropped at every collection, so "is the pool empty" is not a property a test can
+// assert on — it passes on one P and fails under parallel execution. Counting the
+// allocations instead is deterministic, and it is the actual cost: a snapshot
+// standing in for a store with a pool of its own allocates one per query and
+// returns it to a pool that is immediately garbage.
+type vectorScratch struct {
+	pool   sync.Pool
+	allocs atomic.Int64
+}
+
+func newVectorScratch() *vectorScratch {
+	s := &vectorScratch{}
+	s.pool.New = func() any {
+		s.allocs.Add(1)
+		return &vectorRows{}
+	}
+	return s
+}
+
+// allocs reports how many corpus snapshots have been allocated. A steady-state
+// search on an unchanged corpus stops moving it.
+func (s *vectorScratch) allocationCount() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.allocs.Load()
+}
+
+func (s *vectorScratch) borrow() *vectorRows {
+	v, _ := s.pool.Get().(*vectorRows)
+	if v == nil {
+		// Reached only when the pool is emptied between the New and the Get,
+		// which a collection between them can do. Counted here too, so the number
+		// is every allocation and not only the ones that came from New.
+		v = s.newSnapshot()
+	}
+	v.reset()
+	return v
+}
+
+func (s *vectorScratch) newSnapshot() *vectorRows {
+	s.allocs.Add(1)
+	return &vectorRows{}
+}
+
+func (s *vectorScratch) put(v *vectorRows) {
+	if cap(v.embeds) > maxRetainedVectorBytes {
+		v.embeds = nil
+	}
+	s.pool.Put(v)
 }

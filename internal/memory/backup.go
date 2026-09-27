@@ -89,7 +89,7 @@ func (s *Store) Backup(ctx context.Context, dest string) (BackupResult, error) {
 // cannot change it and cannot create a database where the backup failed to
 // land.
 func countBackupContents(ctx context.Context, path string) (BackupCounts, error) {
-	db, err := OpenDBReadOnly(path)
+	db, err := OpenReadDB(path)
 	if err != nil {
 		return BackupCounts{}, fmt.Errorf("open backup for counting: %w", err)
 	}

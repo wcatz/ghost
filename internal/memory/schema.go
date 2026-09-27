@@ -298,7 +298,7 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_at DESC);
 `
 
-// readOnlyDSN builds the read-only DSN OpenDBReadOnly opens. The file: URI
+// readOnlyDSN builds the read-only DSN OpenReadDB opens. The file: URI
 // form is required — modernc.org/sqlite honors mode=ro only on URI DSNs, and
 // a bare path opens read-write and would create a phantom empty ghost.db on
 // first read. The path is URI-escaped so a '?' or '#' in it cannot corrupt the
@@ -306,10 +306,8 @@ CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_
 // write the header). WAL is persisted in the database file itself rather than
 // negotiated per connection, so this connection is in WAL mode too.
 //
-// Deliberately unexported: mcpinit and cmd/ghost each already build this same
-// URI for their own read-only paths, and consolidating them is a separate
-// change with its own blast radius. This one exists for OpenDBReadOnly and
-// does not claim to be the only spelling in the tree.
+// Deliberately unexported: mcpinit builds the same URI for its own read-only
+// write-adjacent paths. This one exists for OpenReadDB.
 func readOnlyDSN(dbPath string) string {
 	u := url.URL{
 		Scheme:   "file",
@@ -319,16 +317,28 @@ func readOnlyDSN(dbPath string) string {
 	return u.String()
 }
 
-// OpenDBReadOnly opens an EXISTING database for reading only. It runs no DDL
+// ErrInMemoryReadHandle means a read-only handle was asked for a private
+// in-memory database. ":memory:" is per-connection: a second connection opens
+// a second, empty database, so a read handle built on it would report an empty
+// store rather than the one the caller seeded. Callers holding only an
+// in-memory handle keep using it, and their snapshot reads run on it directly.
+var ErrInMemoryReadHandle = errors.New("read-only handle cannot open an in-memory database")
+
+// OpenReadDB opens an EXISTING database for reading only. It runs no DDL
 // and no migrations, and it refuses a path that does not exist rather than
-// creating one.
+// creating one. It is the single read-only constructor: a Store that takes
+// snapshot reads is given one of these through NewStoreWithRead, and a CLI
+// diagnostic opens it directly.
 //
 // A diagnostic command must be able to report "there is no database" without
 // making that statement untrue: OpenDB would create the file, stamp
 // user_version and seed the builtin global rows, so the first status run on a
 // fresh install would turn the next one's missing-database line into a healthy
 // one. Callers stat first, or treat ErrNoDatabase as "nothing to report".
-func OpenDBReadOnly(dbPath string) (*sql.DB, error) {
+func OpenReadDB(dbPath string) (*sql.DB, error) {
+	if dbPath == ":memory:" {
+		return nil, ErrInMemoryReadHandle
+	}
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%w: %s", ErrNoDatabase, dbPath)

@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -39,6 +41,67 @@ type embedderDiagnostics interface {
 	Alive(ctx context.Context) bool
 	HasModel(ctx context.Context) (bool, error)
 	Model() string
+}
+
+// emptyWhy explains an empty result that is not an absence, and returns "" for a
+// plain no-match — where the leading sentence is true and the caveat covers the
+// window. The reasons it covers are the two whose cause is not already named
+// elsewhere in the answer: a row withheld as out of date, and a row cut by the
+// item budget. The category and scope reasons are not listed because
+// filterCaveat below already names those filters and suggests the next step, and
+// the dedup and diversity reasons belong to stages that do not run in this
+// version — a version that cannot explain an empty answer says the absence
+// sentence rather than inventing one.
+//
+// No sentence here claims every row was removed the same way. A closed reason set
+// carries the dominant cause, and the note appended to the answer carries the
+// per-stage breakdown; "every" would contradict that note whenever two stages
+// shared the work.
+//
+// This text is read by an agent, not by a reviewer of this repository: it names
+// what happened to the rows and what to do about it, and nothing else. Design
+// vocabulary ("stage 2", "Decision 3") stays in the comments.
+func emptyWhy(result assemble.Result) string {
+	switch result.Reason {
+	case "all_invalid":
+		return "No memory was returned: the candidates found were withheld as out of date, their validity windows having closed or not yet opened. " +
+			"The query was not wrong — the answer is withheld, not absent."
+	case "all_over_budget":
+		return "No memory was returned: the candidates found were cut by the item budget. Raise the limit to see them."
+	}
+	return ""
+}
+
+// assemblerNotes renders the assembler's bounded diagnostics for an empty answer,
+// as a leading label so the lines below it are not mistaken for more memories.
+func assemblerNotes(result assemble.Result) string {
+	if len(result.Notes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, note := range result.Notes {
+		b.WriteString("\n(Note: ")
+		b.WriteString(note)
+		b.WriteString(")")
+	}
+	return b.String()
+}
+
+// failedLegs names the retrieval legs the assembler recorded as errored, or ""
+// when every applicable leg ran. A leg the request made applicable but could not
+// run (a hybrid search with no query vector) is not a failure and is not named.
+func failedLegs(result assemble.Result) string {
+	if result.Trace == nil {
+		return ""
+	}
+	var failed []string
+	for _, name := range []string{"fts", "vector"} {
+		leg := result.Trace.Legs[name]
+		if leg.Applicable && leg.Attempted && !leg.Available {
+			failed = append(failed, name+" leg: "+leg.Err)
+		}
+	}
+	return strings.Join(failed, "; ")
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -171,6 +234,17 @@ func provenanceFor(req *mcp.CallToolRequest) memory.Provenance {
 		return memory.Provenance{Agent: agent}
 	}
 	return memory.Provenance{Agent: detectCallingSource()}
+}
+
+// assembleCapableStore narrows provider.MemoryStore's concrete backing store to
+// the one method the context assembler needs. Candidates is not part of
+// provider.MemoryStore — the interface is a capability surface for the tools
+// Ghost exposes, and the retriever contract is a storage detail — so s.store is
+// type-asserted to this interface at call time; *memory.Store satisfies it. A
+// provider that cannot retrieve candidates gets a structured error rather than
+// a silently unfiltered answer.
+type assembleCapableStore interface {
+	Candidates(ctx context.Context, req memory.CandidateRequest) (*memory.CandidateSet, error)
 }
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
@@ -598,7 +672,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Title:       "Search Memories",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category is applied after a limit*3 fetch and may be incomplete in a sparse index; use ghost_memories_list for exhaustive category browsing. Scope is applied while the result window is selected, so eligible rows can replace conflicting candidates, but retrieval remains windowed and filtered results may still be incomplete. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when a category is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -633,25 +707,32 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 
-		searchLimit := args.Limit
-		// Category remains a post-filter, so its fetch has to leave room for
-		// non-matching rows. Scope does not: SearchHybridScoped applies it
-		// inside window selection, where eligible rows can backfill the window.
-		if args.Category != "" {
-			searchLimit = args.Limit * 3
-			if searchLimit > 100 {
-				searchLimit = 100
-			}
+		// One request, built before the branches below, so explain and the
+		// formatted path cannot disagree about the window: explain reports the
+		// ranking of a window, and the only honest window to report is the one
+		// the tool searches.
+		searchRequest := assemble.Request{
+			ProjectID: args.ProjectID,
+			Query:     args.Query,
+			QueryVec:  queryVec,
+			Scope:     scopeFilter,
+			Category:  args.Category,
+			Source:    assemble.SourceSearch,
+			Budget:    assemble.Budget{MaxItems: args.Limit},
+			Condition: assemble.CondHybrid,
+			Now:       time.Now().UTC(),
 		}
 		// explain returns the store's ranking diagnosis instead of the
-		// formatted list.
+		// formatted list. The explain projection of the assembler's trace
+		// replaces this branch once the stages carry it.
 		if args.Explain {
-			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec, searchLimit, scopeFilter)
+			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec,
+				assemble.RetrievalWindow(searchRequest), scopeFilter)
 			if xErr != nil {
 				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
 			}
 			if args.Category != "" {
-				ex.Notes = append(ex.Notes, "a category filter is applied after the search by this tool; rows below are pre-filter")
+				ex.Notes = append(ex.Notes, "a category filter is not applied to these rows: they are the retrieval window the formatted path searches, before the category filter runs, so a row marked included may not be in that answer")
 			}
 			payload, mErr := json.MarshalIndent(ex, "", "  ")
 			if mErr != nil {
@@ -661,50 +742,83 @@ func (s *Server) registerTools() {
 				Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}},
 			}, nil, nil
 		}
-		// Scope goes down into search selection, not around the finished
-		// window. Ineligible candidates are dropped before the cut, so the
-		// window is filled from the rows beyond it.
-		memories, err := s.store.SearchHybridScoped(ctx, args.ProjectID, args.Query, queryVec, searchLimit, scopeFilter)
+		// The formatted path goes through the context assembler, which owns
+		// retrieval, scope, category and the window. Both filters are applied
+		// to the widened candidate set before the window closes, so a matching
+		// row ranked below the window takes a slot instead of the tool
+		// reporting absence while the memory exists (#573). Retrieval itself
+		// is unchanged: the assembler asks the store for the same legs,
+		// parameters and configured vector floor this path used.
+		candidates, ok := s.store.(assembleCapableStore)
+		if !ok {
+			return nil, nil, fmt.Errorf("ghost_memory_search: store does not support candidate retrieval")
+		}
+		result, err := assemble.Run(ctx, candidates, searchRequest)
 		if err != nil {
-			return nil, nil, fmt.Errorf("search failed: %w", err)
+			// A failed retrieval and an empty result are the two answers an
+			// agent acts on oppositely — one says retry, the other says there
+			// is no such memory. The error says which, in the words the caller
+			// needs, and carries the cause so the failure is diagnosable.
+			return nil, nil, fmt.Errorf("search could not be completed, so it is unknown whether anything matches (the answer is incomplete, not empty \u2014 retry, or read the log): %w", err)
+		}
+		// A leg that errored makes the search incomplete, but "incomplete" and
+		// "empty" are only the same answer when there is nothing to show. With
+		// rows admitted, the answer is degraded rather than destroyed: the rows
+		// the working leg found are returned, and the broken leg is named, so
+		// the caller can retry without losing a retrieval that succeeded. The
+		// assembler records it in the trace; this is the projection.
+		failedLegs := failedLegs(result)
+		if failedLegs != "" && len(result.Items) == 0 {
+			return nil, nil, fmt.Errorf("search was incomplete, so it is unknown whether anything matches (a retrieval leg failed, so this is not an empty result — retry, or read the log): %s", failedLegs)
 		}
 
-		// Category remains the one tool-level post-filter.
-		if args.Category != "" {
-			filtered := memories[:0]
-			for _, m := range memories {
-				if m.Category == args.Category {
-					filtered = append(filtered, m)
-				}
-			}
-			memories = filtered
+		// The shared item renderer, one line per admitted memory. Search keeps
+		// its own framing: this surface's answer is the listing plus, when a
+		// filter left it short, the caveat below.
+		var listing strings.Builder
+		for _, item := range result.Items {
+			listing.WriteString(item.Line())
+			listing.WriteString("\n")
 		}
-
-		// Apply the requested limit once, after category filtering. Scope has
-		// already backfilled the selected window and must not be reintroduced
-		// here as a post-filter.
-		if len(memories) > args.Limit {
-			memories = memories[:args.Limit]
+		if failedLegs != "" {
+			listing.WriteString("\n")
+			listing.WriteString("Warning: this answer is incomplete — one retrieval leg failed, so matches it would have found are missing (")
+			listing.WriteString(failedLegs)
+			listing.WriteString(").\n")
 		}
 		// A filtered result shorter than the requested limit may reflect a
-		// finite candidate window rather than the whole store. This conservative
-		// check runs after category filtering so a scope-filled pre-category
-		// window cannot hide a category shortfall.
-		maybeIncomplete := (args.Category != "" || len(scopeFilter) > 0) && len(memories) < args.Limit
+		// finite candidate window rather than the whole store. The assembler
+		// has already applied both filters, so this reads the admitted count.
+		maybeIncomplete := (args.Category != "" || len(scopeFilter) > 0) && len(result.Items) < args.Limit
 
-		if len(memories) == 0 {
-			// A filtered zero result describes the searched candidate window,
-			// not the whole store. Keep that caveat on the empty answer too.
+		if len(result.Items) == 0 {
+			// "No matching memories found." is an absence claim, and it is only
+			// true when nothing removed a row that was found. The assembler knows
+			// whether a stage emptied the set, so when one did, the answer leads
+			// with that instead: a row withheld as out of date is a different
+			// instruction to the caller (refresh it) from a row that does not
+			// exist (ask about something else), and leading with the absence
+			// sentence would bury the difference under the line a caller stops
+			// reading at.
+			//
+			// The assembler's notes go with it either way. A closed reason set can
+			// name one cause, and these rows may have been removed by more than
+			// one stage, so the per-stage breakdown is what makes the sentence
+			// above checkable rather than merely plausible.
 			text := "No matching memories found."
+			if why := emptyWhy(result); why != "" {
+				text = why
+			}
 			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
 				text += "\n\n" + caveat
 			}
+			text += assemblerNotes(result)
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil, nil
 		}
 
-		text := formatMemories(memories)
+		text := listing.String()
 		if maybeIncomplete {
 			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
 				text += "\n\n" + caveat
@@ -2266,9 +2380,9 @@ func sourceLabel(source string) string {
 }
 
 // filterCaveat names the filters that can make a windowed result short and
-// gives the caller a filter-appropriate next step. Scope is selected before the
-// final cut, but its candidate pool is still finite; category remains a
-// post-filter over a deliberately wider fetch.
+// gives the caller a filter-appropriate next step. Both filters are applied
+// before the final cut now, but the candidate pool they select from is still
+// finite, so further matches may exist beyond it.
 func filterCaveat(category string, scope map[string]string) string {
 	var filters []string
 	if category != "" {

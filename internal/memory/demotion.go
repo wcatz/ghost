@@ -33,7 +33,7 @@ const DefaultDemotionThreshold = 0.90
 // keep a memory visible. No locking: callers that need Store's s.mu.RLock
 // (i.e. GetTopMemories) take it themselves around the call, same as every
 // other Store method taking a raw SQL read handle.
-func DemotionPenalties(ctx context.Context, db sqlQueryer, ids []string, pinned map[string]bool, threshold float64) (map[string]int, error) {
+func DemotionPenalties(ctx context.Context, db Queryer, ids []string, pinned map[string]bool, threshold float64) (map[string]int, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -188,7 +188,7 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // CreateLink — from sinking a production answer behind a development one. The
 // edge is left in the graph; scope exempts it from ranking rather than deleting
 // it.
-func SupersedePenalties(ctx context.Context, db sqlQueryer, ids []string) (map[string]int, error) {
+func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[string]int, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
