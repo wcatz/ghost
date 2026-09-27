@@ -137,12 +137,15 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	foldToKeep := "Dropping is not deletion: a memory you do not name is carried through unchanged, and a memory you do not want is folded into a survivor rather than dropped. What the apply can still add back is what no surviving memory explains — an \"obsolete\" drop nothing replaced, a merge that lost one of its sources, and a rewrite or a supersession whose replacement does not carry the old memory's substance. EVERY category is protected that way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
 	mergeTail := "a loose summary is not recognized as a merge, and the input is kept verbatim beside it"
 	// staleTail and obsoleteTail are the two tails that MEET inside one bullet,
-	// so those are the two that must carry their own terminal punctuation: a
-	// template cannot supply a full stop between two spliced clauses, and without
-	// one the harness is handed two sentences welded into a single clause. The
-	// other tails are each the last thing in their own template line, so the
-	// template's punctuation closes them — which is why omissionCost and
-	// mergeTail deliberately carry none.
+	// and only those need their own terminal punctuation: a template cannot
+	// supply a full stop between two spliced clauses, so without one the harness
+	// is handed two sentences welded into a single clause. Every other tail is
+	// closed by whatever the template puts after it — the end of the bullet, or
+	// the sentence the template continues with — so its own terminal punctuation
+	// is optional. mergeTail relies on that (the template's own sentence follows
+	// it), which is why it deliberately carries none; foldToKeep, countTail and
+	// replaceTail end their lines and carry a full stop because it reads better
+	// to the model, not because anything needs it.
 	staleTail := "since a drop nothing explains is undone by the verbatim re-add."
 	// replaceTail is the same warning for the two operations that REPLACE a row
 	// rather than fold it. The guard exempts nothing, so a rewrite or a

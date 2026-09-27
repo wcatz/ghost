@@ -288,10 +288,12 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"EVERY category is protected",
 		"undone by that re-add",
 		"puts that row back verbatim",
-		// The phrase a leaked DEFAULT obsoleteTail would contain. The longer
-		// literal this replaced could not match anything once obsoleteTail was
-		// reworded, so the assertion passed unconditionally and pinned nothing.
-		"is put back verbatim",
+		// The mode-dependent tail spliced into the obsolete bullet and into the
+		// "drop stale situational memories" rule is staleTail, not obsoleteTail
+		// (obsoleteTail is byte-identical in both modes), so this is the wording a
+		// leaked DEFAULT tail would carry. Asserting on obsoleteTail's own text
+		// pinned nothing: that wording is not in the prompt in either mode.
+		"since a drop nothing explains is undone by the verbatim re-add",
 	} {
 		if strings.Contains(dropping, unwanted) {
 			t.Errorf("--allow-drops prompt still promises retention: %q", unwanted)

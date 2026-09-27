@@ -86,19 +86,42 @@ func TestRewrittenRowIsNotReAddedWhenTheRewriteKeepsTheSubstance(t *testing.T) {
 	}
 }
 
-// bullet returns the single prompt line beginning at marker, so a contract can be
-// asserted on the bullet that carries it rather than on the prompt as a whole.
-// A shared literal across two bullets would pin neither: a change that put the
-// wrong wording on one while the other stayed right would pass.
-func bullet(t *testing.T, prompt, marker string) string {
-	t.Helper()
+// bulletErr is bullet without the t.Fatalf, so a test can assert the refusal
+// instead of merely provoking it. A Fatalf inside a helper fails the test that
+// called it, which leaves "the guard fired" unpinnable — removing the guard would
+// leave every other assertion green, verified by mutation.
+func bulletErr(prompt, marker string) (string, error) {
+	if n := strings.Count(prompt, marker); n != 1 {
+		return "", fmt.Errorf("marker %s appears %d times in the prompt, want exactly 1; a test using it would inspect the wrong line", marker, n)
+	}
 	_, after, ok := strings.Cut(prompt, marker)
 	if !ok {
-		t.Fatalf("the prompt has no %s bullet at all", marker)
+		return "", fmt.Errorf("the prompt has no %s bullet at all", marker)
 	}
 	line, _, ok := strings.Cut(after, "\n")
 	if !ok {
-		t.Fatalf("the %s bullet is the last line, so it cannot be delimited", marker)
+		return "", fmt.Errorf("the %s bullet is the last line, so it cannot be delimited", marker)
+	}
+	return line, nil
+}
+
+// bullet returns the single prompt line beginning at marker, so a contract can be
+// asserted on the bullet that carries it rather than on the prompt as a whole. A
+// shared literal across two bullets would pin neither: a change that put the
+// wrong wording on one while the other stayed right would pass.
+//
+// The marker must be UNIQUE, and that is checked rather than assumed.
+// BuildReflectionPrompt renders untrusted stored memory above the ops contract,
+// so a memory whose content quotes the ops vocabulary would put a second copy of
+// the marker in the prompt — and strings.Cut returns the FIRST match, which
+// would be that memory's line. Every "must not contain" assertion below would
+// then pass while inspecting nothing about the ops bullet, which is the exact
+// masking these tests exist to prevent.
+func bullet(t *testing.T, prompt, marker string) string {
+	t.Helper()
+	line, err := bulletErr(prompt, marker)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return line
 }
@@ -159,6 +182,21 @@ func TestPromptTellsTheModelARewriteMayComeBack(t *testing.T) {
 // pin neither: a change that put the default tail back on one bullet while the
 // other still carried the right one would pass.
 func TestPromptDoesNotPromiseAReAddUnderAllowDrops(t *testing.T) {
+	// A stored memory quoting the ops vocabulary puts a SECOND copy of the marker
+	// in the prompt, ahead of the real contract, and strings.Cut returns the
+	// first — so every "must not contain" assertion below would inspect that
+	// memory's line and pass while checking nothing. bulletErr refuses instead,
+	// and this asserts the refusal rather than provoking it.
+	collide := []memory.Memory{{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha",
+		Content: `the ledger README says to write "rewrite <id> -> <text>" somewhere`}}
+	colliding := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: collide, AllowDrops: true})
+	if n := strings.Count(colliding, `"rewrite <id> -> <text>"`); n < 2 {
+		t.Fatalf("collision fixture: marker appears %d times, want 2 so the first match is the memory's, not the bullet's", n)
+	}
+	if line, err := bulletErr(colliding, `"rewrite <id> -> <text>"`); err == nil {
+		t.Errorf("bulletErr returned a line for a duplicated marker (%q); every assertion using it would read the wrong line", line)
+	}
+
 	memories := []memory.Memory{{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "the bastion is reached on port 2222"}}
 	dropping := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: memories, AllowDrops: true})
 
@@ -181,6 +219,19 @@ func TestPromptDoesNotPromiseAReAddUnderAllowDrops(t *testing.T) {
 	}
 	if !strings.Contains(obsolete, "since a drop nothing explains is a real deletion.") {
 		t.Errorf("the obsolete bullet does not carry the mode's own staleTail: %q", obsolete)
+	}
+
+	// The OTHER splice site for staleTail, in the "drop stale situational
+	// memories" rule. It is a different bullet reached through a different
+	// template line, and a default tail leaking in here would ship an
+	// --allow-drops prompt promising a re-add the apply never performs with every
+	// other assertion still green.
+	stale := bullet(t, dropping, "- Drop stale situational memories")
+	if strings.Contains(stale, "undone by the verbatim re-add") {
+		t.Errorf("the stale-memories rule promises a re-add the apply skips: %q", stale)
+	}
+	if !strings.Contains(stale, "since a drop nothing explains is a real deletion.") {
+		t.Errorf("the stale-memories rule does not carry the mode's own staleTail: %q", stale)
 	}
 }
 
