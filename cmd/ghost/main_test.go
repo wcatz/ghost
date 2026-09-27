@@ -1085,7 +1085,7 @@ func TestReportReductionWarningCountsCandidatesPromotionFailed(t *testing.T) {
 // asserted a write that had not occurred. Each state has to be stated in its own
 // words, and none of them may be the one belonging to a different moment.
 //
-// The fourth case is the one a bare count could not express, and it is the
+// The third case is the one a bare count could not express, and it is the
 // commonest outcome of `--apply --promote-globals`: the apply ran and EVERY
 // candidate promoted, so kept is 0 — the same count as "nothing has been written
 // yet". Inferring the state from the count printed "would be promoted" AFTER the
