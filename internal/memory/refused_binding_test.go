@@ -64,7 +64,11 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 			// last, because the merge deletes that project along with the
 			// repository it recorded — so a merge on its own leaves the next
 			// save from this checkout refusing again and splitting once more.
-			advice: []string{`ghost project merge "SAVED" "real-infra"`, `ghost project bind "real-infra" "SAVED"`},
+			// Rendered through shellQuote below, the way the notice quotes a
+			// command argument: what this case is about is WHICH commands, in
+			// WHICH order, over WHICH ids. How an awkward id is spelled is
+			// TestBindingRefusalNoticeShellQuotesItsCommands' claim.
+			advice: []string{`ghost project merge SAVED real-infra`, `ghost project bind real-infra SAVED`},
 		},
 		{
 			name: "ambiguous name",
@@ -172,7 +176,8 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 			// Advice is a claim about what the reader should run, so it is
 			// asserted as one: those commands, in that order, and nothing the
 			// kind must not name. "SAVED" stands for the project this save went
-			// to, which is a filesystem path and so is quoted in the notice.
+			// to, which is a filesystem path, so it is substituted already
+			// shell-quoted — the quoting itself has its own test.
 			//
 			// The order is checked by position rather than by scanning a window
 			// and resuming past what matched: a path is longer than the
@@ -182,7 +187,7 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 			// stops being the thing being tested.
 			previous := -1
 			for _, want := range tc.advice {
-				at := strings.Index(notice, strings.ReplaceAll(want, "SAVED", canonical))
+				at := strings.Index(notice, strings.ReplaceAll(want, "SAVED", shellQuote(canonical)))
 				if at < 0 {
 					t.Errorf("notice does not suggest %q: %q", want, notice)
 					continue

@@ -1,8 +1,10 @@
 # Ghost CLI reference
 
-The `ghost` binary is both the MCP server and the maintenance CLI. Run `ghost help` for the built-in top-level summary.
+The `ghost` binary is both the MCP server and the maintenance CLI. Run `ghost help` for the built-in top-level summary, or `ghost help <command>` (including a two-word path such as `ghost help project bind`) for that one command's own usage on stdout — `ghost -h <command>` does the same. A name that matches no command is reported on stderr and the summary is shown instead — a help token in place of the name is a second help request rather than a typo, so it is answered with the summary and nothing else, and `ghost help -h <command>` names the command as `ghost -h <command>` does.
 
 Every subcommand accepts `-h` or `--help`: it prints that command's usage on stdout and exits `0`, before anything with a side effect runs — no configuration load, no database open, no file written, no harness spawned. The top-level summary (`ghost help`, `ghost --help`) is unchanged by this and still prints to stderr.
+
+Two spellings decide whether a flag is a request. The token after a flag that *this* command takes a value for is a value, never a help request — `ghost reflect --project -h` runs reflect for a project named `-h` — and a flag belonging to a different command is not a value at all, so `ghost upgrade --cwd -h` prints the upgrade usage instead of upgrading with the help flag swallowed as `--cwd`'s value. And a bare `--` ends the options for that scan: a token after it is an operand, never a help request, so `ghost reflect -- --help` runs reflect rather than printing usage. What the command then does with that operand is its own parser's business — none of them implements `--` (several report it as an unknown flag), so a project whose name looks like a flag is still addressed with the verbatim `--project <name>` form.
 
 ## MCP server
 

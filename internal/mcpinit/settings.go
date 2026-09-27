@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -140,10 +141,19 @@ func writeBackupOnce(path string, data []byte) error {
 // (settings.json, codex config.toml) goes through here rather than a bare
 // os.WriteFile. A symlinked config (a dotfiles checkout, say) is resolved
 // first: renaming over the link itself would replace it with a regular file
-// and strand the real config. An existing file keeps its own permissions, so
-// rewriting a 0600 config.toml cannot silently widen it; a new one is created
-// with perm, which the kernel narrows by the caller's umask just as
-// os.WriteFile would.
+// and strand the real config. A link whose target does not exist yet is the
+// one case that cannot be resolved, and the rename then replaces the link with
+// a regular file holding the new document — the link is gone, and nothing is
+// written at the path it pointed at. An existing file keeps its own
+// permissions, so rewriting a 0600 config.toml cannot silently widen it; a new
+// one is created with perm, which the kernel narrows by the caller's umask
+// just as os.WriteFile would.
+//
+// The rename makes the document atomic for a reader, and the two flushes make
+// it durable for a power cut: without them a loss of power between the write
+// and the rename can leave a config that is empty or partly written, and one
+// after it can leave a directory entry that never reached the disk, so the
+// file is gone even though its inode was written. See writeFileMode.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return writeFileMode(path, data, perm, false)
 }
@@ -192,23 +202,83 @@ func writeFileMode(path string, data []byte, perm os.FileMode, private bool) err
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp file: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("close temp file: %w", err)
-	}
 	// A created file already carries the mode the kernel gave it; only a
-	// replacement needs the target's exact permissions forced onto it.
+	// replacement needs the target's exact permissions forced onto it. Forced
+	// before the flush so the one sync below carries the mode out with the data.
 	if replace {
 		if err := os.Chmod(tmpPath, finalMode); err != nil {
+			_ = tmp.Close()
 			_ = os.Remove(tmpPath)
 			return fmt.Errorf("chmod temp file: %w", err)
 		}
+	}
+	// The flush is what makes the temp file's content survive a power cut, and
+	// it has to happen here: once the rename lands, the file IS the config, and
+	// a power cut before its pages are written leaves a config that reads as
+	// empty or truncated — the exact outcome the temp file exists to prevent,
+	// reached through the rename that was supposed to make it safe. A failure is
+	// fatal rather than reported-and-ignored because nothing has been published
+	// yet: the user's config is still the one that was there, and saying so is
+	// the truth, while renaming anyway would claim a write that cannot be
+	// guaranteed to have landed.
+	if err := syncTempFile(tmp); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("flush temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename temp file: %w", err)
 	}
+	// The rename is itself a directory edit, and it reaches the disk no earlier
+	// than the directory holding it is flushed. Skipping this leaves a window in
+	// which a power cut keeps the file's data and loses the name, so a config
+	// the user knows is configured is simply gone. Its failure is deliberately
+	// not reported: the rename has already published the document, so there is
+	// nothing left to refuse and an error here would fail a write that did
+	// happen, on a filesystem that cannot flush a directory at all.
+	_ = syncParentDir(dir)
 	return nil
+}
+
+// syncTempFile and syncParentDir are the two durability steps of the atomic
+// write, held as vars because nothing about either is observable from the
+// finished result: both are a question of WHEN they ran relative to the rename,
+// and the only evidence of that is the call itself. Production wires them to
+// the real fsync and nothing else assigns them; a test replaces one to read the
+// target and the temp file at that moment, or to fail the flush and see what
+// the write published.
+var (
+	syncTempFile  = func(f *os.File) error { return f.Sync() }
+	syncParentDir = syncDir
+)
+
+// syncDir flushes a directory's own entries. Windows has no equivalent —
+// FlushFileBuffers on a directory handle fails, and NTFS orders the metadata
+// the rename changed itself — so it is a no-op there, the same platform split
+// shellQuote makes. Failing to open or flush the directory is reported, not
+// swallowed; the caller decides what a filesystem that cannot do it means.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	// Closed explicitly rather than deferred, so a close that fails is not
+	// dropped on the floor: a handle the kernel could not release is a fact
+	// about the flush, and the sync result is the one that matters when both
+	// did.
+	syncErr := d.Sync()
+	if err := d.Close(); err != nil && syncErr == nil {
+		syncErr = err
+	}
+	return syncErr
 }
 
 // createTempWithMode opens a uniquely named new file in dir carrying perm, so
