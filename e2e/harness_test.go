@@ -663,6 +663,18 @@ func (s *sandbox) mustRunStdin(stdin string, args ...string) result {
 	return r
 }
 
+// mustFailStdin runs a command with the given stdin and fails the test unless
+// it exits non-zero. It is mustFail for the commands that read stdin, so a
+// command that blocks waiting for a confirmation cannot hang the suite.
+func (s *sandbox) mustFailStdin(stdin string, args ...string) result {
+	s.t.Helper()
+	r := s.runStdin(stdin, args...)
+	if r.code == 0 {
+		s.t.Fatalf("ghost %s: expected a non-zero exit, got %s", strings.Join(args, " "), r)
+	}
+	return r
+}
+
 // mustFail runs a command and fails the test unless it exits non-zero. Used for
 // the error paths, where a zero exit IS the bug.
 func (s *sandbox) mustFail(args ...string) result {
@@ -1278,6 +1290,19 @@ func memoryWithContent(t *testing.T, s *sandbox, want string) string {
 		t.Fatalf("%d memories in %s contain %q, want exactly 1", len(ids), e2eProject, want)
 	}
 	return ids[0]
+}
+
+// sessionCounterLine is the "**Session #N** with this project." line a context
+// render emits, as a pattern.
+var sessionCounterLine = regexp.MustCompile(`(?m)^\*\*Session #\d+\*\* with this project\.$`)
+
+// stripSessionCounter removes the session-counter line from a rendered context
+// block. A context render counts itself as a session, so two renders of the same
+// state differ by exactly that number — which makes a byte comparison of two
+// renders a test of the counter rather than of whatever the caller meant to
+// compare.
+func stripSessionCounter(block string) string {
+	return sessionCounterLine.ReplaceAllString(block, "")
 }
 
 // mustNotExist fails the test if path exists.
