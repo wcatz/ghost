@@ -666,30 +666,30 @@ func TestLoad_SessionScopeFromYAML(t *testing.T) {
 	}
 }
 
-// TestLoad_SessionScopeEmptyYAMLValueIsDroppedWithAWarning: an empty value in
-// the YAML form is not a no-op — it would exclude every memory naming the key —
-// so Load drops that key and says so, the way the env form refuses it.
-func TestLoad_SessionScopeEmptyYAMLValueIsDroppedWithAWarning(t *testing.T) {
-	isolateConfig(t)
-	warnings := captureConfigWarnings(t)
-	writeUserConfig(t, strings.Join([]string{
-		"injection:",
-		"  session_scope:",
-		`    environment: ""`,
-		"    component: api",
-		"",
-	}, "\n"))
+// TestLoad_SessionScopeEmptyYAMLValueIsRefused: an empty (or whitespace-only)
+// value in the YAML form is not a no-op — it would exclude every memory naming
+// the key — and dropping it would widen the rest of the scope, so Load refuses
+// the file the way the env form refuses the same pair.
+func TestLoad_SessionScopeEmptyYAMLValueIsRefused(t *testing.T) {
+	for name, value := range map[string]string{"empty": `""`, "whitespace": `" "`} {
+		t.Run(name, func(t *testing.T) {
+			isolateConfig(t)
+			writeUserConfig(t, strings.Join([]string{
+				"injection:",
+				"  session_scope:",
+				"    environment: " + value,
+				"    component: api",
+				"",
+			}, "\n"))
 
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	got := cfg.Injection.SessionScope
-	if _, ok := got["environment"]; ok || got["component"] != "api" || len(got) != 1 {
-		t.Errorf("injection.session_scope = %v, want only component:api (the empty environment dropped)", got)
-	}
-	if !strings.Contains(warnings.String(), "injection.session_scope.environment: empty value ignored") {
-		t.Errorf("no warning for the dropped empty value; warnings = %q", warnings.String())
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("Load accepted an empty session_scope value; session_scope = %v", cfg.Injection.SessionScope)
+			}
+			if !strings.Contains(err.Error(), "injection.session_scope: empty value for environment") {
+				t.Errorf("Load error = %q, want it to name injection.session_scope and environment", err)
+			}
+		})
 	}
 }
 

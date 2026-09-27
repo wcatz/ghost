@@ -330,24 +330,31 @@ func Load() (*Config, error) {
 	if err := k.Unmarshal("", cfg); err != nil {
 		return nil, err
 	}
-	dropEmptyScopeValues(cfg)
+	if err := checkScopeValues(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
-// dropEmptyScopeValues removes, with a warning, every injection.session_scope
-// key whose value is empty. The env form refuses such a pair outright
-// (stringMap); the YAML form decodes it, and an empty value is not a no-op: it
-// is a filter that excludes every row naming that key with any other value, so
-// `environment: ""` would quietly leave a session with an unexplained subset of
-// its store. Dropping the key is the reading closest to what the line most
-// plausibly meant, and the warning says so.
-func dropEmptyScopeValues(cfg *Config) {
+// checkScopeValues refuses an injection.session_scope key whose value is empty
+// or only whitespace, the way the env form does (stringMap, which trims through
+// commaPairs). An empty value is not a no-op: it is a filter that excludes every
+// row naming that key with any other value. Dropping the key instead would not
+// be safe either — the rest of the scope would still apply, so a row scoped to
+// the dropped key's excluded value would reach the session — so the file is
+// refused and LoadForHook falls back as it does for any unreadable value.
+func checkScopeValues(cfg *Config) error {
+	keys := make([]string, 0, len(cfg.Injection.SessionScope))
 	for key, value := range cfg.Injection.SessionScope {
-		if value == "" {
-			warnf("injection.session_scope.%s: empty value ignored (it would exclude every memory that names %s)", key, key)
-			delete(cfg.Injection.SessionScope, key)
+		if strings.TrimSpace(value) == "" {
+			keys = append(keys, key)
 		}
 	}
+	if len(keys) == 0 {
+		return nil
+	}
+	slices.Sort(keys)
+	return fmt.Errorf("injection.session_scope: empty value for %s", strings.Join(keys, ", "))
 }
 
 // loadEnvLayer applies the GHOST_* environment variables to k: the generic
@@ -863,7 +870,7 @@ func intMap(s string) (interface{}, error) {
 // a filter rather than a no-op. It excludes every row that names the key with
 // any other value, so a trailing "=" would quietly leave a session with an
 // unexplained subset of its store. The YAML form decodes an empty value rather
-// than failing, so Load drops it with a warning instead (dropEmptyScopeValues).
+// than failing, so Load refuses it after decoding (checkScopeValues).
 func stringMap(s string) (interface{}, error) {
 	pairs, err := commaPairs(s)
 	if err != nil {
