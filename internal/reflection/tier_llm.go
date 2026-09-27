@@ -79,6 +79,7 @@ func (h *LlmConsolidator) Consolidate(ctx context.Context, input ReflectionInput
 	normalizeReflectMemories(&result)
 	dropFabricatedMemories(&result, input, h.log())
 	dropForeignProjectMemories(&result, input, h.log())
+	dropSecretMemories(&result, h.log())
 	return result, nil
 }
 

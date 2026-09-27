@@ -24,6 +24,12 @@ type Task struct {
 
 // CreateTask inserts a new task.
 func (s *Store) CreateTask(ctx context.Context, projectID, title, description string, priority int) (string, error) {
+	if err := rejectSecret("title", title); err != nil {
+		return "", err
+	}
+	if err := rejectSecret("description", description); err != nil {
+		return "", err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -117,6 +123,13 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 
 // CompleteTask marks a task as done. Accepts a full task ID or a unique prefix.
 func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) error {
+	// Checked before resolveTaskID so the refusal is the same error whether or
+	// not the id resolves — and a completion note is the one task field with no
+	// length cap, which is where "here is the value that fixed it" gets
+	// written, and it is rendered straight into the next session's context.
+	if err := rejectSecret("notes", notes); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -171,6 +184,13 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (Task, error) {
 // after the merge, so callers don't need a separate read to get ProjectID
 // or the resolved field values.
 func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (Task, error) {
+	// The incoming description only, for the reason UpdateMemory gives: a row
+	// that already holds a credential must stay editable field by field.
+	if description != nil {
+		if err := rejectSecret("description", *description); err != nil {
+			return Task{}, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

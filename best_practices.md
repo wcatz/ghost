@@ -38,8 +38,12 @@
 - Pass only reviewed environment variables; document any new public configuration or escape hatch
 - Never log or commit secrets
 - SOPS-encrypted secrets only — never git restore encrypted files
+- Every store path that writes caller-supplied text calls `memory.rejectSecret` first; the refusal names the field and the credential format and never the value
+- Credential detection is shape-based (`internal/secret`), never keyword-based: a memory store's ordinary vocabulary is full of the words a keyword heuristic would refuse, so a rule that fires on a word is a bug
 
 ## Project Invariants
 - The `_global` project is protected: every destructive or reassigning project operation (`DeleteProject`, `MergeProject`, any future op that deletes project rows or moves child records) must refuse `_global` on either side, with the refusal implemented at the store layer so all callers inherit it
 - New callers of existing store/provider APIs inherit that API's guard clauses — when exposing one through a new CLI command or MCP tool, read the full implementation first and preserve its refusals at the deepest layer
+- New store paths that write caller-supplied text inherit the credential guard: call `rejectSecret(field, text)` before any statement, and name the argument the way the caller named it, so the refusal is actionable
+- A diagnostic about a refused or dropped credential names the format, the category, and a length — never the value, because the log, the agent's context, and a reflection prompt are all places the secret would end up
 - Error-handling replacements at call sites must cover the same failure modes they replace (an empty-string miss-check is only equivalent to `err != nil` if every error path also returns empty)

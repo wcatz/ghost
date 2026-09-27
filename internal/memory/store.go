@@ -2593,6 +2593,14 @@ func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
 
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
+	// Before the lock, the transaction, and the FTS probe: a refused value
+	// must cost nothing and write nothing. When the upsert arrives inside a
+	// caller's transaction this error rolls that caller's work back too, which
+	// is the correct outcome — the secret is not stored, and the caller's
+	// caller is told why.
+	if err := rejectSecret("content", content); err != nil {
+		return "", "", 0, err
+	}
 	parentTx, inTx := storeTxFromContext(ctx)
 	if !inTx {
 		s.mu.Lock()
@@ -3672,6 +3680,16 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 // where a separate lookup-then-write could target a memory that moved to a
 // different project (e.g. via PromoteToGlobal) between the check and the write.
 func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error {
+	// The incoming content only, never the composed result. A row written
+	// before this guard existed can hold a credential, and a user clearing it
+	// out must still be able to retag, re-categorise, or re-prioritise that row
+	// on the way to deleting it — refusing a metadata-only edit would strand
+	// it with ghost_memory_delete as the only remaining move.
+	if content != nil {
+		if err := rejectSecret("content", *content); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -4533,7 +4551,21 @@ func (s *Store) GetLearnedContext(ctx context.Context, projectID string) (string
 }
 
 // UpdateLearnedContext updates the learned context and reflection metadata.
+//
+// Both fields are model-written text, and both are injected verbatim into every
+// later session for the project, so they are guarded like any other save.
+// A refusal here is the cheap outcome: the caller is the reflect command,
+// which already treats a failure on this write as a warning and carries on
+// (cmd/ghost/lifecycle.go), so a hallucinated credential costs one unrecorded
+// summary rather than the whole consolidation — the memories it summarised have
+// already been applied by this point.
 func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error {
+	if err := rejectSecret("learned_context", learnedContext); err != nil {
+		return err
+	}
+	if err := rejectSecret("reflection_summary", summary); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

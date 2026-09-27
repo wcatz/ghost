@@ -34,6 +34,19 @@ type Decision struct {
 // companionClamped reports that composition cut, letting the MCP handler
 // warn the caller even when neither field itself was truncated.
 func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, companionClamped bool, err error) {
+	// Before the lock and the transaction: a decision writes its text twice
+	// (the decisions row and the companion memory built from the same three
+	// fields), so a refusal that landed after the first INSERT would have to be
+	// undone by the rollback anyway — cheaper and clearer to never start.
+	for _, f := range []struct{ name, text string }{
+		{"title", title},
+		{"decision", decision},
+		{"rationale", rationale},
+	} {
+		if err := rejectSecret(f.name, f.text); err != nil {
+			return "", "", false, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
