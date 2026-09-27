@@ -21,10 +21,15 @@ type pipeline struct {
 	rows []memory.Candidate
 	// blockNotes are statements about the assembled block — its conflicts, its
 	// dedup and diversity state. They are held apart from noteBuf because stage 5
-	// runs before stage 8, and a block that stage 8 then empties must not be
-	// described as if it existed: the notes are folded in only when something
-	// was actually admitted, which is the last thing the pipeline knows.
+	// runs before stage 8, and a block that stage 8 then trims must not be
+	// described as if it were whole: contradictPairs is filtered against the final
+	// admitted set, and the rest are dropped when nothing was admitted, because
+	// both are the last things the pipeline knows.
 	blockNotes []string
+	// contradictPairs are the 'contradicts' pairs stage 5 recorded. They are
+	// rendered after the window closes, against the rows the answer actually
+	// holds, so "both remain in the block" cannot outlive one of them.
+	contradictPairs [][2]string
 	// items mirrors rows, materialised once so rendering and the trace read
 	// the same values.
 	items []Item
@@ -198,24 +203,28 @@ func runConflicts(p *pipeline) {
 	// the removal breakdown instead. A contradicts note additionally checks that
 	// both endpoints survived, because the edge set covers every candidate while
 	// the block holds only the rows that made it through.
+	// A failed lookup is a statement about the retrieval, not about the block, so
+	// it is reported whatever was admitted. It is also the whole reason EdgeStatus
+	// distinguishes "err" from "unavailable": a failed lookup and a store with no
+	// edges are different facts, and collapsing them loses the diagnosis.
+	if p.set.EdgesStatus.Status == "err" {
+		p.noteBuf = append(p.noteBuf, formatNote("edges_unavailable: the link lookup failed (%s), so conflict handling had no edges to read", p.set.EdgesStatus.Err))
+	}
 	if len(p.items) > 0 {
 		admitted := make(map[string]bool, len(p.items))
 		for _, it := range p.items {
 			admitted[it.ID] = true
 		}
-		// Whether the block survives stage 8 is not known yet, so these are held
-		// as block notes rather than emitted: an empty answer must not claim two
-		// rows "both remain in the block".
-		switch p.set.EdgesStatus.Status {
-		case "err":
-			notes = append(notes, formatNote("edges_unavailable: the link lookup failed (%s), so conflict handling had no edges to read", p.set.EdgesStatus.Err))
-		case "unavailable":
+		if p.set.EdgesStatus.Status == "unavailable" {
 			notes = append(notes, "edges_unavailable: no link joins two of these candidates")
 		}
-		// A contradiction pair is recorded, never removed.
+		// A contradiction pair is recorded, never removed. The pair is kept
+		// rather than rendered here: stage 8 can still cut one endpoint, and the
+		// note says both rows are in the answer.
 		for _, e := range p.set.Edges {
 			if e.Relation == "contradicts" && admitted[e.From] && admitted[e.To] {
-				notes = append(notes, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", shortID(e.From), shortID(e.To)))
+				p.contradictPairs = append(p.contradictPairs, [2]string{e.From, e.To})
+				notes = append(notes, formatNote("contradicts pair recorded, not separated: %s and %s were both candidates at this stage", shortID(e.From), shortID(e.To)))
 			}
 		}
 	}
@@ -373,22 +382,32 @@ func (p *pipeline) confidenceOf(id string) *float64 {
 	return nil
 }
 
-// notes is the bounded diagnostic note list, stage notes first. An empty result
-// also gets the per-stage breakdown, because a closed reason set can name only
-// one cause and a caller who was told "withheld as out of date" while the budget
-// cut the rest needs to see that both happened.
+// notes is the bounded diagnostic note list, in the order the reader needs it:
+// the per-stage breakdown first when the answer is empty, then the notes that
+// describe the block, then the per-row detail. The breakdown leads because it
+// qualifies the closed reason the answer leads with and bounding drops from the
+// end, so leading with it means pressure discards per-row detail rather than the
+// one sentence that makes the label checkable.
 func (p *pipeline) notes() []string {
-	all := make([]string, 0, len(p.noteBuf)+1)
-	// First, not last. The breakdown qualifies the closed reason the answer leads
-	// with, and bounding the list drops from the end — so leading with it means
-	// pressure discards per-row detail instead of the one sentence that makes the
-	// label checkable.
+	all := make([]string, 0, len(p.noteBuf)+len(p.blockNotes)+len(p.contradictPairs)+1)
 	if len(p.rows) == 0 && len(p.dropped) > 0 {
 		all = append(all, formatNote("%d candidate rows were removed and none reached the answer: %s",
 			len(p.dropped), p.removalBreakdown()))
 	}
 	if len(p.items) > 0 {
 		all = append(all, p.blockNotes...)
+		// Rendered here rather than at stage 5: the pair was recorded when both
+		// endpoints were candidates, and the sentence says both are in the
+		// answer, so it is only true of the rows the answer still holds.
+		admitted := make(map[string]bool, len(p.items))
+		for _, it := range p.items {
+			admitted[it.ID] = true
+		}
+		for _, pair := range p.contradictPairs {
+			if admitted[pair[0]] && admitted[pair[1]] {
+				all = append(all, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", shortID(pair[0]), shortID(pair[1])))
+			}
+		}
 	}
 	all = append(all, p.noteBuf...)
 	return boundNotes(all, p.req.Budget.MaxNoteBytes, p.req.Budget.MaxNotesBytes)

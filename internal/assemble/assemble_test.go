@@ -1068,25 +1068,42 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 	set.Edges = []memory.LinkEdge{{From: "A1", To: "B1", Relation: "contradicts", Strength: 1}}
 	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
 
-	req := baseRequest()
-	req.Budget.MaxItems = 1 // one row admitted, then the budget cuts the second
-	res := run(t, &fakeRetriever{set: set}, req)
-	if len(res.Items) != 1 {
-		t.Fatalf("precondition: wanted one admitted row, got %v", itemIDs(res.Items))
+	// Both endpoints admitted: the pair is reported, because the reader is
+	// looking at an answer that contains both.
+	full := baseRequest()
+	full.Budget.MaxItems = 10
+	res := run(t, &fakeRetriever{set: set}, full)
+	if len(res.Items) != 2 {
+		t.Fatalf("precondition: wanted both rows admitted, got %v", itemIDs(res.Items))
 	}
 	if !hasNote(res.Notes, "contradicts pair recorded") {
-		t.Errorf("a contradicts pair with both endpoints in the block is not reported: %v", res.Notes)
+		t.Errorf("a contradicts pair with both endpoints in the answer is not reported: %v", res.Notes)
+	}
+
+	// One endpoint cut by the budget. Stage 5 saw both; the answer contains one.
+	// A note claiming "both remain in the block" would be false of what the
+	// caller is reading, so it must not be rendered.
+	cutReq := baseRequest()
+	cutReq.Budget.MaxItems = 1
+	cut := run(t, &fakeRetriever{set: set}, cutReq)
+	if len(cut.Items) != 1 {
+		t.Fatalf("precondition: wanted one admitted row, got %v", itemIDs(cut.Items))
+	}
+	for _, n := range cut.Notes {
+		if hasNote([]string{n}, "remain in the block") {
+			t.Errorf("the budget cut one endpoint, but the answer still claims both are in the block: %q", n)
+		}
 	}
 
 	// Now stage 8 empties the block after stage 5 described it — the case the
 	// reviewer is about, and the one a caller sees as a bare "No matching
 	// memories found." with a link-graph claim attached.
-	cut := baseRequest()
-	cut.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	emptyReq := baseRequest()
+	emptyReq.Budget = Budget{MaxItems: 10, MaxBytes: 1}
 	emptySet := setOf(a, b)
 	emptySet.Edges = set.Edges
 	emptySet.EdgesStatus = set.EdgesStatus
-	empty := run(t, &fakeRetriever{set: emptySet}, cut)
+	empty := run(t, &fakeRetriever{set: emptySet}, emptyReq)
 	if len(empty.Items) != 0 {
 		t.Fatalf("precondition: wanted an empty result, got %v", itemIDs(empty.Items))
 	}
@@ -1097,6 +1114,21 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 		if hasNote([]string{n}, "edges_unavailable") {
 			t.Errorf("an empty result carries a link-graph claim about a set that was never retrieved: %q", n)
 		}
+	}
+
+	// A failed edge lookup is a statement about the retrieval, not about the
+	// block, so it stays true when nothing was admitted — and it is the reason
+	// EdgeStatus exists at all ("a failed lookup can be told from no edges").
+	failed := setOf(a, b)
+	failed.EdgesStatus = memory.EdgeStatus{Status: "err", Err: "database is locked"}
+	failedReq := baseRequest()
+	failedReq.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	failedRes := run(t, &fakeRetriever{set: failed}, failedReq)
+	if len(failedRes.Items) != 0 {
+		t.Fatalf("precondition: wanted an empty result, got %v", itemIDs(failedRes.Items))
+	}
+	if !hasNote(failedRes.Notes, "edges_unavailable") {
+		t.Errorf("a failed edge lookup is reported nowhere on an empty answer: %v", failedRes.Notes)
 	}
 
 	// The most common empty answer of all: retrieval found nothing, so there is
@@ -1117,12 +1149,12 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 	kept := candidate("KEEP", "proj", "fact", "admitted row", 0.9)
 	gone := candidate("GONE", "proj", "fact", "expired row", 0.8)
 	gone.ValidUntil = &expired
-	half := setOf(kept, gone)
-	half.Edges = []memory.LinkEdge{{From: "KEEP", To: "GONE", Relation: "contradicts", Strength: 1}}
-	half.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+	halfSet := setOf(kept, gone)
+	halfSet.Edges = []memory.LinkEdge{{From: "KEEP", To: "GONE", Relation: "contradicts", Strength: 1}}
+	halfSet.EdgesStatus = memory.EdgeStatus{Status: "ok"}
 	halfReq := baseRequest()
 	halfReq.Budget.MaxItems = 10
-	partial := run(t, &fakeRetriever{set: half}, halfReq)
+	partial := run(t, &fakeRetriever{set: halfSet}, halfReq)
 	if len(partial.Items) != 1 {
 		t.Fatalf("precondition: wanted one admitted row, got %v", itemIDs(partial.Items))
 	}
