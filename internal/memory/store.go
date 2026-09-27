@@ -1008,10 +1008,13 @@ type nameCandidate struct {
 // every matching row, and projects.name carries no index. The count has to be
 // there either way, and reading the names to go with it costs nothing extra.
 //
-// limit is clamped to at least one because SQLite reads LIMIT 0 as "no rows"
-// and a negative limit as "no limit": either would let the count report a
-// match the row list does not contain, and the single-candidate branch below
-// indexes the first row on the strength of that count.
+// limit is clamped to at least one because SQLite reads LIMIT 0 as "no rows":
+// the query would then report that nothing records the name, and the decision
+// that calls it would take its no-candidate path and open a project of its own
+// and bind the repository to it — a silent duplicate of the same-named project
+// rather than a decision to bind or refuse, which is the split this whole path
+// exists to report. A negative limit means no limit at all, which costs only
+// the bound the limit was passed to set.
 func (s *Store) projectsNamedTx(ctx context.Context, tx *sql.Tx, name string, limit int) ([]nameCandidate, int, error) {
 	if limit < 1 {
 		limit = 1

@@ -273,12 +273,14 @@ func TestAmbiguousNameRefusalNamesAtMostFiveCandidates(t *testing.T) {
 	}
 }
 
-// TestProjectsNamedTxClampsTheLimit pins that the count and the row list cannot
-// disagree. SQLite reads LIMIT 0 as "no rows" and a negative limit as "no
-// limit", so a caller asking for nothing would get a count of one with an
-// empty list, and the single-candidate branch of the decision above indexes the
-// first row on the strength of that count — inside a transaction already
-// holding the store mutex and the write lock.
+// TestProjectsNamedTxClampsTheLimit pins that a limit which would return
+// nothing cannot turn the unique-name decision into a silent duplicate.
+// SQLite reads LIMIT 0 as "no rows", so without the clamp the query reports
+// that no project records the name, and the caller opens a project of its own
+// and binds the repository to it: the same-named project is left behind,
+// unbound, with no refusal to report — the one outcome this path exists to
+// prevent. A negative limit means no limit, so it returns every row; the clamp
+// is what makes both inputs behave like a positive bound.
 func TestProjectsNamedTxClampsTheLimit(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
