@@ -335,7 +335,6 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string, string) {
 		// absent.
 		if entry.Type != nil {
 			merged.Type = entry.Type
-			origin.Type = src.label
 		}
 		if entry.Command != nil {
 			merged.Command = entry.Command
@@ -361,9 +360,12 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string, string) {
 // a lower layer disabling ghost and a higher one overriding only `command`,
 // the message must point at the file holding `enabled: false`, because that is
 // the file the user has to edit. Entry is the fallback for a key no layer set.
+//
+// Only the keys a verdict can complain about are recorded. `type` is merged
+// into the entry (opencode's schema has it) but no verdict inspects it, so
+// tracking where it came from would be unread state.
 type opencodeMCPOrigin struct {
 	Entry   string // last layer that mentioned mcp.ghost at all
-	Type    string // layer that set `type`
 	Command string // layer that set `command`
 	Enabled string // layer that set `enabled`
 }
