@@ -139,12 +139,36 @@ var closedByPlaceholder = map[string]bool{
 	"unspecified": true, "nothing": true, "nil": true, "-": true, "?": true,
 }
 
+// noClaimWords are the words a required-reason value may START with and still
+// name nothing. A placeholder list alone is not enough: the likeliest way a
+// model declines to name a fact is a phrase rather than a keyword — "not
+// applicable", "no such claim", "cannot name it", "unclear" — and a nine-word
+// list reads the first of those as a perfectly good reason. Each is a KEEP here
+// and a NEITHER in internal/supersede, and each is the safe direction: the note
+// stays injectable, the edge is not written.
+//
+// It is the value's FIRST word that decides, because that is where a refusal
+// appears. A reason's later words are its content, so a real reason is not
+// caught by a word it happens to contain: "the runbook was replaced" names a
+// fact even though nothing in the list matches it, and a claim like "it runs
+// Redis 6.2" is never read as a refusal. The cost of the rule is the shape it
+// cannot tell apart — a genuine reason that OPENS with a negation ("no decision
+// was ever recorded, so the thread closed") reads as no reason at all — and that
+// too errs towards keeping the note and not writing the edge.
+var noClaimWords = map[string]bool{
+	"unclear": true, "uncertain": true, "irrelevant": true,
+	"inapplicable": true, "unable": true, "impossible": true,
+	"indeterminate": true, "undecided": true, "pending": true,
+}
+
 // ReasonlessValue reports whether a required-reason field's value names nothing:
-// a placeholder word, or the angle-bracketed template the prompt itself prints —
-// a harness echoing the format back verbatim is a routine failure mode of
+// a placeholder word, the angle-bracketed template the prompt itself prints — a
+// harness echoing the format back verbatim is a routine failure mode of
 // format-constrained replies, and "<the fact that made note N obsolete>" names
-// nothing at all. The comparison is case-insensitive, because a value that
-// arrives uppercased ("replaced: NONE") is the same placeholder.
+// nothing at all — or a value whose FIRST WORD declines to name one (see
+// noClaimWords and isNegation). The comparison is case-insensitive, because a
+// value that arrives uppercased ("replaced: NONE") is the same placeholder and
+// one that arrives lowercased ("closed-by: Not applicable") is the same refusal.
 //
 // Exported because internal/supersede's `replaced:` field is the same contract
 // for a supersedes verdict (#686): a SUPERSEDES that cannot say what the older
@@ -153,7 +177,14 @@ var closedByPlaceholder = map[string]bool{
 // injection but buries it under a supersedes edge would be two vocabularies for
 // one rule.
 func ReasonlessValue(value string) bool {
-	return closedByPlaceholder[strings.ToLower(value)] || strings.HasPrefix(value, "<")
+	if strings.HasPrefix(value, "<") {
+		return true
+	}
+	first := strings.ToLower(value)
+	if i := strings.IndexAny(first, " \t"); i >= 0 {
+		first = first[:i]
+	}
+	return closedByPlaceholder[first] || noClaimWords[first] || isNegation(first)
 }
 
 // ReasonedField reports whether the first occurrence of key in fields carries a

@@ -392,9 +392,14 @@ func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 		if !wantLink && len(pairs) != 0 {
 			t.Errorf("%s (%s): want no link, got %d", c.name, want, len(pairs))
 		}
+		// No labeled case in this set is labeled CAUSES — the prompt rules
+		// those out — so ANY causes link here is one the pass wrote against the
+		// fixture. The assertion is unconditional on purpose: narrowing it to
+		// the cases whose own `wrong` is CAUSES would stop catching a spurious
+		// edge on any other pair.
 		links, _ := store.GetLinks(ctx, older)
 		for _, l := range links {
-			if l.Relation == string(RelationCauses) && c.wrong == RelationCauses {
+			if l.Relation == string(RelationCauses) {
 				t.Errorf("%s: a causes link was written: %+v", c.name, l)
 			}
 		}
@@ -630,9 +635,9 @@ func TestRunReclassifiesPairsCachedUnderTheOldRubric(t *testing.T) {
 	newer := add(t, store, db, c.newer, []float32{1, 0, 0, 0}, c.newerCreated)
 	older := add(t, store, db, c.older, []float32{0.999, 0.001, 0, 0}, c.olderCreated)
 
-	// A row written by a pass running the pre-#641 (v2-prefixed) rubric, so the
-	// test does not depend on which older prefix exists: every prefix but the
-	// current one must miss.
+	// A row written by a pass running the pre-#686 rubric, whose prefix is v2.
+	// The prefix moved to v3 with the `replaced:` rule, so this row no longer
+	// matches and the pair is re-asked.
 	old := func(content string) string {
 		sum := sha256.Sum256([]byte("v2\x00" + content))
 		return hex.EncodeToString(sum[:])

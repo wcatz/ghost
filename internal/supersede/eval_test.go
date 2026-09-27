@@ -93,11 +93,18 @@ func TestSupersedeEvalParserOverTheFixtures(t *testing.T) {
 		RelationNeither:    "",
 	}
 	for _, shape := range []struct {
-		name  string
+		name string
+		// reply renders the line for pair 1 of a two-pair call, so the batched
+		// shape really goes through parseBatchVerdict — a "1: SUPERSEDES | …"
+		// string handed to Classify would be read by parseRelation and the
+		// batched parser would never run.
 		reply func(Relation, string) string
+		// batched says which parser the shape must reach.
+		batched bool
 	}{
 		{
-			name: "single pair",
+			name:    "single pair",
+			batched: false,
 			reply: func(v Relation, claim string) string {
 				if v != RelationSupersedes {
 					return string(v)
@@ -106,16 +113,18 @@ func TestSupersedeEvalParserOverTheFixtures(t *testing.T) {
 			},
 		},
 		{
-			name: "batched pairs",
+			name:    "batched pairs",
+			batched: true,
 			reply: func(v Relation, claim string) string {
 				if v != RelationSupersedes {
-					return "1: " + string(v)
+					return "1: " + string(v) + "\n2: NEITHER"
 				}
-				return "1: SUPERSEDES | replaced: " + claim
+				return "1: SUPERSEDES | replaced: " + claim + "\n2: NEITHER"
 			},
 		},
 		{
-			name: "reasonless",
+			name:    "reasonless",
+			batched: false,
 			reply: func(v Relation, _ string) string {
 				if v != RelationSupersedes {
 					return string(v)
@@ -137,10 +146,27 @@ func TestSupersedeEvalParserOverTheFixtures(t *testing.T) {
 				want = RelationNeither
 			}
 			reply := shape.reply(c.want, claims[c.want])
-			got, err := NewRelationClassifier(&fakeProvider{resp: reply}).Classify(
-				context.Background(), evalCandidate(c))
+			cls := NewRelationClassifier(&fakeProvider{resp: reply})
+			var got Relation
+			var err error
+			if shape.batched {
+				// Two pairs, so the chunked path is the one a real pass takes.
+				var got1 []Relation
+				got1, err = cls.ClassifyBatch(context.Background(), []Candidate{
+					evalCandidate(c),
+					{NewerID: "n2", NewerContent: "n2", OlderID: "o2", OlderContent: "o2"},
+				})
+				if err == nil {
+					if len(got1) != 2 {
+						t.Fatalf("%s/%s: got %d verdicts for 2 pairs", shape.name, c.name, len(got1))
+					}
+					got = got1[0]
+				}
+			} else {
+				got, err = cls.Classify(context.Background(), evalCandidate(c))
+			}
 			if err != nil {
-				t.Fatalf("%s/%s: Classify(%q): %v", shape.name, c.name, reply, err)
+				t.Fatalf("%s/%s: classify %q: %v", shape.name, c.name, reply, err)
 			}
 			if got != want {
 				t.Errorf("%s/%s: verdict = %q, want %q (reply %q)", shape.name, c.name, got, want, reply)
@@ -149,19 +175,37 @@ func TestSupersedeEvalParserOverTheFixtures(t *testing.T) {
 	}
 }
 
-// TestSupersedeEvalFixturesAreSynthetic: the eval's text is invented, and a real
-// memory pasted into a fixture would put stored note content — and whatever it
-// was about — into the repository. The invariant is checked on the one signal
-// that separates them: a real note names the project, a host or a person it was
-// written from, and these name an invented service estate throughout.
-func TestSupersedeEvalFixturesAreSynthetic(t *testing.T) {
+// TestSupersedeEvalFixturesCarryNothingReal: the eval's text is invented, and a
+// real memory pasted into a fixture would put stored note content — and whatever
+// it was about — into the repository, permanently and publicly. Nothing can
+// prove a fixture is invented, but the shapes a pasted note almost always
+// carries can be refused: a filesystem path, a URL, an email address, a private
+// address, and the prompt's own data delimiters (which quoteData would have to
+// rewrite). Each of those is a plausible line in a real note about a real
+// deployment and impossible in a sentence written to be generic.
+func TestSupersedeEvalFixturesCarryNothingReal(t *testing.T) {
+	forbidden := []struct {
+		what  string
+		shape string
+	}{
+		{"a filesystem path", "/home/"},
+		{"a macOS path", "/Users/"},
+		{"a Windows path", `C:\\`},
+		{"a URL", "http://"},
+		{"a secure URL", "https://"},
+		{"an email address", "@"},
+		{"a private IPv4 address", "192.168."},
+		{"a link-local IPv4 address", "169.254."},
+		{"a prompt data delimiter", "«"},
+		{"a prompt data delimiter", "»"},
+	}
 	for _, c := range liveSupersedeCases {
 		for _, field := range []struct{ what, text string }{{"older", c.older}, {"newer", c.newer}} {
-			if strings.Contains(field.text, "«") || strings.Contains(field.text, "»") {
-				t.Errorf("%s: %s note carries a data delimiter, which the prompt would have to rewrite", c.name, field.what)
-			}
-			if strings.Contains(strings.ToLower(field.text), "real memory") {
-				t.Errorf("%s: %s note reads like a note about the corpus itself", c.name, field.what)
+			for _, f := range forbidden {
+				if strings.Contains(field.text, f.shape) {
+					t.Errorf("%s: the %s note carries %s (%q) — a real note pasted into a fixture leaks whatever it was about",
+						c.name, field.what, f.what, f.shape)
+				}
 			}
 		}
 	}

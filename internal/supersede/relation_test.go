@@ -110,6 +110,17 @@ func TestSupersedesVerdictRequiresAReplacedClaim(t *testing.T) {
 		{"placeholder TBD", "SUPERSEDES | replaced: TBD", RelationNeither},
 		{"placeholder unknown", "SUPERSEDES | replaced: unknown", RelationNeither},
 		{"placeholder on the next line", "SUPERSEDES | replaced:\nnone", RelationNeither},
+		// A value that DENIES there is one has named nothing either, and it is
+		// the likeliest way a model says "I cannot tell you what stopped being
+		// true" without using a placeholder word. Judging only whether the
+		// first word is on a nine-word list would let all of these write an
+		// edge, which is the #686 harm the field exists to stop.
+		{"leading denial not", "SUPERSEDES | replaced: not applicable", RelationNeither},
+		{"leading denial no", "SUPERSEDES | replaced: no such claim", RelationNeither},
+		{"leading denial cannot", "SUPERSEDES | replaced: cannot name it", RelationNeither},
+		{"uncertain", "SUPERSEDES | replaced: unclear", RelationNeither},
+		{"uncertain, second word", "SUPERSEDES | replaced: uncertain which value", RelationNeither},
+		{"irrelevant", "SUPERSEDES | replaced: irrelevant to the older note", RelationNeither},
 		// The prompt's own template echoed back verbatim names nothing, and
 		// echoing a format is a routine harness failure mode.
 		{"echoed template", "SUPERSEDES | replaced: <the OLDER note's claim that no longer holds>", RelationNeither},
@@ -144,6 +155,7 @@ func TestSupersedesVerdictRequiresAReplacedClaim(t *testing.T) {
 		{"named claim", "1: SUPERSEDES | replaced: it was pinned to release 14", RelationSupersedes},
 		{"bare verdict", "1: SUPERSEDES", RelationNeither},
 		{"placeholder", "1: SUPERSEDES | replaced: tbd", RelationNeither},
+		{"leading denial", "1: SUPERSEDES | replaced: not applicable", RelationNeither},
 		{"reversed keeps its own shape", "1: REVERSED", RelationReversed},
 		{"causes keeps its own shape", "1: CAUSES", RelationCauses},
 	}
@@ -184,15 +196,6 @@ func TestClassifierPromptAsksTheBothTrueQuestion(t *testing.T) {
 		if !strings.Contains(classifyBatchSystemPrompt, want) {
 			t.Errorf("the batched prompt does not carry %q:\n%s", want, classifyBatchSystemPrompt)
 		}
-	}
-	// The two contracts are one rubric plus two output shapes, so a question that
-	// survives in one survives in the other by construction — pinned here because
-	// that is the only thing keeping the two from drifting.
-	if !strings.Contains(classifySystemPrompt, "is the OLDER note's claim false, or no longer applicable") {
-		t.Errorf("the single-pair prompt lost the question:\n%s", classifySystemPrompt)
-	}
-	if !strings.Contains(classifyBatchSystemPrompt, "is the OLDER note's claim false, or no longer applicable") {
-		t.Errorf("the batched prompt lost the question:\n%s", classifyBatchSystemPrompt)
 	}
 }
 

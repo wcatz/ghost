@@ -18,8 +18,13 @@ import (
 // signal a reader of lifecycle.log needs.
 var retireMarkers = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bno longer\b`),
-	regexp.MustCompile(`(?i)\bretire[ds]?\b`),
-	regexp.MustCompile(`(?i)\bremove[ds]?\b`),
+	// Every inflection of each verb, because a note that says it is "retiring"
+	// the rule has retired it as far as this veto is concerned. Each pattern
+	// here has a case in TestVetoSupersedeLetsEveryRetirementMarkerThrough, and
+	// that test exists because a suffix form that stops matching is silent: it
+	// costs a supersession, and nothing else fails.
+	regexp.MustCompile(`(?i)\bretir(?:e|es|ed|ing)\b`),
+	regexp.MustCompile(`(?i)\bremov(?:e|es|ed|ing)\b`),
 	regexp.MustCompile(`(?i)\bdeprecat(?:ed|ion|ing)\b`),
 	regexp.MustCompile(`(?i)\bobsolete\b`),
 	regexp.MustCompile(`(?i)\breplac(?:e|es|ed|ing|ement)\b`),

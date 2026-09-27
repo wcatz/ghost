@@ -353,15 +353,20 @@ func (s *evalScores) add(c supersedeEvalCase, verdict Relation, err error) {
 // be reminded of — so the two are not symmetric and the pass is KEEP-biased.
 //
 // Measured with GHOST_OPENCODE_MODEL=opencode/big-pickle (free, so the run is
-// reproducible for anyone): 0.93 precision / 1.00 recall on the single-pair path
-// and the same on the batched path, with the one false edge on
-// "partial-fix" — a correction to one detail of a many-fact note. The rubric
-// grew a clause for that class (the edge demotes the whole note, so the facts
-// it did not touch are lost) and the re-run of the same set measured 1.00/1.00
-// on both paths, 14 of 14 edges correct, with 2 of the 14 both-true pairs
-// settled by the veto for free and no unparseable reply. The remaining miss on
-// the batched path is a CAUSES answer on "failure-and-cause", which writes no
-// supersedes edge: a recall miss, and the low-harm direction.
+// reproducible for anyone), twice, on this set:
+//
+//   - first run: 0.93 precision / 1.00 recall on both paths. The one false edge
+//     was "partial-fix" — a correction to one detail of a many-fact note — and
+//     the batched path also answered CAUSES on "failure-and-cause", which writes
+//     no supersedes edge and is a recall miss, the low-harm direction.
+//   - after the rubric grew a clause for that class (the edge demotes the whole
+//     note, so the facts a one-detail correction did not touch are what an agent
+//     still needs): 1.00 precision / 1.00 recall on both paths, 14 of 14 edges
+//     correct, 2 of the 14 both-true pairs settled by the veto for free, and no
+//     unparseable reply on either path.
+//
+// Both figures are for the same 28 pairs; the second run is a re-measurement of
+// the same set after one rubric clause was added, not an independent sample.
 func TestLiveSupersedePrecision(t *testing.T) {
 	if !ai.LiveTestsEnabled() {
 		t.Skip("live LLM test makes billable harness calls; set GHOST_LIVE_TESTS=1 to run")

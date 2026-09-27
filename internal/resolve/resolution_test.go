@@ -101,6 +101,16 @@ func TestIsResolvedRequiresClosedByReason(t *testing.T) {
 		"RESOLVED | closed-by: <the fact that made note 1 obsolete>",
 		"RESOLVED | closed-by: <what made this note obsolete>",
 		"RESOLVED | closed-by: <reason>",
+		// A value whose FIRST word denies there is one has named nothing
+		// either, and a nine-word placeholder list does not catch it. This is
+		// the shared grammar internal/supersede's `replaced:` field rides on
+		// (#686), so the hole was in both passes and is closed in both.
+		"RESOLVED | closed-by: not applicable",
+		"RESOLVED | closed-by: no decision was recorded",
+		"RESOLVED | closed-by: nothing specific",
+		"RESOLVED | closed-by: cannot name it",
+		"RESOLVED | closed-by: unclear",
+		"RESOLVED | closed-by: irrelevant to this note",
 	} {
 		fp := &fakeProvider{resp: resp}
 		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")

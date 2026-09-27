@@ -288,6 +288,64 @@ func TestRunVetoedPairIsNotCountedAsACandidate(t *testing.T) {
 	}
 }
 
+// TestVetoSupersedeLetsEveryRetirementMarkerThrough: the veto's safety rests
+// entirely on its second half. A regex that stops matching — a typo, a missing
+// suffix form, an edit nobody ran a test for — does not fail loudly: it leaves
+// the veto standing on a pair that really was a supersession, and the loss is a
+// stale note nobody notices. So every marker gets a case, in the form the marker
+// is meant to catch, and each one has to reach the classifier.
+func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
+	rule := "NEVER merge on Fridays; the release is cut on Tuesdays instead."
+	cases := []struct {
+		marker string
+		newer  string
+	}{
+		{"no longer", "The no-Friday-merge rule is no longer in force."},
+		{"retire", "We retired the Friday merge ban last sprint."},
+		{"retires", "The policy retires the Friday ban in the next release."},
+		{"retired", "The Friday ban was retired; deploys run on Tuesdays."},
+		{"retiring", "The team is retiring the Friday merge rule."},
+		{"remove", "We remove the Friday restriction from the branch policy."},
+		{"removes", "The policy removes the Friday restriction."},
+		{"removed", "The Friday restriction was removed in the policy rewrite."},
+		{"removing", "The next release is removing the Friday restriction."},
+		{"deprecated", "The Friday merge rule is deprecated; use the canary gate."},
+		{"obsolete", "The Friday merge rule is obsolete after the canary gate landed."},
+		{"replace", "The canary gate replaces the Friday merge rule."},
+		{"replaced", "The Friday merge rule was replaced by the canary gate."},
+		{"superseded", "The Friday merge rule is superseded by the canary gate."},
+		{"dropped", "The Friday merge rule was dropped from the branch policy."},
+		{"relaxed", "The Friday merge rule was relaxed; any weekday works now."},
+		{"loosened", "The Friday merge rule was loosened after the canary gate landed."},
+		{"lifted", "The Friday merge ban was lifted once the gate went green."},
+		{"waived", "The Friday merge ban was waived for the 1.x line only."},
+		{"must now", "A merge must now wait for the canary gate, on any weekday."},
+		{"not required", "The Friday merge ban is not required any more."},
+		{"exception to", "An exception to the Friday ban applies to release branches."},
+	}
+	// Every marker has a case, and every marker's canonical word is checked
+	// against the production predicate as well: a word nothing recognises is a
+	// word whose regex rotted unnoticed, which shows up as a lost supersession
+	// rather than as a failure.
+	words := []string{
+		"no longer", "retire", "retires", "retired", "retiring",
+		"remove", "removes", "removed", "removing",
+		"deprecated", "obsolete", "replace", "replaced", "superseded", "dropped",
+		"relaxed", "loosened", "lifted", "waived", "must now", "not required",
+		"exception to",
+	}
+	for _, c := range cases {
+		if reason, vetoed := VetoSupersede(Candidate{OlderContent: rule, NewerContent: c.newer}); vetoed {
+			t.Errorf("marker %q: the veto stood on a pair the newer note retires (reason %q)", c.marker, reason)
+		}
+	}
+	for _, w := range words {
+		if !namesRetirement(w) {
+			t.Errorf("marker word %q is recognised by no entry in retireMarkers, so the veto stands on a pair the newer note retires", w)
+		}
+	}
+}
+
 // TestVetoSupersedeReasonNamesTheFiredPattern: the reason is what a log line and
 // the CLI report carry, so it has to say which signal fired — resolve.VetoKeep
 // returns the same way.

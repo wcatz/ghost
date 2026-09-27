@@ -1352,15 +1352,23 @@ withdrawn edge justified.
 // point of the pass — a repair whose edges cannot be read is a repair nobody
 // can decide about — and each line names the rule that withdrew the edge, which
 // is what separates a wrong edge from a genuinely obsolete one.
+//
+// The count follows resolve's repair report: a dry run reports what the pass
+// would do (the list it is about to print) and --apply reports what it did.
+// Printing ReassessResult.Withdrawn in a dry run would put "would withdraw 0"
+// above a list of three edges, because that field counts only invalidations that
+// actually landed.
 func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls int) string {
 	verb := "would withdraw"
+	count := len(withdrawn)
 	if apply {
 		verb = "withdrew"
+		count = res.Withdrawn
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d causes, %d reversed, %d UNKNOWN, %s %d (%d classify call(s))\n",
-		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Causes, res.Reversed,
-		res.Unclassified, verb, res.Withdrawn, calls)
+	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN, %s %d (%d classify call(s))\n",
+		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
+		res.Unclassified, verb, count, calls)
 	short := func(id string) string {
 		if len(id) > 8 {
 			return id[:8]
@@ -1372,7 +1380,15 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		if w.Written {
 			marker = "withdrew   "
 		}
-		fmt.Fprintf(&b, "  %s  %s -> %s  %s\n", marker, short(w.NewerID), short(w.OlderID), w.Reason)
+		// A vetoed row was settled with no harness call, and a false veto here
+		// deletes a correct edge the ordinary pass will not re-create, so the
+		// line says which of the two decided it rather than leaving the reader
+		// to infer it from the reason's wording.
+		by := "classifier"
+		if w.Vetoed {
+			by = "veto, no harness call"
+		}
+		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]  %s\n", marker, short(w.NewerID), short(w.OlderID), by, w.Reason)
 	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")
@@ -1436,11 +1452,15 @@ func runSupersede() {
 
 	if reassess {
 		res, withdrawn, err := supersede.Reassess(ctx, store, cls, projectID, apply, logger)
+		// The report is printed before the error is raised, and the non-zero
+		// exit stays: each invalidation is its own transaction, so a failure on
+		// the Nth edge leaves N-1 already withdrawn and unreachable by a later
+		// pass. A repair that partly happened has to be visible as such.
+		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls()))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls()))
 		return
 	}
 

@@ -1440,22 +1440,25 @@ func TestSupersedeReport(t *testing.T) {
 }
 
 // TestSupersedeReassessReport: the repair pass's report is per outcome, and its
-// list is the point of the pass — so each line has to name the edge AND the rule
-// that withdrew it, and a dry run must never be readable as a change that
-// happened.
+// list is the point of the pass — so each line has to name the edge, the rule
+// that withdrew it and WHICH decided it, and the headline count has to be the
+// one the operator is about to act on. A dry run reports the list it is about to
+// print; --apply reports the rows that actually moved, which is fewer whenever a
+// concurrent pass got there first.
 func TestSupersedeReassessReport(t *testing.T) {
 	edges := []supersede.WithdrawnEdge{
-		{NewerID: "abcdef0123456789", OlderID: "9876543210fedcba", Reason: "vetoed: older note states a rule (never) the newer note does not retire"},
+		{NewerID: "abcdef0123456789", OlderID: "9876543210fedcba", Reason: "vetoed: older note states a rule (never) the newer note does not retire", Vetoed: true},
 		{NewerID: "1122334455667788", OlderID: "8877665544332211", Reason: "neither: both notes are still true"},
 	}
 	dry := supersedeReassessReport("proj", supersede.ReassessResult{
-		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Unclassified: 1, Withdrawn: 0,
+		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Neither: 1, Unclassified: 1, Withdrawn: 0,
 	}, false, edges, 2)
 	for _, want := range []string{
-		"proj: 5 live supersedes edge(s), 1 not judged, 1 vetoed, 1 still supersedes, 0 causes, 0 reversed, 1 UNKNOWN, would withdraw 0 (2 classify call(s))",
-		"  would withdraw  abcdef01 -> 98765432",
-		"vetoed: older note states a rule (never) the newer note does not retire",
-		"neither: both notes are still true",
+		// The per-outcome numbers add up to Loaded, and the withdrawal count is
+		// the two edges below it, not the (dry-run-zero) Withdrawn field.
+		"proj: 5 live supersedes edge(s), 1 not judged, 1 vetoed, 1 still supersedes, 1 neither, 0 causes, 0 reversed, 1 UNKNOWN, would withdraw 2 (2 classify call(s))",
+		"  would withdraw  abcdef01 -> 98765432  [veto, no harness call]  vetoed:",
+		"  would withdraw  11223344 -> 88776655  [classifier]  neither: both notes are still true",
 		"Re-run with --apply to withdraw these edges.",
 	} {
 		if !strings.Contains(dry, want) {
@@ -1466,23 +1469,23 @@ func TestSupersedeReassessReport(t *testing.T) {
 		t.Errorf("a dry run reported a withdrawal as done:\n%s", dry)
 	}
 
-	// Under --apply the list says so per edge, and the count reports the rows
-	// actually invalidated — which is smaller than the list whenever a concurrent
-	// pass withdrew an edge first.
+	// Under --apply the list says so per edge, and the headline counts the rows
+	// actually invalidated — one here, because a concurrent pass withdrew the
+	// vetoed edge first and the report must not claim this pass wrote it.
 	applied := []supersede.WithdrawnEdge{
-		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Written: true},
-		{NewerID: edges[1].NewerID, OlderID: edges[1].OlderID, Reason: edges[1].Reason},
+		{NewerID: edges[1].NewerID, OlderID: edges[1].OlderID, Reason: edges[1].Reason, Written: true},
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true},
 	}
 	apply := supersedeReassessReport("proj", supersede.ReassessResult{
-		Loaded: 2, Vetoed: 1, Withdrawn: 1,
+		Loaded: 2, Vetoed: 1, Neither: 1, Withdrawn: 1,
 	}, true, applied, 1)
 	if !strings.Contains(apply, "withdrew 1 (1 classify call(s))") {
-		t.Errorf("apply report does not count the withdrawal:\n%s", apply)
+		t.Errorf("apply report does not count the withdrawal that landed:\n%s", apply)
 	}
-	if !strings.Contains(apply, "  withdrew     abcdef01 -> 98765432") {
+	if !strings.Contains(apply, "  withdrew     11223344 -> 88776655  [classifier]") {
 		t.Errorf("apply report does not mark the edge it wrote:\n%s", apply)
 	}
-	if !strings.Contains(apply, "  would withdraw  11223344 -> 88776655") {
+	if !strings.Contains(apply, "  would withdraw  abcdef01 -> 98765432  [veto, no harness call]") {
 		t.Errorf("apply report does not mark the edge a concurrent pass withdrew first:\n%s", apply)
 	}
 	if strings.Contains(apply, "Re-run with --apply") {

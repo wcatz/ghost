@@ -197,11 +197,14 @@ var relationSynonyms = map[string]Relation{
 // parseRelation scans resp for the first decisive canonical token (SUPERSEDES,
 // CAUSES, NEITHER or REVERSED), guarding against a rambling reply that merely
 // mentions one in passing — we check the first decisive token, not substring
-// containment. A recognized synonym counts only as the LEADING field of a reply
-// that names no canonical token at all: as bare stems they collide with ordinary
-// prose, where "the correct answer is NEITHER" would otherwise decide SUPERSEDES
-// on "correct". A canonical token anywhere in the reply still wins, because the
-// loop below returns before the synonym branch is ever reached.
+// containment. A recognized synonym counts only as the LEADING field, and only
+// when the loop above found no canonical token to decide the reply: as bare
+// stems they collide with ordinary prose, where "the correct answer is NEITHER"
+// would otherwise decide SUPERSEDES on "correct". (A canonical token that was
+// SKIPPED as a negation or as a non-leading REVERSED does not decide the reply
+// either, so a synonym can still be read from such a reply — safely, because
+// nothing reaches a SUPERSEDES without a `replaced:` claim and nothing else
+// changes the verdict.)
 //
 // REVERSED is stricter than the other three, and deliberately so: it is accepted
 // only as the leading field, the same rule parseBatchVerdict applies to a
@@ -455,9 +458,14 @@ func parseBatchRelations(resp string, n int) []Relation {
 //
 // The reversed-direction guard and the required `replaced:` claim are applied on
 // BOTH paths, so neither can write the backwards link of #641 or a #686 edge
-// between two notes that are both still true. A synonym counts only as the
-// leading field, and only when the line names no canonical verdict, matching
-// parseRelation's rule.
+// between two notes that are both still true. The `replaced:` requirement is
+// slightly STRICTER here, and the difference is deliberate: this parser only
+// ever sees one numbered line, so a model that breaks the line right after the
+// colon has put the claim on the next line, where the numbering says it belongs
+// to no pair. That reads NEITHER rather than reaching across lines for a reason
+// the reply did not put there — the same safe direction, one step stricter. A
+// synonym counts only as the leading field, and only when the line names no
+// canonical verdict, matching parseRelation's rule.
 func parseBatchVerdict(rest string) (Relation, bool) {
 	// The number/separator may be emphasized (`**1:**`), and the verdict
 	// itself may be wrapped (`*CAUSES*`); strip leading decoration so the
