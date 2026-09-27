@@ -1013,7 +1013,7 @@ func TestReportDisposedClaims(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	reportDisposedClaims(&buf, result)
+	reportDisposedClaims(&buf, 80, result)
 	got := buf.String()
 
 	for _, want := range []string{
@@ -1037,7 +1037,7 @@ func TestReportDisposedClaims(t *testing.T) {
 // carrying an empty section.
 func TestReportDisposedClaimsSaysNothingWithoutClaims(t *testing.T) {
 	var buf bytes.Buffer
-	reportDisposedClaims(&buf, reflection.ReflectionResult{
+	reportDisposedClaims(&buf, 80, reflection.ReflectionResult{
 		Memories: []reflection.ReflectMemory{{Category: "fact", Content: "anything"}},
 	})
 	if buf.Len() != 0 {

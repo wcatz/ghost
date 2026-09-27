@@ -48,6 +48,24 @@ type ReflectionResult struct {
 	// NOT an exemption: the drop guard audits a disposed row like any other, and
 	// keeps it unless the corpus can show it is gone (see Replacement).
 	Replacements []Replacement `json:"replacements,omitempty"`
+	// Kept are the input ids an explicit `keep` operation named. It is the only
+	// thing separating a keep from the pass-through, and the report needs the
+	// difference: an operator reading a dry run can otherwise see that a row
+	// survived without being able to tell whether the model looked at it (#684).
+	Kept []string `json:"kept,omitempty"`
+	// Drops are the explicit `drop` operations the response asked for, each with
+	// the reason it gave. They are a record of what the model tried to remove, in
+	// the same sense as Replacements and for the same reason: an `obsolete` drop
+	// names no successor, so before this the response recorded nothing at all
+	// about the id it disposed of and a reader of the result could not account
+	// for it. Nothing acts on the record; the drop guard audits the row itself.
+	Drops []Drop `json:"drops,omitempty"`
+	// Refusals are the merge and rewrite operations the grounding check rejected
+	// (#639), with the ids each named — which were emitted unchanged instead —
+	// and the identifiers in the proposed text that no source carried. A refusal
+	// used to be a log line inside the tier and nothing else, so the report
+	// showed the sources as if the model had never asked.
+	Refusals []Refusal `json:"refusals,omitempty"`
 }
 
 // Merge is one merge operation and what it produced. Text and not just the ids so
@@ -77,6 +95,39 @@ type Merge struct {
 type Replacement struct {
 	ID   string
 	Text string
+}
+
+// Drop is one explicit `drop` operation: the input id it names and the reason
+// the response gave for removing it — "obsolete", or "superseded by <id>" with
+// the id already uppercased.
+//
+// It is a record, not a permission, exactly as Replacement is. The drop guard
+// audits the row on its own evidence and `ghost reflect --allow-drops` is the
+// only thing that accepts a deletion; this exists so a reader of the result can
+// see the claim at all, which an obsolete drop otherwise never did.
+type Drop struct {
+	ID     string
+	Reason string
+}
+
+// Refusal is a merge or rewrite the grounding check rejected.
+//
+// Kind is "merge" or "rewrite"; IDs are the input ids the operation named, all
+// of which were emitted unchanged in its place, so the memory they carried is
+// still in the corpus; Text is what the model proposed and Ghost declined to
+// store; Identifiers are the specific values in that text no source carried,
+// which is the whole reason for the refusal.
+//
+// The record is what makes a refusal auditable from outside the tier. Ghost
+// cannot know which side of a corrupted identifier (2.BeXIAhbj.js vs
+// 2.BeXIAhbq.js) is true, so it keeps the sources and writes neither side — but
+// a reader who cannot see the refusal reads the sources as untouched input, and
+// an operation that asked to combine them as never having been made.
+type Refusal struct {
+	Kind        string
+	IDs         []string
+	Text        string
+	Identifiers []string
 }
 
 // ReflectMemory is a discrete memory extracted during reflection.

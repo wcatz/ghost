@@ -93,12 +93,30 @@ ghost reflect myproject --apply
 | `--allow-drops` | Apply even when memories would be removed without a merge. Every category is under the drop guard, so without this flag an input memory no surviving memory explains is re-added verbatim instead of deleted. **Nothing is exempt**: an explicit `obsolete` drop, a rewrite, and a `superseded by <id>` drop are all audited the same way, and a row the model disposed of comes back unless a single output memory carries at least 45% of its tokens. A merge source is audited against the text of its OWN merge, not the whole result. A memory the harness simply never named is carried through unchanged, so a rewrite is not a free change of wording — its replacement has to carry the memory's substance, or the old row survives beside it until a later `ghost resolve` or `ghost supersede` demotes it. The cost of that is a possible duplicate; the alternative is a silent deletion with nobody watching. |
 | `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
 | `--skip-unchanged` | Skip the LLM call when the consolidatable set is unchanged since the last applied pass. |
+| `--full` | Print the full text of every memory the run reports, instead of the 120-byte preview. Display only — the result and the write are identical either way. |
 | `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
 The `auto` tier uses the explicit source when provided, otherwise detects the calling harness. It does not silently switch to a different harness or billing path. When a source is known but its CLI binary is unavailable, auto can fall back to SQLite; the offline tier is also available for an explicit local run.
 
 A harness-backed consolidation is asked for operations on the memory ids it is shown — `keep <id>`, `merge <id>,<id> -> <text>`, `rewrite <id> -> <text>`, `drop <id> reason: obsolete | superseded by <id>` — rather than for a rewritten list of memories. A memory leaves the corpus only through one of those operations: named as a merge source, named for a rewrite, or named in a drop with a reason — and only where a surviving memory accounts for it, or `--allow-drops` accepts the deletion. Naming an id is not by itself enough: a `rewrite` whose replacement does not carry the old row's substance leaves that row in the corpus verbatim, so a rewrite is not a free change of wording on an unattended run. Anything the response does not name is carried through unchanged, byte for byte, so it keeps its id, its embedding, its links and its age. A merge or rewrite that introduces a path, hash, version, hostname or number found in none of the memories it names is rejected and those memories are kept as they are, which is why a `rewrite` fixes a claim and never a specific. An operation Ghost cannot read, an id it did not supply, or a response carrying no operations fails that tier's result, and consolidation falls through to the next tier.
+
+The report ends with an accounting of every input id, printed the same way for a dry run and for `--apply` and before the write, so a dry run previews it exactly:
+
+```text
+Inputs (6) accounted for:
+Merges (1):
+  new <- 01J8Z…02, 01J8Z…03   (48 B from 92 B)
+Refused by the grounding check (0):
+Rewrites (1):
+  01J8Z…04 -> the ledger ingests through the bastion on port 2222, never 22
+Dropped (1, each audited by the drop guard):
+  01J8Z…05 reason: obsolete — nothing in the result carries it; the drop guard re-added 1 row verbatim
+Absent from the result (0):
+Kept verbatim: 1    Passed through (not named): 1
+```
+
+Every input id appears in exactly one line or one count, so the counts add up to the input total — that is the check a reviewer can make in one line, and the reason an input a merge consumed can no longer disappear from the report. A merge line names no successor id because the merged row does not exist until `--apply` writes it; `ghost history <id>` shows the `related_id` that names it. `Absent from the result` is the input set nothing carried — a post-filter removed the row that was carrying one, or the offline SQLite tier absorbed a duplicate, since that tier names no ids — and those rows are the ones an apply deletes. A line the drop guard overrode says so, rather than leaving a drop to be read as a deletion that did not happen.
 
 CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
 

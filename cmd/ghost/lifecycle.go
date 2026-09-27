@@ -436,8 +436,12 @@ const reductionWarnMinInput = 6
 // one thing a report meant to inform an --apply decision must not do.
 //
 // It is a function taking a writer rather than an inline loop because runReflect
-// exits the process, so the loop is not reachable from a test.
-func reportDisposedClaims(w io.Writer, result reflection.ReflectionResult) {
+// exits the process, so the loop is not reachable from a test. The limit is the
+// caller's, so `ghost reflect --full` reaches the claim's text as well as the
+// proposal list's, and the claim's text goes through displayClaim for the same
+// reason the proposal list's does: it is derived from stored text and can carry
+// a value a pre-guard row held.
+func reportDisposedClaims(w io.Writer, limit int, result reflection.ReflectionResult) {
 	if len(result.Replacements) == 0 {
 		return
 	}
@@ -454,9 +458,9 @@ func reportDisposedClaims(w io.Writer, result reflection.ReflectionResult) {
 			_, _ = fmt.Fprintln(w, "  Disposed of (model's claim): (no replacement text recorded)")
 		case !inResult[r.Text]:
 			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): its replacement is NOT in this result — %s\n",
-				truncateForDisplay(r.Text, 80))
+				displayClaim(r.Text, limit))
 		default:
-			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): replaced by %s\n", truncateForDisplay(r.Text, 80))
+			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): replaced by %s\n", displayClaim(r.Text, limit))
 		}
 	}
 }
@@ -553,6 +557,12 @@ type reflectArgs struct {
 	allowDrops     bool
 	skipUnchanged  bool
 	promoteGlobals bool
+	// full asks for the whole text of every memory the run reports, instead of
+	// the compact preview (#684). It is a display flag and nothing else: the
+	// stored text, the content cap and the operations are identical either way,
+	// and it is deliberately not on the unattended lifecycle path, whose stdout
+	// is an append-only log a longer report would fill for nobody to read.
+	full bool
 }
 
 // parseReflectArgs parses `ghost reflect`'s arguments (everything after the
@@ -597,6 +607,8 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 			p.allowDrops = true
 		case args[i] == "--skip-unchanged":
 			p.skipUnchanged = true
+		case args[i] == "--full":
+			p.full = true
 		case args[i] == "--promote-globals":
 			p.promoteGlobals = true
 		case args[i] == "--source" && i+1 < len(args):
@@ -609,6 +621,26 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 		}
 	}
 	return p, nil
+}
+
+// reflectProposalLimit is how many bytes of a memory `ghost reflect` prints by
+// default. A proposal list is a summary — 120 is a screenful of context per
+// memory and a large project has hundreds — and the section that accounts for
+// every input id is where a reader looks for detail when a line says something
+// surprising. `ghost reflect --full` removes the cut everywhere at once, so the
+// compact default and the whole text are one flag apart rather than two modes.
+const reflectProposalLimit = 120
+
+// reflectTextLimit resolves --full against one print site's compact default: no
+// limit at all under --full, and the site's own default otherwise. It is a
+// function rather than a bare `if full` at each site so the flag cannot reach
+// some of them and not others, which is the failure mode a display flag spread
+// across five call sites has.
+func reflectTextLimit(full bool, compact int) int {
+	if full {
+		return 0
+	}
+	return compact
 }
 
 // reflectUsage is the help for `ghost reflect`: stderr when the project comes
@@ -626,6 +658,9 @@ Flags:
   --promote-globals Write cross-project candidates to _global (default: keep them project-scoped)
   --skip-unchanged Skip when the consolidatable set is unchanged since the last
                    applied consolidation (used by the auto lifecycle)
+  --full           Print every reported memory whole, instead of truncating it
+                   to a compact preview. Display only: the result and the write
+                   are identical either way.
   --source string CLI harness for the auto tier: claude-code, opencode, codex,
                    or goose. Defaults to the calling harness (detected from
                    the environment and process ancestry); an undetectable
@@ -942,7 +977,7 @@ func runReflect() {
 	if len(projectMems) > 0 {
 		fmt.Printf("  Project-scoped (%d):\n", len(projectMems))
 		for _, m := range projectMems {
-			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, 120))
+			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, reflectTextLimit(parsed.full, reflectProposalLimit)))
 		}
 	}
 	if len(globalMems) > 0 {
@@ -952,7 +987,7 @@ func runReflect() {
 			fmt.Printf("  Cross-project (%d) — kept project-scoped unless --promote-globals:\n", len(globalMems))
 		}
 		for _, m := range globalMems {
-			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, 120))
+			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, reflectTextLimit(parsed.full, reflectProposalLimit)))
 		}
 	}
 	fmt.Println()
@@ -979,7 +1014,7 @@ func runReflect() {
 	if len(guardedDrops) > 0 {
 		fmt.Fprintf(os.Stderr, "WARNING: %d memory(ies) had no surviving merge target:\n", len(guardedDrops))
 		for _, d := range guardedDrops {
-			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, displayProposal(d.Content, d.Category, 100))
+			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, displayProposal(d.Content, d.Category, reflectTextLimit(parsed.full, 100)))
 		}
 		if allowDrops {
 			fmt.Fprintf(os.Stderr, "  --allow-drops set: these %d memories will be DELETED\n", len(guardedDrops))
@@ -999,9 +1034,18 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-byte cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
 	}
 
+	// What became of every input id (#684). Printed here, after the drop guard has
+	// run and the cap has been applied and BEFORE the write, so a dry run and an
+	// apply read the same and the dry run previews this section exactly. It is
+	// the part of the report a person is actually auditing: the result list
+	// above says what the corpus became, and this says what became of the rows
+	// the run was given, which is the only place a merge is distinguishable from
+	// a loss.
+	reportInputAccounting(os.Stdout, input, result, guardedDrops, allowDrops, parsed.full)
+
 	// What the response claimed it disposed of, and whether the claimed
 	// replacement survived into the result. See reportDisposedClaims.
-	reportDisposedClaims(os.Stdout, result)
+	reportDisposedClaims(os.Stdout, reflectTextLimit(parsed.full, 80), result)
 
 	// The >50% reduction warning. On the unattended lifecycle path this is the
 	// only report of a hard compression, and it goes to the stderr of a process
