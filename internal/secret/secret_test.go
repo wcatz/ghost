@@ -92,12 +92,12 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 		},
 		{
 			// A labelled key with neither a .skey filename nor a "type" field.
-			// This is the shape the cborHex label used to exempt wholesale, and
-			// what catches it is the CBOR tag rather than the envelope: a key is
-			// a byte string of 32 or 64 bytes, which is 5820/5840, while a
-			// script's length needs two bytes and its tag is 59.
+			// What catches it is the CBOR tag rather than the envelope: a 64-byte
+			// byte string is 5840, and no Cardano public key is 64 bytes. A
+			// 32-byte 5820 is deliberately NOT matched, because that is also
+			// every verification key — see the negatives beside it.
 			name:  "cardano cold signing key in a bare cborHex field",
-			text:  `the cold key cborHex: 5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f`,
+			text:  `the cold key cborHex: 5840f2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f`,
 			rule:  "cardano-cbor-hex",
 			label: "Cardano CBOR-encoded key",
 		},
@@ -129,6 +129,15 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			// 16-letter lowercase "word" and is stored.
 			name:  "hex api key under a credential-named key",
 			text:  "api_key: deadbeefcafebabe0123456789abcdef",
+			rule:  "assigned-secret",
+			label: "assigned credential value",
+		},
+		{
+			// The secret is the quoted ARGUMENT, not the value, and -AsPlainText
+			// is the flag that says so. Skipping the candidate because a flag
+			// follows would store this.
+			name:  "plaintext secret passed as a command argument",
+			text:  `$pw = ConvertTo-SecureString "K3q9Xm2pL7wRt4ZbAvN1" -AsPlainText -Force`,
 			rule:  "assigned-secret",
 			label: "assigned credential value",
 		},

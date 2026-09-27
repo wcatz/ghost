@@ -217,19 +217,26 @@ var rules = []rule{
 		// .skey file and carrying a key-sized hex run is a key paste, and a
 		// public Plutus script never names a .skey file.
 		//
-		// The second form is how a labelled key with neither filename nor "type"
-		// is caught, and it works because the two are distinguishable on the wire
-		// rather than by convention: both are a CBOR byte string, so both begin
-		// with 0x58 or 0x59 followed by the length. A Cardano secret key is 32 or
-		// 64 bytes, which is a one-byte length and therefore `5820`/`5840`; a
-		// Plutus script is far larger, so its length needs two bytes and its tag
-		// is `59`. The limitation is the obvious one: a key exported under a
-		// non-standard CBOR wrapper is not recognised.
+		// The second form catches a labelled key with neither filename nor
+		// "type", and it works on the wire rather than by convention: both a key
+		// and a script are a CBOR byte string, so both begin 0x58 or 0x59 followed
+		// by the length, and a script is large enough to need two bytes (tag
+		// `59`). A 64-byte byte string — tag `5840` — is private-only, because no
+		// Cardano public key is 64 bytes, so that is the unambiguous form.
+		//
+		// A 32-byte `5820` is deliberately NOT matched, because that is also the
+		// encoding of every Cardano *public* key: cardano-cli and cardano-node
+		// write exactly `{"type":"KESVerificationKey","cborHex":"5820…"}` for a
+		// block production key, and a block producer has to be able to record
+		// one. So a labelled 32-byte cold signing key is a documented false
+		// negative, and it is the price of not refusing published verification
+		// keys. Unlabelled, it is still caught: 136 hex characters is over
+		// longHexFloor.
 		name:  "cardano-cbor-hex",
 		label: "Cardano CBOR-encoded key (cborHex beside a .skey file)",
 		re: regexp.MustCompile(
 			`(?i)\.skey\b[^\n]*\b[0-9a-f]{64,}` +
-				`|cborhex"?\s*[:=]\s*"?58(?:20|40)[0-9a-f]{8,}`),
+				`|cborhex"?\s*[:=]\s*"?5840[0-9a-f]{8,}`),
 	},
 	{
 		name:  "authorization-bearer",
@@ -578,6 +585,30 @@ func valueIsCommand(text string, valueEnd int) bool {
 	return shellFlagRe.MatchString(rest)
 }
 
+// quotedArgRe finds a quoted token, which is where a command's secret lives.
+var quotedArgRe = regexp.MustCompile(`"([^"\n]{8,})"|'([^'\n]{8,})'`)
+
+// detectQuotedArgument reports whether the rest of a shell command line carries a
+// credential in one of its quoted arguments.
+//
+// The key is deliberately not consulted: `$pw = ConvertTo-SecureString
+// "K3q9Xm2pL7wRt4ZbAvN1" -AsPlainText -Force` names no secret in its variable, and
+// the value is in the argument. Both corpus cases that this gate exists for pass
+// it, because `{1}` carries placeholderChars and `$domainPassword` is not quoted.
+func detectQuotedArgument(rest string) (Finding, bool) {
+	// Only the same line: a flag on the next line is a different statement.
+	if i := strings.IndexAny(rest, "\n\r"); i >= 0 {
+		rest = rest[:i]
+	}
+	for _, m := range quotedArgRe.FindAllStringSubmatch(rest, -1) {
+		arg := m[1] + m[2]
+		if looksLikeCredentialMaterial("", arg) {
+			return Finding{Rule: assignedSecretRule, Label: assignedSecretLabel}, true
+		}
+	}
+	return Finding{}, false
+}
+
 // namesItsOwnKey reports whether a value contains the name of the field it is
 // assigned to, which means the value is a reference to that field rather than
 // something stored in it.
@@ -765,6 +796,15 @@ func Detect(text string) (Finding, bool) {
 		value := text[m[2*assignmentValue]:m[2*assignmentValue+1]]
 		if text[m[2*assignmentShellVar]:m[2*assignmentShellVar+1]] != "" &&
 			valueIsCommand(text, m[2*assignmentValue+1]) {
+			// A command invocation, so the value is the first word of an
+			// argument list — but the secret in
+			// `ConvertTo-SecureString "K3q9…" -AsPlainText` is a quoted ARGUMENT,
+			// not the value, so skipping the candidate without looking would
+			// store it. -AsPlainText is precisely the flag that says the plaintext
+			// argument IS the password.
+			if f, ok := detectQuotedArgument(text[m[2*assignmentValue+1]:]); ok {
+				return f, true
+			}
 			continue
 		}
 		if keyNamesSecret(key) && looksLikeCredentialMaterial(key, value) {
