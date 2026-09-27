@@ -106,12 +106,32 @@ func ScopeLabel(scope map[string]string) string {
 		if i > 0 {
 			b.WriteString(" ")
 		}
-		b.WriteString(k)
+		b.WriteString(scopeToken(k))
 		b.WriteString("=")
-		b.WriteString(scope[k])
+		b.WriteString(scopeToken(scope[k]))
 	}
 	b.WriteString("}")
 	return b.String()
+}
+
+// scopeToken renders one scope key or value. The label is printed OUTSIDE the
+// «...» data delimiters, and a scope is text Ghost did not author (a save
+// argument, an imported artifact), so a value is written bare only when every
+// character is one a scope name plausibly uses. Anything else is written as an
+// ASCII-only Go quoted string: a newline cannot start a line of its own, a `}`
+// cannot close the label early, and a «, » or other non-ASCII rune cannot open
+// a data block of its own.
+func scopeToken(s string) string {
+	if s == "" {
+		return `""`
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
+			r == '.' || r == '_' || r == '-' || r == ':' || r == '/' || r == '@' || r == '+') {
+			return strconv.QuoteToASCII(s)
+		}
+	}
+	return s
 }
 
 // quoteData wraps untrusted stored text in «...» data delimiters, first
