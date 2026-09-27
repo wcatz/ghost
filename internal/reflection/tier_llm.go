@@ -78,7 +78,11 @@ func (h *LlmConsolidator) Consolidate(ctx context.Context, input ReflectionInput
 	//
 	// The bound is one call, on one condition: a transport failure is not a
 	// rejected response, so it is never retried here (a harness that died or
-	// was killed still fails the run, as before).
+	// was killed still fails the run, as before). Both calls share the one
+	// deadline the caller wrapped this call in, so a repair spends the run's
+	// budget rather than extending it: a second answer that cannot finish in
+	// what is left fails the run, which is the right outcome for a phase whose
+	// own outer timeout is what an operator can raise.
 	for attempt := 0; ; attempt++ {
 		responseText, _, err := h.client.Reflect(ctx, prompt)
 		if err != nil {
