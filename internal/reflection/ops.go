@@ -371,17 +371,14 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 			// not passed through below, but the guard may still put it back.
 			continue
 		}
-		// The witness is the text the successor actually carries, which is the
-		// merge's text when the successor was folded into one. Recording the
-		// successor's stored content instead would let the guard honour a claim
-		// about text the result does not hold.
-		//
-		// Supersession is flagged because this witness is a DIFFERENT row, and
-		// nothing here constrains it to be about the memory being disposed of —
-		// only that the target is carried forward. The drop guard checks the two
-		// texts are related before it lets the claim stand (#549).
+		// The text the successor actually carries, which is the merge's text when
+		// the successor was folded into one. Recording the successor's stored
+		// content instead would misreport what the response said it was
+		// replacing. This is a record, not a permission: the drop guard audits a
+		// disposed row like any other, because a kept stale row is repairable by
+		// resolve and supersede and a deleted row is not (#549).
 		result.Replacements = append(result.Replacements,
-			Replacement{ID: op.ids[0], Text: emitted[op.target], Supersession: true})
+			Replacement{ID: op.ids[0], Text: emitted[op.target]})
 	}
 
 	// Everything the response never named is carried through as a keep, verbatim

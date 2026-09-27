@@ -2,8 +2,6 @@ package reflection
 
 import (
 	"strings"
-
-	"github.com/wcatz/ghost/internal/memory"
 )
 
 // DroppedGuarded is an input memory, in any category, that has no close
@@ -40,35 +38,49 @@ const dropContainmentThreshold = 0.45
 // agent writes is ever excluded by it. Deleting an unreferenced input
 // therefore takes an explicit --allow-drops.
 //
-// One exemption, and it is witnessed rather than inferred. result.Replacements
-// names the input ids a response disposed of together with the text that took
-// their place — a rewrite's own new text, or the emitted text of the successor a
-// supersession named. A rewrite and a supersession are the same KIND of claim —
-// "this row no longer needs carrying, that text says it instead" — so they share
-// one list: re-adding such a row would put it back beside the text that replaced
-// it, which is a duplicate rather than a save, and re-adding it is how a memory
-// reading "three issues are still open" survived beside "the three open issues
-// have all been fixed".
+// THERE IS NO EXEMPTION. Not for a rewrite and not for a supersession: an
+// unattended reflect never deletes a memory on the model's say-so alone.
 //
-// They are not equally TRUSTED, though, and that distinction is the rest of this
-// paragraph. A rewrite's witness is the model's own text for that same id, and
-// the grounding check has already tied it to that row by rejecting a rewrite
-// that introduces an identifier absent from its sources, so presence is enough.
-// A supersession's witness is some OTHER carried-forward id, and nothing
-// constrains it to be about the memory being disposed of — the parser's only rule
-// is that the target survives the response. So a supersession is honoured only
-// when its witness is RELATED to the row it disposes of, scored at the same
-// containment the rest of the guard uses (#549).
+// This used to carve out one, and the carve-out was the hole. `drop X reason:
+// superseded by Y` disposed of X whenever Y's text was in the result, with
+// nothing checking that Y had anything to do with X — the parser's only rule is
+// that the target survives the response, so naming a neighbour is a valid
+// operation, and two ordinary deployment notes in the same project paired
+// because they sat adjacent in the prompt is all it took. Requiring the witness
+// to be RELATED closed that, and then turned out to be redundant: the witness
+// text is itself an output, so a row at 45% containment against it also passes
+// the per-output scan below. The whole branch was dead code, and removing it
+// leaves the suite green.
 //
-// The witness has to be there too, for either kind. A filter that runs over the
-// result after the operations are resolved can remove the replacing text —
-// dropForeignProjectMemories deletes a memory naming a project the input corpus
-// never mentioned, and a rewrite or a merge is exactly such a memory — and an
-// exemption trusted on the id alone then disposes of a row with nothing in its
-// place, silently, with nothing left for --allow-drops to act on. A claim whose
-// text is gone lapses, and the input goes back under the ordinary audit. An
-// obsolete drop names no successor and never gets here at all, so the token audit
-// governs it.
+// The rule is KEEP-biased, deliberately. A stale row that is kept is
+// REPAIRABLE: the lifecycle runs resolve and supersede right after reflect, and
+// demoting a row that is genuinely stale is exactly their job. A deleted row is
+// not repairable, and on the unattended path there is nobody watching to notice.
+// So the failure direction here is a duplicate — the old text back beside its
+// replacement — never a silent deletion.
+//
+// The cost, named: the "three issues are still open" class can come back as a
+// kept stale row when the successor is reworded below the containment bar, and
+// stays visible until resolve or supersede demote it. A corpus of those grows
+// the input the next pass has to read. That is the trade, and it is the right way
+// round for a command that rewrites a memory store with no human in the loop.
+//
+// What the guard no longer has to do is the biggest part. An input the response
+// never named is emitted verbatim by executeOps (#639), so there is nothing to
+// rescue: before that, an unnamed memory was emitted by nobody and survived only
+// if this guard FAILED to recognise a survivor, which made a false positive in
+// the "absorbed" direction a silent deletion with no warning and no
+// --allow-drops. An id the model never mentioned needs no inference at all.
+//
+// Which output set an input is compared against is the remaining choice. A MERGED
+// source (result.Merges) is measured against the text of ITS OWN merge, since
+// that is the only witness that can say whether the merge carried it: a merge
+// source is consumed by its merge, so its own text is never in the result, and
+// the parser rejects an id claimed twice, so a sibling cannot be there either.
+// It is measured against nothing at all when the merge is not in the result, and
+// falls back to the strict per-output test. Everything else — an explicit
+// `obsolete` drop, a rewrite, a supersession, and every input of the offline
+// SQLite tier, which names no ids — is measured against a single output.
 //
 // What the guard no longer has to do is the biggest part. An input the response
 // never named is emitted verbatim by executeOps (#639), so there is nothing to
@@ -99,51 +111,6 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 		present[m.Content] = true
 	}
 
-	// The disposed input's own text, so a supersession's claim can be checked for
-	// being ABOUT the memory it disposes of rather than only for having a witness.
-	byID := make(map[string]memory.Memory, len(input.ExistingMemories))
-	for _, in := range input.ExistingMemories {
-		byID[memIDKey(in.ID)] = in
-	}
-
-	// A disposition is honoured when its witness is PRESENT, and — for a
-	// supersession, where the witness is some OTHER row — only when it is also
-	// RELATED (#549). Presence alone was the whole test, so a response could
-	// dispose of any memory at all by naming any carried-forward id as its
-	// successor: the parser's only rule is that the target is carried forward, so
-	// naming a neighbour is a valid operation, and nothing downstream compared
-	// the two texts. The result was a deletion with no warning, no --allow-drops
-	// and a zero exit status — the loss this guard exists to prevent, reached
-	// through the one path the guard had exempted.
-	//
-	// A rewrite is not in that class and is not re-checked here. Its witness is
-	// the model's own text for that same id, already tied to that row by the
-	// grounding check, which rejects a rewrite introducing an identifier absent
-	// from its sources and asks for `keep` instead. The unconstrained assertion
-	// is specifically "this other row says it better".
-	//
-	// Relatedness is the same containment the rest of the guard uses, at the
-	// same threshold, so "the same fact" means one thing in this file. A
-	// supersession that genuinely rewords the fact in wholly different words
-	// scores low and its stale row is re-added beside the replacement — a visible
-	// duplicate, which is the direction this check must fail. The alternative
-	// failure is a silent deletion.
-	replaced := make(map[string]bool, len(result.Replacements))
-	for _, r := range result.Replacements {
-		if r.Text == "" || !present[r.Text] {
-			continue
-		}
-		if r.Supersession {
-			disposed, ok := byID[memIDKey(r.ID)]
-			if !ok {
-				continue
-			}
-			if !hasCloseSurvivor(tokenize(disposed.Content), tokenize(r.Text)) {
-				continue
-			}
-		}
-		replaced[memIDKey(r.ID)] = true
-	}
 	// A merged source is scored against the text of ITS OWN merge, not against
 	// the union of every output (#549). The union was sound before the
 	// pass-through existed, when the union was a handful of survivors; now every
@@ -179,9 +146,6 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 	var drops []DroppedGuarded
 	for _, in := range input.ExistingMemories {
 		key := memIDKey(in.ID)
-		if replaced[key] {
-			continue
-		}
 		inTokens := tokenize(in.Content)
 		if len(inTokens) == 0 {
 			continue

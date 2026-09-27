@@ -1,183 +1,87 @@
 package reflection
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// These pin the two ways a disposal claim could delete a memory an unattended
-// apply never reports (#549): a witness that is PRESENT but has nothing to do
-// with the memory it disposes of, and a merge source scored against every output
-// at once. Both are silent — no warning, no --allow-drops, exit 0 — and both
-// were reachable from an ordinary `ghost reflect --apply --require-llm`.
-
-// TestUnrelatedSupersessionWitnessIsNotAnExemption: `drop X reason: superseded
-// by Y` was honoured on one condition — Y's text is in the result — with no
-// check that X and Y are about the same thing. A response that names any
-// carried-forward id as the successor of an unrelated memory therefore deleted
-// that memory outright. It is not a far-fetched response: the only parser rule
-// is that the target is carried forward, so naming a neighbour is a valid
-// operation, and nothing downstream ever compared the two texts.
-//
-// The pair is deliberately realistic rather than adversarial: both are ordinary
-// deployment notes in the same project, and the model pairs them because they
-// were adjacent in the prompt. The scoring is 0.000, so no threshold choice
-// rescues this case — the texts share nothing.
-func TestUnrelatedSupersessionWitnessIsNotAnExemption(t *testing.T) {
-	const (
-		tlsID    = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
-		imageID  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"
-		orphanID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3"
-		tls      = "the staging cluster terminates TLS on port 8443"
-		image    = "CI publishes a signed image tagged with the git sha"
-		orphan   = "the ledger answers gRPC on port 9000"
-	)
-	in := ReflectionInput{ExistingMemories: []memory.Memory{
-		{ID: tlsID, Category: "architecture", Content: tls},
-		{ID: imageID, Category: "convention", Content: image},
-		{ID: orphanID, Category: "fact", Content: orphan},
-	}}
-	result := ReflectionResult{
-		Memories:     []ReflectMemory{{Category: "convention", Content: image}},
-		Replacements: []Replacement{{ID: tlsID, Text: image, Supersession: true}},
-	}
-
-	drops := AuditGuardedDrops(in, result)
-	if !auditContains(drops, tls) {
-		t.Fatalf("a supersession naming an unrelated memory disposed of it unreported: %+v", drops)
-	}
-	if auditContains(drops, image) {
-		t.Errorf("the named successor was itself flagged: %+v", drops)
-	}
-	// And the disposition is per-id: the memory nobody claimed is still audited,
-	// so narrowing the witness rule must not have turned the exemption into a
-	// blanket "the response disposed of it, never mind how".
-	if !auditContains(drops, orphan) {
-		t.Errorf("an unclaimed memory stopped being audited: %+v", drops)
-	}
+// fmtRewrite is an ops response that rewrites opID1 to the given text and keeps
+// opID2, so a test states only the wording under test.
+func fmtRewrite(text string) string {
+	return fmt.Sprintf(`{"ops":["rewrite %s -> %s","keep %s"]}`, opID1, text, opID2)
 }
 
-// TestRelatedSupersessionIsStillExempt is the accept side, and it is #659's own
-// motivating example: a claim whose witness really does restate the same fact
-// must not put the stale text back beside the text that replaced it, which is a
-// duplicate by construction. Containment is 0.750 here, so the rule separates
-// this from the unrelated pair above rather than rejecting every reworded
-// supersession.
-func TestRelatedSupersessionIsStillExempt(t *testing.T) {
-	const (
-		staleID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
-		freshID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"
-		stale   = "three issues are still open"
-		fresh   = "the three open issues have all been fixed"
-	)
-	in := ReflectionInput{ExistingMemories: []memory.Memory{
-		{ID: staleID, Category: "fact", Content: stale},
-		{ID: freshID, Category: "fact", Content: fresh},
-	}}
-	result := ReflectionResult{
-		Memories:     []ReflectMemory{{Category: "fact", Content: fresh}},
-		Replacements: []Replacement{{ID: staleID, Text: fresh, Supersession: true}},
-	}
-	if drops := AuditGuardedDrops(in, result); auditContains(drops, stale) {
-		t.Fatalf("a genuine supersession re-added the stale text beside its replacement: %+v", drops)
-	}
-}
+// These pin the two ways a consolidation used to delete a memory an unattended
+// apply never reported (#549). Both are silent — no warning, no --allow-drops,
+// exit 0 — and both are now closed by the same rule: the drop guard keeps a row
+// the corpus cannot show is gone, because resolve and supersede run right after
+// reflect and can demote a stale row, while nothing can bring back a deleted one.
 
-// TestRewriteWitnessIsNotReCheckedForRelatedness is the boundary of the
-// supersession rule, and it is why the fix marks the claim kind rather than
-// re-checking every disposition. A rewrite's witness is the model's own text FOR
-// that row, so nothing forces it to echo the old wording — the operation exists
-// precisely to change a claim — and the grounding check has already tied it to
-// that row by rejecting a rewrite that introduces an identifier absent from its
-// sources. Re-checking relatedness here would put every reworded rewrite back
-// beside its replacement, which is the duplicate #659 removed. A supersession
-// names a different row and gets the check; a rewrite does not.
-func TestRewriteWitnessIsNotReCheckedForRelatedness(t *testing.T) {
-	const (
-		id   = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
-		old  = "the ledger is reached from the office subnet"
-		next = "the ledger is reached over the bastion mesh"
-	)
-	in := ReflectionInput{ExistingMemories: []memory.Memory{
-		{ID: id, Category: "fact", Content: old},
-	}}
-	result := ReflectionResult{
-		Memories:     []ReflectMemory{{Category: "fact", Content: next}},
-		Replacements: []Replacement{{ID: id, Text: next}},
-	}
-	if drops := AuditGuardedDrops(in, result); len(drops) != 0 {
-		t.Fatalf("a rewrite was re-added beside its own replacement: %+v", drops)
-	}
-}
-
-// TestSummarizingMergeReAddsTheSourceItCompressed pins the direction the
-// narrowing above deliberately accepts, so it is a decision rather than a
-// side-effect. A merge that SUMMARISES its sources — the normal shape of a real
-// consolidation, where the prompt asks for a corpus of high-quality memories and
-// not a short one — will often carry one source's substance past the bar and
-// compress another's below it. The carried one is absorbed; the compressed one
-// comes back verbatim, beside the merge that absorbed its sibling.
-//
-// That is a paraphrase duplicate, the class #639 measured on every project. It is
-// the price of the narrowing and it is a deliberate one: the alternatives are a
-// silent deletion and a silent duplicate, and only one of those is recoverable.
-// Containment here is 0.800 and 0.250.
-//
-// What this fixture pins is the OUTCOME for a summarizing merge, not the choice
-// of witness set — with one output the union and the merge's own text are the
-// same tokens. TestMergeSourceIsScoredAgainstItsOwnMerge is the one that needs
-// the extra unrelated memory to tell the two apart, and it fails if the union
-// comes back.
-func TestSummarizingMergeReAddsTheSourceItCompressed(t *testing.T) {
-	const (
-		sshID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
-		docID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"
-	)
-	carried := "the bastion accepts SSH on port 2222"
-	compressed := "OIDC discovery is documented in the ledger service README under auth"
-	const merged = "the bastion accepts SSH on 2222 and OIDC discovery is served by idp.internal on 8443"
-
-	in := ReflectionInput{ExistingMemories: []memory.Memory{
-		{ID: sshID, Category: "gotcha", Content: carried},
-		{ID: docID, Category: "fact", Content: compressed},
-	}}
-	result := ReflectionResult{
-		Memories: []ReflectMemory{{Category: "architecture", Content: merged}},
-		Merges:   []Merge{{IDs: []string{sshID, docID}, Text: merged}},
-	}
-
-	drops := AuditGuardedDrops(in, result)
-	if !auditContains(drops, compressed) {
-		t.Fatalf("a source the merge compressed below the bar was treated as absorbed: %+v", drops)
-	}
-	if auditContains(drops, carried) {
-		t.Errorf("the source the merge carried past the bar was flagged: %+v", drops)
-	}
-}
-
-// TestSupersessionFromTheOpsPathStillRequiresRelatedness guards the plumbing.
-// The audit only applies the relatedness check to a claim executeOps marked as a
-// supersession, so a result built the way the LLM tier actually builds one — not
-// a hand-written fixture — has to reach the same verdict. If the drop path ever
-// stopped setting the flag, every supersession would be read as a rewrite and
-// this hole would reopen with nothing failing.
-func TestSupersessionFromTheOpsPathStillRequiresRelatedness(t *testing.T) {
+// TestSupersessionFromTheOpsPathKeepsTheStaleRow drives the real executeOps
+// path, not a hand-built fixture, so the verdict is the one a `ghost reflect
+// --apply --require-llm` would reach. The two notes are ordinary and unrelated —
+// a bastion SSH port and a production region — and the response pairs them,
+// which the parser allows because the target survives the response. The stale row
+// is kept.
+func TestSupersessionFromTheOpsPathKeepsTheStaleRow(t *testing.T) {
 	in := opInput()
-	// opID1 is the bastion SSH port and opID2 the production region: two
-	// ordinary, unrelated notes, which is all it takes for a supersession to
-	// dispose of something it says nothing about.
 	result := opRun(t, in,
 		`{"learned_context":"ctx","ops":["drop `+opID1+` reason: superseded by `+opID2+`","keep `+opID2+`"]}`)
 
-	if len(result.Replacements) != 1 {
-		t.Fatalf("replacements = %+v, want one", result.Replacements)
-	}
-	if !result.Replacements[0].Supersession {
-		t.Fatal("the drop path did not mark the claim a supersession, so the guard reads it as a rewrite and skips the relatedness check")
+	// The claim is still recorded, because a reader of the result should be able
+	// to see what the response said it was replacing.
+	if len(result.Replacements) != 1 || result.Replacements[0].ID != opID1 {
+		t.Fatalf("replacements = %+v, want the one stated claim", result.Replacements)
 	}
 	if drops := AuditGuardedDrops(in, result); !auditContains(drops, in.ExistingMemories[0].Content) {
-		t.Fatalf("an unrelated supersession disposed of a memory through the real ops path: %+v", drops)
+		t.Fatalf("a supersession deleted a memory the corpus could not show was gone: %+v", drops)
+	}
+}
+
+// TestRewrittenRowIsKeptWhenTheRewriteSaysNothingOfIt is the same rule on the
+// rewrite path, and it is a real behaviour change rather than a refinement: a
+// rewrite whose new text shares nothing with the old one used to be an automatic
+// exemption, so the old row went. The whole point of a rewrite is to change the
+// wording, so that exemption covered most rewrites, and it was the same hole as
+// the supersession one — the model saying so, and the guard agreeing. The old row
+// is now kept beside its replacement.
+func TestRewrittenRowIsKeptWhenTheRewriteSaysNothingOfIt(t *testing.T) {
+	const old = "bastion SSH uses port 2222 with a hardware key"
+	const next = "operator access is fronted by Cloudflare Access"
+	in := ReflectionInput{ExistingMemories: []memory.Memory{
+		{ID: opID1, Category: "gotcha", Content: old},
+		{ID: opID2, Category: "fact", Content: "the ledger ingests batches over gRPC"},
+	}}
+	written, drops := passThroughResult(t, in, fmtRewrite(next))
+	if !written[old] {
+		t.Errorf("the rewritten row was deleted on the rewrite's say-so alone, not kept: %v", written)
+	}
+	if !auditContains(drops, old) {
+		t.Errorf("the rewritten row was not flagged for re-add: %+v", drops)
+	}
+}
+
+// TestRewrittenRowIsNotReAddedWhenTheRewriteKeepsTheSubstance is the accept
+// side. A rewrite that carries the memory's substance — the ports, the hosts,
+// the versions — scores past the bar, so the ordinary audit finds the
+// replacement on its own and the old row is not re-added beside it. This is the
+// paraphrase-duplicate class #639 measured, and it is why the rule is a token
+// audit rather than a blanket refusal to dispose of anything.
+func TestRewrittenRowIsNotReAddedWhenTheRewriteKeepsTheSubstance(t *testing.T) {
+	const old = "bastion SSH uses port 2222 with a hardware key"
+	const next = "bastion SSH on port 2222 is now opened with Cloudflare Access"
+	in := ReflectionInput{ExistingMemories: []memory.Memory{
+		{ID: opID1, Category: "gotcha", Content: old},
+		{ID: opID2, Category: "fact", Content: "the ledger ingests batches over gRPC"},
+	}}
+	written, drops := passThroughResult(t, in, fmtRewrite(next))
+	if written[old] {
+		t.Errorf("a rewrite carrying the substance re-added the old row beside it: %v", written)
+	}
+	if len(drops) != 0 {
+		t.Errorf("a rewrite carrying the substance was still flagged: %+v", drops)
 	}
 }
 
@@ -185,10 +89,10 @@ func TestSupersessionFromTheOpsPathStillRequiresRelatedness(t *testing.T) {
 // the UNION of every output memory. That was sound before the pass-through
 // existed, when the union was a handful of survivors; now every id the response
 // never named is emitted verbatim, so the union of a real result is the whole
-// project's vocabulary and a source whose substance its own merge threw away
-// passes containment on the strength of some unrelated memory that happens to
-// share its words. That is the same class of loss the pass-through was written
-// to remove — an unrelated survivor sharing tokens with the absorbed memory —
+// project's vocabulary and a source whose substance its own merge discarded
+// passes containment on the strength of whatever unrelated memory happens to
+// share its words. That is the same class of loss the pass-through was written to
+// remove — an unrelated survivor sharing 45% of the absorbed memory's tokens —
 // reintroduced through the merge branch.
 //
 // The fixture is built so the union DOES rescue the source: the kept OIDC note
@@ -233,8 +137,8 @@ func TestMergeSourceIsScoredAgainstItsOwnMerge(t *testing.T) {
 // TestMergeSourcesAreAbsorbedWhenTheMergeCarriesThem is the accept side: a merge
 // whose text carries every source it folded in still absorbs all of them, or
 // scoring against the merge alone would re-add a duplicate beside the merge that
-// had just replaced it — the paraphrase-duplicate class #639 measured on every
-// project. Both sources are covered well past the bar (0.800 and 0.667).
+// had just replaced it. Both sources are covered well past the bar (0.800 and
+// 0.667).
 //
 // It does NOT distinguish the merge's own text from the per-output test: the
 // fixture has one output and it IS the merge text, so both comparisons see the
@@ -280,5 +184,50 @@ func TestMergeSourceIsAuditedWhenItsOwnMergeIsGone(t *testing.T) {
 	}
 	if drops := AuditGuardedDrops(in, result); !auditContains(drops, sshMem) {
 		t.Fatalf("a source whose merge was filtered away went unreported: %+v", drops)
+	}
+}
+
+// TestSummarizingMergeReAddsTheSourceItCompressed pins the direction the
+// narrowing above deliberately accepts, so it is a decision rather than a
+// side-effect. A merge that SUMMARISES its sources — the normal shape of a real
+// consolidation, where the prompt asks for a corpus of high-quality memories and
+// not a short one — will often carry one source's substance past the bar and
+// compress another's below it. The carried one is absorbed; the compressed one
+// comes back verbatim, beside the merge that absorbed its sibling.
+//
+// That is a paraphrase duplicate, the class #639 measured on every project. It is
+// the price of the narrowing and it is a deliberate one: the alternatives are a
+// silent deletion and a silent duplicate, and only one of those is recoverable.
+// Containment here is 0.800 and 0.250.
+//
+// What this fixture pins is the OUTCOME for a summarizing merge, not the choice
+// of witness set — with one output the union and the merge's own text are the
+// same tokens. TestMergeSourceIsScoredAgainstItsOwnMerge is the one that needs
+// the extra unrelated memory to tell them apart, and it fails if the union
+// comes back.
+func TestSummarizingMergeReAddsTheSourceItCompressed(t *testing.T) {
+	const (
+		sshID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
+		docID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"
+	)
+	carried := "the bastion accepts SSH on port 2222"
+	compressed := "OIDC discovery is documented in the ledger service README under auth"
+	const merged = "the bastion accepts SSH on 2222 and OIDC discovery is served by idp.internal on 8443"
+
+	in := ReflectionInput{ExistingMemories: []memory.Memory{
+		{ID: sshID, Category: "gotcha", Content: carried},
+		{ID: docID, Category: "fact", Content: compressed},
+	}}
+	result := ReflectionResult{
+		Memories: []ReflectMemory{{Category: "architecture", Content: merged}},
+		Merges:   []Merge{{IDs: []string{sshID, docID}, Text: merged}},
+	}
+
+	drops := AuditGuardedDrops(in, result)
+	if !auditContains(drops, compressed) {
+		t.Fatalf("a source the merge compressed below the bar was treated as absorbed: %+v", drops)
+	}
+	if auditContains(drops, carried) {
+		t.Errorf("the source the merge carried past the bar was flagged: %+v", drops)
 	}
 }

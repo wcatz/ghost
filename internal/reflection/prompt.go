@@ -43,13 +43,10 @@ type ReflectionResult struct {
 	// claim checkable after the fact — see Replacement for why an id alone is not
 	// enough.
 	Merges []Merge `json:"merges,omitempty"`
-	// Replacements are the input ids a response disposed of, each with the text
-	// that stands in its place: a rewrite's own new text, or the emitted text of
-	// the successor a supersession named. They share one list because they are one
-	// KIND of claim — "this row no longer needs carrying, that text says it
-	// instead" — and the drop guard treats them alike on whether the witness is
-	// present. They differ on whether it must also be related; see
-	// Replacement.Supersession.
+	// Replacements record the input ids a response disposed of, each with the
+	// text it says took their place. They are a record of the response's claims,
+	// NOT an exemption: the drop guard audits a disposed row like any other, and
+	// keeps it unless the corpus can show it is gone (see Replacement).
 	Replacements []Replacement `json:"replacements,omitempty"`
 }
 
@@ -63,28 +60,20 @@ type Merge struct {
 	Text string
 }
 
-// Replacement is an input id the response disposed of together with the text that
-// took its place, which is what makes the claim checkable after the fact.
+// Replacement records that a response disposed of an input id, and the text it
+// says took its place — a rewrite's own new text, or the emitted text of the
+// successor a `superseded by` drop named.
 //
-// Text and not just id, because the guards that run over the result can still
-// remove a survivor: dropForeignProjectMemories deletes a memory naming a project
-// the input corpus never mentioned, and a rewrite or a merge is exactly such a
-// memory. An exemption trusted on the id alone therefore disposes of a row whose
-// replacement is not in the corpus — no survivor, nothing for --allow-drops to
-// act on, and a silent deletion. The text is the witness, and the drop guard
-// honours the claim only while that text is still there.
+// It is a RECORD of what the response claimed, not a permission. The drop guard
+// does not read it and no longer exempts anything on it: an unattended reflect
+// never deletes a memory on the model's say-so alone, because a stale row that
+// is kept is repairable by resolve and supersede while a deleted row is not (see
+// AuditGuardedDrops). It is kept because it is the only place the response's own
+// account of a disposal is visible to a reader of the result — the dry run and
+// the tests both want to see what was claimed, not what survived.
 type Replacement struct {
 	ID   string
 	Text string
-	// Supersession marks the witness as ANOTHER row rather than a new wording of
-	// this one, which is the only case where the two texts can be unrelated and
-	// the claim is still an assertion. A rewrite's text is the model's own
-	// replacement for that id and the grounding check has already tied it to that
-	// row's identifiers, so its presence is enough. A `superseded by` drop names
-	// some OTHER carried-forward id, and nothing constrains that id to be about
-	// the memory being disposed of — so that claim has to be checked, not merely
-	// witnessed (#549).
-	Supersession bool
 }
 
 // ReflectMemory is a discrete memory extracted during reflection.
