@@ -1,6 +1,9 @@
 package mcpinit
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +135,82 @@ func TestRenderSessionContextAtCountsNoSession(t *testing.T) {
 		t.Errorf("interaction_count = %d after a historical render, want 0: a past reading is not a session start", count)
 	}
 	_ = stored
+}
+
+// TestRenderSessionContextAtRendersGlobalsOnce: the project half excludes
+// _global, exactly as the live loader's `project_id = ?` query does, because the
+// Global section renders those rows. A project half that also carried them would
+// print every global twice and spend the project's row budget on rows the block
+// repeats — and a doubled row is the kind of thing a reader skims past without
+// noticing it is wrong.
+func TestRenderSessionContextAtRendersGlobalsOnce(t *testing.T) {
+	dir, _ := historicalStore(t)
+	saveHistoricalGlobal(t, dir, "cross-project rows are listed once")
+	at := time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC)
+	block := RenderSessionContextAt(dir, &at)
+	if n := strings.Count(block, "cross-project rows are listed once"); n != 1 {
+		t.Errorf("the global row is rendered %d times, want 1:\n%s", n, block)
+	}
+	if !strings.Contains(block, "Global (applies to all projects)") {
+		t.Errorf("the block has no Global section, so the assertion above proved nothing about where the row rendered:\n%s", block)
+	}
+}
+
+// TestRenderSessionContextAtNamesTheInstantWithNoProjectMatched: the no-project
+// branch is reachable from a historical read — a global row recorded at T with an
+// unmatched directory — and it used to emit a Global list from an instant under a
+// heading that never named it, followed by an instruction aimed at the present.
+func TestRenderSessionContextAtNamesTheInstantWithNoProjectMatched(t *testing.T) {
+	dir, _ := historicalStore(t)
+	saveHistoricalGlobal(t, dir, "a global row at that instant")
+	at := time.Date(2035, 1, 1, 0, 0, 0, 0, time.UTC)
+	block := RenderSessionContextAt(filepath.Join(t.TempDir(), "no-project-here"), &at)
+	if block == "" {
+		t.Fatal("the block is empty, so nothing below can be proved about it")
+	}
+	if !strings.Contains(block, "no project matched this directory") {
+		t.Errorf("the block does not report the unmatched directory:\n%s", block)
+	}
+	if !strings.Contains(block, "as_of 2035-01-01T00:00:00Z") {
+		t.Errorf("the block lists globals from an instant without naming it:\n%s", block)
+	}
+	if strings.Contains(block, "Save discoveries with ghost_memory_save") {
+		t.Errorf("the historical block aims the reader at the present:\n%s", block)
+	}
+}
+
+// saveHistoricalGlobal writes a _global row through the store — so it has a
+// recorded version, and a historical read renders it instead of reporting it as a
+// gap — and backdates that version to before the instant the tests read at. The
+// append path stamps datetime('now'), which is before the test's instant anyway;
+// the backdating exists so the row's recorded past is unambiguous.
+func saveHistoricalGlobal(t *testing.T, dir, content string) {
+	t.Helper()
+	db, err := memory.OpenDB(dbPathOf(t))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, memory.GlobalProjectID, memory.GlobalProjectID, "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+	id, _, _, err := store.UpsertWithProvenance(ctx, memory.GlobalProjectID, "preference", content, "manual", 0.7, nil, memory.Provenance{})
+	if err != nil {
+		t.Fatalf("save the global memory: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE memory_history SET recorded_at = ? WHERE memory_id = ?`,
+		"2030-01-01 00:00:00", id); err != nil {
+		t.Fatalf("backdate the global memory's version: %v", err)
+	}
+}
+
+// dbPathOf re-derives the store path the fixture built, which is
+// $XDG_DATA_HOME/ghost/ghost.db — the same layout config.DataDir() returns.
+func dbPathOf(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db")
 }
 
 // TestRenderSessionContextAtWithNoInstantIsTheCurrentPath keeps the seam honest:

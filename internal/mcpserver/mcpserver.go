@@ -837,6 +837,18 @@ func (s *Server) registerTools() {
 		// formatted list. The explain projection of the assembler's trace
 		// replaces this branch once the stages carry it.
 		if args.Explain {
+			// Refused with as_of, not downgraded. This branch is the store's own
+			// ExplainSearchScoped: a diagnosis of the CURRENT ranking, over the
+			// FTS5 index and the live vectors. Handing it back for a historical
+			// request would answer "how did the rows rank at T" with the ranking
+			// they have now, under a request that named T — the one outcome a
+			// caller cannot detect from the payload, since it carries no
+			// qualifier and no trace.
+			if asOf != nil {
+				return nil, nil, fmt.Errorf("explain cannot describe a historical (as_of) read: it reports the current ranking, "+
+					"over the search index and the embeddings as they stand now. Drop as_of to diagnose the present ranking, "+
+					"or drop explain to read the store as it stood at %s", asOf.Format(time.RFC3339))
+			}
 			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec,
 				assemble.RetrievalWindow(searchRequest), scopeFilter)
 			if xErr != nil {

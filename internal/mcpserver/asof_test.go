@@ -212,8 +212,36 @@ func TestAsOfToolArgumentIsOptional(t *testing.T) {
 	}
 }
 
-// asOfTimeIsUTC pins the rendering the surfaces print, so a zone-carrying input
-// cannot make two surfaces label the same instant differently.
+// TestSearchExplainRefusedWithAsOf: the explain branch is the store's own
+// ExplainSearchScoped — a diagnosis of the CURRENT ranking, over the search index
+// and the live vectors — and it runs before the assembler. Answering it for a
+// historical request would return a present-day ranking with no qualifier and no
+// trace to say so, which is the one outcome a caller cannot detect from the
+// payload.
+func TestSearchExplainRefusedWithAsOf(t *testing.T) {
+	_, session := newCapSession(t)
+	out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "anything",
+		"as_of":      asOfToolFuture,
+		"explain":    true,
+	}))
+	if !strings.Contains(out, "explain cannot describe a historical") {
+		t.Errorf("explain with as_of returned %q, want a refusal: the payload is a present-day ranking", out)
+	}
+	// explain alone is untouched.
+	plain := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "anything",
+		"explain":    true,
+	})
+	if plain.IsError {
+		t.Errorf("explain without as_of was refused: %s", resultText(plain))
+	}
+}
+
+// TestAsOfParsesToUTC pins the rendering the surfaces print, so a zone-carrying
+// input cannot make two surfaces label the same instant differently.
 func TestAsOfParsesToUTC(t *testing.T) {
 	got, err := parseAsOf("2026-09-20T11:00:00+02:00")
 	if err != nil {
