@@ -105,9 +105,12 @@ func TestOpenCodeClient_Run_PropagatesStderrOnFailure(t *testing.T) {
 	}
 }
 
+// TestOpenCodeClient_Classify_JoinsSystemAndUserIntoPrompt: opencode run has
+// no --system-prompt flag, so the two are joined — and the joined text arrives
+// on stdin (issue #560), not as a positional argument.
 func TestOpenCodeClient_Classify_JoinsSystemAndUserIntoPrompt(t *testing.T) {
-	bin := fakeOpenCodeBinary(t, `for last; do :; done
-case "$last" in *SYSTEM*USER*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}';; *) echo "prompt not joined" >&2; exit 1;; esac`)
+	bin := fakeOpenCodeBinary(t, `piped=$(cat)
+case "$piped" in *SYSTEM*USER*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}';; *) echo "prompt not joined" >&2; exit 1;; esac`)
 	c := &OpenCodeClient{binary: bin}
 	text, err := c.Classify(context.Background(), "SYSTEM", "USER")
 	if err != nil {
@@ -473,7 +476,12 @@ func TestOpenCodeClient_V2Flags(t *testing.T) {
 	if strings.Contains(text, "--pure") || !strings.Contains(text, "--standalone") {
 		t.Fatalf("V2 args = %q, want --standalone and no --pure", text)
 	}
-	for _, want := range []string{"run", "--format json", "--title [ghost]", "prompt"} {
+	// The message is not one of the arguments: it goes to stdin, so a reflect
+	// prompt larger than the kernel's argv ceiling can still be delivered.
+	if strings.Contains(text, "prompt") {
+		t.Errorf("V2 args = %q, must not carry the prompt as an argv element", text)
+	}
+	for _, want := range []string{"run", "--format json", "--title [ghost]"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("V2 args = %q, missing %q", text, want)
 		}
@@ -549,9 +557,11 @@ func TestOpenCodeClient_Run_OtherFailureWithTextStillFails(t *testing.T) {
 	}
 }
 
+// TestOpenCodeClient_Run_PromptSaysNoTools: the no-tools instruction reaches
+// the model as part of the message, which travels on stdin.
 func TestOpenCodeClient_Run_PromptSaysNoTools(t *testing.T) {
-	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `for last; do :; done
-case "$last" in *"Do not call any tool"*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}';; *) echo "prompt lacks the no-tools instruction" >&2; exit 1;; esac`)}
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `piped=$(cat)
+case "$piped" in *"Do not call any tool"*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}';; *) echo "prompt lacks the no-tools instruction" >&2; exit 1;; esac`)}
 	if _, _, err := c.Reflect(context.Background(), "the task"); err != nil {
 		t.Fatalf("Reflect: %v", err)
 	}

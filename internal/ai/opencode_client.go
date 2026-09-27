@@ -78,10 +78,10 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 		defer cancel()
 	}
-	// --format json emits a JSON-lines stream; --pure skips plugins. The prompt
-	// is the last argument. A configured model is passed with `-m`; when none is
-	// configured, Ghost passes its explicit Big Pickle default because the
-	// child's config dir is scrubbed below. subprocessEnv (below) confines the
+	// --format json emits a JSON-lines stream; --pure skips plugins. A
+	// configured model is passed with `-m`; when none is configured, Ghost
+	// passes its explicit Big Pickle default because the child's config dir is
+	// scrubbed below. subprocessEnv (below) confines the
 	// child to a Ghost-owned scratch dir, which doubles as the neutral working
 	// directory (so the subprocess does not load the repo's CLAUDE.md/AGENTS.md,
 	// project opencode.json, or git context — the reflect prompt is
@@ -108,12 +108,18 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 		model = DefaultOpenCodeModel
 	}
 	args = append(args, "-m", model)
-	args = append(args, openCodeNoToolsPreamble+prompt)
 	cmd, cleanup, err := c.subprocessEnv(ctx, args, policy)
 	if err != nil {
 		return "", err
 	}
 	defer cleanup()
+	// The prompt goes on stdin, never as an argv element (issue #560): the
+	// kernel caps one argument at 32 pages and a reflect prompt is built from
+	// up to 2000 memories of 8000 bytes, so a large project produced a prompt
+	// that failed the spawn with E2BIG. `opencode run` reads the message from
+	// stdin when no positional message is given (V1 and V2 both), so the
+	// no-tools preamble travels with it rather than as an argument of its own.
+	cmd.Stdin = strings.NewReader(openCodeNoToolsPreamble + prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
