@@ -108,7 +108,9 @@ func opencodePluginPath() (string, error) {
 // installOpencodePlugin writes the lifecycle adapter to opencode's plugin
 // directory, rendered with the resolved ghost binary path. Idempotent: an
 // identical file is left untouched; a missing, drifted, or outdated file is
-// overwritten with the embedded source.
+// overwritten with the embedded source. The write goes through
+// writeFileAtomic, so an opencode process loading the plugin during the
+// replacement is handed a whole file rather than a truncated one.
 func installOpencodePlugin(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	path, err := opencodePluginPath()
 	if err != nil {
@@ -129,7 +131,7 @@ func installOpencodePlugin(w io.Writer, ghostBin string, dryRun bool) (bool, err
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return false, fmt.Errorf("create plugin dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(want), 0644); err != nil {
+	if err := writeFileAtomic(path, []byte(want), 0644); err != nil {
 		return false, fmt.Errorf("write plugin: %w", err)
 	}
 	_, _ = fmt.Fprintf(w, "  + installed lifecycle plugin (%s)\n", path)

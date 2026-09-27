@@ -749,7 +749,9 @@ func sanitizeName(name string) string {
 }
 
 // writeRedirects creates MEMORY.md redirect files in Claude's project memory
-// directories for each known Ghost project.
+// directories for each known Ghost project. The write goes through
+// writeFileAtomic: refreshing ghost's own redirect must not leave a
+// half-written file behind for the next session start to read.
 func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -801,7 +803,7 @@ Use `+"`ghost_memory_save`"+` to save new discoveries during work.
 Use `+"`ghost_memory_search`"+` to search for specific facts.
 `, safeName)
 
-		if err := os.WriteFile(target, []byte(content), 0644); err != nil {
+		if err := writeFileAtomic(target, []byte(content), 0644); err != nil {
 			_, _ = fmt.Fprintf(w, "  ! %s — write error: %v\n", p.Name, err)
 			continue
 		}

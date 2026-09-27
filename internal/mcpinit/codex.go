@@ -1220,7 +1220,9 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 // entrypoint in ~/.codex/hooks.json. An existing file is MERGED, never
 // replaced: the user's own hooks (any event ghost doesn't manage) and unknown
 // fields survive byte-semantically. Idempotent via byte-compare against the
-// deterministically rendered desired document.
+// deterministically rendered desired document. Both writes go through
+// writeFileAtomic, so the merge lands by rename and a codex process reading
+// hooks.json during the repair sees a whole document, not a truncated one.
 func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	path, err := codexHooksPath()
 	if err != nil {
@@ -1236,7 +1238,7 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return false, fmt.Errorf("create codex dir: %w", err)
 		}
-		if err := os.WriteFile(path, []byte(renderCodexHooksConfig(ghostBin)), 0644); err != nil {
+		if err := writeFileAtomic(path, []byte(renderCodexHooksConfig(ghostBin)), 0644); err != nil {
 			return false, fmt.Errorf("write hooks.json: %w", err)
 		}
 		_, _ = fmt.Fprintf(w, "  + installed hooks.json (%s)\n", path)
@@ -1257,7 +1259,7 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 		_, _ = fmt.Fprintf(w, "  ~ would update hooks.json (%s)\n", path)
 		return true, nil
 	}
-	if err := os.WriteFile(path, []byte(desired), 0644); err != nil {
+	if err := writeFileAtomic(path, []byte(desired), 0644); err != nil {
 		return false, fmt.Errorf("write hooks.json: %w", err)
 	}
 	_, _ = fmt.Fprintf(w, "  + updated hooks.json (%s)\n", path)
