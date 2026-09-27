@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -841,22 +842,38 @@ func TestLoadForHook_MalformedYAMLFallsBackWithWarning(t *testing.T) {
 }
 
 // TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped pins the hook-path
-// cost of refusing an empty session_scope value: the whole file is dropped, so
-// the session is not scope-filtered, and the warning says why.
+// cost of refusing an empty session_scope value: the whole file is dropped and
+// the session is not scope-filtered, and the warning says why. A
+// GHOST_INJECTION_SESSION_SCOPE replaces the file's session_scope map whole
+// before the check runs, so that file is not refused and the env scope applies.
 func TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped(t *testing.T) {
-	isolateConfig(t)
-	writeUserConfig(t, "injection:\n  session_scope:\n    environment: \"\"\n    component: api\n")
-	warnings := captureConfigWarnings(t)
+	for name, tc := range map[string]struct {
+		env      string
+		want     map[string]string
+		wantWarn bool
+	}{
+		"no env scope":  {wantWarn: true},
+		"env scope set": {env: "environment=development", want: map[string]string{"environment": "development"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateConfig(t)
+			if tc.env != "" {
+				t.Setenv("GHOST_INJECTION_SESSION_SCOPE", tc.env)
+			}
+			writeUserConfig(t, "injection:\n  session_scope:\n    environment: \"\"\n    component: api\n")
+			warnings := captureConfigWarnings(t)
 
-	cfg := LoadForHook()
-	if cfg == nil {
-		t.Fatal("LoadForHook() = nil; the hook path must always be given a config")
-	}
-	if len(cfg.Injection.SessionScope) != 0 {
-		t.Errorf("injection.session_scope = %v, want none (the refused file is not applied)", cfg.Injection.SessionScope)
-	}
-	if got := warnings.String(); !strings.Contains(got, "injection.session_scope: empty value for environment") {
-		t.Errorf("warning %q must name the refused session_scope key", got)
+			cfg := LoadForHook()
+			if cfg == nil {
+				t.Fatal("LoadForHook() = nil; the hook path must always be given a config")
+			}
+			if !maps.Equal(cfg.Injection.SessionScope, tc.want) {
+				t.Errorf("injection.session_scope = %v, want %v", cfg.Injection.SessionScope, tc.want)
+			}
+			if got := warnings.String(); strings.Contains(got, "injection.session_scope: empty value for environment") != tc.wantWarn {
+				t.Errorf("warnings = %q, want a refusal warning: %v", got, tc.wantWarn)
+			}
+		})
 	}
 }
 

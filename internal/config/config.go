@@ -343,10 +343,11 @@ func Load() (*Config, error) {
 //
 // Refusing is chosen for being loud and consistent with the env form, not for
 // keeping rows out: it is not a narrowing guarantee. The CLI subcommands fail on
-// it, but LoadForHook falls back to the compiled defaults plus GHOST_*, which
-// carry no session_scope, so the session-start block for that session is not
-// scope-filtered at all — the same block a store with no session_scope gets
-// (pinned by TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped). Dropping
+// it, but LoadForHook falls back to the compiled defaults plus GHOST_*. The
+// defaults carry no session_scope, so the session-start block for that session
+// is not scope-filtered at all. A GHOST_INJECTION_SESSION_SCOPE replaces the
+// file's whole session_scope map before this check, so that file is not refused
+// and the env scope applies (both cases pinned by TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped). Dropping
 // only the bad key would have kept the others filtering, but silently, and left
 // the file and env forms disagreeing about the same input.
 func checkScopeValues(cfg *Config) error {
