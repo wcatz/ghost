@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // The #630 contract, tested behaviourally: a -h/--help request prints that
@@ -218,31 +220,198 @@ func TestRunCLI_DispatchesWithoutHelp(t *testing.T) {
 
 // TestWantsHelp pins the flag scan itself, including the rule that makes a
 // dash-leading project name pass through untouched: the token after a
-// value-taking flag is that flag's value, never a help request.
+// value-taking flag of THAT command is that flag's value, never a help request,
+// and a flag the command does not take is a typo rather than a value.
 func TestWantsHelp(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		args []string
-		want bool
+		name    string
+		command string
+		args    []string
+		want    bool
 	}{
-		{name: "short", args: []string{"-h"}, want: true},
-		{name: "long", args: []string{"--help"}, want: true},
-		{name: "after a boolean flag", args: []string{"--apply", "-h"}, want: true},
-		{name: "after a value flag's value", args: []string{"--tier", "cli", "--help"}, want: true},
-		{name: "after several value flags", args: []string{"--project", "p", "--source", "cli", "-h"}, want: true},
-		{name: "inline value flag then help", args: []string{"--client=claude", "-h"}, want: true},
-		{name: "project value is a name, not help", args: []string{"--project", "-h"}, want: false},
-		{name: "source value is a name, not help", args: []string{"--source", "--help"}, want: false},
-		{name: "inline project value is a name, not help", args: []string{"--project=--help"}, want: false},
-		{name: "no args", args: nil, want: false},
-		{name: "ordinary args", args: []string{"myproject", "--apply"}, want: false},
+		{name: "short", command: "reflect", args: []string{"-h"}, want: true},
+		{name: "long", command: "reflect", args: []string{"--help"}, want: true},
+		{name: "after a boolean flag", command: "reflect", args: []string{"--apply", "-h"}, want: true},
+		{name: "after a value flag's value", command: "reflect", args: []string{"--tier", "cli", "--help"}, want: true},
+		{name: "after several value flags", command: "reflect", args: []string{"--project", "p", "--source", "cli", "-h"}, want: true},
+		{name: "inline value flag then help", command: "mcp init", args: []string{"--client=claude", "-h"}, want: true},
+		{name: "project value is a name, not help", command: "reflect", args: []string{"--project", "-h"}, want: false},
+		{name: "source value is a name, not help", command: "hook", args: []string{"--source", "--help"}, want: false},
+		{name: "inline project value is a name, not help", command: "reflect", args: []string{"--project=--help"}, want: false},
+		{name: "a value flag of another command is not a value", command: "upgrade", args: []string{"--cwd", "-h"}, want: true},
+		{name: "another command's value flag, long form", command: "backup", args: []string{"--project", "--help"}, want: true},
+		{name: "after end of options", command: "reflect", args: []string{"--", "-h"}, want: false},
+		{name: "after end of options, long form", command: "reflect", args: []string{"--project", "p", "--", "--help"}, want: false},
+		{name: "end of options for a command that takes no value flags", command: "upgrade", args: []string{"--", "--cwd", "-h"}, want: false},
+		{name: "no args", command: "reflect", args: nil, want: false},
+		{name: "ordinary args", command: "reflect", args: []string{"myproject", "--apply"}, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := wantsHelp(tc.args); got != tc.want {
-				t.Errorf("wantsHelp(%v) = %v, want %v", tc.args, got, tc.want)
+			if got := wantsHelp(tc.command, tc.args); got != tc.want {
+				t.Errorf("wantsHelp(%q, %v) = %v, want %v", tc.command, tc.args, got, tc.want)
 			}
 		})
 	}
+}
+
+// TestRunCLI_ForeignValueFlagDoesNotSwallowHelp is the #637 finding at the seam
+// it was reported through: `ghost upgrade --cwd -h` used to be read as --cwd
+// taking "-h" as its value, because one table listed every value flag in the CLI
+// and the scan did not know which command it was scanning. The consequence was
+// not a missed usage line — it was the upgrade RUNNING, with the help flag
+// consumed, on the one command that replaces the running binary. A flag a
+// command does not take has to leave the next token to the scan, which is what
+// makes the -h the user typed a help request.
+func TestRunCLI_ForeignValueFlagDoesNotSwallowHelp(t *testing.T) {
+	roots := isolatedHelpFS(t)
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{name: "upgrade with context's flag", argv: []string{"upgrade", "--cwd", "-h"}, want: "ghost upgrade"},
+		{name: "upgrade with context's flag, long form", argv: []string{"upgrade", "--cwd", "--help"}, want: "ghost upgrade"},
+		{name: "backup with mcp's flag", argv: []string{"backup", "--client", "-h"}, want: "ghost backup"},
+		{name: "context with opencode's flag", argv: []string{"context", "--grace", "1h", "-h"}, want: "ghost context"},
+		{name: "reflect with obsidian's flag", argv: []string{"reflect", "--interval", "5s", "-h"}, want: "ghost reflect"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var dispatched []string
+			stdout, stderr := captureStreams(t, func() {
+				code := runCLI(tc.argv, func(d []string) int {
+					dispatched = d
+					return 0
+				})
+				if code != 0 {
+					t.Errorf("exit code = %d, want 0", code)
+				}
+			})
+			if dispatched != nil {
+				t.Errorf("%v reached the command dispatch: %v", tc.argv, dispatched)
+			}
+			if !strings.Contains(stdout, tc.want) {
+				t.Errorf("stdout = %q, want the usage of the command that was invoked (%q)", stdout, tc.want)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want nothing", stderr)
+			}
+			assertNoFiles(t, roots)
+		})
+	}
+}
+
+// TestRunCLI_EndOfOptionsIsNotHelp pins that "--" ends the option scan, which is
+// what lets a project literally named --help be addressed at all: after it every
+// token is an operand, so the scan must stop rather than read one as a request
+// for usage. The dispatch still gets argv untouched, so the command's own parser
+// decides what the operand means.
+func TestRunCLI_EndOfOptionsIsNotHelp(t *testing.T) {
+	for _, argv := range [][]string{
+		{"reflect", "--", "-h"},
+		{"reflect", "--project", "ghost", "--", "--help"},
+		{"resolve", "--", "--help"},
+	} {
+		var got []string
+		stdout, stderr := captureStreams(t, func() {
+			if code := runCLI(argv, func(d []string) int {
+				got = d
+				return 0
+			}); code != 0 {
+				t.Errorf("runCLI(%v) code = %d, want 0", argv, code)
+			}
+		})
+		if !reflect.DeepEqual(got, argv) {
+			t.Errorf("runCLI(%v) dispatched %v, want the argv untouched: a help request must not swallow operands", argv, got)
+		}
+		if stdout != "" || stderr != "" {
+			t.Errorf("runCLI(%v) wrote stdout %q / stderr %q, want nothing", argv, stdout, stderr)
+		}
+	}
+}
+
+// TestHelpCommandPrintsTheCommandUsage is the third #637 finding: `ghost help
+// <cmd>` printed the top-level summary whatever followed it, so the reader had
+// to run the command to find out what it takes — and for a command whose parser
+// errors on the arguments they typed, that is the wrong way round. The named
+// command's own usage goes to stdout, the same text its -h prints, and a name
+// that is not a command is reported rather than answered with a list that does
+// not contain it.
+func TestHelpCommandPrintsTheCommandUsage(t *testing.T) {
+	// restoreDetectRemote undoes the one global the dispatch wires on its way
+	// to the help case (memory.SetDetectRemote), so a test that drives the real
+	// dispatch leaves the package the way it found it: no repository detector,
+	// which is the default the rest of this package's tests assume.
+	restoreDetectRemote := func(t *testing.T) {
+		t.Helper()
+		t.Cleanup(func() { memory.SetDetectRemote(nil) })
+	}
+
+	// Each case names a phrase only that command's usage can print, so a
+	// top-level summary or a sibling's usage cannot pass it. The real dispatch
+	// is driven, because routing `help <cmd>` to that command's usage is the
+	// change being tested, and reaching the help case in it touches nothing
+	// else: no store, no config, no harness.
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{name: "upgrade", argv: []string{"help", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
+		{name: "reflect", argv: []string{"help", "reflect"}, want: "ghost reflect <project> [flags]"},
+		{name: "mcp init", argv: []string{"help", "mcp", "init"}, want: "ghost mcp init [--client"},
+		{name: "project bind", argv: []string{"help", "project", "bind"}, want: "ghost project bind <project-id> <checkout-directory>"},
+		{name: "opencode cleanup-sessions", argv: []string{"help", "opencode", "cleanup-sessions"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
+		{name: "version", argv: []string{"help", "version"}, want: "ghost version"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			roots := isolatedHelpFS(t)
+			restoreDetectRemote(t)
+			var code int
+			stdout, stderr := captureStreams(t, func() { code = dispatchCommand(tc.argv) })
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0: a question is not a mistake", code)
+			}
+			if !strings.HasPrefix(stdout, "Usage: ghost ") {
+				t.Errorf("stdout = %q, want it to open with the usage line of the named command", stdout)
+			}
+			if !strings.Contains(stdout, tc.want) {
+				t.Errorf("stdout = %q, want it to contain %q", stdout, tc.want)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want nothing", stderr)
+			}
+			assertNoFiles(t, roots)
+		})
+	}
+
+	t.Run("no command", func(t *testing.T) {
+		restoreDetectRemote(t)
+		stdout, stderr := captureStreams(t, func() { dispatchCommand([]string{"help"}) })
+		if stdout != "" {
+			t.Errorf("stdout = %q, want the top-level summary to stay on stderr as it always was", stdout)
+		}
+		if !strings.Contains(stderr, "ghost <command>") {
+			t.Errorf("stderr = %q, want the top-level command list", stderr)
+		}
+	})
+
+	t.Run("unknown command", func(t *testing.T) {
+		restoreDetectRemote(t)
+		var code int
+		stdout, stderr := captureStreams(t, func() { code = dispatchCommand([]string{"help", "frobnicate"}) })
+		if code != 0 {
+			t.Errorf("exit code = %d, want 0: a question with no answer is not a mistake", code)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want the top-level summary to stay on stderr as it always was", stdout)
+		}
+		if !strings.Contains(stderr, `no command "frobnicate"`) {
+			t.Errorf("stderr = %q, want the word that matched no command named", stderr)
+		}
+		if !strings.Contains(stderr, "ghost <command>") {
+			t.Errorf("stderr = %q, want the top-level command list as the fallback", stderr)
+		}
+	})
 }
 
 // TestHelp_ProjectBindStaysByteIdentical: #612 gave `project bind` its own
@@ -270,46 +439,79 @@ func TestHelp_ProjectBindStaysByteIdentical(t *testing.T) {
 	}
 }
 
-// TestHelp_ValueFlagsSkipTheirValue checks the map from the consumer's side:
-// for every registered value flag, `-h`/`--help` in the value position is a
-// VALUE (no help request), while a help request after a real value still
-// reads as help — the skip must narrow the scan, not blind it.
+// TestHelp_ValueFlagsSkipTheirValue checks the per-command table from the
+// consumer's side: for every flag registered for a command, `-h`/`--help` in the
+// value position is a VALUE (no help request), while a help request after a real
+// value still reads as help — the skip must narrow the scan, not blind it.
 func TestHelp_ValueFlagsSkipTheirValue(t *testing.T) {
-	if len(helpValueFlags) == 0 {
-		t.Fatal("helpValueFlags is empty; the value-flag table is missing")
+	if len(helpValueFlagsByCommand) == 0 {
+		t.Fatal("helpValueFlagsByCommand is empty; the value-flag table is missing")
 	}
-	for flag := range helpValueFlags {
-		t.Run(flag, func(t *testing.T) {
-			for _, help := range []string{"-h", "--help"} {
-				if wantsHelp([]string{flag, help}) {
-					t.Errorf("wantsHelp(%v) = true, want false: %s in value position is a value, not help", []string{flag, help}, flag)
+	for command, flags := range helpValueFlagsByCommand {
+		if len(flags) == 0 {
+			t.Errorf("%s is registered with no value flags; a command that takes none must not be a key", command)
+		}
+		for flag := range flags {
+			t.Run(command+" "+flag, func(t *testing.T) {
+				for _, help := range []string{"-h", "--help"} {
+					if wantsHelp(command, []string{flag, help}) {
+						t.Errorf("wantsHelp(%q, %v) = true, want false: %s in value position is a value, not help", command, []string{flag, help}, flag)
+					}
+					if !wantsHelp(command, []string{flag, "value", help}) {
+						t.Errorf("wantsHelp(%q, %v) = false, want true: %s's value then help is still a help request", command, []string{flag, "value", help}, flag)
+					}
 				}
-				if !wantsHelp([]string{flag, "value", help}) {
-					t.Errorf("wantsHelp(%v) = false, want true: %s's value then help is still a help request", []string{flag, "value", help}, flag)
-				}
-			}
-		})
+			})
+		}
 	}
 }
 
-// TestHelp_ValueFlagsCoverEveryParser enforces the other half of the
-// helpValueFlags contract, which the comment can only ask for: the map is a
-// hand-maintained mirror of every flag that consumes the next token, and a
-// value flag added to a parser without registering it would make
+// valueFlagOwners maps each function in this package that parses a value flag to
+// the subcommand paths whose help scan has to honour those flags. One function
+// can serve two commands (parseMCPClient is how both `mcp init` and `mcp status`
+// read --client), and a command can parse inline rather than through a parse*
+// helper (runContext, runHook), so the map is keyed by function name and every
+// owner of that function has to register every flag it parses.
+//
+// A function absent from here that parses a value flag fails the scan: the table
+// is a hand-maintained mirror of the parsers, and a parser missing from it is one
+// whose --flag value the scan will read as a help request.
+var valueFlagOwners = map[string][]string{
+	"parseMCPClient":           {"mcp init", "mcp status"},
+	"parseLifecycleArgs":       {"lifecycle"},
+	"parseReflectArgs":         {"reflect"},
+	"parseSupersedeArgs":       {"supersede"},
+	"parseResolveArgs":         {"resolve"},
+	"parseObsidianFlags":       {"obsidian"},
+	"parseBackupArgs":          {"backup"},
+	"parseExportArgs":          {"export"},
+	"parseCleanupSessionsArgs": {"opencode cleanup-sessions"},
+	"runContext":               {"context"},
+	"runHook":                  {"hook"},
+}
+
+// TestHelp_ValueFlagsCoverEveryParser enforces both halves of the
+// helpValueFlagsByCommand contract, per command, which the comment can only ask
+// for: the map is a hand-maintained mirror of every flag that consumes the next
+// token, and a value flag added to a parser without registering it would make
 // `ghost <cmd> --newflag -h` print usage and exit 0 instead of running the
 // command (or reporting the unknown flag). The scan reads this package's own
 // sources for case clauses that match a flag-shaped literal (`-x` or `--x`;
 // -h/--help excluded, they are the request itself) and advance the argument
 // index — `++`, `+ 1` or `+= 1` on an identifier that also appears indexed
 // inside the clause or its switch tag (`args[i]`), or an `args = args[1:]`
-// reslice of that same identifier. Boolean flags like --apply never advance it, and an unrelated
-// counter bump or string trim is not mistaken for parsing (see advancesIndex
-// for why the loose reading would break the contract instead of protecting
-// it), while the common refactors to the idiom stay covered. Both lists must
-// agree, in both directions, so a stale map entry fails too. Detection is a
-// source-shape heuristic: a parser that reaches for its next token any other
-// way has to keep this scan honest by not looking like a parser, or by
-// extending it here in the same commit.
+// reslice of that same identifier. Boolean flags like --apply never advance it,
+// and an unrelated counter bump or string trim is not mistaken for parsing (see
+// advancesIndex for why the loose reading would break the contract instead of
+// protecting it), while the common refactors to the idiom stay covered.
+//
+// Both directions are checked for EVERY command rather than once for the whole
+// CLI, which is the only level at which this is a guard: a flag registered for
+// the wrong command is the bug the per-command table exists to fix, so a union
+// that merely matched the scan would let it back in. Detection is a source-shape
+// heuristic: a parser that reaches for its next token any other way has to keep
+// this scan honest by not looking like a parser, or by extending it here in the
+// same commit.
 func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 	// A bare flag token, optionally in the attached `--flag=value` form.
 	// Error messages ("--project requires a value", "--client … (claude,
@@ -319,7 +521,14 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 	flagTokenRE := regexp.MustCompile(`^--?[a-zA-Z0-9][a-zA-Z0-9-]*(=[^ \t\n]*)?$`)
 	neverValue := map[string]bool{"-h": true, "--help": true}
 	fset := token.NewFileSet()
-	found := map[string]bool{}
+	// found maps a subcommand path to the value flags its own parsers consume.
+	found := map[string]map[string]bool{}
+	markFound := func(command, flag string) {
+		if found[command] == nil {
+			found[command] = map[string]bool{}
+		}
+		found[command][flag] = true
+	}
 
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -334,70 +543,95 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		// A switch tag lives outside every CaseClause, so seed each clause
-		// with the index expressions of its enclosing switch's tag:
-		// `switch args[i] { case "--x": i++ }` has no IndexExpr in the
-		// clause at all, and a parser written that way would otherwise be
-		// invisible to the scan — the silent direction of this guard.
-		tagIndexed := map[*ast.CaseClause]map[string]bool{}
-		ast.Inspect(f, func(n ast.Node) bool {
-			sw, ok := n.(*ast.SwitchStmt)
-			if !ok || sw.Tag == nil {
-				return true
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
 			}
-			tag := indexExprIdents(sw.Tag)
-			for _, stmt := range sw.Body.List {
-				if cc, ok := stmt.(*ast.CaseClause); ok {
-					tagIndexed[cc] = tag
-				}
-			}
-			return true
-		})
-
-		ast.Inspect(f, func(n ast.Node) bool {
-			cc, ok := n.(*ast.CaseClause)
-			if !ok {
-				return true
-			}
-			indexed := indexExprIdents(cc)
-			for name, v := range tagIndexed[cc] {
-				indexed[name] = v
-			}
-			if !advancesIndex(indexed, cc) {
-				return true
-			}
-			ast.Inspect(cc, func(m ast.Node) bool {
-				lit, ok := m.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
+			owners, owned := valueFlagOwners[fd.Name.Name]
+			// A switch tag lives outside every CaseClause, so seed each clause
+			// with the index expressions of its enclosing switch's tag:
+			// `switch args[i] { case "--x": i++ }` has no IndexExpr in the
+			// clause at all, and a parser written that way would otherwise be
+			// invisible to the scan — the silent direction of this guard.
+			tagIndexed := map[*ast.CaseClause]map[string]bool{}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				sw, ok := n.(*ast.SwitchStmt)
+				if !ok || sw.Tag == nil {
 					return true
 				}
-				s, err := strconv.Unquote(lit.Value)
-				if err != nil || !flagTokenRE.MatchString(s) {
-					return true
+				tag := indexExprIdents(sw.Tag)
+				for _, stmt := range sw.Body.List {
+					if cc, ok := stmt.(*ast.CaseClause); ok {
+						tagIndexed[cc] = tag
+					}
 				}
-				if i := strings.IndexByte(s, '='); i >= 0 {
-					s = s[:i]
-				}
-				if neverValue[s] {
-					return true
-				}
-				found[s] = true
 				return true
 			})
-			return true
-		})
-	}
 
-	for flag := range found {
-		if !helpValueFlags[flag] {
-			t.Errorf("%s consumes the next argument in a parser but is missing from helpValueFlags: "+
-				"`ghost <cmd> %s -h` would print usage instead of running the command", flag, flag)
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				cc, ok := n.(*ast.CaseClause)
+				if !ok {
+					return true
+				}
+				indexed := indexExprIdents(cc)
+				for name, v := range tagIndexed[cc] {
+					indexed[name] = v
+				}
+				if !advancesIndex(indexed, cc) {
+					return true
+				}
+				ast.Inspect(cc, func(m ast.Node) bool {
+					lit, ok := m.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						return true
+					}
+					s, err := strconv.Unquote(lit.Value)
+					if err != nil || !flagTokenRE.MatchString(s) {
+						return true
+					}
+					if i := strings.IndexByte(s, '='); i >= 0 {
+						s = s[:i]
+					}
+					if neverValue[s] {
+						return true
+					}
+					if !owned {
+						t.Errorf("%s parses %s as a value flag but is not in valueFlagOwners: "+
+							"`ghost <cmd> %s -h` would print usage instead of running the command",
+							fd.Name.Name, s, s)
+						return true
+					}
+					for _, command := range owners {
+						markFound(command, s)
+					}
+					return true
+				})
+				return true
+			})
 		}
 	}
-	for flag := range helpValueFlags {
-		if !found[flag] {
-			t.Errorf("helpValueFlags lists %s, but no case clause in cmd/ghost parses it as a value flag: "+
-				"stale entry, or the parsers changed shape and this scan no longer sees them", flag)
+
+	for command, flags := range found {
+		if _, registered := usageByCommand[command]; !registered {
+			t.Errorf("valueFlagOwners names %q, which is not a command in usageByCommand: the help scan can never reach it", command)
+		}
+		for flag := range flags {
+			if !helpValueFlagsByCommand[command][flag] {
+				t.Errorf("%s consumes %s but it is missing from helpValueFlagsByCommand[%q]: "+
+					"`ghost %s %s -h` would print usage instead of running the command", command, flag, command, command, flag)
+			}
+		}
+	}
+	for command, flags := range helpValueFlagsByCommand {
+		if _, registered := usageByCommand[command]; !registered {
+			t.Errorf("helpValueFlagsByCommand lists %q, which is not a command in usageByCommand: a dead entry", command)
+		}
+		for flag := range flags {
+			if !found[command][flag] {
+				t.Errorf("helpValueFlagsByCommand[%q] lists %s, but no parser owned by that command consumes the next token: "+
+					"stale entry, or the parsers changed shape and this scan no longer sees them", command, flag)
+			}
 		}
 	}
 }

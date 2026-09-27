@@ -16,33 +16,60 @@ import (
 // check inside each run* keeps a newly added subcommand from silently missing
 // the contract — register it in usageByCommand and it inherits the behaviour.
 
-// helpValueFlags lists every flag in the CLI that consumes the following
-// argument. The help scan has to know them because the token after one of
-// these is a VALUE, never a flag: a project may be named "-h" — dash-leading
-// names travel through the verbatim --project form — so
-// `ghost reflect --project -h` has to run reflect for that project instead of
-// printing usage.
-var helpValueFlags = map[string]bool{
-	"--client":    true,
-	"--cwd":       true,
-	"--grace":     true,
-	"--interval":  true,
-	"--limit":     true,
-	"--out":       true,
-	"--project":   true,
-	"--source":    true,
-	"--threshold": true,
-	"--tier":      true,
+// helpValueFlagsByCommand lists, per subcommand path, every flag THAT command's
+// parser consumes the following argument for. The help scan has to know them
+// because the token after one of these is a VALUE, never a flag: a project may
+// be named "-h" — dash-leading names travel through the verbatim --project form
+// — so `ghost reflect --project -h` has to run reflect for that project instead
+// of printing usage.
+//
+// The keys are the same subcommand paths as usageByCommand, and the table is
+// per command rather than one list for the whole CLI because a flag that only
+// some commands take cannot be assumed by the rest. `ghost upgrade --cwd -h` is
+// the case that forced it: --cwd belongs to `ghost context`, upgrade has never
+// heard of it and errors on it, but a global list swallowed the -h as --cwd's
+// value and the upgrade ran — with the help flag the user typed, on a command
+// that replaces the running binary. A command that is not a key here takes no
+// value flags, so a stray --flag in front of -h is a typo the user should see
+// rather than a value. A command's own flags are the mirror of its parser, and
+// TestHelp_ValueFlagsCoverEveryParser holds the two to each other in both
+// directions, per command.
+var helpValueFlagsByCommand = map[string]map[string]bool{
+	"backup":                    {"--out": true},
+	"context":                   {"--cwd": true},
+	"export":                    {"--out": true, "--project": true},
+	"hook":                      {"--source": true},
+	"lifecycle":                 {"--project": true, "--source": true},
+	"mcp init":                  {"--client": true},
+	"mcp status":                {"--client": true},
+	"obsidian":                  {"--out": true, "--project": true, "--interval": true},
+	"opencode cleanup-sessions": {"--grace": true, "--limit": true},
+	"reflect":                   {"--project": true, "--source": true, "--tier": true},
+	"resolve":                   {"--project": true, "--source": true},
+	"supersede":                 {"--project": true, "--source": true, "--threshold": true},
 }
 
-// wantsHelp reports whether args — one subcommand's own arguments, without
-// the command words — request that command's usage via -h or --help.
-func wantsHelp(args []string) bool {
+// wantsHelp reports whether args — one subcommand's own arguments, without the
+// command words — request that command's usage via -h or --help. command is the
+// subcommand path usageFor resolved, and it selects which value flags apply.
+//
+// A bare "--" ends the options: everything after it is an operand, whatever it
+// looks like, so `ghost reflect -- --help` runs reflect rather than printing
+// usage, and the reader can address a project named --help. None of the
+// parsers here implements "--" for itself (some reject it, some ignore it),
+// which is why the scan has to make the rule on their behalf: reading a
+// flag-shaped operand as a help request is a side effect the #630 contract
+// exists to prevent, and it would be a silent one — the command that ran is not
+// the command the reader asked about.
+func wantsHelp(command string, args []string) bool {
+	valueFlags := helpValueFlagsByCommand[command]
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "-h" || args[i] == "--help":
 			return true
-		case helpValueFlags[args[i]]:
+		case args[i] == "--":
+			return false
+		case valueFlags[args[i]]:
 			i++ // the next token is this flag's value, not a flag of its own
 		}
 	}
@@ -81,17 +108,19 @@ var usageByCommand = map[string]string{
 	"version":                   versionUsage,
 }
 
-// usageFor resolves argv's registered subcommand path, returning that
-// command's usage and the arguments that follow the path. ok is false when
-// argv opens with no registered command — an unknown command, or the
-// top-level -h/--help, which main's own case prints.
-func usageFor(argv []string) (usage string, rest []string, ok bool) {
+// usageFor resolves argv's registered subcommand path, returning that path, its
+// usage, and the arguments that follow the path. ok is false when argv opens
+// with no registered command — an unknown command, or the top-level -h/--help,
+// which main's own case prints. The path comes back because the help scan needs
+// it: which flags take a value is a property of the command, not of the CLI.
+func usageFor(argv []string) (path, usage string, rest []string, ok bool) {
 	for n := len(argv); n >= 1; n-- {
-		if u, found := usageByCommand[strings.Join(argv[:n], " ")]; found {
-			return u, argv[n:], true
+		p := strings.Join(argv[:n], " ")
+		if u, found := usageByCommand[p]; found {
+			return p, u, argv[n:], true
 		}
 	}
-	return "", nil, false
+	return "", "", nil, false
 }
 
 // handleHelp answers -h/--help for every registered subcommand and reports
@@ -99,8 +128,8 @@ func usageFor(argv []string) (usage string, rest []string, ok bool) {
 // and the caller must exit 0 without dispatching; false means dispatch
 // proceeds exactly as it did before this existed.
 func handleHelp(argv []string) bool {
-	usage, rest, ok := usageFor(argv)
-	if !ok || !wantsHelp(rest) {
+	command, usage, rest, ok := usageFor(argv)
+	if !ok || !wantsHelp(command, rest) {
 		return false
 	}
 	// Reported rather than discarded, the `project bind` precedent (#612):
@@ -111,4 +140,27 @@ func handleHelp(argv []string) bool {
 		fmt.Fprintf(os.Stderr, "warning: cannot print usage: %v\n", err)
 	}
 	return true
+}
+
+// runHelpCommand answers `ghost help [command]`. With a command, it prints that
+// command's own usage — the same text `ghost <command> -h` prints, on stdout,
+// because the reader asked a question and the command is a subcommand's rather
+// than the CLI's. `ghost help` with no command, and any name that is not a
+// registered command path, print the top-level summary on stderr exactly as
+// before; a name that matched nothing is reported on stderr so a typo is
+// visible rather than answered with a list of commands that does not contain it.
+// The exit code stays 0 throughout: a question with no answer is not a mistake
+// in the invocation.
+func runHelpCommand(args []string) int {
+	if _, usage, _, ok := usageFor(args); ok {
+		if _, err := fmt.Fprint(os.Stdout, usage); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot print usage: %v\n", err)
+		}
+		return 0
+	}
+	if len(args) > 0 {
+		fmt.Fprintf(os.Stderr, "ghost help: no command %q in this build; showing the command list\n", strings.Join(args, " "))
+	}
+	printUsage()
+	return 0
 }

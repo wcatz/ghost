@@ -45,8 +45,7 @@ func dispatchCommand(argv []string) int {
 			fmt.Printf("ghost %s\n", version)
 			return 0
 		case "help", "--help", "-h":
-			printUsage()
-			return 0
+			return runHelpCommand(argv[1:])
 		case "mcp":
 			if len(argv) > 1 {
 				switch argv[1] {
