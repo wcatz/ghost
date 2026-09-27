@@ -357,6 +357,117 @@ func TestPortableImportRefusesCredentialContent(t *testing.T) {
 	})
 }
 
+// TestPortableImportSkipsAnAlreadyImportedRecordHoldingACredential pins that the
+// guard does not change what an import does to a row it is not going to write.
+// The portable format promises "Import never overwrites an id that already
+// exists, so re-running is always safe", and an importer answers a
+// already-present id with a skip — so a record that is present must keep
+// answering "skip" even when its text holds a credential, because nothing is
+// being stored and the refusal would protect nothing. It matters in practice:
+// re-importing an artifact a pre-guard build exported, or one whose records
+// already landed on the destination, would otherwise fail with
+// "fix them in the artifact and re-run, which is safe" on rows that were
+// previously no-ops.
+func TestPortableImportSkipsAnAlreadyImportedRecordHoldingACredential(t *testing.T) {
+	ctx := context.Background()
+	withCredential := "the token is " + secretFixture
+
+	t.Run("memory", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		rec := PortableMemory{
+			ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+			Content: withCredential, CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
+		}
+		// Planted with a raw statement, standing in for a row a pre-guard build
+		// exported.
+		plantPortableMemory(t, store, rec)
+
+		for _, apply := range []bool{false, true} {
+			created, _, _, err := store.ImportMemory(ctx, rec, ImportOptions{Apply: apply})
+			if err != nil {
+				t.Errorf("apply=%v: an already-present id was refused: %v", apply, err)
+			}
+			if created {
+				t.Errorf("apply=%v: created = true for an already-present id", apply)
+			}
+		}
+	})
+
+	t.Run("task", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		rec := Task{ID: "t1", ProjectID: "p1", Title: "rotation", Description: withCredential, Status: "pending"}
+		plantPortableTask(t, store, rec)
+
+		for _, apply := range []bool{false, true} {
+			created, err := store.ImportTask(ctx, rec, apply)
+			if err != nil {
+				t.Errorf("apply=%v: an already-present id was refused: %v", apply, err)
+			}
+			if created {
+				t.Errorf("apply=%v: created = true for an already-present id", apply)
+			}
+		}
+	})
+
+	t.Run("decision", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		rec := Decision{
+			ID: "d1", ProjectID: "p1", Title: "rotation", Status: "active",
+			Decision: "rotate quarterly", Rationale: withCredential,
+		}
+		plantPortableDecision(t, store, rec)
+
+		for _, apply := range []bool{false, true} {
+			created, err := store.ImportDecision(ctx, rec, apply)
+			if err != nil {
+				t.Errorf("apply=%v: an already-present id was refused: %v", apply, err)
+			}
+			if created {
+				t.Errorf("apply=%v: created = true for an already-present id", apply)
+			}
+		}
+	})
+}
+
+func plantPortableMemory(t *testing.T, s *Store, m PortableMemory) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `
+		INSERT INTO memories (id, project_id, category, content, source, importance, tags)
+		VALUES (?, ?, ?, ?, 'mcp', 0.7, '[]')
+	`, m.ID, m.ProjectID, m.Category, m.Content); err != nil {
+		t.Fatalf("plant memory %s: %v", m.ID, err)
+	}
+}
+
+func plantPortableTask(t *testing.T, s *Store, task Task) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `
+		INSERT INTO tasks (id, project_id, title, description, status, priority)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, task.ID, task.ProjectID, task.Title, task.Description, task.Status, task.Priority); err != nil {
+		t.Fatalf("plant task %s: %v", task.ID, err)
+	}
+}
+
+func plantPortableDecision(t *testing.T, s *Store, d Decision) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `
+		INSERT INTO decisions (id, project_id, title, decision, alternatives, rationale, status, tags)
+		VALUES (?, ?, ?, ?, '[]', ?, ?, '[]')
+	`, d.ID, d.ProjectID, d.Title, d.Decision, d.Rationale, d.Status); err != nil {
+		t.Fatalf("plant decision %s: %v", d.ID, err)
+	}
+}
+
 func countPortableRows(t *testing.T, s *Store, table string) int {
 	t.Helper()
 	// The table name is a test literal from the three above, never input.

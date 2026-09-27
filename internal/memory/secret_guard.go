@@ -82,14 +82,15 @@ func rejectSecretList(field string, values []string) error {
 
 // The guard's reach, and its deliberate limits.
 //
-// Reached: every write of text a caller supplied, whether it arrives through a
-// tool, an import, or a model — UpsertWithOptions (and so Upsert,
+// Reached: every write of text a tool, an import, or a model hands to a store
+// function the agent can reach — UpsertWithOptions (and so Upsert,
 // UpsertWithProvenance, the MCP save tools, the Claude first-contact import,
 // and reflection's candidate writes), UpdateMemory, RecordDecision, the three
-// task writers, UpdateLearnedContext, and the three portable importers. The
-// importers matter more than their position in this list suggests: they write
-// with raw INSERTs rather than through Upsert, and their input is a JSONL
-// artifact that arrived from somewhere.
+// task writers, UpdateLearnedContext, and the three portable importers
+// ImportMemory/ImportTask/ImportDecision. The importers matter more than their
+// position in this list suggests: they write with raw INSERTs rather than
+// through Upsert, and their input is a JSONL artifact that arrived from
+// somewhere.
 //
 // Not reached, on purpose:
 //
@@ -100,6 +101,15 @@ func rejectSecretList(field string, values []string) error {
 //     unloadable, and a restore that silently dropped rows would be worse than
 //     the leak it prevents. The same three are outside the MaxContentLen
 //     contract in content.go, for the same reason and the same reason only.
+//   - Store.ReplaceNonManual, which writes the reflect tier's memories with its
+//     own statements and is likewise exported on provider.MemoryStore. It
+//     cannot be guarded here: it runs inside ApplyReflection's transaction, so a
+//     refusal would roll back an entire consolidation — every merge and every
+//     preserved row — over one contaminated memory. The mitigation is the
+//     tier's drop guard instead (dropSecretMemories, in
+//     internal/reflection/secrets.go), which removes the memory and lets the
+//     rest of the round commit. That is a weaker claim than this list makes for
+//     the entries above it, and it is stated as such rather than folded in.
 //   - Content already in the database. This guard reads what a caller is
 //     trying to write; it does not sweep rows a previous version stored. Doing
 //     that is a separate, report-first job — a detection pass over existing
@@ -109,8 +119,10 @@ func rejectSecretList(field string, values []string) error {
 //     not a row that was already here.
 //
 // The consequence of the first limit is stated plainly: a caller that reaches
-// Create directly bypasses the guard. Create is a raw "insert exactly this"
-// primitive on the provider.MemoryStore interface and has no production caller
-// — the bench harness is its only user — so the exposure is a future caller
+// Create, RestoreSnapshot or ReplaceNonManual directly bypasses the guard. All
+// three are raw "write exactly this" primitives on the provider.MemoryStore
+// interface, and none has a production caller that does not filter upstream —
+// the bench harness for Create, a snapshot file for RestoreSnapshot, the
+// reflection tier for ReplaceNonManual. So the exposure is a future caller
 // reading the interface rather than a hole in a shipped path. If that changes,
-// the guard moves to Create with it.
+// the guard moves with it.
