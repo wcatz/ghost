@@ -153,6 +153,7 @@ type options struct {
 	probe    bool
 	batch    int
 	warmup   int
+	writes   int
 }
 
 func parseFlags() options {
@@ -169,6 +170,7 @@ func parseFlags() options {
 	flag.BoolVar(&o.probe, "probe", false, "run the _txlock=immediate probe before joining the load")
 	flag.IntVar(&o.batch, "batch", 0, "rows in the maint role's reflection batch")
 	flag.IntVar(&o.warmup, "warmup", 0, "iterations a load role runs before it reports itself ready")
+	flag.IntVar(&o.writes, "writes", 0, "write transactions a load role may issue; it keeps reading after that")
 	flag.Parse()
 	return o
 }
@@ -313,6 +315,23 @@ func (b barriers) abort(reason string) error {
 	return os.WriteFile(b.path(abort), []byte(reason), 0o600)
 }
 
+// aborted reports the failure another process recorded, if there is one to
+// report. An empty marker is not a report: os.WriteFile truncates before it
+// writes, so a reader can catch the file in between and would otherwise fail a
+// barrier wait with no reason at all — the one thing this protocol exists to
+// avoid.
+func (b barriers) aborted() (string, bool) {
+	raw, err := os.ReadFile(b.path(abort))
+	if err != nil {
+		return "", false
+	}
+	reason := strings.TrimSpace(string(raw))
+	if reason == "" {
+		return "", false
+	}
+	return reason, true
+}
+
 // barrierError marks a wait that ended because another process failed or the
 // state never arrived. It is distinct from an operation failure so the report
 // can attribute the cause to the process that caused it.
@@ -336,14 +355,6 @@ func (b barriers) wait(name string, deadline time.Time) error {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-}
-
-func (b barriers) aborted() (string, bool) {
-	raw, err := os.ReadFile(b.path(abort))
-	if err != nil {
-		return "", false
-	}
-	return strings.TrimSpace(string(raw)), true
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +484,19 @@ func openStore(dbPath string) (*sql.DB, *memory.Store, error) {
 // and the character class accepts either case.
 var savedID = regexp.MustCompile(`\(id: ([0-9A-Fa-f]{32})\)`)
 
+// A load role spends its write budget and then keeps reading until the batch
+// commits. The bound is the point, not a throttle.
+//
+// The contract's busy timeout is a bound and not a guarantee — a transaction
+// held longer than 5s still fails its writer — so what a test asserts has to be
+// that ordinary contention is ridden out, not that any amount of it is. A writer
+// looping until the batch arrives issues an unbounded number of write
+// transactions against a corpus that grows with every one, and each transaction
+// gets slower as the near-duplicate scan inside it widens; on a loaded runner
+// that eventually pushes a single write transaction past the very timeout whose
+// sufficiency the test is checking, and the run then fails on the environment
+// rather than on the contract. A fixed budget holds the corpus, and with it the
+// transaction duration, roughly constant.
 func runMCP(ctx context.Context, o options, rep *report) error {
 	db, store, err := openStore(o.dbPath)
 	if err != nil {
@@ -490,28 +514,33 @@ func runMCP(ctx context.Context, o options, rep *report) error {
 	defer cleanup()
 
 	b := barriers{dir: o.barrier}
+	writesLeft := o.writes
 	return loadLoop(ctx, rep, b, o.warmup, "ready-"+o.label, func(i int) error {
-		content := fmt.Sprintf("%s mcp-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
-		res, err := session.CallTool(ctx, &mcp.CallToolParams{
-			Name:      "ghost_memory_save",
-			Arguments: map[string]any{"project_id": o.project, "content": content, "category": "fact"},
-		})
-		if err != nil {
-			return fmt.Errorf("ghost_memory_save: %w", err)
+		if writesLeft > 0 {
+			writesLeft--
+			content := fmt.Sprintf("%s mcp-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
+			res, err := session.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "ghost_memory_save",
+				Arguments: map[string]any{"project_id": o.project, "content": content, "category": "fact"},
+			})
+			if err != nil {
+				return fmt.Errorf("ghost_memory_save: %w", err)
+			}
+			if res.IsError {
+				return fmt.Errorf("ghost_memory_save returned an error result: %s", textOf(res.Content))
+			}
+			match := savedID.FindStringSubmatch(textOf(res.Content))
+			if match == nil {
+				return fmt.Errorf("ghost_memory_save reported no memory id: %s", textOf(res.Content))
+			}
+			rep.IDs = append(rep.IDs, match[1])
+			rep.put("writes", fmt.Sprint(rep.count("writes")+1))
 		}
-		if res.IsError {
-			return fmt.Errorf("ghost_memory_save returned an error result: %s", textOf(res.Content))
-		}
-		match := savedID.FindStringSubmatch(textOf(res.Content))
-		if match == nil {
-			return fmt.Errorf("ghost_memory_save reported no memory id: %s", textOf(res.Content))
-		}
-		rep.IDs = append(rep.IDs, match[1])
-		rep.put("writes", fmt.Sprint(rep.count("writes")+1))
 
-		// Every third save is followed by a real search through the same
+		// Every third iteration is followed by a real search through the same
 		// server, so this process reads its own writes as well as another
-		// process's.
+		// process's — and keeps reading after its write budget is spent, which is
+		// what a live MCP server does between saves.
 		if i%3 == 0 {
 			search, err := session.CallTool(ctx, &mcp.CallToolParams{
 				Name:      "ghost_memory_search",
@@ -620,29 +649,34 @@ func runCLI(ctx context.Context, o options, rep *report, b barriers) error {
 	// row another transaction has already committed to is the one whose
 	// read-then-write can collide with a commit in between.
 	var created []string
+	writesLeft := o.writes
 	return loadLoop(ctx, rep, b, o.warmup, "ready-"+o.label, func(i int) error {
-		content := fmt.Sprintf("%s cli-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
-		id, duplicateOf, _, err := store.Upsert(ctx, o.project, "fact", content, "mcp", 0.5, []string{"concurrency"})
-		if err != nil {
-			return fmt.Errorf("Upsert: %w", err)
-		}
-		// A dedup hit is counted, not failed: Upsert inserts the incoming text
-		// as its own row and links it to the near-duplicate it folded onto, so
-		// the write is neither lost nor a second copy of one row. Reported so a
-		// reader of the run's numbers can see how alike the fixture's rows are.
-		if duplicateOf != "" {
-			rep.put("duplicates", fmt.Sprint(rep.count("duplicates")+1))
-		}
-		rep.IDs = append(rep.IDs, id)
-		rep.put("writes", fmt.Sprint(rep.count("writes")+1))
-		created = append(created, id)
-
-		if len(created) > 4 {
-			updated := fmt.Sprintf("%s cli-%s-rewrite-%03d about kubernetes namespaces", o.load, o.label, i)
-			if err := store.UpdateMemory(ctx, o.project, created[len(created)-5], &updated, nil, nil, nil); err != nil {
-				return fmt.Errorf("UpdateMemory: %w", err)
+		if writesLeft > 0 {
+			writesLeft--
+			content := fmt.Sprintf("%s cli-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
+			id, duplicateOf, _, err := store.Upsert(ctx, o.project, "fact", content, "mcp", 0.5, []string{"concurrency"})
+			if err != nil {
+				return fmt.Errorf("Upsert: %w", err)
 			}
-			rep.put("rewrites", fmt.Sprint(rep.count("rewrites")+1))
+			// A dedup hit is counted, not failed: Upsert inserts the incoming
+			// text as its own row and links it to the near-duplicate it folded
+			// onto, so the write is neither lost nor a second copy of one row.
+			// Reported so a reader of the run's numbers can see how alike the
+			// fixture's rows are.
+			if duplicateOf != "" {
+				rep.put("duplicates", fmt.Sprint(rep.count("duplicates")+1))
+			}
+			rep.IDs = append(rep.IDs, id)
+			rep.put("writes", fmt.Sprint(rep.count("writes")+1))
+			created = append(created, id)
+
+			if len(created) > 4 {
+				updated := fmt.Sprintf("%s cli-%s-rewrite-%03d about kubernetes namespaces", o.load, o.label, i)
+				if err := store.UpdateMemory(ctx, o.project, created[len(created)-5], &updated, nil, nil, nil); err != nil {
+					return fmt.Errorf("UpdateMemory: %w", err)
+				}
+				rep.put("rewrites", fmt.Sprint(rep.count("rewrites")+1))
+			}
 		}
 
 		rows, err := store.SearchFTS(ctx, o.project, o.query, 5)
@@ -928,7 +962,9 @@ func batchCounts(ctx context.Context, q interface {
 // without ever having made two writers fight.
 //
 // The iteration cap is a backstop: the loop stays bounded even if the barrier
-// protocol is broken, and it says so in the report rather than spinning.
+// protocol is broken, and it says so in the report rather than spinning. The
+// write budget is the role's, not the loop's — see the roles for why it is
+// bounded at all.
 func loadLoop(ctx context.Context, rep *report, b barriers, warmup int, readyName string, body func(int) error) error {
 	const maxIterations = 20000
 	for i := 0; i < maxIterations; i++ {

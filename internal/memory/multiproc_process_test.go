@@ -129,7 +129,17 @@ const (
 	// for this many rounds — the contention the 5s busy timeout exists for. With
 	// no warmup the batch could commit against an idle file and the run would
 	// pass without two writers ever meeting.
-	multiprocLoadWarmup = 25
+	multiprocLoadWarmup = 15
+
+	// multiprocLoadWrites is how many write transactions each writer may issue.
+	// It is larger than the warmup so writers are still going when the batch
+	// lands, and bounded because the contract's busy timeout is a bound rather
+	// than a guarantee: a writer that looped until the batch arrived would grow
+	// the corpus without limit, and each write transaction widens the
+	// near-duplicate scan inside it until a single one outlasts the very timeout
+	// the test is checking. Past the budget a writer keeps reading, which is what
+	// a live server does between saves anyway.
+	multiprocLoadWrites = 60
 
 	// multiprocBarrierTimeout bounds each of the parent's waits for a child
 	// process to reach a state. It is a deadlock backstop, not a performance
@@ -202,6 +212,7 @@ func (c *child) start(ctx context.Context, t *testing.T, p multiprocPaths, role,
 		"-query", multiprocQuery,
 		"-batch", fmt.Sprint(multiprocBatchRows),
 		"-warmup", fmt.Sprint(multiprocLoadWarmup),
+		"-writes", fmt.Sprint(multiprocLoadWrites),
 	}
 	args = append(args, extra...)
 	c.name = role + "/" + label
@@ -339,11 +350,26 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 		return c
 	}
 
+	// A barrier that never arrives is a consequence, not a cause: the run keeps
+	// going so that every process's own report is collected, because the process
+	// that failed is the one that knows why. The first such failure is recorded
+	// and the rest are skipped — nothing after it can be reached anyway.
+	var barrierFailure error
+	reach := func(name string) {
+		t.Helper()
+		if barrierFailure != nil {
+			return
+		}
+		if err := waitForBarrier(paths.barrier, name); err != nil {
+			barrierFailure = err
+		}
+	}
+
 	// The _txlock=immediate probe is only evidence about its own transaction
 	// while nothing else holds the write lock, so it runs in the first process
 	// against an otherwise idle database. The rest of the fleet waits for it.
 	probe := spawn(&child{}, "cli", multiprocLoadProject, "probe", "-probe")
-	waitForBarrier(t, paths.barrier, "probe-done")
+	reach("probe-done")
 
 	// The steady-state load: two MCP servers and two CLI children writing, and
 	// two read-only processes searching the rows they are rewriting.
@@ -359,28 +385,39 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 	// writers are provably live and already contending before the batch looks
 	// for them.
 	for _, c := range load {
-		waitForBarrier(t, paths.barrier, "ready-"+c.label)
+		reach("ready-" + c.label)
 	}
-	waitForBarrier(t, paths.barrier, "ready-"+probe.label)
-	writeBarrier(t, paths.barrier, "load-ready")
+	reach("ready-" + probe.label)
 
-	// The two observers, then the batch they exist to observe.
-	poller := spawn(&child{}, "poller", multiprocBatchProject, "poller")
-	snapshot := spawn(&child{}, "snapshot", multiprocBatchProject, "snapshot")
-	maint := spawn(&child{}, "maint", multiprocBatchProject, "maint")
+	var poller, snapshot, maint *child
+	if barrierFailure == nil {
+		writeBarrier(t, paths.barrier, "load-ready")
 
-	// The maintenance process ends the load when it finishes, batch or no batch.
-	// This is the backstop for the case where it never gets there — killed, or
-	// failed before its own deferred write — so the load cannot outlive the
-	// process that releases it and turn a failure into a hung run.
-	go func() {
-		for !maint.finished() {
-			time.Sleep(5 * time.Millisecond)
-		}
-		_ = os.WriteFile(filepath.Join(paths.barrier, "stop"), []byte("backstop"), 0o600)
-	}()
+		// The two observers, then the batch they exist to observe.
+		poller = spawn(&child{}, "poller", multiprocBatchProject, "poller")
+		snapshot = spawn(&child{}, "snapshot", multiprocBatchProject, "snapshot")
+		maint = spawn(&child{}, "maint", multiprocBatchProject, "maint")
+
+		// The maintenance process ends the load when it finishes, batch or no
+		// batch. This is the backstop for the case where it never gets there —
+		// killed, or failed before its own deferred write — so the load cannot
+		// outlive the process that releases it and turn a failure into a hung
+		// run.
+		go func() {
+			for !maint.finished() {
+				time.Sleep(5 * time.Millisecond)
+			}
+			_ = os.WriteFile(filepath.Join(paths.barrier, "stop"), []byte("backstop"), 0o600)
+		}()
+	} else {
+		// No maintenance process is coming to end the load, so end it here.
+		writeBarrier(t, paths.barrier, "stop")
+	}
 
 	waitForChildren(t, ctx, children)
+	if barrierFailure != nil {
+		t.Errorf("%v", barrierFailure)
+	}
 
 	reports := map[string]procReport{}
 	for _, c := range children {
@@ -410,18 +447,21 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 	}
 
 	// The contract, read back from a live connection in each process rather than
-	// from the DSN that produced it.
-	assertConnectionContract(t, reports)
+	// from the DSN that produced it. Skipped when a barrier failed, because the
+	// processes that would have supplied these measurements never ran.
+	if barrierFailure == nil {
+		assertConnectionContract(t, reports)
 
-	probeRep, _ := probe.result()
-	if got := probeRep.str("tx_lock_held"); got != "true" {
-		t.Errorf("a read-then-write transaction on the CLI open path did not hold SQLite's write lock "+
-			"(tx_lock_held=%q): _txlock=immediate is missing or not honoured, so a concurrent commit "+
-			"upgrades this transaction to a SQLITE_BUSY_SNAPSHOT failure", got)
+		probeRep, _ := probe.result()
+		if got := probeRep.str("tx_lock_held"); got != "true" {
+			t.Errorf("a read-then-write transaction on the CLI open path did not hold SQLite's write lock "+
+				"(tx_lock_held=%q): _txlock=immediate is missing or not honoured, so a concurrent commit "+
+				"upgrades this transaction to a SQLITE_BUSY_SNAPSHOT failure", got)
+		}
+
+		assertSnapshotInvariant(t, snapshot)
+		assertBatchAtomicity(t, poller)
 	}
-
-	assertSnapshotInvariant(t, snapshot)
-	assertBatchAtomicity(t, poller)
 	assertNoDroppedWrites(t, ctx, paths.db, reports)
 	assertDatabaseIntact(t, ctx, paths.db)
 
@@ -435,6 +475,16 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 		totalInt(reports, "writes"), totalInt(reports, "rewrites"), totalInt(reports, "reads"),
 		totalInt(reports, "duplicates"), len(children), multiprocBatchRows,
 		reports["poller/poller"].count("samples"), reports["poller/poller"].Observed)
+
+	// On failure, every process's own report. The assertions above say what was
+	// wrong with the contract; this says how far each process got before it did,
+	// which is the difference between a diagnosable CI failure and a rerun.
+	if t.Failed() {
+		for _, c := range children {
+			rep, _ := c.result()
+			t.Logf("%s measured: %v (observed %v, gave up: %q)", c.name, rep.KV, rep.Observed, rep.Aborted)
+		}
+	}
 }
 
 // totalInt sums one measured counter across every process.
@@ -467,17 +517,18 @@ func writeBarrier(t *testing.T, dir, name string) {
 // on. It gives up early if any process has aborted, because in a multi-process
 // test a barrier that will never arrive is almost always the consequence of an
 // earlier failure rather than the failure itself, and waiting out the timeout
-// hides the reason behind a symptom.
-func waitForBarrier(t *testing.T, dir, name string) {
-	t.Helper()
+// hides the reason behind a symptom. It reports the failure instead of failing
+// the test, so the caller can still collect what the processes themselves said
+// — the process that aborted is the one that knows why.
+func waitForBarrier(dir, name string) error {
 	deadline := time.Now().Add(multiprocBarrierTimeout)
 	path := filepath.Join(dir, name)
 	for {
 		if _, err := os.Stat(path); err == nil {
-			return
+			return nil
 		}
 		if reason, ok := abortReason(dir); ok {
-			t.Fatalf("waiting for barrier %q, but a process aborted: %s", name, reason)
+			return fmt.Errorf("waiting for barrier %q, but a process failed: %s", name, reason)
 		}
 		if time.Now().After(deadline) {
 			entries, _ := os.ReadDir(dir)
@@ -486,7 +537,7 @@ func waitForBarrier(t *testing.T, dir, name string) {
 				names = append(names, e.Name())
 			}
 			sort.Strings(names)
-			t.Fatalf("barrier %q never appeared in %s; barriers present: %v", name, dir, names)
+			return fmt.Errorf("barrier %q never appeared in %s; barriers present: %v", name, dir, names)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -494,13 +545,18 @@ func waitForBarrier(t *testing.T, dir, name string) {
 
 // abortReason is the failure a process recorded on its way out, so the parent
 // can report the first thing that went wrong rather than the barrier that
-// stopped because of it.
+// stopped because of it. An empty marker is a marker still being written, not
+// a report.
 func abortReason(dir string) (string, bool) {
 	raw, err := os.ReadFile(filepath.Join(dir, "abort"))
 	if err != nil {
 		return "", false
 	}
-	return strings.TrimSpace(string(raw)), true
+	reason := strings.TrimSpace(string(raw))
+	if reason == "" {
+		return "", false
+	}
+	return reason, true
 }
 
 // waitForChildren waits for every process to exit. It reports nothing itself:
