@@ -1,0 +1,28 @@
+# Graded queries over maintenance_memories.jsonl. Same shape as queries.jsonl:
+# rel maps memory key -> relevance gain, distractors names the keys that must
+# NOT outrank the answer (a resolved copy, a _global copy, a superseded copy —
+# the states the graded dataset never carries). probe "live" (the default) means
+# the answer is the project's own memory; probe "global" means the answer IS the
+# shared _global row, so the suite also shows whether demoting shared rows makes
+# them unfindable. See docs/benchmarks.md ("Maintenance state").
+{"name":"q_pg_version","text":"which postgres version does production run","rel":{"ms_pg_live":3},"distractors":["ms_pg_old","ms_pg_global","ms_pg_global_dep","ms_pg_resolved"]}
+{"name":"q_node_port","text":"what port do mainnet cardano node peers connect on","rel":{"ms_nodeport_live":3},"distractors":["ms_nodeport_old","ms_nodeport_global","ms_nodeport_resolved"]}
+{"name":"q_kes","text":"how often do mainnet kes keys expire","rel":{"ms_kes_live":3},"distractors":["ms_kes_old","ms_kes_resolved"]}
+{"name":"q_grafana","text":"how is grafana exposed to the team","rel":{"ms_grafana_live":3},"distractors":["ms_grafana_global","ms_grafana_global_arch","ms_grafana_resolved"]}
+{"name":"q_sops","text":"where is the sops encryption key kept","rel":{"ms_sops_live":3},"distractors":["ms_sops_old","ms_sops_global"]}
+{"name":"q_backup","text":"how often are production database backups taken","rel":{"ms_backup_live":3},"distractors":["ms_backup_resolved","ms_backup_global"]}
+{"name":"q_runner","text":"which runner image does ci use","rel":{"ms_runner_live":3},"distractors":["ms_runner_old","ms_runner_resolved"]}
+{"name":"q_retention","text":"how long does prometheus keep metrics","rel":{"ms_retention_live":3},"distractors":["ms_retention_old","ms_retention_global"]}
+{"name":"q_redis","text":"what backs the ghost session cache","rel":{"ms_redis_live":3},"distractors":["ms_redis_old","ms_redis_resolved"]}
+{"name":"q_tls","text":"how long are the wildcard certificates valid","rel":{"ms_tls_live":3},"distractors":["ms_tls_global","ms_tls_resolved"]}
+{"name":"q_bastion","text":"how do engineers ssh to the servers","rel":{"ms_bastion_live":3},"distractors":["ms_bastion_old","ms_bastion_resolved"]}
+{"name":"q_ci_cache","text":"when does ci delete build artifacts","rel":{"ms_cache_live":3},"distractors":["ms_cache_global","ms_cache_resolved"]}
+{"name":"q_alerts","text":"where do block producer alerts go","rel":{"ms_alert_live":3},"distractors":["ms_alert_old","ms_alert_resolved"]}
+{"name":"q_registry","text":"where are container images pushed","rel":{"ms_registry_live":3},"distractors":["ms_registry_resolved","ms_registry_global"]}
+{"name":"q_rate","text":"what is the mcp tool call rate limit","rel":{"ms_rate_live":3},"distractors":["ms_rate_global","ms_rate_resolved"]}
+{"name":"q_python","text":"which python version does the tooling venv use","rel":{"ms_python_live":3},"distractors":["ms_python_old","ms_python_resolved"]}
+{"name":"q_scratch","text":"where does ghost write scratch files","rel":{"ms_scratch_live":3},"distractors":["ms_scratch_global","ms_scratch_resolved"]}
+{"name":"q_dns","text":"what ttl do internal dns records use","rel":{"ms_dns_live":3},"distractors":["ms_dns_old","ms_dns_resolved"]}
+{"name":"q_commits","probe":"global","text":"what commit convention does wayne want","rel":{"ms_commits_global":3,"ms_commits_project":1},"distractors":[]}
+{"name":"q_verify","probe":"global","text":"what does a ghost pull request body have to include","rel":{"ms_verify_global":3,"ms_verify_project":1},"distractors":[]}
+{"name":"q_yaml","probe":"global","text":"how are yaml files indented in this fleet","rel":{"ms_yaml_global":3,"ms_yaml_project":1},"distractors":["ms_yaml_resolved"]}

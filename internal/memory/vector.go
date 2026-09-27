@@ -76,6 +76,119 @@ func (s *Store) DeleteEmbedding(ctx context.Context, memoryID string) error {
 	return err
 }
 
+// EmbeddingCosines returns the cosine similarity between queryVec and the stored
+// embedding of each requested memory, keyed by memory ID. An ID is simply absent
+// from the result when there is no score to report for it: no stored vector, a
+// width that does not match queryVec, or a row whose recorded identity belongs to
+// another vector space (a model, dimension or task-prefix change — see
+// embedding.VectorIdentity). Inventing a zero for any of those would read as a
+// measured non-match rather than a missing one, and a cross-space cosine is not
+// even that: it is an arbitrary number, which is why usableVectorEntries skips
+// those rows for the vector legs and GetEmbedding returns nil for them. Foreign
+// rows are counted and logged here for the same reason — a reconfiguration is
+// exactly when the operator is watching the log — but only on the first lookup
+// to meet a given retired identity, through the shared warnForeignOnce gate, so
+// this once-per-query call cannot print the same pending re-embed once per
+// query.
+//
+// It exists because a search result's score is not always in the vector leg's own
+// output. Fusion admits the top keyword hits on a reserved slot whatever their
+// cosine, so a result can be in the window while sitting below every fetched
+// vector list — and a caller that wants to know how strongly a result matched
+// (a score-gated abstention rule, the bench harness's false-positive report) has
+// to read the row's own vector rather than infer a score from a list the row was
+// never in. This is the same cosine the vector leg computes, over exactly the
+// rows asked for, so it costs a window's worth of reads instead of a second scan
+// of the project.
+func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []float32) (map[string]float32, error) {
+	if len(ids) == 0 || len(queryVec) == 0 {
+		return nil, nil
+	}
+	ph := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		ph[i] = "?"
+		args[i] = id
+	}
+	// Read the identity before taking the lock, for the reason searchVector does:
+	// the reads below run with the read lock held, and a second RLock on a
+	// RWMutex with a writer waiting blocks that writer's readers — including this
+	// one — forever.
+	identity := s.configuredEmbeddingIdentity()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.queryDB().QueryContext(ctx, fmt.Sprintf(`
+		SELECT memory_id, embedding, model FROM memory_embeddings
+		WHERE memory_id IN (%s)
+	`, strings.Join(ph, ",")), args...)
+	if err != nil {
+		return nil, fmt.Errorf("embedding cosines: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	cosines := make(map[string]float32, len(ids))
+	// foreign counts skipped rows per stored identity rather than as one total,
+	// for the reason usableVectorEntries gives: retirements overlap (the model
+	// changes again before the first re-embed finishes), and a single total
+	// reported against whichever identity the rows happened to yield first would
+	// absorb the newer retirement into the older one's line.
+	foreign := make(map[string]int)
+	mismatched, mismatchedModel := 0, ""
+	for rows.Next() {
+		var id, model string
+		var blob []byte
+		if err := rows.Scan(&id, &blob, &model); err != nil {
+			return nil, fmt.Errorf("embedding cosines: %w", err)
+		}
+		if identity != "" && model != identity {
+			foreign[model]++
+			continue
+		}
+		vec := bytesToFloat32s(blob)
+		if len(vec) != len(queryVec) {
+			mismatched++
+			if mismatchedModel == "" {
+				mismatchedModel = model
+			}
+			continue
+		}
+		cosines[id] = cosineSimilarity(queryVec, vec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("embedding cosines: %w", err)
+	}
+	if s.logger != nil && len(foreign) > 0 {
+		// Sorted, so a log is deterministic whichever order the rows came back
+		// in. The gate makes this the one line the process ever writes about a
+		// retired identity: this lookup runs once per query (the bench harness
+		// calls it 244 times in a single `ghost bench`), so a warning per call
+		// reports the same pending re-embed a line at a time for as long as it
+		// runs — and a search that already reported this identity has said
+		// everything the operator needs to hear. warnForeignOnce shares one gate
+		// with usableVectorEntries for exactly that reason.
+		models := make([]string, 0, len(foreign))
+		for m := range foreign {
+			models = append(models, m)
+		}
+		sort.Strings(models)
+		for _, m := range models {
+			if s.warnForeignOnce(m) {
+				s.logger.Warn("embedding cosine lookup skipped rows from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",
+					"skipped", foreign[m], "scored", len(cosines), "configured_identity", identity, "stored_identity", m)
+			}
+		}
+	}
+	// The width warning stays per-call, as in usableVectorEntries: it cannot
+	// repeat during a re-embed, because the identity check above takes those
+	// rows first.
+	if s.logger != nil && mismatched > 0 {
+		s.logger.Warn("embedding cosine lookup skipped vectors whose width differs from the query — the embedding model likely changed; re-embed to restore comparable scores",
+			"skipped", mismatched, "scored", len(cosines), "query_dims", len(queryVec), "stored_identity", mismatchedModel)
+	}
+	return cosines, nil
+}
+
 // UnembeddedMemoryIDs returns memory IDs that still need an embedding produced
 // by identity: rows with no vector at all, and rows whose vector was stamped
 // with a different identity — a model, dimension or task-prefix change (see

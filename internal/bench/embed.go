@@ -15,8 +15,16 @@ var builtinQueries []byte
 //go:embed testdata/embeddings.json
 var builtinVectors []byte
 
+//go:embed testdata/negative_queries.jsonl
+var builtinNegativeQueries []byte
+
+//go:embed testdata/negative_embeddings.json
+var builtinNegativeVectors []byte
+
 // BuiltinDataset returns the dataset and embedding fixture compiled into the
-// binary, so `ghost bench` runs without the source tree or Ollama.
+// binary, so `ghost bench` runs without the source tree or Ollama. The no-answer
+// queries' vectors are merged into the same map: they are queried against this
+// same corpus, and the maintenance-state suite keeps its own fixture.
 func BuiltinDataset() (Dataset, Vectors, error) {
 	mems, err := LoadMemories(bytes.NewReader(builtinMemories))
 	if err != nil {
@@ -26,11 +34,22 @@ func BuiltinDataset() (Dataset, Vectors, error) {
 	if err != nil {
 		return Dataset{}, nil, fmt.Errorf("builtin queries: %w", err)
 	}
+	negs, err := LoadNegatives(bytes.NewReader(builtinNegativeQueries))
+	if err != nil {
+		return Dataset{}, nil, fmt.Errorf("builtin no-answer queries: %w", err)
+	}
 	vecs, err := LoadVectors(bytes.NewReader(builtinVectors))
 	if err != nil {
 		return Dataset{}, nil, fmt.Errorf("builtin vectors: %w", err)
 	}
-	return Dataset{Project: "bench", Memories: mems, Queries: qs}, vecs, nil
+	negVecs, err := LoadVectors(bytes.NewReader(builtinNegativeVectors))
+	if err != nil {
+		return Dataset{}, nil, fmt.Errorf("builtin no-answer vectors: %w", err)
+	}
+	for name, vec := range negVecs {
+		vecs[name] = vec
+	}
+	return Dataset{Project: "bench", Memories: mems, Queries: qs, Negatives: negs}, vecs, nil
 }
 
 // FormatResults renders the ablation results as an aligned text table.

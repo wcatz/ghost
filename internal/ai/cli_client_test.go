@@ -65,19 +65,23 @@ printf '%s' '{"memories":[]}'
 	}
 }
 
-func TestCLIClient_Classify_PassesSystemPromptAndUserContentAsDistinctArgs(t *testing.T) {
+// TestCLIClient_Classify_SplitsSystemPromptFromStdinUserContent: the system
+// prompt is small, fixed, and must stay a distinct --system-prompt argument so
+// it can never be confused with user content. The user content is the
+// untrusted, arbitrarily large part, so it travels on stdin (issue #560) and
+// must not appear in argv at all.
+func TestCLIClient_Classify_SplitsSystemPromptFromStdinUserContent(t *testing.T) {
 	bin := fakeClaudeBinary(t, `
 found_flag=0
 found_system=0
-found_user=0
 for arg in "$@"; do
   if [ "$arg" = "--system-prompt" ]; then found_flag=1; fi
   if [ "$arg" = "SYSTEM instructions" ]; then found_system=1; fi
-  if [ "$arg" = "USERDATA content" ]; then found_user=1; fi
+  if [ "$arg" = "USERDATA content" ]; then echo "user content passed as an argv element" >&2; exit 1; fi
 done
 if [ "$found_flag" -ne 1 ]; then echo "missing --system-prompt flag" >&2; exit 1; fi
 if [ "$found_system" -ne 1 ]; then echo "system prompt not passed as distinct arg" >&2; exit 1; fi
-if [ "$found_user" -ne 1 ]; then echo "user content not passed as distinct arg" >&2; exit 1; fi
+if [ "$(cat)" != "USERDATA content" ]; then echo "user content did not arrive on stdin" >&2; exit 1; fi
 printf '%s' "KEEP"
 `)
 	c := &CLIClient{binary: bin}

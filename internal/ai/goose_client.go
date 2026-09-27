@@ -38,9 +38,16 @@ func (c *GooseClient) run(ctx context.Context, prompt string) (string, error) {
 	// --no-profile prevents the configured developer/MCP extensions from
 	// loading; --no-session keeps the untrusted prompt out of Goose's state.
 	args := []string{"run", "-q", "--no-profile", "--no-session"}
-	args = append(args, prompt)
+	// The prompt goes on stdin, never as an argv element (issue #560): the
+	// kernel caps one argument at 32 pages and a reflect prompt is built from
+	// up to 2000 memories of 8000 bytes, so a large project produced a prompt
+	// that failed the spawn with E2BIG. `-i -` is goose's documented
+	// instructions-from-stdin form, and it lands in the same place a text
+	// argument does — both become the run's input contents.
+	args = append(args, "-i", "-")
 	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessGoose)
 	defer release()
+	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

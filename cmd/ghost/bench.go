@@ -80,4 +80,19 @@ func runBench() {
 		os.Exit(1)
 	}
 	fmt.Print(bench.FormatResults(results))
+
+	// The no-answer half of the same corpus: what the ranked path returns when
+	// nothing answers the query, which no graded ratio above can see. Report-only
+	// — it is the baseline the abstention work needs, not a gate.
+	noAnswer, err := bench.NegativeQueries(ds, vecs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fp, err := bench.FalsePositives(ctx, store, noAnswer, queries)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Print(bench.FormatFalsePositives(fp))
 }

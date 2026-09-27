@@ -55,9 +55,17 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 		"-c", "agents.enabled=false",
 		"-c", `web_search="disabled"`,
 	}
-	args = append(args, prompt)
+	// The prompt goes on stdin, never as an argv element (issue #560): the
+	// kernel caps one argument at 32 pages and a reflect prompt is built from
+	// up to 2000 memories of 8000 bytes, so a large project produced a prompt
+	// that failed the spawn with E2BIG. `-` is codex's documented sentinel for
+	// "the prompt is on stdin" (its default when the prompt argument is
+	// omitted, stated explicitly here so the intent survives a flag default
+	// change).
+	args = append(args, "-")
 	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessCodex)
 	defer release()
+	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

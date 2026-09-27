@@ -29,12 +29,15 @@ type QuerySpec struct {
 	Rel  map[string]int `json:"rel"`
 }
 
-// Dataset is a self-contained benchmark: a project name, its memories, and the
-// graded queries over them.
+// Dataset is a self-contained benchmark: a project name, its memories, the
+// graded queries over them, and the no-answer queries nothing in it answers (see
+// falsepositive.go — those are excluded from every graded ratio and measured
+// separately).
 type Dataset struct {
-	Project  string
-	Memories []MemorySpec
-	Queries  []QuerySpec
+	Project   string
+	Memories  []MemorySpec
+	Queries   []QuerySpec
+	Negatives []NegativeQuery
 }
 
 // Vectors maps a memory Key or query Name to its precomputed embedding. Stored
@@ -101,8 +104,8 @@ func decodeJSONL(r io.Reader, fn func(json.RawMessage) error) error {
 	return sc.Err()
 }
 
-// LoadDatasetFiles loads a dataset from a directory containing memories.jsonl
-// and queries.jsonl.
+// LoadDatasetFiles loads a dataset from a directory containing memories.jsonl,
+// queries.jsonl and negative_queries.jsonl.
 func LoadDatasetFiles(dir, project string) (Dataset, error) {
 	mems, err := loadFile(dir+"/memories.jsonl", LoadMemories)
 	if err != nil {
@@ -112,7 +115,11 @@ func LoadDatasetFiles(dir, project string) (Dataset, error) {
 	if err != nil {
 		return Dataset{}, err
 	}
-	return Dataset{Project: project, Memories: mems, Queries: qs}, nil
+	negs, err := loadFile(dir+"/negative_queries.jsonl", LoadNegatives)
+	if err != nil {
+		return Dataset{}, err
+	}
+	return Dataset{Project: project, Memories: mems, Queries: qs, Negatives: negs}, nil
 }
 
 func loadFile[T any](path string, parse func(io.Reader) (T, error)) (T, error) {

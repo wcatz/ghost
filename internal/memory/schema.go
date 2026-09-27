@@ -400,6 +400,31 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	// open, and it does not need the schema to be current to be correct.
 	TightenPermissions(dbPath)
 
+	// Read the stamped version and refuse a newer database BEFORE running any
+	// DDL (issue #560). initSQL is CREATE ... IF NOT EXISTS, so on a database
+	// that merely has more than this build knows it is nearly a no-op — which
+	// is what hid the ordering. It is not one for every difference: an object
+	// the newer build renamed, replaced or dropped (a trigger, an index) is
+	// recreated here, in a database this call then declares unreadable. A
+	// refusal that has already written is not a refusal.
+	//
+	// A fresh database has no stamp to read, and gets the current schema plus
+	// the stamp below; there is nothing above schemaVersion to refuse.
+	var version int
+	if tableCount > 0 {
+		if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("read schema version: %w", err)
+		}
+		// A database written by a newer ghost has columns, constraints, or tables
+		// this binary does not know about. Opening it read-write would let this
+		// binary corrupt state it cannot interpret, so refuse instead.
+		if version > schemaVersion {
+			_ = db.Close()
+			return nil, fmt.Errorf("database schema v%d is newer than this ghost build (v%d) — upgrade ghost before opening it", version, schemaVersion)
+		}
+	}
+
 	if _, err := db.Exec(initSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -420,18 +445,6 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		return db, nil
 	}
 
-	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("read schema version: %w", err)
-	}
-	// A database written by a newer ghost has columns, constraints, or tables
-	// this binary does not know about. Opening it read-write would let this
-	// binary corrupt state it cannot interpret, so refuse instead.
-	if version > schemaVersion {
-		_ = db.Close()
-		return nil, fmt.Errorf("database schema v%d is newer than this ghost build (v%d) — upgrade ghost before opening it", version, schemaVersion)
-	}
 	if version < schemaVersion {
 		// Migration steps rebuild and DROP tables, so a bug in a step is
 		// unrecoverable without a copy. Fail closed: if the backup cannot be

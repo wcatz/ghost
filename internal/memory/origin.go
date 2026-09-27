@@ -2,12 +2,24 @@ package memory
 
 const builtinSeedContent = "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user."
 
-// CanonicalOriginSource applies the small compatibility correction needed by
-// read-only context paths that can render a database before the v15 migration
-// has run. A legacy builtin row is identifiable by its frozen shipped content;
-// all other manual rows retain their source.
-func CanonicalOriginSource(source, content string) string {
-	if source == "manual" && content == builtinSeedContent {
+// CanonicalOriginSourceForProject applies the small compatibility correction
+// needed by read-only context paths that can render a database holding a row
+// in the shape a pre-v15 build wrote, before the v15 migration has corrected
+// it. A legacy builtin row is identifiable by two facts together: it sits in
+// the reserved GlobalProjectID, and its content is the frozen shipped seed.
+//
+// The project check is not redundant with the content check. Content alone
+// cannot tell the shipped rule from a memory a user wrote that happens to
+// contain the same sentence — a project row doing that is direct user material,
+// and relabelling it "builtin" both misattributes it and removes the
+// absence-of-a-tag that marks a row as the user's own. The v15 migration has
+// the same two-part condition for the same reason, so this stays a rewrite of
+// the shipped global seed only. Every other row keeps its source.
+//
+// Callers pass the row's own project_id; a read path that has not loaded one
+// cannot use this to decide the row is a shipped global rule.
+func CanonicalOriginSourceForProject(projectID, source, content string) string {
+	if source == "manual" && projectID == GlobalProjectID && content == builtinSeedContent {
 		return "builtin"
 	}
 	return source
