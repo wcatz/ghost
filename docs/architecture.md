@@ -477,9 +477,16 @@ What exists now:
   afterwards would spend the budget on rows the session excluded and never reach
   an eligible one ranked below the cut. With the key unset the clause is absent,
   so the query, the ranking and the rendered block are the ones that shipped. The
-  loaders are callers of the assembler's label and rule, not of `Run`: passive
-  retrieval is not served by the seam, so moving the digest onto it is its own
-  change.
+  column itself is read only from a store at or past the version that added it
+  (`migrateV12`), because these loaders run on a read-only handle that migrates
+  nothing: naming `memories.scope` on a store below that version fails the query
+  with "no such column", which a loader reads as no rows — a digest with its
+  header, its tasks and its decisions and no memories, and nothing saying why. A
+  store below the floor selects the column as a NULL literal instead, which is what
+  every row in it carries by definition, so the block is the one that store
+  produced before scope was read. The loaders are callers of the assembler's label
+  and rule, not of `Run`: passive retrieval is not served by the seam, so moving
+  the digest onto it is its own change.
 - **The trace is recorded unconditionally**, with per-stage counts, dropped ids
   and per-row decisions. `explain: true` does not read it yet.
 

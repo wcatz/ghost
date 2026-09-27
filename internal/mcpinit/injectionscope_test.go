@@ -11,28 +11,31 @@ import (
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
+	_ "modernc.org/sqlite"
 )
 
 // This suite is the before/after evidence for #577: the session-start surface
 // used to neither show nor apply memories.scope, while every other surface did.
 
 // scopeSession seeds a store with a project and, optionally, global rows, and
-// returns the project directory the hook resolves.
-func scopeSession(t *testing.T, projectRows, globalRows []scopeRow) string {
+// returns the project directory the hook resolves and the path of the database it
+// seeded, for the tests that need to reach the store itself.
+func scopeSession(t *testing.T, projectRows, globalRows []scopeRow) (projectPath, dbPath string) {
 	t.Helper()
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
 		t.Fatalf("mkdir ghostDir: %v", err)
 	}
-	db, err := memory.OpenDB(filepath.Join(ghostDir, "ghost.db"))
+	dbPath = filepath.Join(ghostDir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
 		t.Fatalf("insert _global project: %v", err)
 	}
-	projectPath := filepath.Join(t.TempDir(), "scopeproj")
+	projectPath = filepath.Join(t.TempDir(), "scopeproj")
 	if err := os.MkdirAll(projectPath, 0o755); err != nil {
 		t.Fatalf("mkdir projectPath: %v", err)
 	}
@@ -49,7 +52,7 @@ func scopeSession(t *testing.T, projectRows, globalRows []scopeRow) string {
 	}
 	_ = db.Close()
 	t.Setenv("XDG_DATA_HOME", xdgHome)
-	return projectPath
+	return projectPath, dbPath
 }
 
 // scopeRow is one seeded memory. scope is the raw memories.scope column, so a
@@ -91,8 +94,82 @@ func renderSessionStart(t *testing.T, projectPath string) string {
 // scope was rendered or filtered, for a store whose rows carry no scope, so any
 // change to the framing, the counts, the section order or the row order fails
 // here rather than in a review of a diff nobody read line by line.
+// TestSessionStartOnAStoreBehindTheScopeColumnStillRenders pins the floor. Both
+// loaders read memories.scope through a handle that runs no migration, so a store
+// still stamped below the version that added the column has no such column, and
+// naming it fails the query with "no such column" — which both loaders read as no
+// rows. The first session after upgrading from such a store would then carry its
+// header, its tasks and its decisions and no memories, with nothing saying why.
+// The column is selected as a NULL literal there, so the block is the one that
+// store produced before scope was read at all.
+//
+// The fixture makes the store what a pre-v12 one is: the stamp is back to 11 AND
+// the column is gone (ALTER TABLE ... DROP COLUMN, which is how SQLite says the
+// same thing). Both are needed, and neither alone would do. The stamp alone leaves
+// the column physically present, so a loader that ignored the floor would filter
+// rather than fail; the column alone leaves the stamp current, so a loader reading
+// the stamp would still name a column that is not there. The version is the
+// mechanism — memory.SchemaVersion and memory.DBUserVersion exist for exactly this
+// decision — so the fixture has to exercise the case the mechanism is for.
+func TestSessionStartOnAStoreBehindTheScopeColumnStillRenders(t *testing.T) {
+	projectPath, dbPath := scopeSession(t, []scopeRow{
+		{id: "scold001", category: "convention", content: "sign every commit with DCO", importance: 0.9},
+		{id: "scold002", category: "fact", content: "the prod datastore is postgres", importance: 0.8,
+			scope: `{"environment":"production"}`},
+	}, []scopeRow{
+		{id: "scold003", category: "preference", content: "never commit a plan file", importance: 0.7,
+			scope: `{"environment":"production"}`},
+	})
+
+	// Rewritten through a plain read-write handle on purpose: memory.OpenDB would
+	// migrate a store it finds behind, which is the very thing being simulated
+	// here, and the read-only handle the hook uses can write neither the stamp nor
+	// the schema.
+	stamper, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open for rewriting the store: %v", err)
+	}
+	if _, err := stamper.Exec(`ALTER TABLE memories DROP COLUMN scope`); err != nil {
+		t.Fatalf("drop the scope column: %v", err)
+	}
+	if _, err := stamper.Exec(`PRAGMA user_version = 11`); err != nil {
+		t.Fatalf("stamp user_version: %v", err)
+	}
+	if err := stamper.Close(); err != nil {
+		t.Fatalf("close stamper: %v", err)
+	}
+	if _, err := stamper.Exec(`SELECT scope FROM memories`); err == nil {
+		t.Fatal("the fixture must leave the store without a scope column, or it proves nothing")
+	}
+	readBack, err := memory.OpenReadDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenReadDB: %v", err)
+	}
+	defer readBack.Close() //nolint:errcheck
+	if v, err := memory.DBUserVersion(readBack); err != nil || v != 11 {
+		t.Fatalf("user_version = %d (err %v), want 11", v, err)
+	}
+
+	// A session scope that would exclude both scoped rows if the column were read.
+	// Below the floor the key cannot be applied, and the rows are injected.
+	t.Setenv("GHOST_INJECTION_SESSION_SCOPE", "environment=development")
+	got := renderSessionStart(t, projectPath)
+	for _, want := range []string{
+		"- [convention] «sign every commit with DCO»",
+		"- [fact] «the prod datastore is postgres»",
+		"- [preference] «never commit a plan file»",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a store below the scope column's version must render as it did before the column was read; %q missing from:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "scope{") {
+		t.Errorf("a store below the scope column's version has no scope to label or filter on; got:\n%s", got)
+	}
+}
+
 func TestSessionStartBlockIsUnchangedWhenSessionScopeIsUnset(t *testing.T) {
-	projectPath := scopeSession(t, []scopeRow{
+	projectPath, _ := scopeSession(t, []scopeRow{
 		{id: "scaaaa01", category: "convention", content: "sign every commit with DCO", importance: 0.9},
 		{id: "scaaaa02", category: "gotcha", content: "the sync harness deadlocks on a pool query inside a tx", importance: 0.8},
 		{id: "scaaaa03", category: "fact", content: "the bench fixture holds 220 scored queries", importance: 0.4},
@@ -128,7 +205,7 @@ Save new discoveries with ghost_memory_save during work.
 // format rather than the code — sorted keys, no padding inside the braces —
 // because that is what makes one label recognisable across surfaces.
 func TestSessionStartRendersScopeOnBothSurfaces(t *testing.T) {
-	projectPath := scopeSession(t, []scopeRow{
+	projectPath, _ := scopeSession(t, []scopeRow{
 		{id: "sclbl001", category: "fact", content: "the prod datastore is postgres", importance: 0.9,
 			scope: `{"environment":"production","component":"api"}`},
 		{id: "sclbl002", category: "gotcha", content: "an unscoped note", importance: 0.8},
@@ -172,7 +249,7 @@ func TestSessionStartSessionScopeDropsConflictingRowsBeforeTheCap(t *testing.T) 
 			scope: `{"environment":"development"}`,
 		})
 	}
-	projectPath := scopeSession(t, projectRows, nil)
+	projectPath, _ := scopeSession(t, projectRows, nil)
 
 	// Unset: the block is the production digest, unchanged.
 	unset := renderSessionStart(t, projectPath)
@@ -216,7 +293,7 @@ func TestSessionStartSelectionIsUnchangedByAScopeThatExcludesNothing(t *testing.
 			scope: `{"environment":"development"}`,
 		})
 	}
-	projectPath := scopeSession(t, projectRows, nil)
+	projectPath, _ := scopeSession(t, projectRows, nil)
 
 	selected := func() []string {
 		t.Helper()
@@ -246,7 +323,7 @@ func TestSessionStartSelectionIsUnchangedByAScopeThatExcludesNothing(t *testing.
 // hide the store's most general knowledge. It is memory.ScopeMatches — the rule
 // the assembler applies in Go and the fold-target checks state in SQL.
 func TestSessionStartSessionScopeKeepsRowsThatDoNotMentionTheKey(t *testing.T) {
-	projectPath := scopeSession(t, []scopeRow{
+	projectPath, _ := scopeSession(t, []scopeRow{
 		{id: "scgen001", category: "convention", content: "prefer table-driven tests", importance: 0.9},
 		{id: "scgen002", category: "gotcha", content: "the api client retries forever", importance: 0.8,
 			scope: `{"component":"api"}`},
@@ -285,7 +362,7 @@ func TestGlobalMemoriesSessionScopeFiltersBeforeTheCap(t *testing.T) {
 			scope: `{"environment":"development"}`,
 		})
 	}
-	projectPath := scopeSession(t, nil, globals)
+	projectPath, _ := scopeSession(t, nil, globals)
 
 	t.Setenv("GHOST_INJECTION_SESSION_SCOPE", "environment=development")
 	got := renderSessionStart(t, projectPath)

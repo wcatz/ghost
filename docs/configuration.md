@@ -265,15 +265,17 @@ injection:
     environment: development
 ```
 
-The rule is `memory.ScopeMatches`, the same one search, the linker and the dedup folds use, and it is deliberately asymmetric:
+The rule is `memory.ScopeMatches`, the one search applies to a row against a request, and it is deliberately asymmetric:
 
 - A memory that **does not mention** a requested key applies everywhere, so it is kept. A store's most general knowledge — conventions, gotchas, the build command — never names an environment, and a filter that hid it would leave a session holding the memories it needs least.
 - A memory that **names a requested key and disagrees** is excluded. `environment=production` never reaches a `development` session, however nearly the sentence reads.
 - An **absent or empty** `session_scope` filters nothing, which is the default and today's behaviour: the injected block is byte-identical to the block it was before this key existed, selection and the 15/8 caps included.
 
+The linker and the dedup folds ask the same question the other way round — could these two rows be the same claim in different words — which is `memory.ScopesConflict`, and the answers agree by construction. A key with an empty value asks for the empty value, so `environment: ""` drops every memory that names an environment at all; the `GHOST_*` form rejects that as an error rather than applying it.
+
 The filter narrows the retrieval rather than the rows that come back, because the over-fetch (45 project rows, 16 global) and the caps (15 and 8) are one budget: a production row that had spent a slot of it would have hidden a development row the session asked for.
 
-It is a presentation default, not an access control. The block's counts stay the store's — "N shown of M total" counts every live row in the project, so a row the filter excluded is part of that difference rather than a count of its own — and the MCP tools are not narrowed by it, so an agent that wants a row from another scope can still ask `ghost memory_search` for it. `ghost context` and every host that renders the session-start block read the same key, because they are the same loaders.
+It is a presentation default, not an access control. The block's counts stay the store's — "N shown of M total" counts every live row in the project, so a row the filter excluded is part of that difference rather than a count of its own — and the MCP tools are not narrowed by it, so an agent that wants a row from another scope can still ask `ghost_memory_search` for it. `ghost context` and every host that renders the session-start block read the same key, because they are the same loaders.
 
 ## Lifecycle and reflection
 

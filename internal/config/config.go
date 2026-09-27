@@ -224,9 +224,11 @@ type InjectionConfig struct {
 	// (injection.session_scope). It is empty by default and deliberately has no
 	// compiled default: unset means the session-start surface applies no scope
 	// predicate and shows every scoped row it would otherwise have shown. A
-	// non-empty value is matched with memory.ScopeMatches — the same rule search,
-	// the linker and the dedup folds use — so a memory that does not mention a
-	// requested key still applies.
+	// non-empty value is a request scope, and is matched with memory.ScopeMatches
+	// — the rule search applies, through assemble.ScopeContradicts — so a memory
+	// that does not mention a requested key still applies. The linker and the
+	// dedup folds ask the two-row question instead, memory.ScopesConflict, which
+	// is the same rule read the other way round.
 	SessionScope map[string]string `koanf:"session_scope"`
 }
 
@@ -726,8 +728,8 @@ func isKnownKey(key string) bool {
 //
 //   - a koanf tag that itself contains "_" (obsidian.vault_dir), which the
 //     transformer would split into obsidian.vault.dir; and
-//   - a non-scalar field (injection.behavior_categories and the two injection
-//     maps), which koanf's weakly-typed decode cannot build from a bare string:
+//   - a non-scalar field (injection.behavior_categories and the injection maps),
+//     which koanf's weakly-typed decode cannot build from a bare string:
 //     "gotcha,decision" would arrive as the single element ["gotcha,decision"],
 //     and a string never becomes a map at all.
 type envOverride struct {
@@ -835,8 +837,17 @@ func intMap(s string) (interface{}, error) {
 }
 
 // stringMap parses "key=value,..." into the map[string]string a config key
-// expects. A scope is a set of strings, so nothing here can fail to convert —
-// only the pair syntax can be wrong, which commaPairs names.
+// expects. A scope is a set of strings, so nothing here can fail to convert and
+// the only checks available are the pair syntax commaPairs names and the value.
+//
+// An empty value is an error, as it is in the two numeric maps above — where
+// ParseFloat and Atoi reject it by failing — and for the same reason: nothing
+// else here can reject it, and a request key whose value is the empty string is
+// a filter rather than a no-op. It excludes every row that names the key with
+// any other value, so a trailing "=" would quietly leave a session with an
+// unexplained subset of its store. The YAML form states each value in full, so an
+// empty one is visible to whoever wrote it; the comma-separated form is where a
+// typo can hide, and that is the one checked.
 func stringMap(s string) (interface{}, error) {
 	pairs, err := commaPairs(s)
 	if err != nil {
@@ -844,6 +855,9 @@ func stringMap(s string) (interface{}, error) {
 	}
 	out := make(map[string]string, len(pairs))
 	for _, p := range pairs {
+		if p[1] == "" {
+			return nil, fmt.Errorf("%s: empty value", p[0])
+		}
 		out[p[0]] = p[1]
 	}
 	return out, nil

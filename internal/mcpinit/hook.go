@@ -402,6 +402,38 @@ const globalsDemotionThreshold = 0.85
 // the session digest bounded while preserving the most useful memories.
 const sessionMemoriesCap = 15
 
+// scopeColumnFloor is the schema version that added memories.scope
+// (internal/memory/migrate.go, migrateV12). The session-start loaders read the
+// column, and they read it through a handle that runs no migration.
+const scopeColumnFloor = 12
+
+// scopeColumnExpr is the memories.scope column for a store at or past
+// scopeColumnFloor, and a NULL literal for one below it. The second result says
+// which of the two it is, because a caller that filters on the column cannot name
+// it in a WHERE clause it is not selecting.
+//
+// memory.OpenReadDB opens a store exactly as it is — it refuses to create a
+// missing one, and it cannot make a current one current because it is
+// read-only. So naming the column on a store that predates it fails the whole
+// query with SQLite's "no such column", and both loaders read a failed query as
+// no rows: the digest would render its header, and its tasks, and its decisions,
+// with no memories and nothing saying why, where the same store rendered its
+// memories before this column was selected. NULL is the value every row in such a
+// store carries by definition, so the label is empty and the filter is inert —
+// the block a pre-v12 store produced, reached without a second spelling of either
+// query.
+//
+// A store the hook has never opened read-write is behind only until the first
+// command or MCP server migrates it, so this is a transient window rather than a
+// lasting one; the check is here because that first session is the one a user
+// would notice.
+func scopeColumnExpr(db *sql.DB) (expr string, hasScope bool) {
+	if v, err := memory.DBUserVersion(db); err != nil || v < scopeColumnFloor {
+		return "NULL AS scope", false
+	}
+	return "scope", true
+}
+
 func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
 	// memory.OpenReadDB is the tree's read-only constructor: it refuses a
 	// missing database rather than creating a phantom empty one, and it is the
@@ -430,12 +462,13 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	// production row that spent any of it would have hidden a development row
 	// the session asked for. With no scope configured the clause is absent, so
 	// it cannot change the plan, the fetch or the ranking.
+	scopeColumn, hasScope := scopeColumnExpr(db)
 	scopeClause := ""
-	if len(cfg.Injection.SessionScope) > 0 {
+	if hasScope && len(cfg.Injection.SessionScope) > 0 {
 		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", cfg.Injection.SessionScope)
 	}
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, source, project_id, scope FROM memories
+		SELECT id, category, content, pinned, source, project_id, `+scopeColumn+` FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT ?
@@ -605,12 +638,13 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// applies in Go, held to it by a test that runs both forms over the same
 	// rows — the two exist because this query and the assembler's differ in one
 	// respect that matters: the LIMIT below chooses which rows are read at all.
+	scopeColumn, hasScope := scopeColumnExpr(db)
 	scopeClause := ""
-	if len(injection.SessionScope) > 0 {
+	if hasScope && len(injection.SessionScope) > 0 {
 		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", injection.SessionScope)
 	}
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, importance, created_at, scope FROM memories
+		SELECT id, category, content, pinned, importance, created_at, `+scopeColumn+` FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
 		ORDER BY (`+memory.DecayRankingSQL+`) DESC, importance DESC, created_at DESC, id
 		LIMIT ?

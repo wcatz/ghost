@@ -1368,6 +1368,10 @@ func TestLoad_MalformedEnvOverrideIsAnError(t *testing.T) {
 		{"category weights bad value", "GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha=high"},
 		{"category caps bad value", "GHOST_INJECTION_CATEGORY_CAPS", "gotcha=four"},
 		{"session scope missing value", "GHOST_INJECTION_SESSION_SCOPE", "environment"},
+		// An empty value parses as a string, so nothing rejects it by failing —
+		// and it is a filter rather than a no-op: it excludes every row that
+		// names the key with any other value.
+		{"session scope empty value", "GHOST_INJECTION_SESSION_SCOPE", "environment="},
 		{"demotion threshold", "GHOST_LINKING_DEMOTION_THRESHOLD", "high"},
 	}
 	for _, tc := range cases {
