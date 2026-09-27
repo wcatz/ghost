@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -32,21 +33,39 @@ a session start.
 // rather than ignored because the alternative is answering a question about a
 // past instant with the present.
 //
+// A flag with no value after it is an error too, and the distinction is the whole
+// point of parsing it here: a dropped --as-of is indistinguishable from a current
+// read, so `ghost context --as-of` would render a LIVE session-start block — the
+// Obsidian mirror and the session-count bump included — for a request that asked
+// about the past. The count is the visible damage; the silent substitution is the
+// real one.
+//
 // It is a function so the parser can be tested without running the command: the
 // bad value ends in os.Exit(2), and a test that drove that would have to take the
 // process with it.
 func contextAsOf(args []string) (*time.Time, error) {
 	raw := ""
+	seen := false
 	for i := 0; i < len(args); i++ {
 		switch {
-		case args[i] == "--as-of" && i+1 < len(args):
+		case args[i] == "--as-of":
+			seen = true
+			// The value is the next token whatever it looks like. Taking it
+			// unconditionally and letting time.Parse reject it is deliberate: a
+			// guard that only accepts a token which does not look like a flag
+			// would have to guess, and an instant that fails to parse is a better
+			// answer than a flag silently consumed.
+			if i+1 >= len(args) {
+				return nil, errors.New("--as-of requires an RFC 3339 instant (e.g. 2026-09-20T09:00:00Z)")
+			}
 			raw = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--as-of="):
+			seen = true
 			raw = strings.TrimPrefix(args[i], "--as-of=")
 		}
 	}
-	if raw == "" {
+	if !seen {
 		return nil, nil
 	}
 	instant, err := time.Parse(time.RFC3339, raw)

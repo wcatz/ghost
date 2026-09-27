@@ -655,7 +655,7 @@ anywhere in the read, and no inference: it is a selection.
   shorter set that says nothing about the gap reads as the whole truth.
 - **Which columns are historical.** `content`, `category`, `importance`,
   `resolved_at`, `source` and `project_id` come from the version row. Tags,
-  scope, pin, age, access count, provenance and the validity triple were never
+  scope, pin, access count, provenance and the validity triple were never
   versioned, so they are read from the row as it stands, and a deleted memory has
   no row at all — those fields are zero for it, which is the honest reading rather
   than a guess. `valid_from` / `valid_until` are the sharpest case: nothing
@@ -665,6 +665,34 @@ anywhere in the read, and no inference: it is a selection.
   than worked around: a promotion **rewrites** the history rows' `project_id` (it
   has to, or the project-delete cascade takes a memory's past with it), so a
   pre-promotion instant reports a promoted memory under `_global`.
+- **Which timestamp the age is measured from.** The row's own `created_at`, which
+  is what the current read decays on, whenever it can answer — it is set on
+  INSERT and never rewritten (a snapshot restore carries the snapshot's
+  `created_at` back on both its UPDATE and its INSERT). Two cases it cannot, and
+  both fall back to the version row's own `recorded_at`, which is at or before T
+  by definition: **the row is gone** (a delete takes the memory, so every current
+  column is NULL, and an empty `created_at` reads as ~56,000 days — a memory
+  deleted yesterday sat at the decay floor in every listing covering the past
+  year, on the strength of a column that says nothing about it), and
+  **`created_at` is later than T** (no current writer produces that, and it is
+  refused because `ageDays` clamps a negative age at 0, which makes a
+  future-dated column the most favourable value a row could carry into a ranking
+  of the past). The composite is otherwise the same rule at T, so a historical and
+  a current listing stay ordered by one thing.
+- **The gap is never silent.** The two halves of the read partition the in-scope
+  set, and the "no version recorded" half is bounded by T on **both** its tests —
+  `created_at <= T` and "no history row at or before T" — because an unbounded
+  `NOT EXISTS` answered a different question ("does this memory have history at
+  all") and a pre-v17 memory the lifecycle touched after the upgrade *does* have
+  history. A resolve, a supersede, a delete or a reflection reuse is enough, and
+  the memory then fell out of both halves and vanished from an answer it belongs
+  to. The half that reports tombstones exists for the same reason: a pre-v17
+  memory deleted after T has no live row either, so its gap is reachable only
+  through the tombstone's own project id. (No writer needs to file a baseline
+  there: every one of those first writes appends a row read out of the memories row
+  in the same transaction, so the text it is about to stop holding is recorded
+  anyway — which is why `recordBaselineHistoryTx` is needed only on
+  `UpdateMemory`, the one write that overwrites the text in place.)
 
 `as_of` (RFC 3339) is a parameter on `ghost_memory_search` and
 `ghost_project_context`, and `--as-of` on `ghost context`. In the assembler it is

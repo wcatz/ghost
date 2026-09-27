@@ -140,6 +140,32 @@ func TestContextAsOfFlagIsOptional(t *testing.T) {
 	}
 }
 
+// TestContextAsOfWithoutAValueIsRefused: `--as-of` with nothing usable after it
+// is a mistake, and the mistake it invites is the worst available — the flag is
+// simply not seen, so the command renders a LIVE session-start block, Obsidian
+// sync and session-count bump included, for a request that asked about the past.
+// The count would move the present's session number because of a past reading, and
+// nothing in the output would say the flag was dropped.
+func TestContextAsOfWithoutAValueIsRefused(t *testing.T) {
+	for _, argv := range [][]string{
+		{"--as-of"},
+		{"--cwd", "/tmp", "--as-of"},
+		{"--as-of", "--cwd", "/tmp"}, // a flag is not an instant
+	} {
+		got, err := contextAsOf(argv)
+		if err == nil {
+			t.Errorf("contextAsOf(%v) = %v, want a refusal: a dropped flag renders the present for a past-instant request", argv, got)
+			continue
+		}
+		if got != nil {
+			t.Errorf("contextAsOf(%v) returned %v alongside its error, want nil", argv, got)
+		}
+		if !strings.Contains(err.Error(), "--as-of") {
+			t.Errorf("contextAsOf(%v) refused with %q, want it to name the flag that was incomplete", argv, err)
+		}
+	}
+}
+
 // TestContextAsOfNormalisesToUTC: the rendered note carries the instant, so two
 // spellings of one moment must not produce two different labels for the same read.
 func TestContextAsOfNormalisesToUTC(t *testing.T) {
