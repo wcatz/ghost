@@ -175,16 +175,34 @@ type Tree map[string]string
 // AssertUnchanged to assert a surface left the tree alone — the shape a
 // read-only importer has to satisfy. Pair it with AssertTreeInside for the
 // writes case.
+//
+// Two kinds of entry are recorded as a placeholder rather than as content, and
+// both are blind spots rather than findings: a file whose contents could not be
+// read, and a directory that could not be listed (recorded as a directory, with
+// nothing in it). Each is logged with its path and cause. A fixture that needs
+// an assertion over one of them has to make the tree readable first.
 func Snapshot(t testing.TB, root string) Tree {
 	t.Helper()
 	out := Tree{}
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
-			// An entry that cannot be read is recorded as absent and the walk
-			// continues. Swallowing it cannot make two different trees compare
-			// equal — the entries that did read are in the map either way, and
-			// the comparison reports whatever is missing from either side.
-			return nil //nolint:nilerr // the comparison that follows reports it
+			// A root that does not exist is the documented empty snapshot, not a
+			// read failure worth reporting.
+			if p == root && os.IsNotExist(err) {
+				return nil //nolint:nilerr // a missing root snapshots as empty
+			}
+			// A path WalkDir could not read is dropped and the walk continues, so
+			// a snapshot is what was readable rather than all of it. The blind
+			// spot is real and worth naming: WalkDir reports a failing readdir
+			// against the DIRECTORY it could not list, and it has already handed
+			// that directory's own entry to the callback once, so the directory
+			// is in the snapshot while everything inside it is not. A change
+			// inside an unreadable subtree is therefore invisible to
+			// AssertUnchanged. The remedy is to make the tree readable, not to
+			// believe the comparison — which is why the path and the cause are
+			// reported here rather than left to be inferred.
+			t.Logf("adversarial: cannot read %s: %v", p, err)
+			return nil //nolint:nilerr // the snapshot is what was readable
 		}
 		rel, rerr := filepath.Rel(root, p)
 		if rerr != nil || rel == "." {
@@ -211,7 +229,10 @@ func Snapshot(t testing.TB, root string) Tree {
 			// about the contents, and no fixture should depend on it. The
 			// placeholder carries no path: the map key already names the file,
 			// and a value that varied with how root was spelled would break the
-			// independence Snapshot's keys are there to provide.
+			// independence Snapshot's keys are there to provide. The cause is
+			// reported out of band instead, so a fixture that trips this blind
+			// spot says which file and why rather than passing silently.
+			t.Logf("adversarial: %s recorded as unreadable: %v", rel, rerr)
 			out[rel] = "<unreadable>"
 			return nil //nolint:nilerr // recorded as unreadable just above
 		}
@@ -231,9 +252,12 @@ func Snapshot(t testing.TB, root string) Tree {
 //
 // One blind spot, deliberate: a file Snapshot could not read is recorded as the
 // same placeholder on both sides, so a rewrite of a file that is unreadable
-// throughout compares equal. Its content is not observable from either side, so
-// there is nothing truthful to compare — the answer is to make the file readable
-// (a mode bit, a missing directory), not to believe this.
+// throughout compares equal, and a directory it could not list is recorded as a
+// directory with nothing in it, so a change inside an unreadable subtree is
+// invisible too. Neither is observable from either side, so there is nothing
+// truthful to compare; Snapshot logs each one with its path and cause, and the
+// answer to a fixture that trips either is to make the tree readable (a mode
+// bit, a missing directory) rather than to believe this.
 func (before Tree) AssertUnchanged(t testing.TB, what string, after Tree) {
 	t.Helper()
 	for path, content := range after {

@@ -133,6 +133,74 @@ func TestSnapshotAndAssertions(t *testing.T) {
 	})
 }
 
+// TestSnapshotPinsItsTwoPlaceholders covers the entries Snapshot records as
+// something other than content, because both are blind spots a fixture author
+// has to know about — and because the unreadable placeholder's whole reason for
+// existing is that it must NOT vary with how the root was spelled.
+func TestSnapshotPinsItsTwoPlaceholders(t *testing.T) {
+	t.Run("unreadable_file", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("a mode-0000 file is still readable by root, so there is nothing to pin")
+		}
+		build := func() string {
+			root := t.TempDir()
+			locked := filepath.Join(root, "locked.md")
+			if err := os.WriteFile(locked, []byte("secret"), 0o000); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+			return root
+		}
+		first := Snapshot(t, build())
+		second := Snapshot(t, build())
+
+		if got := first["locked.md"]; got != "<unreadable>" {
+			t.Errorf("unreadable file recorded as %q, want the constant placeholder", got)
+		}
+		// The reason the placeholder is a constant: two roots spelled
+		// differently must snapshot identically, or AssertUnchanged would report
+		// a rewrite of a file nobody touched.
+		if first["locked.md"] != second["locked.md"] {
+			t.Errorf("the placeholder varies with the root: %q vs %q", first["locked.md"], second["locked.md"])
+		}
+	})
+
+	t.Run("unwalkable_subtree", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("a mode-0000 directory is still readable by root, so there is nothing to pin")
+		}
+		root := t.TempDir()
+		locked := filepath.Join(root, "locked")
+		if err := os.MkdirAll(locked, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(locked, "inside.md"), []byte("invisible"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Sealed after the file is in place: a directory the fixture cannot write
+		// into is a directory the fixture could not have planted anything in.
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+		got := Snapshot(t, root)
+		// WalkDir hands the directory's own entry over before it tries to list
+		// it, so the directory is in the snapshot and its contents are not. A
+		// change inside an unreadable subtree is invisible to AssertUnchanged;
+		// pinned here so a fixture that relies on it fails here first.
+		if _, ok := got["locked"]; !ok {
+			t.Error("the unreadable directory itself was not recorded; a fixture cannot tell an empty subtree from an unreadable one")
+		}
+		if _, ok := got["locked/inside.md"]; ok {
+			t.Errorf("Snapshot descended into a directory it could not read: %v", got)
+		}
+		if _, ok := got["."]; ok {
+			t.Error("root itself was recorded as an entry")
+		}
+	})
+}
+
 func TestSnapshotOfMissingRootIsEmpty(t *testing.T) {
 	if got := Snapshot(t, filepath.Join(t.TempDir(), "never-created")); len(got) != 0 {
 		t.Errorf("snapshot of a missing root = %v, want empty", got)
