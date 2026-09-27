@@ -160,7 +160,12 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		cwd = resolved
 	}
 
-	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd)
+	// One config load for the whole handler, handed to both loaders below: this
+	// path reads the config files and the environment, and the digest's two
+	// halves are the same session. A broken config therefore reports once, not
+	// once per half.
+	cfg := config.LoadForHook()
+	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd, cfg)
 
 	// Surface a failed auto-consolidation chain from an earlier session as
 	// ONE labeled line ahead of the context block (after plugin finalize in
@@ -192,7 +197,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		}
 	}
 
-	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals()
+	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals(cfg)
 
 	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown))
 }
@@ -200,12 +205,15 @@ func runSessionStart(data []byte, stdout io.Writer) {
 // loadGlobals reads the cross-project global memories for context rendering.
 // It is the shared, read-only global-section loader used by both the
 // SessionStart hook and the `ghost context` command.
-func loadGlobals() (globals []sessionMemory, totalCount int, totalCountKnown bool) {
+// It takes the config its caller has already loaded rather than reading it a
+// second time: the two entry points load once and hand the same value to both
+// halves of the digest.
+func loadGlobals(cfg *config.Config) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
 	}
-	return loadGlobalMemories(filepath.Join(dataDir, "ghost.db"))
+	return loadGlobalMemories(filepath.Join(dataDir, "ghost.db"), cfg.Injection.SessionScope)
 }
 
 // globalOriginGuidance explains the origin labels actually present in the
@@ -370,7 +378,8 @@ func RenderSessionContext(cwd string) string {
 	// entry point that must. Both are best-effort and idempotent.
 	ensureObsidianSyncRunning()
 
-	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd)
+	cfg := config.LoadForHook()
+	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd, cfg)
 	if projectID != "" {
 		if dataDir, err := config.DataDir(); err == nil {
 			if n := bumpSessionCount(filepath.Join(dataDir, "ghost.db"), projectID); n > 0 {
@@ -378,7 +387,7 @@ func RenderSessionContext(cwd string) string {
 			}
 		}
 	}
-	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals()
+	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals(cfg)
 	// Nothing to surface — don't inject an empty/decorative block.
 	if projectID == "" && len(globals) == 0 {
 		return ""
@@ -427,14 +436,30 @@ const scopeColumnFloor = 12
 // command or MCP server migrates it, so this is a transient window rather than a
 // lasting one; the check is here because that first session is the one a user
 // would notice.
+//
+// A store that is behind is the expected reading, so it is silent. A pragma that
+// could not be READ is not: this falls back to the same unscoped rendering, which
+// is the one outcome the key exists to prevent and which nothing else would say
+// out loud — so it goes to stderr, like the neighbouring demotion lookups. A
+// caller that swallowed the difference would render a block with no scope on it
+// and no filter behind it, and the user would have no way to tell that from a
+// store that has none.
 func scopeColumnExpr(db *sql.DB) (expr string, hasScope bool) {
-	if v, err := memory.DBUserVersion(db); err != nil || v < scopeColumnFloor {
+	v, err := memory.DBUserVersion(db)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ghost: could not read the store's schema version:", err)
+		return "NULL AS scope", false
+	}
+	if v < scopeColumnFloor {
 		return "NULL AS scope", false
 	}
 	return "scope", true
 }
 
-func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
+// sessionScope is injection.session_scope, handed down by loadGlobals from the
+// config its caller loaded. An empty scope narrows nothing, and the fetch below is
+// then the statement that shipped.
+func loadGlobalMemories(dbPath string, sessionScope map[string]string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
 	// memory.OpenReadDB is the tree's read-only constructor: it refuses a
 	// missing database rather than creating a phantom empty one, and it is the
 	// same handle a Store takes for snapshot reads.
@@ -443,12 +468,6 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		return nil, 0, false
 	}
 	defer db.Close() //nolint:errcheck
-
-	// LoadForHook, not Load: this runs inside the host's editor session, so a
-	// broken config must not fail it. This loader needs the config for one
-	// reason — the session scope its fetch is narrowed by — and reads no other
-	// key from it.
-	cfg := config.LoadForHook()
 
 	// Both global queries bind the same sentinel the store persists, so this
 	// read path cannot drift onto a different project than the one the seeds
@@ -464,8 +483,8 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	// it cannot change the plan, the fetch or the ranking.
 	scopeColumn, hasScope := scopeColumnExpr(db)
 	scopeClause := ""
-	if hasScope && len(cfg.Injection.SessionScope) > 0 {
-		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", cfg.Injection.SessionScope)
+	if hasScope && len(sessionScope) > 0 {
+		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", sessionScope)
 	}
 	rows, err := db.Query(`
 		SELECT id, category, content, pinned, source, project_id, `+scopeColumn+` FROM memories
@@ -564,7 +583,10 @@ type sessionMemory struct {
 	Source string
 }
 
-func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
+// cfg is the caller's already-loaded configuration, for the reason loadGlobals
+// states: the session-start path reads the config once and hands the same value
+// to both halves of the digest.
+func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -594,15 +616,14 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		`SELECT learned_context FROM ghost_state WHERE project_id = ?`, projectID,
 	).Scan(&learned)
 
-	// LoadForHook, not Load: this runs inside the host's editor session, so a
-	// broken config must not fail it. LoadForHook reports the failure on stderr
-	// and returns the environment plus the compiled defaults, which pin the same
+	// cfg arrives from the entry point, which loads it with LoadForHook — not
+	// Load, because this runs inside the host's editor session and a broken
+	// config must not fail it. LoadForHook reports the failure on stderr and
+	// returns the environment plus the compiled defaults, which pin the same
 	// injection.* and linking.demotion_threshold values the two former
-	// fallbacks did. Loaded once and reused — it reads the config files and the
-	// environment, and this is the session-start hot path. It is read here,
-	// before the memory query, because injection.session_scope shapes that
-	// query; the behavioral-floor keys below come from the same load.
-	cfg := config.LoadForHook()
+	// fallbacks did. Every key read below comes from that one load: the memory
+	// query is shaped by injection.session_scope, and the two-pass selection
+	// below it by the behavioral-floor keys.
 	injection := cfg.Injection
 
 	// Total count (pre-truncation) so the rendered context can flag how many

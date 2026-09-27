@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	_ "modernc.org/sqlite"
 )
@@ -135,11 +136,14 @@ func TestSessionStartOnAStoreBehindTheScopeColumnStillRenders(t *testing.T) {
 	if _, err := stamper.Exec(`PRAGMA user_version = 11`); err != nil {
 		t.Fatalf("stamp user_version: %v", err)
 	}
-	if err := stamper.Close(); err != nil {
-		t.Fatalf("close stamper: %v", err)
-	}
+	// On the handle that made the change, before it is closed: the fixture's
+	// whole claim is that the column is gone, so an ALTER that became a no-op
+	// must fail here rather than in the assertions below.
 	if _, err := stamper.Exec(`SELECT scope FROM memories`); err == nil {
 		t.Fatal("the fixture must leave the store without a scope column, or it proves nothing")
+	}
+	if err := stamper.Close(); err != nil {
+		t.Fatalf("close stamper: %v", err)
 	}
 	readBack, err := memory.OpenReadDB(dbPath)
 	if err != nil {
@@ -295,9 +299,11 @@ func TestSessionStartSelectionIsUnchangedByAScopeThatExcludesNothing(t *testing.
 	}
 	projectPath, _ := scopeSession(t, projectRows, nil)
 
+	// The config is read per call, as the entry point does, so the env var below
+	// reaches the loader the way it reaches it in a real session.
 	selected := func() []string {
 		t.Helper()
-		_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath)
+		_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 		ids := make([]string, 0, len(memories))
 		for _, m := range memories {
 			ids = append(ids, m.ID)

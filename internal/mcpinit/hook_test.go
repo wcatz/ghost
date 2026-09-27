@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	_ "modernc.org/sqlite"
 )
@@ -284,7 +285,7 @@ func TestLoadGlobalMemories(t *testing.T) {
 		t.Fatalf("insert project-scoped seed text: %v", err)
 	}
 
-	globals, total, totalKnown := loadGlobalMemories(dbPath)
+	globals, total, totalKnown := loadGlobalMemories(dbPath, nil)
 	if len(globals) != 1 {
 		t.Fatalf("expected 1 global memory, got %d (%+v)", len(globals), globals)
 	}
@@ -349,7 +350,7 @@ func TestSessionMemoriesCarryTheirOwnProject(t *testing.T) {
 
 	t.Setenv("XDG_DATA_HOME", xdgHome)
 
-	_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath)
+	_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 	if len(memories) != 1 {
 		t.Fatalf("expected 1 project memory, got %d", len(memories))
 	}
@@ -363,7 +364,7 @@ func TestSessionMemoriesCarryTheirOwnProject(t *testing.T) {
 // to open read-write and materialize a phantom file on first read).
 func TestLoadGlobalMemories_MissingDBNoPhantom(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	globals, total, totalKnown := loadGlobalMemories(dbPath)
+	globals, total, totalKnown := loadGlobalMemories(dbPath, nil)
 	if globals != nil || total != 0 || totalKnown {
 		t.Errorf("missing DB should yield no globals, got globals=%v total=%d known=%v", globals, total, totalKnown)
 	}
@@ -398,7 +399,7 @@ func TestLoadGlobalMemories_DedupsNearDuplicates(t *testing.T) {
 		t.Fatalf("insert link: %v", err)
 	}
 
-	globals, _, _ := loadGlobalMemories(dbPath)
+	globals, _, _ := loadGlobalMemories(dbPath, nil)
 	var sawOriginal, sawRestated bool
 	for _, m := range globals {
 		if strings.Contains(m.Content, "ORIGINAL") {
@@ -441,7 +442,7 @@ func TestLoadGlobalMemories_ExcludesResolved(t *testing.T) {
 		t.Fatalf("insert live global: %v", err)
 	}
 
-	globals, total, totalKnown := loadGlobalMemories(dbPath)
+	globals, total, totalKnown := loadGlobalMemories(dbPath, nil)
 	if len(globals) != 1 || globals[0].ID != "glive0001" {
 		t.Fatalf("resolved global must be excluded from fetch, got %+v", globals)
 	}

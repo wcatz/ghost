@@ -168,6 +168,47 @@ func TestScopeMatchesSQLReadsARequestNeedingEscaping(t *testing.T) {
 	}
 }
 
+// TestScopeMatchesSQLExcludesTheNonStringValueGoAccepts pins the one place the
+// two forms of the rule are known to disagree, rather than leaving it to a
+// comment. scopesConflictSQL compares JSON values with "<>" over json_each, so a
+// stored value that is not a string reads as a difference; Go's decoder rejects
+// the whole document into "no scope" and keeps the row. Nothing in Ghost writes
+// such a scope — scopeJSON marshals a map[string]string — so this needs a
+// hand-edited or imported row, and the disagreement is scopesConflictSQL's rather
+// than this function's.
+//
+// It is pinned because the predicate is no longer only a probe's condition: it is
+// the session-start filter, where the stricter form drops a row the search path
+// would keep. A change to either side that does not follow the other fails here,
+// which is the point of recording the asymmetry at all.
+func TestScopeMatchesSQLExcludesTheNonStringValueGoAccepts(t *testing.T) {
+	s, ctx := newDedupStore(t)
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "a hand-edited scope", Source: "manual", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE memories SET scope = '{"environment":1}' WHERE id = ?`, id); err != nil {
+		t.Fatalf("set scope: %v", err)
+	}
+
+	want := map[string]string{"environment": "production"}
+	var got int
+	query := `SELECT CASE WHEN ` + ScopeMatchesSQL("scope", want) + ` THEN 1 ELSE 0 END
+		FROM memories WHERE id = ?`
+	if err := s.db.QueryRowContext(ctx, query, id).Scan(&got); err != nil {
+		t.Fatalf("scope predicate query: %v", err)
+	}
+	if !ScopeMatches(nil, want) {
+		t.Fatal("test bug: Go reads a non-string scope as no scope, and no scope satisfies any request")
+	}
+	if eligible := got == 1; eligible {
+		t.Errorf("SQL says eligible=%v; the recorded asymmetry is that it excludes a row Go's decoder reads as unscoped", eligible)
+	}
+}
+
 // TestParseScopeJSON pins the exported read of a stored scope column, the one
 // the session-start loaders use because they reach the column through their own
 // read-only handle rather than through a Store scan. The shapes it must refuse

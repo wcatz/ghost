@@ -81,8 +81,8 @@ type Memory struct {
 	// column — no claim was made — while an empty string would look like a
 	// claim about the empty moment. No MCP writer sets them yet (that writer
 	// contract is the follow-up change), so a store nobody has restored or
-	// imported reads every row as nil; ImportMemory and Restore carry the
-	// triple, which is where a non-NULL window first comes from. Either way the
+	// imported reads every row as nil; ImportMemory and RestoreSnapshot carry
+	// the triple, which is where a non-NULL window first comes from. Either way the
 	// fields are on the type because the schema already stores them and the
 	// retrieval path has to carry them to the assembler that evaluates them.
 	// SQLite holds them as unconstrained text, so the values are the stored

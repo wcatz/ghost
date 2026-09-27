@@ -203,8 +203,20 @@ func scopeJSONExpr(scopeExpr string) string {
 // configured can leave the clause out of its statement entirely and read
 // byte-for-byte the rows, order and plan it read before the key existed.
 //
-// It is a second statement of one rule, held to the Go form by
-// TestScopeMatchesSQLAgreesWithScopeMatches the way scopesConflictSQL is held to
+// It is a second statement of one rule, and it is the rule's *unconditional*
+// parity that scopesConflictSQL records against it: the delegate is stricter
+// about a stored value that is not a string. A row holding {"environment":1} is
+// no scope at all to Go's decoder — parseScope reads it as none — so
+// ScopeMatches keeps it, while "<>" over json_each sees a number against a
+// string and this excludes it. That asymmetry is scopesConflictSQL's, it is
+// recorded in its own comment, and
+// TestScopeMatchesSQLExcludesTheNonStringValueGoAccepts pins it here, because
+// this predicate is now a user-visible filter rather than a probe's condition.
+// Nothing in Ghost writes a non-string scope — scopeJSON marshals a
+// map[string]string — so reaching it needs a hand-edited or imported row.
+//
+// The rest of the rule is held to the Go form by
+// TestScopeMatchesSQLAgreesWithScopeMatches, the way scopesConflictSQL is held to
 // ScopesConflict, and for the same reason: both consumers exist. The assembler
 // filters the rows retrieval already returned, in Go, through
 // assemble.ScopeContradicts; the session-start loaders choose their own rows with

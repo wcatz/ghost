@@ -269,7 +269,7 @@ The rule is `memory.ScopeMatches`, the one search applies to a row against a req
 
 - A memory that **does not mention** a requested key applies everywhere, so it is kept. A store's most general knowledge — conventions, gotchas, the build command — never names an environment, and a filter that hid it would leave a session holding the memories it needs least.
 - A memory that **names a requested key and disagrees** is excluded. `environment=production` never reaches a `development` session, however nearly the sentence reads.
-- An **absent or empty** `session_scope` filters nothing, which is the default and today's behaviour: the injected block is byte-identical to the block it was before this key existed, selection and the 15/8 caps included.
+- An **absent or empty** `session_scope` filters nothing, which is the default. Selection, ranking and the 15/8 caps are then the ones that shipped; for a store whose rows carry no scope — every store written before the column existed — so is the whole block, byte for byte. A row that *does* carry scope is labelled either way, because showing the axis is the other half of this feature and the key only decides whether the block is filtered.
 
 The linker and the dedup folds ask the same question the other way round — could these two rows be the same claim in different words — which is `memory.ScopesConflict`, and the answers agree by construction. A key with an empty value asks for the empty value, so `environment: ""` drops every memory that names an environment at all; the `GHOST_*` form rejects that as an error rather than applying it.
 
