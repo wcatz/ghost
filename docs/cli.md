@@ -176,6 +176,8 @@ ghost project merge old-name new-name
 
 Both arguments accept a project name, ID, path-prefix match, or basename match. A basename match is accepted only when exactly one candidate survives the recorded-path and repository-remote checks; an ambiguous match is rejected rather than guessed. The command refuses to merge a project into itself.
 
+The source project's recorded checkout and repository do not survive it: the survivor keeps its own, and the source row is deleted. A merge is therefore how two records of one project become one, not how two checkouts are joined — `ghost project bind` is what records a checkout, and a project that already records a repository refuses to take on another. Joining a checkout to a project that was refusing it is a merge *and then* a bind, in that order, and the bind is refused until the merge has deleted the project that recorded the directory.
+
 ### `ghost project bind <project-id> <checkout-directory>`
 
 Gives a project a recorded checkout, so a session in that directory resolves it:

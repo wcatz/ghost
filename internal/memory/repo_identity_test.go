@@ -266,7 +266,9 @@ func TestResolveOrCreateRepoProject(t *testing.T) {
 		otherID     = "github.com/someone/ghost"
 		newCheckout = "/new/checkout"
 	)
-	resolve := func(s *Store, ctx context.Context, projectRef string) (string, error) {
+	// The refusal is returned rather than discarded so the cases below can
+	// assert it; the routing this test is about is unchanged by it.
+	resolve := func(s *Store, ctx context.Context, projectRef string) (string, *BindingRefusal, error) {
 		return s.ResolveOrCreateRepoProject(ctx, projectRef, "ghost", newCheckout, newCheckout, "checkout", remote)
 	}
 
@@ -277,9 +279,12 @@ func TestResolveOrCreateRepoProject(t *testing.T) {
 			t.Fatalf("EnsureProject: %v", err)
 		}
 
-		id, err := resolve(s, ctx, "")
+		id, refused, err := resolve(s, ctx, "")
 		if err != nil {
 			t.Fatalf("ResolveOrCreateRepoProject: %v", err)
+		}
+		if refused != nil {
+			t.Errorf("a project that was allowed to bind reported a refusal: %+v", refused)
 		}
 		if id != "ghost" {
 			t.Fatalf("canonical project = %q, want ghost", id)
@@ -292,9 +297,9 @@ func TestResolveOrCreateRepoProject(t *testing.T) {
 			t.Errorf("persisted repository = %q, want %q", got, canon)
 		}
 
-		id, err = resolve(s, ctx, "")
-		if err != nil || id != "ghost" {
-			t.Errorf("same binding is not idempotent: got (%q, %v), want (ghost, nil)", id, err)
+		id, refused, err = resolve(s, ctx, "")
+		if err != nil || id != "ghost" || refused != nil {
+			t.Errorf("same binding is not idempotent: got (%q, %+v, %v), want (ghost, nil, nil)", id, refused, err)
 		}
 	})
 
@@ -304,7 +309,10 @@ func TestResolveOrCreateRepoProject(t *testing.T) {
 		if err := s.EnsureProjectWithRepo(ctx, "custom-id", "", "project-display-name", remote); err != nil {
 			t.Fatalf("EnsureProjectWithRepo: %v", err)
 		}
-		id, err := resolve(s, ctx, "")
+		id, refused, err := resolve(s, ctx, "")
+		if refused != nil {
+			t.Errorf("resolving by recorded remote reported a refusal: %+v", refused)
+		}
 		if err != nil || id != "custom-id" {
 			t.Errorf("existing repository resolved to (%q, %v), want (custom-id, nil)", id, err)
 		}
@@ -324,7 +332,7 @@ func TestResolveOrCreateRepoProject(t *testing.T) {
 			t.Fatalf("EnsureProjectWithRepo owner: %v", err)
 		}
 
-		id, err := resolve(s, ctx, pathID)
+		id, _, err := resolve(s, ctx, pathID)
 		if err == nil || !strings.Contains(err.Error(), "different repository") {
 			t.Fatalf("ResolveOrCreateRepoProject = (%q, %v), want a different-repository error", id, err)
 		}
@@ -354,7 +362,10 @@ func TestResolveOrCreateRepoProject(t *testing.T) {
 			t.Fatalf("EnsureProjectWithRepo owner: %v", err)
 		}
 
-		id, err := resolve(s, ctx, pathID)
+		id, refused, err := resolve(s, ctx, pathID)
+		if refused != nil {
+			t.Errorf("merging into the remote owner reported a refusal: %+v", refused)
+		}
 		if err != nil || id != "remote-owner" {
 			t.Fatalf("resolve explicit project = (%q, %v), want (remote-owner, nil)", id, err)
 		}
@@ -370,6 +381,11 @@ func TestResolveOrCreateRepoProject(t *testing.T) {
 		}
 	})
 
+	// The routing is unchanged since #613, and the refusal it now returns is
+	// asserted on purpose: this subtest used to pin a save that opened a
+	// project and said nothing, which is exactly the contract the issue called
+	// a deliberate change rather than a bug. Both outcomes are correct; the
+	// silent one is what had to go.
 	t.Run("ambiguous or conflicting names create the fallback project", func(t *testing.T) {
 		for _, tc := range []struct {
 			name  string
@@ -393,7 +409,10 @@ func TestResolveOrCreateRepoProject(t *testing.T) {
 					}
 				}
 
-				id, err := resolve(s, ctx, "")
+				id, refused, err := resolve(s, ctx, "")
+				if refused == nil {
+					t.Errorf("%s name opened the fallback project with nothing reported; the caller cannot tell it apart from a new project", tc.name)
+				}
 				if err != nil || id != newCheckout {
 					t.Fatalf("fallback resolve = (%q, %v), want (%q, nil)", id, err, newCheckout)
 				}
@@ -900,7 +919,7 @@ func TestResolveOrCreateRepoProjectRefusesGlobalPathOwner(t *testing.T) {
 		t.Fatalf("GetProjectPath global: %v", err)
 	}
 
-	id, err := s.ResolveOrCreateRepoProject(
+	id, _, err := s.ResolveOrCreateRepoProject(
 		ctx, "new-id", "ghost", "new-id", globalPath, "new-project", "https://github.com/wcatz/ghost.git",
 	)
 	if err == nil || !strings.Contains(err.Error(), "_global") {
@@ -995,7 +1014,7 @@ func TestResolveOrCreateRepoProjectRejectsExistingIDConflict(t *testing.T) {
 		t.Fatalf("Create existing memory: %v", err)
 	}
 
-	id, err := s.ResolveOrCreateRepoProject(
+	id, _, err := s.ResolveOrCreateRepoProject(
 		ctx, "", "ghost", "existing", "existing", "existing", "https://github.com/wcatz/ghost.git",
 	)
 	if err == nil || !strings.Contains(err.Error(), "different repository") {
@@ -1096,7 +1115,7 @@ func TestResolveOrCreateRepoProjectRefusesUnrelatedNameBinding(t *testing.T) {
 	}
 
 	const evil = "https://github.com/evil/infra.git"
-	canonical, err := s.ResolveOrCreateRepoProject(
+	canonical, _, err := s.ResolveOrCreateRepoProject(
 		ctx, unrelatedPath, "infra", unrelatedPath, unrelatedPath, unrelatedPath, evil,
 	)
 	if err != nil {
@@ -1164,7 +1183,7 @@ func TestResolveOrCreateRepoProjectBindsNameWhenPathsAgree(t *testing.T) {
 	// explicit path query compares text and misses it, so the unique name is
 	// the only thing that can claim this save — and the recorded path agrees
 	// with where the save came from.
-	canonical, err := s.ResolveOrCreateRepoProject(
+	canonical, _, err := s.ResolveOrCreateRepoProject(
 		ctx, checkout, "infra", checkout, checkout, checkout, "https://github.com/wcatz/infra.git",
 	)
 	if err != nil {
@@ -1205,7 +1224,7 @@ func TestResolveOrCreateRepoProjectRefusesUnresolvableRecordedPath(t *testing.T)
 		t.Fatalf("create %s: %v", elsewhere, err)
 	}
 
-	canonical, err := s.ResolveOrCreateRepoProject(
+	canonical, _, err := s.ResolveOrCreateRepoProject(
 		ctx, elsewhere, "infra", elsewhere, elsewhere, elsewhere, "https://github.com/evil/infra.git",
 	)
 	if err != nil {
@@ -1269,7 +1288,7 @@ func TestResolveOrCreateRepoProjectNestedRepoKeepsEnclosingProjectUnbound(t *tes
 	})
 	t.Cleanup(func() { SetDetectRemote(nil) })
 
-	canonical, err := s.ResolveOrCreateRepoProject(
+	canonical, _, err := s.ResolveOrCreateRepoProject(
 		ctx, nested, "lib", nested, nested, "lib", "https://github.com/other/lib.git",
 	)
 	if err != nil {
@@ -1290,7 +1309,7 @@ func TestResolveOrCreateRepoProjectNestedRepoKeepsEnclosingProjectUnbound(t *tes
 	// A save from the project's own root is the claim the parent is allowed to
 	// make, and it must still make it — a guard that read "matched by path
 	// prefix" as "refuse" would strand every project with no recorded remote.
-	canonical, err = s.ResolveOrCreateRepoProject(
+	canonical, _, err = s.ResolveOrCreateRepoProject(
 		ctx, parent, "infra", parent, parent, "infra", "https://github.com/wcatz/infra.git",
 	)
 	if err != nil {
@@ -1345,12 +1364,12 @@ func TestResolveOrCreateRepoProjectNestedRepoLeavesEnclosingProjectResolvable(t 
 	})
 	t.Cleanup(func() { SetDetectRemote(nil) })
 
-	if _, err := s.ResolveOrCreateRepoProject(
+	if _, _, err := s.ResolveOrCreateRepoProject(
 		ctx, nested, "lib", nested, nested, "lib", "https://github.com/other/lib.git",
 	); err != nil {
 		t.Fatalf("ResolveOrCreateRepoProject from the nested checkout: %v", err)
 	}
-	if _, err := s.ResolveOrCreateRepoProject(
+	if _, _, err := s.ResolveOrCreateRepoProject(
 		ctx, parent, "infra", parent, parent, "infra", "https://github.com/wcatz/infra.git",
 	); err != nil {
 		t.Fatalf("ResolveOrCreateRepoProject from the project root: %v", err)
@@ -1412,7 +1431,7 @@ func TestResolveOrCreateRepoProjectNestedRepoDoesNotMergeEnclosingProject(t *tes
 	})
 	t.Cleanup(func() { SetDetectRemote(nil) })
 
-	canonical, err := s.ResolveOrCreateRepoProject(
+	canonical, _, err := s.ResolveOrCreateRepoProject(
 		ctx, nested, "lib", nested, nested, "lib", "https://github.com/other/lib.git",
 	)
 	if err != nil {
@@ -1475,7 +1494,7 @@ func TestResolveOrCreateRepoProjectBindsRemoteFromSubdirectoryOfSameRepository(t
 	SetDetectRemote(func(string) string { return own })
 	t.Cleanup(func() { SetDetectRemote(nil) })
 
-	canonical, err := s.ResolveOrCreateRepoProject(
+	canonical, _, err := s.ResolveOrCreateRepoProject(
 		ctx, subdir, "infra", subdir, subdir, subdir, own,
 	)
 	if err != nil {
@@ -1549,7 +1568,7 @@ func TestResolveOrCreateRepoProjectDetectsRemoteOnce(t *testing.T) {
 				t.Fatalf("EnsureProject parent: %v", err)
 			}
 			if c.bindFirst {
-				if _, err := s.ResolveOrCreateRepoProject(
+				if _, _, err := s.ResolveOrCreateRepoProject(
 					ctx, parent, "infra", parent, parent, parent, own,
 				); err != nil {
 					t.Fatalf("bind the project from its root: %v", err)
@@ -1560,7 +1579,7 @@ func TestResolveOrCreateRepoProjectDetectsRemoteOnce(t *testing.T) {
 			SetDetectRemote(func(string) string { detections++; return own })
 			t.Cleanup(func() { SetDetectRemote(nil) })
 
-			if _, err := s.ResolveOrCreateRepoProject(
+			if _, _, err := s.ResolveOrCreateRepoProject(
 				ctx, saving, "infra", saving, saving, saving, own,
 			); err != nil {
 				t.Fatalf("ResolveOrCreateRepoProject: %v", err)
@@ -1615,7 +1634,7 @@ func TestResolveOrCreateRepoProjectDetectsBeforeTakingTheStoreLock(t *testing.T)
 	s.mu.Lock()
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.ResolveOrCreateRepoProject(ctx, subdir, "infra", subdir, subdir, subdir, own)
+		_, _, err := s.ResolveOrCreateRepoProject(ctx, subdir, "infra", subdir, subdir, subdir, own)
 		done <- err
 	}()
 

@@ -80,16 +80,22 @@ var detectRemoteForSave = repo.DetectRemote
 // fold an already-duplicate row into its canonical project, and writing to
 // the folded-away id afterwards fails on a foreign key against a project that
 // was deliberately not created.
-func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string, error) {
+//
+// A non-nil refusal means the repository was not allowed to bind the project
+// its name matched, and the save was routed to a project of its own instead.
+// It travels back to the caller rather than only to the log because only the
+// caller can report it: "opened a new project" is otherwise the same sentence
+// as "stopped seeing the context of the project you named" (#613).
+func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string, *memory.BindingRefusal, error) {
 	// An id the caller already knows is not re-derived. This is the exact-id
 	// lookup only, not ResolveProject: a path prefix, a remote or a basename
 	// fallback could each answer with a DIFFERENT project than the caller
 	// named, and reclassifying a save that way moves the memory out from under
 	// the address the client used.
 	if resolvedID, ok, err := s.store.ResolveExactProjectID(ctx, projectID); err != nil {
-		return "", err
+		return "", nil, err
 	} else if ok {
-		return resolvedID, nil
+		return resolvedID, nil, nil
 	}
 
 	pathShaped := strings.ContainsAny(projectID, `/\`)
@@ -108,7 +114,7 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// With no usable repository identity, retain ordinary id/name/path lookup.
 	id, _, err := s.store.ResolveProject(ctx, projectID)
 	if err != nil {
-		return "", fmt.Errorf("resolve project: %w", err)
+		return "", nil, fmt.Errorf("resolve project: %w", err)
 	}
 	if id != "" {
 		projectID = id
@@ -119,7 +125,7 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 // ensureProjectForWithRemote performs the write-side half of project
 // resolution. repoRemote must come from the caller: an empty value preserves
 // the ordinary create-or-resolve behavior and never clears recorded identity.
-func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repoRemote string) (string, error) {
+func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repoRemote string) (string, *memory.BindingRefusal, error) {
 	normalizedRemote := memory.NormalizeRepoRemote(repoRemote)
 	if normalizedRemote != "" {
 		return s.store.ResolveOrCreateRepoProject(
@@ -134,9 +140,9 @@ func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repo
 	}
 
 	if err := s.store.EnsureProjectWithRepo(ctx, projectID, "", projectID, repoRemote); err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return projectID, nil
+	return projectID, nil, nil
 }
 
 // provenanceFor derives write-time provenance for a save made through this
@@ -759,7 +765,9 @@ func (s *Server) registerTools() {
 		// project_id happens to be an absolute path, which is how two
 		// checkouts of one repository stay one project — and it returns the
 		// id to write to, since that checkout may already be represented.
-		canonical, err := s.ensureProjectFor(ctx, args.ProjectID)
+		// A refused binding comes back with it, so the result can say that
+		// this save did not reach the same-named project (#613).
+		canonical, refused, err := s.ensureProjectFor(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
@@ -786,6 +794,9 @@ func (s *Server) registerTools() {
 		msg := fmt.Sprintf("Memory saved (id: %s)", id)
 		if duplicateOf != "" {
 			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
+		}
+		if notice := refused.Notice(); notice != "" {
+			msg += " — " + notice
 		}
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
@@ -1448,7 +1459,15 @@ func (s *Server) registerTools() {
 		// project that has never saved a memory yet fails with a raw
 		// FK-constraint error instead of succeeding, since
 		// decisions.project_id references projects.id.
-		canonical, err := s.ensureProjectFor(ctx, args.ProjectID)
+		//
+		// The refusal from a refused unique-name binding (#613) is discarded
+		// here and cannot be reported: this tool refuses a project_id that
+		// does not already resolve, so the id it passes is one
+		// ResolveProject answered with, and ensureProjectFor returns it on the
+		// exact-id lookup before it can derive repository identity. Teaching
+		// this path to open a project from a path is a separate change from
+		// making the refusal visible.
+		canonical, _, err := s.ensureProjectFor(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}

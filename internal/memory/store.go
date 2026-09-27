@@ -364,10 +364,156 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
+// BindingRefusalKind names the rule that stopped a repository from claiming
+// the project its name matched.
+type BindingRefusalKind string
+
+const (
+	// RefusedAmbiguousName: the name matched more than one project, so none
+	// of them is evidence for any of the others.
+	RefusedAmbiguousName BindingRefusalKind = "ambiguous-name"
+	// RefusedDifferentRemote: the one project of that name already records
+	// another repository.
+	RefusedDifferentRemote BindingRefusalKind = "different-remote"
+	// RefusedPathMismatch: the one project of that name records a checkout
+	// the saving directory is not inside.
+	RefusedPathMismatch BindingRefusalKind = "path-mismatch"
+)
+
+// BindingRefusal reports that a repository was not allowed to claim the
+// project its name matched, and names the project the save went to instead.
+//
+// Every refusal is a fail-safe, and none of them costs the save: the memory is
+// still written, to SavedTo. What a refusal costs is the caller's ability to
+// tell "this save opened a new project" from "a project of this name exists
+// and was left behind" — the second is context the agent has just stopped
+// seeing, and it is indistinguishable from the first unless it is reported.
+//
+// It is returned rather than only logged because the log is not answerable by
+// the agent that made the save. Only the caller knows which project it
+// addressed and what it can tell the user about the result.
+type BindingRefusal struct {
+	// Kind is the rule that refused the binding.
+	Kind BindingRefusalKind
+	// Name is the name derived from the remote that no project could be bound
+	// by — never a directory basename.
+	Name string
+	// ProjectIDs are the projects that record Name, id-ordered, at most
+	// maxNamedCandidates of them: the read that produces them is bounded (see
+	// projectsNamedTx), and the rest are counted rather than listed.
+	ProjectIDs []string
+	// CandidateCount is how many projects record Name in total, which is more
+	// than len(ProjectIDs) whenever the list is capped. It is what makes the
+	// notice say "7 projects" beside five names.
+	CandidateCount int
+	// RecordedPath is the checkout the refusing project records, "" for an
+	// ambiguous name and for a project that records no location.
+	RecordedPath string
+	// RecordedRemote is the repository the refusing project already claims,
+	// "" when it claims none — which is the case RefusedPathMismatch turns on.
+	RecordedRemote string
+	// SavedTo is the project this save was routed to instead.
+	SavedTo string
+}
+
+// Notice renders the refusal for whoever asked for the save: what kept the
+// name, where the memory went, and what — if anything — the reader can run to
+// make the split go away. Empty for no refusal, so a caller can append it to
+// every save result without a nil check.
+//
+// What each kind can be repaired by is not the same, and a command that does
+// not repair it is worse than no command: a reader who follows advice that
+// does not work is further from a fix than one who was told there is nothing
+// to run. Only RefusedPathMismatch has a repair, and it takes two commands in
+// a fixed order — a merge on its own deletes the project the save landed in
+// and with it the repository it recorded, so the next save from that checkout
+// is refused again and opens a second project; the bind is what puts the
+// checkout and its repository on the project that kept the name. The merge
+// comes first because the bind is refused while the other project still
+// records that directory.
+//
+// RefusedDifferentRemote has none: two projects that claim two different
+// repositories are not a split to be closed, and the project this save used
+// already records the checkout, so the next save finds it by id. It names both
+// projects by id and by path rather than by a command to run: `ghost project`
+// dispatches delete, merge and bind and nothing else (cmd/ghost/main.go), so
+// there is no listing command for a notice here to point at.
+//
+// Commands are quoted rather than bare because a project id is often a
+// checkout path, and a path with a space in it is a command that does not run.
+func (r *BindingRefusal) Notice() string {
+	if r == nil {
+		return ""
+	}
+	saved := r.SavedTo
+	if saved == "" {
+		saved = "a project of its own"
+	}
+	held := ""
+	if len(r.ProjectIDs) > 0 {
+		held = r.ProjectIDs[0]
+	}
+	// A refusal built without the count still says how many it found, so a
+	// caller cannot render "0 projects" for a name two projects share.
+	matched := r.CandidateCount
+	if matched < len(r.ProjectIDs) {
+		matched = len(r.ProjectIDs)
+	}
+	switch r.Kind {
+	case RefusedAmbiguousName:
+		return fmt.Sprintf("%d projects are named %q (%s), so the repository could not be bound to any of them; saved to %s instead, which records this checkout and its repository, so the next save from here lands there — save under a project id to choose one instead; if two of the same-named projects are duplicates of each other, fold them with: ghost project merge <duplicate-id> <survivor-id> (the survivor keeps its own recorded checkout and repository, so pick the one whose is right)",
+			matched, r.Name, namedCandidates(r.ProjectIDs, matched), saved)
+	case RefusedDifferentRemote:
+		return fmt.Sprintf("project %q already belongs to a different repository (%s); saved to %s instead — those are two different repositories, so they are two different projects, and a merge would leave one of them without the repository it was verified against. Nothing needs repairing here: %s records this checkout, so the next save from it lands there. But a save under the name goes to the other repository's project, so address the one you meant by id (%s) or by path (%s)",
+			r.Name, r.RecordedRemote, saved, saved, held, saved)
+	case RefusedPathMismatch:
+		return fmt.Sprintf("project %q already exists at %s; saved to %s instead — to write into that project rather than this one, save under %q by name or id. To make this checkout part of it instead, run both, in this order: ghost project merge %q %q (moves what was just saved here into it) then ghost project bind %q %q (records this checkout and its repository on it, so the next save from here lands there instead of splitting again)",
+			r.Name, r.RecordedPath, saved, r.Name, saved, held, held, saved)
+	default:
+		// A kind added later renders here rather than borrowing another
+		// kind's sentence, which would suggest commands that repair a split
+		// this refusal never described.
+		return fmt.Sprintf("project %q was not bound to this repository (%s); saved to %s instead — save under the project you meant, by name, id or path",
+			r.Name, r.Kind, saved)
+	}
+}
+
+// maxNamedCandidates bounds how many candidate projects a notice names, and
+// equally how many this decision carries into its log line and that notice.
+// The text is returned to the agent that made the save and is often still in
+// its context for the rest of the session, and the count of same-named
+// projects is not bounded by anything — it is exactly what a project-merge
+// accident leaves behind.
+const maxNamedCandidates = 5
+
+// namedCandidates lists the candidate ids a refusal carries, at most
+// maxNamedCandidates of them, and counts the rest. The caller has to know that
+// more exist than it is being shown — it is about to choose a project to save
+// under — while which ones to start with is not a decision this text should
+// make. matched is the true total, which is more than the ids whenever the
+// read that found them was capped.
+func namedCandidates(ids []string, matched int) string {
+	listed := ids
+	if len(listed) > maxNamedCandidates {
+		listed = listed[:maxNamedCandidates]
+	}
+	text := strings.Join(listed, ", ")
+	if rest := matched - len(listed); rest > 0 {
+		return fmt.Sprintf("%s and %d more", text, rest)
+	}
+	return text
+}
+
 // ResolveOrCreateRepoProject resolves a repository-aware save to one project
 // and creates that project when no identity match exists. The complete
 // resolve-or-create sequence runs in one immediate SQLite transaction, so
 // separate Ghost processes cannot both create the first project for a remote.
+//
+// It returns the project the save must be written to, and a refusal when the
+// unique-name fallback was not allowed to bind the repository to the project
+// its name matched. The refusal never replaces the id: the save is still
+// routed, and a caller that reports it is telling the truth about a memory
+// that landed, not declining one. Only the log used to record it (#613).
 //
 // projectRef is the id or path ordinary resolution produced; repoName is the
 // final component of the normalized remote, never a directory basename. An
@@ -380,16 +526,16 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 // real directory loses that fallback: the save opens its own project instead —
 // one extra project per distinct id rather than one per save, since the
 // fallback row is then found by id.
-func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error) {
+func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, *BindingRefusal, error) {
 	repoRemote = NormalizeRepoRemote(repoRemote)
 	if repoRemote == "" {
-		return "", fmt.Errorf("resolve or create repository project: empty remote")
+		return "", nil, fmt.Errorf("resolve or create repository project: empty remote")
 	}
 	if id == "" {
-		return "", fmt.Errorf("resolve or create repository project: empty project id")
+		return "", nil, fmt.Errorf("resolve or create repository project: empty project id")
 	}
 	if id == "_global" {
-		return "", fmt.Errorf("refusing to assign a repository to the _global project")
+		return "", nil, fmt.Errorf("refusing to assign a repository to the _global project")
 	}
 	if path == "" {
 		path = id
@@ -410,37 +556,40 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 	// creation across Store handles and independent processes.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", fmt.Errorf("begin repository project tx: %w", err)
+		return "", nil, fmt.Errorf("begin repository project tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	canonical, err := s.resolveRepoProjectTx(ctx, tx, projectRef, path, repoName, repoRemote, saving)
+	canonical, refused, err := s.resolveRepoProjectTx(ctx, tx, projectRef, path, repoName, repoRemote, saving)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if canonical == "" {
 		canonical, err = s.createRepoProjectTx(ctx, tx, id, path, name, repoRemote)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit repository project tx: %w", err)
+	if refused != nil {
+		refused.SavedTo = canonical
 	}
-	return canonical, nil
+	if err := tx.Commit(); err != nil {
+		return "", nil, fmt.Errorf("commit repository project tx: %w", err)
+	}
+	return canonical, refused, nil
 }
 
-func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef, savingPath, repoName, repoRemote string, saving savingRepository) (string, error) {
+func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef, savingPath, repoName, repoRemote string, saving savingRepository) (string, *BindingRefusal, error) {
 	if id, found, err := s.resolveExplicitProjectRepoTx(ctx, tx, projectRef, repoRemote, saving); found || err != nil {
-		return id, err
+		return id, nil, err
 	}
 	if id, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, ""); err != nil {
-		return "", err
+		return "", nil, err
 	} else if id != "" {
-		return id, nil
+		return id, nil, nil
 	}
 	if repoName == "" {
-		return "", nil
+		return "", nil, nil
 	}
 	return s.bindUniqueProjectNameRepoTx(ctx, tx, repoName, savingPath, repoRemote)
 }
@@ -746,34 +895,62 @@ func savingPathIsProjectRoot(recorded, saving string) bool {
 // remote of its own may take that project as its own — unless that project
 // says it lives somewhere the save did not come from, which is the guard
 // below and the reason savingPath is a parameter.
-func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, name, savingPath, repoRemote string) (string, error) {
-	var count int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM projects
-		WHERE name = ? AND id != '_global'
-	`, name).Scan(&count); err != nil {
-		return "", fmt.Errorf("count projects by name for repository: %w", err)
+//
+// A refusal is returned as well as logged, and every kind logs: the caller is
+// the one who can say what the split costs to the agent that made the save, and
+// the operator is the one who needs a durable trace of a project that was not
+// claimed — the write path is the only place the split is ever visible.
+func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, name, savingPath, repoRemote string) (string, *BindingRefusal, error) {
+	candidates, matching, err := s.projectsNamedTx(ctx, tx, name, maxNamedCandidates)
+	if err != nil {
+		return "", nil, err
 	}
-	if count != 1 {
-		return "", nil
+	if matching == 0 {
+		// No project carries the name, so there is nothing to refuse: the
+		// fallback project the caller is about to create is a first save, and
+		// reporting it as a refusal would make the notice unreadable.
+		return "", nil, nil
+	}
+	if matching > 1 {
+		// A name two projects share is evidence for neither. They are named in
+		// the refusal because the caller's next question is which one to save
+		// under, and a count alone cannot answer it.
+		ids := make([]string, 0, len(candidates))
+		for _, c := range candidates {
+			ids = append(ids, c.id)
+		}
+		s.logger.Warn("refused to bind a repository to an ambiguous project name: no candidate can be evidence for another",
+			"name", name, "candidates", ids, "matching", matching,
+			"saving_path", savingPath, "remote", repoRemote)
+		return "", &BindingRefusal{
+			Kind:           RefusedAmbiguousName,
+			Name:           name,
+			ProjectIDs:     ids,
+			CandidateCount: matching,
+		}, nil
 	}
 
-	var id, existingRemote, storedPath string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT id, COALESCE(repo_remote, ''), path
-		FROM projects
-		WHERE name = ? AND id != '_global'
-	`, name).Scan(&id, &existingRemote, &storedPath); err != nil {
-		if err == sql.ErrNoRows {
-			return "", nil
-		}
-		return "", fmt.Errorf("read project by name for repository: %w", err)
-	}
+	candidate := candidates[0]
+	id, existingRemote, storedPath := candidate.id, candidate.remote, candidate.path
 	if existingRemote != "" {
 		if existingRemote == repoRemote {
-			return id, nil
+			return id, nil, nil
 		}
-		return "", nil
+		// A project that already speaks for another repository keeps it: the
+		// remote on a project is the evidence that lets two checkouts of one
+		// repository be one project, and overwriting it here would move that
+		// project's identity onto a directory the evidence does not describe.
+		s.logger.Warn("refused to bind a repository to a project of the same name: it already belongs to another repository",
+			"project", id, "name", name, "recorded_remote", existingRemote,
+			"saving_path", savingPath, "remote", repoRemote)
+		return "", &BindingRefusal{
+			Kind:           RefusedDifferentRemote,
+			Name:           name,
+			ProjectIDs:     []string{id},
+			CandidateCount: 1,
+			RecordedPath:   recordedCheckout(storedPath),
+			RecordedRemote: existingRemote,
+		}, nil
 	}
 	// A name does not outweigh where a project says it lives. An unrelated
 	// clone whose directory is called "infra" would otherwise claim the
@@ -791,7 +968,8 @@ func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, nam
 	// being inherited by whatever directory took its name. The price is that a
 	// second checkout of a project with no recorded remote keeps its own
 	// project rather than inheriting the first one's memories — the trade
-	// #610 asked for, and the reason the refusal is logged rather than silent.
+	// #610 asked for, and the reason the refusal is reported rather than
+	// silent.
 	if storedPathIsUsable(storedPath) && !pathsAgree(absoluteSessionPath(savingPath), storedPath) {
 		// pathsAgree fails for a path that no longer resolves as well as for
 		// one that resolves somewhere else, and the two need different fixes,
@@ -800,12 +978,95 @@ func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, nam
 		s.logger.Warn("refused to bind a repository to a project of the same name: its recorded path does not contain the saving directory",
 			"project", name, "recorded_path", storedPath, "recorded_path_resolves", resolveErr == nil,
 			"saving_path", savingPath, "remote", repoRemote)
-		return "", nil
+		return "", &BindingRefusal{
+			Kind:           RefusedPathMismatch,
+			Name:           name,
+			ProjectIDs:     []string{id},
+			CandidateCount: 1,
+			RecordedPath:   recordedCheckout(storedPath),
+		}, nil
 	}
 	if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
-		return "", fmt.Errorf("bind repository to named project: %w", err)
+		return "", nil, fmt.Errorf("bind repository to named project: %w", err)
 	}
-	return id, nil
+	return id, nil, nil
+}
+
+// recordedCheckout returns the checkout a project records, or "" when the path
+// column holds the id sentinel that a project created by name records instead
+// of a location. The sentinel is a real value in that column and a useless one
+// in a sentence about where a project lives, so a refusal reports the location
+// or nothing.
+func recordedCheckout(stored string) string {
+	if !storedPathIsUsable(stored) {
+		return ""
+	}
+	return stored
+}
+
+// nameCandidate is one project that records a given name, with the two fields
+// the unique-name decision reads: the repository it already claims, if any, and
+// the checkout it records.
+type nameCandidate struct {
+	id     string
+	remote string
+	path   string
+}
+
+// projectsNamedTx reads the projects recording name, at most limit of them and
+// id-ordered, together with how many record it in total.
+//
+// The count decides the refusal and the rows decide the rest, so both come from
+// one query: COUNT(*) OVER () is evaluated before LIMIT, which is what keeps
+// the two consistent.
+//
+// What the limit bounds is what the caller carries — at most limit rows reach
+// the Go slice, the log line and the notice. It does not bound the work SQLite
+// does under the store mutex and the write lock: the window is computed over
+// every matching row, and projects.name carries no index. The count has to be
+// there either way, and reading the names to go with it costs nothing extra.
+//
+// limit is clamped to at least one because SQLite reads LIMIT 0 as "no rows":
+// the query would then report that nothing records the name, and the decision
+// that calls it would take its no-candidate path and open a project of its own
+// and bind the repository to it — a silent duplicate of the same-named project
+// rather than a decision to bind or refuse, which is the split this whole path
+// exists to report. A negative limit means no limit at all, which costs only
+// the bound the limit was passed to set.
+func (s *Store) projectsNamedTx(ctx context.Context, tx *sql.Tx, name string, limit int) ([]nameCandidate, int, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, COALESCE(repo_remote, ''), path, COUNT(*) OVER () AS matching
+		FROM projects
+		WHERE name = ? AND id != '_global'
+		ORDER BY id
+		LIMIT ?
+	`, name, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read projects by name for repository: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var candidates []nameCandidate
+	matching := 0
+	for rows.Next() {
+		var c nameCandidate
+		if err := rows.Scan(&c.id, &c.remote, &c.path, &matching); err != nil {
+			return nil, 0, fmt.Errorf("read project by name for repository: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("read projects by name for repository: %w", err)
+	}
+	if len(candidates) == 0 {
+		// No rows means no project records the name, and with them the window
+		// count that would have said so.
+		return nil, 0, nil
+	}
+	return candidates, matching, nil
 }
 
 func (s *Store) findProjectByRepoRemoteTx(ctx context.Context, tx *sql.Tx, repoRemote, excludeID string) (string, error) {
