@@ -597,6 +597,40 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 			t.Fatal("a root that exists but is unusable was skipped as if absent")
 		}
 	})
+
+	// The Windows shape: the leaf reports ErrNotExist while a FILE sits where
+	// its parent directory belongs, which is what "~/.config is a file"
+	// produces there. Skipping it would build a home with no configuration, so
+	// the parent probe is what keeps the rule intact on that platform.
+	t.Run("absent leaf behind a non-directory parent is refused", func(t *testing.T) {
+		shapedHome := t.TempDir()
+		if err := os.WriteFile(filepath.Join(shapedHome, "Library"), []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		probe := func(name string) (os.FileInfo, error) {
+			if strings.HasSuffix(name, filepath.Join("Library", "Application Support", "goose")) {
+				return nil, fs.ErrNotExist
+			}
+			return os.Lstat(name)
+		}
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, probe); err == nil {
+			t.Fatal("a config root behind a non-directory parent was skipped as if absent")
+		}
+	})
+
+	// The ordinary case the parent probe must not break: ~/.config exists, the
+	// user has never run `goose configure`, so there is no config dir. A
+	// machine in exactly this state — no goose config at all — has to keep
+	// working, and its config comes from the environment.
+	t.Run("unpopulated leaf behind a real directory is skipped", func(t *testing.T) {
+		shapedHome := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(shapedHome, ".config"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat); err != nil {
+			t.Fatalf("a location the user has not populated must be skipped, not refused: %v", err)
+		}
+	})
 }
 
 func TestOpenCodeClientUsesNoToolPolicy(t *testing.T) {

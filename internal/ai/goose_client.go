@@ -218,13 +218,18 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 	return linkGooseConfigDirsWith(home, env, homeDir, os.Lstat)
 }
 
-// linkGooseConfigDirsWith takes the probe as a parameter because the
-// ENOENT/ENOTDIR distinction is not reproducible everywhere: Windows reports "a
-// file where a directory belongs" as ERROR_PATH_NOT_FOUND, and syscall maps
-// ENOTDIR to that same constant, so on that host this case legitimately
-// classifies as absent. The platform's own answer is honoured — a genuine miss
-// is skipped — and only the classification is injected, so the test can pin the
-// rule itself rather than a platform's error code.
+// linkGooseConfigDirsWith takes the probe as a parameter so a test can state a
+// classification instead of arranging one. Arranging the interesting case is
+// not possible everywhere: Windows reports "a file where a directory belongs"
+// as ERROR_PATH_NOT_FOUND, and syscall maps ENOTDIR to that same constant, so
+// on that host a source-level check cannot tell that case from a genuine miss.
+//
+// The parent probe is what makes the rule hold anyway. Each candidate is under
+// a directory the platform either has or does not: ~/.config, and
+// ~/Library/Application Support. A root is skipped only when its PARENT is
+// absent, which is what "this platform does not use this location" actually
+// looks like, and which no errno conflates. "~/.config exists but is a file"
+// then fails closed everywhere, as the branch below requires.
 func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe func(string) (os.FileInfo, error)) error {
 	if harnessEnvValue(env, "XDG_CONFIG_HOME") != "" {
 		// An absolute path the child reads directly; HOME plays no part.
@@ -239,10 +244,29 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe fu
 		// unreadable, and skipping it would hand the child an empty profile
 		// with nothing saying Ghost dropped it.
 		if _, err := probe(source); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
+			// Whether this is "not this platform's location" or a real fault
+			// cannot be read from the source's own errno, because on Windows
+			// "a file where a directory belongs" is ERROR_PATH_NOT_FOUND and
+			// maps to ErrNotExist exactly like a genuine miss.
+			//
+			// The difference is one level up. A location the platform uses has
+			// its parent (~/.config, ~/Library/Application Support) present,
+			// and then a missing leaf is ordinary: a user who has never run
+			// `goose configure` has no config dir either, and that must not
+			// fail the call. A parent that is absent, or that is a FILE rather
+			// than a directory, is the fault — and the second shape is exactly
+			// what a Windows errno cannot distinguish at the leaf.
+			parent := filepath.Dir(source)
+			info, parentErr := probe(parent)
+			switch {
+			case parentErr != nil && errors.Is(parentErr, fs.ErrNotExist):
+				continue // the platform has no such location at all
+			case parentErr != nil:
+				return fmt.Errorf("goose isolated config %s: %w", parent, parentErr)
+			case !info.IsDir():
+				return fmt.Errorf("goose isolated config %s: %w", parent, err)
 			}
-			return fmt.Errorf("goose isolated config %s: %w", source, err)
+			continue // configured location the user has not populated yet
 		}
 		// After the probe, so the isolated home does not gain a
 		// Library/Application Support directory on the platforms that cannot
