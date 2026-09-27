@@ -340,7 +340,9 @@ func ExtractBinary(archive []byte) ([]byte, error) {
 }
 
 // extractTarGzBinary reads the binary out of a gzipped tar. The binary is at
-// the archive root, named "ghost" or "ghost.exe".
+// the archive root, named "ghost" or "ghost.exe", and must be a regular
+// non-empty file — anything else with that name is refused rather than
+// installed.
 func extractTarGzBinary(archive []byte) ([]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
@@ -364,11 +366,45 @@ func extractTarGzBinary(archive []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tar: %w", err)
 		}
-		if hdr.Name == "ghost" || hdr.Name == "ghost.exe" {
-			return io.ReadAll(tr)
+		if hdr.Name != "ghost" && hdr.Name != "ghost.exe" {
+			continue
 		}
+		// A regular file, and not an empty one. A directory or link entry
+		// carrying the binary's name has no body, so matching the name alone
+		// returns zero bytes with no error — and Replace would then rename an
+		// empty file over the installed executable and report an upgrade. The
+		// zip path already skipped directories through FileInfo().IsDir(); this
+		// is the same guard for tar, plus the empty case neither path could see.
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			return nil, fmt.Errorf("ghost in the archive is a %s, not a regular file", tarEntryKind(hdr))
+		}
+		binary, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, fmt.Errorf("reading the ghost binary from the archive: %w", err)
+		}
+		if len(binary) == 0 {
+			return nil, fmt.Errorf("ghost in the archive is empty — refusing to install a zero-byte binary")
+		}
+		return binary, nil
 	}
 	return nil, fmt.Errorf("ghost binary not found in archive")
+}
+
+// tarEntryKind names a tar entry type for a refusal message, so "not a regular
+// file" says which kind was found.
+func tarEntryKind(hdr *tar.Header) string {
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		return "directory"
+	case tar.TypeSymlink:
+		return "symlink"
+	case tar.TypeLink:
+		return "hard link"
+	case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
+		return "device or fifo"
+	default:
+		return fmt.Sprintf("type %q", hdr.Typeflag)
+	}
 }
 
 // inflatedReader fails once the stream it wraps has produced more than limit
@@ -394,7 +430,8 @@ func (c *inflatedReader) Read(p []byte) (int, error) {
 
 // extractZipBinary reads the binary out of a zip. Only root entries count:
 // goreleaser puts the binary at the archive root, so an entry that could only
-// be reached by traversing out of the archive is not a file ghost published.
+// be reached by traversing out of the archive is not a file ghost published. As
+// on the tar path, what is accepted has to be a regular non-empty file.
 //
 // A zip is random-access, so an entry this loop skips is never inflated at
 // all; the one entry it opens is bounded directly, by the same cap.
@@ -407,6 +444,9 @@ func extractZipBinary(archive []byte) ([]byte, error) {
 		if f.FileInfo().IsDir() || (f.Name != "ghost" && f.Name != "ghost.exe") {
 			continue
 		}
+		if !f.Mode().IsRegular() {
+			return nil, fmt.Errorf("ghost in the archive is not a regular file")
+		}
 		rc, err := f.Open()
 		if err != nil {
 			return nil, fmt.Errorf("zip %s: %w", f.Name, err)
@@ -415,6 +455,9 @@ func extractZipBinary(archive []byte) ([]byte, error) {
 		_ = rc.Close() //nolint:errcheck
 		if readErr != nil {
 			return nil, readErr
+		}
+		if len(binary) == 0 {
+			return nil, fmt.Errorf("ghost in the archive is empty — refusing to install a zero-byte binary")
 		}
 		return binary, nil
 	}
