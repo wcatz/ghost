@@ -45,6 +45,7 @@ import (
 type reassessStore interface {
 	ResolvedCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	ClearResolved(ctx context.Context, projectID string, ids []string) (int, error)
@@ -296,6 +297,14 @@ func assertedByDemotions(ctx context.Context, store reassessStore, projectID str
 	links, err := store.LinksByRelationSource(ctx, projectID, "supersedes", "llm")
 	if err != nil {
 		return nil, fmt.Errorf("load supersedes links: %w", err)
+	}
+	// The same exemption Run applies, for the same reason: an edge across a
+	// scope conflict asserts no replacement, so holding the row back on its
+	// account would report "still demoted" for a retirement that should not
+	// exist, and no pass could ever repair it.
+	links, err = scopeCompatibleSupersedes(ctx, store, links)
+	if err != nil {
+		return nil, err
 	}
 	for _, l := range links {
 		if resolvedIDs[l.TargetID] {

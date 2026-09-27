@@ -119,3 +119,54 @@ func ScopesConflict(a, b map[string]string) bool {
 	}
 	return false
 }
+
+// scopesConflictSQL renders ScopesConflict as a SQL predicate over two
+// expressions that each yield a memories.scope value. It returns a boolean SQL
+// expression that is 1 (true) exactly when ScopesConflict is true for the two
+// stored scopes.
+//
+// It is a second statement of one rule, and that is a cost with a purpose. The
+// statements that need it — the two fold-target liveness checks — choose their
+// candidate set with the same statement's LIMIT, so a scope check applied after
+// the cut would spend the candidate budget on rows the caller may not fold into
+// and miss a compatible one ranked just below. A second statement is the only
+// way to decide inside the cut.
+//
+// Two copies of a rule drift, so TestScopesConflictSQLAgreesWithScopesConflict
+// runs both forms over the same table and requires they answer identically,
+// including the shapes a save would never produce (NULL, '{}', malformed JSON).
+// Change one without the other and that test fails.
+//
+// json_each is SQLite's table-valued function over a JSON object, so a shared
+// key with two different values is a self-join on key. json_valid guards each
+// side: parseScope reads a value it cannot decode as no scope and deliberately
+// does not fail the read, whereas json_each on a malformed document raises an
+// error — and the callers treat a failed query as "no candidates", so an
+// unguarded decode would make one bad row invisible to dedup rather than merely
+// unscoped.
+//
+// Values are compared with <> on the JSON text. A scope value is always a
+// string: scopeJSON marshals a map[string]string, and a non-string in the column
+// would be a hand-edited row rather than something Ghost wrote. Go's decoder
+// rejects such a row into "no scope" while this predicate would see a
+// difference; the asymmetry needs a hand-edited database to reach and is
+// recorded here rather than paid for with a stricter predicate that costs an
+// explicit type check on every comparison.
+func scopesConflictSQL(a, b string) string {
+	return `(EXISTS (
+		SELECT 1
+		FROM json_each(` + scopeJSONExpr(a) + `) ja
+		JOIN json_each(` + scopeJSONExpr(b) + `) jb
+		  ON ja.key = jb.key AND ja.value <> jb.value
+	))`
+}
+
+// scopeJSONExpr wraps a scope expression so a NULL, an empty document or a
+// malformed one reads as the empty object — no keys, so no conflict can be
+// found — instead of aborting the statement. The empty document matters on its
+// own: scopeJSON never writes one (an empty scope is stored as NULL), but a row
+// written before that convention, or by an import, can carry '{}', and parseScope
+// already reads it as no scope.
+func scopeJSONExpr(scopeExpr string) string {
+	return `CASE WHEN json_valid(` + scopeExpr + `) THEN ` + scopeExpr + ` ELSE '{}' END`
+}

@@ -2315,6 +2315,16 @@ type UpsertOptions struct {
 // folding into a dead row is the failure FoldOnly makes unrecoverable: it
 // strengthens a record injection already dropped and then returns without
 // storing the incoming wording, so the memory exists nowhere.
+//
+// A 'supersedes' edge only makes the row dead if it is a verdict the store may
+// act on, and an edge whose endpoints name the same key with different values is
+// not: a development row never replaced a production one. Reading such an edge
+// as a verdict blocks every fold of that row — so each re-save of the exact text
+// inserts a second copy instead of folding, and a fact that should occupy one
+// row fills the store with restatements. The exemption is asked inside the
+// statement because the probe that chose the row is this statement's sibling and
+// both are decided under the same LIMIT (see scopesConflictSQL). The edge is not
+// deleted; it is merely not a reason to refuse a fold.
 func foldTargetStillLive(ctx context.Context, tx *sql.Tx, projectID, id string) (bool, error) {
 	if id == "" {
 		return false, nil
@@ -2324,10 +2334,13 @@ func foldTargetStillLive(ctx context.Context, tx *sql.Tx, projectID, id string) 
 		SELECT 1 FROM memories m
 		WHERE m.id = ? AND m.project_id = ? AND m.resolved_at IS NULL
 		  AND NOT EXISTS (
-		      SELECT 1 FROM memory_links l
+		      SELECT 1
+		      FROM memory_links l
+		      JOIN memories s ON s.id = l.source_id
 		      WHERE l.target_id = m.id
 		        AND l.relation = 'supersedes'
 		        AND l.invalidated_at IS NULL
+		        AND NOT `+scopesConflictSQL("s.scope", "m.scope")+`
 		  )
 	`, id, projectID).Scan(&live)
 	if err == sql.ErrNoRows {
@@ -2496,6 +2509,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// memory is in neither _global nor anywhere it is read from. Its target is
 	// therefore re-verified inside the write transaction below and the
 	// insertion is taken instead when the probe named a dead row.
+	//
+	// The exclusion is scoped, for the reason foldTargetStillLive gives in full:
+	// an edge whose endpoints name different environments asserts no
+	// replacement, and excluding the row anyway would make every re-save of it
+	// insert a duplicate. The check is inside the statement because this
+	// statement's LIMIT chooses the candidates — filtering after it would spend
+	// the budget on rows no fold may use.
 	if existingID == "" {
 		crossRows, crossErr := db.QueryContext(ctx, `
 			SELECT m.id, m.content, m.scope
@@ -2505,10 +2525,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			  AND m.category != ?
 			  AND m.resolved_at IS NULL
 			  AND NOT EXISTS (
-			      SELECT 1 FROM memory_links l
+			      SELECT 1
+			      FROM memory_links l
+			      JOIN memories s ON s.id = l.source_id
 			      WHERE l.target_id = m.id
 			        AND l.relation = 'supersedes'
 			        AND l.invalidated_at IS NULL
+			        AND NOT `+scopesConflictSQL("s.scope", "m.scope")+`
 			  )
 			  AND memories_fts MATCH ?
 			ORDER BY rank, m.importance DESC

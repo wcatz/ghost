@@ -177,6 +177,17 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // locking: same contract as DemotionPenalties — callers holding Store's
 // s.mu.RLock (GetTopMemories) pass its read handle; the hook passes its own
 // read-only handle.
+//
+// A scope-conflicting endpoint pair is exempt, for the same reason it is exempt
+// in DemotionPenalties and no different one: the edge asserts that one claim
+// replaced another, and a memory that names environment=production and one that
+// names environment=development are two claims about two places however
+// similar their sentences read. internal/supersede refuses to write such an
+// edge, but this is the only place that can stop one already in the store — a
+// 'supersedes' link written before that rule existed, or by a manual
+// CreateLink — from sinking a production answer behind a development one. The
+// edge is left in the graph; scope exempts it from ranking rather than deleting
+// it.
 func SupersedePenalties(ctx context.Context, db sqlQueryer, ids []string) (map[string]int, error) {
 	if len(ids) < 2 {
 		return nil, nil
@@ -194,9 +205,12 @@ func SupersedePenalties(ctx context.Context, db sqlQueryer, ids []string) (map[s
 	list := strings.Join(ph, ",")
 
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT source_id, target_id FROM memory_links
-		WHERE relation = 'supersedes' AND invalidated_at IS NULL
-		  AND source_id IN (%s) AND target_id IN (%s)
+		SELECT l.source_id, l.target_id, source_mem.scope, target_mem.scope
+		FROM memory_links l
+		JOIN memories source_mem ON source_mem.id = l.source_id
+		JOIN memories target_mem ON target_mem.id = l.target_id
+		WHERE l.relation = 'supersedes' AND l.invalidated_at IS NULL
+		  AND l.source_id IN (%s) AND l.target_id IN (%s)
 	`, list, list), args...)
 	if err != nil {
 		return nil, fmt.Errorf("supersede penalties: %w", err)
@@ -206,8 +220,12 @@ func SupersedePenalties(ctx context.Context, db sqlQueryer, ids []string) (map[s
 	penalty := make(map[string]int, len(ids))
 	for rows.Next() {
 		var src, tgt string
-		if err := rows.Scan(&src, &tgt); err != nil {
+		var sourceScope, targetScope sql.NullString
+		if err := rows.Scan(&src, &tgt, &sourceScope, &targetScope); err != nil {
 			return nil, fmt.Errorf("supersede penalties: %w", err)
+		}
+		if ScopesConflict(parseScope(sourceScope), parseScope(targetScope)) {
+			continue
 		}
 		// src supersedes tgt: sink the superseded side once per edge.
 		// The query already restricted both endpoints to ids, so src is

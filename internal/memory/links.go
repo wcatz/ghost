@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 )
@@ -232,6 +233,17 @@ func (s *Store) LinkStats(ctx context.Context) (links, scans int, err error) {
 // are in ids: each pair is [superseder, superseded]. Used by ranking to demote
 // a memory only when its actual replacement co-occurs in the same result set,
 // so a superseded fact is never buried when its successor isn't even present.
+//
+// A pair whose endpoints' scopes conflict is withheld, on the same terms as
+// SupersedePenalties: two claims about different places never stood in a
+// supersession relation, and an edge that says they did is not a verdict any
+// reader may act on. The edge stays in the graph.
+//
+// This function has no production caller today — SupersedePenalties is the
+// reader ranking uses, and it applies the same exemption. The guard is here so
+// that a caller added later inherits the store's rule rather than
+// contradicting it, which is the trap best_practices.md warns about when an
+// existing store API is exposed through a new path.
 func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string, error) {
 	if len(ids) < 2 {
 		return nil, nil
@@ -250,9 +262,12 @@ func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string
 	}
 	list := strings.Join(ph, ",")
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT source_id, target_id FROM memory_links
-		WHERE relation = 'supersedes' AND invalidated_at IS NULL
-		  AND source_id IN (%s) AND target_id IN (%s)
+		SELECT l.source_id, l.target_id, source_mem.scope, target_mem.scope
+		FROM memory_links l
+		JOIN memories source_mem ON source_mem.id = l.source_id
+		JOIN memories target_mem ON target_mem.id = l.target_id
+		WHERE l.relation = 'supersedes' AND l.invalidated_at IS NULL
+		  AND l.source_id IN (%s) AND l.target_id IN (%s)
 	`, list, list), args...)
 	if err != nil {
 		return nil, fmt.Errorf("supersedes within: %w", err)
@@ -262,8 +277,12 @@ func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string
 	var pairs [][2]string
 	for rows.Next() {
 		var src, tgt string
-		if err := rows.Scan(&src, &tgt); err != nil {
+		var sourceScope, targetScope sql.NullString
+		if err := rows.Scan(&src, &tgt, &sourceScope, &targetScope); err != nil {
 			return nil, err
+		}
+		if ScopesConflict(parseScope(sourceScope), parseScope(targetScope)) {
+			continue
 		}
 		pairs = append(pairs, [2]string{src, tgt})
 	}
