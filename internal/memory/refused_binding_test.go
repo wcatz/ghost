@@ -283,8 +283,9 @@ func TestAmbiguousNameRefusalNamesAtMostFiveCandidates(t *testing.T) {
 // clamp turns both inputs into the same bound of one.
 //
 // Two projects share the name so that each input is observable rather than
-// merely equal to the fixture: an unclamped limit returns both rows, and a
-// clamped one returns the first of them beside the true count of two.
+// merely equal to the fixture: an unclamped -1 returns both rows, an unclamped
+// 0 returns none and a count of 0, and a clamped limit of either returns the
+// first of them beside the true count of two.
 func TestProjectsNamedTxClampsTheLimit(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
