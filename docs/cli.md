@@ -88,13 +88,15 @@ ghost reflect myproject --apply
 | `--apply` | Save the consolidated result. |
 | `--restore` | Restore the most recent consolidation snapshot. |
 | `--require-llm` | Fail instead of falling back to the offline SQLite/Jaccard tier. |
-| `--allow-drops` | Apply even when memories would be removed without a merge. Every category is under the drop guard, so without this flag any input memory the consolidation never referenced is re-added verbatim instead of deleted. |
+| `--allow-drops` | Apply even when memories would be removed without a merge. Every category is under the drop guard, so without this flag an input memory no surviving memory explains is re-added verbatim instead of deleted. What that now covers is narrow: an explicit `obsolete` drop the corpus cannot corroborate, a merge that lost one of its sources, and the SQLite tier's absorbed duplicates — and a claim the response made about an id is honoured only while the text that replaced or absorbed it is still in the result, since a filter can remove it after the operations are resolved. A memory the harness simply never named is carried through unchanged, and an input it disposed of — named for a rewrite, or dropped as `superseded by <id>` — is not re-added, but only while the text that replaced it is still in the result. |
 | `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
 | `--skip-unchanged` | Skip the LLM call when the consolidatable set is unchanged since the last applied pass. |
 | `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
 The `auto` tier uses the explicit source when provided, otherwise detects the calling harness. It does not silently switch to a different harness or billing path. When a source is known but its CLI binary is unavailable, auto can fall back to SQLite; the offline tier is also available for an explicit local run.
+
+A harness-backed consolidation is asked for operations on the memory ids it is shown — `keep <id>`, `merge <id>,<id> -> <text>`, `rewrite <id> -> <text>`, `drop <id> reason: obsolete | superseded by <id>` — rather than for a rewritten list of memories. A memory leaves the corpus only through one of those operations: named as a merge source, named for a rewrite, or named in a drop with a reason. Anything the response does not name is carried through unchanged, byte for byte, so it keeps its id, its embedding, its links and its age. A merge or rewrite that introduces a path, hash, version, hostname or number found in none of the memories it names is rejected and those memories are kept as they are, which is why a `rewrite` fixes a claim and never a specific. An operation Ghost cannot read, an id it did not supply, or a response carrying no operations fails that tier's result, and consolidation falls through to the next tier.
 
 CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
 

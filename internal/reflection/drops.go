@@ -1,5 +1,9 @@
 package reflection
 
+import (
+	"strings"
+)
+
 // DroppedGuarded is an input memory, in any category, that has no close
 // survivor in the consolidation output. Importance and Tags are carried so the
 // memory can be re-inserted verbatim by RetainGuardedDrops without losing its
@@ -12,13 +16,15 @@ type DroppedGuarded struct {
 }
 
 // dropContainmentThreshold: an input memory counts as survived when this
-// fraction of its tokens appears in some single output memory. Containment
-// (input→output), not Jaccard: the question is whether the input's substance
-// survives anywhere, not whether the rewrite is fully explained by one source.
+// fraction of its tokens appears in the output it is compared against.
+// Containment (input→output), not Jaccard: the question is whether the input's
+// substance survives anywhere, not whether the rewrite is fully explained by one
+// source.
+//
 // Deliberately lenient — a false positive costs a healthy merge whose input is
 // then also re-added verbatim (a duplicate row), while an outright deletion
-// lands far below the threshold (an unrelated survivor shares only a stray
-// token or two).
+// lands far below the threshold (an unrelated survivor shares only a stray token
+// or two).
 const dropContainmentThreshold = 0.45
 
 // AuditGuardedDrops returns every input memory that has no token-overlap
@@ -32,22 +38,95 @@ const dropContainmentThreshold = 0.45
 // agent writes is ever excluded by it. Deleting an unreferenced input
 // therefore takes an explicit --allow-drops.
 //
+// One exemption, and it is witnessed rather than inferred. result.Replacements
+// names the input ids a response disposed of together with the text that took
+// their place — a rewrite's own new text, or the emitted text of the successor a
+// supersession named. A rewrite and a supersession are the same claim about the
+// same thing, so they share one list and one check: re-adding such a row would
+// put it back beside the text that replaced it, which is a duplicate rather than a
+// save, and re-adding it is how a memory reading "three issues are still open"
+// survived beside "the three open issues have all been fixed".
+//
+// The witness has to be there, though. A filter that runs over the result after
+// the operations are resolved can remove the replacing text —
+// dropForeignProjectMemories deletes a memory naming a project the input corpus
+// never mentioned, and a rewrite or a merge is exactly such a memory — and an
+// exemption trusted on the id alone then disposes of a row with nothing in its
+// place, silently, with nothing left for --allow-drops to act on. A claim whose
+// text is gone lapses, and the input goes back under the ordinary audit. An
+// obsolete drop names no successor and never gets here at all, so the token audit
+// governs it.
+//
+// What the guard no longer has to do is the biggest part. An input the response
+// never named is emitted verbatim by executeOps (#639), so there is nothing to
+// rescue: before that, an unnamed memory was emitted by nobody and survived only
+// if this guard FAILED to recognise a survivor, which made a false positive in
+// the "absorbed" direction a silent deletion with no warning and no
+// --allow-drops. An id the model never mentioned needs no inference at all.
+//
+// Which output set an input is compared against is the remaining choice, and it is
+// witnessed the same way. A MERGED source (result.Merges) is measured against the
+// union of every output, because a merge may carry its substance across a survivor
+// plus its siblings — but only while the merge that folded it in is still in the
+// result, since with the pass-through above the union of a result whose merge was
+// removed is the rest of the project. Everything else is measured against a single
+// output. The SQLite fallback names no ids, so every one of its inputs is measured
+// the strict way.
+//
 // Uses the package's tokenize (numeric-retaining, stopword-filtered) so merged
 // rewrites that preserve substance — including ports and versions — are
 // recognized as survivors and are not re-added alongside the merge.
 func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []DroppedGuarded {
 	outTokens := make([]map[string]bool, 0, len(result.Memories))
+	union := make(map[string]bool)
+	present := make(map[string]bool, len(result.Memories))
 	for _, m := range result.Memories {
-		outTokens = append(outTokens, tokenize(m.Content))
+		tokens := tokenize(m.Content)
+		outTokens = append(outTokens, tokens)
+		for tok := range tokens {
+			union[tok] = true
+		}
+		present[m.Content] = true
+	}
+
+	replaced := make(map[string]bool, len(result.Replacements))
+	for _, r := range result.Replacements {
+		if r.Text != "" && present[r.Text] {
+			replaced[memIDKey(r.ID)] = true
+		}
+	}
+	// A merged source is scored against the union only while the merge that folded
+	// it in is still in the result. A merge a post-filter removed leaves the union
+	// as the rest of the project — the pass-through emits every unclaimed input —
+	// so a source whose words recur elsewhere would pass containment against a
+	// vocabulary that has nothing to do with it, and be neither re-added nor
+	// reported. A lapsed claim falls back to the strict per-output test, which is
+	// the right question once there is no merge to be spread across.
+	merged := make(map[string]bool, len(result.Merges))
+	for _, m := range result.Merges {
+		if m.Text == "" || !present[m.Text] {
+			continue
+		}
+		for _, id := range m.IDs {
+			merged[memIDKey(id)] = true
+		}
 	}
 
 	var drops []DroppedGuarded
 	for _, in := range input.ExistingMemories {
+		key := memIDKey(in.ID)
+		if replaced[key] {
+			continue
+		}
 		inTokens := tokenize(in.Content)
 		if len(inTokens) == 0 {
 			continue
 		}
-		if hasCloseSurvivor(inTokens, outTokens) {
+		if merged[key] {
+			if hasCloseSurvivor(inTokens, union) {
+				continue
+			}
+		} else if hasCloseSurvivorInAny(inTokens, outTokens) {
 			continue
 		}
 		drops = append(drops, DroppedGuarded{
@@ -60,22 +139,43 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 	return drops
 }
 
-func hasCloseSurvivor(inTokens map[string]bool, outTokens []map[string]bool) bool {
+// hasCloseSurvivor scores an input against one output's token set.
+func hasCloseSurvivor(inTokens map[string]bool, outTokens map[string]bool) bool {
+	if len(outTokens) == 0 {
+		return false
+	}
+	found := 0
+	for tok := range inTokens {
+		if outTokens[tok] {
+			found++
+		}
+	}
+	return float64(found)/float64(len(inTokens)) >= dropContainmentThreshold
+}
+
+// hasCloseSurvivorInAny scores an input against each output separately and
+// accepts the first that explains enough of it. This is the test an input
+// deserves when nothing in the response accounted for it: the guard is asking
+// "did the model absorb this, or forget it", and only one survivor claiming the
+// memory's substance can answer yes.
+func hasCloseSurvivorInAny(inTokens map[string]bool, outTokens []map[string]bool) bool {
 	for _, out := range outTokens {
 		if len(out) == 0 {
 			continue
 		}
-		found := 0
-		for tok := range inTokens {
-			if out[tok] {
-				found++
-			}
-		}
-		if float64(found)/float64(len(inTokens)) >= dropContainmentThreshold {
+		if hasCloseSurvivor(inTokens, out) {
 			return true
 		}
 	}
 	return false
+}
+
+// memIDKey normalizes a stored or emitted id for comparison. Ids are ULIDs, but
+// a model that lower-cases one still means the memory it was shown, and the
+// comparison must not depend on which side of the contract the spelling came
+// from.
+func memIDKey(id string) string {
+	return strings.ToUpper(strings.TrimSpace(id))
 }
 
 // RetainGuardedDrops turns every flagged drop back into a result memory so it

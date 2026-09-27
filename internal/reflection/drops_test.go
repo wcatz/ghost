@@ -92,6 +92,136 @@ func TestAuditGuardedDrops_RetainsEveryCategory(t *testing.T) {
 	}
 }
 
+// TestAuditGuardedDrops_MergedInputIsJudgedAgainstTheOutputUnion: a merge may
+// carry an input's substance across a survivor plus a sibling, and scoring it
+// against any one of them re-adds it verbatim beside the merge that had just
+// absorbed it — the paraphrase-duplicate class #639 measured on every project. A
+// merged source (result.MergedIDs) is therefore measured against the union of the
+// outputs.
+//
+// The fixture straddles the threshold on purpose: no single output covers 45% of
+// the SSH note and the three together cover 86% of it, so the only thing the
+// assertion turns on is which set the input is scored against.
+func TestAuditGuardedDrops_MergedInputIsJudgedAgainstTheOutputUnion(t *testing.T) {
+	ssh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH from the office is firewalled, so use port 2222"}
+	region := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1"}
+	kept := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "fact", Content: "ssh from the office is firewalled for the whole subnet"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region, kept}}
+
+	// The merge folded the SSH and region notes together and dropped the words
+	// "from the office"; the memory it did not touch carries them.
+	result := ReflectionResult{
+		Memories: []ReflectMemory{
+			{Category: "gotcha", Content: "the bastion is reached on port 2222 from the region fsn1"},
+			{Category: "fact", Content: kept.Content},
+		},
+		Merges: []Merge{{IDs: []string{ssh.ID, region.ID}, Text: "the bastion is reached on port 2222 from the region fsn1"}},
+	}
+
+	strict := result
+	strict.Merges = nil
+	if drops := AuditGuardedDrops(input, strict); len(drops) != 1 || drops[0].Content != ssh.Content {
+		t.Fatalf("a single-output comparison should have flagged the SSH note, got %+v", drops)
+	}
+	if drops := AuditGuardedDrops(input, result); len(drops) != 0 {
+		t.Fatalf("a merged source spread across the output union was flagged: %+v", drops)
+	}
+}
+
+// TestAuditGuardedDrops_NonMergedInputIsStillJudgedAgainstOneOutput is the other
+// half, and the reason the union is not applied to everything. An explicit drop
+// names its id and emits nothing, so for that row the guard is the only thing
+// standing between the harness's claim and a deletion — and it has to be
+// answered by one survivor. A corpus-wide union would answer "absorbed" for any
+// memory whose words also occur somewhere else, and honour the claim, which is
+// the unattended loss #337/#549 exist to prevent.
+func TestAuditGuardedDrops_NonMergedInputIsStillJudgedAgainstOneOutput(t *testing.T) {
+	redisNote := "Redis maxmemory must stay at 512mb in production or the OOM killer reaps the pod"
+	regionNote := "Cloudflare fronts the production region fsn1"
+	input := ReflectionInput{ExistingMemories: []memory.Memory{
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: redisNote},
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: regionNote},
+	}}
+	result := ReflectionResult{Memories: []ReflectMemory{
+		{Category: "fact", Content: "redis is the only stateful service"},
+		{Category: "fact", Content: regionNote},
+		{Category: "gotcha", Content: "the OOM killer reaps any worker over 512mb during a batch window"},
+	}}
+
+	drops := AuditGuardedDrops(input, result)
+	if len(drops) != 1 || drops[0].Content != redisNote {
+		t.Fatalf("an explicitly dropped memory was absorbed by the corpus-wide vocabulary: %+v", drops)
+	}
+
+	// The same fixture must be absorbed once the response merges it in, else it
+	// pins nothing: no single output reaches 45% and the three together reach 50%.
+	merged := result
+	merged.Merges = []Merge{{
+		IDs:  []string{"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"},
+		Text: "the OOM killer reaps any worker over 512mb during a batch window",
+	}}
+	if drops := AuditGuardedDrops(input, merged); len(drops) != 0 {
+		t.Fatalf("the same fixture must be absorbed once it was merged, else it pins nothing: %+v", drops)
+	}
+}
+
+// TestAuditGuardedDrops_HonoursAnExplicitSupersession: the guard cannot tell
+// "forgot" from "deliberately replaced", which is how a stale memory was
+// restored beside the memory that replaced it (#639). An input the harness
+// dropped as superseded by another input id, whose successor is still in the
+// result, is a decision with a witness, so the guard does not undo it — while an
+// input with no such claim is still audited, and the exemption is per-id rather
+// than global.
+func TestAuditGuardedDrops_HonoursAnExplicitSupersession(t *testing.T) {
+	// The superseded row and its successor share almost no vocabulary — an old
+	// access method replaced by a new one — so nothing but the explicit claim
+	// distinguishes "the harness said so" from "the harness forgot".
+	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH uses port 2222 with a hardware key"}
+	fixed := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "operator access is now fronted by Cloudflare Access"}
+	orphan := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "gotcha", Content: "the metrics endpoint is bound to 12798"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed, orphan}}
+
+	result := ReflectionResult{
+		Memories:     []ReflectMemory{{Category: "fact", Content: fixed.Content}},
+		Replacements: []Replacement{{ID: stale.ID, Text: fixed.Content}},
+	}
+	drops := AuditGuardedDrops(input, result)
+	if len(drops) != 1 || drops[0].Content != orphan.Content {
+		t.Fatalf("want only the unrelated input audited, got %+v", drops)
+	}
+}
+
+// TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone: a filter that
+// runs over the result after the operations can still remove the successor —
+// dropForeignProjectMemories deletes a memory naming a project the input corpus
+// never mentioned, and a merge is exactly such a memory. The stated supersession
+// then names nothing, and honouring it would delete the dropped row with no
+// replacement. The witness is the successor's text, so a claim whose text is no
+// longer in the result lapses and both rows go back under the audit: the stale
+// one is re-added, and so is the successor the filter removed.
+func TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone(t *testing.T) {
+	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH uses port 2222 with a hardware key"}
+	fixed := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "operator access is now fronted by Cloudflare Access"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed}}
+
+	result := ReflectionResult{
+		Memories:     nil, // the successor was removed from the result
+		Merges:       []Merge{{IDs: []string{fixed.ID}, Text: fixed.Content}},
+		Replacements: []Replacement{{ID: stale.ID, Text: fixed.Content}},
+	}
+	drops := AuditGuardedDrops(input, result)
+	retained := map[string]bool{}
+	for _, d := range drops {
+		retained[d.Content] = true
+	}
+	if !retained[stale.Content] {
+		t.Fatalf("a supersession outlived its successor and let the stale row go: %+v", drops)
+	}
+	if !retained[fixed.Content] {
+		t.Fatalf("the successor the filter removed was not itself re-added: %+v", drops)
+	}
+}
+
 // TestRetainGuardedDrops_CarriesFieldsVerbatim: retention must not launder the
 // memory. Content stays byte-identical so ReplaceNonManual's exact-content
 // reuse matches the original row and its embedding/links survive (#452), and

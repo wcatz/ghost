@@ -2,8 +2,6 @@ package reflection
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
 	"strings"
 
@@ -65,60 +63,43 @@ func (h *LlmConsolidator) Consolidate(ctx context.Context, input ReflectionInput
 	if err != nil {
 		return ReflectionResult{}, err
 	}
-	result, err := parseReflectionResponse(responseText)
+	// Per-id operations, not a rewritten memory list (#639). An unreadable
+	// operation, an unknown id, or a contradiction between two operations fails
+	// the whole response: applying the readable half of it would rewrite the
+	// corpus as if the model had said something it did not, and the tiered
+	// consolidator has a deterministic tier to fall through to instead.
+	resp, err := parseOpResponse(responseText)
 	if err != nil {
 		return ReflectionResult{}, err
 	}
+	result, err := executeOps(resp, input, h.log())
+	if err != nil {
+		return ReflectionResult{}, err
+	}
+	normalizeReflectMemories(&result)
 	dropFabricatedMemories(&result, input, h.log())
 	dropForeignProjectMemories(&result, input, h.log())
 	return result, nil
 }
 
-func parseReflectionResponse(text string) (ReflectionResult, error) {
-	text = strings.TrimSpace(text)
-
-	// Strip markdown code fences.
-	if strings.HasPrefix(text, "```") {
-		if idx := strings.Index(text, "\n"); idx != -1 {
-			text = text[idx+1:]
-		}
-		if idx := strings.LastIndex(text, "```"); idx != -1 {
-			text = text[:idx]
-		}
-		text = strings.TrimSpace(text)
-	}
-
-	// Unparseable output is an error, not a result: the old fallback returned
-	// the raw text as learned_context with ZERO memories, which read as "the
-	// model consolidated everything away" — the tiered quality gate then fell
-	// through to sqlite with no hint of the real cause (truncated/malformed JSON).
-	var result ReflectionResult
-	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		snippet := text
-		if len(snippet) > 120 {
-			snippet = memory.TruncateUTF8(snippet, 120) + "..."
-		}
-		return ReflectionResult{}, fmt.Errorf("reflection output is not valid JSON: %w (starts: %q)", err, snippet)
-	}
-
-	normalizeReflectMemories(&result)
-
-	return result, nil
-}
-
 // normalizeReflectMemories enforces what an LLM emission is allowed to claim
-// about itself. It runs after unmarshalling and is deliberately a separate
-// function: these rules are the difference between a bad suggestion and a
-// permanent, machine-made decision, and they deserve to be tested directly
-// rather than only through a harness call.
+// about itself. It runs after the operations have been executed and is
+// deliberately a separate function: these rules are the difference between a bad
+// suggestion and a permanent, machine-made decision, and they deserve to be
+// tested directly rather than only through a harness call.
+//
+// Under the per-id contract most of what arrives here is a stored row or a merge
+// derived from stored rows, so these rules are a backstop rather than the main
+// defence: an importance the model never states, a scope the classifier inferred,
+// and a merge whose text is entirely the model's.
 //
 // The scope rule is the one that matters. The SQLite tier refuses to promote
-// anything secret-looking, and justified it by saying the LLM tier's prompt
-// excludes secrets — but a prompt is a request, not a guarantee, so the check
+// anything secret-looking, and justified the LLM tier's gap by saying the LLM
+// tier's prompt excludes secrets — but a prompt is a request, not a guarantee, so the check
 // has to be on the value the model actually returned. A global memory is
 // replayed into every future session in every project: promoting a credential
 // does not contain a leak, it takes one confined to a single project and
-// widens it to all of them.
+// widens it to all of them (issue #545).
 func normalizeReflectMemories(result *ReflectionResult) {
 	for i := range result.Memories {
 		m := &result.Memories[i]
