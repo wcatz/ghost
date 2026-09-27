@@ -294,7 +294,10 @@ for name in AWS_SECRET_ACCESS_KEY GITHUB_TOKEN GHOST_API_KEY GHOST_DATABASE_URL;
   eval "value=\${$name-}"
   [ -z "$value" ] || { echo "leaked $name" >&2; exit 1; }
 done
-[ "$GOOSE_PATH_ROOT" = "/decoy/goose" ] || { echo "missing Goose root" >&2; exit 1; }
+# GOOSE_PATH_ROOT is the variable goose consults FIRST, so the child must not
+# keep the real one: the decoy /decoy/goose is a real plugin root, and passing
+# it through is what let the child find Ghost's own package.
+case "$GOOSE_PATH_ROOT" in "/decoy/goose") echo "GOOSE_PATH_ROOT passed through unconfined" >&2; exit 1;; esac
 [ -z "$OPENCODE_API_KEY" ] || { echo "OpenCode key leaked to Goose" >&2; exit 1; }
 args="$*"
 case "$args" in *" --no-profile"*) ;; *) echo "missing --no-profile" >&2; exit 1;; esac
@@ -428,6 +431,166 @@ func TestGooseIsolationNamesTheDirectoryItCouldNotProbe(t *testing.T) {
 	}
 	if errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("error %q reads as 'not there' when the fault is an unreadable directory", err)
+	}
+}
+
+// TestGooseChildCannotDiscoverGhostsOwnPluginUnderPathRoot: goose resolves its
+// plugin directory from GOOSE_PATH_ROOT FIRST, before any home variable. In
+// goose's own Paths::get_dir, path_root() short-circuits the whole match, so
+// when that variable is set the child reads
+// $GOOSE_PATH_ROOT/.agents/plugins and home_dir() is never consulted — which
+// means an isolated HOME confines nothing.
+//
+// The allowlist passes GOOSE_PATH_ROOT through, so a user who sets it (a CI
+// environment, or GOOSE_PATH_ROOT=$HOME to relocate goose's own data) keeps
+// pointing the child at the real plugin root, and `ghost mcp init --client
+// goose` put Ghost's MCP server there. This drives the real spawn-env builder
+// rather than the isolation helper, because the wiring is the claim: the
+// variable has to be rewritten to a root inside the scratch home, and the real
+// config has to travel with it.
+func TestGooseChildCannotDiscoverGhostsOwnPluginUnderPathRoot(t *testing.T) {
+	realRoot := t.TempDir()
+	// The package `ghost mcp init --client goose` would have installed, and
+	// the config the child authenticates from.
+	plantPlugin(t, filepath.Join(realRoot, ".agents", "plugins", "ghost"))
+	plantGooseConfig(t, filepath.Join(realRoot, "config"))
+
+	bin := fakeHarnessPolicyBinary(t, "goose", `
+root="$GOOSE_PATH_ROOT"
+[ -e "$root/.agents/plugins/ghost/mcp.json" ] && { echo "goose child discovered Ghost's own plugin under GOOSE_PATH_ROOT=$root" >&2; exit 1; }
+[ -r "$root/config/config.yaml" ] || { echo "goose child lost the config it authenticates from" >&2; exit 1; }
+case "$root" in "$GHOST_SCRATCH_DIR"/*) ;; *) echo "GOOSE_PATH_ROOT not confined: $root" >&2; exit 1;; esac
+printf '%s' 'KEEP'
+`)
+
+	t.Setenv("HOME", realRoot)
+	t.Setenv("USERPROFILE", realRoot)
+	t.Setenv("GOOSE_PATH_ROOT", realRoot)
+
+	text, _, err := (&GooseClient{binary: bin}).Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if text != "KEEP" {
+		t.Fatalf("stdout = %q", text)
+	}
+}
+
+// TestGooseSubprocessEnvFallsBackToTempDirWhenScratchUnavailable covers the goose
+// fallback specifically: an unusable scratch root must not fail the run, and the
+// child still gets an isolated HOME — and an isolated GOOSE_PATH_ROOT, which is
+// the one that governs plugin discovery — inside a private MkdirTemp tree that
+// the returned cleanup removes.
+//
+// It mirrors TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable for
+// opencode. The fallback is the branch that runs when a user's data dir is
+// broken, which is exactly when nobody is watching for a boundary quietly
+// reopening, so the boundary has to be asserted here rather than assumed.
+func TestGooseSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(blocker, "scratch"))
+	tmp := t.TempDir()
+	for _, key := range tempDirKeys {
+		t.Setenv(key, tmp)
+	}
+
+	realHome := t.TempDir()
+	plantPlugin(t, filepath.Join(realHome, ".agents", "plugins", "ghost"))
+	// Both layouts are populated, because GOOSE_PATH_ROOT is set and takes
+	// precedence: the child reads $ROOT/config, and the home-relative roots are
+	// what a parent without that variable would read.
+	plantGooseConfig(t, filepath.Join(realHome, "config"))
+	plantGooseConfig(t, filepath.Join(realHome, ".config", "goose"))
+	t.Setenv("HOME", realHome)
+	t.Setenv("USERPROFILE", realHome)
+	t.Setenv("GOOSE_PATH_ROOT", realHome)
+
+	client := &GooseClient{binary: "goose"}
+	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run", "-q"})
+	if err != nil {
+		t.Fatalf("subprocessEnv: %v", err)
+	}
+	defer cleanup()
+
+	if !strings.Contains(cmd.Dir, "ghost-goose-") {
+		t.Fatalf("fallback cmd.Dir = %q, want a private ghost-goose- tree", cmd.Dir)
+	}
+	for _, key := range []string{"HOME", "GOOSE_PATH_ROOT"} {
+		got := envValue(cmd.Env, key)
+		if got == "" {
+			t.Errorf("%s is empty in the fallback child", key)
+			continue
+		}
+		if got == realHome {
+			t.Errorf("%s = %q — the fallback restored the real home", key, got)
+		}
+		if !strings.HasPrefix(got, cmd.Dir+string(os.PathSeparator)) {
+			t.Errorf("%s = %q, want it inside the fallback dir %q", key, got, cmd.Dir)
+		}
+	}
+	for _, key := range tempDirKeys {
+		if got := envValue(cmd.Env, key); got != cmd.Dir {
+			t.Errorf("%s = %q, want the fallback dir %q", key, got, cmd.Dir)
+		}
+	}
+	// The config the child authenticates from has to have travelled.
+	if _, err := os.Stat(filepath.Join(envValue(cmd.Env, "HOME"), ".config", "goose", "config.yaml")); err != nil {
+		t.Errorf("fallback child lost the home-relative config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(envValue(cmd.Env, "GOOSE_PATH_ROOT"), "config", "config.yaml")); err != nil {
+		t.Errorf("fallback child lost the path-root config: %v", err)
+	}
+}
+
+// plantPlugin writes the package `ghost mcp init --client goose` installs.
+func plantPlugin(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plantGooseConfig writes a config directory with the files goose reads, one of
+// which carries the credentials the child needs to authenticate.
+func plantGooseConfig(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"config.yaml":  "provider: openai\n",
+		"secrets.yaml": "token: carried\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A relative GOOSE_PATH_ROOT is not a plugin root at all: goose's
+// validated_path_root drops anything that is not absolute, so the child falls
+// back to the home variables this code already confines. Rewriting it would be
+// changing a variable the child ignores, and would repoint it at a scratch path
+// in case some build stops filtering.
+func TestGooseIsolationLeavesARelativePathRootAlone(t *testing.T) {
+	home := t.TempDir()
+	cmd := &exec.Cmd{Dir: t.TempDir(), Env: []string{"HOME=" + home, "GOOSE_PATH_ROOT=relative/goose"}}
+	if err := configureGooseIsolation(cmd); err != nil {
+		t.Fatalf("configureGooseIsolation: %v", err)
+	}
+	if got := envValue(cmd.Env, "GOOSE_PATH_ROOT"); got != "relative/goose" {
+		t.Errorf("GOOSE_PATH_ROOT = %q, want the value left untouched", got)
+	}
+	// The home is still confined, so the fallback the relative value triggers
+	// cannot reach the real plugin root.
+	if got := envValue(cmd.Env, "HOME"); got == home {
+		t.Error("HOME was not confined alongside a relative path root")
 	}
 }
 

@@ -144,6 +144,10 @@ func (c *GooseClient) subprocessEnv(ctx context.Context, args []string) (*exec.C
 // a scratch path. USERPROFILE is the variable that identifies the home there,
 // and it is set, so clearing the pair removes the alternate route back to the
 // real one.
+//
+// GOOSE_PATH_ROOT overrides all of the above, and is handled separately in
+// confineGoosePathRoot: goose consults it before any home variable, so isolating
+// HOME achieves nothing while it is set.
 func configureGooseIsolation(cmd *exec.Cmd) error {
 	if cmd.Dir == "" {
 		return fmt.Errorf("goose scratch directory is empty")
@@ -172,8 +176,57 @@ func configureGooseIsolation(cmd *exec.Cmd) error {
 	env = setHarnessEnvValue(env, "USERPROFILE", home)
 	env = setHarnessEnvValue(env, "HOMEDRIVE", "")
 	env = setHarnessEnvValue(env, "HOMEPATH", "")
-	cmd.Env = env
+	confined, err := confineGoosePathRoot(home, env)
+	if err != nil {
+		return err
+	}
+	cmd.Env = confined
 	return nil
+}
+
+// confineGoosePathRoot repoints GOOSE_PATH_ROOT into the isolated home, which
+// is the only isolation that matters when the variable is set.
+//
+// goose's Paths::get_dir checks path_root() FIRST and short-circuits the whole
+// match: with GOOSE_PATH_ROOT set, plugins resolve to
+// $GOOSE_PATH_ROOT/.agents/plugins and home_dir() is never consulted. So a user
+// who sets it — a CI environment, or GOOSE_PATH_ROOT=$HOME to relocate goose's
+// own data — keeps pointing the child at the real plugin root however the home
+// is isolated, and `ghost mcp init --client goose` put Ghost's MCP server there.
+// The allowlist passes the variable through, so without this the child starts a
+// second Ghost server from inside a reflect/resolve/supersede call.
+//
+// The config moves with the root, because that root is also where goose reads
+// config.yaml, secrets.yaml and settings.json: the new root's config/ is linked
+// (or copied) from the real one, exactly as the home-relative roots are. A
+// relative value is left alone — goose's validated_path_root ignores anything
+// non-absolute, so it is not a plugin root to begin with, and rewriting it
+// would be changing a variable the child already ignores.
+func confineGoosePathRoot(home string, env []string) ([]string, error) {
+	root := harnessEnvValue(env, "GOOSE_PATH_ROOT")
+	if root == "" || !filepath.IsAbs(root) {
+		return env, nil
+	}
+	isolated := filepath.Join(home, "goose-root")
+	if err := os.MkdirAll(isolated, 0o700); err != nil {
+		return env, fmt.Errorf("goose isolated path root %s: %w", isolated, err)
+	}
+	// The real config may legitimately be absent — a user can set the variable
+	// purely to relocate goose's data and configure it through GOOSE_* instead —
+	// so an unreadable source is a refusal and a missing one is not.
+	source := filepath.Join(root, "config")
+	if info, err := os.Stat(source); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return env, fmt.Errorf("goose isolated path root: cannot read %s: %w", source, err)
+		}
+		slog.Info("goose path root has no config directory; the child will run without one",
+			"config", source)
+	} else if !info.IsDir() {
+		return env, fmt.Errorf("goose isolated path root: %s is not a directory", source)
+	} else if err := carryGooseConfigDir(source, filepath.Join(isolated, "config")); err != nil {
+		return env, err
+	}
+	return setHarnessEnvValue(env, "GOOSE_PATH_ROOT", isolated), nil
 }
 
 // gooseHomeDir returns the real home the child is being moved away from, or ""
@@ -236,6 +289,19 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 // A probe failure that is not "not there" is returned rather than treated as
 // absence, so an untraversable home or a TCC-denied ~/Library is reported
 // instead of silently dropping the configuration.
+//
+// That refusal ends the walk, and linkGooseConfigDirsWith likewise returns on
+// the FIRST candidate root it cannot classify — even when an earlier root was
+// carried successfully. This is deliberate rather than incidental. The
+// candidates are alternative locations for the same configuration, and any one
+// of them can hold a plugin directory on some platform, so a root that cannot
+// be examined is a root that might be the discoverable one. Carrying the
+// others first would mean finishing the loop on partial information: the child
+// would be configured and confined except for the location nobody was able to
+// check, which is the shape of bug this whole branch exists to remove. Failing
+// closed costs a degraded reflect, resolve or supersede call on a machine with
+// an unreadable config directory, and buys a guarantee that cannot be quietly
+// narrowed later.
 //
 // The probe is expected to RESOLVE symlinks (os.Stat), because the walk's only
 // question is "is there a directory here", and a symlink to one is that. A
