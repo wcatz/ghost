@@ -18,6 +18,13 @@ import (
 // appears here in exactly one line or one count, so the section is a partition of
 // the input set and the operator can check it by adding the numbers up.
 //
+// EVERY header and count line is a count of IDS, never of records. A merge may
+// name any number of sources, so `Merges (2)` over one three-source merge is
+// right where the count of merge operations is not, and a section whose numbers
+// do not add up to the input total is the one thing this report cannot be. The
+// line under the header is what reconciles the two: it names the ids the header
+// counted.
+//
 // The same section is printed for a dry run and for an apply, and it is printed
 // BEFORE the write, so the two are the same report and a dry run previews it
 // exactly rather than approximately. That is also why a merge line names no
@@ -42,13 +49,25 @@ func reportInputAccounting(w io.Writer, input reflection.ReflectionInput, result
 	// Discarded on purpose, as for every other report on this path: a write that
 	// fails cannot be reported through the same failed write, and the report
 	// lands on the stdout of a dry run a person is reading.
-	_, _ = fmt.Fprintf(w, "Inputs (%d) accounted for:\n", acc.Inputs)
+	_, _ = fmt.Fprintf(w, "Inputs (%d) accounted for; every count below is ids, so they add up to it:\n", acc.Inputs)
+
+	// Merges and refusals are the two buckets whose records are not one id each,
+	// so their headers count the ids the lines name rather than the lines. A
+	// header that counted operations would break the only check the section asks
+	// the reader to make.
+	merged, refused := 0, 0
+	for _, m := range acc.Merges {
+		merged += len(m.IDs)
+	}
+	for _, r := range acc.Refusals {
+		refused += len(r.IDs)
+	}
 
 	// Every section prints its count whether or not it has lines, so an operator
 	// reading a preview can tell "no merges happened" from "the section is
 	// missing" — and can add the counts up to the input total, which is the one
 	// check that says the preview accounts for the whole corpus.
-	_, _ = fmt.Fprintf(w, "Merges (%d):\n", len(acc.Merges))
+	_, _ = fmt.Fprintf(w, "Merges (%d):\n", merged)
 	for _, m := range acc.Merges {
 		line := fmt.Sprintf("  new <- %s   (%d B from %d B)", strings.Join(m.IDs, ", "), len(m.Text), m.SourceBytes)
 		if !m.In {
@@ -57,7 +76,7 @@ func reportInputAccounting(w io.Writer, input reflection.ReflectionInput, result
 		_, _ = fmt.Fprintln(w, line+guardClause(m.Guarded, allowDrops, "source"))
 	}
 
-	_, _ = fmt.Fprintf(w, "Refused by the grounding check (%d):\n", len(acc.Refusals))
+	_, _ = fmt.Fprintf(w, "Refused by the grounding check (%d):\n", refused)
 	for _, r := range acc.Refusals {
 		// The identifiers are printed whole: a path or a version cut in half
 		// names nothing, so the clause that explains the refusal would be the

@@ -102,9 +102,12 @@ func countReported(t *testing.T, section, label string) int {
 
 // assertAccountsFor is the invariant #684 asks for, checked against the reply
 // the test itself wrote rather than against the accounting's own idea of what
-// it did. lineIDs are the ids the section must name, kept and passed are the
-// two counts' worth; every input id has to appear in exactly one of the three.
-func assertAccountsFor(t *testing.T, section string, fixtures []accountFixture, lineIDs, kept, passed []string) {
+// it did. lineIDs are the ids the section must name, refs are the ids it may
+// quote as somebody ELSE's successor (a `superseded by` reason names the memory
+// that replaces the dropped row, and that one is accounted for by its own
+// bucket), and kept and passed are the two counts' worth. Every input id has to
+// appear in exactly one of lineIDs, kept and passed.
+func assertAccountsFor(t *testing.T, section string, fixtures []accountFixture, lineIDs, refs, kept, passed []string) {
 	t.Helper()
 
 	// The caller's own model of the round: one account per input id.
@@ -126,10 +129,22 @@ func assertAccountsFor(t *testing.T, section string, fixtures []accountFixture, 
 	if len(accounted) != len(fixtures) {
 		t.Errorf("the section accounts for %d distinct ids over %d inputs:\n%s", len(accounted), len(fixtures), section)
 	}
+	for _, id := range refs {
+		if accounted[id] != 1 {
+			t.Errorf("the section references %s as a successor, but that id is not accounted for exactly once itself\n%s", id, section)
+		}
+	}
 
 	// The quoted ids are exactly the ones the line kinds name, once each.
+	referenced := make(map[string]bool, len(refs))
+	for _, id := range refs {
+		referenced[id] = true
+	}
 	quoted := make(map[string]int)
 	for _, id := range storedIDsQuoted(section) {
+		if referenced[id] {
+			continue
+		}
 		quoted[id]++
 	}
 	for id, n := range quoted {
@@ -153,24 +168,47 @@ func assertAccountsFor(t *testing.T, section string, fixtures []accountFixture, 
 	if got := countReported(t, section, "Inputs ("); got != len(fixtures) {
 		t.Errorf("the section reports %d inputs, want %d:\n%s", got, len(fixtures), section)
 	}
+	// The check the report itself tells the reader to make, made here: every
+	// header is a count of IDS, so the section's own numbers add up to the input
+	// total. This is the assertion a count of merge OPERATIONS fails, which is
+	// why the mixed fixture merges three sources rather than two.
+	sum := len(kept) + len(passed)
+	for _, header := range []string{
+		"Merges (",
+		"Refused by the grounding check (",
+		"Rewrites (",
+		"Dropped (",
+		"Absent from the result (",
+	} {
+		sum += countReported(t, section, header)
+	}
+	if sum != len(fixtures) {
+		t.Errorf("the section's own counts sum to %d over %d inputs, so the check it asks the reader to make does not come out:\n%s",
+			sum, len(fixtures), section)
+	}
 	if quoted, counted := len(quoted), len(kept)+len(passed); quoted+counted != len(fixtures) {
 		t.Errorf("the section names %d ids and counts %d more, which is not the %d inputs:\n%s", quoted, counted, len(fixtures), section)
 	}
 }
 
 // TestReflectSummaryAccountsForEveryInputID is the mixed case: one reply that
-// keeps a row, merges two, rewrites one, drops one and never mentions the last.
+// keeps a row, merges three, rewrites one, drops one and never mentions the last.
 // The five dispositions are the five the operations vocabulary has, and each has
 // to be visible in the report — the input a merge consumed used to vanish from
 // it entirely, which is what made a dry run unauditable.
+//
+// The merge takes THREE sources on purpose: that is the one place a header
+// counting operations and a header counting ids disagree, and it is the case a
+// reader has to be able to add up.
 func TestReflectSummaryAccountsForEveryInputID(t *testing.T) {
 	kept := accountFixture{accountingID(1), "the bastion answers ping on 443 and ssh on 2222"}
 	mergeA := accountFixture{accountingID(2), "production runs in region fsn1 behind Cloudflare"}
 	mergeB := accountFixture{accountingID(3), "Cloudflare fronts the production region fsn1"}
-	rewritten := accountFixture{accountingID(4), "the ledger ingests through the bastion on port 2222, not 22"}
-	dropped := accountFixture{accountingID(5), "the bastion also answers ssh on port 2222 only"}
-	unnamed := accountFixture{accountingID(6), "the ingest pipeline writes run manifests under /var/lib/ghost"}
-	fixtures := []accountFixture{kept, mergeA, mergeB, rewritten, dropped, unnamed}
+	mergeC := accountFixture{accountingID(4), "the production region fsn1 sits behind Cloudflare"}
+	rewritten := accountFixture{accountingID(5), "the ledger ingests through the bastion on port 2222, not 22"}
+	dropped := accountFixture{accountingID(6), "the bastion also answers ssh on port 2222 only"}
+	unnamed := accountFixture{accountingID(7), "the ingest pipeline writes run manifests under /var/lib/ghost"}
+	fixtures := []accountFixture{kept, mergeA, mergeB, mergeC, rewritten, dropped, unnamed}
 	input := accountingInput(t, fixtures...)
 
 	const mergeText = "production in region fsn1 runs behind Cloudflare"
@@ -178,10 +216,10 @@ func TestReflectSummaryAccountsForEveryInputID(t *testing.T) {
 	result, guarded := reflectRoundForTest(t, input, func() string {
 		return fmt.Sprintf(`{"learned_context":"ctx","ops":[
 			"keep %s",
-			"merge %s,%s -> %s",
+			"merge %s,%s,%s -> %s",
 			"rewrite %s -> %s",
 			"drop %s reason: obsolete"]}`,
-			kept.id, mergeA.id, mergeB.id, mergeText, rewritten.id, rewriteText, dropped.id)
+			kept.id, mergeA.id, mergeB.id, mergeC.id, mergeText, rewritten.id, rewriteText, dropped.id)
 	}, false)
 
 	if len(guarded) != 0 {
@@ -192,15 +230,17 @@ func TestReflectSummaryAccountsForEveryInputID(t *testing.T) {
 	t.Logf("section:\n%s", section)
 
 	assertAccountsFor(t, section, fixtures,
-		accountingIDs(mergeA, mergeB, rewritten, dropped), // merges, then the rewrite, then the drop
-		accountingIDs(kept), accountingIDs(unnamed))
+		// the merge's three sources, then the rewrite, then the drop
+		accountingIDs(mergeA, mergeB, mergeC, rewritten, dropped),
+		nil, accountingIDs(kept), accountingIDs(unnamed))
 
 	// The merge line is the part the issue is about: a successor the dry run
 	// can point at, the ids it consumed, and what it cost.
-	if !strings.Contains(section, "new <- "+mergeA.id+", "+mergeB.id) {
-		t.Errorf("the merge line does not name the successor and the ids it folded in:\n%s", section)
+	if !strings.Contains(section, "new <- "+mergeA.id+", "+mergeB.id+", "+mergeC.id) {
+		t.Errorf("the merge line does not name the successor and every id it folded in:\n%s", section)
 	}
-	if !strings.Contains(section, fmt.Sprintf("(%d B from %d B)", len(mergeText), len(mergeA.content)+len(mergeB.content))) {
+	sourceBytes := len(mergeA.content) + len(mergeB.content) + len(mergeC.content)
+	if !strings.Contains(section, fmt.Sprintf("(%d B from %d B)", len(mergeText), sourceBytes)) {
 		t.Errorf("the merge line does not report the bytes it produced against the bytes it consumed:\n%s", section)
 	}
 	// The drop line carries the reason the model gave, which nothing recorded
@@ -208,6 +248,38 @@ func TestReflectSummaryAccountsForEveryInputID(t *testing.T) {
 	// at all about the id it disposed of.
 	if !strings.Contains(section, dropped.id+" reason: obsolete") {
 		t.Errorf("the drop line does not carry the reason the response gave:\n%s", section)
+	}
+}
+
+// TestReflectSummaryAccountsForASupersession covers the one place a line quotes
+// an id it does not account for: a `superseded by` reason names the memory that
+// replaces the dropped row, and that successor belongs to its own bucket. The
+// reason is worth printing whole — which row took over is the first question
+// asked of a supersession — and the accounting still has to be exactly once.
+func TestReflectSummaryAccountsForASupersession(t *testing.T) {
+	stale := accountFixture{accountingID(81), "the ledger syncs from the relay export staging directory"}
+	successor := accountFixture{accountingID(82), "the ledger syncs from the relay export directory"}
+	fixtures := []accountFixture{stale, successor}
+	input := accountingInput(t, fixtures...)
+
+	result, guarded := reflectRoundForTest(t, input, func() string {
+		return fmt.Sprintf(`{"learned_context":"ctx","ops":["keep %s","drop %s reason: superseded by %s"]}`,
+			successor.id, stale.id, successor.id)
+	}, false)
+	if len(guarded) != 0 {
+		t.Fatalf("the guard flagged %d rows, so the drop did not take effect: %+v", len(guarded), guarded)
+	}
+	if resultCarries(result, stale.content) {
+		t.Fatalf("the superseded row is still in the result, so this is not the case it claims to be: %+v", result.Memories)
+	}
+
+	section := accountingSection(t, input, result, guarded, false, false)
+	t.Logf("section:\n%s", section)
+
+	assertAccountsFor(t, section, fixtures, accountingIDs(stale), accountingIDs(successor),
+		accountingIDs(successor), nil)
+	if !strings.Contains(section, "reason: superseded by "+successor.id) {
+		t.Errorf("the drop line does not name the successor that took over:\n%s", section)
 	}
 }
 
@@ -241,11 +313,11 @@ func TestReflectSummaryAccountsForARefusedMerge(t *testing.T) {
 	section := accountingSection(t, input, result, guarded, false, false)
 	t.Logf("section:\n%s", section)
 
-	assertAccountsFor(t, section, fixtures, accountingIDs(sourceA, sourceB), nil, accountingIDs(unnamed))
+	assertAccountsFor(t, section, fixtures, accountingIDs(sourceA, sourceB), nil, nil, accountingIDs(unnamed))
 	if !strings.Contains(section, "/opt/ledger/cache") {
 		t.Errorf("the refusal does not name the identifier that caused it:\n%s", section)
 	}
-	if !strings.Contains(section, "Refused by the grounding check (1):") {
+	if !strings.Contains(section, "Refused by the grounding check (2):") {
 		t.Errorf("a refused merge is not reported as one:\n%s", section)
 	}
 }
@@ -271,7 +343,7 @@ func TestReflectSummaryAccountsForADropTheGuardRetains(t *testing.T) {
 	section := accountingSection(t, input, result, guarded, false, false)
 	t.Logf("section:\n%s", section)
 
-	assertAccountsFor(t, section, fixtures, accountingIDs(dropped), nil, accountingIDs(other))
+	assertAccountsFor(t, section, fixtures, accountingIDs(dropped), nil, nil, accountingIDs(other))
 	// The outcome, not just the claim: a drop line read on its own is a
 	// deletion, and this is the case where it is not one.
 	if !strings.Contains(section, "the drop guard re-added 1 row verbatim") {
@@ -312,7 +384,7 @@ func TestReflectSummaryAccountsForTheSQLiteTierAbsorptions(t *testing.T) {
 	section := accountingSection(t, input, result, guarded, false, false)
 	t.Logf("section:\n%s", section)
 
-	assertAccountsFor(t, section, fixtures, accountingIDs(absent), nil, accountingIDs(longer, other))
+	assertAccountsFor(t, section, fixtures, accountingIDs(absent), nil, nil, accountingIDs(longer, other))
 	if !strings.Contains(section, "Absent from the result (1)") {
 		t.Errorf("an input the result does not carry is not reported as absent:\n%s", section)
 	}
@@ -421,7 +493,7 @@ func TestReflectSummaryNamesTheOperationsThatDidNotLand(t *testing.T) {
 	section := accountingSection(t, input, result, guarded, true, false)
 	t.Logf("section:\n%s", section)
 
-	assertAccountsFor(t, section, fixtures, accountingIDs(sourceA, sourceB), nil, nil)
+	assertAccountsFor(t, section, fixtures, accountingIDs(sourceA, sourceB), nil, nil, nil)
 	if !strings.Contains(section, "the merged text is not in this result") {
 		t.Errorf("a merge whose text a post-filter removed reads as one that happened:\n%s", section)
 	}
@@ -449,7 +521,7 @@ func TestReflectSummaryTellsADeletedDropFromARetainedOne(t *testing.T) {
 
 	section := accountingSection(t, input, result, guarded, true, false)
 	t.Logf("section:\n%s", section)
-	assertAccountsFor(t, section, fixtures, accountingIDs(dropped), nil, accountingIDs(other))
+	assertAccountsFor(t, section, fixtures, accountingIDs(dropped), nil, nil, accountingIDs(other))
 	if !strings.Contains(section, "--allow-drops accepts the deletion") {
 		t.Errorf("a deletion the operator accepted is not reported as one:\n%s", section)
 	}

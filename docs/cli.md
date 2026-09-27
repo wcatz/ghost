@@ -104,19 +104,19 @@ A harness-backed consolidation is asked for operations on the memory ids it is s
 The report ends with an accounting of every input id, printed the same way for a dry run and for `--apply` and before the write, so a dry run previews it exactly:
 
 ```text
-Inputs (6) accounted for:
-Merges (1):
-  new <- 01J8Z…02, 01J8Z…03   (48 B from 92 B)
+Inputs (7) accounted for; every count below is ids, so they add up to it:
+Merges (3):
+  new <- 01J8Z…02, 01J8Z…03, 01J8Z…04   (48 B from 141 B)
 Refused by the grounding check (0):
 Rewrites (1):
-  01J8Z…04 -> the ledger ingests through the bastion on port 2222, never 22
+  01J8Z…05 -> the ledger ingests through the bastion on port 2222, never 22
 Dropped (1, each audited by the drop guard):
-  01J8Z…05 reason: obsolete — nothing in the result carries it; the drop guard re-added 1 row verbatim
+  01J8Z…06 reason: obsolete — nothing in the result carries it; the drop guard re-added 1 row verbatim
 Absent from the result (0):
 Kept verbatim: 1    Passed through (not named): 1
 ```
 
-Every input id appears in exactly one line or one count, so the counts add up to the input total — that is the check a reviewer can make in one line, and the reason an input a merge consumed can no longer disappear from the report. A merge line names no successor id because the merged row does not exist until `--apply` writes it; `ghost history <id>` shows the `related_id` that names it. `Absent from the result` is the input set nothing carried — a post-filter removed the row that was carrying one, or the offline SQLite tier absorbed a duplicate, since that tier names no ids — and those rows are the ones an apply deletes. A line the drop guard overrode says so, rather than leaving a drop to be read as a deletion that did not happen.
+Every input id appears in exactly one line or one count, and **every count is a count of ids** — a merge may name any number of sources, so `Merges (3)` above is three ids folded into one row, and the numbers add up to the input total. That is the check a reviewer can make in one line, and the reason an input a merge consumed can no longer disappear from the report. A merge line names no successor id because the merged row does not exist until `--apply` writes it; `ghost history <id>` shows the `related_id` that names it. `Absent from the result` is the input set nothing carried — a post-filter removed the row that was carrying one, or the offline SQLite tier absorbed a duplicate, since that tier names no ids — and those rows are the ones an apply deletes. A line the drop guard overrode says so, rather than leaving a drop to be read as a deletion that did not happen. A `superseded by` reason names the successor it replaces, so that id is quoted on the drop line and accounted for by its own count — the accounting is per input id, not per mention.
 
 CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
 
