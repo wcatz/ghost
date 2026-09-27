@@ -898,9 +898,9 @@ func assertNoDroppedWrites(t *testing.T, ctx context.Context, dbPath string, rep
 // about the contract that no process was in a position to satisfy.
 func assertDatabaseIntact(t *testing.T, ctx context.Context, dbPath string, batchRan bool) {
 	t.Helper()
-	db, err := OpenDBReadOnly(dbPath)
+	db, err := OpenReadDB(dbPath)
 	if err != nil {
-		t.Fatalf("OpenDBReadOnly for verification: %v", err)
+		t.Fatalf("OpenReadDB for verification: %v", err)
 	}
 	defer db.Close() //nolint:errcheck
 

@@ -19,7 +19,7 @@
 //	         subcommand — plus the store writes a CLI makes. Upsert, then
 //	         UpdateMemory, which reads a row and writes it back inside one
 //	         transaction and is the case _txlock=immediate exists for.
-//	ro       a read-only handle: memory.OpenDBReadOnly, the shape the mcpinit
+//	ro       a read-only handle: memory.OpenReadDB, the shape the mcpinit
 //	         hooks and `ghost obsidian` read through.
 //	maint    a lifecycle writer: one ApplyReflection batch, the single
 //	         transaction a reflect pass performs, plus a maintenance_runs row.
@@ -755,7 +755,7 @@ func runCLI(ctx context.Context, o options, rep *report, b barriers) error {
 }
 
 func runReadOnly(ctx context.Context, o options, rep *report, b barriers) error {
-	db, err := memory.OpenDBReadOnly(o.dbPath)
+	db, err := memory.OpenReadDB(o.dbPath)
 	if err != nil {
 		return err
 	}
@@ -897,7 +897,7 @@ func runMaintenance(ctx context.Context, o options, rep *report, b barriers) err
 // would take the write lock instead and stall the batch, proving nothing about
 // snapshot isolation.
 func runSnapshot(ctx context.Context, o options, rep *report, b barriers) error {
-	db, err := memory.OpenDBReadOnly(o.dbPath)
+	db, err := memory.OpenReadDB(o.dbPath)
 	if err != nil {
 		return err
 	}
@@ -956,7 +956,7 @@ func runSnapshot(ctx context.Context, o options, rep *report, b barriers) error 
 // snapshot per sample. This role only records what it saw; the parent decides
 // which states are legal, because only the parent knows the batch size.
 func runPoller(ctx context.Context, o options, rep *report, b barriers) error {
-	db, err := memory.OpenDBReadOnly(o.dbPath)
+	db, err := memory.OpenReadDB(o.dbPath)
 	if err != nil {
 		return err
 	}
