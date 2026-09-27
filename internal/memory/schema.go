@@ -303,8 +303,17 @@ CREATE TABLE IF NOT EXISTS link_scans (
 -- row with it, so a cascading history table would be empty exactly when the
 -- audit is asked for. Nothing reuses a memory id (ids come from
 -- hex(randomblob(16)) and a snapshot restore reinstates the id it recorded), so
--- an orphaned history row cannot be read as some other memory's. project_id
--- DOES cascade: deleting a project is meant to take the whole corpus with it.
+-- an orphaned history row cannot be read as some other memory's.
+--
+-- project_id DOES cascade: deleting a project is meant to take the whole corpus
+-- with it. That makes this column load-bearing for every write that moves a
+-- memory BETWEEN projects, which is why both of them have to reassign it here as
+-- well as on memories: a merge and a promotion both KEEP the rows, so a history
+-- row left naming the project the memory just left is taken by that project's
+-- DELETE, leaving a live memory whose recorded past is gone. MergeProject (in
+-- projectMergeStatements, and in the s.mergeProjectTx method the bind-recovery
+-- paths call) and PromoteToGlobal both do this; a new writer that moves a memory
+-- between projects has to as well.
 CREATE TABLE IF NOT EXISTS memory_provenance (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     memory_id   TEXT NOT NULL,
