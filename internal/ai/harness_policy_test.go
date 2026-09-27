@@ -618,8 +618,8 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 		}
 	})
 
-	// The ordinary case the parent probe must not break: ~/.config exists, the
-	// user has never run `goose configure`, so there is no config dir. A
+	// The ordinary case the ancestor walk must not break: ~/.config exists,
+	// the user has never run `goose configure`, so there is no config dir. A
 	// machine in exactly this state — no goose config at all — has to keep
 	// working, and its config comes from the environment.
 	t.Run("unpopulated leaf behind a real directory is skipped", func(t *testing.T) {
@@ -629,6 +629,31 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 		}
 		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat); err != nil {
 			t.Fatalf("a location the user has not populated must be skipped, not refused: %v", err)
+		}
+	})
+
+	// The conflation reaches deeper than the leaf, which is why a one-level
+	// parent check is not enough. With ~/Library a file, Windows reports
+	// ~/Library/Application Support/goose as not-found, and so reports
+	// ~/Library/Application Support as not-found too — so walking up one level
+	// sees nothing and the fault goes unreported. The walk has to keep going
+	// until something actually exists, and then ask whether it is a directory.
+	t.Run("a file above the parent is still found", func(t *testing.T) {
+		shapedHome := t.TempDir()
+		if err := os.WriteFile(filepath.Join(shapedHome, "Library"), []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Model the Windows errno for the paths THROUGH the blocking file,
+		// which is what it collapses to not-found; the file itself still
+		// stats, and that is exactly what the walk has to find.
+		probe := func(name string) (os.FileInfo, error) {
+			if strings.Contains(name, filepath.Join("Library", "Application Support")) {
+				return nil, fs.ErrNotExist
+			}
+			return os.Lstat(name)
+		}
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, probe); err == nil {
+			t.Fatal("a file above the parent was walked past as if the location were simply unused")
 		}
 	})
 }

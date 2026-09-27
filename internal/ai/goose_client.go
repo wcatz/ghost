@@ -224,12 +224,35 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 // as ERROR_PATH_NOT_FOUND, and syscall maps ENOTDIR to that same constant, so
 // on that host a source-level check cannot tell that case from a genuine miss.
 //
-// The parent probe is what makes the rule hold anyway. Each candidate is under
-// a directory the platform either has or does not: ~/.config, and
-// ~/Library/Application Support. A root is skipped only when its PARENT is
-// absent, which is what "this platform does not use this location" actually
-// looks like, and which no errno conflates. "~/.config exists but is a file"
-// then fails closed everywhere, as the branch below requires.
+// firstExistingAncestor is what makes the rule hold anyway. It walks up from
+// path to stop (inclusive) and returns the first ancestor that stats, with its
+// info. A non-nil info whose IsDir is false is the Windows-shaped fault; a nil
+// info with a nil error means nothing up to and including the home exists, so
+// the leaf is merely unpopulated.
+//
+// A probe failure that is not "not there" is returned rather than treated as
+// absence, so an untraversable home or a TCC-denied ~/Library is reported
+// instead of silently dropping the configuration.
+func firstExistingAncestor(path, stop string, probe func(string) (os.FileInfo, error)) (string, os.FileInfo, error) {
+	current := filepath.Dir(path)
+	for {
+		info, err := probe(current)
+		switch {
+		case err == nil:
+			return current, info, nil
+		case !errors.Is(err, fs.ErrNotExist):
+			return current, nil, err
+		}
+		if current == stop {
+			return current, nil, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current { // reached the filesystem root without a match
+			return current, nil, nil
+		}
+		current = parent
+	}
+}
 func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe func(string) (os.FileInfo, error)) error {
 	if harnessEnvValue(env, "XDG_CONFIG_HOME") != "" {
 		// An absolute path the child reads directly; HOME plays no part.
@@ -247,26 +270,27 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe fu
 			// Whether this is "not this platform's location" or a real fault
 			// cannot be read from the source's own errno, because on Windows
 			// "a file where a directory belongs" is ERROR_PATH_NOT_FOUND and
-			// maps to ErrNotExist exactly like a genuine miss.
+			// maps to ErrNotExist exactly like a genuine miss. The same
+			// conflation applies to every path THROUGH that file, so walking up
+			// one level does not clear it either: with ~/Library a file,
+			// ~/Library/Application Support reports not-found too.
 			//
-			// The difference is one level up. A location the platform uses has
-			// its parent (~/.config, ~/Library/Application Support) present,
-			// and then a missing leaf is ordinary: a user who has never run
-			// `goose configure` has no config dir either, and that must not
-			// fail the call. A parent that is absent, or that is a FILE rather
-			// than a directory, is the fault — and the second shape is exactly
-			// what a Windows errno cannot distinguish at the leaf.
-			parent := filepath.Dir(source)
-			info, parentErr := probe(parent)
+			// What does clear it is walking up to the first ancestor that
+			// actually exists and asking whether it is a directory. A location
+			// the platform uses has a real directory somewhere above it, and a
+			// missing leaf under one is ordinary — a user who has never run
+			// `goose configure` has no config dir either, and that must not fail
+			// the call, because their configuration comes from the environment.
+			// A file instead of a directory is the fault, and no errno at any
+			// depth can report it differently from an absent path.
+			ancestor, info, ancestorErr := firstExistingAncestor(source, homeDir, probe)
 			switch {
-			case parentErr != nil && errors.Is(parentErr, fs.ErrNotExist):
-				continue // the platform has no such location at all
-			case parentErr != nil:
-				return fmt.Errorf("goose isolated config %s: %w", parent, parentErr)
-			case !info.IsDir():
-				return fmt.Errorf("goose isolated config %s: %w", parent, err)
+			case ancestorErr != nil:
+				return fmt.Errorf("goose isolated config %s: %w", source, err)
+			case info != nil && !info.IsDir():
+				return fmt.Errorf("goose isolated config %s: %s is not a directory", source, ancestor)
 			}
-			continue // configured location the user has not populated yet
+			continue
 		}
 		// After the probe, so the isolated home does not gain a
 		// Library/Application Support directory on the platforms that cannot
