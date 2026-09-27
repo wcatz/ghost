@@ -509,6 +509,16 @@ const maxRetainedVectorBytes = 32 << 20
 // A store built as a literal (ExplainSearch's trace store) has no pool
 // function, so the nil case is a real one rather than a bug to assert away.
 func (s *Store) borrowVectorRows() *vectorRows {
+	// A store literal built without a pool gets a fresh snapshot rather than a
+	// nil dereference. That is the pre-#556 behaviour and the expensive one, so
+	// the literals that stand in for a store share the real store's pool instead
+	// (see the field comment); this branch is what a store that nobody wired up
+	// gets, and it is correct rather than fast.
+	if s.vectorRowsPool == nil {
+		v := &vectorRows{}
+		v.reset()
+		return v
+	}
 	v, _ := s.vectorRowsPool.Get().(*vectorRows)
 	if v == nil {
 		v = &vectorRows{}
@@ -521,6 +531,9 @@ func (s *Store) borrowVectorRows() *vectorRows {
 func (s *Store) returnVectorRows(v *vectorRows) {
 	if cap(v.embeds) > maxRetainedVectorBytes {
 		v.embeds = nil
+	}
+	if s.vectorRowsPool == nil {
+		return
 	}
 	s.vectorRowsPool.Put(v)
 }

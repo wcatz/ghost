@@ -161,7 +161,17 @@ type LegStatus struct {
 // failed lookup can never read as "no edges exist": "ok" (the query ran, and
 // may have returned none), "unavailable" (a successful query returned no
 // edges) or "err" (the query failed).
-type EdgeStatus struct{ Status, Err string }
+type EdgeStatus struct {
+	Status, Err string
+	// Chunks is how many queries the edge read took. The read is chunked, so a
+	// pair whose endpoints land in different chunks is never read, and a caller
+	// whose window exceeds the chunk therefore gets a partial picture. A whole-set
+	// claim ("no link joins two of these candidates") is only true at one chunk, so
+	// the count travels with the status rather than staying a detail of the loop.
+	// Zero means no query ran, which is the same thing: with fewer than two
+	// candidates no pair can exist.
+	Chunks int
+}
 
 // edge statuses, as reported in EdgeStatus.Status.
 const (
@@ -261,6 +271,11 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		vectorMinSimilarity: floor,
 		embeddingIdentity:   identity,
 		foreignWarned:       s.foreignWarned,
+		// The corpus scratch crosses for the same reason: this store runs the
+		// real vector leg, and a pool of its own would be a pool of one that is
+		// garbage the moment this retrieval returns — a corpus-sized allocation
+		// on every search, which is what the pool exists to avoid.
+		vectorRowsPool: s.vectorRowsPool,
 	}
 
 	set := &CandidateSet{Legs: map[string]LegStatus{}}
@@ -622,19 +637,26 @@ func (s *Store) loadCandidateEdges(ctx context.Context, ids []string) ([]LinkEdg
 		return nil, EdgeStatus{Status: edgesUnavailable}
 	}
 	var edges []LinkEdge
+	chunks := 0
 	for start := 0; start < len(ids); start += edgeChunkIDs {
 		end := min(start+edgeChunkIDs, len(ids))
+		chunks++
 		chunk, err := s.edgesWithin(ctx, ids[start:end])
 		if err != nil {
 			s.logger.Debug("candidate edge load failed", "error", err)
-			return nil, EdgeStatus{Status: edgesErr, Err: err.Error()}
+			return nil, EdgeStatus{Status: edgesErr, Err: err.Error(), Chunks: chunks}
 		}
 		edges = append(edges, chunk...)
 	}
 	if len(edges) == 0 {
-		return nil, EdgeStatus{Status: edgesUnavailable}
+		// unavailable means "the query ran and found nothing". At more than one
+		// chunk it is only true of the chunks that ran, so the count comes with it
+		// and the caller can tell a complete read from a partial one — which
+		// is the difference between "these candidates do not contradict" and "a
+		// contradiction across a query boundary would not have been read".
+		return nil, EdgeStatus{Status: edgesUnavailable, Chunks: chunks}
 	}
-	return edges, EdgeStatus{Status: edgesOK}
+	return edges, EdgeStatus{Status: edgesOK, Chunks: chunks}
 }
 
 // edgesWithin reads the valid edges among a set of candidate ids.

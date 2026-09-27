@@ -104,7 +104,13 @@ func runValidity(p *pipeline) {
 			// either. It is reported so a caller can see the row's claim is
 			// unreadable rather than absent — as a note, which is true of the row
 			// whether it survives or not.
-			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%q), treated as unset", shortID(c.ID), raw))
+			// quoteData, because this is stored text on its way to a tool
+			// answer: a portable artifact is explicitly untrusted input, and
+			// the validity triple is writable through ImportMemory and
+			// RestoreSnapshot. %q escapes a delimiter without delimiting it, so
+			// a value carrying one could close the data block and continue as
+			// instruction. Delimited like every other stored text in an answer.
+			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%s), treated as unset", shortID(c.ID), quoteData(raw)))
 		}
 		if v.state == validityExpired || v.state == validityFuture {
 			dropped = append(dropped, c.ID)
@@ -161,12 +167,14 @@ func runPredicates(p *pipeline) {
 			dropped = append(dropped, c.ID)
 			p.dropped[c.ID] = "category_mismatch"
 			p.droppedBy[stagePredicates]++
+			p.droppedBy[dropCategory]++
 			p.trace.decide(c.ID, stagePredicates, "category_mismatch", c.Score)
 			continue
 		case !sig.ScopeMatched:
 			dropped = append(dropped, c.ID)
 			p.dropped[c.ID] = "scope_contradiction"
 			p.droppedBy[stagePredicates]++
+			p.droppedBy[dropScope]++
 			p.trace.decide(c.ID, stagePredicates, "scope_contradiction", c.Score)
 			continue
 		}
@@ -184,6 +192,14 @@ func runPredicates(p *pipeline) {
 // decision recorded is what makes a later change measurable — but it is not a
 // one-line change: a real multiplier needs a float here, applied where
 // ProvenanceContribution and ConfidenceContribution are computed.
+// The two stage-3 verdicts are counted under their own keys as well as under
+// stagePredicates, so a reason can name the filter that emptied the set rather than
+// the stage that contained it. They are not stages: nothing runs them.
+const (
+	dropCategory = "predicate:category"
+	dropScope    = "predicate:scope"
+)
+
 const provenanceWeight = "1.0"
 
 // maxRenderedConflictPairs bounds how many contradicting pairs the answer names.
@@ -248,13 +264,17 @@ func runConflicts(p *pipeline) {
 		for _, it := range p.items {
 			admitted[it.ID] = true
 		}
-		// "unavailable" means the store found no edges among the candidate ids it
-		// was given, so it is a claim about the whole set and depends on the ids
-		// having been read in full: the store loads them in one chunk of 200,
-		// which covers this surface (a window of at most 100) but not a caller
-		// with a larger budget, whose pairs across a chunk boundary would go
-		// unrecorded while this note claims otherwise.
-		if p.set.EdgesStatus.Status == "unavailable" {
+		// "unavailable" means the read found nothing, and that is a claim about
+		// the whole candidate set only when one query covered it. The read is
+		// chunked, and a caller whose window exceeds the chunk is legitimate here
+		// — the window is not capped at the ceiling — so at more than one chunk a
+		// pair across a query boundary was never read, and saying these candidates
+		// do not contradict each other would be the opposite of what is known. The
+		// count decides the sentence.
+		switch {
+		case p.set.EdgesStatus.Status == "unavailable" && p.set.EdgesStatus.Chunks > 1:
+			notes = append(notes, formatNote("edges_partial: the link lookup read these candidates in %d queries, so a contradicting pair across a query boundary was not read — this block is not known to be free of one", p.set.EdgesStatus.Chunks))
+		case p.set.EdgesStatus.Status == "unavailable":
 			notes = append(notes, "edges_unavailable: no link joins two of these candidates")
 		}
 		// A contradiction pair is recorded, never removed. The pair is kept, not
@@ -574,13 +594,17 @@ func (p *pipeline) dominantRemoval() (string, string) {
 	return best.stage, best.reason
 }
 
-// predicateReason names the narrower of the two stage-3 verdicts, or "" when
-// neither filter is set.
+// predicateReason names the stage-3 verdict that removed the rows, or "" when
+// neither filter is set. The two verdicts are counted apart, because they answer
+// different questions for the caller: a category that removed nothing while the
+// scope removed everything is a scope problem, and a reason naming the category
+// sends the reader to change the wrong filter. A tie names the category, which is
+// the narrower of the two and the one a caller is likelier to have set by accident.
 func (p *pipeline) predicateReason() string {
 	switch {
-	case p.req.Category != "":
+	case p.droppedBy[dropCategory] > 0 && p.droppedBy[dropCategory] >= p.droppedBy[dropScope]:
 		return "all_out_of_category"
-	case len(p.req.Scope) > 0:
+	case p.droppedBy[dropScope] > 0:
 		return "all_out_of_scope"
 	}
 	return ""
