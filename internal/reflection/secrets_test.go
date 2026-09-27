@@ -1,126 +1,99 @@
 package reflection
 
-import (
-	"bytes"
-	"log/slog"
-	"strings"
-	"testing"
-)
+import "testing"
 
-const credentialFixture = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
+// TestLooksLikeSecretIsAScopeDecision pins the contract of the one function
+// left in secrets.go, and it is a contract about the SCOPE of a memory, not
+// about whether it holds a credential value.
+//
+// A global memory is replayed into every project on every save, so a
+// project-local secret must not be widened into global context. That is a
+// different question from "is this a credential value", which is
+// internal/secret's and is enforced at the store layer — a memory saying
+// "rotate the deployment password every quarter" is ordinary operational
+// knowledge, and refusing to save it (or to keep it project-scoped) is the
+// keyword-heuristic failure this whole arrangement exists to avoid.
+//
+// The function is also the reason the credential drop is not here: a
+// credential-shaped memory that a tier proposes is dropped at the write
+// boundary (cmd/ghost/promotion.go), after the drop guard's audit, because
+// that ordering is what stops it being re-added or silently deleted. Nothing
+// in this file writes, so nothing in this file can be the mitigation for
+// leaving a write path unguarded.
+func TestLooksLikeSecretIsAScopeDecision(t *testing.T) {
+	cases := []struct {
+		name  string
+		text  string
+		flags bool
+	}{
+		// Prose about credentials is ordinary knowledge, and blocking it from
+		// global scope would refuse a memory store's most common content.
+		{name: "prose about rotating a password", text: "Rotate the deployment password every quarter", flags: true},
+		{name: "prose about where a token lives", text: "the access token is in the runner env", flags: true},
+		{name: "prose about key material", text: "the private key is read from disk at boot", flags: true},
+		{name: "a credential rotation schedule", text: "password rotation is automated by the vault", flags: true},
 
-// logCapture collects a handler's output so a test can assert what a diagnostic
-// does and does not carry.
-type logCapture struct{ buf bytes.Buffer }
+		// Assignment syntax, which is what actually looks like a value being
+		// carried between projects. The separator normalization is the reason
+		// "api-key:" and "api key" reach the same verdict.
+		{name: "an assignment with an equals sign", text: "TOKEN=<the value from the vault>", flags: true},
+		{name: "an assignment with a colon", text: "CLIENT_SECRET: from the secrets manager", flags: true},
+		{name: "a hyphenated assignment key", text: "api-key is rotated weekly", flags: true},
+		{name: "an underscore assignment key", text: "api_key is rotated weekly", flags: true},
 
-func (c *logCapture) Write(p []byte) (int, error) { return c.buf.Write(p) }
-
-func (c *logCapture) logger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(&c.buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-}
-
-// TestDropSecretMemoriesRemovesCredentialOutput is the reflection half of issue
-// #553. A consolidation prompt is a request, not a guarantee: a model asked to
-// summarise ten memories will occasionally quote a value verbatim into its
-// "consolidated" output, and that output becomes a new row — embedded, injected
-// into every future session, and mirrored to the Obsidian vault. The store
-// refuses such a save, but refusing it from inside the reflection tier would
-// abort a whole apply transaction over one row; dropping the row is the same
-// mitigation with the rest of the round intact.
-func TestDropSecretMemoriesRemovesCredentialOutput(t *testing.T) {
-	result := ReflectionResult{
-		LearnedContext: "a summary of the project",
-		Memories: []ReflectMemory{
-			{Category: "fact", Content: "the relay listens on 2222"},
-			{Category: "gotcha", Content: "the token is " + credentialFixture},
-			{Category: "convention", Content: "commits are conventional commits"},
-		},
+		// A word that merely contains a credential word is not one, for the
+		// patterns that carry a trailing delimiter. Without that, "tokenizer"
+		// would block a global memory about the wrong thing entirely.
+		{name: "a tokenizer is not a token", text: "the tokenizer keeps a 30k vocabulary", flags: false},
+		// A KNOWN over-match, recorded rather than asserted away. The prefix
+		// test is a plain Contains, so `credential_` matches inside a longer
+		// hyphenated word and this flags as scope-bearing when it is not. It is
+		// pre-existing and unchanged by this PR, and the consequence is bounded:
+		// the memory stays project-scoped instead of global, which costs a
+		// memory its cross-project reach rather than refusing the save or
+		// storing a value. Fixing it properly means comparing on word
+		// boundaries rather than substrings, which is a change to a function
+		// this PR only documents.
+		{name: "KNOWN OVER-MATCH: credential-less", text: "the credential-less helper has no config", flags: true},
+		{name: "unrelated operational prose", text: "the relay listens on 2222", flags: false},
+		{name: "an ordinary global preference", text: "tabs, not spaces, in every repository we touch", flags: false},
 	}
-	capture := &logCapture{}
-	DropSecretMemories(&result, capture.logger())
 
-	if len(result.Memories) != 2 {
-		t.Fatalf("got %d memories, want 2: %+v", len(result.Memories), result.Memories)
-	}
-	if result.Memories[0].Content != "the relay listens on 2222" ||
-		result.Memories[1].Content != "commits are conventional commits" {
-		t.Errorf("the surviving memories are not the two expected ones, in order: %+v", result.Memories)
-	}
-	if result.LearnedContext != "a summary of the project" {
-		t.Errorf("dropSecretMemories changed LearnedContext to %q; it guards memories only", result.LearnedContext)
-	}
-}
-
-// TestDropSecretMemoriesLogsTheFormatNotTheValue is what makes the drop safe to
-// report. The diagnostic is the only place an operator learns a consolidation
-// lost a memory, and it is also a place a credential would land in the log file
-// forever — so it names the rule and the category and stops there.
-func TestDropSecretMemoriesLogsTheFormatNotTheValue(t *testing.T) {
-	result := ReflectionResult{Memories: []ReflectMemory{
-		{Category: "gotcha", Content: "the token is " + credentialFixture},
-	}}
-	capture := &logCapture{}
-	DropSecretMemories(&result, capture.logger())
-
-	out := capture.buf.String()
-	if out == "" {
-		t.Fatal("the drop was not logged — a silently discarded memory is indistinguishable from one the model never emitted")
-	}
-	if !strings.Contains(out, "GitHub personal access token") {
-		t.Errorf("the log does not name the matched format: %s", out)
-	}
-	if !strings.Contains(out, "gotcha") {
-		t.Errorf("the log does not name the category that lost the memory: %s", out)
-	}
-	if strings.Contains(out, credentialFixture) || strings.Contains(out, "0123456789abcdef") {
-		t.Errorf("the log echoes the dropped credential: %s", out)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := looksLikeSecret(lowerAll(tc.text))
+			if got != tc.flags {
+				t.Errorf("looksLikeSecret(%q) = %v, want %v — this is a scope decision about replaying into every project, not a detection of a credential value",
+					tc.text, got, tc.flags)
+			}
+		})
 	}
 }
 
-// TestDropSecretMemoriesToleratesNilLogger matches the sibling guards
-// (dropFabricatedMemories, dropForeignProjectMemories), which substitute
-// slog.Default() for a nil logger rather than panicking or staying silent: the
-// guard's job is to drop, and a drop that cannot report itself is the one
-// failure mode its rationale names. The default logger is redirected for the
-// duration so the substitution is exercised without the warning landing in the
-// test's own output.
-func TestDropSecretMemoriesToleratesNilLogger(t *testing.T) {
-	var logged bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-
-	result := ReflectionResult{Memories: []ReflectMemory{
-		{Category: "fact", Content: "the relay listens on 2222"},
-		{Category: "gotcha", Content: "the token is " + credentialFixture},
-	}}
-	DropSecretMemories(&result, nil)
-
-	if len(result.Memories) != 1 {
-		t.Fatalf("got %d memories, want 1: %+v", len(result.Memories), result.Memories)
+// TestLooksLikeSecretSeesNoValue pins that the function never inspects a
+// value's shape: two texts differing only in the value must reach the same
+// verdict, because the question is what the memory is ABOUT, not what it
+// carries. internal/secret is what answers the second question.
+func TestLooksLikeSecretSeesNoValue(t *testing.T) {
+	const head = "the deploy token is "
+	shapes := []string{
+		"a random string",
+		"in the runner env",
+		"rotated quarterly",
 	}
-	if !strings.Contains(logged.String(), "GitHub personal access token") {
-		t.Errorf("a nil logger produced no diagnostic, so the drop is unauditable: %q", logged.String())
-	}
-	if strings.Contains(logged.String(), credentialFixture) {
-		t.Errorf("the substituted default logger echoed the credential: %q", logged.String())
+	for _, shape := range shapes {
+		if looksLikeSecret(lowerAll(head+shape)) != true {
+			t.Errorf("looksLikeSecret(%q) = false, want true — the key names a credential either way", head+shape)
+		}
 	}
 }
 
-// TestDropSecretMemoriesKeepsProseAboutCredentials is the false-positive guard
-// at the tier, where a false positive costs a memory: a consolidation that
-// correctly observed "rotate the deployment password quarterly" must not lose
-// that observation to a keyword match.
-func TestDropSecretMemoriesKeepsProseAboutCredentials(t *testing.T) {
-	result := ReflectionResult{Memories: []ReflectMemory{
-		{Category: "convention", Content: "Rotate the deployment password every quarter."},
-		{Category: "fact", Content: "The CI access_token lives in the runner env."},
-		{Category: "gotcha", Content: "The tokenizer keeps a 30k vocabulary and drops unknown words."},
-	}}
-	capture := &logCapture{}
-	DropSecretMemories(&result, capture.logger())
-
-	if len(result.Memories) != 3 {
-		t.Errorf("got %d memories, want all 3: %+v", len(result.Memories), result.Memories)
+func lowerAll(s string) string {
+	b := []byte(s)
+	for i := range b {
+		if b[i] >= 'A' && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
 	}
+	return string(b)
 }

@@ -105,9 +105,10 @@ func rejectSecretList(field string, values []string) error {
 //
 //     It runs inside ApplyReflection's transaction, so a refusal would roll back
 //     an entire consolidation — every merge and every preserved row — over one
-//     contaminated memory. The tier's drop guard (dropSecretMemories, in
-//     internal/reflection/secrets.go) is the mitigation, and it runs before the
-//     store ever sees the value.
+//     contaminated memory. The mitigation is `dropCredentialProposals` in
+//     cmd/ghost/promotion.go, which sits at the write boundary and therefore
+//     after the drop guard's audit — see the comment there for why that ordering
+//     is the point rather than an accident.
 //
 //     Filtering here instead would be worse than either. ReplaceNonManual
 //     deletes every replaceable row the snapshot does not account for, so

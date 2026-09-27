@@ -61,8 +61,13 @@ func TestCredentialIsDroppedAfterTheGuardAuditNotBefore(t *testing.T) {
 	if len(f.projectMems) != 1 || !strings.Contains(f.projectMems[0].Content, "2222") {
 		t.Errorf("the surviving project memories are not the one clean memory: %+v", f.projectMems)
 	}
-	// The report must not print the value either — the audit's own warning line
-	// is the path that would.
+	// The removal is reported, and the report is diagnosable: a discard that
+	// leaves no trace is indistinguishable from a proposal the model never
+	// emitted. Format, category and length, never the content.
+	if !strings.Contains(stderr, "GitHub personal access token") || !strings.Contains(stderr, "not applied") {
+		t.Errorf("the removal was not reported with its format:\n%s", stderr)
+	}
+	// Neither the drop line nor the audit's own warning line may print the value.
 	if strings.Contains(stderr, credential) {
 		t.Errorf("the reflect report printed the credential:\n%s", stderr)
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -42,10 +43,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		globalMems = nil
 	}
-	projectMems, globalMems, dropped := dropCredentialProposals(projectMems, globalMems)
-	if dropped > 0 {
-		fmt.Printf("note: %d consolidation proposal(s) held a credential value and were not applied\n", dropped)
-	}
+	projectMems, globalMems = dropCredentialProposals(projectMems, globalMems)
 	projectRows := reflectMemoriesToMemory(projectID, projectMems, replaced)
 	globalRows := reflectMemoriesToMemory("_global", globalMems, replaced)
 	if len(projectRows) == 0 && len(globalRows) == 0 {
@@ -55,22 +53,31 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 }
 
 // dropCredentialProposals removes the proposals whose content holds a
-// credential, from both lists, and reports how many it removed.
-func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory) (keptProject, keptGlobal []reflection.ReflectMemory, dropped int) {
-	keep := func(in []reflection.ReflectMemory) (out []reflection.ReflectMemory, n int) {
+// credential, from both lists.
+//
+// Every removal is reported — format, category, scope and length, never the
+// content — because a discard that leaves no trace is indistinguishable from a
+// proposal the model never emitted, and this is the only place a consolidation
+// silently loses a memory it had already decided to write.
+func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory) (keptProject, keptGlobal []reflection.ReflectMemory) {
+	keep := func(in []reflection.ReflectMemory) (out []reflection.ReflectMemory, dropped int) {
 		out = in[:0]
 		for _, m := range in {
-			if _, ok := secret.Detect(m.Content); ok {
-				n++
+			finding, ok := secret.Detect(m.Content)
+			if !ok {
+				out = append(out, m)
 				continue
 			}
-			out = append(out, m)
+			dropped++
+			fmt.Fprintf(os.Stderr,
+				"note: consolidation proposal not applied — it holds a credential value (format=%s category=%s scope=%s bytes=%d)\n",
+				finding.Label, m.Category, m.Scope, len(m.Content))
 		}
-		return out, n
+		return out, dropped
 	}
-	keptProject, n := keep(projectMems)
-	keptGlobal, m := keep(globalMems)
-	return keptProject, keptGlobal, n + m
+	keptProject, _ = keep(projectMems)
+	keptGlobal, _ = keep(globalMems)
+	return keptProject, keptGlobal
 }
 
 // reflectMemoriesToMemory converts proposals to store rows. replaced maps an
