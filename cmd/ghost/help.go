@@ -161,12 +161,14 @@ func handleHelp(argv []string) bool {
 // stderr exactly as before; a name that matched nothing is reported there first,
 // so a typo is visible rather than answered with a list that does not contain
 // it, while a help token is not reported at all — `ghost help -h` is one
-// question asked twice, not a misspelling. A leading help token is also dropped
-// before the lookup, so `ghost help -h upgrade` names the command exactly as
-// `ghost -h upgrade` does instead of discarding it. The exit code stays 0
-// throughout: a question with no answer is not a mistake in the invocation.
+// question asked twice, not a misspelling. Every leading help token is dropped
+// before the lookup rather than just the first, so `ghost help -h upgrade` names
+// the command exactly as `ghost -h upgrade` does, `ghost help -h -h` is still
+// only a question, and what is left in the name position is a name a reader
+// typed. The exit code stays 0 throughout: a question with no answer is not a
+// mistake in the invocation.
 func runHelpCommand(args []string) int {
-	if len(args) > 0 && isHelpToken(args[0]) {
+	for len(args) > 0 && isHelpToken(args[0]) {
 		args = args[1:]
 	}
 	if _, usage, _, ok := usageFor(args); ok {

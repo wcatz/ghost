@@ -401,8 +401,9 @@ func TestHelpCommandPrintsTheCommandUsage(t *testing.T) {
 	// named-command form through the other spelling, and is documented as such.
 	t.Run("a help token in place of a command", func(t *testing.T) {
 		for _, tc := range []struct {
-			argv []string
-			want string // a phrase only the named command's usage prints
+			argv   []string
+			want   string // a phrase only the named command's usage prints
+			report bool   // the name that matched nothing is named on stderr
 		}{
 			{argv: []string{"help", "-h"}},
 			{argv: []string{"help", "--help"}},
@@ -416,6 +417,13 @@ func TestHelpCommandPrintsTheCommandUsage(t *testing.T) {
 			// summary with the name silently discarded.
 			{argv: []string{"help", "-h", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
 			{argv: []string{"help", "--help", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
+			// Asked twice, and twice is still not a typo: the tokens are all
+			// dropped, so `ghost help -h -h` is the summary and
+			// `ghost help -h -h upgrade` is upgrade's usage, which is what
+			// `ghost -h -h upgrade` already printed.
+			{argv: []string{"help", "-h", "-h"}},
+			{argv: []string{"help", "--help", "-h", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
+			{argv: []string{"help", "-h", "frobnicate"}, report: true},
 		} {
 			restoreDetectRemote(t)
 			var code int
@@ -435,8 +443,9 @@ func TestHelpCommandPrintsTheCommandUsage(t *testing.T) {
 			if !strings.Contains(stderr, "ghost <command>") {
 				t.Errorf("`ghost %s` stderr = %q, want the top-level command list", strings.Join(tc.argv, " "), stderr)
 			}
-			if strings.Contains(stderr, "no command") {
-				t.Errorf("`ghost %s` reported a help request as a command that does not exist: %q", strings.Join(tc.argv, " "), strings.SplitN(stderr, "\n", 2)[0])
+			reported := strings.Contains(stderr, "no command")
+			if reported != tc.report {
+				t.Errorf("`ghost %s` reported a command that does not exist = %v, want %v (stderr: %q)", strings.Join(tc.argv, " "), reported, tc.report, strings.SplitN(stderr, "\n", 2)[0])
 			}
 		}
 	})
