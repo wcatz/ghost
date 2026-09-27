@@ -539,7 +539,9 @@ const purgedTextMarker = "[purged]"
 // also what makes a memory id reusable — `ghost import` refuses an id that still
 // has history, and this is how an operator frees one.
 //
-// It erases recorded text only. A live memory row is left exactly as it was,
+// It erases recorded text only, which is what distinguishes it from
+// DeleteWithOptions(PurgeHistory: true) — that one is a delete and takes the row
+// with it. A live memory row here is left exactly as it was,
 // because "erase the history of this memory" and "delete this memory" are
 // different requests and conflating them would destroy knowledge nobody asked to
 // lose. What it does reach is every copy of the text the database kept, so

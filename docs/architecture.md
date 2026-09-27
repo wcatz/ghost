@@ -452,10 +452,12 @@ prints it. Three things follow:
   and leave the text on disk. A plain delete deliberately keeps the history —
   that is what makes the table worth having — and an id whose history still exists
   is one `ghost import` refuses to write into, because the artifact's ids are
-  verbatim and the two records would splice under one id. A purge erases its
-  recorded text only: a live memory row is left exactly as it was, because
-  "erase the history of this memory" and "delete this memory" are different
-  requests.
+  verbatim and the two records would splice under one id. The second direction is
+  `Store.PurgeMemoryHistory` alone, and it differs in kind from the two entry
+  points above: it erases recorded text and leaves a live memory row exactly as it
+  was, because "erase the history of this memory" and "delete this memory" are
+  different requests. The entry points do not have that choice — they are a
+  delete, and the live row goes with its history.
 - **A purge reaches every copy this database holds**, not just the history table.
   `memory_snapshots` is the one that matters: every applied reflection copies each
   non-manual memory's full content into a snapshot, the column has no foreign key,
