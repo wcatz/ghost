@@ -85,13 +85,17 @@ const idTokenWidth = 8
 // "Names a single path component" is deliberately permissive — a dash, a dot or
 // a space in the prefix is left exactly as it was — so the only ids that take
 // the hashed path are the ones that could have escaped or could not be created.
+// A tab, a newline or a carriage return is the one addition to that set: such a
+// name is a legal path component, but it is invisible to `ls`, breaks a glob in
+// any shell that does not quote its output, and cannot be typed by a user who
+// wants to open the note. A name nobody can name is not a name.
 func idToken(id string) string {
 	head := id
 	if len(head) > idTokenWidth {
 		head = head[:idTokenWidth]
 	}
 	if head != "" && head != "." && head != ".." &&
-		!strings.ContainsAny(head, `/\`) && !strings.ContainsRune(head, 0) {
+		!strings.ContainsAny(head, "/\\\t\n\r") && !strings.ContainsRune(head, 0) {
 		return head
 	}
 	sum := sha256.Sum256([]byte(id))

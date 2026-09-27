@@ -41,6 +41,21 @@ var hostileIDs = []struct{ name, id string }{
 	{"trailing-dot", "abc."},
 	{"space", "has space"},
 	{"empty", ""},
+	// yamlScalar flattens a tab, a newline and a carriage return to a space, so
+	// an id carrying one is written to the front matter as something other than
+	// itself. prune reads the id back out of the note to decide which files it
+	// may delete, so that is a second, independent way a note can be written and
+	// then removed on the same pass.
+	{"tab", "tab\tid-xyz"},
+	{"newline", "line\nid-xyz"},
+	{"carriage-return", "cr\rid-xyz"},
+	{"crlf", "crlf\r\nid-xyz"},
+	// The three whitespace ids above all flatten to the same bytes, so whatever
+	// reads them back has to tell them apart some other way. These two differ
+	// from "tab\tid-xyz" only in the whitespace, so a reader that recovers the
+	// flattened text matches none of the three.
+	{"whitespace-only", " "},
+	{"all-whitespace", "\t\n\r"},
 }
 
 // TestFileNameStaysInsideItsDirectory defends the containment half for the
@@ -75,6 +90,17 @@ func TestFileNameStaysInsideItsDirectory(t *testing.T) {
 		b := fileName(memory.Memory{ID: "../../bbbbbbb", Content: "Body B, long enough to be a real memory."})
 		if a == b {
 			t.Errorf("two different ids produced one filename %q", a)
+		}
+	})
+
+	t.Run("an_unnameable_name_is_hashed", func(t *testing.T) {
+		// A tab or a line break in a name is legal, and unusable: invisible to
+		// `ls`, unopenable by a user, and a glob in most shells never matches it.
+		for _, id := range []string{"tab\there", "line\nhere", "cr\rhere"} {
+			name := fileName(memory.Memory{ID: id, Content: "A body long enough to be a real memory about naming."})
+			if strings.ContainsAny(name, "\t\n\r") {
+				t.Errorf("idToken(%q) kept an unnameable byte: %q", id, name)
+			}
 		}
 	})
 
@@ -233,6 +259,73 @@ func TestFolderNameStaysCreatable(t *testing.T) {
 	}
 }
 
+// TestExportKeepsEveryNoteOfACollidingIdSet is the fixture for the second way an
+// id cannot be read back out of a note, and the one that decides the keep-set's
+// key.
+//
+// yamlScalar flattens a tab, a newline and a carriage return to a space, so three
+// distinct ids render to the SAME ghost_id line. Keyed on that line — which is
+// what the keep-set used to be — the three notes collided on one key, the other
+// two matched nothing, and prune deleted them: the export wrote three notes and
+// left one, silently, on every run. Keyed on the canonical filename instead,
+// which is unique per record, there is nothing to collide.
+//
+// The three are planted together on purpose. Asserted one at a time, a single
+// unmatched id is indistinguishable from an id that simply has no note — the
+// per-id fixture in TestExportKeepsHostileRecordIDsInsideTheVault passes for a
+// keep-set that dropped the note, and this is the case that separates the two.
+func TestExportKeepsEveryNoteOfACollidingIdSet(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	ids := []string{"tab\tid-xyz", "tab\r\nid-xyz", "tab id-xyz"}
+	for i, id := range ids {
+		if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
+			ID: id, ProjectID: "ghost", Category: "fact",
+			Content: fmt.Sprintf("A body long enough to be a real memory, record %d of the colliding set.", i),
+			Source:  "mcp",
+		}, memory.ImportOptions{Apply: true}); err != nil {
+			t.Fatalf("import %q: %v", id, err)
+		}
+	}
+
+	// The three really do render to one line, or this fixture is testing nothing.
+	for _, id := range ids {
+		if got, want := unquoteYAMLScalar(yamlScalar(id, false)), "tab id-xyz"; got != want {
+			t.Fatalf("id %q renders as %q, not %q — this fixture needs the collision", id, got, want)
+		}
+	}
+
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
+	noteCount := func(where string) int {
+		t.Helper()
+		notes, err := filepath.Glob(filepath.Join(vault, "ghost", "Memories", "*.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(notes) != len(ids) {
+			names := make([]string, 0, len(notes))
+			for _, n := range notes {
+				names = append(names, filepath.Base(n))
+			}
+			t.Errorf("%s: %d of %d notes remain; they share one ghost_id line, so each needs its own name:\n  %v",
+				where, len(notes), len(ids), names)
+		}
+		return len(notes)
+	}
+
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	noteCount("after the first export")
+
+	// And on a second pass, so this is durable rather than a first-write fluke.
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	noteCount("after the second export")
+}
+
 // TestHostileContentRendersAsInertStructure is the inertness half for the
 // renderers: the shared corpus, planted as memory content, must be present in
 // the note verbatim while the front matter around it stays exactly as parseable
@@ -380,8 +473,9 @@ func TestTagsCannotImpersonateFrontmatterKeys(t *testing.T) {
 	}
 }
 
-// TestGhostIDSurvivesItsOwnQuoting pins the agreement the whole prune design
-// rests on: the reader must return the id the writer wrote.
+// TestGhostIDReadsBackAsWritten pins the agreement between the renderer and its
+// reader: whatever the note says its ghost_id is, hasGhostID must return that,
+// character for character.
 //
 // fm writes ghost_id through yamlScalar, which quotes any value a YAML reader
 // would not take as a plain scalar — and a separator, a backslash or a NUL in an
@@ -389,8 +483,16 @@ func TestTagsCannotImpersonateFrontmatterKeys(t *testing.T) {
 // was written quoted and read back quoted. The mismatch was silent in the worst
 // direction: prune looked the quoted text up in a keep-set keyed by the real id,
 // did not find it, and deleted the note it had just written, on every export,
-// for good. The note existed for exactly as long as the pass that created it.
-func TestGhostIDSurvivesItsOwnQuoting(t *testing.T) {
+// for good.
+//
+// The expectation is yamlScalar's own output, not the stored id, and the
+// difference is the point. yamlScalar also flattens a tab, a newline and a
+// carriage return to a space, which is what keeps every key on one line and is
+// lossy: "tab<TAB>id", "line<NL>id" and "tab id" are three ids and one line. So
+// the reader returns the id AS RECORDED, and nothing may be keyed on it
+// recovering the stored id — which is why prune keys on the canonical filename
+// instead (see TestExportKeepsBothNotesOfACollidingPair).
+func TestGhostIDReadsBackAsWritten(t *testing.T) {
 	ids := []string{
 		"938891EAF111890B5C116BA2BFDFB40A", // plain hex: never quoted
 		"-/../x",
@@ -408,6 +510,13 @@ func TestGhostIDSurvivesItsOwnQuoting(t *testing.T) {
 		`back\slash`,
 		"trailing:",
 		"colon: inside",
+		// Flattened, so these are the cases where the reader cannot give the
+		// stored id back however careful it is.
+		"tab\tid-xyz",
+		"line\nid-xyz",
+		"cr\rid-xyz",
+		"\t\n\r",
+		" ",
 	}
 
 	for _, id := range ids {
@@ -426,16 +535,19 @@ func TestGhostIDSurvivesItsOwnQuoting(t *testing.T) {
 			if !ok {
 				t.Fatalf("hasGhostID found no ghost_id in:\n%s", note)
 			}
-			if got != id {
-				t.Errorf("hasGhostID = %q, want %q\n  the note was written as:\n%s", got, id, note)
+			// yamlScalar's output, unquoted: the transforms the writer applied,
+			// undone in the order that inverts them.
+			want := unquoteYAMLScalar(yamlScalar(id, false))
+			if got != want {
+				t.Errorf("hasGhostID = %q, want %q (what the renderer wrote for %q)\n  the note was written as:\n%s", got, want, id, note)
 			}
 		})
 	}
 
 	t.Run("a_single_quoted_value_stays_as_written", func(t *testing.T) {
-		// This function decides which files prune may DELETE, so it must not
+		// This function reports which files are Ghost's to prune, so it must not
 		// start matching a hand-written quoting form it never emitted. A note
-		// written that way keeps reading as its own text and stays untouchable.
+		// written that way keeps reading as its own text.
 		dir := t.TempDir()
 		path := filepath.Join(dir, "handwritten.md")
 		if err := os.WriteFile(path, []byte("---\nghost_id: 'abc'\n---\nbody\n"), 0o600); err != nil {

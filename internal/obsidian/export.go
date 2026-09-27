@@ -90,11 +90,12 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		data = append(data, projData{p: p, folder: folders[p.ID], memories: mems, trunc: trunc})
 	}
 
-	// Pass 2: render + diff-write + collect keep-set, then prune. keep maps
-	// each entity's ghost_id to its canonical basename this pass: content
-	// edits rewrite a memory in place (same ID, new slug), so prune must
-	// drop old-slug files even though their ghost_id is still live.
-	keep := make(map[string]string)
+	// Pass 2: render + diff-write + collect keep-set, then prune. The keep-set
+	// holds each entity's canonical basename, not its id: a content edit
+	// rewrites a memory in place (same ID, new slug), so the old-slug file is
+	// stale and its name is simply not in the set. See keepSet for why it is
+	// keyed on the name.
+	keep := make(keepSet)
 	var subtrees []string
 	written, skipped := 0, 0
 	for _, d := range data {
@@ -103,7 +104,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			if err != nil {
 				return fmt.Errorf("links for %s: %w", m.ID, err)
 			}
-			keep[m.ID] = fileFor[m.ID]
+			keep[fileFor[m.ID]] = struct{}{}
 			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Memories", fileFor[m.ID]), renderMemory(m, links, fileFor))
 			if err != nil {
 				return err
@@ -120,7 +121,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		}
 		for _, dec := range decisions {
 			name := fileNameFor(dec.Title, dec.ID)
-			keep[dec.ID] = name
+			keep[name] = struct{}{}
 			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Decisions", name), renderDecision(dec))
 			if err != nil {
 				return err
@@ -137,7 +138,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		}
 		for _, tk := range tasks {
 			name := fileNameFor(tk.Title, tk.ID)
-			keep[tk.ID] = name
+			keep[name] = struct{}{}
 			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Tasks", name), renderTask(tk))
 			if err != nil {
 				return err
