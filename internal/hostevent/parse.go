@@ -4,22 +4,34 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // maxPayloadBytes bounds one hook payload. A var so tests can lower it.
 //
 // A payload is an envelope — an event name, a session id, a cwd, a transcript
 // path, the contract object — and it is retained twice: once decoded into
-// Payload, once verbatim in Raw. Nothing else on the path bounded it, since the
+// Payload, once verbatim in Raw. Nothing else on the path bounded it: the
 // caller read stdin with an unbounded io.ReadAll, so a host (or anything that
 // can write to the hook's stdin) chose how much memory a fail-open path
-// allocates. One mebibyte is three orders of magnitude more than any v1 envelope
+// allocates. ReadPayload is the bounded read, and Parse's check refuses what
+// it returns past the ceiling. One mebibyte is three orders of magnitude more than any v1 envelope
 // needs; past it the outcome is the package's only outcome, an error the caller
 // turns into "allow the stop".
 var maxPayloadBytes = 1 << 20
 
 // errPayloadTooLarge reports a payload past maxPayloadBytes.
 var errPayloadTooLarge = errors.New("hook payload exceeds the size ceiling")
+
+// ReadPayload reads one hook payload from r, stopping one byte past the
+// ceiling. Parse's length check refuses what it returns when it is over, but
+// only a bounded read keeps the ceiling from being a check made after the
+// allocation it exists to prevent: the hook's stdin is written by the host,
+// or by anything that can write to it, and an unbounded io.ReadAll lets it
+// choose how much memory a fail-open path holds.
+func ReadPayload(r io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, int64(maxPayloadBytes)+1))
+}
 
 // Parse builds a Payload from raw stdin bytes. The contract is mandatory:
 // sourceArg and eventArg must be non-empty and known, and hook_event_name must

@@ -500,7 +500,7 @@ func TestTagsCannotImpersonateFrontmatterKeys(t *testing.T) {
 // lossy: "tab<TAB>id", "line<NL>id" and "tab id" are three ids and one line. So
 // the reader returns the id AS RECORDED, and nothing may be keyed on it
 // recovering the stored id — which is why prune keys on the canonical filename
-// instead (see TestExportKeepsBothNotesOfACollidingPair).
+// instead (see TestExportKeepsEveryNoteOfACollidingIdSet).
 func TestGhostIDReadsBackAsWritten(t *testing.T) {
 	ids := []string{
 		"938891EAF111890B5C116BA2BFDFB40A", // plain hex: never quoted
