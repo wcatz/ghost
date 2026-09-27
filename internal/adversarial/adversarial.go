@@ -167,6 +167,11 @@ func AssertLocalName(t testing.TB, what, name string) {
 // root, and for a regular file its contents.
 type Tree map[string]string
 
+// dirEntry is what a directory records as. A literal rather than the empty
+// string, because an empty file records as the empty string and a name that
+// swaps between the two is a change a containment assertion should report.
+const dirEntry = "<dir>"
+
 // Snapshot walks root and records it. Entries are keyed by slash-separated
 // path relative to root, so a comparison does not depend on how the root itself
 // was spelled. A root that does not exist snapshots as empty.
@@ -176,13 +181,16 @@ type Tree map[string]string
 // read-only importer has to satisfy. Pair it with AssertTreeInside for the
 // writes case.
 //
-// Three kinds of entry are recorded as a placeholder rather than as content, and
-// each is a blind spot rather than a finding: a file whose contents could not be
-// read, a directory that could not be listed (recorded as a directory, with
-// nothing in it), and a non-regular entry such as a symlink, whose target is
-// deliberately not followed. The first two are logged with their path and cause.
-// A fixture that needs an assertion over one of them has to make the tree
-// readable, or the entry a real file, first.
+// Every entry records something other than its content, and three of those are
+// placeholders rather than findings: a file whose contents could not be read, a
+// directory that could not be listed, and a non-regular entry such as a symlink,
+// whose target is deliberately not read. The first two are logged with their
+// path and cause. A fixture that needs an assertion over one of them has to make
+// the tree readable, or the entry a real file, first.
+//
+// A directory records as dirEntry rather than as the empty string, so a name that
+// swaps between an empty file and an empty directory is reported rather than
+// comparing equal on two entries that only look alike.
 func Snapshot(t testing.TB, root string) Tree {
 	t.Helper()
 	out := Tree{}
@@ -211,13 +219,14 @@ func Snapshot(t testing.TB, root string) Tree {
 			return nil //nolint:nilerr // an unrelatable path is not a fixture failure, and "." is root itself
 		}
 		rel = filepath.ToSlash(rel)
-		out[rel] = ""
 		if d.IsDir() {
+			out[rel] = dirEntry
 			return nil
 		}
-		// A symlink's own name is the entry; its target is not read, because
-		// following it would snapshot whatever it points at and turn a
+		// A symlink's own name and type are the entry; its target is not read,
+		// because following it would snapshot whatever it points at and turn a
 		// containment assertion into an assertion about someone else's tree.
+		// Repointing a link is therefore a change this comparison cannot see.
 		if !d.Type().IsRegular() {
 			out[rel] = "<" + d.Type().String() + ">"
 			return nil
@@ -252,16 +261,18 @@ func Snapshot(t testing.TB, root string) Tree {
 // itself as read-only has to satisfy this against a tree full of hostile
 // filenames.
 //
-// Three blind spots, deliberate, and none of them is a comparison this can
-// make: a file Snapshot could not read is recorded as the same placeholder on
-// both sides, so a rewrite of a file that is unreadable throughout compares
-// equal; a directory it could not list is recorded as a directory with nothing
-// in it, so a change inside an unreadable subtree is invisible; and a symlink is
-// recorded as its type rather than its target, so a link repointed elsewhere
-// compares equal. Each is unobservable from either side, so there is nothing
-// truthful to compare — Snapshot logs the first two with their path and cause,
-// and the answer to a fixture that trips any of them is to make the tree
-// readable, or the entry a real file, rather than to believe this.
+// Three blind spots, deliberate, and all of them the same shape: something the
+// snapshot does not record, so there is nothing here to compare it. A file
+// Snapshot could not read is recorded as the same placeholder on both sides, so
+// a rewrite of a file that is unreadable throughout compares equal; a directory
+// it could not list is recorded as a directory with nothing in it, so a change
+// inside an unreadable subtree is invisible; and a symlink records as its type
+// rather than its target — a target Snapshot deliberately does not read, so a
+// link repointed elsewhere compares equal even though the target is perfectly
+// observable to anything that cares to call Readlink. Snapshot logs the first
+// two with their path and cause, and the answer to a fixture that trips any of
+// them is to make the tree readable, or the entry a real file, rather than to
+// believe this.
 func (before Tree) AssertUnchanged(t testing.TB, what string, after Tree) {
 	t.Helper()
 	for path, content := range after {

@@ -165,11 +165,34 @@ func TestSnapshotPinsItsTwoPlaceholders(t *testing.T) {
 		if got := first["locked.md"]; got != "<unreadable>" {
 			t.Errorf("unreadable file recorded as %q, want the constant placeholder", got)
 		}
-		// Compared over the whole trees, not one key: a single-key comparison
-		// against an already-pinned literal cannot fail on its own, and the
-		// property here is about every value, readable or not.
+		// Compared over the whole trees, so the property covers every value and
+		// not only the locked file's placeholder: the added readable.md is what
+		// makes this more than a one-key check.
 		if !maps.Equal(first, second) {
 			t.Errorf("two identical trees snapshotted differently:\n  first:  %v\n  second: %v", first, second)
+		}
+	})
+
+	t.Run("empty_file_and_empty_directory_are_distinguishable", func(t *testing.T) {
+		// Both would record as the empty string if a directory were not given a
+		// literal of its own, and a name that swaps between the two is a change
+		// this assertion exists to report.
+		fileRoot := t.TempDir()
+		if err := os.WriteFile(filepath.Join(fileRoot, "swapped"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dirRoot := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dirRoot, "swapped"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		fileTree := Snapshot(t, fileRoot)
+		dirTree := Snapshot(t, dirRoot)
+		if fileTree["swapped"] == dirTree["swapped"] {
+			t.Errorf("an empty file and an empty directory both record as %q, so a swap between them is invisible",
+				fileTree["swapped"])
+		}
+		if dirTree["swapped"] != dirEntry {
+			t.Errorf("a directory records as %q, want %q", dirTree["swapped"], dirEntry)
 		}
 	})
 
