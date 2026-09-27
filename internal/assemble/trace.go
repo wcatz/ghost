@@ -121,3 +121,14 @@ func (t *Trace) decide(id, stage, reason string, before float64) {
 		ID: id, Stage: stage, Reason: reason, Kept: false, Before: before,
 	})
 }
+
+// keep records that a row survived a stage, with the reason the stage noted
+// while letting it through. An unreadable validity value is the case v1 has: the
+// value is reported, and the row is kept, so the two facts have to be recorded
+// separately. Recording a kept row through decide would tell a consumer of the
+// trace that a row in the answer was excluded from it.
+func (t *Trace) keep(id, stage, reason string, before float64) {
+	t.Decisions = append(t.Decisions, Decision{
+		ID: id, Stage: stage, Reason: reason, Kept: true, Before: before,
+	})
+}

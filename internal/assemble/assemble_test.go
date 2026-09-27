@@ -930,3 +930,40 @@ func TestOriginLabelIsScopedToTheGlobalProject(t *testing.T) {
 		t.Errorf("project row = %q, want no origin label: a project row carrying the seed text is the user's own material", lines["P1"])
 	}
 }
+
+// TestTraceDoesNotReportAKeptRowAsExcluded: Decision is "one row's fate at one
+// stage", and it is what an explain projection reads as "the reason this
+// candidate was left out". A row that survived stage 2 with an unreadable
+// validity value was recorded through the same path as a dropped one, so the
+// trace claimed a row in the answer was excluded from it — the one thing a
+// consumer of the trace cannot be allowed to get wrong.
+func TestTraceDoesNotReportAKeptRowAsExcluded(t *testing.T) {
+	garbage := "sometime last spring"
+	rows := []memory.Candidate{candidate("KEPT", "proj", "fact", "one", 0.9)}
+	rows[0].ValidUntil = &garbage
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
+
+	if len(res.Items) != 1 {
+		t.Fatalf("the row was dropped, so there is nothing to check: %v", itemIDs(res.Items))
+	}
+	for _, d := range res.Trace.Decisions {
+		if d.ID == "KEPT" && !d.Kept {
+			t.Errorf("trace records %s as excluded at %s (%s) while it is in the answer",
+				d.ID, d.Stage, d.Reason)
+		}
+	}
+	var kept, excluded int
+	for _, d := range res.Trace.Decisions {
+		if d.Kept {
+			kept++
+		} else {
+			excluded++
+		}
+	}
+	if kept != 1 || excluded != 0 {
+		t.Errorf("decisions = %d kept / %d excluded, want 1/0: an unreadable value is recorded, not an exclusion", kept, excluded)
+	}
+}

@@ -76,7 +76,9 @@ func runValidity(p *pipeline) {
 			// either. It is reported so a caller can see the row's claim is
 			// unreadable rather than absent.
 			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%q), treated as unset", shortID(c.ID), raw))
-			p.trace.decide(c.ID, stageValidity, "validity_unparseable", c.Score)
+			// Kept, not excluded: an unreadable value is no claim at all, so the
+			// row stays and the trace says the claim was unreadable.
+			p.trace.keep(c.ID, stageValidity, "validity_unparseable", c.Score)
 		}
 		if v.state == validityExpired || v.state == validityFuture {
 			dropped = append(dropped, c.ID)

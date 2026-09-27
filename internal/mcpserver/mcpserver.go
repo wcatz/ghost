@@ -43,6 +43,23 @@ type embedderDiagnostics interface {
 	Model() string
 }
 
+// emptyWhy explains an empty result that is not an absence. It returns "" for a
+// plain no-match, where the leading sentence is already true and the caveat
+// covers the window. Every other reason names the stage that emptied the set, in
+// the words that tell the caller what to do differently: a row withheld as out of
+// date is refreshed, a row cut by a cap is the cap raised, a row removed by a
+// filter is the filter dropped.
+func emptyWhy(result assemble.Result) string {
+	switch result.Reason {
+	case "all_invalid":
+		return "Every matching memory was withheld as out of date — its validity window has closed or has not opened yet (Decision 3's stage 2). " +
+			"Nothing is wrong with the query; the answer is withheld, not absent."
+	case "all_over_budget":
+		return "Every matching memory was cut by the assembler's item budget. Raise the limit to see them."
+	}
+	return ""
+}
+
 // failedLegs names the retrieval legs the assembler recorded as errored, or ""
 // when every applicable leg ran. A leg the request made applicable but could not
 // run (a hybrid search with no query vector) is not a failure and is not named.
@@ -717,14 +734,15 @@ func (s *Server) registerTools() {
 			// needs, and carries the cause so the failure is diagnosable.
 			return nil, nil, fmt.Errorf("search could not be completed, so it is unknown whether anything matches (the answer is incomplete, not empty \u2014 retry, or read the log): %w", err)
 		}
-		// A leg that errored is an incomplete search whatever the assembler
-		// managed to return, and "incomplete" and "empty" are the two answers an
-		// agent acts on oppositely. The assembler records it in the reason and
-		// the notes; this is the projection, and it deliberately suppresses the
-		// filter caveat — that caveat would blame the caller's filter for rows
-		// the retriever never produced.
-		if failed := failedLegs(result); failed != "" {
-			return nil, nil, fmt.Errorf("search was incomplete, so it is unknown whether anything matches (a retrieval leg failed, so this is not an empty result — retry, or read the log): %s", failed)
+		// A leg that errored makes the search incomplete, but "incomplete" and
+		// "empty" are only the same answer when there is nothing to show. With
+		// rows admitted, the answer is degraded rather than destroyed: the rows
+		// the working leg found are returned, and the broken leg is named, so
+		// the caller can retry without losing a retrieval that succeeded. The
+		// assembler records it in the trace; this is the projection.
+		failedLegs := failedLegs(result)
+		if failedLegs != "" && len(result.Items) == 0 {
+			return nil, nil, fmt.Errorf("search was incomplete, so it is unknown whether anything matches (a retrieval leg failed, so this is not an empty result — retry, or read the log): %s", failedLegs)
 		}
 
 		// The shared item renderer, one line per admitted memory. Search keeps
@@ -735,15 +753,27 @@ func (s *Server) registerTools() {
 			listing.WriteString(item.Line())
 			listing.WriteString("\n")
 		}
+		if failedLegs != "" {
+			listing.WriteString("\n")
+			listing.WriteString("Warning: this answer is incomplete — one retrieval leg failed, so matches it would have found are missing (")
+			listing.WriteString(failedLegs)
+			listing.WriteString(").\n")
+		}
 		// A filtered result shorter than the requested limit may reflect a
 		// finite candidate window rather than the whole store. The assembler
 		// has already applied both filters, so this reads the admitted count.
 		maybeIncomplete := (args.Category != "" || len(scopeFilter) > 0) && len(result.Items) < args.Limit
 
 		if len(result.Items) == 0 {
-			// A filtered zero result describes the searched candidate window,
-			// not the whole store. Keep that caveat on the empty answer too.
+			// An empty answer is only an absence claim when nothing filtered the
+			// rows out. The assembler knows which stage emptied the set, and rows
+			// that were found and then withheld — as out of date, or over a
+			// budget — must not read as memories that do not exist. The reason
+			// line is what keeps that distinction in front of the caller.
 			text := "No matching memories found."
+			if why := emptyWhy(result); why != "" {
+				text += "\n\n" + why
+			}
 			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
 				text += "\n\n" + caveat
 			}

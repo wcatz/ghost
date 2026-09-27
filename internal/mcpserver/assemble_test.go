@@ -298,3 +298,114 @@ func TestPartialRetrievalFailureIsNotAnAbsence(t *testing.T) {
 		t.Errorf("error text does not name the leg that failed: %s", out)
 	}
 }
+
+// degradedStore returns rows from a leg that worked while another leg failed —
+// the partial case with a non-empty answer. The rows are real matches, so the
+// answer must be degraded rather than destroyed: an error here loses a working
+// retrieval to a broken index.
+type degradedStore struct {
+	provider.MemoryStore
+}
+
+func (degradedStore) Candidates(_ context.Context, _ memory.CandidateRequest) (*memory.CandidateSet, error) {
+	set := &memory.CandidateSet{Legs: map[string]memory.LegStatus{
+		"fts":    {Applicable: true, Attempted: true, Available: false, Err: "search memories: no such table: memories_fts"},
+		"vector": {Applicable: true, Attempted: true, Available: true, Eligible: 1},
+	}}
+	for _, c := range []struct{ id, content string }{
+		{"VEC1", "vector-only match that survived the keyword leg failure"},
+	} {
+		set.Rows = append(set.Rows, memory.Candidate{
+			Memory: memory.Memory{
+				ID: c.id, ProjectID: "test-project", Category: "fact",
+				Content: c.content, CreatedAt: "2026-09-01 12:00:00", Source: "mcp",
+			},
+			FTSRank: -1, VectorRank: 0, VectorScore: 0.9, Base: 0.9, Decay: 1, Score: 0.9,
+		})
+	}
+	return set, nil
+}
+
+// TestPartialFailureWithRowsStillReturnsThem: a leg that failed while another
+// returned matches is a degraded answer, not a failed one. Returning a tool
+// error here would discard a working retrieval because the keyword index is
+// broken, and would claim "unknown whether anything matches" about a result that
+// has rows in it.
+func TestPartialFailureWithRowsStillReturnsThem(t *testing.T) {
+	store := testStore(t)
+	srv := New(degradedStore{MemoryStore: store},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	session := connectedClient(t, srv)
+
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "vector-only match",
+	})
+
+	if res.IsError {
+		t.Fatalf("a partial failure with rows returned a tool error: %s", resultText(res))
+	}
+	out := resultText(res)
+	if !strings.Contains(out, "vector-only match that survived") {
+		t.Errorf("the surviving leg's rows were discarded: %s", out)
+	}
+	if !strings.Contains(out, "memories_fts") {
+		t.Errorf("the answer does not say which leg failed, so the caller cannot tell it is degraded: %s", out)
+	}
+	if strings.Contains(out, "No matching memories found") {
+		t.Errorf("a result with rows reported absence: %s", out)
+	}
+}
+
+// invalidStore returns only rows whose validity window has closed. The assembler
+// withholds them all, so the answer is empty for a reason the caller must be
+// told: the rows were found and then judged out of date, which is not the same as
+// not existing. Store.ImportMemory and Restore both write these columns, so this
+// is reachable from a real artifact.
+type invalidStore struct {
+	provider.MemoryStore
+}
+
+func (invalidStore) Candidates(_ context.Context, _ memory.CandidateRequest) (*memory.CandidateSet, error) {
+	past := "2020-01-01 00:00:00"
+	set := &memory.CandidateSet{Legs: map[string]memory.LegStatus{
+		"fts": {Applicable: true, Attempted: true, Available: true, CoverageComplete: false},
+	}}
+	set.Rows = append(set.Rows, memory.Candidate{
+		Memory: memory.Memory{
+			ID: "OLD1", ProjectID: "test-project", Category: "fact",
+			Content: "retention policy that has since expired", CreatedAt: "2026-09-01 12:00:00",
+			Source: "mcp", ValidUntil: &past,
+		},
+		Base: 0.9, Decay: 1, Score: 0.9,
+	})
+	return set, nil
+}
+
+// TestExpiredRowsAreReportedAsWithheldNotAbsent: stage 2 dropping every row must
+// not render as the bare absence string. A caller told "no matching memories"
+// concludes the memory does not exist; the truth is that it was found and
+// withheld as out of date, which is a different instruction (refresh it, ask
+// about something else).
+func TestExpiredRowsAreReportedAsWithheldNotAbsent(t *testing.T) {
+	store := testStore(t)
+	srv := New(invalidStore{MemoryStore: store},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	session := connectedClient(t, srv)
+
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "retention policy",
+	})
+
+	if res.IsError {
+		t.Fatalf("a withheld-for-validity result returned a tool error: %s", resultText(res))
+	}
+	out := resultText(res)
+	if !strings.Contains(out, "out of date") {
+		t.Errorf("every row was withheld as expired, but the answer does not say so: %s", out)
+	}
+	if !strings.Contains(out, "No matching memories found") {
+		t.Logf("answer: %s", out)
+	}
+}
