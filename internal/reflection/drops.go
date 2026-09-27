@@ -38,26 +38,24 @@ const dropContainmentThreshold = 0.45
 // agent writes is ever excluded by it. Deleting an unreferenced input
 // therefore takes an explicit --allow-drops.
 //
-// Two exceptions, both witnessed rather than inferred.
+// One exemption, and it is witnessed rather than inferred. result.Replacements
+// names the input ids a response disposed of together with the text that took
+// their place — a rewrite's own new text, or the emitted text of the successor a
+// supersession named. A rewrite and a supersession are the same claim about the
+// same thing, so they share one list and one check: re-adding such a row would
+// put it back beside the text that replaced it, which is a duplicate rather than a
+// save, and re-adding it is how a memory reading "three issues are still open"
+// survived beside "the three open issues have all been fixed".
 //
-// The first is a supersession the harness stated: result.Supersessions holds the
-// ids it dropped as superseded by another input id, together with the text that
-// successor carries into the result. Re-adding such a row is how a memory
-// reading "three issues are still open" survived beside "the three open issues
-// have all been fixed". The witness has to be present, though: a successor one
-// of the result's own post-filters removed (dropForeignProjectMemories deletes a
-// memory naming a project the input corpus never mentioned) is no successor, so
-// the exemption lapses and the input goes back under the audit. An obsolete drop
-// names no successor at all and always goes under the audit, because Ghost
-// cannot check the claim.
-//
-// The second is a rewrite's source, in result.RewrittenIDs. A rewrite states
-// that the row's text should now be something else, so re-adding the old text
-// beside the new one is a duplicate by construction rather than a save — the
-// 45% test asks "is the old memory still in here somewhere", which is the wrong
-// question about a row the response deliberately replaced. A MERGE's sources stay
-// under the audit, because a merge that lost one of them is a merge the model got
-// wrong rather than one it asked for.
+// The witness has to be there, though. A filter that runs over the result after
+// the operations are resolved can remove the replacing text —
+// dropForeignProjectMemories deletes a memory naming a project the input corpus
+// never mentioned, and a rewrite or a merge is exactly such a memory — and an
+// exemption trusted on the id alone then disposes of a row with nothing in its
+// place, silently, with nothing left for --allow-drops to act on. A claim whose
+// text is gone lapses, and the input goes back under the ordinary audit. An
+// obsolete drop names no successor and never gets here at all, so the token audit
+// governs it.
 //
 // What the guard no longer has to do is the biggest part. An input the response
 // never named is emitted verbatim by executeOps (#639), so there is nothing to
@@ -88,15 +86,11 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 		present[m.Content] = true
 	}
 
-	superseded := make(map[string]bool, len(result.Supersessions))
-	for _, s := range result.Supersessions {
-		if s.TargetText != "" && present[s.TargetText] {
-			superseded[memIDKey(s.DroppedID)] = true
+	replaced := make(map[string]bool, len(result.Replacements))
+	for _, r := range result.Replacements {
+		if r.Text != "" && present[r.Text] {
+			replaced[memIDKey(r.ID)] = true
 		}
-	}
-	rewritten := make(map[string]bool, len(result.RewrittenIDs))
-	for _, id := range result.RewrittenIDs {
-		rewritten[memIDKey(id)] = true
 	}
 	merged := make(map[string]bool, len(result.MergedIDs))
 	for _, id := range result.MergedIDs {
@@ -106,7 +100,7 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 	var drops []DroppedGuarded
 	for _, in := range input.ExistingMemories {
 		key := memIDKey(in.ID)
-		if superseded[key] || rewritten[key] {
+		if replaced[key] {
 			continue
 		}
 		inTokens := tokenize(in.Content)

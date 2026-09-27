@@ -212,8 +212,8 @@ func TestDropOpEmitsNothingAndStaysUnderTheDropGuard(t *testing.T) {
 	if _, ok := findMemory(result, in.ExistingMemories[0].Content); ok {
 		t.Errorf("a dropped memory was emitted: %+v", result.Memories)
 	}
-	if len(result.Supersessions) != 0 {
-		t.Errorf("an obsolete drop claimed supersession: %+v", result.Supersessions)
+	if len(result.Replacements) != 0 {
+		t.Errorf("an obsolete drop claimed a replacement: %+v", result.Replacements)
 	}
 	if _, ok := findMemory(result, in.ExistingMemories[1].Content); !ok {
 		t.Errorf("the id the response never mentioned was not carried through: %+v", result.Memories)
@@ -236,13 +236,11 @@ func TestSupersededDropIsNotReAdded(t *testing.T) {
 	if len(result.Memories) != 1 || result.Memories[0].Content != in.ExistingMemories[1].Content {
 		t.Fatalf("want only the surviving row, got %+v", result.Memories)
 	}
-	if len(result.Supersessions) != 1 {
-		t.Fatalf("supersessions = %+v, want the one stated claim", result.Supersessions)
+	if len(result.Replacements) != 1 {
+		t.Fatalf("replacements = %+v, want the one stated claim", result.Replacements)
 	}
-	if s := result.Supersessions[0]; s.DroppedID != opID1 || s.TargetID != opID2 ||
-		s.TargetText != in.ExistingMemories[1].Content {
-		t.Errorf("supersession = %+v, want %q superseded by %q carrying %q",
-			s, opID1, opID2, in.ExistingMemories[1].Content)
+	if r := result.Replacements[0]; r.ID != opID1 || r.Text != in.ExistingMemories[1].Content {
+		t.Errorf("replacement = %+v, want %q replaced by the text of %q", r, opID1, opID2)
 	}
 	drops := AuditGuardedDrops(in, result)
 	if len(drops) != 0 {
@@ -280,8 +278,8 @@ func TestExecuteOpsRecordsWhichIdsWereMergedOrRewritten(t *testing.T) {
 			t.Errorf("%s was kept or dropped but recorded as merged: %v", unwanted, result.MergedIDs)
 		}
 	}
-	if len(result.RewrittenIDs) != 0 {
-		t.Errorf("nothing was rewritten, but RewrittenIDs = %v", result.RewrittenIDs)
+	if len(result.Replacements) != 0 {
+		t.Errorf("nothing was rewritten, but a replacement was recorded: %v", result.Replacements)
 	}
 }
 
@@ -298,8 +296,8 @@ func TestRejectedRewriteClaimsNothing(t *testing.T) {
 		t.Fatalf("got %d memories, want the source verbatim plus the other input: %+v",
 			len(result.Memories), result.Memories)
 	}
-	if len(result.RewrittenIDs) != 0 {
-		t.Errorf("a rejected rewrite claimed the row: %v", result.RewrittenIDs)
+	if len(result.Replacements) != 0 {
+		t.Errorf("a rejected rewrite claimed the row: %v", result.Replacements)
 	}
 }
 
@@ -336,10 +334,10 @@ func TestSupersessionWitnessFollowsAMerge(t *testing.T) {
 	result := opRun(t, in,
 		`{"learned_context":"ctx","ops":["drop `+opID1+` reason: superseded by `+opID2+`","merge `+opID2+`,`+opID3+` -> `+merged+`"]}`)
 
-	if len(result.Supersessions) != 1 {
-		t.Fatalf("supersessions = %+v, want one", result.Supersessions)
+	if len(result.Replacements) != 1 {
+		t.Fatalf("replacements = %+v, want one", result.Replacements)
 	}
-	if got := result.Supersessions[0].TargetText; got != merged {
+	if got := result.Replacements[0].Text; got != merged {
 		t.Errorf("witness text = %q, want the merged text %q", got, merged)
 	}
 	if drops := AuditGuardedDrops(in, result); len(drops) != 0 {

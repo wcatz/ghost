@@ -179,10 +179,8 @@ func TestAuditGuardedDrops_HonoursAnExplicitSupersession(t *testing.T) {
 	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed, orphan}}
 
 	result := ReflectionResult{
-		Memories: []ReflectMemory{{Category: "fact", Content: fixed.Content}},
-		Supersessions: []Supersession{{
-			DroppedID: stale.ID, TargetID: fixed.ID, TargetText: fixed.Content,
-		}},
+		Memories:     []ReflectMemory{{Category: "fact", Content: fixed.Content}},
+		Replacements: []Replacement{{ID: stale.ID, Text: fixed.Content}},
 	}
 	drops := AuditGuardedDrops(input, result)
 	if len(drops) != 1 || drops[0].Content != orphan.Content {
@@ -204,9 +202,9 @@ func TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone(t *testing.T
 	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed}}
 
 	result := ReflectionResult{
-		Memories:      nil, // the successor was removed from the result
-		MergedIDs:     []string{fixed.ID},
-		Supersessions: []Supersession{{DroppedID: stale.ID, TargetID: fixed.ID, TargetText: fixed.Content}},
+		Memories:     nil, // the successor was removed from the result
+		MergedIDs:    []string{fixed.ID},
+		Replacements: []Replacement{{ID: stale.ID, Text: fixed.Content}},
 	}
 	drops := AuditGuardedDrops(input, result)
 	retained := map[string]bool{}

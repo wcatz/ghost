@@ -40,32 +40,28 @@ type ReflectionResult struct {
 	// because there the guard is asking whether the response accounted for the
 	// memory at all (#639).
 	MergedIDs []string `json:"merged_ids,omitempty"`
-	// RewrittenIDs are the input ids a rewrite replaced. They are exempt from the
-	// drop guard entirely: a rewrite states that the row's text should now be
-	// something else, so re-adding the old text beside the new one is a duplicate
-	// by construction rather than a save. The grounding check is what stands
-	// between a rewrite and a wrong specific.
-	RewrittenIDs []string `json:"rewritten_ids,omitempty"`
-	// Supersessions are the supersessions the response stated: an input id it
-	// dropped as superseded by another input id, the id it named, and the text
-	// that successor carries into the result. The drop guard honours one only
-	// while that text is still in the result — a successor one of the result's
-	// own post-filters removed is no successor — and never re-adds the dropped
-	// row, which is how a memory reading "three issues are still open" survived
-	// beside "the three open issues have all been fixed". An obsolete drop is
-	// NOT recorded: it names no successor, so the token audit governs it.
-	Supersessions []Supersession `json:"supersessions,omitempty"`
+	// Replacements are the input ids a response disposed of, each with the text
+	// that stands in its place: a rewrite's own new text, or the emitted text of
+	// the successor a supersession named. They share one list because they are one
+	// claim — "this row no longer needs carrying, that text says it instead" — and
+	// the drop guard treats them identically. See Replacement for why the text is
+	// part of the record rather than implied.
+	Replacements []Replacement `json:"replacements,omitempty"`
 }
 
-// Supersession is one stated supersession and the text its successor carries
-// forward. TargetText is what makes the claim checkable after the fact: the
-// guards that run over the result can still remove a survivor, and a supersession
-// whose successor is gone must fall back to the ordinary audit rather than
-// delete a memory with nothing replacing it.
-type Supersession struct {
-	DroppedID  string
-	TargetID   string
-	TargetText string
+// Replacement is an input id the response disposed of together with the text that
+// took its place, which is what makes the claim checkable after the fact.
+//
+// Text and not just id, because the guards that run over the result can still
+// remove a survivor: dropForeignProjectMemories deletes a memory naming a project
+// the input corpus never mentioned, and a rewrite or a merge is exactly such a
+// memory. An exemption trusted on the id alone therefore disposes of a row whose
+// replacement is not in the corpus — no survivor, nothing for --allow-drops to
+// act on, and a silent deletion. The text is the witness, and the drop guard
+// honours the claim only while that text is still there.
+type Replacement struct {
+	ID   string
+	Text string
 }
 
 // ReflectMemory is a discrete memory extracted during reflection.

@@ -353,7 +353,8 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 			// may claim otherwise. The grounding check, not the drop guard, is what
 			// keeps a rejected rewrite from replacing a row.
 			if op.kind == opRewrite {
-				result.RewrittenIDs = append(result.RewrittenIDs, op.ids[0])
+				result.Replacements = append(result.Replacements,
+					Replacement{ID: op.ids[0], Text: op.text})
 			} else {
 				result.MergedIDs = append(result.MergedIDs, op.ids...)
 			}
@@ -370,11 +371,12 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 			// not passed through below, but the guard may still put it back.
 			continue
 		}
-		result.Supersessions = append(result.Supersessions, Supersession{
-			DroppedID:  op.ids[0],
-			TargetID:   op.target,
-			TargetText: emitted[op.target],
-		})
+		// The witness is the text the successor actually carries, which is the
+		// merge's text when the successor was folded into one. Recording the
+		// successor's stored content instead would let the guard honour a claim
+		// about text the result does not hold.
+		result.Replacements = append(result.Replacements,
+			Replacement{ID: op.ids[0], Text: emitted[op.target]})
 	}
 
 	// Everything the response never named is carried through as a keep, verbatim
