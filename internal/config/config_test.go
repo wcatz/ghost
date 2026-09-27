@@ -853,6 +853,11 @@ func TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped(t *testing.T) {
 		wantWarn bool
 	}{
 		"no env scope":  {wantWarn: true},
+		// The file's component: api does not survive: the env override is loaded
+		// as one map value for the key injection.session_scope, and koanf's Load
+		// replaces that key's value whole instead of merging it entry by entry.
+		// This case is the pin; if the override ever merges per entry, want
+		// gains component:api and this fails.
 		"env scope set": {env: "environment=development", want: map[string]string{"environment": "development"}},
 	} {
 		t.Run(name, func(t *testing.T) {
