@@ -305,6 +305,59 @@ func TestLoadGlobalMemories(t *testing.T) {
 	}
 }
 
+// TestSessionMemoriesCarryTheirOwnProject is the other half of the identity
+// rule TestLoadGlobalMemories pins for globals: the project loader stamps the
+// project it queried onto every row it returns.
+//
+// Nothing renders an origin label for project rows today, so this looks
+// inert. It is not: sessionMemory is one shared shape, and a field that is
+// only sometimes populated is exactly the trap the global loader just fell
+// into. If this ever goes back to empty, the first surface that asks a project
+// row where it lives gets "" — which is not the reserved global project, so
+// the compatibility rewrite silently stops applying and a stale global seed
+// renders as untagged user material with no test objecting.
+//
+// The wanted value is the literal the project row was inserted under, not a
+// constant, so a change to the project id this test uses cannot redefine
+// "correct" alongside the code.
+func TestSessionMemoriesCarryTheirOwnProject(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghostDir: %v", err)
+	}
+
+	db, err := memory.OpenDB(filepath.Join(ghostDir, "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	projectPath := filepath.Join(t.TempDir(), "ownproj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project path: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projectPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	insertProject(t, db, "p1", canonical, "ownproj")
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES ('ownmem001', 'p1', 'preference', 'a preference of the user own', 'manual', 0.9)`,
+	); err != nil {
+		t.Fatalf("insert project memory: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath)
+	if len(memories) != 1 {
+		t.Fatalf("expected 1 project memory, got %d", len(memories))
+	}
+	if memories[0].ProjectID != "p1" {
+		t.Errorf("ProjectID: got %q, want p1 — a project row must carry the project it is stored under", memories[0].ProjectID)
+	}
+}
+
 // TestLoadGlobalMemories_MissingDBNoPhantom verifies the session hook never
 // creates an empty ghost.db when none exists (the bare-path mode=ro DSN used
 // to open read-write and materialize a phantom file on first read).

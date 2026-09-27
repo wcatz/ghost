@@ -27,9 +27,9 @@ import (
 // projects.id row the global seeds are written into, the memories.project_id
 // every global row carries, and the value cross-project queries filter on.
 //
-// Code outside this package that reads or writes the global scope should bind
-// this rather than repeating the literal, and must not synthesize a project id
-// for a row it loaded — use the row's own project_id.
+// A row's project comes from the row. A caller that stamps this sentinel onto
+// memory it merely recognised as global would make the origin rewrite apply to
+// rows it never owned.
 const GlobalProjectID = "_global"
 
 // Memory represents a single discrete memory.
