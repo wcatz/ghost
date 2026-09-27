@@ -241,6 +241,170 @@ ghost obsidian sync --interval 30s
 
 The sync opens the database read-only and is safe alongside a live MCP server. Press `Ctrl-C` to stop it.
 
+## Backup, export and import
+
+The memory database is a plain SQLite file, and these three commands are the supported way to move it around. `backup` and `export` answer different questions — a **backup** is a restorable copy of the database; an **export** is an inspectable artifact you can read, edit and diff — and neither is built on the other.
+
+### `ghost backup`
+
+Writes a consistent snapshot of the live database, safe to run while the MCP server is using it:
+
+```bash
+ghost backup
+ghost backup --out ~/backups/ghost.db.snapshot
+```
+
+| Flag | Meaning |
+|---|---|
+| `--out <path>` | Where to write the snapshot. Defaults to a timestamped file beside the database in the data directory. The path must not already exist. |
+
+The snapshot is taken with SQLite's `VACUUM INTO`, which reads one consistent snapshot of a live WAL database. Copying the file by hand cannot: copying `ghost.db` without its `-wal` loses whatever the write-ahead log held, and copying both while a write lands can capture a torn state. The write lock is held for the length of the vacuum and no longer.
+
+The command prints the path, the file size, and the row count of each table it counted, so a restore can be checked against what the file actually contains:
+
+```text
+backed up ~/.local/share/ghost/ghost.db.backup-20260926T153207Z (204800 bytes)
+  projects:     1
+  memories:     4
+  memory_links: 1
+  tasks:        1
+  decisions:    1
+```
+
+The file is created at `0600` **before** a byte of the snapshot is written to it, and the path is claimed with `O_EXCL`. Two things follow, both of which matter for an `--out` outside the `0700` data directory:
+
+- **No window.** `VACUUM INTO` names no mode for the file it creates, so a copy it creates lands at SQLite's default minus the umask — `0644` under a permissive umask. Creating the file first means a full copy of the memory database is never group- or world-readable, not even briefly. SQLite accepts an existing *empty* file as a `VACUUM INTO` destination and keeps its mode; it refuses a non-empty one, which is what makes the emptiness the reservation guarantees into the thing SQLite checks.
+- **No overwrite, and no symlink.** `O_EXCL` is the atomic claim, so there is no gap between "I looked and it was absent" and "I created it" for another writer or a symlink swap to slip into, and a dangling symlink at the destination is refused rather than written *through* to whatever it points at.
+
+A vacuum that fails removes its own reservation, so a retry is not blocked by an empty leftover this run created.
+
+To restore: stop Ghost, remove `ghost.db`, `ghost.db-wal` and `ghost.db-shm` from the data directory, move the snapshot in as `ghost.db`, and start Ghost again. Ghost migrates the restored file on the next open, taking a pre-migration copy first.
+
+### `ghost export`
+
+Writes memories, tasks, decisions and projects as JSON Lines:
+
+```bash
+ghost export
+ghost export --project myproject --out ~/backups/myproject.jsonl
+ghost export --out - | head -3
+```
+
+| Flag | Meaning |
+|---|---|
+| `--project <name>` | Export one project, matched by name or id **exactly**. No path-prefix or basename fallback: a filter is a choice about what to copy, and one that resolved like project resolution could select a different project on another machine than the one named here. A filter that matches nothing is an error. |
+| `--out <path>` | Where to write it. Defaults to a timestamped `.jsonl` beside the database. `-` writes to standard output, with the summary on stderr so the stream stays pipeable. |
+
+The file is JSON Lines: one self-describing object per line, opened by a header line carrying the schema version.
+
+```json
+{"type":"header","schema_version":1}
+{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one","repo_remote":"github.com/wcatz/one","created_at":"…","updated_at":"…"}}
+{"type":"memory","memory":{"id":"…","project_id":"p1","category":"gotcha","content":"…","importance":0.5,"source":"manual","pinned":false,"created_at":"…","scope":{"environment":"production"}}}
+{"type":"task","task":{"id":"…","project_id":"p1","title":"…","status":"pending","priority":2}}
+{"type":"decision","decision":{"id":"…","project_id":"p1","title":"…","decision":"…","rationale":"…","status":"active"}}
+```
+
+A memory record carries every column of the row that describes the memory: category, importance, access count, pin state, source, tags, created/updated timestamps, `resolved_at`, the validity triple (`valid_from`, `valid_until`, `verified_at`), the provenance fields (`agent`, `session_id`, `source_ref`, `confidence`) and `scope`. A project record carries its id, path, name, repository remote and timestamps.
+
+Two exports of an unchanged database are **byte-identical**: projects come first, then memories, tasks and decisions, each in id order, and the header carries no timestamp. An artifact can therefore be diffed against the previous one, and a diff shows only what changed in the store.
+
+These things are deliberately **not** exported:
+
+| Excluded | Why |
+|---|---|
+| `memory_embeddings` | The vector is derived from the content by a local model, not stored knowledge. The embedding worker rebuilds it for every imported memory. |
+| `memory_links` | A link only means something between two memories that are both present, so importing edges ahead of their endpoints would fail the foreign key or fabricate relationships. The linking worker recomputes related edges after an import. |
+| `resolve_kept_hash` | A cache of the resolve classifier's verdicts keyed by content hash. Ghost recomputes it. |
+| Ghost's own `_global` `builtin` seeds | The shipped rules this Ghost carries. Each is written under a per-install random id, so your copy and the destination's could never be recognised as the same row and the import would add a second one beside it — and nothing would ever remove it. The destination writes them itself, by content, on every open, so the restored store ends up with one copy, written by Ghost. A memory of your own filed under `_global` is **not** one of these: it is the only copy of itself, and it exports. |
+
+That last row is why an export's memory count can be one lower than the row count `ghost backup` prints for the same store: the seed is in the database copy and deliberately not in the artifact.
+
+### `ghost import`
+
+Loads an artifact written by `ghost export`:
+
+```bash
+ghost import ~/backups/one.jsonl
+ghost import ~/backups/one.jsonl --apply
+ghost import ~/backups/one.jsonl --apply --trust-provenance
+```
+
+| Flag | Meaning |
+|---|---|
+| `--apply` | Actually write. Without it the command is a dry run that reports what it would create, skip and reject, and writes nothing. |
+| `--trust-provenance` | Keep each memory's own source and pin state instead of downgrading them. Off by default; pass it when the artifact is **your own** export. |
+
+A dry run is not a separate code path: every record goes through the same validation an apply run would, so the preview describes the run that follows rather than a similar one. It also opens the database **read-only** — `ghost import` without `--apply` cannot migrate a database whose schema is behind, or seed the builtin rows, while reporting "nothing written". Two consequences worth knowing:
+
+- A dry run needs a database to preview **into**, so on a machine with no Ghost store yet it reports that rather than creating one. Start a session (or run `ghost mcp init`) first, as `ghost export` also requires.
+- Because it cannot migrate, a store from an **older** Ghost is refused with a message naming both versions rather than failing on a missing column:
+
+  ```text
+  error: the database at ~/.local/share/ghost/ghost.db is at schema v11 and this Ghost reads v16
+         — start a session, or run ghost mcp init, to migrate it before exporting it or
+         previewing an import into it
+  ```
+
+  A store from a **newer** Ghost gets a different message — upgrade Ghost — because migrating backwards is not the fix. Both are checked by reading `PRAGMA user_version` on the read-only connection, so the check never writes.
+
+  The check is strict: the store must be at exactly this Ghost's schema version, not merely at or above some floor. The only columns `export` and a dry run select that postdate v10 are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12–v15 store would in fact query fine — but a floor would hardcode which columns exist at which version, and the day a reader selects a newer column it would quietly admit a store that fails with a missing-column error again. So a v12–v15 store is asked to run one read-write open first, which is `ghost mcp init` or any session. `ghost backup` runs no version check of its own, but it is itself a read-write open: it reaches the store through the same path as a session, so it migrates and seeds the store it copies, and a store from a newer Ghost is refused outright. That makes it one way to *pay* this cost — run it once, then the export works — rather than a way around it. It is safe to run against a live MCP server, which is why it uses `VACUUM INTO` at all.
+
+### Imported provenance
+
+By default an imported memory is stamped `source = "onboarding"` and unpinned, whatever the artifact says:
+
+```text
+  create  memory:   line 3  "carried across machines" (a1) (provenance downgraded to onboarding, unpinned)
+imported 1 memory from ~/backups/one.jsonl
+  provenance downgraded to onboarding and unpinned — pass --trust-provenance to keep the artifact's own
+```
+
+The reason is that an artifact is a file that arrived from somewhere, and on its own authority it would otherwise be able to plant rows that read as yours or as Ghost's:
+
+| The artifact claims | What the store would then treat it as |
+|---|---|
+| `source: "manual"` | the user's own words — excluded from consolidation by name |
+| `source: "builtin"` | a rule Ghost ships — excluded from consolidation by name, and presented as Ghost's own |
+| `pinned: 1` | exempt from consolidation whatever its source |
+
+`onboarding` is the source `internal/claudeimport` already uses for memories brought in from outside Ghost at first contact, and it is in the database's `CHECK` already, so downgrading needs no migration. A downgraded memory stays ordinary: consolidatable, and honest about where it came from.
+
+**Importing your own export? Pass `--trust-provenance`.** The rows come back with their own source and pin, which is what a restore wants. The asymmetry is deliberate: the cost of the default being wrong is planted provenance, and the cost of the flag being wrong is passing it once.
+
+```text
+  skip    project:  line 2  "one" (p1)
+  create  memory:   line 3  "the WAL holds a transaction…" (3A6B…)
+would import 1 project, 1 memory from ~/backups/one.jsonl
+
+nothing written — pass --apply to import
+```
+
+Rules the import follows:
+
+- **A record whose id already exists is skipped, never overwritten.** The artifact is the older of the two copies by construction, so overwriting would restore stale data over live data. This also makes re-running an import always safe, which is how you repair a run that rejected a record.
+- **A file whose schema version this build does not read is refused outright**, in either direction. Reading a newer one would insert records whose fields this build interprets by guesswork.
+- **Imported memory content goes through the same length cap and the same validation as a normal save** — category, source and importance are checked against the schema's own value sets, and over-long content is cut at `MaxContentLen` with the same explicit marker. An artifact from another machine is another way to reach the memories table, and must not be a way around its rules.
+- **Projects are created when missing**, and records are applied projects first, then memories, tasks and decisions, so a file whose records were reordered by an editor still imports. A `blocked_by` or `superseded_by` pointer is only honoured when the record it names is in the same artifact and is applied first; a pointer to a record the artifact does not contain, or one inside a cycle, is dropped.
+- **A record that cannot be imported is rejected and the run continues**, so one hand-edited line does not abandon the rest of a large artifact. Rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
+- **A line that will not parse is rejected on its own.** A truncated, badly merged or hand-edited artifact still imports every record around the damage, and the bad line is reported with its line number. This is what the line-per-record shape buys: a file-level refusal is reserved for the problems that are not one line's — a missing or unreadable schema version, a second header, an unknown record type — where applying part of the file would mean importing data whose meaning is a guess.
+- **A project this store already has is adopted, not duplicated.** Project ids are per-install, so an artifact from another machine names a project the destination has never seen while the destination very often has its own project for the same checkout or the same repository. Both `path` and `repo_remote` are unique, so inserting the artifact's project would collide — and because every memory, task and decision names the artifact's project id, one collision would take the whole file with it. Instead the records are attached to the project that is already there, and the report line says so:
+
+  ```text
+    skip    project:  line 2  "thing → ghost (this store already records that checkout or repository)"
+    create  memory:   line 3  "the WAL holds a transaction…" (3A6B…)
+  ```
+
+  A collision that survives that — another writer claiming the same directory between the plan and the write — is refused by name, in the dry run as well as the apply:
+
+  ```text
+  error: project laptop-1 cannot be imported: this Ghost already records /src/thing as project ghost — import into that project, or merge it with `ghost project merge`
+  ```
+
+- **A record with no `created_at` or no `importance` takes the column's own default**, not a bound zero. A stored empty string makes `julianday('')` NULL, which makes the whole time-decay expression NULL and sorts the memory out of every ranked read — present in the store, invisible to recall. A *stated* `importance: 0` is kept as 0: a memory saved without an importance is stored as 0, exported as `"importance":0`, and re-importing it must not promote it to the 0.5 default.
+
+Import does not run Upsert's near-duplicate probe. A restore is putting back what was there, not adding knowledge, and folding two rows of the artifact into one would silently drop a memory the user chose to keep.
+
 ## Context and benchmarks
 
 ### `ghost context`
