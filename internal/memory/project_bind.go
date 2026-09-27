@@ -80,6 +80,21 @@ var (
 	ErrBindRemoteConflict = errors.New("the project already belongs to a different repository")
 )
 
+// projectRef names another project for a refusal: its display name, with the
+// id beside it so the reader can still address the project `ghost project merge`
+// takes. A project made over MCP is stored under a derived id the reader has
+// never seen, and one that predates that stores a bare name as its id, so a
+// refusal carrying only the id is either unreadable or a name — the id alone
+// cannot be right for both. Name and id are equal for a project created from a
+// name (the common case), and then only the name is printed, so the ordinary
+// refusal reads exactly as it did before.
+func projectRef(name, id string) string {
+	if name == "" || name == id {
+		return fmt.Sprintf("%q", id)
+	}
+	return fmt.Sprintf("%q (%s)", name, id)
+}
+
 // ProjectBinding reports what one bind changed, so a caller can tell the user
 // what moved and can stay quiet about the parts that did not.
 type ProjectBinding struct {
@@ -190,15 +205,15 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 			return result, fmt.Errorf("%w: %q is bound to %q, not %q — merge the projects instead of rebinding", ErrBindRemoteConflict, id, storedRemote, remote)
 		}
 		if storedRemote == "" {
-			var owner string
+			var owner, ownerName string
 			ownerErr := tx.QueryRowContext(ctx,
-				`SELECT id FROM projects WHERE repo_remote = ? AND id NOT IN ('_global', ?) LIMIT 1`,
-				remote, id).Scan(&owner)
+				`SELECT id, name FROM projects WHERE repo_remote = ? AND id NOT IN ('_global', ?) LIMIT 1`,
+				remote, id).Scan(&owner, &ownerName)
 			if ownerErr != nil && !errors.Is(ownerErr, sql.ErrNoRows) {
 				return result, fmt.Errorf("find repository owner: %w", ownerErr)
 			}
 			if owner != "" {
-				return result, fmt.Errorf("%w: %q belongs to project %q — bind the path there, or merge the projects", ErrBindRemoteClaimed, remote, owner)
+				return result, fmt.Errorf("%w: %q belongs to project %s — bind the path there, or merge the projects", ErrBindRemoteClaimed, remote, projectRef(ownerName, owner))
 			}
 		}
 	}
@@ -267,17 +282,24 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 // A recorded path that no longer resolves on disk is skipped: canonicalPath
 // fails on it, and resolution would reject that candidate too (pathsAgree
 // resolves both sides), so it can neither be the same directory nor shadow one.
+//
+// The refusals name the other project by its NAME, not by its id. A project
+// created over MCP is stored under a derived id, so an id is a string the reader
+// has never seen and cannot act on, while the name is what they called it and
+// what the commands these refusals recommend take. projectRef renders the two
+// together, so a project whose name and id coincide reads as the bare name the
+// refusal used to print.
 func checkBindPathConflicts(ctx context.Context, tx *sql.Tx, id, physical string) error {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT id, path, COALESCE(repo_remote, '') FROM projects WHERE id != ? AND id != '_global'`, id)
+		`SELECT id, name, path, COALESCE(repo_remote, '') FROM projects WHERE id != ? AND id != '_global'`, id)
 	if err != nil {
 		return fmt.Errorf("read project paths: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
 
 	for rows.Next() {
-		var otherID, otherPath, otherRemote string
-		if err := rows.Scan(&otherID, &otherPath, &otherRemote); err != nil {
+		var otherID, otherName, otherPath, otherRemote string
+		if err := rows.Scan(&otherID, &otherName, &otherPath, &otherRemote); err != nil {
 			return fmt.Errorf("scan project path: %w", err)
 		}
 		if !storedPathIsUsable(otherPath) {
@@ -287,22 +309,23 @@ func checkBindPathConflicts(ctx context.Context, tx *sql.Tx, id, physical string
 		if err != nil {
 			continue
 		}
+		other := projectRef(otherName, otherID)
 		switch {
 		case otherPhysical == physical:
-			return fmt.Errorf("%w: %q already records %q — bind the path there, or merge the projects",
-				ErrBindPathClaimed, otherID, otherPath)
+			return fmt.Errorf("%w: %s already records %q — bind the path there, or merge the projects",
+				ErrBindPathClaimed, other, otherPath)
 		case samePath(otherPhysical, physical):
 			// The other project is inside the path being bound, so this
 			// project would claim every clone under it.
-			return fmt.Errorf("%w: %q is inside it (%q) — binding the parent would claim every clone beneath it, which is how an unrelated directory reads another project's memories",
-				ErrBindPathContainsOther, otherID, otherPath)
+			return fmt.Errorf("%w: %s is inside it (%q) — binding the parent would claim every clone beneath it, which is how an unrelated directory reads another project's memories",
+				ErrBindPathContainsOther, other, otherPath)
 		case samePath(physical, otherPhysical) && otherRemote == "":
 			// The path being bound is inside the other project's location, and
 			// that project has no remote, so its directory claims the whole
 			// subtree — a session in any clone under it resolves to it. The
 			// remedy is the identity that ends the claim.
-			return fmt.Errorf("%w: %q records %q and has no repository remote, so that directory answers for everything beneath it — bind the outer project instead, or give it a remote",
-				ErrBindPathInsideOther, otherID, otherPath)
+			return fmt.Errorf("%w: %s records %q and has no repository remote, so that directory answers for everything beneath it — bind the outer project instead, or give it a remote",
+				ErrBindPathInsideOther, other, otherPath)
 		}
 	}
 	if err := rows.Err(); err != nil {
