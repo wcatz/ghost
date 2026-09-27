@@ -69,6 +69,29 @@ type fakeStore struct {
 	alreadyResolved   []memory.Memory     // ResolvedCandidates pool (reassess)
 	cleared           []string            // ids passed to ClearResolved
 	clearErr          error               // when set, returned by ClearResolved
+	// known holds every row GetByIDs can serve. It defaults to the union of
+	// both candidate pools so a test that does not care about endpoint scopes
+	// does not have to restate its rows; scopeCompatibleSupersedes needs the
+	// source endpoint, which the candidate pools do not always contain.
+	known []memory.Memory
+}
+
+func (s *fakeStore) GetByIDs(_ context.Context, ids []string) ([]memory.Memory, error) {
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	pool := s.known
+	if len(pool) == 0 {
+		pool = append(append([]memory.Memory{}, s.candidates...), s.alreadyResolved...)
+	}
+	var out []memory.Memory
+	for _, m := range pool {
+		if want[m.ID] {
+			out = append(out, m)
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeStore) ResolveCandidates(_ context.Context, _ string) ([]memory.Memory, error) {

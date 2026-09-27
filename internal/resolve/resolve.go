@@ -102,10 +102,82 @@ func ContentHash(content string) string {
 // testability.
 type resolveStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	SetResolved(ctx context.Context, ids []string) (int, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
+}
+
+// linkScopeReader is the one method scopeCompatibleSupersedes needs. Both
+// resolveStore and reassessStore satisfy it, so the rule is stated once for the
+// ordinary pass and the repair pass instead of twice.
+type linkScopeReader interface {
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
+}
+
+// scopeCompatibleSupersedes filters live 'supersedes'/'llm' links down to the
+// ones the pass may act on.
+//
+// An edge is a verdict that one claim replaced another, and it is only that
+// when both endpoints could be the same claim. A development row never replaced
+// a production one, so an edge between them asserts nothing — yet the classifier
+// that wrote it could not have known: it is handed the two note bodies and
+// nothing else, and scope is a column beside the text. Any store consolidated
+// before internal/supersede learned to refuse the pair can hold such an edge,
+// and read as sound it retires a live memory: the ordinary pass stamps
+// resolved_at on it, which is persisted, removes it from ranked injection
+// everywhere, and is undone only by an explicit repair pass.
+//
+// The endpoints' scopes are read from the store rather than from the link,
+// because the link row carries neither. A link whose source cannot be loaded is
+// dropped rather than trusted: memory_links cascades with its memories, so the
+// case should be unreachable, and if it is reached the two failure modes are not
+// equal — a pair the classifier never sees can be judged on its own merits next
+// pass, while a row resolved on a verdict that turned out to be unsound needs
+// --reassess to undo.
+func scopeCompatibleSupersedes(ctx context.Context, store linkScopeReader, links []memory.Link) ([]memory.Link, error) {
+	if len(links) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(links)*2)
+	seen := make(map[string]bool, len(links)*2)
+	for _, l := range links {
+		for _, id := range []string{l.SourceID, l.TargetID} {
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	mems, err := store.GetByIDs(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load supersedes link endpoints: %w", err)
+	}
+	scopeByID := make(map[string]map[string]string, len(mems))
+	for _, m := range mems {
+		scopeByID[m.ID] = m.Scope
+	}
+
+	out := make([]memory.Link, 0, len(links))
+	for _, l := range links {
+		newer, ok := scopeByID[l.SourceID]
+		if !ok {
+			continue
+		}
+		older, ok := scopeByID[l.TargetID]
+		if !ok {
+			// The target is the row the pass acts on, so a missing one is not a
+			// pair to judge; the caller finds it in its own pool or not at all.
+			continue
+		}
+		if memory.ScopesConflict(newer, older) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out, nil
 }
 
 // Result summarizes a pass.
@@ -191,10 +263,16 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	// memory ('supersedes' is written newer→older), so its TargetID is the older
 	// now-obsolete claim. Only demote links whose older endpoint is still an
 	// eligible candidate (unresolved, unpinned, non-exempt category) — anything
-	// else is already handled or out of scope.
+	// else is already handled or out of scope — and whose endpoints do not
+	// conflict on scope, which is not a verdict this pass may act on
+	// (scopeCompatibleSupersedes).
 	links, err := store.LinksByRelationSource(ctx, projectID, "supersedes", "llm")
 	if err != nil {
 		return res, nil, fmt.Errorf("load supersedes links: %w", err)
+	}
+	links, err = scopeCompatibleSupersedes(ctx, store, links)
+	if err != nil {
+		return res, nil, err
 	}
 	for _, l := range links {
 		older, ok := byID[l.TargetID]

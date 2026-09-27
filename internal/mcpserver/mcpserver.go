@@ -175,11 +175,13 @@ func provenanceFor(req *mcp.CallToolRequest) memory.Provenance {
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
 // the methods ghost_resolve needs (ResolveCandidates, SetResolved, the
-// supersedes-link read for deterministic demotion, and the KEEP-verdict cache).
-// These aren't part of provider.MemoryStore, so s.store is type-asserted to
-// this interface at call time; *memory.Store satisfies it.
+// supersedes-link read for deterministic demotion with GetByIDs for the link
+// endpoints' scopes, and the KEEP-verdict cache). These aren't part of
+// provider.MemoryStore, so s.store is type-asserted to this interface at call
+// time; *memory.Store satisfies it.
 type resolveCapableStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	SetResolved(ctx context.Context, ids []string) (int, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)

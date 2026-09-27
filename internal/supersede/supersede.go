@@ -101,7 +101,7 @@ type vectorStore interface {
 	GetAll(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	GetEmbedding(ctx context.Context, memoryID string) ([]float32, error)
-	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
+	SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]memory.ScoredMemory, error)
 	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
 	InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
@@ -113,6 +113,31 @@ type vectorStore interface {
 // memories whose cosine similarity is at least threshold, oriented newer→older
 // by updated_at. A pair is emitted once regardless of which endpoint surfaced
 // it. Memories without embeddings are skipped (no similarity signal).
+//
+// A pair whose endpoints' scopes conflict is never emitted. The classifier
+// cannot see the difference: it is handed the two note bodies and nothing else,
+// and scope is a column beside the text, so "development pool timeout is 5s"
+// and "production pool timeout is 30s" arrive as the same sentence twice and
+// the rubric's NEITHER example can only catch the pair that names its
+// environments in prose. Refusing the pair here is what keeps that from costing
+// a classify call and writing a 'supersedes' edge between two claims about
+// different places — the same exemption the linker's 'related' edge and
+// Upsert's 'duplicate' fold already apply (memory.ScopesConflict).
+//
+// The refusal is made twice, on purpose. The scope reaches the store so the
+// neighbour budget counts only rows this source may link to — filtering after
+// the cut spends the whole budget on rows that can never be linked, and a
+// compatible pair ranked just below the cut is then never examined at all. The
+// ScopesConflict test is the invariant the returned candidates must satisfy;
+// the shipped store already guarantees it, but vectorStore is an interface and
+// the guarantee is a property of one implementation, not of the contract.
+//
+// Neither refusal is counted in Result. Against the shipped store the
+// conflicting rows are dropped by the query, before this function sees them, so
+// a count taken here would report zero for work the pass really did decline —
+// a number that reads as "nothing was skipped", which is worse than no number.
+// Run's reclassify filter can see its own pairs and logs each refusal; on the
+// fresh path a refusal shows up as a candidate the pass never spends a call on.
 func SelectCandidates(ctx context.Context, store vectorStore, projectID string, threshold float32) ([]Candidate, error) {
 	mems, err := store.GetAll(ctx, projectID, 100000)
 	if err != nil {
@@ -134,7 +159,8 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			// propose pairs from a cosine between two spaces, and each confirmed
 			// one costs a classify call and writes a demoting edge.
 		}
-		neighbors, err := store.SearchVector(ctx, projectID, vec, maxNeighbors+1)
+		// +1 because the memory itself is its own nearest neighbor.
+		neighbors, err := store.SearchVectorScoped(ctx, projectID, vec, maxNeighbors+1, m.Scope)
 		if err != nil {
 			return nil, fmt.Errorf("search vector for %s: %w", m.ID, err)
 		}
@@ -145,6 +171,9 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			other, ok := byID[n.MemoryID]
 			if !ok {
 				continue // e.g. a _global neighbor not in this project's set
+			}
+			if memory.ScopesConflict(m.Scope, n.Scope) {
+				continue
 			}
 			newer, older := orient(m, other)
 			if newer.ID == older.ID {
@@ -249,6 +278,15 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // Result.StaleSkipped rather than failing the pass — the pair no longer
 // exists, so there is nothing to link.
 //
+// A pair whose endpoints' scopes conflict is dropped and logged, fresh or
+// reclassifying alike, and any existing link for it is left in place: two claims
+// about different environments never stand in a supersession relation, so the
+// pass must neither spend a classify call on them nor write the edge.
+// SupersedePenalties is what keeps an edge written before this rule existed from
+// demoting anything. The reclassify half is what makes the rule reach an edge
+// that already exists, and what it saves is one call per endpoint edit, not one
+// per pass: skip-if-unchanged already holds an untouched pair quiet.
+//
 // CreateLink and InvalidateLink are both idempotent no-ops when there's
 // nothing to change, so re-running Run converges and self-heals after
 // reflection's cascade-delete of links. A pair whose verdict is unparseable is
@@ -330,21 +368,41 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	if err != nil {
 		return res, nil, fmt.Errorf("existence check: %w", err)
 	}
-	aliveSet := make(map[string]bool, len(aliveMems))
+	aliveByID := make(map[string]memory.Memory, len(aliveMems))
 	for _, m := range aliveMems {
-		aliveSet[m.ID] = true
+		aliveByID[m.ID] = m
 	}
 	live := all[:0]
 	for _, c := range all {
-		if aliveSet[c.NewerID] && aliveSet[c.OlderID] {
-			live = append(live, c)
+		newerMem, okNewer := aliveByID[c.NewerID]
+		olderMem, okOlder := aliveByID[c.OlderID]
+		if !okNewer || !okOlder {
+			res.StaleSkipped++
+			if logger != nil {
+				logger.Info("supersede: dropping stale pair (endpoint replaced by a concurrent pass)",
+					"newer", c.NewerID, "older", c.OlderID)
+			}
 			continue
 		}
-		res.StaleSkipped++
-		if logger != nil {
-			logger.Info("supersede: dropping stale pair (endpoint replaced by a concurrent pass)",
-				"newer", c.NewerID, "older", c.OlderID)
+		// The scope refusal, at the one point every pair passes through, so it
+		// covers the reclassify path as well as the fresh one. SelectCandidates
+		// already refuses a conflicting fresh pair, but a 'supersedes' link
+		// written before that guard existed is re-proposed on the first pass
+		// after either endpoint is edited (skip-if-unchanged holds the rest
+		// quiet, and CreateLink never touches memories.updated_at), and the
+		// classifier cannot see scope — so that pass would spend a billed call
+		// re-judging two claims about different environments and re-affirm an
+		// edge that ought not to exist. The edge itself is left alone: scope
+		// exempts a pair from ranking, it does not delete graph history, which
+		// is the same line memory.DemotionPenalties draws for 'related' edges.
+		if memory.ScopesConflict(newerMem.Scope, olderMem.Scope) {
+			if logger != nil {
+				logger.Info("supersede: dropping pair whose scopes conflict",
+					"newer", c.NewerID, "older", c.OlderID)
+			}
+			continue
 		}
+		live = append(live, c)
 	}
 	all = live
 	res.Candidates = len(all)

@@ -205,6 +205,45 @@ func TestLinksByRelationSource(t *testing.T) {
 	}
 }
 
+// TestSupersedesWithinIgnoresScopeConflictingEdge: this function has no
+// production caller — SupersedePenalties is the reader ranking uses — but it is
+// exported and documented as returning the 'supersedes' edges ranking consults,
+// so a caller added later would inherit an answer that contradicts every other
+// reader of the same edge. The guard is here so the function's contract cannot
+// quietly disagree with the rest of the store.
+func TestSupersedesWithinIgnoresScopeConflictingEdge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	dev := makeScopedMemory(t, s, "api listen port is 8443", "development")
+	prod := makeScopedMemory(t, s, "api listen port is 8443", "production")
+	sameProd := makeScopedMemory(t, s, "worker pool size is 12", "production")
+	sameProdNewer := makeScopedMemory(t, s, "worker pool size is 12", "production")
+
+	if err := s.CreateLink(ctx, dev, prod, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink conflicting: %v", err)
+	}
+	if err := s.CreateLink(ctx, sameProdNewer, sameProd, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink same scope: %v", err)
+	}
+
+	// The conflicting edge is not deleted, only withheld.
+	links, err := s.GetLinks(ctx, prod)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("scope guard must not delete the existing edge, got %+v", links)
+	}
+
+	pairs, err := s.SupersedesWithin(ctx, []string{dev, prod, sameProdNewer, sameProd})
+	if err != nil {
+		t.Fatalf("SupersedesWithin: %v", err)
+	}
+	if len(pairs) != 1 || pairs[0] != [2]string{sameProdNewer, sameProd} {
+		t.Errorf("SupersedesWithin = %v, want only the same-scope pair %v", pairs, [2]string{sameProdNewer, sameProd})
+	}
+}
+
 func TestLinksByRelationSourceExcludesInvalidated(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

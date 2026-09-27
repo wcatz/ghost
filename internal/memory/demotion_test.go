@@ -116,6 +116,59 @@ func TestSupersedePenalties(t *testing.T) {
 	}
 }
 
+// TestSupersedePenaltiesIgnoresScopeConflictingEdge: a 'supersedes' edge whose
+// endpoints name different environments is a claim that one replaced the other,
+// which is not a claim either of them makes. It can already be in the store —
+// written before the writer-side guard existed, or by a manual link — so the
+// consumer is the only place that can keep it from sinking a production answer
+// behind a development one.
+func TestSupersedePenaltiesIgnoresScopeConflictingEdge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	dev := makeScopedMemory(t, s, "development pool timeout is 5s", "development")
+	prod := makeScopedMemory(t, s, "production pool timeout is 30s", "production")
+	if err := s.CreateLink(ctx, dev, prod, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	links, err := s.GetLinks(ctx, dev)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("scope guard must not delete the existing edge, got %+v", links)
+	}
+	penalty, err := SupersedePenalties(ctx, s.db, []string{dev, prod})
+	if err != nil {
+		t.Fatalf("SupersedePenalties: %v", err)
+	}
+	if len(penalty) != 0 {
+		t.Fatalf("scope-conflicting supersedes edge produced demotion penalties: %v", penalty)
+	}
+}
+
+// TestSupersedePenaltiesKeepsOneSidedScopeEdge: silence is not disagreement. A
+// scoped memory and an unscoped one are compatible, and the guard must not
+// exempt that pair — a global rule and the environment it applies to are
+// genuinely about to replace one another.
+func TestSupersedePenaltiesKeepsOneSidedScopeEdge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scoped := makeScopedMemory(t, s, "production pool timeout is 30s", "production")
+	unscoped := makeMemory(t, s, "pool timeout is 5s everywhere")
+	if err := s.CreateLink(ctx, scoped, unscoped, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	penalty, err := SupersedePenalties(ctx, s.db, []string{scoped, unscoped})
+	if err != nil {
+		t.Fatalf("SupersedePenalties: %v", err)
+	}
+	if penalty[unscoped] != 1 {
+		t.Errorf("one-sided scope should remain compatible, got penalties %v", penalty)
+	}
+}
+
 func TestDemotionPenaltiesIgnoresBelowThreshold(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
