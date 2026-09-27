@@ -46,12 +46,17 @@ type reflectionApplier interface {
 // offer a restore hint, and above all must not record the skip fingerprint over
 // an unchanged corpus — because then --skip-unchanged skips the project
 // forever, and a stored row holding a credential is never revisited.
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (preserved []string, promoted int, keptMems []memory.Memory, applied bool, err error) {
+// `keptProject` and `keptGlobal` are the POST-drop proposal sets, because the
+// caller's "Applied: N memories consolidated" line counts them. Returning only a
+// count left it counting the pre-drop lists, so a partial drop — one good
+// proposal and one credential — reported 2 written when 1 was.
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, applied bool, err error) {
 	if !promoteGlobals && len(globalMems) > 0 {
 		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		globalMems = nil
 	}
-	projectMems, globalMems, dropped := dropCredentialProposals(projectMems, globalMems)
+	keptProject, keptGlobal, dropped := dropCredentialProposals(projectMems, globalMems)
+	projectMems, globalMems = keptProject, keptGlobal
 	projectRows := reflectMemoriesToMemory(projectID, projectMems, replaced)
 	globalRows := reflectMemoriesToMemory("_global", globalMems, replaced)
 	if len(projectRows) == 0 && len(globalRows) == 0 {
@@ -60,11 +65,11 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		// above, and saying so here is the point — a removal claim printed before
 		// anyone knows whether a replace runs closes the incident in the
 		// operator's head while the value sits in the database.
-		return nil, 0, nil, false, nil
+		return keptProject, keptGlobal, nil, 0, nil, false, nil
 	}
 	preserved, promoted, kept, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
 	if err != nil {
-		return nil, 0, nil, false, err
+		return keptProject, keptGlobal, nil, 0, nil, false, err
 	}
 	// Two things have to be true for a carried-forward row to be gone, and this
 	// note says only what holds. A proposal dropped for holding a credential is
@@ -84,7 +89,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		fmt.Fprintln(os.Stderr,
 			"note: the project replace has just removed any stored memory the dropped proposal(s) were carrying forward, because it held a credential value. A manual, builtin, pinned or resolved row is not replaceable and would still be there: check the project")
 	}
-	return preserved, promoted, kept, true, nil
+	return keptProject, keptGlobal, preserved, promoted, kept, true, nil
 }
 
 // displayProposal renders a proposal or a guarded drop for the operator's own

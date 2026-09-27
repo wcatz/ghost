@@ -38,7 +38,7 @@ func TestCredentialIsDroppedAfterTheGuardAuditNotBefore(t *testing.T) {
 	f := &fakeReflectionApplier{}
 
 	stderr := captureStderr(t, func() {
-		_, _, _, _, err := applyReflection(
+		_, _, _, _, _, _, err := applyReflection(
 			context.Background(), f, "p1",
 			projectMemories("the relay listens on 2222", "the deploy token is "+credential),
 			nil, "since", false,

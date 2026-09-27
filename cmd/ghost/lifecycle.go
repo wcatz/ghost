@@ -1050,7 +1050,10 @@ func runReflect() {
 	// project by the replace and then written nowhere at all, because promotion
 	// returns early and the recovery list was empty. applyReflection folds
 	// those candidates back into the project itself when promotion is off.
-	preserved, promoted, keptMems, applied, err := applyReflection(
+	// The POST-drop sets, not the caller's pre-drop ones: the summary below counts
+	// them, and a partial drop — one good proposal and one credential — has to
+	// report only what was written.
+	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, applied, err := applyReflection(
 		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
@@ -1112,14 +1115,14 @@ func runReflect() {
 	// Keying this on the project-memory count alone dropped both the summary
 	// and the learned context for a promotion-only round — exactly the round
 	// the flag was added for.
-	if applied && (promoted > 0 || len(keptMems) > 0 || len(projectMems) > 0 || len(globalMems) > 0) {
+	if applied && (promoted > 0 || len(keptMems) > 0 || len(keptProjectMems) > 0 || len(keptGlobalMems) > 0) {
 		// Everything the project ends up holding, which is projectMems plus the
 		// candidates that landed back in it: all of them when promotion is off,
 		// and the kept subset when it is on. appliedSummary counts rows, so
 		// leaving these out understates what was written.
-		appliedProjectMems := append([]reflection.ReflectMemory(nil), projectMems...)
+		appliedProjectMems := append([]reflection.ReflectMemory(nil), keptProjectMems...)
 		if !parsed.promoteGlobals {
-			appliedProjectMems = append(appliedProjectMems, globalMems...)
+			appliedProjectMems = append(appliedProjectMems, keptGlobalMems...)
 		} else {
 			// Only the candidates that actually failed promotion. Adding all of
 			// globalMems here would count the promoted rows as project memories
@@ -1128,7 +1131,7 @@ func runReflect() {
 			for _, m := range keptMems {
 				keptText[m.Content] = true
 			}
-			for _, m := range globalMems {
+			for _, m := range keptGlobalMems {
 				if keptText[m.Content] {
 					appliedProjectMems = append(appliedProjectMems, m)
 				}
@@ -1137,9 +1140,9 @@ func runReflect() {
 		// appliedSummary reports the REAL promoted count rather than the number
 		// of candidates, so a partial promotion does not print "3 promoted to
 		// global" one line after "Promoted 1/3".
-		summary := appliedSummary(appliedProjectMems, globalMems, promoted, parsed.promoteGlobals)
+		summary := appliedSummary(appliedProjectMems, keptGlobalMems, promoted, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
-		if len(globalMems) > 0 && !parsed.promoteGlobals {
+		if len(keptGlobalMems) > 0 && !parsed.promoteGlobals {
 			fmt.Println("(re-run with --promote-globals to inject them into every project)")
 		}
 		if len(projectForSummary) > 0 {
