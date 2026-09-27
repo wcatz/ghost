@@ -507,15 +507,16 @@ func TestEveryWriterRejectsConfidenceOutsideTheUnitRange(t *testing.T) {
 					"category":   "fact",
 					"confidence": bad,
 				}
-				if tool == "ghost_memory_update" {
+				switch tool {
+				case "ghost_memory_save":
+					args["project_id"] = "test-project"
+				case "ghost_memory_update":
 					args["project_id"] = "test-project"
 					args["memory_id"] = savedMemory(t, srv, session, "ghost_memory_save", map[string]any{
 						"project_id": "test-project",
 						"content":    "a memory that already exists",
 						"category":   "fact",
 					}).ID
-				} else if tool == "ghost_memory_save" {
-					args["project_id"] = "test-project"
 				}
 				res := callTool(t, session, tool, args)
 				if !res.IsError {
