@@ -172,23 +172,43 @@ func runContextCommand(t *testing.T, s *sandbox) {
 	})
 	s.mustRun("project", "bind", e2eProject, s.work)
 
-	bound := s.mustRun("context", "--cwd", s.work)
-	mustContain(t, "context for a bound directory", bound.stdout, "Ghost context: "+e2eProject)
-	mustContain(t, "context for a bound directory", bound.stdout, "a memory the context block has to carry")
-	// --cwd is the flag the row's help advertises, and it is what makes the
-	// opencode adapter's injection work from a directory that is not the cwd.
-	//
-	// The two renderings agree on content but NOT byte for byte, and the reason
-	// is the product's: a context render counts itself as a session, so the
-	// second run has a higher session number. Comparing the digests with that
-	// line removed is what makes this an assertion about --cwd rather than about
-	// the counter — and leaving the line in would have made the test fail on a
-	// correct implementation.
+	// The process's own working directory IS the bound one — every command in
+	// the sandbox runs with cmd.Dir = s.work — so the implicit-cwd render is
+	// the one that takes no flag at all. Comparing it against an explicit
+	// --cwd pointing at the SAME directory is the only pair that isolates the
+	// flag: run --cwd twice and the comparison is a command with itself, which
+	// would stay green with the flag ignored outright.
+	implicit := s.mustRun("context")
+	mustContain(t, "context with no --cwd", implicit.stdout, "Ghost context: "+e2eProject)
+	mustContain(t, "context with no --cwd", implicit.stdout, "a memory the context block has to carry")
+
 	explicit := s.mustRun("context", "--cwd", s.work)
-	if stripSessionCounter(explicit.stdout) != stripSessionCounter(bound.stdout) {
-		t.Fatalf("`ghost context --cwd` and the cwd it defaults to render differently:\n--- default ---\n%s\n--- --cwd ---\n%s",
-			bound.stdout, explicit.stdout)
+	if stripSessionCounter(explicit.stdout) != stripSessionCounter(implicit.stdout) {
+		t.Fatalf("`ghost context --cwd <bound dir>` and `ghost context` render differently:\n"+
+			"--- implicit cwd ---\n%s\n--- --cwd ---\n%s", implicit.stdout, explicit.stdout)
 	}
+
+	// The = form is a separate branch in the parser, and a flag that only
+	// worked in its space form would be invisible above.
+	equals := s.mustRun("context", "--cwd="+s.work)
+	if stripSessionCounter(equals.stdout) != stripSessionCounter(implicit.stdout) {
+		t.Fatalf("`ghost context --cwd=<dir>` and `ghost context` render differently:\n"+
+			"--- implicit cwd ---\n%s\n--- --cwd= ---\n%s", implicit.stdout, equals.stdout)
+	}
+
+	// And the flag is HONOURED, which is the half a same-directory comparison
+	// can never show: a second project bound elsewhere must not leak into this
+	// directory's digest.
+	other := t.TempDir()
+	call(t, s.mcpSession(t), "ghost_memory_save", map[string]any{
+		"project_id": "other-proj",
+		"content":    "a memory that belongs to a different directory",
+	})
+	s.mustRun("project", "bind", "other-proj", other)
+	elsewhere := s.mustRun("context", "--cwd", other)
+	mustContain(t, "context for the other directory", elsewhere.stdout, "Ghost context: other-proj")
+	mustNotContain(t, "context for the other directory", elsewhere.stdout,
+		"a memory the context block has to carry")
 }
 
 // runMaintenanceCommands is the real invocation behind the `maintenance` row,
