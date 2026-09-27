@@ -180,18 +180,15 @@ func Snapshot(t testing.TB, root string) Tree {
 	out := Tree{}
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
-			// A tree that cannot be walked snapshots as what was readable, and
-			// the comparison that follows reports the difference. Swallowing it
-			// here cannot make two different trees compare equal, because the
-			// entries that did read are in the map either way.
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return nil
+			// An entry that cannot be read is recorded as absent and the walk
+			// continues. Swallowing it cannot make two different trees compare
+			// equal — the entries that did read are in the map either way, and
+			// the comparison reports whatever is missing from either side.
+			return nil //nolint:nilerr // the comparison that follows reports it
 		}
 		rel, rerr := filepath.Rel(root, p)
 		if rerr != nil || rel == "." {
-			return nil //nolint:nilerr // an unrelatable path is not a fixture failure
+			return nil //nolint:nilerr // "." is root itself, which is not an entry
 		}
 		rel = filepath.ToSlash(rel)
 		out[rel] = ""
@@ -207,8 +204,10 @@ func Snapshot(t testing.TB, root string) Tree {
 		}
 		data, rerr := os.ReadFile(p) // #nosec G304 -- the path came from walking root
 		if rerr != nil {
+			// Recorded rather than skipped, so an unreadable file is a visible
+			// difference instead of a silently absent entry.
 			out[rel] = "<unreadable: " + rerr.Error() + ">"
-			return nil //nolint:nilerr // recorded as unreadable above
+			return nil //nolint:nilerr // recorded as unreadable just above
 		}
 		out[rel] = string(data)
 		return nil
