@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/selfupdate"
@@ -123,13 +124,46 @@ func TestParseUpgradeArgsRejectsAnythingElse(t *testing.T) {
 // network or the binary the test runner is executing. Every digest agrees
 // until a test deliberately breaks one.
 type upgradeFixture struct {
-	release *selfupdate.Release
-	asset   *selfupdate.Asset
-	binary  []byte
-	// manifest and body are read through the pointer at request time, so a
-	// test can substitute what the release publishes without a second server.
-	manifest *string
-	body     *[]byte
+	release  *selfupdate.Release
+	asset    *selfupdate.Asset
+	binary   []byte
+	payloads *releasePayloads
+}
+
+// releasePayloads is what the fixture's server hands out, read at request time
+// so a test can substitute what the release publishes without a second server.
+// The lock is not decoration: httptest answers each request on its own
+// goroutine, a test rewrites these values from the goroutine running the
+// command under test, and nothing orders the two — CI runs this package under
+// -race, which reports the pair as a data race.
+type releasePayloads struct {
+	mu       sync.Mutex
+	manifest string
+	archive  []byte
+}
+
+func (p *releasePayloads) setManifest(manifest string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.manifest = manifest
+}
+
+func (p *releasePayloads) manifestText() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.manifest
+}
+
+func (p *releasePayloads) setArchive(archive []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.archive = archive
+}
+
+func (p *releasePayloads) archiveBytes() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.archive
 }
 
 func newUpgradeFixture(t *testing.T, binary []byte) *upgradeFixture {
@@ -139,15 +173,17 @@ func newUpgradeFixture(t *testing.T, binary []byte) *upgradeFixture {
 	assetName := selfupdate.AssetName(version)
 	archive := releaseArchive(t, assetName, binary)
 	digest := sha256HexDigest(archive)
-	manifest := digest + "  " + assetName + "\n"
-	body := archive
+	payloads := &releasePayloads{
+		manifest: digest + "  " + assetName + "\n",
+		archive:  archive,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/checksums.txt", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, manifest)
+		_, _ = io.WriteString(w, payloads.manifestText())
 	})
 	mux.HandleFunc("/archive", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(body)
+		_, _ = w.Write(payloads.archiveBytes())
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -167,12 +203,7 @@ func newUpgradeFixture(t *testing.T, binary []byte) *upgradeFixture {
 	if err != nil {
 		t.Fatalf("FindAsset: %v", err)
 	}
-	return &upgradeFixture{release: rel, asset: asset, binary: binary, manifest: &manifest, body: &body}
-}
-
-// serveBytes replaces what the fixture's archive endpoint serves.
-func serveBytes(_ *testing.T, fx *upgradeFixture, body []byte) {
-	*fx.body = body
+	return &upgradeFixture{release: rel, asset: asset, binary: binary, payloads: payloads}
 }
 
 func sha256HexDigest(data []byte) string {
@@ -288,13 +319,13 @@ func TestInstallReleaseRefusesBeforeInstalling(t *testing.T) {
 			// that arrived are not the ones that were released.
 			name: "the manifest is for other bytes",
 			corrupt: func(fx *upgradeFixture) {
-				*fx.manifest = otherHex + "  " + fx.asset.Name + "\n"
+				fx.payloads.setManifest(otherHex + "  " + fx.asset.Name + "\n")
 			},
 		},
 		{
 			name: "the manifest has no entry for the asset",
 			corrupt: func(fx *upgradeFixture) {
-				*fx.manifest = otherHex + "  some_other_asset.tar.gz\n"
+				fx.payloads.setManifest(otherHex + "  some_other_asset.tar.gz\n")
 			},
 		},
 	}
@@ -334,8 +365,8 @@ func TestInstallReleaseVerifiesTheDigestBeforeParsingTheArchive(t *testing.T) {
 	// The manifest vouches for the substituted bytes, and the reported digest
 	// still vouches for the release's real archive: exactly one of the two
 	// can pass.
-	*fx.manifest = sha256HexDigest(notAnArchive) + "  " + fx.asset.Name + "\n"
-	serveBytes(t, fx, notAnArchive)
+	fx.payloads.setManifest(sha256HexDigest(notAnArchive) + "  " + fx.asset.Name + "\n")
+	fx.payloads.setArchive(notAnArchive)
 
 	err := installRelease(context.Background(), io.Discard, fx.release, fx.asset, func([]byte) error {
 		t.Error("the installer ran for an archive that was never verified")

@@ -155,15 +155,46 @@ func TestExtractBinaryRefusesAnEntryOverItsCap(t *testing.T) {
 	}
 }
 
+// TestExtractBinaryCapsTheEntriesItSkips is the half of the cap that a limit
+// on the returned bytes does not cover. archive/tar reads an entry in full to
+// reach the next header — a gzip stream cannot seek — so every entry ahead of
+// the binary is inflated before the loop gets there, and those are real entries
+// (LICENSE, README.md) rather than something only an attacker would add.
+func TestExtractBinaryCapsTheEntriesItSkips(t *testing.T) {
+	original := binaryCap
+	binaryCap = 4096
+	t.Cleanup(func() { binaryCap = original })
+
+	archive := tarGzWith(t,
+		// A small, entirely plausible documentation entry that inflates well
+		// past the cap, ahead of a binary small enough to be the only thing
+		// read.
+		archiveEntry{name: "README.md", body: bytes.Repeat([]byte("a"), 64<<10)},
+		archiveEntry{name: "ghost", body: []byte("binary")},
+	)
+
+	_, err := ExtractBinary(archive)
+	if err == nil {
+		t.Fatal("expected an error: the archive inflates past the cap in an entry the extraction never returns")
+	}
+	if !strings.Contains(err.Error(), "cap") {
+		t.Errorf("error should name the cap, got: %v", err)
+	}
+}
+
 // TestExtractBinaryAcceptsAnEntryExactlyAtItsCap is the other half of the
-// boundary: "over the cap" must not be implemented as "big".
+// boundary: "over the cap" must not be implemented as "big". It is expressed on
+// the zip path, where the single entry it opens is the whole of what the
+// archive inflates; a .tar.gz spends part of the cap on headers and block
+// padding, which is why its limit is on everything the archive inflates rather
+// than on one entry.
 func TestExtractBinaryAcceptsAnEntryExactlyAtItsCap(t *testing.T) {
 	original := binaryCap
 	binaryCap = 1024
 	t.Cleanup(func() { binaryCap = original })
 
 	atCap := bytes.Repeat([]byte("a"), int(binaryCap))
-	got, err := ExtractBinary(tarGzWith(t, archiveEntry{name: "ghost", body: atCap}))
+	got, err := ExtractBinary(zipWith(t, archiveEntry{name: "ghost.exe", body: atCap}))
 	if err != nil {
 		t.Fatalf("ExtractBinary at the cap: %v", err)
 	}

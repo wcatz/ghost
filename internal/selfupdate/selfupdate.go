@@ -55,11 +55,13 @@ const (
 	// tens of MiB, so this leaves room to grow while keeping an endless or
 	// hostile response from exhausting memory.
 	maxArchiveBytes int64 = 200 << 20
-	// maxBinaryBytes bounds what comes out of the decompressor. The transfer
-	// cap above bounds what arrives, which says nothing about how far one
-	// archive expands: today's Windows binary is ~24 MiB inside a ~9 MiB zip,
-	// so a decompression bomb is a small download with an unbounded result.
-	// 128 MiB is several times the largest binary ghost ships.
+	// maxBinaryBytes bounds what one archive inflates into. The transfer cap
+	// above bounds what arrives, which says nothing about how far that expands:
+	// today's Windows binary is ~24 MiB inside a ~9 MiB zip, so a
+	// decompression bomb is a small download with an unbounded result. For a
+	// .tar.gz the bound covers every entry, since opening one inflates the
+	// entries ahead of the binary too; 128 MiB is several times the ~23 MiB a
+	// real release inflates to.
 	maxBinaryBytes int64 = 128 << 20
 )
 
@@ -326,9 +328,10 @@ var zipMagic = []byte("PK")
 // a mislabelled asset still reads as what it is and a renamed one cannot
 // present a different format to the parser.
 //
-// The entry is read through binaryCap. The transfer cap bounds what arrived,
-// not what it decompresses into, and an uncapped read here was the one place a
-// few hundred KiB of hostile archive could exhaust memory.
+// The cap bounds what the archive inflates into, not just the bytes that are
+// kept: the transfer cap limits what arrived, which says nothing about how far
+// one archive expands, and an uncapped read here was the last place a small
+// hostile archive could spend unbounded memory and CPU.
 func ExtractBinary(archive []byte) ([]byte, error) {
 	if bytes.HasPrefix(archive, zipMagic) {
 		return extractZipBinary(archive)
@@ -345,7 +348,14 @@ func extractTarGzBinary(archive []byte) ([]byte, error) {
 	}
 	defer gz.Close() //nolint:errcheck
 
-	tr := tar.NewReader(gz)
+	// Bounded on the way out, not only on what is kept. archive/tar reads an
+	// entry in full to reach the next header — a gzip stream is not seekable,
+	// so Next() copies the skipped body to io.Discard — and the entries ahead
+	// of the binary are real (LICENSE, README.md). A cap on the returned bytes
+	// alone would leave a few hundred KiB of compressible data in any other
+	// entry free to expand without limit, spending CPU that no deadline here
+	// can stop: the archive is already downloaded and in memory by now.
+	tr := tar.NewReader(&inflatedReader{r: gz, limit: binaryCap})
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -355,15 +365,39 @@ func extractTarGzBinary(archive []byte) ([]byte, error) {
 			return nil, fmt.Errorf("tar: %w", err)
 		}
 		if hdr.Name == "ghost" || hdr.Name == "ghost.exe" {
-			return readCapped(tr, binaryCap, "ghost binary")
+			return io.ReadAll(tr)
 		}
 	}
 	return nil, fmt.Errorf("ghost binary not found in archive")
 }
 
+// inflatedReader fails once the stream it wraps has produced more than limit
+// bytes. It is the bound on what an archive costs to open, whether or not the
+// bytes are kept: gzip expands as it is read, so the work is done before
+// anything can decide whether it wanted the result.
+type inflatedReader struct {
+	r     io.Reader
+	limit int64
+	read  int64
+}
+
+func (c *inflatedReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.read += int64(n)
+	if c.read > c.limit {
+		// n discarded along with the rest: the archive is being refused, so
+		// the bytes this call produced have no further reader.
+		return 0, fmt.Errorf("the release archive expands past the %d-byte cap", c.limit)
+	}
+	return n, err
+}
+
 // extractZipBinary reads the binary out of a zip. Only root entries count:
 // goreleaser puts the binary at the archive root, so an entry that could only
 // be reached by traversing out of the archive is not a file ghost published.
+//
+// A zip is random-access, so an entry this loop skips is never inflated at
+// all; the one entry it opens is bounded directly, by the same cap.
 func extractZipBinary(archive []byte) ([]byte, error) {
 	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil {
