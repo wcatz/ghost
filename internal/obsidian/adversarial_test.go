@@ -21,9 +21,10 @@ import (
 // here plant the shared corpus in every field the renderers touch and assert
 // three things: the note lands INSIDE the vault and inside the subtree prune
 // manages, the front matter stays one closed block, one key per line, with the
-// real ghost_id first (the reader's block, not prune's key — prune decides from
-// the filename), and a hostile value is present verbatim as text rather than
-// having become structure.
+// real ghost_id first (the reader's block, and prune's OWNERSHIP test — it will
+// not touch a file without one, though its keep-set is keyed on the filename, not
+// on the id), and a hostile value is present verbatim as text rather than having
+// become structure.
 //
 // Nothing is stripped. A payload that cannot be found is a payload the user
 // cannot see, and an Obsidian note that silently lost its injection is not a
