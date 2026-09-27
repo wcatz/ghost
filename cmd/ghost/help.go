@@ -38,6 +38,7 @@ var helpValueFlagsByCommand = map[string]map[string]bool{
 	"backup":                    {"--out": true},
 	"context":                   {"--cwd": true},
 	"export":                    {"--out": true, "--project": true},
+	"history":                   {"--limit": true},
 	"hook":                      {"--source": true},
 	"lifecycle":                 {"--project": true, "--source": true},
 	"mcp init":                  {"--client": true},
