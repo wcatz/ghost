@@ -13,9 +13,11 @@ import (
 // afterwards because their own LIMIT chooses the candidates, and
 // foldTargetStillLive, which has no window to protect and carries the rule
 // because a scope-conflicting 'supersedes' edge is not a verdict the row may be
-// acted on. Each states the rule over two scope expressions, and only
-// foldTargetStillLive compares two persisted columns: in the probes one side is
-// the incoming save's scope, bound as a parameter.
+// acted on. Each states the rule over two scope expressions, and the two that
+// compare stored rows do it over two persisted columns — foldTargetStillLive's,
+// and the cross-category probe's 'supersedes' exclusion — while the dedup filter
+// in each probe takes one side as the incoming save's scope, bound as a
+// parameter.
 //
 // Two copies of one rule drift. This test is what stops them: every case the
 // Go table covers is run through the SQL predicate too, so a change to either
