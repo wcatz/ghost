@@ -107,7 +107,10 @@ func TestSaveRecordsEveryValidityAndProvenanceField(t *testing.T) {
 		want  time.Time
 	}{
 		{"valid_from", m.ValidFrom, time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)},
-		{"valid_until", m.ValidUntil, time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)},
+		// A bare date as a window's end is the END of that day, not its start —
+		// see wholeDayEnd. Without that, "valid until 2026-12-01" would be dead
+		// from midnight on the 1st.
+		{"valid_until", m.ValidUntil, time.Date(2026, 12, 1, 23, 59, 59, 0, time.UTC)},
 		{"verified_at", m.VerifiedAt, time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)},
 	} {
 		raw := stamp(t, m, tc.field, tc.got)
@@ -211,7 +214,7 @@ func TestSaveGlobalRecordsEveryValidityAndProvenanceField(t *testing.T) {
 		want  time.Time
 	}{
 		{"valid_from", m.ValidFrom, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
-		{"valid_until", m.ValidUntil, time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{"valid_until", m.ValidUntil, time.Date(2030, 1, 1, 23, 59, 59, 0, time.UTC)},
 	} {
 		raw := stamp(t, m, tc.field, tc.got)
 		if at, err := time.Parse("2006-01-02 15:04:05", raw); err != nil {
@@ -266,7 +269,7 @@ func TestUpdateRecordsValidityAndProvenanceFields(t *testing.T) {
 		want  time.Time
 	}{
 		{"valid_from", after.ValidFrom, time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)},
-		{"valid_until", after.ValidUntil, time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC)},
+		{"valid_until", after.ValidUntil, time.Date(2027, 2, 1, 23, 59, 59, 0, time.UTC)},
 		{"verified_at", after.VerifiedAt, time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)},
 	} {
 		raw := stamp(t, after, tc.field, tc.got)
@@ -547,20 +550,60 @@ func effectiveWindow(m memory.Memory) (string, bool) {
 // Equal boundaries are the same contradiction with different digits: a window
 // that is open for no length of time is a claim with no period at all, and
 // reading it as "currently valid" is a claim the caller never made.
+//
+// Two full stamps, not two dates: a bare date is a whole day — the start of it at
+// one end, the end of it at the other — so naming the same date twice asks for a
+// one-day window, which is a coherent claim. Naming the same instant twice asks
+// for none, and that is the one to refuse.
 func TestSaveRejectsAWindowThatIsOpenForNoTime(t *testing.T) {
 	session := newToolSession(t)
 	res := callTool(t, session, "ghost_memory_save", map[string]any{
 		"project_id":  "test-project",
 		"content":     "a claim about a window of zero length",
 		"category":    "fact",
-		"valid_from":  "2026-10-01",
-		"valid_until": "2026-10-01",
+		"valid_from":  "2026-10-01T00:00:00Z",
+		"valid_until": "2026-10-01T00:00:00Z",
 	})
 	if !res.IsError {
 		t.Fatalf("save accepted a window open for no time: %q", resultText(res))
 	}
 	if !strings.Contains(resultText(res), "must end after it starts") {
 		t.Errorf("error does not say what is wrong with the window: %q", resultText(res))
+	}
+}
+
+// A bare date as a window's end is the end of that day, not its start. Read as
+// midnight it would retire the row from the first instant of the day the caller
+// said the claim was true through, and the renderer would print the same date
+// back with no `expired` marker on the very morning search had already dropped
+// it — the one case where the label and the filter would have disagreed.
+func TestADateValidUntilIsTrueThroughThatWholeDay(t *testing.T) {
+	srv, session := newCapSession(t)
+	pinAgent(t, "opencode")
+
+	today := time.Now().UTC().Format("2006-01-02")
+	m := savedMemory(t, srv, session, "ghost_memory_save", map[string]any{
+		"project_id":  "test-project",
+		"content":     "the freeze holds for the rest of today",
+		"category":    "fact",
+		"valid_until": today,
+	})
+
+	raw := stamp(t, m, "valid_until", m.ValidUntil)
+	at, err := time.Parse(memory.StoredStampLayout, raw)
+	if err != nil {
+		t.Fatalf("valid_until = %q is not the stored layout: %v", raw, err)
+	}
+	end := time.Date(at.Year(), at.Month(), at.Day(), 23, 59, 59, 0, time.UTC)
+	if !at.Equal(end) {
+		t.Errorf("valid_until = %v, want the last second of %s (%v) — a bare date is the whole day, not its first instant", at, today, end)
+	}
+
+	// The behavioural half: the row is still returned today. Midnight semantics
+	// would have withheld it, and only a row the filter actually keeps can show
+	// that.
+	if out := searchText(t, session, "test-project", "freeze rest of today"); !strings.Contains(out, m.ID) {
+		t.Errorf("a claim dated valid_until %s was withheld on %s itself: %q", today, today, out)
 	}
 }
 

@@ -49,10 +49,24 @@ type validityArgs struct {
 }
 
 // acceptedStampForms is the caller's side of the same contract, in the order the
-// error message lists them.
-var acceptedStampForms = []string{time.RFC3339, "2006-01-02"}
+// error message lists them. The whole-day form is memory.DateStampLayout because
+// it is the same string the store's readers accept.
+var acceptedStampForms = []string{time.RFC3339, memory.DateStampLayout}
 
 // parseStampArg normalizes one caller-supplied stamp into the stored layout.
+//
+// endOfDay says whether a bare date is the end of a window rather than its
+// start, because the two mean different instants and only one of them is the
+// plain reading. A date as a window's START is midnight and needs no adjustment:
+// a claim that begins on the 1st begins then. As an END it does, because
+// assemble.ExpiredAt is a strict "before now" — midnight would retire the row
+// from the first instant of the day the caller said it was true through, and
+// "valid until 2026-12-31" plainly means the whole of the 31st. The stored value
+// is therefore the last second of that day, which is the finest a
+// second-resolution text column can express: the claim stops one second before
+// the day is over rather than a day before it began. A full RFC 3339 stamp is
+// taken at the instant the caller wrote, because there they did say which one,
+// and assemble.stampText prints either day boundary back as a date.
 //
 // nil and an empty string are the same request — "no claim" — and become a nil
 // pointer, so a caller that sends "" does not write a claim with no readable
@@ -60,7 +74,7 @@ var acceptedStampForms = []string{time.RFC3339, "2006-01-02"}
 // documented, and a value matching none is an error naming the field, the
 // accepted formats and the value itself, because a rejected date is something
 // the caller can fix and an unreadable stored one is not.
-func parseStampArg(field string, raw any) (*string, error) {
+func parseStampArg(field string, raw any, endOfDay bool) (*string, error) {
 	if raw == nil {
 		return nil, nil
 	}
@@ -73,8 +87,12 @@ func parseStampArg(field string, raw any) (*string, error) {
 	}
 	for _, layout := range acceptedStampForms {
 		if t, err := time.Parse(layout, s); err == nil {
-			stored := t.UTC().Format(memory.StoredStampLayout)
-			return &stored, nil
+			stored := t.UTC()
+			if endOfDay && layout == memory.DateStampLayout {
+				stored = stored.Add(24*time.Hour - time.Second)
+			}
+			out := stored.Format(memory.StoredStampLayout)
+			return &out, nil
 		}
 	}
 	return nil, fmt.Errorf("%s must be RFC 3339 (2026-10-01T09:00:00Z) or a date (2026-10-01), got %q", field, s)
@@ -90,13 +108,13 @@ func parseStampArg(field string, raw any) (*string, error) {
 func parseStampFields(args validityArgs) (memory.Validity, error) {
 	var v memory.Validity
 	var err error
-	if v.ValidFrom, err = parseStampArg("valid_from", args.ValidFrom); err != nil {
+	if v.ValidFrom, err = parseStampArg("valid_from", args.ValidFrom, false); err != nil {
 		return memory.Validity{}, err
 	}
-	if v.ValidUntil, err = parseStampArg("valid_until", args.ValidUntil); err != nil {
+	if v.ValidUntil, err = parseStampArg("valid_until", args.ValidUntil, true); err != nil {
 		return memory.Validity{}, err
 	}
-	if v.VerifiedAt, err = parseStampArg("verified_at", args.VerifiedAt); err != nil {
+	if v.VerifiedAt, err = parseStampArg("verified_at", args.VerifiedAt, false); err != nil {
 		return memory.Validity{}, err
 	}
 
@@ -109,71 +127,18 @@ func parseStampFields(args validityArgs) (memory.Validity, error) {
 	}
 
 	// The window is checked on the instants, after normalization, so a date-only
-	// boundary compares the same as a timestamped one.
-	if err := checkWindowOrder(v, memory.Validity{}); err != nil {
+	// boundary compares the same as a timestamped one. This pass judges the
+	// arguments alone; memory.CheckWindowOrder is the one rule, and the store
+	// re-runs it inside its own transaction against the row as it is at that
+	// moment, which is the check that has to hold. Judging the caller's half
+	// against a value read before the write would leave two concurrent edits able
+	// to each pass against a snapshot the other has already invalidated, and would
+	// refuse a verification-only edit on a row whose stored window this caller
+	// never touched and may not be able to restate.
+	if err := memory.CheckWindowOrder(v, memory.Validity{}); err != nil {
 		return memory.Validity{}, err
 	}
 	return v, nil
-}
-
-// readStamp reads a stored validity stamp over every layout the store's readers
-// accept, reporting whether it was readable at all. It mirrors
-// assemble.parseStamp over the same memory.StampLayouts, and exists here so a
-// writer judging a value it did not store reads it exactly as a reader will: one
-// list of layouts, one owner, no writer-only dialect.
-func readStamp(s string) (time.Time, bool) {
-	for _, layout := range memory.StampLayouts {
-		if at, err := time.Parse(layout, s); err == nil {
-			return at, true
-		}
-	}
-	return time.Time{}, false
-}
-
-// checkWindowOrder refuses a window that does not end after it starts.
-//
-// stored is what the row already holds, which matters on the update path: a save
-// carries both boundaries or neither, but an edit that restates one boundary
-// against a row holding the other can create a contradiction the arguments alone
-// do not show. A row saved with valid_from 2026-01-01 and then updated with
-// valid_until 2020-01-01 has a window that ends before it starts, and stage 2
-// reads `until` first and drops the row as expired — a claim that silently
-// disappears from every search with no error anywhere. The rule is applied to
-// the effective pair, so it is the same rule whatever produced each half.
-//
-// Only a contradiction is refused. A window that has already closed, or one that
-// has not opened, is a legitimate thing to record: it is what a caller writes to
-// say a claim is over, or not yet in force.
-func checkWindowOrder(v, stored memory.Validity) error {
-	from, until := v.ValidFrom, v.ValidUntil
-	if from == nil {
-		from = stored.ValidFrom
-	}
-	if until == nil {
-		until = stored.ValidUntil
-	}
-	if from == nil || until == nil {
-		return nil
-	}
-	fromAt, fromReadable := readStamp(*from)
-	untilAt, untilReadable := readStamp(*until)
-	if !fromReadable || !untilReadable {
-		// Both halves came through parseStampArg, which accepts nothing
-		// unparseable, so a value that fails here is one this build stored — an
-		// imported artifact, a hand edit, or the whole-day form a reader accepts
-		// and a writer never produces. Read it the way the reader does before
-		// giving up: a check that only understood the shape this build writes
-		// would wave through a contradiction on every row stored as a bare date.
-		//
-		// A value no layout reads is genuinely not a claim, and stage 2 treats it
-		// as unset — so there is nothing here to contradict, and refusing would
-		// make an unrelated edit fail on a row Ghost cannot interpret.
-		return nil
-	}
-	if !untilAt.After(fromAt) {
-		return fmt.Errorf("valid_until %s is not after valid_from %s — a window must end after it starts, or a claim that is true for no time at all", *until, *from)
-	}
-	return nil
 }
 
 // parseConfidence normalizes the confidence argument to the stored *float64, or

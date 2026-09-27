@@ -125,15 +125,21 @@ func ConfidenceLabel(confidence *float64) string {
 	return " confidence " + strconv.FormatFloat(*confidence, 'g', -1, 64)
 }
 
-// stampText renders one validity boundary, dropping the time of day only when it
-// is midnight UTC — into memory.DateStampLayout, the same whole-day form a reader
-// accepts. A validity window is almost always stated in days and "valid until
-// 2026-10-01" is what the caller meant; anything with a time of day keeps it, since
-// then the time was the point. The two are the same instant, so nothing is lost: a
-// caller who wrote 2026-01-15T00:00:00Z reads back 2026-01-15, and one who wrote
-// 2026-01-15T09:00:00Z reads back the hour.
+// stampText renders one validity boundary in the whole-day form when the instant
+// is a day boundary, and in full otherwise — into memory.DateStampLayout, the same
+// form a reader accepts.
+//
+// Both ends of a day are day boundaries, and a validity window is almost always
+// stated in days: the writers store a bare start as midnight and a bare end as
+// 23:59:59 (see internal/mcpserver's wholeDayEnd), so "valid until 2026-10-01" is
+// stored as the last second of the 1st and has to read back as the 1st. Rendering
+// that as 2026-10-01 23:59:59 would be both noisier and a different claim from the
+// one the caller wrote; rendering midnight as a date is the same instant, so
+// nothing is lost either way. A time of day the caller actually chose keeps it.
 func stampText(t *time.Time) string {
-	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
+	midnight := t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0
+	endOfDay := t.Hour() == 23 && t.Minute() == 59 && t.Second() == 59
+	if midnight || endOfDay {
 		return t.Format(memory.DateStampLayout)
 	}
 	return t.Format(memory.StoredStampLayout)

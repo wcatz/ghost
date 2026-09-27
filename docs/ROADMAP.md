@@ -276,12 +276,11 @@ machine-readable scope ([#562](https://github.com/wcatz/ghost/pull/562),
 
 ### P0 — correctness first (make the axes mean something)
 
-The four axes are named in [`architecture.md`](architecture.md#memory-axes). Validity is written and consulted (the tools accept a claim's period and retrieval withholds a row whose window has closed), but a store whose rows all predate the writer contract still reads every row as unset; confidence is written and rendered and still read by nothing. Scope is partially implemented because it is persisted and searchable, but session-start injection still ignores it. P0 is the smallest set of changes that makes those axes mean what the schema says they mean, and stops the active defects below.
+The four axes are named in [`architecture.md`](architecture.md#memory-axes). Validity is written and consulted (the tools accept a claim's period, and `ghost_memory_search` withholds a row whose window has closed), but a store whose rows all predate the writer contract still reads every row as unset, and the browsing surfaces and the session-start block do not filter on it yet; confidence is written and rendered and still read by nothing. Scope is implemented — persisted, searchable, and now rendered and applied by session-start injection ([#577](https://github.com/wcatz/ghost/issues/577), closed). P0 is the smallest set of changes that makes those axes mean what the schema says they mean, and stops the active defects below.
 
 | Issue | Why it is P0 |
 |---|---|
 | [#575](https://github.com/wcatz/ghost/issues/575) | Validity and provenance had no production writer, so the columns were inert in every row a live store held; the writer contract and the shared rendering landed with it, and what is left is the multiplier nothing scores on yet |
-| [#577](https://github.com/wcatz/ghost/issues/577) | Session-start injection neither renders nor filters scope — the surface that most needs it |
 | [#579](https://github.com/wcatz/ghost/issues/579) | Define the four axes and their invariants; the documentation half can land first and this section already starts it |
 | [#580](https://github.com/wcatz/ghost/issues/580) | Retrieval never abstains: weak matches are returned as if authoritative |
 | [#588](https://github.com/wcatz/ghost/issues/588) | **Bug.** Every lifecycle call leaks a `[ghost]` OpenCode session into the user's session list (6,397 measured); needs an isolated data dir plus post-call deletion |

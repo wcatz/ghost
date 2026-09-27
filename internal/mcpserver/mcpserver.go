@@ -609,20 +609,6 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
 	}
 
-	// The window is judged against the row's stored boundaries as well as the
-	// caller's. An edit that restates one half of a window the row already holds
-	// can otherwise create a contradiction the arguments do not show — and
-	// stage 2 would then read the row as expired and drop it from every search,
-	// with no error anywhere to say why. Only an edit that touches the window gets
-	// here; an edit about the text leaves the stored pair alone and cannot
-	// contradict itself.
-	if !fields.Validity.IsZero() {
-		stored := memory.Validity{ValidFrom: mems[0].ValidFrom, ValidUntil: mems[0].ValidUntil}
-		if err := checkWindowOrder(fields.Validity, stored); err != nil {
-			return "", err
-		}
-	}
-
 	importance, err := optFloat32(args.Importance, "importance")
 	if err != nil {
 		return "", err

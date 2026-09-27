@@ -53,6 +53,21 @@ func TestItemLineRendersValidityDatesAndTimes(t *testing.T) {
 			wants: []string{"valid from 2026-01-15", "verified 2026-09-20 09:30:00"},
 		},
 		{
+			// What a writer stores for a bare date as a window's end. Rendering it
+			// as a timestamp would print a claim the caller never made, and one
+			// whose label would not match the day it covers.
+			name:  "an end of day",
+			item:  Item{ValidityState: validityValid, ValidFrom: stamp("2026-01-15 00:00:00"), ValidUntil: stamp("2026-10-01 23:59:59")},
+			wants: []string{"valid from 2026-01-15", "until 2026-10-01"},
+		},
+		{
+			// The near miss a rule keyed only on the hour would take: 23:59:58 is
+			// not a day boundary and must keep its second.
+			name:  "a second before the end of the day",
+			item:  Item{ValidityState: validityValid, ValidUntil: stamp("2026-10-01 23:59:58")},
+			wants: []string{"until 2026-10-01 23:59:58"},
+		},
+		{
 			name:  "verification with no window",
 			item:  Item{ValidityState: validityValid, VerifiedAt: stamp("2026-09-20 00:00:00")},
 			wants: []string{"verified 2026-09-20"},

@@ -2529,6 +2529,56 @@ const DateStampLayout = "2006-01-02"
 // accepted only its own would read a real claim as no claim at all.
 var StampLayouts = []string{StoredStampLayout, DateStampLayout}
 
+// ParseStamp reads a stored validity stamp over every layout StampLayouts names,
+// reporting whether it was readable. The store owns it because a writer judging a
+// value it did not store and a reader interpreting one have to reach the same
+// answer: a check that understood only the shape Ghost writes would wave through
+// a contradiction on every imported, restored or hand-edited row, and a reader
+// that understood only its own would read a real claim as no claim at all.
+func ParseStamp(s string) (time.Time, bool) {
+	for _, layout := range StampLayouts {
+		if at, err := time.Parse(layout, s); err == nil {
+			return at, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// CheckWindowOrder refuses a window that does not end after it starts, judging the
+// effective pair: the boundaries the caller supplied, with a missing half taken
+// from what the row already holds.
+//
+// Both halves matter because a save carries a window or nothing, while an edit
+// carries one boundary and inherits the other. Only a contradiction is refused: a
+// window that has already closed, or one that has not opened, is a legitimate
+// thing to record — it is what a caller writes to say a claim is over, or not yet
+// in force.
+//
+// A half no layout reads is not a claim, and the reader treats it as unset, so
+// there is nothing here to contradict. Refusing on one would make an unrelated
+// edit fail on a row whose own stored value this build cannot interpret.
+func CheckWindowOrder(v, stored Validity) error {
+	from, until := v.ValidFrom, v.ValidUntil
+	if from == nil {
+		from = stored.ValidFrom
+	}
+	if until == nil {
+		until = stored.ValidUntil
+	}
+	if from == nil || until == nil {
+		return nil
+	}
+	fromAt, fromOK := ParseStamp(*from)
+	untilAt, untilOK := ParseStamp(*until)
+	if !fromOK || !untilOK {
+		return nil
+	}
+	if !untilAt.After(fromAt) {
+		return fmt.Errorf("valid_until %s is not after valid_from %s — a window must end after it starts, or a claim that is true for no time at all", *until, *from)
+	}
+	return nil
+}
+
 // Validity is the optional temporal claim attached to one write: when the
 // memory became true, when it stops being true, and when someone last checked.
 //
@@ -2606,6 +2656,15 @@ func nullIfEmpty(s string) any {
 		return nil
 	}
 	return s
+}
+
+// nullStringPtr turns a nullable column into the pointer shape a Validity field
+// carries, and NULL into the nil that means "no claim was made".
+func nullStringPtr(s sql.NullString) *string {
+	if !s.Valid {
+		return nil
+	}
+	return &s.String
 }
 
 // nullIfEmptyPtr maps a validity stamp to SQL NULL, and an empty string to NULL
@@ -3960,14 +4019,29 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 
 	var curContent, curCategory, curTags string
 	var curImportance float32
+	// The stored validity triple comes out of the same statement as the fields
+	// this edit replaces, because the window it is judged against has to be the
+	// row's at the moment the write lands. Reading it before the transaction —
+	// as a tool-level pre-check does — would leave two concurrent edits to two
+	// different boundaries able to each pass against a snapshot the other has
+	// already invalidated, and store a window that ends before it starts.
+	var curFrom, curUntil, curVerified sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT content, category, importance, tags FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
-	).Scan(&curContent, &curCategory, &curImportance, &curTags)
+		`SELECT content, category, importance, tags, valid_from, valid_until, verified_at
+		 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+	).Scan(&curContent, &curCategory, &curImportance, &curTags, &curFrom, &curUntil, &curVerified)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("memory %s not found in project %s", id, projectID)
 	}
 	if err != nil {
 		return fmt.Errorf("lookup memory: %w", err)
+	}
+
+	if err := CheckWindowOrder(opts.Validity, Validity{
+		ValidFrom:  nullStringPtr(curFrom),
+		ValidUntil: nullStringPtr(curUntil),
+	}); err != nil {
+		return err
 	}
 
 	newContent, newCategory, newImportance, newTags := curContent, curCategory, curImportance, curTags
