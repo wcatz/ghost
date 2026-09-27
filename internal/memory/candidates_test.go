@@ -450,8 +450,8 @@ func TestCandidatesCarriesScoringFacts(t *testing.T) {
 }
 
 // TestCandidatesScansValidityColumns: the columns exist and are readable, so
-// the retrieval DTO carries them. Nothing writes them yet, which is why the
-// test writes them the way a future writer will.
+// the retrieval DTO carries them. No MCP writer sets them yet, which is why the
+// test writes them the way ImportMemory and Restore do.
 func TestCandidatesScansValidityColumns(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

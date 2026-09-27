@@ -634,6 +634,36 @@ func TestInjectionConfigDefaults(t *testing.T) {
 	if cfg.Injection.CategoryCaps["gotcha"] != 4 {
 		t.Errorf("category_caps[gotcha] = %d, want 4", cfg.Injection.CategoryCaps["gotcha"])
 	}
+	// Unset by design: an absent session_scope means today's behaviour, which is
+	// to render scope and filter nothing. A compiled default of {} would be the
+	// same rule, but a non-nil default would be indistinguishable from a scope
+	// somebody chose.
+	if len(cfg.Injection.SessionScope) != 0 {
+		t.Errorf("session_scope default should be empty, got %v", cfg.Injection.SessionScope)
+	}
+}
+
+// TestLoad_SessionScopeFromYAML is the config half of #577's second half: the
+// session scope is a setting, and a setting that only a GHOST_* variable can
+// reach is not one an operator can write down. The key must therefore bind a
+// nested map, and bind nothing at all when the file omits it.
+func TestLoad_SessionScopeFromYAML(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, strings.Join([]string{
+		"injection:",
+		"  session_scope:",
+		"    environment: development",
+		"    component: api",
+		"",
+	}, "\n"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Injection.SessionScope; got["environment"] != "development" || got["component"] != "api" || len(got) != 2 {
+		t.Errorf("injection.session_scope = %v, want environment:development component:api", got)
+	}
 }
 
 func TestScratchDefaults(t *testing.T) {
@@ -1231,6 +1261,8 @@ func TestLoad_AllKnownKeysDoNotWarn(t *testing.T) {
 		"    gotcha: 1.2",
 		"  category_caps:",
 		"    gotcha: 4",
+		"  session_scope:",
+		"    environment: development",
 		"search:",
 		"  min_similarity: 0.0",
 		"obsidian:",
@@ -1297,6 +1329,7 @@ func TestLoad_InjectionEnvOverrides(t *testing.T) {
 	t.Setenv("GHOST_INJECTION_BEHAVIOR_CATEGORIES", "gotcha, decision")
 	t.Setenv("GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha=1.2,decision=1.5")
 	t.Setenv("GHOST_INJECTION_CATEGORY_CAPS", "gotcha=2,decision=1")
+	t.Setenv("GHOST_INJECTION_SESSION_SCOPE", "environment=development, component=api")
 
 	cfg, err := Load()
 	if err != nil {
@@ -1316,6 +1349,11 @@ func TestLoad_InjectionEnvOverrides(t *testing.T) {
 	if got := cfg.Injection.CategoryCaps; got["gotcha"] != 2 || got["decision"] != 1 {
 		t.Errorf("injection.category_caps = %v, want gotcha:2 decision:1", got)
 	}
+	// A map is not a string and a bare "environment=development" is not YAML, so
+	// this key needs the same explicit parse the other two maps need.
+	if got := cfg.Injection.SessionScope; got["environment"] != "development" || got["component"] != "api" || len(got) != 2 {
+		t.Errorf("injection.session_scope = %v, want environment:development component:api", got)
+	}
 }
 
 // TestLoad_MalformedEnvOverrideIsAnError pins that a GHOST_ value which cannot
@@ -1329,6 +1367,7 @@ func TestLoad_MalformedEnvOverrideIsAnError(t *testing.T) {
 		{"category weights missing value", "GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha"},
 		{"category weights bad value", "GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha=high"},
 		{"category caps bad value", "GHOST_INJECTION_CATEGORY_CAPS", "gotcha=four"},
+		{"session scope missing value", "GHOST_INJECTION_SESSION_SCOPE", "environment"},
 		{"demotion threshold", "GHOST_LINKING_DEMOTION_THRESHOLD", "high"},
 	}
 	for _, tc := range cases {

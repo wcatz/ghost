@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	_ "modernc.org/sqlite"
@@ -272,7 +273,12 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 			if label != "" {
 				origin = " (" + label + ")"
 			}
-			fmt.Fprintf(&gsb, "- [%s] %s%s\n", m.Category, quoteData(m.Content), origin)
+			// The scope label is the one assemble.ScopeLabel writes into a
+			// search line, so a global preference reads here exactly as it does
+			// in ghost_memories_list. Empty for an unscoped row, which is what
+			// keeps this line byte-identical for every store written before the
+			// column existed.
+			fmt.Fprintf(&gsb, "- [%s]%s %s%s\n", m.Category, assemble.ScopeLabel(m.Scope), quoteData(m.Content), origin)
 		}
 	}
 	globalSection := gsb.String()
@@ -305,7 +311,12 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
 		for _, m := range memories {
-			fmt.Fprintf(&sb, "- [%s] %s\n", m.Category, quoteData(m.Content))
+			// The scope label is the one assemble.ScopeLabel writes into a
+			// search line. A row that carries scope has to say so here, or the
+			// injected block is the one surface where an agent cannot see the
+			// axis every other surface shows; a row that does not renders
+			// exactly as it did before, because the label is empty.
+			fmt.Fprintf(&sb, "- [%s]%s %s\n", m.Category, assemble.ScopeLabel(m.Scope), quoteData(m.Content))
 		}
 	}
 
@@ -401,6 +412,12 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	}
 	defer db.Close() //nolint:errcheck
 
+	// LoadForHook, not Load: this runs inside the host's editor session, so a
+	// broken config must not fail it. This loader needs the config for one
+	// reason — the session scope its fetch is narrowed by — and reads no other
+	// key from it.
+	cfg := config.LoadForHook()
+
 	// Both global queries bind the same sentinel the store persists, so this
 	// read path cannot drift onto a different project than the one the seeds
 	// were written into.
@@ -408,9 +425,18 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		totalCountKnown = true
 	}
 
+	// The session scope narrows the fetch, not the rows it returns: the 16-row
+	// over-fetch, the dedup pass and the 8-item cap below are one budget, and a
+	// production row that spent any of it would have hidden a development row
+	// the session asked for. With no scope configured the clause is absent, so
+	// it cannot change the plan, the fetch or the ranking.
+	scopeClause := ""
+	if len(cfg.Injection.SessionScope) > 0 {
+		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", cfg.Injection.SessionScope)
+	}
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, source, project_id FROM memories
-		WHERE project_id = ? AND resolved_at IS NULL
+		SELECT id, category, content, pinned, source, project_id, scope FROM memories
+		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT ?
 	`, memory.GlobalProjectID, globalsCap*2)
@@ -422,7 +448,8 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	for rows.Next() {
 		var id, cat, content, source, projectID string
 		var pinnedInt int
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source, &projectID); err != nil {
+		var rawScope []byte
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source, &projectID, &rawScope); err != nil {
 			continue
 		}
 		// 300 bytes here vs. 200 for project memories below is deliberate,
@@ -436,7 +463,11 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		// for a legacy-shaped seed is decided by this field — stamping a
 		// value here would make that decision depend on a constant instead of
 		// the row.
-		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, ProjectID: projectID, Source: source})
+		globals = append(globals, sessionMemory{
+			ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
+			ProjectID: projectID, Source: source,
+			Scope: memory.ParseScopeJSON(rawScope),
+		})
 	}
 
 	// Dedup: unlike project memories (where StableDemote only reorders and
@@ -481,6 +512,11 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 type sessionMemory struct {
 	ID, Category, Content string
 	Pinned                bool
+	// Scope is the row's machine-readable scope, decoded with
+	// memory.ParseScopeJSON. It is what the renderer labels the line with and
+	// what the session-scope filter decides on, so both halves read the same
+	// column through the same decoder.
+	Scope map[string]string
 	// ProjectID is the project this row is stored under, which both loaders
 	// reach differently: the globals loader scans it out of the row, the
 	// project loader stamps the id it filtered on — which is the row's own
@@ -525,6 +561,17 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		`SELECT learned_context FROM ghost_state WHERE project_id = ?`, projectID,
 	).Scan(&learned)
 
+	// LoadForHook, not Load: this runs inside the host's editor session, so a
+	// broken config must not fail it. LoadForHook reports the failure on stderr
+	// and returns the environment plus the compiled defaults, which pin the same
+	// injection.* and linking.demotion_threshold values the two former
+	// fallbacks did. Loaded once and reused — it reads the config files and the
+	// environment, and this is the session-start hot path. It is read here,
+	// before the memory query, because injection.session_scope shapes that
+	// query; the behavioral-floor keys below come from the same load.
+	cfg := config.LoadForHook()
+	injection := cfg.Injection
+
 	// Total count (pre-truncation) so the rendered context can flag how many
 	// memories weren't shown instead of silently dropping them — see the
 	// "N not shown" line in runSessionStart. A failed COUNT is reported
@@ -547,9 +594,24 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// without under-returning. importance and created_at are fetched (not
 	// just id/category/content/pinned) so pass-1's behavioral ordering can
 	// re-score with memory.DecayFactor and category weights in Go.
+	//
+	// The session scope narrows the fetch, not the rows it returns: the 45-row
+	// over-fetch, the 15-item cap and the demotion pass below are one budget,
+	// and a row the session excluded must not spend any of it. With no scope
+	// configured the clause is absent, so it cannot change the plan, the fetch
+	// or the ranking.
+	//
+	// memory.ScopeMatchesSQL is the SQL statement of the rule the assembler
+	// applies in Go, held to it by a test that runs both forms over the same
+	// rows — the two exist because this query and the assembler's differ in one
+	// respect that matters: the LIMIT below chooses which rows are read at all.
+	scopeClause := ""
+	if len(injection.SessionScope) > 0 {
+		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", injection.SessionScope)
+	}
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, importance, created_at FROM memories
-		WHERE project_id = ? AND resolved_at IS NULL
+		SELECT id, category, content, pinned, importance, created_at, scope FROM memories
+		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
 		ORDER BY (`+memory.DecayRankingSQL+`) DESC, importance DESC, created_at DESC, id
 		LIMIT ?
 	`, projectID, sessionMemoriesCap*3)
@@ -573,7 +635,8 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		var id, cat, content, createdAt string
 		var pinnedInt int
 		var importance float64
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt); err != nil {
+		var rawScope []byte
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt, &rawScope); err != nil {
 			continue
 		}
 		// 200 bytes per item (vs. globals' 300 above) — project memories
@@ -589,7 +652,10 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 			t = now
 		}
 		cands = append(cands, candidate{
-			mem:        sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, ProjectID: projectID},
+			mem: sessionMemory{
+				ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
+				ProjectID: projectID, Scope: memory.ParseScopeJSON(rawScope),
+			},
 			importance: importance,
 			createdAt:  t,
 		})
@@ -604,14 +670,6 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// rank-only ordering. behavior_floor=0 disables the bias entirely and
 	// reproduces the historical rank-only selection.
 	behaviorFloor := 0
-	// LoadForHook, not Load: this runs inside the host's editor session, so a
-	// broken config must not fail it. LoadForHook reports the failure on stderr
-	// and returns the environment plus the compiled defaults, which pin the same
-	// injection.* and linking.demotion_threshold values the two former
-	// fallbacks did. Loaded once and reused — it reads the config files and the
-	// environment, and this is the session-start hot path.
-	cfg := config.LoadForHook()
-	injection := cfg.Injection
 	if injection.BehaviorFloor > 0 {
 		behaviorFloor = injection.BehaviorFloor
 		if behaviorFloor > sessionMemoriesCap {

@@ -75,15 +75,22 @@ func (i Item) Line() string {
 		origin = " source=" + label
 	}
 	return "- [" + i.Category + "] `" + i.ID + "` (" +
-		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + scopeLabel(i.Scope) + origin +
+		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) + origin +
 		") " + quoteData(i.Content)
 }
 
-// scopeLabel renders a memory's scope for a listing, or "" when unscoped.
+// ScopeLabel renders a memory's scope for a listing, or "" when unscoped.
 // Keys are sorted: map iteration order is random in Go, so an unsorted rendering
 // would show the same scope in a different order on each read and look like the
 // scope itself was changing.
-func scopeLabel(scope map[string]string) string {
+//
+// It is exported because the label is what makes scope legible, and a surface
+// that re-derived it would be free to spell it differently: the search line and
+// the session-start block would then show the same scope in two forms, and
+// neither reader could be sure the two are the same claim. The value carries a
+// leading space, so a caller places it wherever its own line puts an item's
+// attributes.
+func ScopeLabel(scope map[string]string) string {
 	if len(scope) == 0 {
 		return ""
 	}

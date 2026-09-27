@@ -220,6 +220,14 @@ type InjectionConfig struct {
 	BehaviorCategories []string           `koanf:"behavior_categories"`
 	CategoryWeights    map[string]float64 `koanf:"category_weights"`
 	CategoryCaps       map[string]int     `koanf:"category_caps"`
+	// SessionScope is the scope the injected block is selected under
+	// (injection.session_scope). It is empty by default and deliberately has no
+	// compiled default: unset means the session-start surface applies no scope
+	// predicate and shows every scoped row it would otherwise have shown. A
+	// non-empty value is matched with memory.ScopeMatches — the same rule search,
+	// the linker and the dedup folds use — so a memory that does not mention a
+	// requested key still applies.
+	SessionScope map[string]string `koanf:"session_scope"`
 }
 
 // DefaultInjectionConfig returns the compiled injection defaults. It mirrors the
@@ -826,6 +834,21 @@ func intMap(s string) (interface{}, error) {
 	return out, nil
 }
 
+// stringMap parses "key=value,..." into the map[string]string a config key
+// expects. A scope is a set of strings, so nothing here can fail to convert —
+// only the pair syntax can be wrong, which commaPairs names.
+func stringMap(s string) (interface{}, error) {
+	pairs, err := commaPairs(s)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		out[p[0]] = p[1]
+	}
+	return out, nil
+}
+
 // envOverrides is a slice rather than a map so the order the variables are
 // applied in is fixed instead of randomized by map iteration.
 var envOverrides = []envOverride{
@@ -860,6 +883,7 @@ var envOverrides = []envOverride{
 	{"GHOST_INJECTION_BEHAVIOR_CATEGORIES", "injection.behavior_categories", commaList},
 	{"GHOST_INJECTION_CATEGORY_WEIGHTS", "injection.category_weights", floatMap},
 	{"GHOST_INJECTION_CATEGORY_CAPS", "injection.category_caps", intMap},
+	{"GHOST_INJECTION_SESSION_SCOPE", "injection.session_scope", stringMap},
 }
 
 // DataDirPath returns the ghost data directory path WITHOUT creating it, so

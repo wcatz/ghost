@@ -404,17 +404,20 @@ Axis interaction rules:
 - **Resolved leaves injection, not the database.** `resolved_at` removes a row from ranked session injection ([#559](https://github.com/wcatz/ghost/issues/559)) but keeps it searchable and auditable.
 - **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Not yet enforced: stage 5 of the assembler *records* a co-occurring `contradicts` pair and leaves both rows in place, because the existing contract requires a contradicted row to survive while a duplicate restatement sinks. Separating the pair needs its own contract change ([#581](https://github.com/wcatz/ghost/issues/581)).
 - **A scope conflict blocks the relation, and is not repaired by deleting it.** Two memories naming `environment=production` and `environment=development` are two claims about two places, so no relation may be proposed or created between them — not `duplicate` (at save time), not `related` (at link time), not `supersedes` (at supersede time), because each of those writers is the only one that can see both scopes at the moment it decides. An edge that already exists stays in the graph and is exempt at read time instead: every reader ignores it, and none deletes a row to reach that verdict. The exemption is stated where the decision is made, and every writer that chooses between candidates states it *inside* the query, because the same `LIMIT` chooses them: a conflict decided after the cut spends the budget on rows the caller may not use and misses a compatible candidate ranked just below ([#665](https://github.com/wcatz/ghost/issues/665)). The two cosine writers narrow inside the query (`SearchVectorScoped`), so a neighbour budget counts only rows a memory may relate to. `Upsert`'s two dedup probes and `foldTargetStillLive` each carry a second, SQL statement of the rule (`scopesConflictSQL`, held to the Go one by a test that runs both over the same table), for two different reasons: the probes because their own `LIMIT 15` chooses the candidates — so a save whose fifteen best FTS matches all name another environment still finds the compatible duplicate at rank 16 — and `foldTargetStillLive` because it has no window to protect, names one row by id, and carries the rule to keep a scope-conflicting `supersedes` edge from being read as a verdict on it.
-- **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes.
+- **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes. Both are decided where the rows are read, not after: the search legs and the two cosine writers narrow the candidate pool in SQL, the assembler applies the rule in Go over the widened set it is handed, and the session-start loaders narrow their own fetch in SQL. A read that cannot filter after its own `LIMIT` therefore carries a SQL statement of the rule, and a test holds each one to the Go form.
 - **Provenance is history, not a weight.** `agent`/`session_id`/`source_ref` describe who wrote a row; append-only history of those changes is [#578](https://github.com/wcatz/ghost/issues/578).
 
 ## Context assembly (target design)
 
 > **Partly built.** The seam exists (`internal/assemble`, `assemble.Run`, and
-> `Store.Candidates` behind it), and the formatted `ghost_memory_search` path
-> runs on it with both filters applied before the window closes. What does not
-> exist yet: the session-start injector still runs its own ad-hoc pipeline
-> ([#577](https://github.com/wcatz/ghost/issues/577)), the conflict, dedup,
-> diversity and budget stages are pass-throughs, abstention is not derived
+> `Store.Candidates` behind it), the formatted `ghost_memory_search` path runs on
+> it with both filters applied before the window closes, and the session-start
+> surface renders and applies `memories.scope` from the shared label and the
+> shared rule ([#577](https://github.com/wcatz/ghost/issues/577)). What does not
+> exist yet: the session-start injector still runs its own ad-hoc pipeline rather
+> than `assemble.Run` (passive retrieval is not served by the seam yet), the
+> conflict, dedup, diversity and budget stages are pass-throughs, abstention is
+> not derived
 > ([#580](https://github.com/wcatz/ghost/issues/580)), and `explain: true` still
 > calls the store's own diagnosis rather than projecting the assembler's trace
 > ([#583](https://github.com/wcatz/ghost/issues/583), [#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
@@ -455,9 +458,28 @@ What exists now:
   `valid_from`, `valid_until` and `verified_at` as `*string`, bound on every
   retrieval scan, and stage 2 interprets them against the request clock
   (`valid`, `future`, `expired`, `unverified`, `unset`; an unreadable value is
-  reported as `validity_unparseable` rather than read as valid). Nothing writes
-  them yet, so every existing row reads nil and stage 2 is corpus-neutral; the
+  reported as `validity_unparseable` rather than read as valid). No MCP writer
+  exists yet, so a store nobody has restored or imported reads every row as
+  unset and stage 2 is corpus-neutral; `Store.Restore` and `Store.ImportMemory`
+  do write the triple, which is where a non-NULL window first comes from. The
   writer contract is the next change.
+- **The session-start surface shows and applies scope.** The two session-start
+  loaders select `memories.scope`, print it with `assemble.ScopeLabel` — the same
+  label a search line carries, so the two cannot spell one scope differently —
+  and narrow their own fetch when `injection.session_scope` is set
+  ([#577](https://github.com/wcatz/ghost/issues/577)). The filter is
+  `memory.ScopeMatchesSQL`, the SQL statement of the rule stage 3 applies in Go
+  through `assemble.ScopeContradicts`, and it is held to the Go form by a test
+  that runs both over the same rows. It has to be decided in SQL for the reason
+  `scopesConflictSQL` gives: a statement that chooses its own candidate set with a
+  `LIMIT` cannot check scope after that cut. Both loaders are that statement — the
+  45-row and 16-row over-fetches are their candidate sets — so a check applied
+  afterwards would spend the budget on rows the session excluded and never reach
+  an eligible one ranked below the cut. With the key unset the clause is absent,
+  so the query, the ranking and the rendered block are the ones that shipped. The
+  loaders are callers of the assembler's label and rule, not of `Run`: passive
+  retrieval is not served by the seam, so moving the digest onto it is its own
+  change.
 - **The trace is recorded unconditionally**, with per-stage counts, dropped ids
   and per-row decisions. `explain: true` does not read it yet.
 
@@ -486,7 +508,7 @@ query
 Rules the pipeline must hold:
 
 - **Filters precede window closure.** Stages 2-4 run over the widened candidate set from stage 1, never over an already-truncated list.
-- **One renderer, one field set.** Scope, validity state, and confidence appear identically in `ghost_memory_search` output and in the injected session-start block.
+- **One renderer, one field set.** Scope, validity state, and confidence appear identically in `ghost_memory_search` output and in the injected session-start block. Scope does today: both surfaces print the label from `assemble.ScopeLabel`, and validity state and confidence arrive with the writer that can set them.
 - **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
 - **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)).
 - **The budget is a hard boundary.** Stage 8 trims deterministically and is tested at, just under, and just over the limit; injection and search use different budgets but the same code.

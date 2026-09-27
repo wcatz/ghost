@@ -250,9 +250,30 @@ injection:
   category_weights: {}
   category_caps:
     gotcha: 4
+  session_scope: {}
 ```
 
 Set `behavior_floor: 0` to disable the category bias and use rank-only selection. `category_weights` can give a category a small ordering boost. `category_caps` prevents one behavioral category from consuming every reserved slot.
+
+### `injection.session_scope`
+
+A memory's scope is a set of machine-readable key/value pairs naming where it applies. Every surface renders it as `scope{environment=production}`, and `ghost_memory_search` takes one as an argument. `session_scope` gives the injected block one: the scope this session is working in, so a memory scoped to another environment is not spent on this one's tokens, and the agent is not handed a fact about production while it edits development.
+
+```yaml
+injection:
+  session_scope:
+    environment: development
+```
+
+The rule is `memory.ScopeMatches`, the same one search, the linker and the dedup folds use, and it is deliberately asymmetric:
+
+- A memory that **does not mention** a requested key applies everywhere, so it is kept. A store's most general knowledge — conventions, gotchas, the build command — never names an environment, and a filter that hid it would leave a session holding the memories it needs least.
+- A memory that **names a requested key and disagrees** is excluded. `environment=production` never reaches a `development` session, however nearly the sentence reads.
+- An **absent or empty** `session_scope` filters nothing, which is the default and today's behaviour: the injected block is byte-identical to the block it was before this key existed, selection and the 15/8 caps included.
+
+The filter narrows the retrieval rather than the rows that come back, because the over-fetch (45 project rows, 16 global) and the caps (15 and 8) are one budget: a production row that had spent a slot of it would have hidden a development row the session asked for.
+
+It is a presentation default, not an access control. The block's counts stay the store's — "N shown of M total" counts every live row in the project, so a row the filter excluded is part of that difference rather than a count of its own — and the MCP tools are not narrowed by it, so an agent that wants a row from another scope can still ask `ghost memory_search` for it. `ghost context` and every host that renders the session-start block read the same key, because they are the same loaders.
 
 ## Lifecycle and reflection
 
@@ -376,16 +397,18 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_INJECTION_BEHAVIOR_CATEGORIES` | `injection.behavior_categories` |
 | `GHOST_INJECTION_CATEGORY_WEIGHTS` | `injection.category_weights` |
 | `GHOST_INJECTION_CATEGORY_CAPS` | `injection.category_caps` |
+| `GHOST_INJECTION_SESSION_SCOPE` | `injection.session_scope` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
 | `GHOST_ROUTING_DEFAULT_PROJECT` | `routing.default_project` |
 | `GHOST_LIFECYCLE_MIN_INTERVAL` | `lifecycle.min_interval` |
 
-The four `injection.*` variables take structured values, so they use a comma-separated form rather than YAML syntax. Whitespace around the separators is ignored:
+The five `injection.*` variables take structured values, so they use a comma-separated form rather than YAML syntax. Whitespace around the separators is ignored:
 
 ```bash
 GHOST_INJECTION_BEHAVIOR_CATEGORIES="gotcha,decision"
 GHOST_INJECTION_CATEGORY_WEIGHTS="gotcha=1.2,decision=1.5"
 GHOST_INJECTION_CATEGORY_CAPS="gotcha=4,decision=2"
+GHOST_INJECTION_SESSION_SCOPE="environment=development"
 ```
 
 A value that cannot be read as its key's type is an error naming the variable, not a silently ignored setting.

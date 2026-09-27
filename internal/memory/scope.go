@@ -3,6 +3,7 @@ package memory
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 )
 
 // scopeJSON marshals scope for storage, mapping an empty or nil scope to NULL
@@ -50,6 +51,13 @@ func parseScopeJSON(raw []byte) map[string]string {
 	}
 	return m
 }
+
+// ParseScopeJSON turns a stored memories.scope column back into a map. It is
+// parseScope for a caller that already holds the column text — a reader with its
+// own read-only handle rather than a Store scan, such as the session-start
+// loaders — so the two reads cannot disagree about what an unreadable column
+// means. It stays nil, rather than failing, for a value it cannot decode.
+func ParseScopeJSON(raw []byte) map[string]string { return parseScopeJSON(raw) }
 
 // ScopeMatches reports whether a memory's scope satisfies a request.
 //
@@ -182,4 +190,38 @@ func scopesConflictSQL(a, b string) string {
 // candidate" rather than as the error it is.
 func scopeJSONExpr(scopeExpr string) string {
 	return `CASE WHEN json_valid(` + scopeExpr + `) THEN ` + scopeExpr + ` ELSE '{}' END`
+}
+
+// ScopeMatchesSQL renders ScopeMatches as a SQL boolean expression: 1 exactly
+// when the row whose scope column is scopeExpr satisfies a request scope of want.
+// A caller appends it to a WHERE clause whose LIMIT chooses the candidate set,
+// because a check applied after that LIMIT would spend the fetch budget on rows
+// the request excludes and never reach an eligible one ranked below the cut.
+//
+// An empty want yields the constant 1 — the no-op ScopeMatches already is, since
+// requesting no scope matches everything — so a caller that has no session scope
+// configured can leave the clause out of its statement entirely and read
+// byte-for-byte the rows, order and plan it read before the key existed.
+//
+// It is a second statement of one rule, held to the Go form by
+// TestScopeMatchesSQLAgreesWithScopeMatches the way scopesConflictSQL is held to
+// ScopesConflict, and for the same reason: both consumers exist. The assembler
+// filters the rows retrieval already returned, in Go, through
+// assemble.ScopeContradicts; the session-start loaders choose their own rows with
+// a LIMIT they cannot filter afterwards.
+func ScopeMatchesSQL(scopeExpr string, want map[string]string) string {
+	if len(want) == 0 {
+		return "1"
+	}
+	// json.Marshal of a map[string]string cannot fail. The fallback is the same
+	// constant 1 rather than a predicate that excluded every row, because a
+	// session rendered from an empty block with nothing said about why is the
+	// worse answer. The literal is a single-quoted SQL string, so a request value
+	// holding a quote is doubled rather than allowed to end the statement early.
+	b, err := json.Marshal(want)
+	if err != nil {
+		return "1"
+	}
+	quoted := strings.ReplaceAll(string(b), "'", "''")
+	return `NOT ` + scopesConflictSQL(scopeExpr, `'`+quoted+`'`)
 }
