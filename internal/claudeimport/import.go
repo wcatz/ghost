@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,6 +20,23 @@ import (
 const (
 	minContentLen = 20
 	source        = "onboarding"
+
+	// maxMemoryFileBytes bounds one auto-memory file. A memory this import
+	// keeps is capped at memory.MaxContentLen — 8 KB — so a file orders of
+	// magnitude past that is not a memory, and reading it would hand a file
+	// ghost did not choose the whole of the process's memory budget on a path
+	// that runs unattended during `ghost mcp init`. A file past the ceiling is
+	// skipped, like a stub: nothing that would have been kept is lost.
+	maxMemoryFileBytes = 1 << 20
+
+	// maxFrontmatterLine bounds one front-matter line, for the same reason
+	// bufio.Scanner has a default. The default is 64 KiB, which is short enough
+	// that an ordinary long description crossed it — and a crossed scanner
+	// stops, so the whole block was being discarded rather than the one long
+	// line. 256 KiB is far past any description a person writes and well inside
+	// maxMemoryFileBytes, so a line past it means the file is not a memory file
+	// rather than that the file is large.
+	maxFrontmatterLine = 256 << 10
 )
 
 var importTags = []string{"claude-code", "auto-import"}
@@ -106,9 +124,20 @@ func isStub(content string) bool {
 // not be imported.
 func ParseMemoryFile(path string) (content, category string, importance float32, skip bool, err error) {
 	cleanPath := filepath.Clean(path)
-	data, err := os.ReadFile(cleanPath) // #nosec G304 — path is validated by caller via ClaudeMemoryDir
+	// Read through a LimitReader rather than os.ReadFile so the ceiling bounds
+	// the read, not just the outcome: the extra byte is what distinguishes "at
+	// the ceiling" from "past it" without reading the rest of the file.
+	f, err := os.Open(cleanPath) // #nosec G304 — path is validated by caller via ClaudeMemoryDir
 	if err != nil {
 		return "", "", 0, false, err
+	}
+	defer f.Close() //nolint:errcheck
+	data, err := io.ReadAll(io.LimitReader(f, maxMemoryFileBytes+1))
+	if err != nil {
+		return "", "", 0, false, err
+	}
+	if len(data) > maxMemoryFileBytes {
+		return "", "", 0, true, nil
 	}
 
 	name := filepath.Base(path)
@@ -164,6 +193,7 @@ func parseFrontmatter(raw string) (name, description, fileType, body string) {
 	body = raw[4+end+4:] // skip closing "---\n"
 
 	scanner := bufio.NewScanner(strings.NewReader(fm))
+	scanner.Buffer(nil, maxFrontmatterLine)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if k, v, ok := parseYAMLLine(line); ok {
@@ -176,6 +206,15 @@ func parseFrontmatter(raw string) (name, description, fileType, body string) {
 				fileType = v
 			}
 		}
+	}
+	// A line past maxFrontmatterLine stops the scan with an error, and the
+	// fields read before it describe a block this function never finished
+	// reading. Reporting those would attach a name and a type the file may not
+	// have meant; reporting none of them is the same whole-file fallback an
+	// unterminated block already gets, and it is the honest one — the file
+	// still imports, as body text.
+	if err := scanner.Err(); err != nil {
+		return "", "", "", raw
 	}
 	return name, description, fileType, body
 }

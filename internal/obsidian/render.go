@@ -3,6 +3,8 @@
 package obsidian
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -15,7 +17,7 @@ const banner = "> [!info] Mirrored from Ghost — edits here are not synced back
 // slug derives a stable-ish, readable filename prefix from the first ~6
 // content words: lowercase, alnum-only, dash-joined, max 40 chars.
 // Entirely non-ASCII content degrades to "note"; identity is preserved by
-// the id8 suffix in the filename.
+// the id token in the filename.
 func slug(content string) string {
 	var words []string
 	for _, w := range strings.Fields(strings.ToLower(content)) {
@@ -44,7 +46,7 @@ func slug(content string) string {
 
 // aliasLabel derives a short, readable display name from text: the first line,
 // whitespace-collapsed, capped at 60 runes. Obsidian shows it in the graph and
-// Quick Switcher instead of the id8-suffixed filename. Empty when text has no
+// Quick Switcher instead of the id-suffixed filename. Empty when text has no
 // usable content, in which case the caller omits the aliases key entirely.
 func aliasLabel(text string) string {
 	line := text
@@ -59,15 +61,45 @@ func aliasLabel(text string) string {
 	return line
 }
 
-func id8(id string) string {
-	if len(id) > 8 {
-		return id[:8]
+// idTokenWidth is how many bytes of an id name a note. It is also the width
+// adversarial.AssertLocalName's own bound leaves room for, which is what keeps
+// the fixture and this function from drifting apart silently.
+const idTokenWidth = 8
+
+// idToken is the filename fragment that identifies a record: the first
+// idTokenWidth bytes of its id when those name a single path component, and
+// otherwise a hash of the whole id.
+//
+// Every id ghost mints is hex, so the plain path is the only one a real record
+// takes and its note keeps the name it already had. The hashed path is for ids
+// that arrived from somewhere else: a portable artifact carries its own ids and
+// Store.ImportMemory writes them verbatim, so an id can hold a separator, a NUL
+// or a backslash. A separator in that fragment is not cosmetic — the note lands
+// outside the Memories/ subtree prune watches and is then deleted by it, because
+// the keep-set holds the un-cleaned name and never matches the file on disk; a
+// NUL makes the write fail with EINVAL, which fails the whole export on every
+// run and every retry. Hashing keeps the fragment one path element, and unlike
+// replacing the offending bytes it keeps two different ids apart, so two hostile
+// ids cannot collapse onto one filename.
+//
+// "Names a single path component" is deliberately permissive — a dash, a dot or
+// a space in the prefix is left exactly as it was — so the only ids that take
+// the hashed path are the ones that could have escaped or could not be created.
+func idToken(id string) string {
+	head := id
+	if len(head) > idTokenWidth {
+		head = head[:idTokenWidth]
 	}
-	return id
+	if head != "" && head != "." && head != ".." &&
+		!strings.ContainsAny(head, `/\`) && !strings.ContainsRune(head, 0) {
+		return head
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "x" + hex.EncodeToString(sum[:])[:idTokenWidth-1]
 }
 
 func fileName(m memory.Memory) string {
-	return slug(m.Content) + "-" + id8(m.ID) + ".md"
+	return slug(m.Content) + "-" + idToken(m.ID) + ".md"
 }
 
 func date(ts string) string {
@@ -258,7 +290,7 @@ func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]strin
 			if f, ok := fileFor[other]; ok {
 				fmt.Fprintf(&b, "- [[%s]] — %s (%.2f)\n", strings.TrimSuffix(f, ".md"), l.Relation, l.Strength)
 			} else {
-				fmt.Fprintf(&b, "- %s — %s (%.2f)\n", id8(other), l.Relation, l.Strength)
+				fmt.Fprintf(&b, "- %s — %s (%.2f)\n", idToken(other), l.Relation, l.Strength)
 			}
 		}
 	}
@@ -266,7 +298,7 @@ func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]strin
 }
 
 // fileNameFor derives a filename for a decision or task from its title.
-func fileNameFor(title, id string) string { return slug(title) + "-" + id8(id) + ".md" }
+func fileNameFor(title, id string) string { return slug(title) + "-" + idToken(id) + ".md" }
 
 func renderDecision(d memory.Decision) string {
 	var b strings.Builder

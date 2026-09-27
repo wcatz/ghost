@@ -82,6 +82,15 @@ func writeIfChanged(path, content string) (bool, error) {
 // the only files prune may touch. Only a closed frontmatter block (between
 // the opening and closing --- lines) counts: a note that merely starts with a
 // --- horizontal rule and mentions ghost_id later in its body is not Ghost's.
+//
+// The value is unquoted because fm writes it through yamlScalar, which quotes
+// any value a YAML reader would not take as a plain scalar. Reading the raw line
+// back therefore returned the QUOTED text for every id that needed quoting —
+// which is every id an artifact can bring that starts with a YAML indicator, a
+// separator or a NUL — and the mismatch is silent in the worst direction: the
+// note was written, then prune did not find its id in the keep-set and deleted
+// it, on every export, for good. Ids are hex when Ghost mints them, so this only
+// ever fired for an id that arrived from outside; it fired for all of them.
 func hasGhostID(path string) (string, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -97,10 +106,44 @@ func hasGhostID(path string) (string, bool) {
 			return id, found
 		}
 		if v, ok := strings.CutPrefix(line, "ghost_id: "); ok && !found {
-			id, found = strings.TrimSpace(v), true
+			id, found = unquoteYAMLScalar(strings.TrimSpace(v)), true
 		}
 	}
 	return "", false // frontmatter never closed
+}
+
+// unquoteYAMLScalar reverses the quoting yamlScalar applies, so a value written
+// through it reads back as the value that went in. It undoes exactly the two
+// escapes yamlScalar emits and nothing else — a hand-written note is never
+// reinterpreted through escapes this function does not recognise, which matters
+// because it decides which files prune may DELETE. Only the double-quoted form
+// is recognised, because that is the only one yamlScalar emits; a single-quoted
+// value keeps reading as the text it says and therefore never matches a keep-set
+// key. A quoted value that does not decode is returned unchanged, which leaves
+// it unmatched and therefore untouchable.
+func unquoteYAMLScalar(s string) string {
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return s
+	}
+	inner := s[1 : len(s)-1]
+	var b strings.Builder
+	b.Grow(len(inner))
+	for i := 0; i < len(inner); i++ {
+		if inner[i] != '\\' || i+1 >= len(inner) {
+			b.WriteByte(inner[i])
+			continue
+		}
+		switch inner[i+1] {
+		case '\\', '"':
+			b.WriteByte(inner[i+1])
+			i++
+		default:
+			// Not an escape yamlScalar emits: keep both bytes so the value is
+			// returned as it was written rather than as something else.
+			b.WriteByte(inner[i])
+		}
+	}
+	return b.String()
 }
 
 // hasGhostContent reports whether dir contains any .md file with a ghost_id

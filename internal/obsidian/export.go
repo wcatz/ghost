@@ -197,6 +197,12 @@ func folderName(p memory.Project) string {
 	return string(b)
 }
 
+// maxFolderName bounds one project folder. It is also the bound
+// adversarial.AssertLocalName enforces on the tree an export leaves behind, which
+// is what keeps the ceiling and the fixture from drifting apart without either
+// noticing.
+const maxFolderName = 120
+
 // folderNames maps each project ID to a distinct vault folder. Folders that
 // collide case-insensitively (APFS/NTFS would silently merge "Foo" and
 // "foo") are disambiguated: the first keeps its plain name, later collisions
@@ -204,11 +210,18 @@ func folderName(p memory.Project) string {
 // deterministic (ListProjects sorts by name), so folder assignment is too.
 //
 // Containment: a computed folder of ".", "..", "", or anything failing
-// filepath.IsLocal is replaced with "project-" + id8 — the write path must
-// stay under the vault root no matter what the projects table holds, just
-// like prune's subtree guard on the delete path.
+// filepath.IsLocal is replaced with "project-" + the project id's token — the
+// write path must stay under the vault root no matter what the projects table
+// holds, just like prune's subtree guard on the delete path. A folder longer
+// than maxFolderName is replaced the same way, because it fails differently but
+// just as completely: a project name is whatever a caller sent (EnsureProject
+// stores it verbatim, and an artifact carries its own), so an over-long one is
+// reachable, and MkdirAll answered ENAMETOOLONG for it on every export and every
+// retry — taking every other project's notes down with it. Replaced rather than
+// truncated, so two projects with the same over-long name still get distinct
+// folders.
 //
-// id8 collisions are astronomically unlikely (hex UUIDs); a collision would
+// id-token collisions are astronomically unlikely (hex UUIDs); a collision would
 // merge folders/files in the vault without any data loss in the store.
 func folderNames(projects []memory.Project) map[string]string {
 	folders := make(map[string]string, len(projects))
@@ -216,10 +229,10 @@ func folderNames(projects []memory.Project) map[string]string {
 	for _, p := range projects {
 		f := folderName(p)
 		if seen[strings.ToLower(f)] {
-			f += "-" + id8(p.ID)
+			f += "-" + idToken(p.ID)
 		}
-		if f == "." || f == ".." || f == "" || !filepath.IsLocal(f) {
-			f = "project-" + id8(p.ID)
+		if f == "." || f == ".." || f == "" || !filepath.IsLocal(f) || len(f) > maxFolderName {
+			f = "project-" + idToken(p.ID)
 		}
 		seen[strings.ToLower(f)] = true
 		folders[p.ID] = f
