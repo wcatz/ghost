@@ -1032,14 +1032,14 @@ Axis interaction rules:
 
 > **Partly built.** The seam exists (`internal/assemble`, `assemble.Run`, and
 > `Store.Candidates` behind it), the formatted `ghost_memory_search` path runs on
-> it with both filters applied before the window closes, and the session-start
+> it with both filters applied before the window closes, a derived abstention
+> outcome and a response-fit byte cap
+> ([#580](https://github.com/wcatz/ghost/issues/580)), and the session-start
 > surface renders and applies `memories.scope` from the shared label and the
 > shared rule ([#577](https://github.com/wcatz/ghost/issues/577)). What does not
 > exist yet: the session-start injector still runs its own ad-hoc pipeline rather
 > than `assemble.Run` (passive retrieval is not served by the seam yet), the
-> conflict, dedup, diversity and budget stages are pass-throughs, abstention is
-> not derived
-> ([#580](https://github.com/wcatz/ghost/issues/580)), and `explain: true` still
+> conflict, dedup and diversity stages are pass-throughs, and `explain: true` still
 > calls the store's own diagnosis rather than projecting the assembler's trace
 > ([#583](https://github.com/wcatz/ghost/issues/583), [#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
 > [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
@@ -1111,14 +1111,97 @@ What exists now:
   produced before scope was read. The loaders are callers of the assembler's label
   and rule, not of `Run`: passive retrieval is not served by the seam, so moving
   the digest onto it is its own change.
-- **The trace is recorded unconditionally**, with per-stage counts, dropped ids
-  and per-row decisions. `explain: true` does not read it yet.
+- **The trace is recorded unconditionally**, with per-stage counts, dropped ids,
+  per-row decisions and the exact floors that were evaluated. `explain: true`
+  does not read it yet.
+- **Abstention is derived, and it is an outcome rather than an empty list**
+  ([#580](https://github.com/wcatz/ghost/issues/580)). Every block carries
+  `answerable`, `weak` or `empty` with a reason from a closed vocabulary, and
+  `ghost_memory_search` renders the verdict as a machine line
+  (`[ghost:outcome=… reason=… floor_fts_rank=… abstain_cosine=… candidates=…
+  admitted=… legs=… tokens_est=…]`, with a trailing `retrieval_partial`
+  token whenever a leg ran and failed) plus a human sentence for the two
+  non-answerable cases. `weak` withholds no row — only the response-fit pass may
+  remove one — so a caller can see the weak candidates and judge them; what it
+  gets is the instruction not to. Arm A (a keyword rank of 0-3) is on; **arm B
+  (a vector cosine) ships OFF**, because the bench no-answer report shows the
+  answerable and no-answer cosine distributions overlap, so no constant
+  separates them, and `context.abstain_cosine` is a decision a user makes rather
+  than one Ghost infers. The cosine is range-checked on BOTH sides of the seam —
+  `config` on its environment and file paths, and `validateRequest` on the request
+  itself — because a guard that lives only in the layer above the seam is one the
+  next caller does not inherit, and all four unusable values fail silently rather
+  than loudly: a negative and a NaN read as OFF, and an infinite or above-one one
+  arms a threshold no cosine can clear. An unavailable embedder is never a reason to call a match
+  weak: a result whose rows carry keyword ranks is judged by arm A whether or not the vector leg
+  ran, and the leg's condition is reported on the line instead of in the reason. A leg that
+  *failed* suppresses the floor outright (`retrieval_partial`), because a verdict needs every
+  applicable leg's input. And a result with **no arm able to judge it** is `no_floor_arm`: no arm
+  held a VALUE, which is a different question from which legs ran. A leg that answered can have
+  retrieved nothing — a semantic query sharing no words with the corpus leaves every row at the -1
+  "never retrieved" sentinel, as does an `as_of` read for the vector leg, since an embedding records
+  current content only — and a threshold applied to a sentinel is a comparison nobody made. Reporting
+  `below_floor` there would be a claim against a threshold nobody applied, which is the same error as
+  blaming an embedder outage for a weak keyword hit, in the other direction. The line and the trace both keep "a threshold" and "a
+threshold that ran" apart: it renders `off`, `not_applied` (configured, but the
+  vector leg never ran or ran and failed) or the number, and
+`Floors` carries `VectorArmOn` (what the request configured) beside
+`VectorApplied` (the arm's own state: it was on AND the vector leg executed, so
+a cosine could be compared at all), so a configured floor on a machine with no
+embedder is visible as unused rather than looking like a floor that cleared
+something. Neither field records a comparison against a particular row — an empty
+result reads no cosine, and a result whose first row cleared the keyword arm
+never reaches one — and what did execute is `Trace.Legs`, the map the line's
+`legs=` field renders. (`VectorAvailable` is not it: that means the caller
+supplied a query vector, which reads true for a machine whose embedder answered
+and whose vector leg then failed.)
+- **The empty result says which of three things happened.** An empty block whose
+  rows were found and then withheld — out of date, out of scope, out of
+  category, or cut by a budget — says "no sufficiently trustworthy memory found"
+  and names the cause. A search that never finished says so. Only
+  `no_candidates` may say nothing matched, and only over coverage every
+  applicable leg vouched for: available, error-free, untruncated, and
+  `LegStatus.CoverageComplete`. The vector leg reports that last one as **false**
+  until its expected/indexed/unembedded counts are reconciled, so a hybrid search
+  cannot claim absence today, and `Run` does not work around it — a row with no
+  embedding is invisible to the leg's own scan, so nothing the leg read can speak
+  for the rows it never saw. Where absence is not earned, the answer carries the
+  window note instead, which opens "no match within the searched window" and
+  closes "this is not evidence that nothing exists"; that note is the spec's
+  mechanism for suppressing an absence claim. The reconciliation is still
+  **owed**, and it lands with a change that owns the counts in `internal/memory`:
+  the two `COUNT(*)` scans it costs run on every hybrid search, on the live tool
+  path, so the abstention change reads `CoverageComplete` and obeys it rather than
+  filling it.
+- **`response_fit` is a `Run` post-pass, and it measures the whole response.**
+  While the rendered envelope exceeds `Budget.MaxBytes` it drops the
+  lowest-ranked row, recomputes the outcome, re-derives and re-bounds the notes,
+  and re-renders; notes give way before the verdict line, and if the verdict
+  itself cannot fit, `Run` returns `ErrResponseBudgetExceeded` rather than an
+  outcome. A trim also suppresses the window caveat, which would otherwise blame
+  the window for a shortfall the byte cap caused and advise raising a limit that
+  only makes the response larger. The window note an incomplete-coverage empty
+  result carries names each knob the request actually set and no other: the item
+  limit when one was set, the scope filter when one was set, and the category
+  filter when one was set. An unfiltered hybrid search is the shipped default,
+  and it does set a limit, so the note every such caller gets advises widening
+  that limit and says nothing about a scope filter it never passed. `Budget.MaxBytes` is the RESPONSE's bytes and `Slice.MaxBytes` is item
+  content — one field cannot bound both units. `ghost_memory_search` caps a
+  response at twice `memory.MaxContentLen` (16000 bytes), the same order as the
+  session-start injector's CONTENT (15 project memories at 200 bytes plus 8 globals
+  at 300 is about 5.4 KB of content; the block that wraps it in headings, per-row
+  labels and a tasks and decisions section is larger, which is why the cap is a
+  multiple rather than a match). The content cap is the binding half, not the
+  "same order" argument: at or below 8000 a maximum-length memory plus the
+  truncation marker, the item line's framing and the verdict line is already past
+  the cap, so the pass would drop the only row and the answer would come back
+  `empty`/`all_over_budget` naming a server-side cap no search argument reaches.
+  Tokens are reported as an ESTIMATE (bytes/4, rounded up, `tokens_est=`) for
+  callers that budget in tokens; bytes remain the unit and there is no tokenizer.
 
 What the remaining stages will add, in pipeline order: conflict recording and
-dedup reordering (stage 5-6, where `contradicts` is recorded and not acted on),
-diversity (7, off by default), the budget byte caps and the `response_fit`
-post-pass (8), and abstention as an outcome (Decision 3,
-[#580](https://github.com/wcatz/ghost/issues/580)).
+dedup reordering (stage 5-6, where `contradicts` is recorded and not acted on)
+and diversity (7, off by default).
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
 
@@ -1131,8 +1214,10 @@ query
   5. conflicts      suppress superseded rows; never emit a contradicts pair together
   6. dedup          collapse duplicate/near-duplicate links to one representative
   7. diversity      cap per-source share so one project cannot crowd out the rest
-  8. budget         final ordering, then a hard byte/token trim
+  8. budget         final ordering, then the per-slice hard trim
   9. render         one renderer shared by search output and injected context
+       → outcome    answerable | weak | empty, with a reason from a closed set
+       → response_fit  drop the lowest-ranked row until the whole response fits
        → Trace      per-stage row counts and per-row exclusion reasons
 ```
 
@@ -1141,8 +1226,9 @@ Rules the pipeline must hold:
 - **Filters precede window closure.** Stages 2-4 run over the widened candidate set from stage 1, never over an already-truncated list.
 - **One renderer, one field set.** Scope, validity state, and confidence appear identically in `ghost_memory_search` output and in the injected session-start block. Scope does today: both surfaces print the label from `assemble.ScopeLabel`, and validity state and confidence arrive with the writer that can set them.
 - **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
-- **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)).
-- **The budget is a hard boundary.** Stage 8 trims deterministically and is tested at, just under, and just over the limit; injection and search use different budgets but the same code.
+- **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)). An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
+- **The budget is a hard boundary, in the unit it names.** Stage 8's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.
+- **One renderer owns the response.** The assembler renders the search answer whole — listing, verdict sentence, filter caveat, diagnostics and the machine line — because a byte cap enforced against a second rendering is a cap on text the caller never receives.
 - **The pipeline is measurable.** Bench gains context precision, contamination rate, budget adherence, diversity, and token cost ([#582](https://github.com/wcatz/ghost/issues/582)), and contamination classification reuses the production exclusion reasons so the two cannot drift.
 
 ## Concurrency contract

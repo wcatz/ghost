@@ -70,12 +70,17 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		mustNotContain(t, "search", out, "No matching memories found")
 
 		// A query nothing matches must say so rather than answering with the
-		// nearest thing: the absence claim is the part an agent acts on.
+		// nearest thing, and it must not claim the store has nothing either:
+		// the vector leg cannot vouch for rows it never saw, so the answer
+		// states what it searched and stops there (#580).
 		empty := call(t, cs, "ghost_memory_search", map[string]any{
 			"project_id": e2eProject,
 			"query":      "zzzznotpresentzzzz",
 		})
-		mustContain(t, "search (miss)", empty, "No matching memories found")
+		mustNotContain(t, "search (miss)", empty, "relay port")
+		mustNotContain(t, "search (miss)", empty, "No matching memories found")
+		mustContain(t, "search (miss)", empty, "no match within the searched window")
+		mustContain(t, "search (miss)", empty, "reason=no_candidates")
 		_ = seeded
 	},
 
@@ -826,7 +831,13 @@ func TestMCPLifecycles(t *testing.T) {
 			"query":      "pool timeout",
 			"scope":      map[string]any{"environment": "staging"},
 		})
-		mustContain(t, "scoped search (staging, only a production row)", empty, "No matching memories found")
+		// The scope filter is what emptied this one, so the answer has to say so
+		// and hand back the knob that would widen it — and it must not read as
+		// "the store has nothing", because the vector leg cannot vouch for rows
+		// it never saw (#580).
+		mustNotContain(t, "scoped search (staging, only a production row)", empty, "30s in production")
+		mustNotContain(t, "scoped search (staging, only a production row)", empty, "No matching memories found")
+		mustContain(t, "scoped search (staging, only a production row)", empty, "drop the scope filter")
 
 		// And the scopes are on disk as asked, not just in the answer.
 		for _, tc := range []struct{ id, want string }{{prod, "production"}, {dev, "development"}} {

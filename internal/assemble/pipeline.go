@@ -55,9 +55,21 @@ type pipeline struct {
 	// droppedBy counts how many rows each stage removed, which is how an
 	// empty result names the stage responsible.
 	droppedBy map[string]int
-	noteBuf   []string
+	// droppedByBound counts the same removals by WHICH cap in stage 8 cut the
+	// row, because the caps have different remedies: a row-count cap is fixed by
+	// raising the limit and a content-byte cap is not. One map for the stage and
+	// one for the bound, since a stage can empty a set in more than one way and
+	// the sentence has to name the one that accounts for the rows.
+	droppedByBound map[string]int
+	noteBuf        []string
 	// dropped is every id any stage removed, for the notes.
 	dropped map[string]string
+	// noteCut is how many notes the response-fit post-pass has taken off the end
+	// of the bounded list. It lives here rather than in the post-pass so notes()
+	// stays the one function that produces the list: a second derivation would be
+	// a second statement of which notes exist, and the two would disagree the
+	// first time a row drop re-derived them.
+	noteCut int
 }
 
 // stage is one step of the ordered pipeline. A stage that changes nothing in
@@ -358,6 +370,10 @@ func runBudget(p *pipeline) {
 			clamped := clampBytes(items[i].Content, s.ClampBytes)
 			items[i].Content = clamped
 			items[i].Bytes = len(clamped)
+			// The token estimate is derived from the bytes, so a clamp that
+			// shortened the content has to shorten the estimate too. Leaving it
+			// would report a per-item cost the answer no longer pays.
+			items[i].Tokens = tokenEstimate(items[i].Bytes)
 		}
 	}
 
@@ -376,6 +392,17 @@ func runBudget(p *pipeline) {
 			overItems := s.MaxItems > 0 && count[it.Bucket] >= s.MaxItems
 			overBytes := s.MaxBytes > 0 && bytes[it.Bucket]+it.Bytes > s.MaxBytes
 			if overItems || overBytes {
+				// WHICH bound cut the row is the caller's next step, so it is
+				// counted rather than inferred afterwards: raising the row limit
+				// does nothing for a row the byte cap cut, and an answer that
+				// says "raise the limit" for one sends the caller round the same
+				// loop with a bigger number. A row over both counts as the byte
+				// cap, which is the stricter of the two.
+				if overBytes {
+					p.droppedByBound[boundSliceBytes]++
+				} else {
+					p.droppedByBound[boundSliceItems]++
+				}
 				continue
 			}
 			keepRow[i] = true
@@ -387,23 +414,22 @@ func runBudget(p *pipeline) {
 
 	// The total cap, applied across buckets.
 	if p.req.Budget.MaxItems > 0 && len(rows) > p.req.Budget.MaxItems {
+		p.droppedByBound[boundTotalItems] += len(rows) - p.req.Budget.MaxItems
 		keepRow := make([]bool, len(rows))
 		for i := range p.req.Budget.MaxItems {
 			keepRow[i] = true
 		}
 		rows, items, dropped = trim(rows, items, keepRow, dropped, p, "budget")
 	}
-	if p.req.Budget.MaxBytes > 0 {
-		used, keepRow := 0, make([]bool, len(items))
-		for i, it := range items {
-			if used+it.Bytes > p.req.Budget.MaxBytes {
-				break
-			}
-			used += it.Bytes
-			keepRow[i] = true
-		}
-		rows, items, dropped = trim(rows, items, keepRow, dropped, p, "budget")
-	}
+	// Budget.MaxBytes is NOT applied here. It bounds the complete rendered
+	// response, which this stage cannot measure: it owns item membership and the
+	// framing belongs to the renderer. The response-fit post-pass in outcome.go
+	// trims against it, one row at a time, and records what it removed. Applying
+	// it to item CONTENT as well would bound the same budget twice with two
+	// different units, so the effective limit would depend on how much framing
+	// a caller's rows happened to need — and a cap could silently cut a row
+	// before the post-pass ever saw the response that did not fit. Slice.MaxBytes
+	// is the item-content cap; this is not it.
 
 	p.rows, p.items = rows, items
 	notes := []string(nil)
@@ -504,9 +530,8 @@ func (p *pipeline) evidenceOf(id string) memory.EvidenceCounts {
 // the design it carries leg status and the retrieval_partial modifier, not notes.
 func (p *pipeline) notes() []string {
 	all := make([]string, 0, len(p.noteBuf)+len(p.blockNotes)+len(p.contradictPairs)+1)
-	if len(p.rows) == 0 && len(p.dropped) > 0 {
-		all = append(all, formatNote("%d candidate rows were removed and none reached the answer: %s",
-			len(p.dropped), p.removalBreakdown()))
+	if breakdown := p.breakdownNote(); breakdown != "" {
+		all = append(all, breakdown)
 	}
 	all = append(all, p.retrievalFailures...)
 	if len(p.items) > 0 {
@@ -543,12 +568,38 @@ func (p *pipeline) notes() []string {
 		}
 	}
 	all = append(all, p.noteBuf...)
-	return boundNotes(all, p.req.Budget.MaxNoteBytes, p.req.Budget.MaxNotesBytes)
+	return p.cutNotes(boundNotes(all, p.req.Budget.MaxNoteBytes, p.req.Budget.MaxNotesBytes))
+}
+
+// breakdownLeads reports whether the per-stage removal breakdown heads the note
+// list, which is the only place notes() puts it. It leads because the
+// response-fit pass cuts notes from the TAIL, so the breakdown is the last one
+// to go — and the last one an answer can lose.
+func (p *pipeline) breakdownLeads() bool {
+	return len(p.rows) == 0 && len(p.dropped) > 0
+}
+
+// cutNotes applies the response-fit post-pass's tail cut. It is separate from
+// boundNotes because the two bound different things: boundNotes keeps the list
+// inside its byte budget by truncating, while this removes whole notes the
+// rendered response had no room for. Truncating here instead would leave a
+// half-note in an answer that had already decided to drop it.
+func (p *pipeline) cutNotes(notes []string) []string {
+	if p.noteCut <= 0 {
+		return notes
+	}
+	if p.noteCut >= len(notes) {
+		return nil
+	}
+	return notes[:len(notes)-p.noteCut]
 }
 
 // removalBreakdown is the per-stage removal count in pipeline order.
 func (p *pipeline) removalBreakdown() string {
-	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageBudget}
+	// response_fit is last because it runs last: it is a Run post-pass, not a
+	// stage, and counting it separately is what lets a reader tell a set the
+	// pipeline emptied from one the byte cap emptied.
+	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageBudget, stageResponseFit}
 	parts := make([]string, 0, len(order))
 	for _, stage := range order {
 		if n := p.droppedBy[stage]; n > 0 {
@@ -559,86 +610,6 @@ func (p *pipeline) removalBreakdown() string {
 		return "no stage recorded a removal"
 	}
 	return strings.Join(parts, ", ")
-}
-
-// outcome and reason are Decision 3's rules, restricted to what v1 can decide.
-// The relevance floor arrives with abstention, so an admitted row is answerable
-// and `weak` is not yet reachable; every empty result still names the stage that
-// emptied it, which is the part a caller acts on.
-func (p *pipeline) reason() string {
-	if len(p.items) > 0 {
-		return ""
-	}
-	if len(p.set.Rows) == 0 {
-		if p.set.Legs["fts"].Err != "" || p.set.Legs["vector"].Err != "" {
-			return "retrieval_failed"
-		}
-		return "no_candidates"
-	}
-	// The reason set is closed, so a set emptied by more than one stage can
-	// carry only one label, and the label has to be the cause that accounts for
-	// the rows. Picking the first stage that removed anything would let a single
-	// expired row claim a set that the item budget actually emptied, and the
-	// caller's next move differs: one looks for a date problem, the other raises
-	// the limit. Ties go to the earlier stage, which keeps "the first matching
-	// stage supplies the reason" true for the cases where the stages do not
-	// compete.
-	stage, reason := p.dominantRemoval()
-	if stage == "" {
-		return "no_candidates"
-	}
-	return reason
-}
-
-// dominantRemoval is the stage responsible for most of the removed rows, and the
-// reason that goes with it. Stage order breaks ties, so the result does not
-// depend on map iteration.
-func (p *pipeline) dominantRemoval() (string, string) {
-	type cause struct {
-		stage, reason string
-		count         int
-	}
-	candidates := []cause{
-		{stage: stageValidity, reason: "all_invalid"},
-		{stage: stagePredicates, reason: p.predicateReason()},
-		{stage: stageDedup, reason: "all_dedup_dropped"},
-		{stage: stageDiversity, reason: "all_diversity_capped"},
-		{stage: stageBudget, reason: "all_over_budget"},
-	}
-	best := cause{}
-	for _, c := range candidates {
-		c.count = p.droppedBy[c.stage]
-		if c.count > best.count {
-			best = c
-		}
-	}
-	if best.reason == "" {
-		return "", ""
-	}
-	return best.stage, best.reason
-}
-
-// predicateReason names the stage-3 verdict that removed the rows, or "" when
-// neither filter is set. The two verdicts are counted apart, because they answer
-// different questions for the caller: a category that removed nothing while the
-// scope removed everything is a scope problem, and a reason naming the category
-// sends the reader to change the wrong filter. A tie names the category, which is
-// the narrower of the two and the one a caller is likelier to have set by accident.
-func (p *pipeline) predicateReason() string {
-	switch {
-	case p.droppedBy[dropCategory] > 0 && p.droppedBy[dropCategory] >= p.droppedBy[dropScope]:
-		return "all_out_of_category"
-	case p.droppedBy[dropScope] > 0:
-		return "all_out_of_scope"
-	}
-	return ""
-}
-
-func (p *pipeline) outcome(reason string) Outcome {
-	if len(p.items) > 0 {
-		return OutcomeAnswerable
-	}
-	return OutcomeEmpty
 }
 
 // scopeKeys lists the scope keys a request asked about, sorted for a stable

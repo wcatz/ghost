@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,6 +42,7 @@ type Config struct {
 	Linking    LinkingConfig    `koanf:"linking"`
 	Injection  InjectionConfig  `koanf:"injection"`
 	Search     SearchConfig     `koanf:"search"`
+	Context    ContextConfig    `koanf:"context"`
 	Obsidian   ObsidianConfig   `koanf:"obsidian"`
 	Routing    RoutingConfig    `koanf:"routing"`
 	Scratch    ScratchConfig    `koanf:"scratch"`
@@ -132,6 +134,21 @@ type SearchConfig struct {
 	// dropping non-positive cosines; raise to stop weak semantic matches from
 	// padding the fused window. FTS candidates are exempt.
 	MinSimilarity float64 `koanf:"min_similarity"`
+}
+
+// ContextConfig controls how the assembler reports an assembled block's
+// relevance verdict.
+type ContextConfig struct {
+	// AbstainCosine is Arm B of the assembler's relevance floor (#580): a row
+	// satisfies it when the vector leg's cosine is at least this value. 0
+	// (default) leaves the arm OFF, which is the only honest default today —
+	// the bench no-answer report shows the answerable and no-answer cosine
+	// distributions overlap, so no constant separates them and a threshold set
+	// here is a decision a user makes, not one Ghost infers. search.
+	// min_similarity is a different floor and does not feed this: it is applied
+	// inside the vector leg before fusion and therefore never sees a keyword-only
+	// result, which is exactly the case arm B is here to judge.
+	AbstainCosine float32 `koanf:"abstain_cosine"`
 }
 
 // RoutingConfig steers sessions whose cwd matches no known project.
@@ -274,6 +291,7 @@ var defaults = map[string]interface{}{
 	"injection.behavior_categories":            []string{"gotcha", "convention", "preference", "decision"},
 	"injection.category_caps":                  map[string]interface{}{"gotcha": 4},
 	"search.min_similarity":                    0.0,
+	"context.abstain_cosine":                   float32(0.0),
 	"obsidian.vault_dir":                       "",
 	"obsidian.interval":                        "30s",
 	"obsidian.auto_sync":                       false,
@@ -333,7 +351,30 @@ func Load() (*Config, error) {
 	if err := checkScopeValues(cfg); err != nil {
 		return nil, err
 	}
+	if err := checkContextValues(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+// checkContextValues refuses a context.abstain_cosine no cosine can be, on the
+// FILE path as well as the environment one.
+//
+// cosineValue already refuses these for the environment, and koanf's YAML parser
+// resolves the same spellings — `.inf`, `-.inf`, `.nan` — into the float32 field
+// without complaint, so the env check alone would leave the worst of it unguarded
+// on the path a hand-edited config actually takes. They are worth refusing for
+// what they do downstream rather than for being unreadable: an infinite floor is
+// a relevance verdict no row's cosine can clear, so every answer outside the
+// keyword arm would come back `weak` with nothing in it to tell that from a
+// measured verdict; NaN compares false against 0 and so reads as no threshold at
+// all, telling a user who set a floor that there is none; and a negative value is
+// satisfied by the worst row in the corpus, which is the opposite of a floor.
+func checkContextValues(cfg *Config) error {
+	if v := float64(cfg.Context.AbstainCosine); math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("context.abstain_cosine: a cosine is between 0 and 1, got %v", cfg.Context.AbstainCosine)
+	}
+	return nil
 }
 
 // checkScopeValues refuses an injection.session_scope key whose value is empty
@@ -802,6 +843,35 @@ func floatValue(s string) (interface{}, error) {
 	return v, nil
 }
 
+// cosineValue parses a 32-bit cosine in [0, 1], for the one key that holds one
+// (context.abstain_cosine). Its own parser because the parse has to land on the
+// field's own type: a float64 handed to a float32 field through confmap decodes as
+// zero, so a cosine set in the environment would read as no threshold at all
+// while the key looked like it had been accepted.
+//
+// It also refuses what ParseFloat accepts and a cosine cannot be, which is the
+// whole reason this is not the generic float parser. An infinite floor is a
+// relevance verdict no row's cosine can clear, so every result outside the
+// keyword arm would come back `weak` with nothing in the answer to distinguish
+// that verdict from a measured one; NaN compares false against 0, so it reads as
+// OFF and a user who set a floor is told there is none; a negative value is
+// satisfied by every row including the worst, which is the opposite of a floor.
+// All three are typos, and a typo has to be the load error every other unreadable
+// GHOST_* value produces rather than a silently accepted setting.
+func cosineValue(s string) (interface{}, error) {
+	v, err := strconv.ParseFloat(s, 32)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case math.IsNaN(v) || math.IsInf(v, 0):
+		return nil, fmt.Errorf("not a cosine: %s", s)
+	case v < 0 || v > 1:
+		return nil, fmt.Errorf("a cosine is between 0 and 1, got %s", s)
+	}
+	return float32(v), nil
+}
+
 // commaList parses "a,b,c" into the []string a config key expects.
 func commaList(s string) (interface{}, error) {
 	parts := strings.Split(s, ",")
@@ -916,6 +986,9 @@ var envOverrides = []envOverride{
 	{"GHOST_OLLAMA_URL", "embedding.ollama_url", stringValue},
 	{"GHOST_ROUTING_DEFAULT_PROJECT", "routing.default_project", stringValue},
 	{"GHOST_SEARCH_MIN_SIMILARITY", "search.min_similarity", floatValue},
+	// GHOST_CONTEXT_ABSTAIN_COSINE: the generic _→. transformer would produce
+	// context.abstain.cosine, missing the abstain_cosine key entirely.
+	{"GHOST_CONTEXT_ABSTAIN_COSINE", "context.abstain_cosine", cosineValue},
 	// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
 	// scratch.max.bytes, missing the max_bytes key entirely.
 	{"GHOST_SCRATCH_MAX_BYTES", "scratch.max_bytes", intValue},

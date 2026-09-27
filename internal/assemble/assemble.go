@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -61,10 +62,14 @@ type Slice struct {
 // and `_global` while injection applies independent caps. A budget that bounds
 // neither rows nor bytes is rejected: an unbounded block is not a request, it is
 // an omission. A MaxBytes cap alone is bounded, so it is honoured — the
-// retrieval window falls back to its documented ceiling and stage 8 still trims.
-// That trim is against item content: the response-fit post-pass that bounds a
-// complete rendered response is not in this pipeline yet, so a byte cap is not yet
-// a cap on the response.
+// retrieval window falls back to its documented ceiling, stage 8 still trims by
+// the per-slice item caps, and Run's response-fit post-pass brings the complete
+// rendered response inside MaxBytes. MaxBytes is the RESPONSE's bytes, never
+// item content: Slice.MaxBytes is the item-content cap, and applying one field to
+// two units would make the effective limit depend on a caller's framing.
+//
+// A budget that bounds nothing at all, including one whose slices carry only a
+// ClampBytes presentation cap, is refused before this is reached.
 type Budget struct {
 	MaxItems      int // 0 = unbounded total
 	MaxBytes      int // complete response bytes; 0 = unbounded total
@@ -110,16 +115,26 @@ type Request struct {
 	// holds now; the store refuses that combination rather than answering it with
 	// the keyword leg.
 	AsOf *time.Time
-	// AbstainCosine is the caller-resolved cfg.Context.AbstainCosine. 0
-	// disables the vector floor arm; the arms themselves arrive with the
-	// abstention work, so v1 reports no `weak`.
+	// AbstainCosine is the caller-resolved cfg.Context.AbstainCosine: the
+	// vector arm's floor, and 0 for OFF. It ships off because a threshold
+	// nobody measured is a relevance verdict, and the bench no-answer report
+	// shows the answerable and no-answer cosine distributions overlap.
 	AbstainCosine float32
 	Explain       bool
 }
 
-// Result is the assembled block. Bytes is the complete rendered response,
-// including framing and outcome; 0 until the response-fit post-pass measures a
-// render, because this package does not own the framing.
+// Result is the assembled block. Run owns the whole response — listing, verdict
+// sentence, filter caveat, diagnostics and the machine line — so Response is the
+// text a caller returns verbatim and Bytes is its length, never 0 on a successful
+// Run.
+//
+// The framing is the SEARCH framing, for every Source, because that is the only
+// one this version knows: nothing here branches on Source. A caller whose surface
+// frames differently must not read Response, and must leave Budget.MaxBytes at 0
+// until it supplies a render of its own — otherwise the post-pass measures this
+// envelope against a budget that was stated for another one, and drops rows
+// against a cap the caller never described. Session-start is the next surface
+// (#577) and inherits that constraint, not an exemption.
 type Result struct {
 	Items   []Item
 	Outcome Outcome
@@ -127,14 +142,31 @@ type Result struct {
 	Notes   []string
 	// Qualifiers are the statements that change what the ANSWER MEANS rather than
 	// what it contains: that it is a historical read, that a leg did not run, that
-	// some memories have no recorded version to place. A surface must render them
-	// on every answer, including an empty one, because a block that is silently a
-	// past reading is read as a current one — and Notes cannot carry them, since
-	// Notes is a diagnostic list a surface shows for the empty case and bounds
-	// from the end, where a qualifier is the first thing to go.
+	// some memories have no recorded version to place. Response already renders
+	// them, leading the block, because they are bytes the caller receives and the
+	// response-fit post-pass has to measure them to cap it honestly — a surface
+	// that prepended its own copy would ship text the cap never saw. The field is
+	// what a caller reads when it needs the statements apart from the answer.
+	// Notes cannot carry them: Notes is a diagnostic list a surface shows for the
+	// empty case and bounds from the end, where a qualifier is the first to go.
 	Qualifiers []string
 	Trace      *Trace
 	Bytes      int // complete rendered response, including framing and outcome
+	// Abstention is the human sentence for a non-answerable result: what the
+	// caller should do about it. "" for an answerable one, which withholds
+	// nothing and needs no caveat.
+	Abstention string
+	// Machine is the machine-readable verdict line, one trailing line of the
+	// response. It is a field rather than something the caller composes so the
+	// response-fit post-pass can measure the line it is trimming to fit.
+	Machine string
+	// Response is the complete rendered text for the search surface, which is
+	// the framing this version owns. Bytes is its length.
+	Response string
+	// Tokens is the token ESTIMATE for the admitted rows: bytes/4, rounded up
+	// per item. Bytes remain the budget unit (there is no tokenizer here), so
+	// this is reported for the caller's own budgeting and is never a cap.
+	Tokens int
 }
 
 // ErrResponseBudgetExceeded is returned when even the empty envelope exceeds
@@ -199,14 +231,15 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	}
 
 	p := &pipeline{
-		req:        req,
-		mode:       projectMode(req),
-		set:        set,
-		trace:      newTrace(req, set),
-		rows:       set.Rows,
-		droppedBy:  map[string]int{},
-		dropped:    map[string]string{},
-		qualifiers: qualifiersFor(req, set),
+		req:            req,
+		mode:           projectMode(req),
+		set:            set,
+		trace:          newTrace(req, set),
+		rows:           set.Rows,
+		droppedBy:      map[string]int{},
+		droppedByBound: map[string]int{},
+		dropped:        map[string]string{},
+		qualifiers:     qualifiersFor(req, set),
 	}
 	// A window that had to fall back to the ceiling is disclosed, because the
 	// block's size is then decided by a number the caller did not state. The note
@@ -245,15 +278,21 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 		st.run(p)
 	}
 
-	res := Result{
+	// The verdict and the complete envelope are produced together, after the
+	// stages, because the outcome is a function of what they admitted and the
+	// envelope is measured from the outcome. The post-pass fitResponse runs is
+	// what brings that envelope inside a byte cap, and it needs both.
+	//
+	// Qualifiers (#683) are carried through untouched: they state what the answer
+	// MEANS, where Outcome and Reason are derived here. fitResponse sets both of
+	// those itself, which is why this no longer calls outcome()/reason() —
+	// outcome.go's verdict() supersedes both.
+	return p.fitResponse(Result{
 		Items:      p.items,
 		Trace:      p.trace,
 		Notes:      p.notes(),
 		Qualifiers: p.qualifiers,
-		Reason:     p.reason(),
-	}
-	res.Outcome = p.outcome(res.Reason)
-	return res, nil
+	})
 }
 
 // candidateRequest maps a Request onto the store's retriever request without
@@ -408,6 +447,19 @@ func validateRequest(req Request) error {
 	}
 	if req.Budget.MaxItems < 0 || req.Budget.MaxBytes < 0 {
 		return errors.New("assemble: a budget cannot be negative")
+	}
+	// The cosine is checked HERE rather than only in config, because Run is the
+	// exported entry point and the four unusable values fail silently rather than
+	// loudly: NaN and a negative both compare false against 0, so the arm reads as
+	// OFF and the line tells a user who set a floor that they have none; an
+	// infinite or above-one value arms a threshold no cosine can clear, so every
+	// result outside the keyword arm comes back weak with nothing on the line to
+	// separate it from a measured verdict. config.cosineValue already refuses all
+	// four on both of its paths — this makes every future caller inherit that
+	// instead of having to remember it.
+	if v := float64(req.AbstainCosine); math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
+		return fmt.Errorf("assemble: AbstainCosine is a cosine in [0,1], where 0 leaves the arm off, "+
+			"got %v", req.AbstainCosine)
 	}
 	for _, s := range req.Budget.Slices {
 		if s.MaxItems < 0 || s.MaxBytes < 0 || s.ClampBytes < 0 {

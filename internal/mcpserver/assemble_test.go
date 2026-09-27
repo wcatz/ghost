@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 )
@@ -137,8 +136,14 @@ func TestSearchWithoutFiltersIsUnchanged(t *testing.T) {
 	if !strings.Contains(out, "«database configuration pooling timeout retry»") {
 		t.Errorf("item line lost its quoted content:\n%s", out)
 	}
-	if strings.Contains(out, "[ghost:") {
-		t.Errorf("search rendered a machine outcome line before the abstention work lands:\n%s", out)
+	// The machine line is new, and an unfiltered search is exactly where it must
+	// not disturb anything: it trails the listing, says the result is answerable,
+	// and carries no abstention sentence of its own.
+	if !strings.Contains(out, "[ghost:outcome=answerable") {
+		t.Errorf("an unfiltered search carries no machine verdict line:\n%s", out)
+	}
+	if strings.Contains(out, "do not rely") {
+		t.Errorf("an answerable result carries abstention copy:\n%s", out)
 	}
 }
 
@@ -411,54 +416,5 @@ func TestExpiredRowsAreReportedAsWithheldNotAbsent(t *testing.T) {
 	// memories do not exist when they were found and withheld.
 	if strings.Contains(out, "No matching memories found") {
 		t.Errorf("a withheld answer leads with an absence claim: %s", out)
-	}
-}
-
-// TestEmptyWhyMakesNoUniformClaimAndShowsTheBreakdown: the reason set is closed,
-// so a set emptied by two stages carries one reason — and the sentence that
-// leads the answer must not claim every row failed the same way while the note
-// beneath it says otherwise. The copy and the note are asserted together here,
-// because their agreement is the property: neither is trustworthy alone.
-func TestEmptyWhyMakesNoUniformClaimAndShowsTheBreakdown(t *testing.T) {
-	result := assemble.Result{
-		Reason: "all_invalid", // the dominant cause, per the assembler's own choice
-		Notes: []string{
-			"10 candidate rows were removed and none reached the answer: validity 1, budget 9",
-		},
-	}
-
-	why := emptyWhy(result)
-	if why == "" {
-		t.Fatal("emptyWhy returned nothing for a set the assembler emptied")
-	}
-	for _, uniform := range []string{"Every matching memory", "All matching memories"} {
-		if strings.Contains(why, uniform) {
-			t.Errorf("the answer claims a uniform cause (%q) while the note says two stages removed rows: %s", uniform, why)
-		}
-	}
-	if !strings.Contains(why, "withheld as out of date") {
-		t.Errorf("the answer does not say what happened to the rows: %s", why)
-	}
-	if got := assemblerNotes(result); !strings.Contains(got, "validity 1, budget 9") {
-		t.Errorf("the answer omits the per-stage breakdown that makes the sentence checkable: %q", got)
-	}
-
-	// A plain no-match keeps the absence sentence: there is nothing withheld to
-	// explain, and the caveat covers the window.
-	if why := emptyWhy(assemble.Result{Reason: "no_candidates"}); why != "" {
-		t.Errorf("emptyWhy(%q) = %q, want nothing: the absence sentence is already true", "no_candidates", why)
-	}
-}
-
-// TestCategoryAndScopeReasonsAreLeftToTheFilterCaveat: those two reasons are
-// already named by filterCaveat, which also suggests the next step, so emptyWhy
-// must not duplicate them. The rendered answers are pinned by the existing scope
-// tests; this asserts the division of labour so a later reason is not added twice.
-func TestCategoryAndScopeReasonsAreLeftToTheFilterCaveat(t *testing.T) {
-	for _, reason := range []string{"all_out_of_category", "all_out_of_scope", "all_dedup_dropped", "all_diversity_capped"} {
-		if why := emptyWhy(assemble.Result{Reason: reason}); why != "" {
-			t.Errorf("emptyWhy(%q) = %q, want \"\": the filter caveat names the filter, and the dedup and "+
-				"diversity stages do not run in this version", reason, why)
-		}
 	}
 }
