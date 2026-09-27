@@ -198,10 +198,11 @@ func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 	})
 
 	t.Run("non_regular_entry", func(t *testing.T) {
-		// The third placeholder. Pinned as an exact literal, because the
-		// property Snapshot is documenting is that a symlink records as its TYPE
-		// and never as its target's content — and "not the target" alone would
-		// pass for any other non-target string.
+		// The third placeholder, as a literal rather than derived from
+		// fs.FileMode.String(): the property Snapshot documents is that a symlink
+		// records as its type and never as its target's content, and both "not
+		// the target" and a derived expectation would move with any change to
+		// how the type is rendered instead of failing.
 		outside := t.TempDir()
 		if err := os.WriteFile(filepath.Join(outside, "target.md"), []byte("not ours"), 0o600); err != nil {
 			t.Fatal(err)
@@ -211,7 +212,10 @@ func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 		got := Snapshot(t, root)
-		want := "<" + os.ModeSymlink.String() + ">"
+		// "L" then nine dashes: fs.FileMode.String() spells the type and then the
+		// permission bits, and a DirEntry's Type() carries only the type, so the
+		// permission half is always unknown.
+		const want = "<L--------->"
 		if got["link.md"] != want {
 			t.Errorf("a symlink records as %q, want %q", got["link.md"], want)
 		}
