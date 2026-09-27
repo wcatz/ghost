@@ -95,12 +95,22 @@ ranking change:
   `TestValidityFixtureCoversEveryStage2State` fails if the four stop covering
   every state stage 2 reads.
 - **The `embeddings.json` fixture was added to, never rewritten.** The four new
-  vectors were embedded through `internal/embedding`'s `EmbedDocument`, the
-  same client and `search_document: ` prefix that produced the committed ones,
-  and the merge refuses to run unless the file re-encodes byte-for-byte, so the
-  diff is four added keys and nothing else. Re-embedding an existing key
-  reproduces the committed vector exactly on the current model, so this table is
-  measured in the same space as the one before it.
+  vectors were embedded through `internal/embedding`'s `EmbedDocument`, the same
+  client and `search_document: ` prefix that produced the committed ones, and
+  they were merged into the fixture by a one-off script that read the existing
+  keys, re-encoded them through the same JSON writer and refused to write unless
+  the result decoded to the original map — which is why the diff below is 3080
+  added lines and zero deletions. That script was not committed: it is four keys
+  in and nothing out, and a tool that exists to preserve one file's keys is a
+  thing to keep only while keys are being added. The route for a future
+  regeneration is the one the fixture header and `dataset.go`'s `Vectors` doc
+  both name — `POST /api/embed` against `nomic-embed-text:v1.5` for every key
+  when the dataset changes — and that route rewrites every key, so its diff is
+  expected to be whole-file. Re-embedding an existing key reproduces the
+  committed vector exactly on the current model, so this table is measured in the
+  same space as the one before it. Reproduce the additive shape with
+  `git diff --stat origin/main -- internal/bench/testdata/embeddings.json`
+  (3080 insertions, 0 deletions) and the numbers with `go run ./cmd/ghost bench`.
 - **The no-answer report moved with the corpus**: a floor that refuses all the
   no-answer queries now costs 51/220 answerable queries rather than 52, because
   the new rows are vector neighbours for one more answerable query.
