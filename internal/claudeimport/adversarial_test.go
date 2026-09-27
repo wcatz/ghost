@@ -302,7 +302,14 @@ func TestImportedMemoriesAreNeverPromotedToGlobal(t *testing.T) {
 	if _, err := importFromDir(context.Background(), store, "p-hostile", dir, slog.Default()); err != nil {
 		t.Fatalf("importFromDir: %v", err)
 	}
-	store.EnsureProject(context.Background(), "_global", "", "_global")
+	// Registered empty, so the _global read below is a real query rather than
+	// "no such project". _global holds no checkout, so the import's own
+	// ClaudeMemoryDir guard could never have reached it in the first place —
+	// this is the belt to that suspenders, and it is why the assertion below is
+	// about what the importer WRITES rather than about what it could resolve.
+	if err := store.EnsureProject(context.Background(), "_global", "", "_global"); err != nil {
+		t.Fatal(err)
+	}
 
 	mems, err := store.GetAll(context.Background(), "p-hostile", 1000)
 	if err != nil {
