@@ -103,26 +103,46 @@ func TestParseRefusesDeeplyNestedJSON(t *testing.T) {
 }
 
 // TestParseRefusesInvalidUTF8InKnownFields defends the invalid-UTF-8 case
-// (#585).
+// (#585), and states what actually refuses it.
 //
-// A raw invalid byte inside a JSON string is not decodable, and a lone
-// surrogate is not a code point. Both must be an error rather than a mojibake
-// string that then has to match an event name — a replacement character is as
-// good a candidate for a session id as any other, and one in a path is a path to
-// a file that does not exist.
+// encoding/json does not reject invalid UTF-8: a raw invalid byte and an
+// unpaired surrogate escape both decode to U+FFFD, and a NUL escape decodes to
+// a NUL. So the parse is not what refuses them. The event name is: argv decides
+// the event, the payload's name has to normalize to it, and a name carrying a
+// replacement character or a NUL is not a v1 event, so it fails open. The same
+// bytes in a field the contract does not constrain are accepted and kept as
+// decoded (see TestNULBytesNeverReachTheFilesystem for where a NUL is stopped).
 func TestParseRefusesInvalidUTF8InKnownFields(t *testing.T) {
 	for _, tc := range []struct{ name, value string }{
-		{"raw-invalid-byte", `"St\xffop"`},
+		// A real 0xff byte inside the JSON string, not the four characters \xff.
+		{"raw-invalid-byte", `"St` + string([]byte{0xff}) + `op"`},
 		{"lone-high-surrogate", `"St\ud800op"`},
 		{"lone-low-surrogate", `"Stop\udc00"`},
-		{"nul-escape", `"St\x00op"`},
+		{"nul-escape", `"St\u0000op"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := `{"contract":{"version":1,"source":"claude-code"},"hook_event_name":` + tc.value + `,"session_id":"s1"}`
+			// The payload is well-formed JSON: decoding it on its own succeeds,
+			// so a refusal below comes from the event-name rule, not from a
+			// syntax error any malformed payload would also hit.
+			var probe map[string]any
+			if err := json.Unmarshal([]byte(payload), &probe); err != nil {
+				t.Fatalf("fixture is not valid JSON, so it would not test the event-name rule: %v", err)
+			}
 			if _, err := Parse([]byte(payload), "stop", "claude-code"); err == nil {
-				t.Errorf("a payload whose event name is %s was accepted", tc.value)
+				t.Errorf("a payload whose event name is %q was accepted", tc.value)
 			}
 		})
+	}
+
+	// The same raw byte outside the vocabulary is data: accepted and coerced.
+	payload := `{"contract":{"version":1,"source":"claude-code"},"hook_event_name":"Stop","session_id":"s` + string([]byte{0xff}) + `1"}`
+	got, err := Parse([]byte(payload), "stop", "claude-code")
+	if err != nil {
+		t.Fatalf("an invalid byte in session_id must not refuse an otherwise valid payload: %v", err)
+	}
+	if got.SessionID != "s\uFFFD1" {
+		t.Errorf("session_id = %q, want the invalid byte coerced to U+FFFD", got.SessionID)
 	}
 }
 
