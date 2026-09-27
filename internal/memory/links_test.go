@@ -98,6 +98,45 @@ func TestLinksCascadeOnMemoryDelete(t *testing.T) {
 	}
 }
 
+// TestInvalidateLinkCountsOnlyLiveLinks pins the count's meaning: it is links
+// that LEFT the live set, not rows the UPDATE happened to match. Without the
+// invalidated_at IS NULL guard, re-invalidating an already-invalidated link
+// reports 1 (SQLite counts a matched row even when the new value equals the
+// old), so a caller would log a graph change that an earlier pass already made.
+func TestInvalidateLinkCountsOnlyLiveLinks(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "alpha count test")
+	b := makeMemory(t, s, "beta count test")
+
+	if err := s.CreateLink(ctx, a, b, "supersedes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	n, err := s.InvalidateLink(ctx, a, b, "supersedes")
+	if err != nil {
+		t.Fatalf("InvalidateLink: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("first invalidation moved %d link(s) out of the live set, want 1", n)
+	}
+	n, err = s.InvalidateLink(ctx, a, b, "supersedes")
+	if err != nil {
+		t.Fatalf("InvalidateLink (repeat): %v", err)
+	}
+	if n != 0 {
+		t.Errorf("re-invalidating a dead link reported %d, want 0", n)
+	}
+	// A link that never existed is 0 too, which is the case a reversed
+	// candidate normally hits.
+	n, err = s.InvalidateLink(ctx, a, b, "causes")
+	if err != nil {
+		t.Fatalf("InvalidateLink (absent): %v", err)
+	}
+	if n != 0 {
+		t.Errorf("invalidating an absent relation reported %d, want 0", n)
+	}
+}
+
 func TestInvalidateLinkHidesFromGetLinks(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -108,7 +147,7 @@ func TestInvalidateLinkHidesFromGetLinks(t *testing.T) {
 		t.Fatalf("CreateLink: %v", err)
 	}
 	// Invalidate using reversed order — normalization must still find it.
-	if err := s.InvalidateLink(ctx, b, a, "related"); err != nil {
+	if _, err := s.InvalidateLink(ctx, b, a, "related"); err != nil {
 		t.Fatalf("InvalidateLink: %v", err)
 	}
 	links, err := s.GetLinks(ctx, a)
@@ -253,7 +292,7 @@ func TestLinksByRelationSourceExcludesInvalidated(t *testing.T) {
 	if err := s.CreateLink(ctx, a, b, "causes", 0.9, "llm"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
-	if err := s.InvalidateLink(ctx, a, b, "causes"); err != nil {
+	if _, err := s.InvalidateLink(ctx, a, b, "causes"); err != nil {
 		t.Fatalf("InvalidateLink: %v", err)
 	}
 
