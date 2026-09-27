@@ -1553,3 +1553,61 @@ func TestTheAllZeroBudgetIsStillRejected(t *testing.T) {
 		t.Error("an all-zero budget was accepted, so a caller that forgot to state a size got one silently")
 	}
 }
+
+// TestTheCeilingNoteOnlyFiresWhenTheWindowFellBack: the note exists to disclose a
+// bound the pipeline invented, so it must fire exactly when the window did fall
+// back — no more often. A budget of per-slice item caps is the documented
+// injection shape, and its window is the sum of those caps, not the ceiling: told
+// otherwise, a caller with a 120-row budget across two buckets would be told it
+// asked for nothing and got 100.
+func TestTheCeilingNoteOnlyFiresWhenTheWindowFellBack(t *testing.T) {
+	tests := []struct {
+		name        string
+		budget      Budget
+		category    string
+		wantWindow  int
+		wantTheNote bool
+	}{
+		{
+			name:        "per-slice item caps sum above the ceiling",
+			budget:      Budget{Slices: []Slice{{Bucket: "proj", MaxItems: 60}, {Bucket: "_global", MaxItems: 60}}},
+			wantWindow:  120,
+			wantTheNote: false,
+		},
+		{
+			name:        "per-slice item caps sum below the ceiling",
+			budget:      Budget{Slices: []Slice{{Bucket: "proj", MaxItems: 20}, {Bucket: "_global", MaxItems: 20}}},
+			wantWindow:  40,
+			wantTheNote: false,
+		},
+		{
+			name:        "a category widens a slice sum to the ceiling, without inventing it",
+			budget:      Budget{Slices: []Slice{{Bucket: "proj", MaxItems: 40}}},
+			category:    "gotcha",
+			wantWindow:  maxRetrievalWindow,
+			wantTheNote: false,
+		},
+		{
+			name:        "a byte cap alone is the one shape that invented the window",
+			budget:      Budget{MaxBytes: 40_000},
+			wantWindow:  maxRetrievalWindow,
+			wantTheNote: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := baseRequest()
+			req.Budget = tc.budget
+			req.Category = tc.category
+
+			if got := RetrievalWindow(req); got != tc.wantWindow {
+				t.Errorf("RetrievalWindow = %d, want %d", got, tc.wantWindow)
+			}
+			res := run(t, &fakeRetriever{set: setOf()}, req)
+			if got := hasNote(res.Notes, "states no item bound"); got != tc.wantTheNote {
+				t.Errorf("the ceiling note is present = %v, want %v: it discloses a bound the pipeline "+
+					"invented, and this budget states one. notes: %v", got, tc.wantTheNote, res.Notes)
+			}
+		})
+	}
+}

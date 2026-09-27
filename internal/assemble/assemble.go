@@ -180,7 +180,7 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	// block's size is then decided by a number the caller did not state. The
 	// request still names what bounds the block — its bytes — so the note says
 	// both, and a reader is not left taking the window for the block's size.
-	if req.Budget.MaxItems <= 0 && RetrievalWindow(req) >= maxRetrievalWindow {
+	if windowIsACeiling(req) {
 		p.retrievalFailures = append(p.retrievalFailures, formatNote(
 			"retrieval_window_capped: this budget states no item bound, so the retrieval window is the documented ceiling of %d rows; the block's own size is bounded by the byte cap, not by a row count",
 			maxRetrievalWindow))
@@ -241,16 +241,41 @@ func resolvedParams(req Request) memory.SearchParams {
 	return memory.DefaultSearchParams()
 }
 
+// itemBound is the caller's bound on row count: the total, or the sum of the
+// per-slice caps when there is no total, which is the shape injection uses for
+// independent per-bucket caps. It is 0 when the caller bounded no rows at all,
+// which is the only case in which the window is the pipeline's choice rather than
+// the caller's.
+func itemBound(req Request) int {
+	if req.Budget.MaxItems > 0 {
+		return req.Budget.MaxItems
+	}
+	total := 0
+	for _, s := range req.Budget.Slices {
+		total += s.MaxItems
+	}
+	return total
+}
+
+// windowIsACeiling reports whether the retrieval window is the documented
+// maximum rather than something the caller asked for. It reads the same bound the
+// window does, because a disclosure about a window that disagrees with the window
+// is worse than no disclosure: the two would have to be kept in step by hand.
+func windowIsACeiling(req Request) bool {
+	return itemBound(req) <= 0 && retrievalWindow(req) >= maxRetrievalWindow
+}
+
 // RetrievalWindow is the window Run will ask the retriever for on this request.
 // Exported so a caller whose own path has to describe the same window asks here
 // instead of repeating the rule: explain mode reports the ranking of a window,
 // and a diagnosis of a window the tool does not use describes nothing.
 //
-// It is never 0 for a request Run accepts. A budget with no item bound — a byte
-// cap alone, or a slice clamp alone — is a coherent request ("as many rows as
-// fit"), and the all-zero check admits it, so the window falls back to
-// maxRetrievalWindow rather than handing the store a fetch limit it refuses with
-// a message about a limit instead of about the budget.
+// It is never 0 for a request Run accepts. A byte cap alone is a coherent request
+// — "as many rows as fit" — and validateRequest admits it, so the window falls
+// back to maxRetrievalWindow rather than handing the store a fetch limit it
+// refuses with a message about a limit instead of about the budget. A budget that
+// bounds nothing at all, including one whose slices carry only a ClampBytes
+// presentation cap, is refused before this is reached.
 func RetrievalWindow(req Request) int { return retrievalWindow(req) }
 
 // retrievalWindow is how wide the retrieval window is. It is the caller's total
@@ -258,12 +283,7 @@ func RetrievalWindow(req Request) int { return retrievalWindow(req) }
 // budget: the retriever has to be able to return at least as many rows as the
 // caller will accept, or a closure could never be filled.
 func retrievalWindow(req Request) int {
-	total := req.Budget.MaxItems
-	if total <= 0 {
-		for _, s := range req.Budget.Slices {
-			total += s.MaxItems
-		}
-	}
+	total := itemBound(req)
 	if total <= 0 {
 		// No item bound anywhere, so nothing sizes a window from the budget.
 		// The ceiling is the honest default: stage 8 still trims by bytes or by
