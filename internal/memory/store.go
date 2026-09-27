@@ -22,6 +22,16 @@ import (
 	"unicode/utf8"
 )
 
+// GlobalProjectID is the reserved project id Ghost stores its own shipped
+// rules under. It is a persisted value, not an in-memory convention: it is the
+// projects.id row the global seeds are written into, the memories.project_id
+// every global row carries, and the value cross-project queries filter on.
+//
+// A row's project comes from the row. A caller that stamps this sentinel onto
+// memory it merely recognised as global would make the origin rewrite apply to
+// rows it never owned.
+const GlobalProjectID = "_global"
+
 // Memory represents a single discrete memory.
 type Memory struct {
 	ID           string   `json:"id"`

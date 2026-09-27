@@ -243,6 +243,119 @@ func TestSourceLabelUsesSharedOriginClassification(t *testing.T) {
 	}
 }
 
+// builtinSeedText is the frozen shipped rule Ghost writes into the global
+// project, pinned and tagged source='builtin'. The memory package keeps its own
+// unexported copy, so this stays a literal: it pins the cross-package text here
+// rather than tracking whatever the package currently defines.
+const builtinSeedText = "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user."
+
+// TestSourceLabelForMemoryScopesTheSeedRewriteToTheGlobalProject covers the
+// compatibility rewrite: a row still in the shape a pre-v15 build wrote — the
+// shipped seed recorded as source='manual' — must render as the Ghost-shipped
+// rule it is, but only when it sits in the global project.
+func TestSourceLabelForMemoryScopesTheSeedRewriteToTheGlobalProject(t *testing.T) {
+	global := memory.Memory{ProjectID: memory.GlobalProjectID, Content: builtinSeedText, Source: "manual"}
+	if got := sourceLabelForMemory(global); got != " source=builtin" {
+		t.Errorf("legacy-shaped builtin source label = %q, want source=builtin", got)
+	}
+	// The rewrite is scoped to the project Ghost ships the seed into. A user
+	// who saved the same sentence inside a project wrote it themselves, and
+	// relabelling it strips the absence-of-a-tag that marks direct user
+	// material — the one signal mcpInstructions tells the agent to read.
+	project := memory.Memory{ProjectID: "abc123", Content: builtinSeedText, Source: "manual"}
+	if got := sourceLabelForMemory(project); got != "" {
+		t.Errorf("project-scoped seed text label = %q, want no label (direct user material)", got)
+	}
+}
+
+// TestFormatMemoriesBuiltinRewriteAppliesOnlyToTheGlobalSeed is the rendered
+// form of the same boundary: one shared helper decides both rows, and the
+// difference is which project each row belongs to, not what it says.
+func TestFormatMemoriesBuiltinRewriteAppliesOnlyToTheGlobalSeed(t *testing.T) {
+	out := formatMemories([]memory.Memory{
+		{ID: "globalseed01", ProjectID: memory.GlobalProjectID, Category: "preference", Content: builtinSeedText, Source: "manual"},
+		{ID: "projectseed1", ProjectID: "abc123", Category: "preference", Content: builtinSeedText, Source: "manual"},
+	})
+
+	globalLine, projectLine := "", ""
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "`globalseed01`"):
+			globalLine = line
+		case strings.Contains(line, "`projectseed1`"):
+			projectLine = line
+		}
+	}
+	if globalLine == "" || projectLine == "" {
+		t.Fatalf("both rows must be rendered; got:\n%s", out)
+	}
+	if !strings.Contains(globalLine, "source=builtin") {
+		t.Errorf("the shipped global seed must render as builtin:\n%s", globalLine)
+	}
+	if strings.Contains(projectLine, "source=") {
+		t.Errorf("a project row repeating the shipped words is the user's own and must stay untagged:\n%s", projectLine)
+	}
+}
+
+// TestFormatMemoriesBuiltinRewriteUsesTheStoredProject runs the same boundary
+// through the real store and a real listing query, so the guard cannot pass by
+// accident: if the query path stopped populating ProjectID, the test on
+// hand-built rows above would keep passing while every global silently
+// rendered as untagged user material again.
+//
+// The schema is current; the rows are inserted after the v15 migration ran, so
+// this pins the read path's handling of that row shape rather than migration
+// execution.
+func TestFormatMemoriesBuiltinRewriteUsesTheStoredProject(t *testing.T) {
+	srv, _ := newCapSession(t)
+	ctx := context.Background()
+
+	if err := srv.store.EnsureProject(ctx, memory.GlobalProjectID, memory.GlobalProjectID, "global"); err != nil {
+		t.Fatalf("EnsureProject(global): %v", err)
+	}
+	// The legacy shape: shipped seed text recorded as source='manual'.
+	globalID, err := srv.store.Create(ctx, memory.GlobalProjectID, memory.Memory{
+		Category: "preference", Content: builtinSeedText, Source: "manual", Importance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("Create global seed: %v", err)
+	}
+	// testStore registers the project as id "abc123" (see testStore).
+	projectID, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "preference", Content: builtinSeedText, Source: "manual", Importance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("Create project seed: %v", err)
+	}
+
+	memories, err := srv.store.GetTopMemories(ctx, "abc123", 10)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	out := formatMemories(memories)
+
+	for id, wantLabel := range map[string]string{globalID: "source=builtin", projectID: ""} {
+		line := ""
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, "`"+id+"`") {
+				line = l
+			}
+		}
+		if line == "" {
+			t.Fatalf("row %s missing from the listing:\n%s", id, out)
+		}
+		if wantLabel == "" {
+			if strings.Contains(line, "source=") {
+				t.Errorf("project row %s must stay untagged:\n%s", id, line)
+			}
+			continue
+		}
+		if !strings.Contains(line, wantLabel) {
+			t.Errorf("global row %s must render %q:\n%s", id, wantLabel, line)
+		}
+	}
+}
+
 // TestFormatMemoriesRendersOriginLabel backs the sentence mcpInstructions
 // now relies on: "The section labels each row's origin — trust that label".
 //
@@ -254,13 +367,6 @@ func TestSourceLabelUsesSharedOriginClassification(t *testing.T) {
 // manual renders as no label, and that absence is load-bearing — it is what
 // marks a row as the user's own, the same rule the banner uses. Tagging it
 // too would make the marker mean nothing by applying it to everything.
-func TestSourceLabelForContentRelabelsLegacyBuiltin(t *testing.T) {
-	got := sourceLabelForContent("manual", "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.")
-	if got != " source=builtin" {
-		t.Errorf("legacy builtin source label = %q, want source=builtin", got)
-	}
-}
-
 func TestFormatMemoriesRendersOriginLabel(t *testing.T) {
 	srv, session := newCapSession(t)
 

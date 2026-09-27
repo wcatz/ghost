@@ -252,6 +252,12 @@ func openFileTestDB(t *testing.T) (db *sql.DB, path string) {
 	return db, path
 }
 
+// TestLoadGlobalMemories: the loader returns only the global project, and each
+// row carries the project it is actually stored under. The origin label for a
+// legacy-shaped seed is decided by that field, so a sessionMemory without it
+// cannot tell Ghost's shipped global rule from a project row repeating the same
+// words. The project row below repeats the seed text on purpose: it is the
+// boundary the global section must not cross.
 func TestLoadGlobalMemories(t *testing.T) {
 	db, dbPath := openFileTestDB(t)
 
@@ -260,16 +266,33 @@ func TestLoadGlobalMemories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert _global project: %v", err)
 	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('abc123', '/tmp/test', 'test-project')`); err != nil {
+		t.Fatalf("insert project row: %v", err)
+	}
 	_, err = db.Exec(
 		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('testid01', '_global', 'preference', 'never push to main', 'manual')`,
 	)
 	if err != nil {
 		t.Fatalf("insert global memory: %v", err)
 	}
+	// Same words as the shipped seed, but the user's own, in a project.
+	_, err = db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('testid02', 'abc123', 'preference', ?, 'manual')`,
+		builtinSeedText,
+	)
+	if err != nil {
+		t.Fatalf("insert project-scoped seed text: %v", err)
+	}
 
 	globals, total, totalKnown := loadGlobalMemories(dbPath)
 	if len(globals) != 1 {
-		t.Fatalf("expected 1 global memory, got %d", len(globals))
+		t.Fatalf("expected 1 global memory, got %d (%+v)", len(globals), globals)
+	}
+	// Compared to the persisted literal, not memory.GlobalProjectID: the loader
+	// binds the canonical sentinel in SQL, and a sentinel that disagreed with
+	// the stored value would return no rows at all.
+	if globals[0].ProjectID != "_global" {
+		t.Errorf("ProjectID: got %q, want _global — the global loader must carry the stored project identity", globals[0].ProjectID)
 	}
 	if globals[0].Category != "preference" {
 		t.Errorf("category: got %q, want preference", globals[0].Category)
@@ -278,7 +301,60 @@ func TestLoadGlobalMemories(t *testing.T) {
 		t.Errorf("content: got %q, want 'never push to main'", globals[0].Content)
 	}
 	if !totalKnown || total != 1 {
-		t.Errorf("total: got known=%v total=%d, want known=true total=1", totalKnown, total)
+		t.Errorf("total: got known=%v total=%d, want known=true total=1 — a project row must not be counted as global", totalKnown, total)
+	}
+}
+
+// TestSessionMemoriesCarryTheirOwnProject is the other half of the identity
+// rule TestLoadGlobalMemories pins for globals: the project loader stamps the
+// project it queried onto every row it returns.
+//
+// Nothing renders an origin label for project rows today, so this looks
+// inert. It is not: sessionMemory is one shared shape, and a field that is
+// only sometimes populated is exactly the trap the global loader just fell
+// into. If this ever goes back to empty, the first surface that asks a project
+// row where it lives gets "" — which is not the reserved global project, so
+// the compatibility rewrite silently stops applying and a stale global seed
+// renders as untagged user material with no test objecting.
+//
+// The wanted value is the literal the project row was inserted under, not a
+// constant, so a change to the project id this test uses cannot redefine
+// "correct" alongside the code.
+func TestSessionMemoriesCarryTheirOwnProject(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghostDir: %v", err)
+	}
+
+	db, err := memory.OpenDB(filepath.Join(ghostDir, "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	projectPath := filepath.Join(t.TempDir(), "ownproj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project path: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projectPath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	insertProject(t, db, "p1", canonical, "ownproj")
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES ('ownmem001', 'p1', 'preference', 'a preference of the user own', 'manual', 0.9)`,
+	); err != nil {
+		t.Fatalf("insert project memory: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath)
+	if len(memories) != 1 {
+		t.Fatalf("expected 1 project memory, got %d", len(memories))
+	}
+	if memories[0].ProjectID != "p1" {
+		t.Errorf("ProjectID: got %q, want p1 — a project row must carry the project it is stored under", memories[0].ProjectID)
 	}
 }
 
@@ -456,6 +532,66 @@ func TestHandleSessionStartHook_GlobalsOnNoMatch(t *testing.T) {
 	}
 	if !strings.Contains(result, "sign all commits with DCO") {
 		t.Errorf("global memory content missing from no-match output; got:\n%s", result)
+	}
+}
+
+// TestHandleSessionStartHook_LegacyShapedSeedGuidanceIsConsistent is the
+// end-to-end form of the origin rule: a store holds a global row still in the
+// shape a pre-v15 build wrote — the shipped seed recorded as source='manual' —
+// and the hook must derive both the row's label and the guidance sentence that
+// describes those labels from the same canonicalized origin. Reading the raw
+// source in only one of the two produced a block that rendered "(builtin)" and
+// then said no row had a recorded automated origin.
+//
+// The schema here is current: the row is inserted after the v15 migration has
+// already run, so this does not exercise migration execution — it pins that the
+// read path still canonicalizes that row shape on a database it will never
+// re-migrate. It also covers the loader's half end to end, which
+// TestLoadGlobalMemories covers only in isolation: the renderer recognises the
+// seed as global from the project the loader reports, so a loader that
+// returned the wrong project would quietly render every global as untagged
+// user material.
+func TestHandleSessionStartHook_LegacyShapedSeedGuidanceIsConsistent(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghostDir: %v", err)
+	}
+
+	db, err := memory.OpenDB(filepath.Join(ghostDir, "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
+	// The legacy shape: shipped seed text, still recorded as source='manual'.
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('gsed0001', '_global', 'preference', ?, 'manual')`,
+		builtinSeedText,
+	); err != nil {
+		t.Fatalf("insert legacy-shaped seed: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": "/tmp/no-project-here"})
+	var out strings.Builder
+	runSessionStartHook(t, string(input), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "(builtin)") {
+		t.Errorf("the legacy-shaped shipped seed must render with its origin label:\n%s", result)
+	}
+	if strings.Contains(result, "no recorded automated origin") {
+		t.Errorf("guidance denies the origin the row above it is tagged with:\n%s", result)
+	}
+	if !strings.Contains(result, "parenthesized tags (builtin)") {
+		t.Errorf("guidance must name builtin as an origin actually present:\n%s", result)
+	}
+	if strings.Contains(result, "the user's own saved cross-project preferences") {
+		t.Errorf("the shipped rule must not be presented as the user's own preference:\n%s", result)
 	}
 }
 
