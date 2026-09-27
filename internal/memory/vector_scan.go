@@ -253,7 +253,6 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 	first := true
 
 	for rows.Next() {
-		v.facts.scanned++
 		// RawBytes, not string/[]byte destinations. database/sql clones a
 		// string or []byte column into a fresh allocation for every row, which
 		// is one throwaway per column of every memory in the corpus; a
@@ -311,18 +310,24 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	v.facts.mismatched, v.facts.mismatchedModel = mismatched, mismatchedModel
+	// The facts are counted beside the warning rather than inside it, so a count
+	// cannot depend on a diagnostic channel being present. Every store NewStore
+	// builds has a logger — a nil one becomes a discard handler — so no caller
+	// reaches the difference today; it is stated because the coupling is wrong on
+	// its face, and a count gated on a log call is one refactor away from being
+	// gated on it for real.
+	v.facts.mismatched = mismatched
+	for m := range foreign {
+		v.facts.foreign += foreign[m]
+	}
 	if s.logger != nil && len(foreign) > 0 {
 		// Sorted so a log is deterministic whichever row order the planner
-		// happened to yield, and so the fact's single foreignModel names a
-		// stable identity.
+		// happened to yield.
 		models := make([]string, 0, len(foreign))
 		for m := range foreign {
 			models = append(models, m)
-			v.facts.foreign += foreign[m]
 		}
 		sort.Strings(models)
-		v.facts.foreignModel = models[0]
 		for _, m := range models {
 			if s.warnForeignOnce(m) {
 				s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",

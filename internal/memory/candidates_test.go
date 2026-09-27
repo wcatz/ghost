@@ -1023,3 +1023,39 @@ func TestCandidatesWarnsOncePerRetiredIdentity(t *testing.T) {
 			"the snapshot store is not sharing the process's warning gate", n)
 	}
 }
+
+// TestLegFactsAreNotLeftOverFromAnEarlierSearch: the vector scan's snapshot is
+// pooled and reused across queries, and the leg's facts now travel on it. A count
+// that survives the reuse would be reported as this search's: a leg that skipped
+// a retired identity once would keep claiming it skipped rows for every later
+// query, which is the difference between "your model changed" and "your model
+// changed, on every search since".
+func TestLegFactsAreNotLeftOverFromAnEarlierSearch(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	store.SetEmbeddingIdentity(identityCurrent)
+	seedIdentityRows(t, store, ctx) // one vector in the configured space, one retired
+
+	req := candidateRequest("configured", 10, time.Now().UTC())
+	req.ProjectID = "test-proj"
+	req.QueryVec = []float32{1, 0, 0}
+	req.Condition = CondHybrid
+	first, err := store.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates (mixed identities): %v", err)
+	}
+	if first.Legs["vector"].DimMismatch == 0 {
+		t.Fatal("precondition: the first search should have skipped the retired vector")
+	}
+
+	// Retire the odd one out: the same search, now with nothing to skip.
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM memory_embeddings WHERE model = ?", identityStale); err != nil {
+		t.Fatalf("delete the stale vector: %v", err)
+	}
+	second, err := store.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates (one identity): %v", err)
+	}
+	if got := second.Legs["vector"].DimMismatch; got != 0 {
+		t.Errorf("the second search reports %d skipped rows, want 0: the fact is left over from the pooled snapshot", got)
+	}
+}

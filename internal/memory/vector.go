@@ -281,9 +281,13 @@ func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryV
 // another model, or one whose dimensions differ, is invisible to the scan, and
 // treating those rows as absent is how a changed-model setup looks like an empty
 // store.
+//
+// It carries the two counts and nothing else. The stored identities behind the
+// foreign count stay local to the scan, where the warning log names them one per
+// identity; a model name cannot reach a caller anyway, because LegStatus has no
+// field to carry it, and a field no consumer can read is a claim nothing checks.
 type vectorLegFacts struct {
-	scanned, mismatched, foreign  int
-	mismatchedModel, foreignModel string
+	mismatched, foreign int
 }
 
 // searchVectorLeg is the project's vector leg, with its facts. Every exported
