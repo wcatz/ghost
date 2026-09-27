@@ -1293,10 +1293,10 @@ func TestARetrievalFailureSurvivesConflictChatter(t *testing.T) {
 		t.Errorf("the retrieval's own failure does not lead the notes: %v", res.Notes)
 	}
 
-	// And the order is what makes it survive a budget the chatter would fill: a
-	// 300-byte total admits the leg failure and the two fixed stage notes, and
-	// drops every pair behind them. Put the leg failure at the tail and the
-	// budget is spent before it is reached.
+	// And the order is what makes it survive a budget the chatter would fill. At
+	// 300 total the leg failure and one stage note fit (boundNotes charges each
+	// note its length plus one) and every pair behind them is dropped. Put the leg
+	// failure at the tail and the budget is spent before it is reached.
 	tight := baseRequest()
 	tight.Budget = Budget{MaxItems: 100, MaxNotesBytes: 300}
 	tightRes := run(t, &fakeRetriever{set: set}, tight)
@@ -1331,7 +1331,9 @@ func TestARetrievalFailureSurvivesConflictChatter(t *testing.T) {
 	}
 
 	// A failed lookup is its own shape — no edges with it — and its disclosure
-	// leads the list for the same reason the leg failure does.
+	// leads the list for the same reason the leg failure does. Whether a pair can
+	// still be reported alongside it is its own test, with a populated edge list,
+	// because a fixture with no edges cannot falsify that assertion.
 	failedEdges := setOf(rows[0], rows[1])
 	failedEdges.EdgesStatus = memory.EdgeStatus{Status: "err", Err: "candidate edges: database is locked"}
 	failedEdges.Legs = set.Legs
@@ -1339,7 +1341,121 @@ func TestARetrievalFailureSurvivesConflictChatter(t *testing.T) {
 	if !hasNote(failedRes.Notes, "the link lookup failed") {
 		t.Errorf("a failed link lookup is not reported: %v", failedRes.Notes)
 	}
-	if hasNote(failedRes.Notes, "both remain in the block") {
-		t.Errorf("pairs are reported for a lookup that returned none: %v", failedRes.Notes)
+}
+
+// TestOneFactIsOneNoteWhicheverWayTheEdgePoints: memory_links is keyed on
+// (source, target, relation) and only the symmetric 'related' relation is
+// order-normalised, so (A→B, contradicts) and (B→A, contradicts) are two legal
+// rows for one fact. Reporting both means the same pair appears twice in the
+// answer and the remainder count is inflated, which is the "a pair is one fact"
+// claim failing on a store that is allowed to hold the shape.
+func TestOneFactIsOneNoteWhicheverWayTheEdgePoints(t *testing.T) {
+	a := candidate("A1", "proj", "fact", "one", 0.9)
+	b := candidate("B1", "proj", "fact", "two", 0.8)
+	set := setOf(a, b)
+	set.Edges = []memory.LinkEdge{
+		{From: "A1", To: "B1", Relation: "contradicts", Strength: 1},
+		{From: "B1", To: "A1", Relation: "contradicts", Strength: 1},
+	}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+
+	res := run(t, &fakeRetriever{set: set}, req)
+
+	pairs := 0
+	for _, n := range res.Notes {
+		if hasNote([]string{n}, "both remain in the block") {
+			pairs++
+		}
+	}
+	if pairs != 1 {
+		t.Errorf("one contradicting pair is reported %d times, want 1: %v", pairs, res.Notes)
+	}
+}
+
+// TestThePartialListSaysItIsPartialUnderPressure: the count of the pairs beyond
+// the cap is the sentence that tells a reader the list they are looking at is
+// truncated. It cannot be the first thing bounding drops, or the answer presents
+// a capped list as the whole block — which is the same dishonesty as promising a
+// record the reader cannot reach.
+func TestThePartialListSaysItIsPartialUnderPressure(t *testing.T) {
+	rows := make([]memory.Candidate, 0, 30)
+	edges := make([]memory.LinkEdge, 0, 15)
+	for i := range 30 {
+		id := string(rune('A'+i/26)) + string(rune('a'+i%26))
+		rows = append(rows, candidate(id, "proj", "fact", "row "+id, 0.5))
+	}
+	for i := 0; i < len(rows); i += 2 {
+		edges = append(edges, memory.LinkEdge{From: rows[i].ID, To: rows[i+1].ID, Relation: "contradicts", Strength: 1})
+	}
+	set := setOf(rows...)
+	set.Edges = edges
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+	// A budget the five pair sentences alone would fill, so the count is only
+	// present because it leads them.
+	req := baseRequest()
+	req.Budget = Budget{MaxItems: 100, MaxNotesBytes: 600}
+
+	res := run(t, &fakeRetriever{set: set}, req)
+
+	if !hasNote(res.Notes, "further contradicting pairs are in this block") {
+		t.Errorf("the answer presents a capped list of pairs as the whole block: %v", res.Notes)
+	}
+}
+
+// TestAFailedLookupReportsNoPairsEvenIfEdgesWereSupplied: a failed lookup means
+// no edges were read, so saying "both remain in the block" about them asserts a
+// fact about rows the assembler never saw. The production store never returns
+// edges with an error, but the retriever is an interface, so the assembler states
+// the rule itself rather than leaning on an invariant it cannot see.
+func TestAFailedLookupReportsNoPairsEvenIfEdgesWereSupplied(t *testing.T) {
+	a := candidate("A1", "proj", "fact", "one", 0.9)
+	b := candidate("B1", "proj", "fact", "two", 0.8)
+	set := setOf(a, b)
+	set.Edges = []memory.LinkEdge{{From: "A1", To: "B1", Relation: "contradicts", Strength: 1}}
+	set.EdgesStatus = memory.EdgeStatus{Status: "err", Err: "candidate edges: database is locked"}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+
+	res := run(t, &fakeRetriever{set: set}, req)
+
+	if !hasNote(res.Notes, "the link lookup failed") {
+		t.Errorf("the failed lookup is not disclosed: %v", res.Notes)
+	}
+	if hasNote(res.Notes, "both remain in the block") {
+		t.Errorf("pairs are reported for a lookup that read no edges: %v", res.Notes)
+	}
+}
+
+// TestTheStageRecordKeepsTheStageScopedSentence: the trace and the answer are
+// two audiences, and each keeps its own sentence. The answer half is asserted
+// elsewhere; without this, deleting the stage record's copy would leave the
+// package green and the trace silently missing the stage's own statement.
+func TestTheStageRecordKeepsTheStageScopedSentence(t *testing.T) {
+	a := candidate("A1", "proj", "fact", "one", 0.9)
+	b := candidate("B1", "proj", "fact", "two", 0.8)
+	set := setOf(a, b)
+	set.Edges = []memory.LinkEdge{{From: "A1", To: "B1", Relation: "contradicts", Strength: 1}}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+
+	res := run(t, &fakeRetriever{set: set}, req)
+
+	var stageNotes []string
+	for _, st := range res.Trace.Stages {
+		if st.Stage == stageConflicts {
+			stageNotes = st.Notes
+		}
+	}
+	if stageNotes == nil {
+		t.Fatalf("no %s stage record in the trace: %+v", stageConflicts, res.Trace.Stages)
+	}
+	if !hasNote(stageNotes, "were both candidates at this stage") {
+		t.Errorf("the stage record does not state what was true at the stage: %v", stageNotes)
+	}
+	if hasNote(stageNotes, "both remain in the block") {
+		t.Errorf("the stage record carries the answer's sentence, which is about a window that had not closed: %v", stageNotes)
 	}
 }
