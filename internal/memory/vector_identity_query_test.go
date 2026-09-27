@@ -1,6 +1,10 @@
 package memory
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -267,5 +271,77 @@ func TestEmbeddingCosinesSkipsWrongWidth(t *testing.T) {
 	}
 	if got, ok := cosines[id]; ok {
 		t.Errorf("cosine for a wrong-width row = %v, want absent", got)
+	}
+}
+
+// TestEmbeddingCosinesWarnsOncePerIdentity: the cosine lookup runs once per
+// query — the bench harness calls it 244 times in one `ghost bench` — so a
+// warning logged on every call reports the same reconfiguration a line at a
+// time for as long as the re-embed runs, which buries the state it exists to
+// report. The warning still has to fire (a reconfiguration is exactly when the
+// operator is watching), just once, through the same per-retired-identity gate
+// searchVector's warning uses.
+func TestEmbeddingCosinesWarnsOncePerIdentity(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var buf bytes.Buffer
+	store := NewStore(db, slog.New(slog.NewTextHandler(&buf, nil)))
+	store.SetEmbeddingIdentity(identityCurrent)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "test-proj", "/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id := createTestMemory(t, store, ctx, "memory from the retired space")
+	if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0}, identityStale); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+
+	// Two calls, the gate's own claim on the first: one line, not two.
+	for i := 0; i < 2; i++ {
+		if _, err := store.EmbeddingCosines(ctx, []string{id}, []float32{1, 0, 0}); err != nil {
+			t.Fatalf("EmbeddingCosines #%d: %v", i+1, err)
+		}
+	}
+	if got := strings.Count(buf.String(), "another vector space"); got != 1 {
+		t.Errorf("cosine lookup logged the foreign-vector warning %d times across 2 calls, want 1: one line per retired identity, whatever the call rate", got)
+	}
+}
+
+// TestEmbeddingCosinesSharesTheSearchWarningGate: routing through the gate
+// rather than a private flag is what keeps one process to one line for a
+// retirement, whichever path noticed it first. A search that has already
+// reported a retired identity must leave the cosine lookup nothing to say —
+// the two are the same diagnosis, and the operator needs it once.
+func TestEmbeddingCosinesSharesTheSearchWarningGate(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var buf bytes.Buffer
+	store := NewStore(db, slog.New(slog.NewTextHandler(&buf, nil)))
+	store.SetEmbeddingIdentity(identityCurrent)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "test-proj", "/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id := createTestMemory(t, store, ctx, "memory from the retired space")
+	if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0}, identityStale); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+
+	if _, err := store.SearchVector(ctx, "test-proj", []float32{1, 0, 0}, 10); err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if _, err := store.EmbeddingCosines(ctx, []string{id}, []float32{1, 0, 0}); err != nil {
+		t.Fatalf("EmbeddingCosines: %v", err)
+	}
+	if got := strings.Count(buf.String(), "another vector space"); got != 1 {
+		t.Errorf("search + cosine lookup logged %d warnings for one retired identity, want 1: both paths must spend the same gate, or a query costs a second line", got)
 	}
 }

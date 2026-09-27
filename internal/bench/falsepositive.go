@@ -107,9 +107,11 @@ var FalsePositiveFloors = []float32{0.3, 0.4, 0.5}
 // so a short list undercounts precisely the rows that came from the leg with no
 // score of its own, and the top result of a keyword-led window is one of them.
 //
-// A row absent from the result has no embedding, or one whose dimensions do not
-// match the query's, and is reported here as 0: below every floor this report
-// counts, which is the right answer for a row with no comparable vector.
+// A row absent from the result has no embedding, was embedded under a
+// different model than this query, or has dimensions that do not match the
+// query's — none of which gives it a comparable score — and is reported here
+// as 0: below every floor this report counts, which is the right answer for a
+// row with no score to report.
 func resultCosines(ctx context.Context, store *memory.Store, queryVec []float32, ids []string) (map[string]float32, error) {
 	scored, err := store.EmbeddingCosines(ctx, ids, queryVec)
 	if err != nil {

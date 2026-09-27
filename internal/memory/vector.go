@@ -86,7 +86,10 @@ func (s *Store) DeleteEmbedding(ctx context.Context, memoryID string) error {
 // even that: it is an arbitrary number, which is why usableVectorEntries skips
 // those rows for the vector legs and GetEmbedding returns nil for them. Foreign
 // rows are counted and logged here for the same reason — a reconfiguration is
-// exactly when the operator is watching the log.
+// exactly when the operator is watching the log — but only on the first lookup
+// to meet a given retired identity, through the shared warnForeignOnce gate, so
+// this once-per-query call cannot print the same pending re-embed once per
+// query.
 //
 // It exists because a search result's score is not always in the vector leg's own
 // output. Fusion admits the top keyword hits on a reserved slot whatever their
@@ -125,8 +128,13 @@ func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []f
 	defer rows.Close() //nolint:errcheck
 
 	cosines := make(map[string]float32, len(ids))
-	var foreign, mismatched int
-	foreignModel, mismatchedModel := "", ""
+	// foreign counts skipped rows per stored identity rather than as one total,
+	// for the reason usableVectorEntries gives: retirements overlap (the model
+	// changes again before the first re-embed finishes), and a single total
+	// reported against whichever identity the rows happened to yield first would
+	// absorb the newer retirement into the older one's line.
+	foreign := make(map[string]int)
+	mismatched, mismatchedModel := 0, ""
 	for rows.Next() {
 		var id, model string
 		var blob []byte
@@ -134,10 +142,7 @@ func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []f
 			return nil, fmt.Errorf("embedding cosines: %w", err)
 		}
 		if identity != "" && model != identity {
-			foreign++
-			if foreignModel == "" {
-				foreignModel = model
-			}
+			foreign[model]++
 			continue
 		}
 		vec := bytesToFloat32s(blob)
@@ -153,15 +158,33 @@ func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []f
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("embedding cosines: %w", err)
 	}
-	if s.logger != nil {
-		if foreign > 0 {
-			s.logger.Warn("embedding cosine lookup skipped rows from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded",
-				"skipped", foreign, "scored", len(cosines), "configured_identity", identity, "stored_identity", foreignModel)
+	if s.logger != nil && len(foreign) > 0 {
+		// Sorted, so a log is deterministic whichever order the rows came back
+		// in. The gate makes this the one line the process ever writes about a
+		// retired identity: this lookup runs once per query (the bench harness
+		// calls it 244 times in a single `ghost bench`), so a warning per call
+		// reports the same pending re-embed a line at a time for as long as it
+		// runs — and a search that already reported this identity has said
+		// everything the operator needs to hear. warnForeignOnce shares one gate
+		// with usableVectorEntries for exactly that reason.
+		models := make([]string, 0, len(foreign))
+		for m := range foreign {
+			models = append(models, m)
 		}
-		if mismatched > 0 {
-			s.logger.Warn("embedding cosine lookup skipped vectors whose width differs from the query — the embedding model likely changed; re-embed to restore comparable scores",
-				"skipped", mismatched, "scored", len(cosines), "query_dims", len(queryVec), "stored_identity", mismatchedModel)
+		sort.Strings(models)
+		for _, m := range models {
+			if s.warnForeignOnce(m) {
+				s.logger.Warn("embedding cosine lookup skipped rows from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",
+					"skipped", foreign[m], "scored", len(cosines), "configured_identity", identity, "stored_identity", m)
+			}
 		}
+	}
+	// The width warning stays per-call, as in usableVectorEntries: it cannot
+	// repeat during a re-embed, because the identity check above takes those
+	// rows first.
+	if s.logger != nil && mismatched > 0 {
+		s.logger.Warn("embedding cosine lookup skipped vectors whose width differs from the query — the embedding model likely changed; re-embed to restore comparable scores",
+			"skipped", mismatched, "scored", len(cosines), "query_dims", len(queryVec), "stored_identity", mismatchedModel)
 	}
 	return cosines, nil
 }
