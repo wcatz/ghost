@@ -234,9 +234,13 @@ func TestMergeSourceIsScoredAgainstItsOwnMerge(t *testing.T) {
 // whose text carries every source it folded in still absorbs all of them, or
 // scoring against the merge alone would re-add a duplicate beside the merge that
 // had just replaced it — the paraphrase-duplicate class #639 measured on every
-// project. Both sources are covered well past the bar (0.800 and 0.667) and the
-// fixture carries no other output to rescue them, so a regression that fell back
-// to the per-output test would be caught here too.
+// project. Both sources are covered well past the bar (0.800 and 0.667).
+//
+// It does NOT distinguish the merge's own text from the per-output test: the
+// fixture has one output and it IS the merge text, so both comparisons see the
+// same tokens. TestMergeSourceIsScoredAgainstItsOwnMerge is the one that needs an
+// unrelated second memory to tell the two apart, and it is the one that fails if
+// the union comes back.
 func TestMergeSourcesAreAbsorbedWhenTheMergeCarriesThem(t *testing.T) {
 	const (
 		sshID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
