@@ -375,7 +375,10 @@ func extractTarGzBinary(archive []byte) ([]byte, error) {
 		// empty file over the installed executable and report an upgrade. The
 		// zip path already skipped directories through FileInfo().IsDir(); this
 		// is the same guard for tar, plus the empty case neither path could see.
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+		// TypeReg is the zero value, so a header that names no type is a
+		// regular file. (tar.TypeRegA, the old spelling, is the same byte and
+		// is deprecated, so matching it would only add a lint finding.)
+		if hdr.Typeflag != tar.TypeReg {
 			return nil, fmt.Errorf("ghost in the archive is a %s, not a regular file", tarEntryKind(hdr))
 		}
 		binary, err := io.ReadAll(tr)
