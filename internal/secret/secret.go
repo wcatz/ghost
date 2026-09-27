@@ -585,6 +585,21 @@ func valueIsCommand(text string, valueEnd int) bool {
 	return shellFlagRe.MatchString(rest)
 }
 
+// valueIsQuoted reports whether the captured value was written as a quoted
+// literal — that is, whether the character before the capture is a quote.
+// assignmentRe consumes an optional opening quote, so the capture itself no
+// longer carries it.
+func valueIsQuoted(text string, valueStart int) bool {
+	if valueStart <= 0 {
+		return false
+	}
+	switch text[valueStart-1] {
+	case '"', '\'':
+		return true
+	}
+	return false
+}
+
 // quotedArgRe finds a quoted token, which is where a command's secret lives.
 var quotedArgRe = regexp.MustCompile(`"([^"\n]{8,})"|'([^'\n]{8,})'`)
 
@@ -795,13 +810,22 @@ func Detect(text string) (Finding, bool) {
 		key := text[m[2*assignmentKey]:m[2*assignmentKey+1]]
 		value := text[m[2*assignmentValue]:m[2*assignmentValue+1]]
 		if text[m[2*assignmentShellVar]:m[2*assignmentShellVar+1]] != "" &&
-			valueIsCommand(text, m[2*assignmentValue+1]) {
-			// A command invocation, so the value is the first word of an
-			// argument list — but the secret in
-			// `ConvertTo-SecureString "K3q9…" -AsPlainText` is a quoted ARGUMENT,
-			// not the value, so skipping the candidate without looking would
-			// store it. -AsPlainText is precisely the flag that says the plaintext
-			// argument IS the password.
+			valueIsCommand(text, m[2*assignmentValue+1]) &&
+			!valueIsQuoted(text, m[2*assignmentValue]) {
+			// A command invocation whose value is the command word rather than a
+			// literal: `$domainAdminPassword = ConvertTo-SecureString "{1}" …`.
+			// `ConvertTo-SecureString` is a cmdlet, not a password, so the value
+			// is skipped.
+			//
+			// The rest of the line still has to be checked, because the secret in
+			// `ConvertTo-SecureString "K3q9…" -AsPlainText` is a quoted ARGUMENT
+			// and nothing else looks there. -AsPlainText is precisely the flag
+			// that says the plaintext argument IS the password.
+			//
+			// The quoted-value test is what keeps the two apart. A quoted value
+			// (`$db_password = "K3q9…" -AsPlainText`) is a literal however much is
+			// flagged after it, so it falls through to the normal key and value
+			// test below rather than being skipped as a command word.
 			if f, ok := detectQuotedArgument(text[m[2*assignmentValue+1]:]); ok {
 				return f, true
 			}

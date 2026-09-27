@@ -142,6 +142,14 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			label: "assigned credential value",
 		},
 		{
+			// The same literal, one flag away. A quoted value is a literal however
+			// much is flagged after it, so a command-looking tail must not skip it.
+			name:  "quoted literal with a trailing shell flag",
+			text:  `$db_password = "K3q9Xm2pL7wRt4ZbAvN1" -AsPlainText`,
+			rule:  "assigned-secret",
+			label: "assigned credential value",
+		},
+		{
 			// A literal assigned to a shell variable. The $ on the key is not a
 			// reason to skip: only a value with a flag after it is a command.
 			name:  "literal secret assigned to a shell variable",

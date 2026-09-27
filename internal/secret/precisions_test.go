@@ -170,6 +170,23 @@ func TestDetectAllowsHelmAndKubernetesCredentialVocabulary(t *testing.T) {
 			was:  "assigned-secret, placeholder gate only",
 		},
 		{
+			// A labelled 32-byte CBOR byte string is ALSO every Cardano
+			// verification key, and cardano-cli writes exactly this shape for a
+			// block production key. 68 characters, far under longHexFloor, and
+			// cardano-key-file does not match it either — its KES/Evol alternative
+			// needs `Key` to be the whole remainder, and there is no
+			// Signing/Private tail in KESVerificationKey. Putting `5820` back
+			// into the cborHex alternative fails these two.
+			name: "labelled kes verification key",
+			text: `{"type":"KESVerificationKey","description":"cold vrf key","cborHex":"5820f2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f"}`,
+			was:  "cardano-cbor-hex",
+		},
+		{
+			name: "labelled payment verification key",
+			text: `{"type":"PaymentVerificationKey","cborHex":"5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f"}`,
+			was:  "cardano-cbor-hex",
+		},
+		{
 			// Only the entropy bar stops this. 20 characters, two character
 			// classes, mixed case so no single-case word run forms, no separator
 			// and therefore no word segment, and exactly at the length floor — and
