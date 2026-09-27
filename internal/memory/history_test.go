@@ -370,12 +370,29 @@ func TestMemoryHistoryCapsRowsPerMemory(t *testing.T) {
 		}
 	}
 
+	// The TABLE is what the cap bounds, so that is what is asserted. Asserting the
+	// read instead would prove nothing: MemoryHistory's own default limit is
+	// historyVersionsPerMemory, so a read returns exactly that many rows whether
+	// the prune ran or not. This assertion was that mistake, and the mutation
+	// that disabled the prune entirely — a memory's history grew without bound and
+	// the test still passed.
+	var stored int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_provenance WHERE memory_id = ?`, id,
+	).Scan(&stored); err != nil {
+		t.Fatalf("count history rows: %v", err)
+	}
+	if stored != historyVersionsPerMemory {
+		t.Fatalf("the table holds %d rows for this memory, want the cap of %d — the prune did not run",
+			stored, historyVersionsPerMemory)
+	}
+
 	entries, err := s.MemoryHistory(ctx, id, 0)
 	if err != nil {
 		t.Fatalf("MemoryHistory: %v", err)
 	}
 	if len(entries) != historyVersionsPerMemory {
-		t.Fatalf("kept %d rows, want the newest %d", len(entries), historyVersionsPerMemory)
+		t.Fatalf("read back %d rows, want the newest %d", len(entries), historyVersionsPerMemory)
 	}
 	// The survivors are the newest: the insert is the row that was culled.
 	for i, e := range entries {

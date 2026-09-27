@@ -477,13 +477,26 @@ clock, and neither can be lost to a crash between the write and its cleanup:
    also means the newest row can never be taken, so a memory always has one
    statement of what it says now, and a memory under the cap keeps everything —
    which is why a rarely-changed memory never loses its `baseline`. One
-   `ROW_NUMBER()` delete covers the whole batch, not one statement per id.
+   `ROW_NUMBER()`-windowed `DELETE` covers the whole batch, not one statement per
+   id.
 2. **Across the store**, only the newest 20 000 rows survive (`historyRowsCap`).
    The per-memory bound cannot do this job — every created-then-dropped memory is
    a distinct `memory_id` with a couple of rows of its own, and one applied
    reflection can churn the whole non-manual corpus. The cap is a rowid window
    rather than an `ORDER BY` over the table: an implicit rowid is `max(rowid)+1`
    and is never reused, so rowid order *is* insertion order.
+
+Both questions are asked in **one** statement, and each `DELETE` behind them runs
+only when the answer says a cap is actually exceeded (`pruneHistoryTx`). That is
+not tidiness. This runs inside the caller's write transaction, so everything it
+adds is time the write lock is held, and the write lock is the one resource
+concurrent writers queue for — see the concurrency contract above. A first version
+that ran the windowed `DELETE` and a separate `max(rowid)` probe on every append
+added three statements to every save, and `TestConcurrentProcessesMixedReadWrite`
+began failing with `SQLITE_BUSY` at `BEGIN IMMEDIATE`: it is a bound, not a
+guarantee, and a per-upsert statement that looks free in a one-process test is
+what reaches it. A memory under the cap and a table under the global cap are the
+normal state, and then the only statement is the probe.
 
 `Store.MemoryHistory` reads one memory's history oldest first — a changelog, not
 a log tail — and `ghost history <memory-id>` prints it.

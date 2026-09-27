@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	sqlite "modernc.org/sqlite"
@@ -286,10 +287,7 @@ func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEven
 			}
 			start = end
 		}
-		if err := pruneHistoryForIDsTx(ctx, tx, batch); err != nil {
-			return err
-		}
-		if err := pruneHistoryTableTx(ctx, tx); err != nil {
+		if err := pruneHistoryTx(ctx, tx, batch); err != nil {
 			return err
 		}
 	}
@@ -439,19 +437,23 @@ func linkSuccessorTx(ctx context.Context, tx *sql.Tx, oldID, successorID string)
 	return nil
 }
 
-// pruneHistoryForIDsTx applies the per-memory half of the growth policy to a
-// batch in ONE statement: for each named memory, everything past its newest
-// historyVersionsPerMemory rows goes.
+// pruneHistoryTx applies the growth policy in the caller's transaction: the
+// per-memory cap for the ids just appended, and the table-wide cap.
 //
-// The rank is by rowid, not recorded_at. recorded_at is second-precision, so
-// every write one reflection makes in a pass shares a timestamp and the order
-// among them is arbitrary — an audit whose newest rows are chosen by a tie-break
-// is not deterministic. rowid is monotonic and never reused, so it is insertion
-// order exactly.
+// Both bounds are asked about in ONE statement, because this runs inside the
+// caller's write transaction and everything it adds is time the write lock is
+// held. The write lock is the single resource concurrent writers queue for, so a
+// per-upsert statement that looks free in a one-process test is what tips a
+// busy_timeout under contention — which is exactly how this landed: the
+// multi-process test in multiproc_concurrency_test.go began failing with
+// SQLITE_BUSY at BEGIN IMMEDIATE once each write carried three extra statements.
 //
-// Ranking by rowid DESC also means the trim can never remove a memory's newest
-// row: it is rank 1, and the predicate only takes rank above the cap.
-func pruneHistoryForIDsTx(ctx context.Context, tx *sql.Tx, ids []string) error {
+// The probe therefore reports the two questions in one union (which of these
+// memories are over the per-memory cap, and the newest rowid in the table), and
+// the DELETEs behind those answers are skipped entirely in the common case: a
+// memory under the cap and a table under the global cap are the normal state, and
+// then nothing is deleted.
+func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 	for len(ids) > 0 {
 		batch := ids
 		if len(batch) > historyBatchSize {
@@ -466,46 +468,93 @@ func pruneHistoryForIDsTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 			args = append(args, id)
 		}
 		args = append(args, historyVersionsPerMemory)
-		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM memory_provenance
-			WHERE rowid IN (
-			    SELECT rowid FROM (
-			        SELECT rowid, ROW_NUMBER() OVER (
-			                   PARTITION BY memory_id ORDER BY rowid DESC) AS rank
-			        FROM memory_provenance
-			        WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
-			    )
-			    WHERE rank > ?
-			)`, args...); err != nil {
-			return fmt.Errorf("cap history rows per memory: %w", err)
-		}
-	}
-	return nil
-}
 
-// pruneHistoryTableTx caps the table as a whole, in the appending transaction —
-// so the bound cannot be lost to a crash between the write and its cleanup, and
-// it needs neither a background job nor a clock.
-//
-// The cap is a rowid window rather than an ORDER BY over every row: an implicit
-// rowid is max(rowid)+1 and is never reused, so rowid order IS insertion order,
-// and after `rowid <= newest - cap` every surviving rowid lies in a window of cap
-// integer values — at most cap rows, whatever the gaps. Reading max(rowid) is a
-// single index lookup, so a write under the cap pays one lookup and no delete.
-func pruneHistoryTableTx(ctx context.Context, tx *sql.Tx) error {
-	var newest int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(max(rowid), 0) FROM memory_provenance`,
-	).Scan(&newest); err != nil {
-		return fmt.Errorf("read newest history row: %w", err)
-	}
-	if newest <= int64(historyRowsCap) {
-		return nil
-	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM memory_provenance WHERE rowid <= ?`, newest-int64(historyRowsCap),
-	); err != nil {
-		return fmt.Errorf("cap history table size: %w", err)
+		// kind 'over' carries the memory ids past the per-memory cap; kind 'max'
+		// carries the newest rowid as text, since the two answers have different
+		// types and one result set carries both.
+		rows, err := tx.QueryContext(ctx, `
+			SELECT 'over', memory_id FROM memory_provenance
+			WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
+			GROUP BY memory_id
+			HAVING count(*) > ?
+			UNION ALL
+			SELECT 'max', COALESCE(CAST(max(rowid) AS TEXT), '0') FROM memory_provenance
+		`, args...)
+		if err != nil {
+			return fmt.Errorf("probe history growth: %w", err)
+		}
+		var (
+			over   []string
+			newest int64
+			sawMax bool
+		)
+		for rows.Next() {
+			var kind, value string
+			if err := rows.Scan(&kind, &value); err != nil {
+				rows.Close() //nolint:errcheck
+				return fmt.Errorf("scan history growth probe: %w", err)
+			}
+			switch kind {
+			case "over":
+				over = append(over, value)
+			case "max":
+				v, convErr := strconv.ParseInt(value, 10, 64)
+				if convErr != nil {
+					rows.Close() //nolint:errcheck
+					return fmt.Errorf("parse newest history rowid %q: %w", value, convErr)
+				}
+				newest, sawMax = v, true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return fmt.Errorf("read history growth probe: %w", err)
+		}
+		rows.Close() //nolint:errcheck
+
+		// Per memory: everything past the newest historyVersionsPerMemory rows,
+		// ranked by rowid. rowid rather than recorded_at because recorded_at is
+		// second-precision — every write one reflection makes in a pass shares a
+		// timestamp, and the newest rows would then be chosen by a tie-break.
+		// Ranking by rowid DESC also means the predicate can never take a memory's
+		// newest row: it is rank 1.
+		if len(over) > 0 {
+			overPlaceholders := make([]string, 0, len(over))
+			overArgs := make([]interface{}, 0, len(over)+1)
+			for _, id := range over {
+				overPlaceholders = append(overPlaceholders, "?")
+				overArgs = append(overArgs, id)
+			}
+			overArgs = append(overArgs, historyVersionsPerMemory)
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM memory_provenance
+				WHERE rowid IN (
+				    SELECT rowid FROM (
+				        SELECT rowid, ROW_NUMBER() OVER (
+				                   PARTITION BY memory_id ORDER BY rowid DESC) AS rank
+				        FROM memory_provenance
+				        WHERE memory_id IN (`+strings.Join(overPlaceholders, ",")+`)
+				    )
+				    WHERE rank > ?
+				)`, overArgs...); err != nil {
+				return fmt.Errorf("cap history rows per memory: %w", err)
+			}
+		}
+
+		// Across the store: a rowid window rather than an ORDER BY over every row.
+		// An implicit rowid is max(rowid)+1 and is never reused, so rowid order IS
+		// insertion order, and after `rowid <= newest - cap` every surviving rowid
+		// lies in a window of cap integer values — at most cap rows, whatever the
+		// gaps. The per-memory cap cannot do this job: every created-then-dropped
+		// memory is its own memory_id with a couple of rows, and one applied
+		// reflection can churn the whole non-manual corpus.
+		if sawMax && newest > int64(historyRowsCap) {
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM memory_provenance WHERE rowid <= ?`, newest-int64(historyRowsCap),
+			); err != nil {
+				return fmt.Errorf("cap history table size: %w", err)
+			}
+		}
 	}
 	return nil
 }
