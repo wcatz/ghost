@@ -1,6 +1,6 @@
 # Ghost CLI reference
 
-The `ghost` binary is both the MCP server and the maintenance CLI. Run `ghost help` for the built-in top-level summary, or `ghost help <command>` (including a two-word path such as `ghost help project bind`) for that one command's own usage on stdout — `ghost -h <command>` does the same. A name that matches no command is reported on stderr and the summary is shown instead.
+The `ghost` binary is both the MCP server and the maintenance CLI. Run `ghost help` for the built-in top-level summary, or `ghost help <command>` (including a two-word path such as `ghost help project bind`) for that one command's own usage on stdout — `ghost -h <command>` does the same. A name that matches no command is reported on stderr and the summary is shown instead — a help token in place of the name is a second help request rather than a typo, so it is answered with the summary and nothing else, and `ghost help -h <command>` names the command as `ghost -h <command>` does.
 
 Every subcommand accepts `-h` or `--help`: it prints that command's usage on stdout and exits `0`, before anything with a side effect runs — no configuration load, no database open, no file written, no harness spawned. The top-level summary (`ghost help`, `ghost --help`) is unchanged by this and still prints to stderr.
 

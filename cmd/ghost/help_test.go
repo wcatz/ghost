@@ -410,6 +410,12 @@ func TestHelpCommandPrintsTheCommandUsage(t *testing.T) {
 			{argv: []string{"--help"}},
 			{argv: []string{"-h", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
 			{argv: []string{"--help", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
+			// The same question asked twice, with the command after it: dropping
+			// the token is what keeps the two spellings agreeing on which text
+			// names the command, so this has to print upgrade's usage and not the
+			// summary with the name silently discarded.
+			{argv: []string{"help", "-h", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
+			{argv: []string{"help", "--help", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
 		} {
 			restoreDetectRemote(t)
 			var code int
