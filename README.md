@@ -237,7 +237,7 @@ GhostMem publishes reproducible retrieval and end-to-end results with the harnes
 
 - **LongMemEval-S retrieval:** hybrid Recall@5 **93.0%** and Recall@10 **97.3%** on the 470 answerable questions.
 - **End-to-end LongMemEval-S:** **96.2%** blended accuracy across 500 questions with the documented DeepSeek v4 Pro generator and judge.
-- **`ghost bench`:** hybrid NDCG@10 **0.818** on 220 graded queries and 547 memories.
+- **`ghost bench`:** hybrid NDCG@10 **0.818** on 220 graded queries and 551 memories.
 
 Different generators and judges make cross-system scores directional rather than strictly comparable. Full tables, methodology, caveats, and reproduction commands are in [`docs/benchmarks.md`](docs/benchmarks.md).
 

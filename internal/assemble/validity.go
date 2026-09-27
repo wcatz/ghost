@@ -2,6 +2,7 @@ package assemble
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -10,8 +11,10 @@ import (
 // stampLayouts are the layouts SQLite's datetime() and date() produce. Both are
 // accepted because the columns are unconstrained text: a row written with a
 // date is as readable as one written with a timestamp, and rejecting the
-// shorter form would silently turn a real claim into no claim.
-var stampLayouts = []string{"2006-01-02 15:04:05", "2006-01-02"}
+// shorter form would silently turn a real claim into no claim. The first is
+// memory.StoredStampLayout, which is what Ghost's own writers store; the second
+// is what a portable artifact, a hand edit or a date() call can leave behind.
+var stampLayouts = []string{memory.StoredStampLayout, dateOnlyLayout}
 
 // parseStamp reads a stored timestamp, or the zero time when it cannot be read.
 // A malformed created_at is treated as ancient rather than fresh, so it can
@@ -146,6 +149,110 @@ func readValidity(c memory.Candidate, now time.Time) validityVerdict {
 // formatNote builds a bounded diagnostic note.
 func formatNote(format string, args ...any) string {
 	return fmt.Sprintf(format, args...)
+}
+
+// validityLabel renders a row's validity claim for a listing, or "" when it
+// states none.
+//
+// This is the one place the claim is turned into words, and every surface reaches
+// it — Item.Line below, and ValidityLabel for the surfaces that still render
+// memory.Memory directly — so a reader comparing a searched answer with a
+// listing sees the same fields in the same place, which is the convergence the
+// architecture document asks for. A second implementation would let the two drift
+// the moment either was edited, which is how a caller ends up believing a window
+// means something in one place and nothing in the other.
+//
+// A state is rendered whenever the values do not already say it:
+//
+//   - unverified, because "true until then, checked by nobody" and "true until
+//     then, checked on the 20th" are different things to act on and only the
+//     first has nothing in the numbers to say so.
+//   - expired and not-yet-valid, because a browsing surface — a list, a
+//     cross-project search, a project context — has not run stage 2 and will
+//     otherwise print a retired claim with nothing marking it retired. That is the
+//     worst available reading of a dated row, and it is the reading a caller gets
+//     if the label omits the one word that settles it.
+//
+// On the assembler's own surfaces the last two never appear: stage 2 drops those
+// rows before stage 9 renders them, so Item.Line is only ever handed valid,
+// unverified or unset. A surface that has not run the stages derives the state
+// itself with ValidityStateOf, because it cannot claim a row is out of date
+// without knowing what date it is.
+func validityLabel(state string, from, until, verified *time.Time) string {
+	var b strings.Builder
+	if from != nil {
+		b.WriteString(" valid from ")
+		b.WriteString(stampText(from))
+	}
+	if until != nil {
+		b.WriteString(" until ")
+		b.WriteString(stampText(until))
+	}
+	// Rendered whenever it is recorded, window or not: with a window it is the
+	// moment somebody last checked the claim, and without one it is the whole
+	// claim. Printing it only in the second case would make "true until then,
+	// checked on the 20th" and "true until then, checked last week" identical.
+	if verified != nil {
+		b.WriteString(" verified ")
+		b.WriteString(stampText(verified))
+	}
+	switch state {
+	case validityExpired:
+		b.WriteString(" expired")
+	case validityFuture:
+		b.WriteString(" not yet valid")
+	case validityUnverified:
+		b.WriteString(" unverified")
+	}
+	return b.String()
+}
+
+// ValidityStateOf is the stage-2 verdict for a stored triple read against a
+// clock, for the surfaces that have not run the pipeline and so cannot inherit
+// one from a trace. It is the same rule the stages apply, over the same two
+// leaves, so a browsing surface and a searched one cannot disagree about whether
+// a row is retired.
+//
+// An unreadable value is not a state: it reads as unset, and the trace is where
+// that is reported.
+func ValidityStateOf(from, until, verified *string, now time.Time) string {
+	f, u, v := parseStampPtr(from), parseStampPtr(until), parseStampPtr(verified)
+	switch {
+	case ExpiredAt(u, now):
+		return validityExpired
+	case NotYetValidAt(f, now):
+		return validityFuture
+	case f == nil && u == nil && v == nil:
+		return validityUnset
+	case v == nil:
+		return validityUnverified
+	default:
+		return validityValid
+	}
+}
+
+// ValidityLabel renders a stored validity triple for a listing, for the surfaces
+// that render memory.Memory rather than an Item: ghost_memories_list,
+// ghost_search_all, ghost_project_context and the ghost:// resources.
+//
+// It takes the stored strings because those are what memory.Memory carries, and
+// it parses them here so the parsing has one implementation: the column is
+// unconstrained text, so a row can hold a value this build does not read, and
+// deciding what to show about a value nothing can interpret is the renderer's
+// call, not each caller's. An unreadable value renders as nothing — the row
+// carries no readable claim, which is what stage 2 called unset and what the
+// trace reports as validity_unparseable.
+//
+// state is the row's verdict against the clock the caller is rendering for;
+// ValidityStateOf is what a surface with no trace to read it from passes. An
+// empty state renders the values and no verdict, and is right only where the
+// caller already knows the row survived stage 2.
+func ValidityLabel(state string, from, until, verified *string) string {
+	f, u, v := parseStampPtr(from), parseStampPtr(until), parseStampPtr(verified)
+	if f == nil && u == nil && v == nil && state != validityUnverified {
+		return ""
+	}
+	return validityLabel(state, f, u, v)
 }
 
 // clampBytes truncates to at most n bytes on a rune boundary, so a multi-byte

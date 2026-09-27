@@ -958,7 +958,7 @@ func TestApplyMemoryUpdate(t *testing.T) {
 	}
 
 	t.Run("updates content and reports changed fields", func(t *testing.T) {
-		msg, err := srv.applyMemoryUpdate(ctx, updateArgs{
+		msg, err := srv.applyMemoryUpdate(ctx, nil, updateArgs{
 			ProjectID: "test-project", MemoryID: id, Content: "corrected",
 		})
 		if err != nil {
@@ -977,7 +977,7 @@ func TestApplyMemoryUpdate(t *testing.T) {
 		if err := srv.store.EnsureProject(ctx, "other", "/tmp/other", "other"); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
-		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+		_, err := srv.applyMemoryUpdate(ctx, nil, updateArgs{
 			ProjectID: "other", MemoryID: id, Content: "hijack",
 		})
 		if err == nil {
@@ -990,7 +990,7 @@ func TestApplyMemoryUpdate(t *testing.T) {
 	})
 
 	t.Run("rejects unknown memory", func(t *testing.T) {
-		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+		_, err := srv.applyMemoryUpdate(ctx, nil, updateArgs{
 			ProjectID: "test-project", MemoryID: "nope", Content: "x",
 		})
 		if err == nil {
@@ -999,7 +999,7 @@ func TestApplyMemoryUpdate(t *testing.T) {
 	})
 
 	t.Run("rejects invalid category", func(t *testing.T) {
-		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+		_, err := srv.applyMemoryUpdate(ctx, nil, updateArgs{
 			ProjectID: "test-project", MemoryID: id, Category: "bogus",
 		})
 		if err == nil {
@@ -1008,7 +1008,7 @@ func TestApplyMemoryUpdate(t *testing.T) {
 	})
 
 	t.Run("rejects empty update", func(t *testing.T) {
-		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+		_, err := srv.applyMemoryUpdate(ctx, nil, updateArgs{
 			ProjectID: "test-project", MemoryID: id,
 		})
 		if err == nil {
@@ -1018,7 +1018,7 @@ func TestApplyMemoryUpdate(t *testing.T) {
 
 	t.Run("clamps importance", func(t *testing.T) {
 		imp := float32(4.2)
-		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+		_, err := srv.applyMemoryUpdate(ctx, nil, updateArgs{
 			ProjectID: "test-project", MemoryID: id, Importance: &imp,
 		})
 		if err != nil {

@@ -674,9 +674,10 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
 | **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — `memory_history` now records every state change and who made it, but nothing reads it during retrieval; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
-| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — the columns are read into `memory.Memory` and stage 2 of the assembler evaluates them against the request clock, so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)). No MCP writer exists yet (PR 3), so a store nobody has restored or imported reads every row as unset and the evaluation is corpus-neutral; `Store.RestoreSnapshot` and `Store.ImportMemory` both carry the triple, which is where a non-NULL window first comes from ([#575](https://github.com/wcatz/ghost/issues/575)) |
+| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memory_search` is the only surface that runs the pipeline, so it is the only one that filters a closed window out — the browsing surfaces still show it, marked `expired`, and the session-start block shows it with no marker at all because it renders its own rows (see the assembler section below). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way |
+
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate) |
-| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write | Inert — `confidence` is written on some paths and never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)), and the history has no reader yet: `ghost history <memory-id>` and `Store.MemoryHistory` are the only two, and no retrieval path consults them |
+| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write | Inert for ranking, visible to the reader — the three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four, but stage 4's multiplier stays pinned at `1.0` and nothing scores on them. The history has no reader yet: `ghost history <memory-id>` and `Store.MemoryHistory` are the only two, and no retrieval path consults them |
 
 Axis interaction rules:
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
@@ -733,15 +734,32 @@ What exists now:
   answer, so a matching row the window cut was invisible and the tool reported
   absence while the memory existed. Project membership stays in SQL and is
   recorded as a per-row verdict, never applied as a second drop.
-- **The three validity columns are readable.** `Memory` now carries
+- **The three validity columns are readable and writable.** `Memory` carries
   `valid_from`, `valid_until` and `verified_at` as `*string`, bound on every
   retrieval scan, and stage 2 interprets them against the request clock
   (`valid`, `future`, `expired`, `unverified`, `unset`; an unreadable value is
-  reported as `validity_unparseable` rather than read as valid). No MCP writer
-  exists yet, so a store nobody has restored or imported reads every row as
-  unset and stage 2 is corpus-neutral; `Store.RestoreSnapshot` and `Store.ImportMemory`
-  do write the triple, which is where a non-NULL window first comes from. The
-  writer contract is the next change.
+  reported as `validity_unparseable` rather than read as valid). The three writer
+  tools accept them, so a claim's period is expressible at last. `Create`,
+  `ImportMemory` and `RestoreSnapshot` carry the triple too, and every row
+  written before any of those reads nil, which is what stage 2 calls unset —
+  so a store nobody has written a window into is corpus-neutral for the stage.
+
+  **Only `ghost_memory_search` filters on it**, because it is the only surface
+  that runs the pipeline. `ghost_memories_list`, `ghost_search_all`,
+  `ghost_project_context` and the `ghost://` resources still return a closed
+  window, and the shared renderer marks it `expired` rather than printing a
+  retired claim unmarked — honest, but not yet a filter. The session-start block
+  is the one surface that shows a closed window with nothing marking it, because
+  it renders its own rows through none of the shared labels. All of them move
+  onto the pipeline with the rest of the PR plan; until then, a window that has
+  closed is a fact only search acts on.
+- **A stamp can be replaced but not removed.** The write path stores NULL for an
+  absent value and refuses an empty string, so a claim recorded by mistake is
+  corrected by writing a different one rather than by retracting it. The
+  alternative — an explicit clear — would give the column a third state
+  ("stated, then withdrawn") that retrieval would have to interpret, and nothing
+  consumes one today.
+
 - **The session-start surface shows and applies scope.** The two session-start
   loaders select `memories.scope`, print it with `assemble.ScopeLabel` — the same
   label a search line carries, so the two cannot spell one scope differently —
@@ -768,8 +786,7 @@ What exists now:
   every row in it carries by definition, so the block is the one that store
   produced before scope was read. The loaders are callers of the assembler's label
   and rule, not of `Run`: passive retrieval is not served by the seam, so moving
-  the digest onto it is its own change.
-- **The trace is recorded unconditionally**, with per-stage counts, dropped ids
+  the digest onto it is its own change.- **The trace is recorded unconditionally**, with per-stage counts, dropped ids
   and per-row decisions. `explain: true` does not read it yet.
 
 What the remaining stages will add, in pipeline order: conflict recording and
@@ -797,7 +814,17 @@ query
 Rules the pipeline must hold:
 
 - **Filters precede window closure.** Stages 2-4 run over the widened candidate set from stage 1, never over an already-truncated list.
-- **One renderer, one field set.** Scope, validity state, and confidence appear identically in `ghost_memory_search` output and in the injected session-start block. Scope does today: both surfaces print the label from `assemble.ScopeLabel`, and validity state and confidence arrive with the writer that can set them.
+- **One renderer, one field set.** Scope, validity, confidence, the writing agent
+  and the source reference are rendered by one implementation per field — scope
+  already, through `assemble.ScopeLabel`; the rest through
+  `assemble.ValidityLabel`, `ConfidenceLabel`, `AgentLabel` and `SourceRefLabel`.
+  `ghost_memory_search` reaches them through `assemble.Item.Line`, and the
+  surfaces that still render `memory.Memory` directly — `ghost_memories_list`,
+  `ghost_search_all`, `ghost_project_context`, the `ghost://` resources — call
+  the same four, and scope is already one implementation across the search,
+  listing and session-start surfaces. What is **not** converged is the
+  session-start block, which shows none of the four; it moves onto `assemble`
+  with the rest of the plan.
 - **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
 - **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)).
 - **The budget is a hard boundary.** Stage 8 trims deterministically and is tested at, just under, and just over the limit; injection and search use different budgets but the same code.

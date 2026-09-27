@@ -483,6 +483,13 @@ func migrateV9(tx *sql.Tx) error {
 // measured belief, and an invented midpoint would launder into evidence the
 // moment anything ranked by it.
 //
+// NULL is also what a later write with nothing to say writes: the tools'
+// validity and provenance arguments are all optional, and a caller that
+// states no window, no reference and no confidence gets the same record a
+// pre-v10 row has. That is the point of the columns being nullable — a
+// migration is where a fabricated value would be least excusable, since
+// there is no caller to have asked.
+//
 // Purely additive: no existing column, constraint, trigger, or FTS index
 // changes, so there is no table rebuild and no writer or reader needs to
 // change for the migration to be correct.

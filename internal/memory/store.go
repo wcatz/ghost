@@ -80,15 +80,16 @@ type Memory struct {
 	//
 	// All three are pointers because nil is the honest reading of a NULL
 	// column — no claim was made — while an empty string would look like a
-	// claim about the empty moment. No MCP writer sets them yet (that writer
-	// contract is the follow-up change), so a store nobody has restored or
-	// imported reads every row as nil; ImportMemory and RestoreSnapshot carry
-	// the triple, which is where a non-NULL window first comes from. Either way the
-	// fields are on the type because the schema already stores them and the
-	// retrieval path has to carry them to the assembler that evaluates them.
-	// SQLite holds them as unconstrained text, so the values are the stored
-	// strings, not parsed times: interpreting them belongs to the caller, which
-	// is the only layer that knows the request clock.
+	// claim about the empty moment. The tools write them (ghost_memory_save,
+	// ghost_save_global, ghost_memory_update) and Create writes them, so a row
+	// with a window is now expressible; ImportMemory and RestoreSnapshot carry
+	// the triple too, and every row written before any of those reads nil, which
+	// is what stage 2 calls unset. SQLite holds them as unconstrained text, so
+	// the values are the stored strings, not parsed times: interpreting them
+	// belongs to the caller, which is the only layer that knows the request
+	// clock. The tools normalize what they accept into memory.StoredStampLayout,
+	// but nothing here may assume it — an imported artifact, a restored snapshot
+	// or a hand-edited row can hold the whole-day form the readers also accept.
 	ValidFrom  *string `json:"valid_from,omitempty"`
 	ValidUntil *string `json:"valid_until,omitempty"`
 	VerifiedAt *string `json:"verified_at,omitempty"`
@@ -2412,11 +2413,31 @@ func secretTagFields(tags []string) []secretField {
 	return out
 }
 
+// secretSourceRefField checks a write-time source reference, or nothing when the
+// caller stated none.
+//
+// A reference is a path, a commit, a URL or a ticket, and it is stored on the same
+// row and rendered on the same line as the content — the shared item line prints
+// it as a labelled field on every listing, and an exported artifact carries it to
+// whoever imports one. A caller pasting a token into it would be storing and
+// replaying a credential by exactly the route the guard exists to close, and the
+// field is the one place on the line where a credential looks least like one:
+// a long unbroken string after "source_ref=" reads as a URL.
+func secretSourceRefField(sourceRef string) []secretField {
+	if sourceRef == "" {
+		return nil
+	}
+	return []secretField{{"source_ref", sourceRef}}
+}
+
 // Create inserts a new memory and returns its ID. The insert and the history
 // row that records it share one transaction, so a memory cannot exist without
 // its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
 	if err := rejectSecretFields(secretContentAndTags(m.Content, m.Tags)...); err != nil {
+		return "", err
+	}
+	if err := rejectSecretFields(secretSourceRefField(m.SourceRef)...); err != nil {
 		return "", err
 	}
 	return s.insertMemory(ctx, projectID, m)
@@ -2441,12 +2462,15 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 	var id string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
-		                      agent, session_id, source_ref, confidence, scope)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      agent, session_id, source_ref, confidence, scope,
+		                      valid_from, valid_until, verified_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags),
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID),
-		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope)).Scan(&id)
+		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope),
+		nullIfEmptyPtr(m.ValidFrom), nullIfEmptyPtr(m.ValidUntil),
+		nullIfEmptyPtr(m.VerifiedAt)).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create memory: %w", err)
 	}
@@ -2476,15 +2500,66 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 // under a manual-sourced target (or any target) is never silently discarded.
 // If no candidate scores above the applicable bar, it creates a new,
 // unlinked row.
+
+// StoredStampLayout is the layout a writer stores a validity stamp in: SQLite's
+// own datetime() shape, in UTC.
+//
+// The columns are unconstrained text, so nothing in the schema enforces this and
+// a row may legitimately hold a date alone — a portable artifact, a hand edit,
+// or the short form SQLite's date() produces. Writers normalize what they accept
+// to this one layout so their own rows need a single case to read, and every
+// reader still has to try both. It lives here because the column is the storage
+// layer's and the layout is part of its contract, not a detail of any one
+// caller: a writer that stored one shape and a renderer that printed another
+// would show a caller a moment Ghost never recorded.
+const StoredStampLayout = "2006-01-02 15:04:05"
+
+// Validity is the optional temporal claim attached to one write: when the
+// memory became true, when it stops being true, and when someone last checked.
+//
+// Every field is a pointer and every nil means "no claim was made", which is
+// distinct from a claim about the zero moment — the same reason the columns
+// themselves are nullable. A caller that states nothing is recorded as NULL and
+// read back as unset, so a store can tell the difference between "nobody has
+// said" and "said to be valid forever".
+//
+// It is separate from Provenance rather than a fifth field on it because the two
+// answer different questions: Provenance is who wrote this and how much they
+// were trusted, Validity is when it stopped being true. A memory can be
+// certainly true right now and expire next month, and collapsing the two would
+// make the next check of a fact look like a reason to doubt the agent that
+// stated it.
+type Validity struct {
+	// ValidFrom is when the memory became true. A time after now makes the row
+	// unreadable until then, which is a real claim about a scheduled change and
+	// not a data error.
+	ValidFrom *string
+	// ValidUntil is when the memory stops being true. A time at or before now
+	// withholds the row from ranked retrieval; see internal/assemble stage 2.
+	ValidUntil *string
+	// VerifiedAt is when a human or agent last checked the claim. In v1 it is a
+	// flag: it marks a row as re-checked and does not by itself decide anything.
+	VerifiedAt *string
+}
+
+// IsZero reports whether the claim is entirely absent, so a write can leave the
+// three columns alone without the caller having to know which of them exist. It
+// is the one place that question is answered, because the callers that need it —
+// a tool deciding whether a request stated anything at all — must not each hold
+// their own copy of it and disagree about what "stated nothing" means.
+func (v Validity) IsZero() bool {
+	return v.ValidFrom == nil && v.ValidUntil == nil && v.VerifiedAt == nil
+}
+
 // Provenance is the optional write-time context attached to a single save.
 // Every field is optional and its zero value means "not known": passing no
 // Provenance at all records NULL across the board rather than a guess.
 //
-// SessionID is deliberately not auto-populated. Ghost has no session identity
-// available on the MCP path — no column, no handshake field, no env marker —
-// so it stays empty until a caller that genuinely knows supplies it. An
-// auto-filled value would be fabricated provenance, which is the exact thing
-// these columns exist to avoid.
+// SessionID is never auto-populated from process state. It names a session the
+// host controls, so only a caller that has one may supply it: the MCP tools
+// pass the transport's session id, which a stdio host does not have, and every
+// other path leaves it empty. A store-invented value would be fabricated
+// provenance, which is the exact thing these columns exist to avoid.
 type Provenance struct {
 	// Agent names the harness that produced the memory. The values are the
 	// source tokens ai.NewSourceProviderForSource understands — claude-code,
@@ -2518,14 +2593,32 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
+// nullIfEmptyPtr maps a validity stamp to SQL NULL, and an empty string to NULL
+// as well, so no writer can record a claim about the empty moment. A nil pointer
+// is the caller's statement that no claim was made; an empty string would be a
+// claim with no readable value, which stage 2 reports as validity_unparseable —
+// a permanently confusing row to leave in a store on the caller's behalf.
+func nullIfEmptyPtr(s *string) any {
+	if s == nil || *s == "" {
+		return nil
+	}
+	return *s
+}
+
 // Upsert stores a memory with no provenance, exactly as before.
-// UpsertOptions carries the optional facts about one save. Provenance and
-// scope are orthogonal — where a memory came from and where it applies — so
-// they are separate fields rather than one growing parameter list, and a zero
-// UpsertOptions is exactly what plain Upsert passes.
+// UpsertOptions carries the optional facts about one save. Provenance, scope
+// and validity are orthogonal — where a memory came from, where it applies, and
+// when it was true — so they are separate fields rather than one growing
+// parameter list, and a zero UpsertOptions is exactly what plain Upsert passes.
 type UpsertOptions struct {
 	Provenance Provenance
 	Scope      map[string]string
+	// Validity is the temporal claim this save makes, if any. A zero Validity
+	// writes NULL to all three columns, which is the record for a memory whose
+	// author stated no currency — the state of every memory written before the
+	// columns existed, and the state the tools write when the caller says
+	// nothing.
+	Validity Validity
 
 	// FoldOnly changes what happens when an equivalent row is found (the same
 	// text after foldOnlyEquivalent's normalization): the existing row is
@@ -2675,6 +2768,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// is the correct outcome — the secret is not stored, and the caller's
 	// caller is told why.
 	if err := rejectSecretFields(secretContentAndTags(content, tags)...); err != nil {
+		return "", "", 0, err
+	}
+	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
 		return "", "", 0, err
 	}
 	parentTx, inTx := storeTxFromContext(ctx)
@@ -3030,13 +3126,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 
 		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags,
-			                      agent, session_id, source_ref, confidence, scope, pinned)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			                      agent, session_id, source_ref, confidence, scope, pinned,
+			                      valid_from, valid_until, verified_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
 		`, projectID, category, content, source, importance, string(tagsJSON),
 			nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 			nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
-			scopeJSON(opts.Scope), boolToInt(opts.Pin)).Scan(&id); err != nil {
+			scopeJSON(opts.Scope), boolToInt(opts.Pin),
+			nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
+			nullIfEmptyPtr(opts.Validity.VerifiedAt)).Scan(&id); err != nil {
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
 		}
 		if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
@@ -3087,13 +3186,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// another writer between that decision and the row.
 	if err = db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
-		                      agent, session_id, source_ref, confidence, scope, pinned)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      agent, session_id, source_ref, confidence, scope, pinned,
+		                      valid_from, valid_until, verified_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, category, content, source, importance, string(tagsJSON),
 		nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 		nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
-		scopeJSON(opts.Scope), boolToInt(opts.Pin)).Scan(&id); err != nil {
+		scopeJSON(opts.Scope), boolToInt(opts.Pin),
+		nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
+		nullIfEmptyPtr(opts.Validity.VerifiedAt)).Scan(&id); err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
@@ -3743,6 +3845,30 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	return tx.Commit()
 }
 
+// UpdateOptions is the optional set of facts an edit may change. Every field is
+// optional and its zero value means "not part of this edit", which is what makes
+// the edit partial: a caller correcting a port number must not silently drop the
+// validity window and the source reference the row already carries.
+//
+// The one asymmetry is Tags, where nil means keep and a non-nil empty slice
+// means clear. A caller that wants to remove every tag has no other way to say
+// it, and an empty tag list is a real state rather than an absent one.
+type UpdateOptions struct {
+	Content    *string
+	Category   *string
+	Importance *float32
+	Tags       []string
+	// Validity replaces only the stamps it carries. A nil field leaves the
+	// stored value alone, so a caller restating one boundary does not erase the
+	// other, and an edit about something else erases nothing.
+	Validity Validity
+	// Provenance re-attributes the row to the session performing this edit. An
+	// empty field keeps the stored value rather than clearing it, because a
+	// write whose author Ghost could not identify is no evidence that the
+	// author of the previous write was wrong.
+	Provenance Provenance
+}
+
 // UpdateMemory applies a partial update to a memory. Nil content/category/
 // importance preserve current values; a non-nil tags slice replaces the tag
 // list (pass an empty slice to clear). Source and pinned are never touched.
@@ -3755,24 +3881,57 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 // atomically inside a single transaction — closing the check-then-write race
 // where a separate lookup-then-write could target a memory that moved to a
 // different project (e.g. via PromoteToGlobal) between the check and the write.
+//
+// The validity triple and the provenance fields are not reachable through this
+// signature: they need UpdateMemoryWithOptions, which is the only path that
+// writes them. This wrapper keeps the pre-existing callers (the reflection and
+// maintenance paths, which know no validity claim) from having to spell out a
+// zero UpdateOptions each. The credential guards are in the method it delegates
+// to, not here, so that the options path is guarded on the same terms as this
+// one.
 func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error {
-	// The incoming content only, never the composed result. A row written
-	// before this guard existed can hold a credential, and a user clearing it
-	// out must still be able to retag, re-categorise, or re-prioritise that row
-	// on the way to deleting it — refusing a metadata-only edit would strand
-	// it with ghost_memory_delete as the only remaining move.
-	if content != nil {
-		if err := rejectSecret("content", *content); err != nil {
+	return s.UpdateMemoryWithOptions(ctx, projectID, id, UpdateOptions{
+		Content: content, Category: category, Importance: importance, Tags: tags,
+	})
+}
+
+// UpdateMemoryWithOptions is UpdateMemory over the full partial-edit set, adding
+// the validity triple and the write-time provenance an MCP edit may carry.
+//
+// A validity stamp that changes does not invalidate the embedding: the vector
+// describes the text, and an edit that only re-dates a claim leaves the text —
+// and therefore the vector — exactly as it was. Invalidating it would re-embed
+// every row whose window was merely corrected, for no change in what the memory
+// says.
+func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id string, opts UpdateOptions) error {
+	// The credential guards live here rather than in UpdateMemory, because this
+	// is where the fields arrive on both paths and a guard one call above would
+	// leave the options path — the one the MCP edit tool uses — unguarded.
+	//
+	// The incoming content only, never the composed result. A row written before
+	// the guard existed can hold a credential, and a user clearing it out must
+	// still be able to retag, re-categorise, or re-prioritise that row on the way
+	// to deleting it — refusing a metadata-only edit would strand it with
+	// ghost_memory_delete as the only remaining move.
+	if opts.Content != nil {
+		if err := rejectSecret("content", *opts.Content); err != nil {
 			return err
 		}
 	}
 	// The tags, unconditionally, and that unconditional part is the point: this
-	// method is reachable with tags and nil content, so a content-only guard
-	// skips exactly the call that carries them. validateTags upstream caps the
-	// shape at ten tags of 64 characters and nothing else, and a tag is returned
-	// by search and quoted into the next reflect prompt — so the exposure is the
-	// same one the body has.
-	if err := rejectSecretList("tags", tags); err != nil {
+	// method is reachable with tags and no content, so a content-only guard skips
+	// exactly the call that carries them. validateTags upstream caps the shape at
+	// ten tags of 64 characters and nothing else, and a tag is returned by search
+	// and quoted into the next reflect prompt — so the exposure is the same one
+	// the body has.
+	if err := rejectSecretList("tags", opts.Tags); err != nil {
+		return err
+	}
+	// The reference, on the same terms as the content and the tags: it is
+	// caller-supplied text stored on the row and rendered beside the content on
+	// every listing. Empty is skipped, so a caller that mentions no reference is
+	// not charged for a check.
+	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -3797,17 +3956,17 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 	}
 
 	newContent, newCategory, newImportance, newTags := curContent, curCategory, curImportance, curTags
-	if content != nil {
-		newContent = *content
+	if opts.Content != nil {
+		newContent = *opts.Content
 	}
-	if category != nil {
-		newCategory = *category
+	if opts.Category != nil {
+		newCategory = *opts.Category
 	}
-	if importance != nil {
-		newImportance = *importance
+	if opts.Importance != nil {
+		newImportance = *opts.Importance
 	}
-	if tags != nil {
-		b, mErr := json.Marshal(tags)
+	if opts.Tags != nil {
+		b, mErr := json.Marshal(opts.Tags)
 		if mErr != nil {
 			return fmt.Errorf("marshal tags: %w", mErr)
 		}
@@ -3832,12 +3991,33 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 	if newContent != curContent {
 		clearResolved = 1
 	}
+	// The validity and provenance columns are written with COALESCE rather than
+	// read, merged and written back: this statement is the only thing that
+	// touches them, so an omitted field has to be the stored value by
+	// construction. A read-modify-write would make two concurrent edits to two
+	// different fields of the same row able to lose one of the two, and it would
+	// put the current values in Go variables the caller cannot see.
+	//
+	// NULLIF(?, '') is what makes an empty provenance string mean "keep" rather
+	// than "clear": an undetectable harness is no evidence against the author of
+	// the previous write, and NULLIF turns "" into the NULL COALESCE skips.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE memories
 		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now'),
-		    resolved_at = CASE WHEN ? THEN NULL ELSE resolved_at END
+		    resolved_at = CASE WHEN ? THEN NULL ELSE resolved_at END,
+		    valid_from   = COALESCE(?, valid_from),
+		    valid_until  = COALESCE(?, valid_until),
+		    verified_at  = COALESCE(?, verified_at),
+		    confidence   = COALESCE(?, confidence),
+		    agent        = COALESCE(NULLIF(?, ''), agent),
+		    session_id   = COALESCE(NULLIF(?, ''), session_id),
+		    source_ref   = COALESCE(NULLIF(?, ''), source_ref)
 		WHERE id = ?
-	`, newContent, newCategory, newImportance, newTags, clearResolved, id); err != nil {
+	`, newContent, newCategory, newImportance, newTags, clearResolved,
+		nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
+		nullIfEmptyPtr(opts.Validity.VerifiedAt), opts.Provenance.Confidence,
+		opts.Provenance.Agent, opts.Provenance.SessionID, opts.Provenance.SourceRef,
+		id); err != nil {
 		return fmt.Errorf("update memory: %w", err)
 	}
 
@@ -3852,10 +4032,15 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 		}
 	}
 	// The state this write produced, which is the only other copy of the new text
-	// once the next edit overwrites it. No Provenance: this call carries no agent
-	// or session, and inventing one would be the fabricated provenance the agent
-	// columns exist to avoid.
-	if err := appendHistoryTx(ctx, tx, id, phaseUpdate, Provenance{}); err != nil {
+	// once the next edit overwrites it.
+	//
+	// The caller's Provenance, not a zero one: a history row records who
+	// performed the write, and an edit through a session knows that. The MCP
+	// path passes provenanceFor's result, whose empty fields mean "nobody
+	// reported an agent" rather than "nobody acted" — which is the same
+	// admission every other history phase makes, and the reason this row can
+	// name an editor that the pre-history UPDATE could not.
+	if err := appendHistoryTx(ctx, tx, id, phaseUpdate, opts.Provenance); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -35,7 +35,12 @@ type Item struct {
 	ValidityState string
 	Confidence    *float64
 	Agent         string
-	Score         float64
+	// SourceRef is the reference the writer recorded: a file, a commit, a URL.
+	// It travels with the item for the same reason Agent does — it is what makes
+	// a claim checkable, and an item that could not show it would make writing
+	// it pointless.
+	SourceRef string
+	Score     float64
 	// Source is the row's stored origin. It travels with the item because the
 	// shared line labels it, and mcpInstructions tells the agent to trust that
 	// label: a renderer that could not see the origin would have to drop the
@@ -75,8 +80,68 @@ func (i Item) Line() string {
 		origin = " source=" + label
 	}
 	return "- [" + i.Category + "] `" + i.ID + "` (" +
-		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) + origin +
+		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
+		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
+		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin +
 		") " + quoteData(i.Content)
+}
+
+// AgentLabel renders the writing harness, or "" when the row records none.
+//
+// The value is delimited like every other stored text in an answer, which looks
+// redundant against the closed vocabulary ai.SourceForClientName and
+// ai.DetectSource produce (claude-code, opencode, codex, goose) — and is not. A
+// portable artifact carries an `agent` field written by whoever exported it, and
+// the same renderer serves imported rows, so "the writer only ever sets one of
+// four tokens" is true of the MCP path rather than of the column.
+func AgentLabel(agent string) string {
+	if agent == "" {
+		return ""
+	}
+	return " agent=" + quoteData(agent)
+}
+
+// SourceRefLabel renders the reference a claim was read from, or "" when the row
+// records none. Free text on its way into a tool answer, so it is delimited: a
+// path or URL carrying « or » would otherwise close the data block early and let
+// its own tail read as instruction.
+func SourceRefLabel(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	return " source_ref=" + quoteData(ref)
+}
+
+// ConfidenceLabel renders a recorded belief, or "" when the row records none.
+//
+// It is a label and not a score. Stage 4's multiplier is pinned at 1.0, so
+// nothing ranks on this number and a row with confidence 0.2 is not demoted — a
+// reader who believes otherwise is being told something the pipeline does not do,
+// which is the worse of the two errors available here.
+func ConfidenceLabel(confidence *float64) string {
+	if confidence == nil {
+		return ""
+	}
+	return " confidence " + strconv.FormatFloat(*confidence, 'g', -1, 64)
+}
+
+// dateOnlyLayout is both halves of one format: the second of the two
+// stampLayouts, which is what a reader accepts, and what a whole-day boundary is
+// printed as. A stamp at exactly midnight UTC renders as the date alone, because
+// a validity window is almost always stated in days and "valid until 2026-10-01"
+// is what the caller meant; anything with a time of day keeps it, since then the
+// time was the point. The two are the same instant, so nothing is lost — a
+// caller who wrote 2026-01-15T00:00:00Z reads back 2026-01-15, and one who wrote
+// 2026-01-15T09:00:00Z reads back the hour.
+const dateOnlyLayout = "2006-01-02"
+
+// stampText renders one validity boundary, dropping the time of day only when it
+// is midnight UTC.
+func stampText(t *time.Time) string {
+	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
+		return t.Format(dateOnlyLayout)
+	}
+	return t.Format(memory.StoredStampLayout)
 }
 
 // ScopeLabel renders a memory's scope for a listing, or "" when unscoped.
@@ -172,6 +237,7 @@ func itemOf(c memory.Candidate) Item {
 		Scope:      c.Scope,
 		Confidence: c.Confidence,
 		Agent:      c.Agent,
+		SourceRef:  c.SourceRef,
 		Score:      c.Score,
 		Source:     c.Source,
 	}

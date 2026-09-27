@@ -3,6 +3,20 @@
 # Keys are stable; embeddings.json is keyed by these keys (and by query names
 # in queries.jsonl). Regenerate embeddings via Ollama POST /api/embed
 # (nomic-embed-text:v1.5, 768 dims) when this file changes. See docs/benchmarks.md.
+#
+# The four validity_* rows carry valid_from/valid_until/verified_at so the corpus
+# exercises temporal validity instead of assuming it away: a corpus where every row
+# states no window cannot tell a retrieval stage that honours one from one that
+# ignores it, because both produce the same answer. The dates are deliberately far
+# apart (2020 closed, 2099 not yet open) because this file is committed and re-run
+# years from now — a "recently expired" row would quietly become the wrong state,
+# and a fixture that changes meaning on its own is not a fixture. The four together
+# are the four states a CLAIM can be in: one open window, one closed window, one
+# window not yet opened, one verified claim with no expiry. The fifth state, unset,
+# needs no fixture — the other 547 rows are it. No graded query targets
+# them, because a query whose answer is a row a correct retrieval must withhold is a
+# mislabelled query; the condition that scores validity is the assembler's own
+# (docs/superpowers/specs/2026-09-25-context-assembler-design.md, PR 7).
 {"key":"node_port","category":"fact","content":"The mainnet cardano-node listens for peer connections on TCP port 3001.","importance":0.7,"tags":["cardano","node","network"]}
 {"key":"relay_topology","category":"architecture","content":"Relay nodes connect to the block producer over a private topology; the block producer only peers with our own relays, never public peers.","importance":0.8,"tags":["cardano","topology","relay"]}
 {"key":"kes_rotation","category":"gotcha","content":"KES keys expire every 90 days on mainnet; rotate the operational certificate before the KES period lapses or the block producer stops forging blocks.","importance":0.9,"tags":["cardano","kes","keys"]}
@@ -550,3 +564,7 @@
 {"key": "state_scope_before_edit", "category": "preference", "content": "State the scope before editing: what files you will touch and what you will not touch; one concern per change.", "importance": 0.8, "tags": ["process", "review"]}
 {"key": "never_remove_for_add", "category": "preference", "content": "Never remove a feature to add a feature; if capability Y gets in the way of X, the approach is wrong.", "importance": 0.9, "tags": ["process", "quality"]}
 {"key": "run_tests_before_after", "category": "preference", "content": "When modifying a function with tests, run those tests before AND after the change.", "importance": 0.9, "tags": ["process", "testing"]}
+{"key":"validity_expired_dbsync_window","category":"fact","content":"The legacy db-sync migration window closed when the old ingest pipeline was decommissioned.","importance":0.5,"tags":["infra","migration","lifecycle"],"valid_from":"2020-01-01","valid_until":"2020-06-01"}
+{"key":"validity_future_mirror_launch","category":"fact","content":"The replacement block mirror behind the load balancer takes over peer traffic at the next scheduled cutover.","importance":0.5,"tags":["cardano","network","lifecycle"],"valid_from":"2099-01-01","valid_until":"2199-12-31"}
+{"key":"validity_open_backup_horizon","category":"convention","content":"Backup snapshots are retained for fourteen days before the oldest one is pruned.","importance":0.6,"tags":["backup","retention"],"valid_from":"2024-01-01","valid_until":"2199-12-31"}
+{"key":"validity_current_wallet_policy","category":"convention","content":"Wallets holding governance voting power sign with a hardware device; a hot key cannot execute a governance action.","importance":0.7,"tags":["cardano","governance","keys"],"valid_from":"2024-01-01","verified_at":"2026-01-01"}
