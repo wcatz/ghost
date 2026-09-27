@@ -1224,3 +1224,84 @@ func TestReachableMixedRemovalIsValidityNotCategory(t *testing.T) {
 		t.Errorf("notes %v do not carry the per-stage breakdown of the mixed case", res.Notes)
 	}
 }
+
+// TestEachConflictPairIsReportedOnce: a pair is one fact. Recording it at stage 5
+// and rendering it again afterwards reported it twice — and since the answer-level
+// notes come before the per-row ones and the list is bounded, every duplicate
+// spends the budget that a retrieval-failure disclosure needs. The stage record
+// and the answer are different audiences, so they get separate slices; only the
+// answer-level one reaches the caller.
+func TestEachConflictPairIsReportedOnce(t *testing.T) {
+	a := candidate("A1", "proj", "fact", "one", 0.9)
+	b := candidate("B1", "proj", "fact", "two", 0.8)
+	set := setOf(a, b)
+	set.Edges = []memory.LinkEdge{{From: "A1", To: "B1", Relation: "contradicts", Strength: 1}}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+
+	res := run(t, &fakeRetriever{set: set}, req)
+
+	seen := 0
+	for _, n := range res.Notes {
+		if hasNote([]string{n}, "contradicts pair recorded") {
+			seen++
+			if hasNote([]string{n}, "were both candidates at this stage") {
+				t.Errorf("the answer carries a stage-scoped note: %q", n)
+			}
+		}
+	}
+	if seen != 1 {
+		t.Errorf("the pair is reported %d times, want 1: %v", seen, res.Notes)
+	}
+}
+
+// TestARetrievalFailureSurvivesConflictChatter: the leg-failure note is the one
+// sentence that tells a caller its answer is not an absence, so it must not be the
+// note a long list of conflict pairs squeezes out of the bound.
+func TestARetrievalFailureSurvivesConflictChatter(t *testing.T) {
+	rows := make([]memory.Candidate, 0, 30)
+	edges := make([]memory.LinkEdge, 0, 30)
+	for i := range 30 {
+		id := string(rune('A'+i/26)) + string(rune('a'+i%26))
+		rows = append(rows, candidate(id, "proj", "fact", "row "+id, 0.5))
+	}
+	for i := 0; i < len(rows); i += 2 {
+		edges = append(edges, memory.LinkEdge{From: rows[i].ID, To: rows[i+1].ID, Relation: "contradicts", Strength: 1})
+	}
+	set := setOf(rows...)
+	set.Edges = edges
+	// A failed link lookup and a failed keyword leg: both are statements about the
+	// retrieval, and both must outrank the conflict chatter in a bounded list.
+	set.EdgesStatus = memory.EdgeStatus{Status: "err", Err: "candidate edges: database is locked"}
+	// The keyword leg failed; the vector leg completed with nothing.
+	set.Legs = map[string]memory.LegStatus{
+		"fts":    {Applicable: true, Attempted: true, Available: false, Err: "search memories: no such table: memories_fts"},
+		"vector": {Applicable: true, Attempted: true, Available: true},
+	}
+	req := baseRequest()
+	req.Budget.MaxItems = 100
+
+	res := run(t, &fakeRetriever{set: set}, req)
+
+	for _, want := range []string{"retrieval_fts leg failed", "the link lookup failed"} {
+		if !hasNote(res.Notes, want) {
+			t.Errorf("%q was squeezed out of the bound by conflict chatter: %v", want, res.Notes)
+		}
+	}
+	// The pairs are a bounded summary, not a list: a graph with dozens of
+	// contradicting edges must not be able to crowd out anything else.
+	pairs := 0
+	for _, n := range res.Notes {
+		if hasNote([]string{n}, "both remain in the block") {
+			pairs++
+		}
+	}
+	if pairs == 0 || pairs > maxRenderedConflictPairs {
+		t.Errorf("the answer names %d contradicting pairs, want 1..%d: the summary must be bounded",
+			pairs, maxRenderedConflictPairs)
+	}
+	if !hasNote(res.Notes, "more contradicting pairs are in this block") {
+		t.Errorf("the pairs beyond the cap are not counted: %v", res.Notes)
+	}
+}

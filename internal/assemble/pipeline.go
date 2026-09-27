@@ -30,6 +30,11 @@ type pipeline struct {
 	// rendered after the window closes, against the rows the answer actually
 	// holds, so "both remain in the block" cannot outlive one of them.
 	contradictPairs [][2]string
+	// edgeFailure is the retrieval's own statement that the link lookup failed.
+	// It is a fact about the retrieval, not about the block, and it leads the
+	// notes ahead of the conflict chatter — a list of pairs must not be able to
+	// squeeze out the one sentence that says the answer is not an absence.
+	edgeFailure string
 	// items mirrors rows, materialised once so rendering and the trace read
 	// the same values.
 	items []Item
@@ -171,6 +176,13 @@ func runPredicates(p *pipeline) {
 // ProvenanceContribution and ConfidenceContribution are computed.
 const provenanceWeight = "1.0"
 
+// maxRenderedConflictPairs bounds how many contradicting pairs the answer names.
+// The pairs are a record of a stage that deliberately changes nothing, so a
+// handful is enough for a reader to know the block contains them; a graph with
+// dozens must not be able to spend the note budget that the leg-failure
+// disclosure and the per-row diagnostics need.
+const maxRenderedConflictPairs = 5
+
 // runProvenance is stage 4: the weight is pinned and the decision is recorded
 // for every row, so a caller can already see what a future multiplier would act
 // on. Both contributions are zero while the weight is 1.0, which is what makes a
@@ -197,6 +209,10 @@ func runConflicts(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string
 	var notes []string
+	// The trace's own copy of the stage's statements, kept apart from the ones
+	// the answer will show: a note true at this stage is not always true of the
+	// answer, and reporting both to the same reader says the same fact twice.
+	var stageNotes []string
 	// Everything below is a statement about the block, so nothing is said when
 	// there is no block: "no link joins two of these candidates" is a claim
 	// about a set that was never retrieved, and an empty answer is explained by
@@ -208,7 +224,7 @@ func runConflicts(p *pipeline) {
 	// distinguishes "err" from "unavailable": a failed lookup and a store with no
 	// edges are different facts, and collapsing them loses the diagnosis.
 	if p.set.EdgesStatus.Status == "err" {
-		p.noteBuf = append(p.noteBuf, formatNote("edges_unavailable: the link lookup failed (%s), so conflict handling had no edges to read", p.set.EdgesStatus.Err))
+		p.edgeFailure = formatNote("edges_unavailable: the link lookup failed (%s), so conflict handling had no edges to read", p.set.EdgesStatus.Err)
 	}
 	if len(p.items) > 0 {
 		admitted := make(map[string]bool, len(p.items))
@@ -218,18 +234,21 @@ func runConflicts(p *pipeline) {
 		if p.set.EdgesStatus.Status == "unavailable" {
 			notes = append(notes, "edges_unavailable: no link joins two of these candidates")
 		}
-		// A contradiction pair is recorded, never removed. The pair is kept
-		// rather than rendered here: stage 8 can still cut one endpoint, and the
-		// note says both rows are in the answer.
+		// A contradiction pair is recorded, never removed. The pair is kept, not
+		// rendered into the user-facing notes: stage 8 can still cut one endpoint,
+		// and notes() renders the pair once, against the rows the answer finally
+		// holds. The stage record below gets its own statement, which is true of
+		// this stage — the two audiences get different sentences, not the same
+		// one twice.
 		for _, e := range p.set.Edges {
 			if e.Relation == "contradicts" && admitted[e.From] && admitted[e.To] {
 				p.contradictPairs = append(p.contradictPairs, [2]string{e.From, e.To})
-				notes = append(notes, formatNote("contradicts pair recorded, not separated: %s and %s were both candidates at this stage", shortID(e.From), shortID(e.To)))
+				stageNotes = append(stageNotes, formatNote("contradicts pair recorded, not separated: %s and %s were both candidates at this stage", shortID(e.From), shortID(e.To)))
 			}
 		}
 	}
 	p.blockNotes = append(p.blockNotes, notes...)
-	p.trace.record(stageConflicts, in, len(p.rows), dropped, false, notes...)
+	p.trace.record(stageConflicts, in, len(p.rows), dropped, false, append(append([]string(nil), stageNotes...), notes...)...)
 }
 
 // runDedup is stage 6. The retriever reorders the window by supersede and
@@ -383,30 +402,45 @@ func (p *pipeline) confidenceOf(id string) *float64 {
 }
 
 // notes is the bounded diagnostic note list, in the order the reader needs it:
-// the per-stage breakdown first when the answer is empty, then the notes that
-// describe the block, then the per-row detail. The breakdown leads because it
-// qualifies the closed reason the answer leads with and bounding drops from the
-// end, so leading with it means pressure discards per-row detail rather than the
-// one sentence that makes the label checkable.
+// the per-stage breakdown when the answer is empty, then the retrieval's own
+// failures, then the statements about the block, then the per-row detail. Each
+// group leads the one below it because bounding drops from the end, so the
+// sentences that qualify the answer survive pressure and the per-row detail is
+// what gets dropped.
 func (p *pipeline) notes() []string {
 	all := make([]string, 0, len(p.noteBuf)+len(p.blockNotes)+len(p.contradictPairs)+1)
 	if len(p.rows) == 0 && len(p.dropped) > 0 {
 		all = append(all, formatNote("%d candidate rows were removed and none reached the answer: %s",
 			len(p.dropped), p.removalBreakdown()))
 	}
+	if p.edgeFailure != "" {
+		all = append(all, p.edgeFailure)
+	}
 	if len(p.items) > 0 {
 		all = append(all, p.blockNotes...)
 		// Rendered here rather than at stage 5: the pair was recorded when both
 		// endpoints were candidates, and the sentence says both are in the
-		// answer, so it is only true of the rows the answer still holds.
+		// answer, so it is only true of the rows the answer still holds. Capped,
+		// because a graph with many contradicting pairs would otherwise spend the
+		// whole note budget on conflicts and drop the rows' own diagnostics.
 		admitted := make(map[string]bool, len(p.items))
 		for _, it := range p.items {
 			admitted[it.ID] = true
 		}
+		rendered, held := 0, 0
 		for _, pair := range p.contradictPairs {
-			if admitted[pair[0]] && admitted[pair[1]] {
-				all = append(all, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", shortID(pair[0]), shortID(pair[1])))
+			if !admitted[pair[0]] || !admitted[pair[1]] {
+				continue
 			}
+			if rendered == maxRenderedConflictPairs {
+				held++
+				continue
+			}
+			all = append(all, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", shortID(pair[0]), shortID(pair[1])))
+			rendered++
+		}
+		if held > 0 {
+			all = append(all, formatNote("%d more contradicting pairs are in this block; the trace lists all of them", held))
 		}
 	}
 	all = append(all, p.noteBuf...)
