@@ -29,11 +29,23 @@ func scopeJSON(scope map[string]string) any {
 // memory's content is still valid, and dropping it over a bad side-channel
 // field would lose knowledge for a formatting problem.
 func parseScope(raw sql.NullString) map[string]string {
-	if !raw.Valid || raw.String == "" || raw.String == "{}" {
+	if !raw.Valid {
+		return nil
+	}
+	return parseScopeJSON([]byte(raw.String))
+}
+
+// parseScopeJSON is parseScope over the raw column text, for callers that
+// already hold it as bytes — the vector search does, because it copies the
+// column rather than decoding a string per row of the corpus, and a scan that
+// parsed every scope to find the few rows that win a result slot was paying a
+// json.Unmarshal per memory per query.
+func parseScopeJSON(raw []byte) map[string]string {
+	if len(raw) == 0 {
 		return nil
 	}
 	var m map[string]string
-	if err := json.Unmarshal([]byte(raw.String), &m); err != nil || len(m) == 0 {
+	if err := json.Unmarshal(raw, &m); err != nil || len(m) == 0 {
 		return nil
 	}
 	return m

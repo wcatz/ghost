@@ -122,7 +122,7 @@ type Store struct {
 	// searched and only the presence of a row matters.
 	embeddingIdentity string
 
-	// foreignWarned gates the warning usableVectorEntries logs when a search
+	// foreignWarned gates the warning loadVectorRows logs when a search
 	// skips vectors recorded under a retired identity: it records which
 	// retired identities have already been reported, so each is logged once
 	// per process rather than once per search — a re-embed lasts many queries,
@@ -134,6 +134,13 @@ type Store struct {
 	// explain.go): an explain run must not spend a second warning on rows the
 	// real search already reported.
 	foreignWarned *foreignWarnGate
+
+	// vectorRowsPool recycles the per-search scratch a vector search copies
+	// candidate rows into (vectorRows). Concurrent searches each take their
+	// own, and the pool exists so that a steady-state search refills the
+	// column buffers it grew last time instead of allocating the whole corpus
+	// again per query — see #556.
+	vectorRowsPool sync.Pool
 }
 
 // foreignWarnGate is the per-identity warning gate: the set of retired
@@ -216,7 +223,9 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold, foreignWarned: &foreignWarnGate{warned: make(map[string]bool)}}
+	s := &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold, foreignWarned: &foreignWarnGate{warned: make(map[string]bool)}}
+	s.vectorRowsPool.New = func() any { return &vectorRows{} }
+	return s
 }
 
 func (s *Store) queryDB() sqlQueryer {
