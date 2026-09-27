@@ -173,6 +173,10 @@ func TestClassifierPromptAsksTheBothTrueQuestion(t *testing.T) {
 		"is the OLDER note's claim false, or no longer applicable",
 		"both still true are NEITHER",
 		"replaced: <the OLDER note's claim that no longer holds>",
+		// The many-fact case is its own rule, not an example of one: the
+		// partial-fix fixture was the one false edge the first eval run wrote,
+		// and the reason is structural (the edge demotes the whole note).
+		"correction to one detail of a many-fact note does not supersede that note",
 	} {
 		if !strings.Contains(system, want) {
 			t.Errorf("the single-pair prompt does not carry %q:\n%s", want, system)
