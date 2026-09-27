@@ -3,7 +3,10 @@ package ai
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,7 +154,7 @@ func configureGooseIsolation(cmd *exec.Cmd) error {
 	// child will look for them.
 	homeDir := gooseHomeDir(env)
 	if homeDir == "" {
-		return fmt.Errorf("goose child has no home or config root; refusing to run with plugin discovery unconfined")
+		return fmt.Errorf("goose child has no home (HOME or USERPROFILE); refusing to run with plugin discovery unconfined")
 	}
 
 	home := filepath.Join(cmd.Dir, "goose-home")
@@ -219,11 +222,22 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 	for _, rel := range gooseHomeConfigRelPaths {
 		source := filepath.Join(append([]string{homeDir}, rel...)...)
 		target := filepath.Join(append([]string{home}, rel...)...)
+		// Only "not there" means "not this platform's location". Any other
+		// failure — an untraversable home, macOS TCC on ~/Library, a
+		// file where a directory belongs — means the config is there and
+		// unreadable, and skipping it would hand the child an empty profile
+		// with nothing saying Ghost dropped it.
+		if _, err := os.Lstat(source); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("goose isolated config %s: %w", source, err)
+		}
+		// After the probe, so the isolated home does not gain a
+		// Library/Application Support directory on the platforms that cannot
+		// have one there.
 		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 			return fmt.Errorf("goose isolated config %s: %w", filepath.Dir(target), err)
-		}
-		if _, err := os.Lstat(source); err != nil {
-			continue // not this platform's location, or not configured
 		}
 		if err := carryGooseConfigDir(source, target); err != nil {
 			return err
@@ -242,34 +256,66 @@ func carryGooseConfigDir(source, target string) error {
 }
 
 func carryGooseConfigDirWith(source, target string, linkDir func(string, string) error) error {
-	if err := linkDir(source, target); err != nil && !os.IsExist(err) {
-		return copyGooseConfigDir(source, target)
+	err := linkDir(source, target)
+	if err == nil || os.IsExist(err) {
+		return nil
+	}
+	skipped, copyErr := copyGooseConfigDir(source, target)
+	if copyErr != nil {
+		return copyErr
+	}
+	if len(skipped) > 0 {
+		// The copy is still a working config directory for everything it did
+		// carry, so this is a warning rather than a refusal — but it is named,
+		// because a child missing the file it needs fails as a provider error
+		// with nothing else pointing here.
+		slog.Warn("goose config copied into the isolated home is incomplete",
+			"config", target, "skipped", strings.Join(skipped, ","))
 	}
 	return nil
 }
 
 // copyGooseConfigDir is the unprivileged fallback for a symlink the platform
-// refuses. Only regular files are copied, and never a symlink's target, so a
-// config directory cannot pull in a tree the child should not read.
-func copyGooseConfigDir(source, target string) error {
+// refuses. It copies the directory's regular files, one level deep and without
+// recursing, so a config directory cannot pull a tree into the child.
+//
+// A symlinked file IS carried: the dirent type of a symlink is not regular, but
+// a dotfiles-managed config.yaml or secrets.yaml symlinked into a repo is the
+// common way these files are kept, and skipping it would leave the child with a
+// config directory that reports success and contains nothing goose can
+// authenticate with. The link is resolved with os.Stat so the target's mode
+// decides, and a link that dangles or points at a directory is skipped and
+// counted rather than followed.
+//
+// Anything skipped leaves the carried config incomplete, so the names are
+// returned for the caller to report. Silently returning a partial directory is
+// the one outcome worse than failing: the child would authenticate against
+// whatever defaults it has and the user would see a provider error with nothing
+// pointing at Ghost.
+func copyGooseConfigDir(source, target string) ([]string, error) {
 	entries, err := os.ReadDir(source)
 	if err != nil {
-		return fmt.Errorf("goose isolated config %s: %w", target, err)
+		return nil, fmt.Errorf("goose isolated config %s: %w", target, err)
 	}
 	if err := os.MkdirAll(target, 0o700); err != nil {
-		return fmt.Errorf("goose isolated config %s: %w", target, err)
+		return nil, fmt.Errorf("goose isolated config %s: %w", target, err)
 	}
+	var skipped []string
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
+		from := filepath.Join(source, entry.Name())
+		to := filepath.Join(target, entry.Name())
+		info, err := os.Stat(from) // resolves a symlink; the target's mode decides
+		if err != nil || !info.Mode().IsRegular() {
+			skipped = append(skipped, entry.Name())
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(source, entry.Name()))
+		data, err := os.ReadFile(from)
 		if err != nil {
-			return fmt.Errorf("goose isolated config %s: %w", filepath.Join(target, entry.Name()), err)
+			return skipped, fmt.Errorf("goose isolated config %s: %w", to, err)
 		}
-		if err := os.WriteFile(filepath.Join(target, entry.Name()), data, 0o600); err != nil {
-			return fmt.Errorf("goose isolated config %s: %w", filepath.Join(target, entry.Name()), err)
+		if err := os.WriteFile(to, data, 0o600); err != nil {
+			return skipped, fmt.Errorf("goose isolated config %s: %w", to, err)
 		}
 	}
-	return nil
+	return skipped, nil
 }

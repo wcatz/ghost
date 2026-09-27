@@ -420,6 +420,11 @@ func TestConfigureGooseIsolationFailsClosed(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(got, ".agents")); !os.IsNotExist(err) {
 			t.Errorf("isolated home exposes an .agents directory: %v", err)
 		}
+		// Only the roots that exist are reproduced: this fixture configures
+		// .config, so the macOS root must not be conjured into the home.
+		if _, err := os.Stat(filepath.Join(got, "Library")); !os.IsNotExist(err) {
+			t.Errorf("isolated home carries a macOS config root that was never there: %v", err)
+		}
 	})
 
 	// macOS does not set XDG_CONFIG_HOME, and goose documents both
@@ -499,6 +504,16 @@ func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(source, "sessions"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// A dotfiles-managed config is the common case and reports a symlink
+	// dirent type, so reading the dirent type alone would drop it and leave a
+	// directory that reports success and holds nothing goose can use.
+	managed := filepath.Join(t.TempDir(), "goose-config.yaml")
+	if err := os.WriteFile(managed, []byte("provider: managed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(managed, filepath.Join(source, "managed.yaml")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
 
 	target := filepath.Join(t.TempDir(), "goose")
 	denied := func(string, string) error { return errors.New("symlink privilege not held") }
@@ -506,7 +521,11 @@ func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
 		t.Fatalf("carryGooseConfigDirWith: %v", err)
 	}
 
-	for name, want := range map[string]string{"config.yaml": "provider: openai\n", "secrets.yaml": "token: x\n"} {
+	for name, want := range map[string]string{
+		"config.yaml":  "provider: openai\n",
+		"secrets.yaml": "token: x\n",
+		"managed.yaml": "provider: managed\n", // reached through a symlink
+	} {
 		got, err := os.ReadFile(filepath.Join(target, name))
 		if err != nil {
 			t.Fatalf("copied config missing %s: %v", name, err)
@@ -517,6 +536,34 @@ func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(target, "sessions")); !os.IsNotExist(err) {
 		t.Errorf("copy carried a subdirectory: %v", err)
+	}
+}
+
+// TestGooseIsolationRefusesANonDirectoryConfigRoot: only "not there" may be
+// passed over when a candidate config root is probed, because that is how a
+// platform's unused location is recognised. A root that exists but is not a
+// usable directory must fail instead: skipping it would hand the child a home
+// with no configuration and no indication that Ghost dropped it, and the child
+// would then authenticate against goose's defaults while the user saw a
+// provider error pointing nowhere.
+//
+// A mode-000 directory is deliberately not the case here. Lstat needs only the
+// search permission of the PARENT, so an unreadable config directory stats
+// fine, the link is still created, and the child fails against the real path —
+// which names the actual problem instead of hiding it.
+func TestGooseIsolationRefusesANonDirectoryConfigRoot(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".config"), []byte("not a directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := &exec.Cmd{Dir: t.TempDir(), Env: []string{"HOME=" + home}}
+	if err := configureGooseIsolation(cmd); err == nil {
+		t.Fatal("isolation reported success with a config root that is not a directory")
+	}
+	// HOME must not be repointed when the boundary was not established.
+	if got := envValue(cmd.Env, "HOME"); got != home {
+		t.Errorf("HOME = %q, want the untouched value after a refusal", got)
 	}
 }
 
