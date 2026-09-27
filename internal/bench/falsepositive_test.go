@@ -16,9 +16,10 @@ import (
 // and a floor here would be a gate on that work rather than on this change.
 //
 // What IS enforced is that the set can measure something at all — every flavor
-// present, results actually returned for queries nothing answers, and the two
-// distributions separated. A suite where search returned nothing for any of them
-// would report a beautiful 0.000 and mean nothing.
+// present, and results actually returned for queries nothing answers. A suite
+// where search returned nothing for any of them would report a beautiful 0.000
+// and mean nothing. What the two distributions do with each other is reported,
+// never asserted; see the comment inside for why that line must stay unset.
 func TestFalsePositiveReport(t *testing.T) {
 	ds, vecs, err := BuiltinDataset()
 	if err != nil {
