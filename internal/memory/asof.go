@@ -229,8 +229,15 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		-- has neither a live row nor a version at or before T, and reporting the gap
 		-- needs the tombstone's own project id. Its text is not used — a delete row
 		-- is dated D and says what the memory held at D, which is not a claim about
-		-- T. The two halves are disjoint (a tombstoned memory is not live), so the
-		-- UNION cannot double-count.
+		-- T.
+		--
+		-- The two halves are NOT disjoint, and the id test is what makes them so:
+		-- "tombstoned" does not imply "not live", because a snapshot restore
+		-- reinstates the row under the id it recorded (and appends its own restore
+		-- row). A memory that was deleted and then restored is live, is in scope by
+		-- created_at, and has no version at or before T — so without this it was in
+		-- both halves and one memory was disclosed as two, which reaches
+		-- CandidateSet.Unrecorded and every surface's count.
 		unrecorded AS (
 		    SELECT m.id AS memory_id, m.project_id, m.created_at
 		    FROM memories m
@@ -244,6 +251,7 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		    WHERE h.phase = '`+phaseDelete+`'
 		      AND NOT EXISTS (SELECT 1 FROM memory_history v
 		                      WHERE v.memory_id = h.memory_id AND v.recorded_at <= ?)
+		      AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = h.memory_id)
 		      AND `+historyScope+`
 		)
 		SELECT memory_id, project_id, known, phase, recorded_at, content, category,

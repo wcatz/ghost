@@ -688,7 +688,10 @@ anywhere in the read, and no inference: it is a selection.
   the memory then fell out of both halves and vanished from an answer it belongs
   to. The half that reports tombstones exists for the same reason: a pre-v17
   memory deleted after T has no live row either, so its gap is reachable only
-  through the tombstone's own project id. (No writer needs to file a baseline
+  through the tombstone's own project id — and that half excludes ids that are
+  live again, because a snapshot restore reinstates a row under the id it
+  recorded, so "tombstoned" does not imply "not live" and one memory would
+  otherwise be disclosed as two. (No writer needs to file a baseline
   there: every one of those first writes appends a row read out of the memories row
   in the same transaction, so the text it is about to stop holding is recorded
   anyway — which is why `recordBaselineHistoryTx` is needed only on

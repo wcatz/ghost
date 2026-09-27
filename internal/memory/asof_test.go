@@ -735,6 +735,69 @@ func TestAsOfCreatedAtFallsBackWhenTheColumnCannotAnswer(t *testing.T) {
 	}
 }
 
+// TestMemoriesAsOfCountsARestoredMemoryOnce: "tombstoned" does not imply "not
+// live". A snapshot restore reinstates the row under the id it recorded, and
+// appends its own `restore` row, so a memory can be live now and still carry the
+// delete that took it — which put it in BOTH halves of the gap read, and one
+// memory was disclosed as two. The count is not cosmetic: it reaches
+// CandidateSet.Unrecorded and every surface's "N memories are unknown" sentence.
+func TestMemoriesAsOfCountsARestoredMemoryOnce(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const content = "a memory deleted and then restored under its own id"
+
+	id := mustSave(t, s, content)
+	dropHistory(t, s, id)
+	if err := s.DeleteWithOptions(ctx, id, DeleteOptions{}); err != nil {
+		t.Fatalf("DeleteWithOptions: %v", err)
+	}
+	// A snapshot of the memory as it stood before the delete, which is what a
+	// restore replays. The restore is the real path on purpose: it is the only
+	// writer that brings a deleted id back, and the point of the test is that
+	// "has a delete row" and "is live" are different questions.
+	if _, err := s.db.Exec(`
+		INSERT INTO memory_snapshots
+		    (snapshot_id, project_id, category, content, importance, source, created_at, memory_id, scope_captured)
+		VALUES ('snap1', ?, 'fact', ?, 0.5, 'mcp', ?, ?, 1)`,
+		testProject, content, asOfStampSave, id); err != nil {
+		t.Fatalf("insert the snapshot: %v", err)
+	}
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("the restore recorded no history for the reinstated id, so this fixture is not the case under test")
+	}
+	stamps := make([]string, len(entries))
+	for i := range stamps {
+		stamps[i] = asOfStampLate
+	}
+	stampHistory(t, s, id, stamps...)
+
+	set := mustAsOf(t, s, asOfStampSave)
+	times := 0
+	for _, row := range set.Unknown {
+		if row.ID == id {
+			times++
+		}
+	}
+	if times != 1 {
+		t.Errorf("the restored memory is reported as a gap %d times, want 1 — a live row and its own tombstone are the same memory", times)
+	}
+	if ids := set.UnknownIDs(); len(ids) != len(set.Unknown) {
+		t.Errorf("UnknownIDs returns %v for %d unknown rows, want one id per row", ids, len(set.Unknown))
+	}
+	// The set must still be right for the memory's other half: with every version
+	// dated after T it is a gap, not a known row.
+	if _, ok := asOfContentByID(t, set)[id]; ok {
+		t.Errorf("the memory reads as known at %s, want a reported gap: every one of its versions is dated %s", asOfStampSave, asOfStampLate)
+	}
+}
+
 // mustSave is the fixture's save, returning the id.
 func mustSave(t *testing.T, s *Store, content string) string {
 	t.Helper()
