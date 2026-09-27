@@ -1,6 +1,7 @@
 package adversarial
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -142,6 +143,10 @@ func TestSnapshotPinsItsTwoPlaceholders(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("a mode-0000 file is still readable by root, so there is nothing to pin")
 		}
+		// Two roots with the same relative structure and the same contents. The
+		// reason the placeholder is a constant is this: a value carrying the
+		// path it failed at would differ between two trees that are the same,
+		// and AssertUnchanged would report a rewrite of a file nobody touched.
 		build := func() string {
 			root := t.TempDir()
 			locked := filepath.Join(root, "locked.md")
@@ -149,6 +154,9 @@ func TestSnapshotPinsItsTwoPlaceholders(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(locked, 0o600) })
+			if err := os.WriteFile(filepath.Join(root, "readable.md"), []byte("visible"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			return root
 		}
 		first := Snapshot(t, build())
@@ -157,11 +165,11 @@ func TestSnapshotPinsItsTwoPlaceholders(t *testing.T) {
 		if got := first["locked.md"]; got != "<unreadable>" {
 			t.Errorf("unreadable file recorded as %q, want the constant placeholder", got)
 		}
-		// The reason the placeholder is a constant: two roots spelled
-		// differently must snapshot identically, or AssertUnchanged would report
-		// a rewrite of a file nobody touched.
-		if first["locked.md"] != second["locked.md"] {
-			t.Errorf("the placeholder varies with the root: %q vs %q", first["locked.md"], second["locked.md"])
+		// Compared over the whole trees, not one key: a single-key comparison
+		// against an already-pinned literal cannot fail on its own, and the
+		// property here is about every value, readable or not.
+		if !maps.Equal(first, second) {
+			t.Errorf("two identical trees snapshotted differently:\n  first:  %v\n  second: %v", first, second)
 		}
 	})
 
