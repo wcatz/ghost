@@ -123,6 +123,46 @@ func TestBuildReflectionPrompt_ForbidsFabrication(t *testing.T) {
 	}
 }
 
+// TestBuildReflectionPrompt_AsksForPerIdOperations is the prompt half of #639.
+// The output contract only fixes identity churn if the model is told to name
+// the id it is acting on: a harness that answers in free text resets every
+// memory's id, and with it the row's embedding, links and age. The prompt has
+// to state the four operations, and the verbatim one has to be the default for
+// a memory that is already right.
+func TestBuildReflectionPrompt_AsksForPerIdOperations(t *testing.T) {
+	prompt := BuildReflectionPrompt(ReflectionInput{
+		ProjectName: "ghost",
+		ExistingMemories: []memory.Memory{
+			{ID: "D20E133860CC4AFE38B485AD5371BA59", Category: "gotcha", Content: "port 2222 not 22"},
+		},
+	})
+	for _, want := range []string{
+		`"ops"`,
+		"keep <id>",
+		"merge <id>",
+		"rewrite <id>",
+		"drop <id> reason:",
+		"superseded by <id>",
+		"obsolete",
+		"rejected and the original memories are kept",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+	// The id is the whole contract: without it in the input list the model
+	// cannot name what it is acting on.
+	if !strings.Contains(prompt, "D20E133860CC4AFE38B485AD5371BA59") {
+		t.Error("prompt does not render the input memory's id")
+	}
+	// The retired free-text contract must not survive in the prompt.
+	for _, unwanted := range []string{`"memories"`, "COMPLETE consolidated memory set"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Errorf("prompt still asks for the free-text contract: %q", unwanted)
+		}
+	}
+}
+
 // TestBuildReflectionPrompt_ProtectsEveryCategory pins the prompt half of the
 // drop guard. AuditGuardedDrops retained every category from #549, so a prompt
 // still naming only gotcha/dependency/preference/convention would leave the
@@ -132,7 +172,7 @@ func TestBuildReflectionPrompt_ForbidsFabrication(t *testing.T) {
 func TestBuildReflectionPrompt_ProtectsEveryCategory(t *testing.T) {
 	prompt := BuildReflectionPrompt(ReflectionInput{
 		ProjectName:      "ghost",
-		ExistingMemories: []memory.Memory{{Category: "decision", Content: "chose X"}},
+		ExistingMemories: []memory.Memory{{ID: "D20E133860CC4AFE38B485AD5371BA59", Category: "decision", Content: "chose X"}},
 	})
 	for _, want := range []string{
 		"EVERY category is protected",
@@ -161,7 +201,7 @@ func TestBuildReflectionPrompt_ProtectsEveryCategory(t *testing.T) {
 // the OTHER branch's sentence is absent, since a prompt containing both
 // contradicts itself.
 func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
-	memories := []memory.Memory{{Category: "gotcha", Content: "port 2222 not 22"}}
+	memories := []memory.Memory{{ID: "D20E133860CC4AFE38B485AD5371BA59", Category: "gotcha", Content: "port 2222 not 22"}}
 
 	retained := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: memories})
 	dropping := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: memories, AllowDrops: true})

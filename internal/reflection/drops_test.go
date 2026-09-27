@@ -92,6 +92,58 @@ func TestAuditGuardedDrops_RetainsEveryCategory(t *testing.T) {
 	}
 }
 
+// TestAuditGuardedDrops_MeasuresContainmentAcrossTheOutputUnion: containment
+// used to be measured against a SINGLE output memory, so a memory whose
+// substance a merge split across two survivors looked unreferenced and came
+// back verbatim beside the merge that had already replaced it. That
+// paraphrase-beside-its-own-successor pair is what the drop guard produced
+// across every project in the #639 benchmark. The inputs' substance survives
+// where it survives, so the question is whether it survives anywhere in the
+// result, not whether one memory explains all of it.
+func TestAuditGuardedDrops_MeasuresContainmentAcrossTheOutputUnion(t *testing.T) {
+	input := ReflectionInput{ExistingMemories: []memory.Memory{
+		mem("gotcha", "Bastion SSH needs port 2222 because port 22 is firewalled from the office"),
+	}}
+	// No single output holds 45% of the input's tokens; the union does.
+	result := ReflectionResult{Memories: []ReflectMemory{
+		{Category: "gotcha", Content: "The office firewall blocks port 22 outbound"},
+		{Category: "fact", Content: "Use port 2222 for bastion SSH instead"},
+	}}
+
+	each := AuditGuardedDrops(input, ReflectionResult{Memories: result.Memories[:1]})
+	if len(each) != 1 {
+		t.Fatalf("single-output containment should not have recognized the input, got %d", len(each))
+	}
+	if drops := AuditGuardedDrops(input, result); len(drops) != 0 {
+		t.Fatalf("a survivor spread across the output union was flagged: %+v", drops)
+	}
+}
+
+// TestAuditGuardedDrops_HonoursAnExplicitSupersession: the guard cannot tell
+// "forgot" from "deliberately replaced", which is how a stale memory was
+// restored beside the memory that replaced it (#639). An input the harness
+// dropped as superseded by another input id is a decision with a witness, so
+// the guard does not undo it — while an input with no such claim is still
+// audited, and the exemption is per-id rather than global.
+func TestAuditGuardedDrops_HonoursAnExplicitSupersession(t *testing.T) {
+	// The superseded row and its successor share almost no vocabulary — an old
+	// access method replaced by a new one — so nothing but the explicit claim
+	// distinguishes "the harness said so" from "the harness forgot".
+	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH uses port 2222 with a hardware key"}
+	fixed := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "operator access is now fronted by Cloudflare Access"}
+	orphan := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "gotcha", Content: "the metrics endpoint is bound to 12798"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed, orphan}}
+
+	result := ReflectionResult{
+		Memories:      []ReflectMemory{{Category: "fact", Content: fixed.Content}},
+		SupersededIDs: []string{stale.ID},
+	}
+	drops := AuditGuardedDrops(input, result)
+	if len(drops) != 1 || drops[0].Content != orphan.Content {
+		t.Fatalf("want only the unrelated input audited, got %+v", drops)
+	}
+}
+
 // TestRetainGuardedDrops_CarriesFieldsVerbatim: retention must not launder the
 // memory. Content stays byte-identical so ReplaceNonManual's exact-content
 // reuse matches the original row and its embedding/links survive (#452), and

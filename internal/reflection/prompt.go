@@ -33,6 +33,13 @@ type ReflectionInput struct {
 type ReflectionResult struct {
 	LearnedContext string          `json:"learned_context"`
 	Memories       []ReflectMemory `json:"memories"`
+	// SupersededIDs are the input memory ids a harness dropped as superseded by
+	// another input id that the same response carries forward. The drop guard
+	// honours them instead of re-adding the stale row beside its own successor:
+	// an input the harness named and explained is not one it forgot (#639). An
+	// obsolete drop is NOT listed — that claim names no successor, so the token
+	// audit still governs it.
+	SupersededIDs []string `json:"superseded_ids,omitempty"`
 }
 
 // ReflectMemory is a discrete memory extracted during reflection.
@@ -90,29 +97,40 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	// told omission is safe while their corpus loses the memory. Declared out here
 	// because the output rules below are emitted whether or not there are any
 	// existing memories to list.
-	foldToKeep := "Dropping is not deletion: an input you do not fold into a survivor is kept verbatim by the apply, so omitting a memory never removes it. EVERY category is protected this way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
+	foldToKeep := "Dropping is not deletion: an input you never name is kept verbatim by the apply, so omitting a memory never removes it. An \"obsolete\" drop is treated the same way — Ghost cannot check that claim, so the memory is kept unless this run deletes omissions. EVERY category is protected this way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
 	mergeTail := "a loose summary is not recognized as a merge, and the input is kept verbatim beside it"
 	staleTail := "since omitting one does not remove it"
 	countTail := "A count you reach by dropping is undone by the verbatim re-add."
+	omissionCost := "kept verbatim beside the operations you did return, so forgetting one means the consolidation you had in mind for it never happens"
 	if input.AllowDrops {
-		foldToKeep = "This run DELETES any input you do not fold into a surviving memory, in EVERY category: gotcha, dependency, preference, convention, architecture, decision, pattern and fact. There is no protected category this run — fold anything you want to keep."
+		foldToKeep = "This run DELETES any input you do not name, in EVERY category: gotcha, dependency, preference, convention, architecture, decision, pattern and fact. There is no protected category this run — fold anything you want to keep."
 		mergeTail = "a loose summary is not recognized as a merge, and the input is deleted even though you mentioned it"
 		staleTail = "since omitting one deletes it"
 		countTail = "A count you reach by dropping is a real deletion, not a cleanup."
+		omissionCost = "DELETED, because this run deletes every id you do not name"
 	}
 
-	// Existing memories for consolidation.
+	// Existing memories for consolidation. The id leads the line because the
+	// output contract is operations on ids: without it in front of the model
+	// there is nothing for it to name, and a memory it is merely restating comes
+	// back as a paraphrase with a fresh id, a new embedding, an empty link graph
+	// and a reset age. The rendered fields are otherwise unchanged from the
+	// pre-#639 prompt (category, importance, source, tags, content), so
+	// InputSignature still mirrors them — the id it already carried covers the
+	// new leading field.
 	if len(input.ExistingMemories) > 0 {
 		_, _ = fmt.Fprintf(&sb, "\n\n## Existing Memories (%d total) — CONSOLIDATE THESE\n", len(input.ExistingMemories))
-		sb.WriteString("Review each memory. Merge duplicates, combine similar items into one stronger memory, drop stale/irrelevant ones, and keep confirmed facts. " + foldToKeep + "\n")
+		sb.WriteString("Review each memory by its id. Fold duplicates into one stronger memory, combine similar items into one, and drop the ones that are wrong or already said better elsewhere. " + foldToKeep + "\n")
 		for _, m := range input.ExistingMemories {
-			line := fmt.Sprintf("- [%s] (imp:%.1f, src:%s", m.Category, m.Importance, m.Source)
+			line := fmt.Sprintf("- id:%s [%s] (imp:%.1f, src:%s", m.ID, m.Category, m.Importance, m.Source)
 			if m.AccessCount > 0 {
 				line += fmt.Sprintf(", used:%d", m.AccessCount)
 			}
 			// Tags travel with their memory — omitting them forced the model to
 			// invent fresh tags for every memory, cross-assigning keywords from
-			// unrelated memories elsewhere in the corpus.
+			// unrelated memories elsewhere in the corpus. A merge now unions the
+			// tags of the ids it names, so they are shown for the model to reason
+			// about rather than to re-emit.
 			if len(m.Tags) > 0 {
 				line += fmt.Sprintf(", tags:[%s]", strings.Join(m.Tags, ","))
 			}
@@ -121,7 +139,7 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 		}
 	}
 
-	// The three mode-dependent clauses are spliced in as real concatenation, not
+	// The mode-dependent clauses are spliced in as real concatenation, not
 	// written inside the raw string below: a `+mergeTail+` between backticks is
 	// literal text, and the model would have been told "omitting is free" by a
 	// template that silently dropped the sentence carrying the other half.
@@ -129,16 +147,20 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 
 Produce a JSON object with two fields:
 1. "learned_context": A concise paragraph (max 200 words) describing this project's architecture, the developer's patterns, and key technical decisions.
-2. "memories": The COMPLETE consolidated memory set. This REPLACES all existing non-manual memories. Rules:
-   - Merge duplicates into one stronger memory (higher importance). A merge must carry the input's substance into the survivor — restate the specifics, do not summarize them away: ` + mergeTail + `.` + "\n" + `
+2. "ops": an array of operation strings, one per id listed above. Every id gets exactly one operation, and an id appears in at most one operation:
+   - "keep <id>" — this memory is already right and complete. Use it for the memory as it stands and do NOT retype it: a kept memory keeps its id, its age, its links and its embedding, which no rewrite can. Restating a memory you had nothing to change is what made consolidation churn identities.
+   - "merge <id>,<id>,<id> -> <text>" — two or more of these memories state one fact. A merge must carry the inputs' substance into the survivor — restate the specifics, do not summarize them away: ` + mergeTail + `. Category, importance and tags are taken from the ids you name, so a merge never silently recategorizes a memory or strips its labels.
+   - "rewrite <id> -> <text>" — correct ONE memory: a wrong number, a wrong name, a wrong host, a claim that is no longer true. Never for a paraphrase, and never to put a memory into new words.
+   - "drop <id> reason: obsolete" — the memory is wrong or no longer true and nothing else in the corpus replaces it. Prefer folding it into a survivor, ` + staleTail + `
+   - "drop <id> reason: superseded by <id>" — another id in this same list already says it better, and you carry that one forward. The target must be an id you keep, merge or rewrite in this response: a supersession pointing at a target you also drop leaves the corpus with nothing.
+   Rules:
+   - Every id listed above needs an operation. An id you never mention is ` + omissionCost + `
+   - An identifier in merge or rewrite text — a path, hash, version, hostname, port or any number — must appear in one of the ids you are merging or rewriting, copied exactly. A merge or rewrite that introduces an identifier absent from its sources is rejected and the original memories are kept, so a typo is never stored as fact. When you cannot reproduce the specifics exactly, "keep" instead.
    - Keep identity facts (architecture, conventions) — never drop these
-   - Drop stale situational memories (old gotchas that were fixed) — fold them into the memory that replaces them, ` + staleTail + "\n" + `
-   - Each memory: "category" (architecture/decision/pattern/convention/gotcha/dependency/preference/fact), "content" (1-2 sentences), "importance" (0.0-1.0), "tags" (1-3 keywords), "scope" ("project" or "global")
-   - Tags: when carrying a memory forward, keep its existing tags (shown as tags:[...] above); when merging memories, union their tags. Only invent tags for memories that have none — and derive them from THAT memory's content, never from neighboring memories
-   - Aim for 10-25 high-quality memories, not 50 repetitive ones — and get there by FOLDING inputs into survivors, never by omitting them. ` + countTail + "\n" + `
-   - Scope: most memories are "project". Mark as "global" ONLY if the knowledge applies across ALL repositories — examples: user preferences, cross-repo workflows (deploying from one repo to another), personal tooling choices, SSH hosts, infrastructure topology. Project-specific architecture, patterns, or conventions are always "project".
-   - Anti-fabrication: the input above is the ONLY source of truth. Never invent specifics that do not appear in it — commit SHAs, version numbers, file paths, package names, feature names, ports, hosts, or model names. If you cannot verify an identifier in the input, omit it or describe the fact generically ("a fix was applied", not "fixed in fdf4583"). A plausible-looking but unverified SHA, feature, or version is a hallucination.
-   - Project-scoping: every emitted memory must be about the project named under "Project" above. Do not import facts about other projects, repositories, or tools from your own knowledge — the corpus only contains this project plus explicit "global" user preferences that were already present in the input. If a memory is not traceable to the input data, drop it rather than emit it.
+   - Drop stale situational memories (old gotchas that were fixed) into the memory that replaces them, ` + staleTail + `
+   - Every category is a candidate: architecture, decision, pattern, convention, gotcha, dependency, preference, fact. Aim for a corpus of high-quality memories, not a short one — and get there by FOLDING inputs into survivors, never by omitting them. ` + countTail + `
+   - Anti-fabrication: the input above is the ONLY source of truth. Never invent specifics that do not appear in it — commit SHAs, version numbers, file paths, package names, feature names, ports, hosts, or model names. If you cannot verify an identifier in the input, keep that memory as it is rather than emitting a "corrected" version. A plausible-looking but unverified SHA, feature, or version is a hallucination.
+   - Project-scoping: every operation must be about the project named under "Project" above. Do not import facts about other projects, repositories, or tools from your own knowledge — the corpus only contains this project plus explicit "global" user preferences that were already present in the input. If a memory is not traceable to the input data, drop it rather than keep it.
 
 Return ONLY the JSON object, no other text.`)
 

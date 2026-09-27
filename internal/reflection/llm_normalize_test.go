@@ -1,9 +1,7 @@
 package reflection
 
 import (
-	"strings"
 	"testing"
-	"unicode/utf8"
 )
 
 // TestNormalizeReflectMemoriesScopeRules pins the rules that decide what an
@@ -71,22 +69,6 @@ func TestNormalizeReflectMemoriesScopeRules(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestParseReflectionResponseErrorSnippetIsRuneSafe keeps malformed model
-// output from exposing a split UTF-8 rune in a diagnostic preview.
-func TestParseReflectionResponseErrorSnippetIsRuneSafe(t *testing.T) {
-	bad := "x" + strings.Repeat("🙂", 40) + "not-json"
-	_, err := parseReflectionResponse(bad)
-	if err == nil {
-		t.Fatal("parseReflectionResponse unexpectedly accepted malformed JSON")
-	}
-	if !utf8.ValidString(err.Error()) {
-		t.Errorf("error contains a split UTF-8 rune: %q", err.Error())
-	}
-	if strings.Contains(err.Error(), `\x`) || strings.Contains(err.Error(), `\u`) {
-		t.Errorf("error exposes a split rune as an escape: %q", err.Error())
 	}
 }
 

@@ -301,79 +301,51 @@ func TestSQLiteConsolidator_SetsScope(t *testing.T) {
 	}
 }
 
-func TestParseReflectionResponse_NormalizesScope(t *testing.T) {
-	input := `{"learned_context":"ctx","memories":[
-		{"category":"fact","content":"with scope","importance":0.8,"tags":[],"scope":"global"},
-		{"category":"fact","content":"no scope","importance":0.7,"tags":[]},
-		{"category":"fact","content":"bad scope","importance":0.6,"tags":[],"scope":"invalid"}
-	]}`
+// TestOpTierNormalizesScopeThroughTheTier moves the scope normalization check
+// to where the value now arrives. Under the per-id contract (#639) the harness
+// no longer states a scope for most memories, so what reaches
+// normalizeReflectMemories is a stored row or a merge whose scope was inferred —
+// and the one rule that still has teeth is that secret-looking text is never
+// promoted, because a global memory is replayed into every project's injected
+// context (issue #545).
+func TestOpTierNormalizesScopeThroughTheTier(t *testing.T) {
+	in := ReflectionInput{ProjectName: "ghost", ExistingMemories: []memory.Memory{
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "convention", Content: "tabs, not spaces, in every repository we touch"},
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "the deploy token is GITHUB_TOKEN=ghp_example in the runner env"},
+	}}
+	llm := NewLlmConsolidator(&fakeReflector{reply: `{"ops":["merge ` +
+		`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2` +
+		` -> the deploy token is GITHUB_TOKEN=ghp_example in the runner env, and tabs are used in every repository we touch"]}`})
 
-	result, err := parseReflectionResponse(input)
+	result, err := llm.Consolidate(context.Background(), in)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Consolidate: %v", err)
 	}
-	if result.Memories[0].Scope != "global" {
-		t.Errorf("expected global scope preserved, got %q", result.Memories[0].Scope)
+	if len(result.Memories) != 1 {
+		t.Fatalf("got %d memories, want the one merge: %+v", len(result.Memories), result.Memories)
 	}
-	if result.Memories[1].Scope != "project" {
-		t.Errorf("expected missing scope normalized to project, got %q", result.Memories[1].Scope)
-	}
-	if result.Memories[2].Scope != "project" {
-		t.Errorf("expected invalid scope normalized to project, got %q", result.Memories[2].Scope)
+	if got := result.Memories[0].Scope; got != "project" {
+		t.Errorf("scope = %q, want project — a merge naming a credential must never be promoted", got)
 	}
 }
 
-// TestParseReflectionResponse_NormalizesCategory: an invalid category would
-// fail the schema CHECK inside ReplaceNonManual and sink the entire apply
-// transaction — parse must collapse it to the schema default ('fact') the
-// same way invalid scope collapses to 'project'.
-func TestParseReflectionResponse_NormalizesCategory(t *testing.T) {
-	input := `{"learned_context":"ctx","memories":[
-		{"category":"gotcha","content":"valid","importance":0.8,"tags":[]},
-		{"category":"bug","content":"invalid","importance":0.7,"tags":[]},
-		{"category":"","content":"empty","importance":0.6,"tags":[]},
-		{"content":"missing","importance":0.5,"tags":[]}
-	]}`
+// TestOpTierKeepsACrossRepoMergeGlobal: the scope the model no longer states
+// still has to reach the promotion path, or --promote-globals would have nothing
+// to promote from an LLM tier at all.
+func TestOpTierKeepsACrossRepoMergeGlobal(t *testing.T) {
+	in := ReflectionInput{ProjectName: "ghost", ExistingMemories: []memory.Memory{
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "convention", Content: "tabs, not spaces, in every repository we touch"},
+	}}
+	llm := NewLlmConsolidator(&fakeReflector{reply: `{"ops":["rewrite ` +
+		`AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1` +
+		` -> use tabs, not spaces, in every repository we touch"]}`})
 
-	result, err := parseReflectionResponse(input)
+	result, err := llm.Consolidate(context.Background(), in)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("Consolidate: %v", err)
 	}
-	if result.Memories[0].Category != "gotcha" {
-		t.Errorf("valid category must be preserved, got %q", result.Memories[0].Category)
-	}
-	for i, want := range []string{"fact", "fact", "fact"} {
-		if result.Memories[i+1].Category != want {
-			t.Errorf("memory %d category = %q, want %q", i+1, result.Memories[i+1].Category, want)
-		}
-	}
-}
-
-// TestParseReflectionResponse_MalformedJSON: unparseable output (e.g. a
-// response truncated mid-JSON) must surface as an error — the old fallback
-// returned it as learned_context with zero memories, which the tiered quality
-// gate misread as "consolidated everything away" with no hint of the cause.
-func TestParseReflectionResponse_MalformedJSON(t *testing.T) {
-	truncated := `{"learned_context":"ctx","memories":[{"category":"fact","content":"cut off mid-obj`
-	if _, err := parseReflectionResponse(truncated); err == nil {
-		t.Fatal("expected error for truncated JSON, got nil")
-	}
-
-	prose := "I could not produce JSON, here is a summary instead."
-	if _, err := parseReflectionResponse(prose); err == nil {
-		t.Fatal("expected error for non-JSON prose, got nil")
-	}
-}
-
-// TestParseReflectionResponse_StripsFences: fenced JSON still parses.
-func TestParseReflectionResponse_StripsFences(t *testing.T) {
-	fenced := "```json\n{\"learned_context\":\"ctx\",\"memories\":[{\"category\":\"fact\",\"content\":\"ok\",\"importance\":0.7,\"tags\":[\"a\"]}]}\n```"
-	result, err := parseReflectionResponse(fenced)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result.Memories) != 1 || result.Memories[0].Content != "ok" {
-		t.Fatalf("fenced JSON not parsed: %+v", result)
+	if len(result.Memories) != 1 || result.Memories[0].Scope != "global" {
+		t.Fatalf("want one globally-scoped survivor, got %+v", result.Memories)
 	}
 }
 
@@ -392,8 +364,11 @@ func TestBuildReflectionPrompt_IncludesTags(t *testing.T) {
 	if !strings.Contains(prompt, "tags:[obsidian,vault]") {
 		t.Errorf("prompt missing serialized tags:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "keep its existing tags") {
-		t.Errorf("prompt missing tag-preservation rule")
+	// Since #639 the tags are no longer the model's to state: a keep carries the
+	// stored row's and a merge unions the ids it names, so the rule the prompt has
+	// to carry is that it is done for the harness.
+	if !strings.Contains(prompt, "tags are taken from the ids you name") {
+		t.Errorf("prompt does not say how tags are derived")
 	}
 }
 
