@@ -122,7 +122,34 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 		byID[key] = in
 		order = append(order, key)
 	}
-	acc := InputAccounting{Inputs: len(order), Refusals: result.Refusals}
+	// Every id a line prints is the STORED spelling, never the one the model
+	// wrote. `trimIDLabel` strips the prompt's `id:` label and trims but does not
+	// upper-case, and memIDKey exists precisely because a model that lower-cased
+	// an id still means the row it was shown — so printing the raw spelling would
+	// let a merge line show `01j8z…02` where a count line shows `01J8Z…02`, and
+	// these ids are the keys the report asks an operator to look rows up by.
+	// An id the input does not carry is passed through unchanged: the parser
+	// refuses one, so a line can only reach that with a hand-built result, and
+	// printing nothing there would be worse than printing what it was given.
+	storedID := func(id string) string {
+		if m, ok := byID[memIDKey(id)]; ok {
+			return m.ID
+		}
+		return id
+	}
+	storedIDs := func(ids []string) []string {
+		out := make([]string, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, storedID(id))
+		}
+		return out
+	}
+
+	acc := InputAccounting{Inputs: len(order)}
+	for _, r := range result.Refusals {
+		r.IDs = storedIDs(r.IDs)
+		acc.Refusals = append(acc.Refusals, r)
+	}
 
 	// Which operation owns an id. The four lists are disjoint by the parser's own
 	// rule — an id takes exactly one operation — except that a supersession is
@@ -132,7 +159,7 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 	// the rewrites it is after that.
 	dropOf := make(map[string]AccountDrop, len(result.Drops))
 	for _, d := range result.Drops {
-		dropOf[memIDKey(d.ID)] = AccountDrop{ID: d.ID, Reason: d.Reason, Guarded: flagged[memIDKey(d.ID)]}
+		dropOf[memIDKey(d.ID)] = AccountDrop{ID: storedID(d.ID), Reason: d.Reason, Guarded: flagged[memIDKey(d.ID)]}
 	}
 	rewriteOf := make(map[string]AccountRewrite, len(result.Replacements))
 	for _, r := range result.Replacements {
@@ -140,7 +167,7 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 		if _, claimed := dropOf[key]; claimed {
 			continue
 		}
-		rewriteOf[key] = AccountRewrite{ID: r.ID, Text: r.Text, In: present[r.Text], Guarded: flagged[key]}
+		rewriteOf[key] = AccountRewrite{ID: storedID(r.ID), Text: r.Text, In: present[r.Text], Guarded: flagged[key]}
 	}
 	refused := make(map[string]bool)
 	for _, r := range result.Refusals {
@@ -156,7 +183,7 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 	// annotates the merge line rather than counting the source separately.
 	mergeOf := make(map[string]int, len(result.Merges))
 	for _, m := range result.Merges {
-		line := AccountMerge{IDs: m.IDs, Text: m.Text, In: present[m.Text]}
+		line := AccountMerge{IDs: storedIDs(m.IDs), Text: m.Text, In: present[m.Text]}
 		for _, id := range m.IDs {
 			if src, ok := byID[memIDKey(id)]; ok {
 				line.SourceBytes += len(src.Content)

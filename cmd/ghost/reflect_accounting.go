@@ -19,7 +19,7 @@ import (
 // the input set and the operator can check it by adding the numbers up.
 //
 // EVERY header and count line is a count of IDS, never of records. A merge may
-// name any number of sources, so `Merges (2)` over one three-source merge is
+// name any number of sources, so `Merges (3)` over one three-source merge is
 // right where the count of merge operations is not, and a section whose numbers
 // do not add up to the input total is the one thing this report cannot be. The
 // line under the header is what reconciles the two: it names the ids the header
@@ -133,17 +133,21 @@ func reportInputAccounting(w io.Writer, input reflection.ReflectionInput, result
 // how many rather than naming them: the line already names every one of them,
 // and a report that quoted an id twice would break the one-account contract the
 // section exists to keep. `subject` is the word for what was flagged, so a merge
-// reads as sources and a rewrite or a drop as a row.
+// reads as sources and a rewrite or a drop as a row, and the verb agrees with
+// the count because this is the wording an operator reads on every accepted
+// deletion.
 func guardClause(guarded int, allowDrops bool, subject string) string {
 	if guarded <= 0 {
 		return ""
 	}
-	plural := ""
+	plural, verb := "", "have"
 	if guarded > 1 {
-		plural = "s"
+		plural, verb = "s", "have"
+	} else {
+		verb = "has"
 	}
 	if allowDrops {
-		return fmt.Sprintf("; %d %s%s have no surviving output, and --allow-drops accepts the deletion", guarded, subject, plural)
+		return fmt.Sprintf("; %d %s%s %s no surviving output, and --allow-drops accepts the deletion", guarded, subject, plural, verb)
 	}
 	return fmt.Sprintf("; the drop guard re-added %d %s%s verbatim", guarded, subject, plural)
 }

@@ -432,6 +432,43 @@ func resultCarries(result reflection.ReflectionResult, content string) bool {
 	return false
 }
 
+// TestReflectSummaryPrintsTheStoredIDSpelling pins the id the report quotes to
+// the spelling the DATABASE holds. The op parser strips the prompt's `id:`
+// label and trims but does not upper-case, and the drop's successor target is
+// upper-cased while the dropped id is not, so a model that lower-cases an id —
+// which `memIDKey` exists to tolerate — would otherwise have its operation line
+// print `01j8z…02` where a count line prints `01J8Z…02`. These ids are the keys
+// the report asks an operator to look rows up by, and a copied id that does not
+// match the store is the one kind of typo this section cannot afford.
+func TestReflectSummaryPrintsTheStoredIDSpelling(t *testing.T) {
+	source := accountFixture{accountingID(91), "the ledger syncs from the relay export directory"}
+	unnamed := accountFixture{accountingID(92), "the ingest pipeline writes run manifests under /var/lib/ghost"}
+	fixtures := []accountFixture{source, unnamed}
+	input := accountingInput(t, fixtures...)
+
+	// The harness answers in the case the parser accepts and a stored row does
+	// not spell: the id lower-cased. One id takes exactly one operation, so this
+	// is the rewrite alone and the other fixture is the pass-through.
+	lower := strings.ToLower(source.id)
+	result, guarded := reflectRoundForTest(t, input, func() string {
+		return fmt.Sprintf(`{"learned_context":"ctx","ops":["rewrite %s -> the ledger syncs from the relay export directory nightly"]}`, lower)
+	}, false)
+	if len(guarded) != 0 {
+		t.Fatalf("the guard flagged %d rows, so this fixture is not the clean case it claims to be: %+v", len(guarded), guarded)
+	}
+
+	section := accountingSection(t, input, result, guarded, false, false)
+	t.Logf("section:\n%s", section)
+
+	assertAccountsFor(t, section, fixtures, accountingIDs(source), nil, nil, accountingIDs(unnamed))
+	if !strings.Contains(section, source.id+" ->") {
+		t.Errorf("the rewrite line does not quote the stored spelling of the id:\n%s", section)
+	}
+	if strings.Contains(section, lower) {
+		t.Errorf("the report quotes the model's spelling of the id, which the database does not hold:\n%s", section)
+	}
+}
+
 // TestReflectFullIsParsed pins the flag as argv rather than as a field some
 // other run path sets: parseReflectArgs silently ignores a flag it does not
 // take, so a --full that was never added to the parser would be accepted on the
@@ -522,11 +559,17 @@ func TestReflectSummaryTellsADeletedDropFromARetainedOne(t *testing.T) {
 	section := accountingSection(t, input, result, guarded, true, false)
 	t.Logf("section:\n%s", section)
 	assertAccountsFor(t, section, fixtures, accountingIDs(dropped), nil, nil, accountingIDs(other))
-	if !strings.Contains(section, "--allow-drops accepts the deletion") {
+	if !strings.Contains(section, "1 row has no surviving output, and --allow-drops accepts the deletion") {
 		t.Errorf("a deletion the operator accepted is not reported as one:\n%s", section)
 	}
 	if strings.Contains(section, "re-added") {
 		t.Errorf("a deletion under --allow-drops is reported as a re-add:\n%s", section)
+	}
+	// The exact clause, singular verb and all: this is the wording an operator
+	// reads on every accepted deletion, and "1 row have" is what pluralising the
+	// noun alone produces.
+	if !strings.Contains(section, "; 1 row has no surviving output") {
+		t.Errorf("the guard clause does not read as a sentence:\n%s", section)
 	}
 }
 
