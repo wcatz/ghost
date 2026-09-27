@@ -151,6 +151,15 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			label: "assigned credential value",
 		},
 		{
+			// Five letter groups of five: no wordSegmentFloor-sized segment, so
+			// the value test sees a credential and the command-word skip must not
+			// override it. A recovery code or a passphrase in dash groups.
+			name:  "quoted dash-grouped passphrase with a trailing flag",
+			text:  `$api_key = "XkQpz-ZmRtv-LvNbw-HcJdx" -AsPlainText -Force`,
+			rule:  "assigned-secret",
+			label: "assigned credential value",
+		},
+		{
 			// The same literal, one flag away. A quoted value is a literal however
 			// much is flagged after it, so a command-looking tail must not skip it.
 			name:  "quoted literal with a trailing shell flag",

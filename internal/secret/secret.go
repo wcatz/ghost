@@ -589,20 +589,48 @@ func valueIsCommand(text string, valueEnd int) bool {
 // two or more segments of letters only, separated by -, . or /.
 var commandWordRe = regexp.MustCompile(`^[A-Za-z]+([-./][A-Za-z]+)+$`)
 
+// commandWordSegmentMin is the shortest segment that makes a word-join a name
+// rather than a random string.
+//
+// It is wordSegmentFloor, deliberately the same constant the value test uses, so
+// the two cannot drift: a shape the value test is willing to call a name is a
+// shape the skip may exempt, and anything else goes to the value test. Five
+// letter groups (`XkQpz-ZmRtv-LvNbw-HcJdx`, a recovery code or a passphrase in
+// dash groups) has no six-letter segment, so hasWordSegment cannot see a name in
+// it and neither may this.
+const commandWordSegmentMin = wordSegmentFloor
+
+// isCommandWordShape reports whether value is a hyphen/dot/slash join of
+// letters-only segments, at least one of which is long enough to be a word.
+func isCommandWordShape(value string) bool {
+	if !commandWordRe.MatchString(value) {
+		return false
+	}
+	for _, segment := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == '-' || r == '.' || r == '/'
+	}) {
+		if len(segment) >= commandWordSegmentMin {
+			return true
+		}
+	}
+	return false
+}
+
 // isCommandWord reports whether a value names a command rather than a secret.
 //
-// The shape is the vendor's: a cmdlet or executable path is words joined by
+// The shape is the vendor's: a cmdlet or executable path is WORDS joined by
 // separators, so `ConvertTo-SecureString`, `Get-SecretValue` and
-// `/usr/bin/openssl` match and a credential does not. `K3q9Xm2pL7wRt4ZbAvN1` has
-// no separator and digits, and `read-secret-from-keyvault` does match — which is
-// correct, because a name like that is a name.
+// `/usr/bin/openssl` match. `K3q9Xm2pL7wRt4ZbAvN1` has no separator and has
+// digits, so it does not, and `XkQpz-ZmRtv-LvNbw-HcJdx` has five letter groups of
+// five — no wordSegmentFloor-sized segment, which is exactly the condition the
+// value test applies, so the value test is what decides it.
 //
 // This exists because "is the value a literal" cannot be answered by looking for
 // quotes: PowerShell allows `$x = "ConvertTo-SecureString" …`, and refusing that
 // would be a false positive on exactly the corpus line the precision table
 // already pins.
 func isCommandWord(value string) bool {
-	return commandWordRe.MatchString(value)
+	return isCommandWordShape(value)
 }
 
 // quotedArgRe finds a quoted token, which is where a command's secret lives.
