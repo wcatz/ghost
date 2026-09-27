@@ -1260,29 +1260,32 @@ func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provi
 // the subcommand word). Hand-rolled, matching the historical loop exactly:
 // value flags accept both "--flag value" and "--flag=value", positionals set
 // the project (last one wins — --project assigns the same way), a
-// non-numeric --threshold keeps the default, and any other flag is an
-// unknown-flag error (which the caller prints and exits on). The project may
-// come from --project, which takes the NEXT argument verbatim — a
-// dash-leading name such as -x or --odd is a name, not a flag — so the
-// lifecycle coordinator can emit one uniform form for every project; a
-// valueless --project is an error. Extracted from runSupersede so the argv
-// contract is unit-testable without os.Exit.
-func parseSupersedeArgs(args []string) (project, source string, apply bool, threshold float32, err error) {
+// non-numeric --threshold keeps the default, --reassess selects the repair
+// pass over the edges already in the graph (issue #686), and any other flag is
+// an unknown-flag error (which the caller prints and exits on). The project may
+// come from --project, which takes the NEXT argument verbatim — a dash-leading
+// name such as -x or --odd is a name, not a flag — so the lifecycle coordinator
+// can emit one uniform form for every project; a valueless --project is an
+// error. Extracted from runSupersede so the argv contract is unit-testable
+// without os.Exit.
+func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, err error) {
 	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--apply":
 			apply = true
+		case args[i] == "--reassess":
+			reassess = true
 		case args[i] == "--project":
 			if i+1 >= len(args) {
-				return "", "", false, 0, errors.New("--project requires a value")
+				return "", "", false, false, 0, errors.New("--project requires a value")
 			}
 			project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
 			project = strings.TrimPrefix(args[i], "--project=")
 			if project == "" {
-				return "", "", false, 0, errors.New("--project requires a value")
+				return "", "", false, false, 0, errors.New("--project requires a value")
 			}
 		case args[i] == "--threshold" && i+1 < len(args):
 			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
@@ -1301,10 +1304,10 @@ func parseSupersedeArgs(args []string) (project, source string, apply bool, thre
 		case !strings.HasPrefix(args[i], "-"):
 			project = args[i]
 		default:
-			return "", "", false, 0, fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, 0, fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
-	return project, source, apply, threshold, nil
+	return project, source, apply, reassess, threshold, nil
 }
 
 // supersedeUsage is the help for `ghost supersede`: stderr when the project
@@ -1314,6 +1317,10 @@ const supersedeUsage = `Usage: ghost supersede <project> [flags]
 
 Flags:
   --apply             Write the supersedes/causes links (default is dry-run/preview)
+  --reassess          Re-judge the supersedes links ALREADY in the graph and, with
+                      --apply, withdraw the ones that no longer hold. This is how a
+                      wrong supersession is repaired. --threshold is not used: there
+                      are no candidates to select.
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
@@ -1323,14 +1330,55 @@ Flags:
                       takes the next argument verbatim, so dash-prefixed names work.
 
 Classifies each candidate as supersedes, causes, reversed, or neither. A
-reversed verdict — the older note is the current one and the newer note restates
-an obsolete claim — is refused rather than written, because a supersedes link
-only ever points from the newer note to the older one. Runs through the
-configured CLI harness of the calling session (--source overrides; otherwise
-detected from the environment and process ancestry — an undetectable caller is
-an error, never a fallback to a different harness). The harness owns its
-authentication and billing.
+supersedes answer has to name the older note's claim that no longer holds, and
+one that cannot is neither: a supersedes link demotes its target in ranking and
+marks it resolved, so an edge between two notes that are both still true takes a
+live memory out of every later session. A reversed verdict — the older note is
+the current one and the newer note restates an obsolete claim — is refused
+rather than written, because a supersedes link only ever points from the newer
+note to the older one. Runs through the configured CLI harness of the calling
+session (--source overrides; otherwise detected from the environment and process
+ancestry — an undetectable caller is an error, never a fallback to a different
+harness). The harness owns its authentication and billing.
+
+Withdrawing an edge (--reassess --apply) writes the unsupersede history row and
+leaves the resolution it may have caused in place: follow it with
+"ghost resolve <project> --reassess" to clear a resolved_at that only a
+withdrawn edge justified.
 `
+
+// supersedeReassessReport renders the --reassess result: the per-outcome counts,
+// then one line per edge the pass withdrew or would withdraw. The list is the
+// point of the pass — a repair whose edges cannot be read is a repair nobody
+// can decide about — and each line names the rule that withdrew the edge, which
+// is what separates a wrong edge from a genuinely obsolete one.
+func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls int) string {
+	verb := "would withdraw"
+	if apply {
+		verb = "withdrew"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d causes, %d reversed, %d UNKNOWN, %s %d (%d classify call(s))\n",
+		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Causes, res.Reversed,
+		res.Unclassified, verb, res.Withdrawn, calls)
+	short := func(id string) string {
+		if len(id) > 8 {
+			return id[:8]
+		}
+		return id
+	}
+	for _, w := range withdrawn {
+		marker := "would withdraw"
+		if w.Written {
+			marker = "withdrew   "
+		}
+		fmt.Fprintf(&b, "  %s  %s -> %s  %s\n", marker, short(w.NewerID), short(w.OlderID), w.Reason)
+	}
+	if !apply && len(withdrawn) > 0 {
+		b.WriteString("\nRe-run with --apply to withdraw these edges.")
+	}
+	return b.String()
+}
 
 // supersedeReport renders the pass's per-outcome report: the one-line summary
 // followed by the deterministic veto's count. A pass that declined work it did
@@ -1356,7 +1404,7 @@ func supersedeReport(projectName string, res supersede.Result, verb string, call
 // older note states a rule the newer note never retires is vetoed for free
 // (#686). See docs/benchmarks.md Phase 3.
 func runSupersede() {
-	projectName, source, apply, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
+	projectName, source, apply, reassess, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
 		os.Exit(1)
@@ -1385,6 +1433,17 @@ func runSupersede() {
 	}
 	cls := supersede.NewRelationClassifier(provider)
 	cls.SetLogger(logger)
+
+	if reassess {
+		res, withdrawn, err := supersede.Reassess(ctx, store, cls, projectID, apply, logger)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls()))
+		return
+	}
+
 	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

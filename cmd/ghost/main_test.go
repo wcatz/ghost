@@ -1439,10 +1439,63 @@ func TestSupersedeReport(t *testing.T) {
 	}
 }
 
+// TestSupersedeReassessReport: the repair pass's report is per outcome, and its
+// list is the point of the pass — so each line has to name the edge AND the rule
+// that withdrew it, and a dry run must never be readable as a change that
+// happened.
+func TestSupersedeReassessReport(t *testing.T) {
+	edges := []supersede.WithdrawnEdge{
+		{NewerID: "abcdef0123456789", OlderID: "9876543210fedcba", Reason: "vetoed: older note states a rule (never) the newer note does not retire"},
+		{NewerID: "1122334455667788", OlderID: "8877665544332211", Reason: "neither: both notes are still true"},
+	}
+	dry := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Unclassified: 1, Withdrawn: 0,
+	}, false, edges, 2)
+	for _, want := range []string{
+		"proj: 5 live supersedes edge(s), 1 not judged, 1 vetoed, 1 still supersedes, 0 causes, 0 reversed, 1 UNKNOWN, would withdraw 0 (2 classify call(s))",
+		"  would withdraw  abcdef01 -> 98765432",
+		"vetoed: older note states a rule (never) the newer note does not retire",
+		"neither: both notes are still true",
+		"Re-run with --apply to withdraw these edges.",
+	} {
+		if !strings.Contains(dry, want) {
+			t.Errorf("dry report missing %q:\n%s", want, dry)
+		}
+	}
+	if strings.Contains(dry, "  withdrew ") {
+		t.Errorf("a dry run reported a withdrawal as done:\n%s", dry)
+	}
+
+	// Under --apply the list says so per edge, and the count reports the rows
+	// actually invalidated — which is smaller than the list whenever a concurrent
+	// pass withdrew an edge first.
+	applied := []supersede.WithdrawnEdge{
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Written: true},
+		{NewerID: edges[1].NewerID, OlderID: edges[1].OlderID, Reason: edges[1].Reason},
+	}
+	apply := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 2, Vetoed: 1, Withdrawn: 1,
+	}, true, applied, 1)
+	if !strings.Contains(apply, "withdrew 1 (1 classify call(s))") {
+		t.Errorf("apply report does not count the withdrawal:\n%s", apply)
+	}
+	if !strings.Contains(apply, "  withdrew     abcdef01 -> 98765432") {
+		t.Errorf("apply report does not mark the edge it wrote:\n%s", apply)
+	}
+	if !strings.Contains(apply, "  would withdraw  11223344 -> 88776655") {
+		t.Errorf("apply report does not mark the edge a concurrent pass withdrew first:\n%s", apply)
+	}
+	if strings.Contains(apply, "Re-run with --apply") {
+		t.Errorf("an applied report must not offer to apply again:\n%s", apply)
+	}
+}
+
 // TestParseSupersedeArgs pins `ghost supersede` argv parsing: same shapes as
 // resolve except the project is last-wins across positionals (historical
 // behavior) and --threshold exists in both value forms, defaulting to 0.80
-// when the value does not parse.
+// when the value does not parse. --reassess is resolve's repair flag with the
+// same meaning (#686): the edges are already in the graph, so --apply withdraws
+// them instead of writing new ones.
 func TestParseSupersedeArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -1450,29 +1503,35 @@ func TestParseSupersedeArgs(t *testing.T) {
 		project   string
 		source    string
 		apply     bool
+		reassess  bool
 		threshold float32
 	}{
-		{"positional", []string{"myproj"}, "myproj", "", false, 0.80},
-		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, 0.80},
-		{"threshold separate value", []string{"myproj", "--threshold", "0.5"}, "myproj", "", false, 0.5},
-		{"threshold equals value", []string{"myproj", "--threshold=0.25"}, "myproj", "", false, 0.25},
-		{"threshold bad value keeps default", []string{"myproj", "--threshold", "abc"}, "myproj", "", false, 0.80},
-		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, 0.80},
-		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, 0.80},
-		{"last positional wins", []string{"a", "b"}, "b", "", false, 0.80},
-		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, 0.80},
-		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, 0.80},
-		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, 0.80},
-		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, 0.80},
+		{"positional", []string{"myproj"}, "myproj", "", false, false, 0.80},
+		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, false, 0.80},
+		{"reassess dry run", []string{"myproj", "--reassess"}, "myproj", "", false, true, 0.80},
+		{"reassess with apply", []string{"myproj", "--reassess", "--apply"}, "myproj", "", true, true, 0.80},
+		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true, 0.80},
+		{"threshold separate value", []string{"myproj", "--threshold", "0.5"}, "myproj", "", false, false, 0.5},
+		{"threshold equals value", []string{"myproj", "--threshold=0.25"}, "myproj", "", false, false, 0.25},
+		{"threshold bad value keeps default", []string{"myproj", "--threshold", "abc"}, "myproj", "", false, false, 0.80},
+		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false, 0.80},
+		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false, 0.80},
+		{"last positional wins", []string{"a", "b"}, "b", "", false, false, 0.80},
+		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false, 0.80},
+		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false, 0.80},
+		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false, 0.80},
+		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, 0.80},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			project, source, apply, threshold, err := parseSupersedeArgs(tc.args)
+			project, source, apply, reassess, threshold, err := parseSupersedeArgs(tc.args)
 			if err != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", tc.args, err)
 			}
-			if project != tc.project || source != tc.source || apply != tc.apply || threshold != tc.threshold {
-				t.Errorf("parseSupersedeArgs(%v) = (%q, %q, %v, %v), want (%q, %q, %v, %v)",
-					tc.args, project, source, apply, threshold, tc.project, tc.source, tc.apply, tc.threshold)
+			if project != tc.project || source != tc.source || apply != tc.apply ||
+				reassess != tc.reassess || threshold != tc.threshold {
+				t.Errorf("parseSupersedeArgs(%v) = (%q, %q, %v, %v, %v), want (%q, %q, %v, %v, %v)",
+					tc.args, project, source, apply, reassess, threshold,
+					tc.project, tc.source, tc.apply, tc.reassess, tc.threshold)
 			}
 		})
 	}
@@ -1487,7 +1546,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"threshold missing value", []string{"myproj", "--threshold"}, `unknown flag "--threshold"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, _, err := parseSupersedeArgs(tc.args)
+			_, _, _, _, _, err := parseSupersedeArgs(tc.args)
 			if err == nil {
 				t.Fatalf("parseSupersedeArgs(%v) must fail", tc.args)
 			}
@@ -1554,9 +1613,12 @@ func TestDashProjectLifecycleRoundTrip(t *testing.T) {
 			}
 			got, apply = project, a
 		case "supersede":
-			project, _, a, _, perr := parseSupersedeArgs(args)
+			project, _, a, reassess, _, perr := parseSupersedeArgs(args)
 			if perr != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", ph.args, perr)
+			}
+			if reassess {
+				t.Errorf("the supersede phase must never emit --reassess (phase argv: %v)", ph.args)
 			}
 			got, apply = project, a
 		default:
