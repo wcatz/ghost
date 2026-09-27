@@ -33,6 +33,12 @@ type pipeline struct {
 	// trace rather than here: a note true at stage 5 is not always true of the
 	// answer, and one sentence cannot serve both readers.
 	contradictPairs [][2]string
+	// windowDisclosure is the note explaining a window that is the pipeline's
+	// ceiling rather than the caller's. It is held here because it is set before
+	// the stages run and belongs to the stage that acts on it: stage 8 is what
+	// enforces whatever byte bound the caller gave, so its record is where a
+	// reader looking at the trace will find it.
+	windowDisclosure string
 	// retrievalFailures are the retrieval's own statements — a leg that errored,
 	// a link lookup that failed. They are facts about the retrieval rather than
 	// about the block, so they lead the notes ahead of the conflict chatter: a
@@ -368,7 +374,11 @@ func runBudget(p *pipeline) {
 	}
 
 	p.rows, p.items = rows, items
-	p.trace.record(stageBudget, in, len(rows), dropped, false)
+	notes := []string(nil)
+	if p.windowDisclosure != "" {
+		notes = append(notes, p.windowDisclosure)
+	}
+	p.trace.record(stageBudget, in, len(rows), dropped, false, notes...)
 }
 
 // runRender is stage 9: the shared item renderer. Each surface keeps its own

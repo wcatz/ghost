@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -59,8 +60,11 @@ type Slice struct {
 // Slices are the per-bucket caps, so search applies one limit across project
 // and `_global` while injection applies independent caps. A budget that bounds
 // neither rows nor bytes is rejected: an unbounded block is not a request, it is
-// an omission. A MaxBytes cap alone is bounded and is honoured — the retrieval
-// window falls back to its documented ceiling and stage 8 still trims by bytes.
+// an omission. A MaxBytes cap alone is bounded, so it is honoured — the
+// retrieval window falls back to its documented ceiling and stage 8 still trims.
+// That trim is against item content: the response-fit post-pass that bounds a
+// complete rendered response is not in this pipeline yet, so a byte cap is not yet
+// a cap on the response.
 type Budget struct {
 	MaxItems      int // 0 = unbounded total
 	MaxBytes      int // complete response bytes; 0 = unbounded total
@@ -177,13 +181,27 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 		dropped:   map[string]string{},
 	}
 	// A window that had to fall back to the ceiling is disclosed, because the
-	// block's size is then decided by a number the caller did not state. The
-	// request still names what bounds the block — its bytes — so the note says
-	// both, and a reader is not left taking the window for the block's size.
+	// block's size is then decided by a number the caller did not state. The note
+	// also says what does bound the block, and that half is derived from the
+	// request rather than asserted: a total byte cap bounds every row, while a
+	// per-slice byte cap bounds only the buckets it names — leaving a row in a
+	// bucket with no slice bounded by nothing but this window.
 	if windowIsACeiling(req) {
-		p.retrievalFailures = append(p.retrievalFailures, formatNote(
-			"retrieval_window_capped: this budget states no item bound, so the retrieval window is the documented ceiling of %d rows; the block's own size is bounded by the byte cap, not by a row count",
-			maxRetrievalWindow))
+		bound := "a row in a bucket with no slice is bounded by nothing but this window"
+		if req.Budget.MaxBytes > 0 {
+			bound = "the block's own size is bounded by the byte cap, not by a row count"
+		} else if len(req.Budget.Slices) > 0 {
+			bound = "the block is bounded only by the byte caps on the slices you named, and " + bound
+		}
+		note := formatNote(
+			"retrieval_window_capped: this budget states no item bound, so the retrieval window is the documented ceiling of %d rows; %s",
+			maxRetrievalWindow, bound)
+		p.retrievalFailures = append(p.retrievalFailures, note)
+		// The trace gets it too. Trace.Limit reports the window, so a consumer
+		// building a projection from the trace — explain, in the next PR — would
+		// otherwise read a 100 with nothing beside it and no way to tell it from a
+		// caller's 100.
+		p.windowDisclosure = note
 	}
 
 	// A leg that errored is named before the stages run, so every later
@@ -262,7 +280,10 @@ func itemBound(req Request) int {
 // window does, because a disclosure about a window that disagrees with the window
 // is worse than no disclosure: the two would have to be kept in step by hand.
 func windowIsACeiling(req Request) bool {
-	return itemBound(req) <= 0 && retrievalWindow(req) >= maxRetrievalWindow
+	// ==, not >=: the fallback sets the window to exactly the ceiling, and a
+	// looser comparison would let a future ceiling of twice the size keep the note
+	// claiming the old number — the drift this function exists to prevent.
+	return itemBound(req) <= 0 && retrievalWindow(req) == maxRetrievalWindow
 }
 
 // RetrievalWindow is the window Run will ask the retriever for on this request.
@@ -286,9 +307,10 @@ func retrievalWindow(req Request) int {
 	total := itemBound(req)
 	if total <= 0 {
 		// No item bound anywhere, so nothing sizes a window from the budget.
-		// The ceiling is the honest default: stage 8 still trims by bytes or by
-		// the slice clamp, so the caller gets what it asked for, and a fetch
-		// limit of 0 would be refused by the store before any of that.
+		// The ceiling is the honest default: stage 8 still trims by whatever
+		// bytes the request bounds, so the caller gets a block its own limits
+		// decide, and a fetch limit of 0 would be refused by the store before
+		// any of that.
 		total = maxRetrievalWindow
 	}
 	if req.Category != "" {
@@ -356,6 +378,10 @@ func validateRequest(req Request) error {
 			return fmt.Errorf("assemble: slice %q cannot have a negative bound", s.Bucket)
 		}
 	}
+	if buckets := sliceBuckets(req.Budget.Slices); len(buckets) > 0 {
+		return fmt.Errorf("assemble: two slices name the same bucket (%s): itemBound would sum both caps "+
+			"while stage 8 honours only the first, so the window would not be the block's", strings.Join(buckets, ", "))
+	}
 	if req.Budget.MaxItems == 0 && req.Budget.MaxBytes == 0 && !anySliceBound(req.Budget.Slices) {
 		return errors.New("assemble: this budget states no bound on the block: set MaxItems or MaxBytes, or give a slice an item or byte cap — a ClampBytes clamp alone bounds neither, since a clamped item is shorter")
 	}
@@ -367,6 +393,28 @@ func validateRequest(req Request) error {
 		return errors.New("assemble: passive retrieval (an empty query) is not served yet; it arrives with the session-start migration")
 	}
 	return nil
+}
+
+// sliceBuckets lists the bucket names that appear more than once. The two halves
+// of a slice budget disagree about a repeat: the window sums every cap, and
+// sliceFor honours the first slice for a bucket, so the window is the wider of the
+// two and the disagreement over-fetches rather than dropping a row. A caller who
+// meant one cap per bucket has written something else, and it is cheap to refuse.
+func sliceBuckets(slices []Slice) []string {
+	seen := make(map[string]bool, len(slices))
+	dupes := make(map[string]bool, len(slices))
+	var order []string
+	for _, s := range slices {
+		if !seen[s.Bucket] {
+			seen[s.Bucket] = true
+			continue
+		}
+		if !dupes[s.Bucket] {
+			dupes[s.Bucket] = true
+			order = append(order, s.Bucket)
+		}
+	}
+	return order
 }
 
 // anySliceBound reports whether a slice list bounds the block at all. ClampBytes

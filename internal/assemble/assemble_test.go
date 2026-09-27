@@ -1515,7 +1515,7 @@ func TestABudgetWithoutAnItemBoundStillGetsAWindow(t *testing.T) {
 	// beyond the window (the retriever hands back the window plus its discarded
 	// tail). The note has to say what actually bounds the block, or a reader
 	// would take the ceiling for the block's size.
-	if !hasNote(res.Notes, "byte") {
+	if !hasNote(res.Notes, "byte cap") {
 		t.Errorf("the note does not say what bounds the block: %v", res.Notes)
 	}
 }
@@ -1609,5 +1609,82 @@ func TestTheCeilingNoteOnlyFiresWhenTheWindowFellBack(t *testing.T) {
 					"invented, and this budget states one. notes: %v", got, tc.wantTheNote, res.Notes)
 			}
 		})
+	}
+}
+
+// TestTheCeilingNoteDoesNotClaimATotalByteCapItDoesNotHave: stage 8's per-bucket
+// loop leaves a row in a bucket with no matching slice unbounded in bytes, so a
+// budget whose only byte bound is a slice cap does not bound the whole block. The
+// note is a disclosure about an invented window, and a disclosure that names a
+// bound the request does not have is the failure this PR keeps fixing in its own
+// text.
+func TestTheCeilingNoteDoesNotClaimATotalByteCapItDoesNotHave(t *testing.T) {
+	req := baseRequest()
+	req.Budget = Budget{Slices: []Slice{{Bucket: "proj", MaxBytes: 10}}}
+
+	res := run(t, &fakeRetriever{set: setOf(
+		candidate("P1", "proj", "fact", "project row", 0.5),
+		candidate("G1", "_global", "fact", "global row", 0.4),
+	)}, req)
+
+	var note string
+	for _, n := range res.Notes {
+		if hasNote([]string{n}, "retrieval_window_capped") {
+			note = n
+		}
+	}
+	if note == "" {
+		t.Fatalf("no disclosure on a budget with no item bound: %v", res.Notes)
+	}
+	if hasNote([]string{note}, "bounded by the byte cap, not by a row count") {
+		t.Errorf("the note claims a total byte cap the request does not have — a bucket with no "+
+			"slice is bounded by nothing: %q", note)
+	}
+	if !hasNote([]string{note}, "no slice") {
+		t.Errorf("the note does not say that an unsliced bucket is unbounded: %q", note)
+	}
+}
+
+// TestTheTraceExplainsItsOwnWindow: the trace is what the explain projection
+// reads, and Trace.Limit now reports the window rather than the caller's budget.
+// When that window is the pipeline's choice, the trace has to say so — a consumer
+// reading "limit 100" with nothing beside it cannot tell it from a caller's 100.
+func TestTheTraceExplainsItsOwnWindow(t *testing.T) {
+	req := baseRequest()
+	req.Budget = Budget{MaxBytes: 40_000}
+
+	res := run(t, &fakeRetriever{set: setOf(candidate("A1", "proj", "fact", "row", 0.5))}, req)
+
+	if res.Trace.Limit != maxRetrievalWindow {
+		t.Fatalf("precondition: the trace should report the fallback window, got %d", res.Trace.Limit)
+	}
+	explained := false
+	for _, st := range res.Trace.Stages {
+		for _, n := range st.Notes {
+			if hasNote([]string{n}, "retrieval_window_capped") {
+				explained = true
+			}
+		}
+	}
+	if !explained {
+		t.Errorf("no stage record carries the disclosure, so the trace cannot explain the %d it "+
+			"reports: %+v", res.Trace.Limit, res.Trace.Stages)
+	}
+}
+
+// TestADuplicateSliceBucketIsRefused: itemBound sums the per-slice item caps while
+// sliceFor honours only the first slice for a bucket, so two slices naming the same
+// bucket make the window wider than the block can ever be. Over-fetch rather than a
+// membership bug, and cheap to refuse: a repeated bucket name is an unambiguous
+// caller error whose two halves disagree about which slice applies.
+func TestADuplicateSliceBucketIsRefused(t *testing.T) {
+	req := baseRequest()
+	req.Budget = Budget{Slices: []Slice{
+		{Bucket: "proj", MaxItems: 50},
+		{Bucket: "proj", MaxItems: 50},
+	}}
+
+	if _, err := Run(context.Background(), &fakeRetriever{set: setOf()}, req); err == nil {
+		t.Error("two slices for one bucket were accepted, so the window is sized by their sum while stage 8 honours the first")
 	}
 }

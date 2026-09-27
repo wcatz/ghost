@@ -175,7 +175,10 @@ const (
 )
 
 // boundNotes keeps notes within the per-note and total bounds, in order, so the
-// first thing that happened is the thing that survives.
+// first thing that happened is the thing that survives. Order is therefore load-
+// bearing, not cosmetic: a caller who sets a total below its own first note gets an
+// empty list rather than a truncated one, because a partial note is worse than
+// none. Put the sentence that qualifies the result at the front for that reason.
 func boundNotes(notes []string, perNote, total int) []string {
 	if perNote <= 0 {
 		perNote = defaultMaxNoteBytes

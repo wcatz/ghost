@@ -12,9 +12,14 @@ import (
 // explains.
 type Trace struct {
 	ProjectID, Query string
-	Limit            int
-	VectorAvailable  bool
-	Notes            []string
+	// Limit is the window Run asked the retriever for, not the caller's budget:
+	// the caller's item bound widened for a category predicate, or the documented
+	// ceiling when the budget states no item bound at all. The stage 8 record
+	// carries a note when that ceiling was the pipeline's choice, so a projection
+	// built from this trace can tell an invented window from a requested one.
+	Limit           int
+	VectorAvailable bool
+	Notes           []string
 	// Mode is the storage-level project mode retrieval ran in.
 	Mode      string
 	Legs      map[string]memory.LegStatus
