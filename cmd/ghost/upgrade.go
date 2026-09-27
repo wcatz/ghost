@@ -114,6 +114,20 @@ func parseUpgradeArgs(args []string) (upgradeOptions, error) {
 // read as a prerelease either: nothing about "dev" says it is a candidate
 // release. The archive digest still has to agree before anything is installed. An
 // unorderable version identical to the release is still the one installed.
+//
+// One ORDERABLE shape is worth naming, because it reads newer than it is. A
+// local `make build` stamps the binary with `git describe`, so five commits past
+// v0.32.0 it reports "0.32.0-5-gabc1234" and a dirty tree adds "-dirty". That is
+// a legal prerelease, and semver ranks every prerelease BELOW its release, so
+// the release compares as the NEWER of the two and the guard proceeds: the run
+// installs v0.32.0 over a build five commits ahead of it, which is the shape
+// this function cannot see. Neither opt-in prevents it, and that is arithmetic
+// rather than an oversight — --allow-prerelease asks about the RELEASE, which
+// is final, and --allow-downgrade is only consulted once the release compares as
+// older. The remedy is not to run this on a describe build. Reading
+// "-N-g<sha>" as newer than its base would fix the direction at the cost of
+// inventing an ordering semver does not define, and a dirty tree would still
+// have no count to compare.
 func decideUpgrade(running, latest string, opts upgradeOptions) upgradeOutcome {
 	if strings.TrimPrefix(running, "v") == strings.TrimPrefix(latest, "v") {
 		return upgradeCurrent

@@ -39,6 +39,24 @@ func TestCompareVersions(t *testing.T) {
 		{name: "negative component is unparseable", a: "0.-1.0", b: "0.32.0", wantErr: true},
 		{name: "nightly tag is unparseable", a: "nightly", b: "0.32.0", wantErr: true},
 		{name: "surrounding space is unparseable", a: " 0.32.0", b: "0.32.0", wantErr: true},
+		// semver: "Numeric identifiers MUST NOT include leading zeroes." A
+		// component that does is not a version this package can order, and
+		// reading it as 1.2.3 would let "01.2.3" pass for a release that
+		// predates the one a tag names.
+		{name: "leading zero in a component is unparseable", a: "01.2.3", b: "0.32.0", wantErr: true},
+		{name: "leading zero in the minor is unparseable", a: "0.02.3", b: "0.32.0", wantErr: true},
+		{name: "leading zero in the patch is unparseable", a: "0.32.00", b: "0.32.0", wantErr: true},
+		// A zero-padded PRERELEASE identifier is a different case and stays
+		// parseable: semver's numeric production is `0 | [1-9][0-9]*`, so "00"
+		// matches the alphanumeric production instead and is legal. What
+		// changes is its RANK — it is no longer a number, and a numeric
+		// identifier always ranks below an alphanumeric one, so "0" now sorts
+		// before "00" where reading both as numbers said they were equal.
+		{name: "a zero-padded prerelease identifier is alphanumeric", a: "1.0.0-0", b: "1.0.0-00", want: -1},
+		// A single zero is the one leading zero semver allows, and a prerelease
+		// that is only zeros is still a numeric identifier.
+		{name: "a zero component is a number", a: "0.0.0", b: "0.0.0", want: 0},
+		{name: "zero prerelease identifier is numeric", a: "1.0.0-0", b: "1.0.0-alpha", want: -1},
 		// v0.3.0-working is a tag this repository has really used, so a
 		// word-shaped prerelease has to parse rather than look like garbage.
 		{name: "a word prerelease sorts before its release", a: "0.3.0-working", b: "0.3.0", want: -1},
