@@ -433,6 +433,96 @@ func TestMigrateRepairsPreExistingCacheOrphans(t *testing.T) {
 	}
 }
 
+// TestMigrateRepairsAnOrphanedEvidenceRow: the evidence table is in the
+// derived-cache whitelist, and this is the case that puts it there.
+//
+// An evidence row whose memory is gone is debris by the table's OWN definition —
+// the foreign key cascades, so a live store cannot hold one, and this table says
+// in its schema comment that evidence without its memory means nothing. Left
+// unwhitelisted it would be treated as user content: every later migration would
+// ABORT on it, with copy-pasteable DELETEs, and a build one version ahead of the
+// delete would refuse to open the store at all. That is the failure the whitelist
+// exists to prevent, and the evidence rows it gives up are rows that a correct
+// delete would already have removed.
+//
+// The store must be USABLE afterwards, not merely open: the repair runs before the
+// migration steps, so a table left broken by it would fail the first save.
+func TestMigrateRepairsAnOrphanedEvidenceRow(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	// A bare DSN, deliberately: foreign_keys is off here, which is exactly how a
+	// row becomes an orphan at all.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	for _, s := range []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v18-orphan', 'p1')`,
+		`INSERT INTO memories (id, project_id, content, source) VALUES ('m1', 'p1', 'a live fact', 'mcp')`,
+		`INSERT INTO memory_provenance (memory_id, kind, agent, observed_at)
+		 VALUES ('m1', 'observed', 'claude-code', datetime('now'))`,
+		`INSERT INTO memory_provenance (memory_id, kind, agent, observed_at)
+		 VALUES ('deleted-elsewhere', 'observed', 'codex', datetime('now'))`,
+		`PRAGMA user_version = 17`,
+	} {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed (%s): %v", s, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the seeding handle: %v", err)
+	}
+
+	// The orphan is provably there before the open, or the test proves nothing.
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	var orphans int
+	if err := raw.QueryRow(`SELECT count(*) FROM memory_provenance WHERE memory_id = 'deleted-elsewhere'`).Scan(&orphans); err != nil {
+		t.Fatalf("count the orphan: %v", err)
+	}
+	if orphans != 1 {
+		t.Fatalf("the fixture has %d orphan row(s), want 1", orphans)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	opened, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB refused a store whose only orphan is derived debris: %v", err)
+	}
+	defer opened.Close() //nolint:errcheck
+	if v := schemaVersionOf(t, opened); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+	if err := opened.QueryRow(`SELECT count(*) FROM memory_provenance WHERE memory_id = 'deleted-elsewhere'`).Scan(&orphans); err != nil {
+		t.Fatalf("count the orphan after the repair: %v", err)
+	}
+	if orphans != 0 {
+		t.Errorf("%d orphaned evidence row(s) survived the repair", orphans)
+	}
+	// The live row's evidence is NOT collateral: the repair deletes rows, not
+	// evidence.
+	var kept int
+	if err := opened.QueryRow(`SELECT count(*) FROM memory_provenance WHERE memory_id = 'm1' AND agent = 'claude-code'`).Scan(&kept); err != nil {
+		t.Fatalf("count the surviving evidence: %v", err)
+	}
+	if kept != 1 {
+		t.Errorf("the live memory's evidence has %d row(s), want its 1", kept)
+	}
+	// And the store still writes, which is what "not bricked" has to mean for a
+	// table the repair just deleted from.
+	if _, err := opened.Exec(
+		`INSERT INTO memory_provenance (memory_id, kind, agent, observed_at) VALUES ('m1', 'observed', 'goose', datetime('now'))`,
+	); err != nil {
+		t.Errorf("the store cannot write evidence after the repair: %v", err)
+	}
+}
+
 // TestMigrateBlocksUserContentOrphans: an orphan in a user-content table (a
 // memories row whose project is gone) must NOT be auto-deleted — migrate fails
 // with copy-pasteable DELETE statements naming the offending rows, so the

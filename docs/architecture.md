@@ -330,7 +330,8 @@ The main schema tables are:
 | `ghost_state` | Per-project learned context and interaction state |
 | `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
 | `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`). Its `memory_id` deliberately has no foreign key |
-| `memory_provenance` | Append-only per-memory EVIDENCE records (schema v18, [#673](https://github.com/wcatz/ghost/issues/673)) — SEVERAL rows per memory, one per observation, each naming the agent, session, reference and confidence that supported it, with `observed_at`/`verified_at`. A different question from the change log, and the name `memory_history` deliberately did not take. Its `memory_id` cascades |
+| `memory_provenance` | Append-only per-memory EVIDENCE records (schema v18, [#673](https://github.com/wcatz/ghost/issues/673)) — SEVERAL rows per memory, one per observation, each naming the agent, session, reference and confidence that supported it, with `observed_at`/`verified_at`, and `carried_from` when a consolidation carried the record off the memory it was consolidated from. A different question from the change log, and the name `memory_history` deliberately did not take. Its `memory_id` cascades, and the table is in the migration's derived-row whitelist so an orphan cannot brick a newer build |
+| `memory_snapshot_evidence` | The evidence a reflection snapshot carries, so a restore brings the support back with the row (schema v18). Pruned with the snapshots themselves |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
@@ -637,8 +638,17 @@ convention: a kind no reader knows is a kind no reader can filter.
 |---|---|---|
 | `Create`, `Upsert` insert | `observed` | the new row |
 | `Upsert` fold, including `FoldOnly` | `observed` | the **surviving** memory — see below |
+| `RecordDecision` | `observed` | the companion memory, empty of provenance (the tool reports none) |
+| `ReplaceNonManual`, fresh insert | a **carry** of its sources' records | the row the rewrite or merge becomes — see below |
 | `ImportMemory` | the artifact's own records, then `imported` | the imported row |
+| `RestoreSnapshot` | the snapshot's records, verbatim | a re-created row — see below |
 | `migrateV18` | `legacy` | a memory that already recorded a provenance value |
+
+Two writers deliberately append nothing, and both are cases where a record would be
+a claim nobody made. `ReplaceNonManual`'s **reuse** branch updates a row in place, so
+that row's evidence never left it. And the *carried* records keep the kind they
+were: the observation really was made, by that agent, about that content, at that
+time; what it was not made about is the wording now on the row.
 
 **A fold is the case the table exists for.** A near-duplicate save used to be a
 discard: the incoming wording became a linked copy and the agent, session and
@@ -646,6 +656,43 @@ reference that reported it went with it. The fold now appends the second report
 to the row the corpus actually kept. `FoldOnly` — the promotion path, which stores
 no row of its own — needs this more, not less: without it the report would leave
 no trace at all.
+
+**A consolidation carries, because the foreign key would otherwise forget.** A
+rewrite or a merge mints a new id, and the evidence of the row it replaces dies with
+it — so every consolidated memory would read "no recorded evidence" from then on,
+on the one write path that runs unattended over the whole corpus. The new row
+therefore gets a verbatim copy of each source's records, with `carried_from` naming
+the memory each came from. A merge names every one of its sources, so two agents
+agreeing on one fact survives the merge as two records rather than one.
+
+`carried_from` is the honest half. The copy keeps the kind, the agent, the session,
+the reference, the confidence and both stamps — a consolidation is not an
+observation and gets to invent none of them — and the pointer says what it is: an
+agent reported *something this was consolidated from*, not this wording. It is also
+the way back, because the id it names is gone while the change log kept that id's
+whole past.
+
+The carry is **one statement for the whole set** (an engine-dependent row order
+would put a diff between two exports of an unchanged corpus on the card, so it
+carries an `ORDER BY memory_id, rowid`), and it runs *before* the delete that
+removes the sources — that is the ordering constraint the whole feature rests on,
+and `TestConsolidationCarriesEvidenceToTheRowThatSurvives` fails if the two blocks
+swap.
+
+**A restore brings the support back, because the snapshot carries it.** The same
+cascade that takes a rewritten row's evidence takes it on restore, and a restore
+that returned the text alone would hand back a memory that reads as never observed
+in a database that still had the evidence to return. `memory_snapshot_evidence`
+holds it beside the snapshot row — a table rather than a column, because a memory
+has several records — and is pruned with the snapshots it belongs to, so it cannot
+outlive what it describes.
+
+Only the **re-created** rows are restored. A row the replace never deleted is
+updated in place, and the snapshot holds an *older* copy of its evidence: restoring
+that too would replace a row's own support with what it held at snapshot time, and
+silently drop every corroboration recorded since. A pre-v18 snapshot carries no
+evidence, and a pre-v13 one recorded no `memory_id` to attribute it to, so a row
+restored from either comes back with none — which is the truth.
 
 **Nothing is invented.** Every column except `kind` is NULL when the host did not
 report it, and `nullIfEmpty` is what keeps "" from being stored in place of an
@@ -711,8 +758,12 @@ under the memory they support, because a bare evidence line cannot be attributed
 An import is deliberately **not** a fixed point: it keeps the records the artifact
 carried and adds one of its own for the arrival, because a destination that
 adopted the source's records verbatim would say nothing about how the fact reached
-*it*. The Obsidian vault is a human-readable mirror, not a transfer format, and its
-front matter is about the memory.
+*it*. One field is deliberately NOT carried: `carried_from`, which names a memory
+that was deleted — the reason the record was carried — so it resolves against
+nothing on the far side and the change log that could explain it is not in the
+artifact either. The destination holds those records as its own direct support,
+which is what they are. The Obsidian vault is a human-readable mirror, not a
+transfer format, and its front matter is about the memory.
 
 ### Memory lifecycle
 

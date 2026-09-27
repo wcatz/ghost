@@ -411,6 +411,87 @@ func TestEvidenceCountsReportWhatSupportsAMemory(t *testing.T) {
 	}
 }
 
+// TestCarryIsVerbatimAndNamesItsSource: one statement, every field, and the
+// pointer that says the record is inherited rather than observed here. A carry
+// that rewrote a field would be inventing evidence — a consolidation is not an
+// observation, and it cannot know what a reporting agent would have said about
+// wording it has not seen.
+func TestCarryIsVerbatimAndNamesItsSource(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	source, _, _, err := s.UpsertWithProvenance(ctx, testProject, "gotcha",
+		"the vault seal is read-only once written", "mcp", 0.6, nil,
+		Provenance{Agent: "claude-code", SessionID: "ses_a", SourceRef: "docs/vault.md", Confidence: f64Ptr(0.8)})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`UPDATE memory_provenance SET verified_at = datetime('now') WHERE memory_id = ?`, source,
+	); err != nil {
+		t.Fatalf("stamp a verification: %v", err)
+	}
+	before, err := s.MemoryProvenance(ctx, source)
+	if err != nil || len(before) != 1 {
+		t.Fatalf("the fixture needs one evidence record: %d %v", len(before), err)
+	}
+
+	const carried = "the vault seal is read-only once written, and cannot be rewritten"
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "gotcha", Content: carried, Importance: 0.6,
+		ReplacesIDs: []string{source},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	after, err := s.MemoryProvenance(ctx, carriedIDOf(t, s, carried))
+	if err != nil || len(after) != 1 {
+		t.Fatalf("the carried row has %d record(s), want 1: %v", len(after), evidenceKinds(t, after))
+	}
+	// Every field the source held, field by field rather than through the kind, so
+	// a carry that kept the kind and dropped the session still fails.
+	want, got := before[0], after[0]
+	if got.Kind != want.Kind || got.Agent != want.Agent || got.SessionID != want.SessionID ||
+		got.SourceRef != want.SourceRef || got.CarriedFrom != source {
+		t.Errorf("carried record = %+v, want the source's fields and carried_from=%s", got, source)
+	}
+	if (got.Confidence == nil) != (want.Confidence == nil) ||
+		(want.Confidence != nil && *got.Confidence != *want.Confidence) {
+		t.Errorf("carried confidence = %v, want %v", derefF(got.Confidence), derefF(want.Confidence))
+	}
+	if (got.ObservedAt == nil) != (want.ObservedAt == nil) ||
+		(want.ObservedAt != nil && *got.ObservedAt != *want.ObservedAt) {
+		t.Errorf("carried observed_at = %v, want the source's own %v", got.ObservedAt, want.ObservedAt)
+	}
+	if (got.VerifiedAt == nil) != (want.VerifiedAt == nil) ||
+		(want.VerifiedAt != nil && *got.VerifiedAt != *want.VerifiedAt) {
+		t.Errorf("carried verified_at = %v, want the source's own %v", got.VerifiedAt, want.VerifiedAt)
+	}
+	// A new id: the carry must not have moved the record, only copied it.
+	if got.ID == want.ID {
+		t.Error("the carried record kept the source's own id; a carry copies, it does not move")
+	}
+	if got.MemoryID == source {
+		t.Error("the carried record is still attached to the source memory")
+	}
+}
+
+// carriedIDOf is the id of the one live memory holding content.
+func carriedIDOf(t *testing.T, s *Store, content string) string {
+	t.Helper()
+	rows, err := s.GetAll(context.Background(), testProject, 1000)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	for _, m := range rows {
+		if m.Content == content {
+			return m.ID
+		}
+	}
+	t.Fatalf("no live memory holds %q", content)
+	return ""
+}
+
 // TestMemoryProvenanceReadsOldestFirst: the evidence table is a log of what
 // supported a memory over time, and "read forwards" is the only order in which
 // the sequence means anything. observed_at is second-precision, so the order is

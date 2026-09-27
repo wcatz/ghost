@@ -430,9 +430,55 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
     source_ref  TEXT,
     confidence  REAL,
     observed_at TEXT,
-    verified_at TEXT
+    verified_at TEXT,
+    -- The memory this record was INHERITED from, and empty for a record that
+    -- observed this row directly.
+    --
+    -- A consolidation rewrite or merge mints a new id, and the foreign key below
+    -- takes the source's evidence with it, so a carried row is a verbatim copy of
+    -- its source's row and this is what says so. The copy is honest — the
+    -- observation really was made, by that agent, at that time — but it is not an
+    -- observation of THIS wording, and a reader has to be able to tell the
+    -- difference between "an agent reported this" and "an agent reported something
+    -- this was consolidated from". The kind does not change for the carry: the
+    -- record is still the observation it was, and a fifth kind would lose which.
+    --
+    -- It is also the way back. The id it names is gone — that is why the record was
+    -- carried — but the CHANGE LOG keeps that id's whole past, so a reader who
+    -- wants to know what the source said follows this column into memory_history
+    -- rather than into a dead end. The same pointer shape, pointing the other way.
+    -- One index, on memory_id, and no index on carried_from: nothing looks a
+    -- record up BY the memory it came from. The column is followed the other way
+    -- -- the id it names is read out of the record and used against
+    -- memory_history -- so a second b-tree would be an insert every consolidation
+    -- pays and no query asks for. The same rule the change log's growth policy
+    -- states for its own recorded_at.
+    carried_from TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id);
+
+-- The evidence a snapshot carries, so a restore brings the SUPPORT back with the
+-- row. Same columns as memory_provenance, minus carried_from: a record restored
+-- under its own id is its own record again, and marking it inherited would
+-- misreport the row's own support as a successor's.
+--
+-- A table rather than a column on memory_snapshots because a memory can have
+-- several records and a snapshot row is one row; and it is pruned with the
+-- snapshots themselves (ReplaceNonManual's prune), so it cannot outlive the
+-- snapshot it describes.
+CREATE TABLE IF NOT EXISTS memory_snapshot_evidence (
+    snapshot_id  TEXT NOT NULL,
+    memory_id    TEXT NOT NULL,
+    kind         TEXT NOT NULL
+                 CHECK (kind IN ('observed', 'imported', 'verified', 'legacy')),
+    agent        TEXT,
+    session_id   TEXT,
+    source_ref   TEXT,
+    confidence   REAL,
+    observed_at  TEXT,
+    verified_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_evidence ON memory_snapshot_evidence(snapshot_id, memory_id);
 
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),

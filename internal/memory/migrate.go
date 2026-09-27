@@ -140,11 +140,19 @@ func migrate(db *sql.DB, from int) error {
 // not abort the migration (which would brick every newer binary). It is deleted
 // with a loud warning instead. Anything NOT in this list is treated as
 // user-content and never auto-deleted.
+//
+// memory_provenance is in the list on this table's own definition rather than on
+// convenience: its rows are claims ABOUT a memory, its foreign key cascades, and a
+// live store therefore cannot hold one whose memory is gone. An orphan here is
+// debris a correct delete would already have removed, and treating it as user
+// content would mean every later migration aborts on it — bricking every build
+// newer than the delete that left it, over rows that mean nothing.
 var cacheFKWhitelist = map[string]bool{
 	"memory_embeddings": true,
 	"link_scans":        true,
 	"supersede_checked": true,
 	"memory_links":      true,
+	"memory_provenance": true,
 }
 
 // repairPreExistingFKOrphans deletes derived-cache rows whose parent row is
@@ -1147,9 +1155,26 @@ func migrateV18(tx *sql.Tx) error {
     source_ref  TEXT,
     confidence  REAL,
     observed_at TEXT,
-    verified_at TEXT
+    verified_at TEXT,
+    carried_from TEXT
 )`,
+		// One index, for the reason initSQL's says: the reads filter on
+		// memory_id, and a carried_from index would be a b-tree insert on every
+		// consolidation carry that no query asks for.
 		`CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id)`,
+		`CREATE TABLE IF NOT EXISTS memory_snapshot_evidence (
+    snapshot_id  TEXT NOT NULL,
+    memory_id    TEXT NOT NULL,
+    kind         TEXT NOT NULL
+                 CHECK (kind IN ('observed', 'imported', 'verified', 'legacy')),
+    agent        TEXT,
+    session_id   TEXT,
+    source_ref   TEXT,
+    confidence   REAL,
+    observed_at  TEXT,
+    verified_at  TEXT
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshot_evidence ON memory_snapshot_evidence(snapshot_id, memory_id)`,
 		`INSERT INTO memory_provenance (memory_id, kind, agent, session_id, source_ref, confidence, verified_at)
 SELECT id, 'legacy', agent, session_id, source_ref, confidence, verified_at
 FROM memories
@@ -1221,7 +1246,7 @@ func refuseForeignProvenanceTable(run tableInspector) error {
 // it, and the check is a refusal rather than an adaptation — see the step.
 var evidenceTableColumns = []string{
 	"id", "memory_id", "kind", "agent", "session_id", "source_ref",
-	"confidence", "observed_at", "verified_at",
+	"confidence", "observed_at", "verified_at", "carried_from",
 }
 
 // tableExists reports whether a table of that name is in the schema.

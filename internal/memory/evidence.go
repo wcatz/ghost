@@ -62,6 +62,15 @@ type Evidence struct {
 	// may carry it whatever its kind: a `legacy` seed of a hand-verified memory
 	// has one, and so will a `verified` row.
 	VerifiedAt *string
+	// CarriedFrom is the memory this record was inherited from, and empty for a
+	// record that observed this row directly. A consolidation rewrite or merge
+	// mints a new id and the foreign key takes the source's evidence with it, so
+	// the record is copied and this says so — verbatim, because the observation
+	// really was made, but not an observation of THIS wording.
+	//
+	// It is also the way back into the change log: the id it names is gone, and
+	// the change log is what kept that id's past.
+	CarriedFrom string
 }
 
 // EvidenceCounts is what a reader can say about a memory's support without
@@ -140,30 +149,155 @@ func plural(n int, one, many string) string {
 // copy of one. Widening that guard to the provenance columns themselves is
 // #656's seam and not this function's, because refusing one would change what a
 // save stores in memories too.
-func appendEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID, kind string, prov Provenance, verifiedAt string) error {
+func appendEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID, kind string, prov Provenance, isVerification bool) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_provenance
 			(memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
-		VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, datetime('now'), `+verifiedAtExpr(isVerification)+`)`,
 		memoryID, kind,
 		nullIfEmpty(prov.Agent), nullIfEmpty(prov.SessionID), nullIfEmpty(prov.SourceRef),
-		prov.Confidence, nullIfEmpty(verifiedAt),
+		prov.Confidence,
 	); err != nil {
 		return fmt.Errorf("append %s evidence for %s: %w", kind, memoryID, err)
 	}
 	return nil
 }
 
-// verifiedAtOrEmpty unwraps an optional stamp for a bind parameter, where "" and
-// NULL are the same thing because the column is bound through nullIfEmpty. It
-// exists so a caller holding a *string does not have to spell that out — and
-// because an evidence record must never carry the STRING "NULL" or "<nil>", which
-// is what a careless fmt would have written.
-func verifiedAtOrEmpty(at *string) string {
-	if at == nil {
-		return ""
+// verifiedAtExpr is the SQL expression the verified_at column of an appended
+// record reads: NULL for a record that OBSERVES a fact, and the store's own clock
+// for a record that IS the verification.
+//
+// Two literals spliced into one statement, never a value — the same shape as
+// historyContentExpr, and for the same reason: a caller that could pass its own
+// stamp could backdate a verification, and one that passed a formatted string
+// instead would store that string. Both alternatives were the alternative designs
+// to a bool; the bool is the only one with no way to be wrong about the stamp.
+func verifiedAtExpr(isVerification bool) string {
+	if isVerification {
+		return "datetime('now')"
 	}
-	return *at
+	return "NULL"
+}
+
+// AppendVerifiedEvidenceTx records that somebody CHECKED a memory, in the
+// caller's transaction.
+//
+// It is exported, and that is the whole reason: the validity writers that turn a
+// save tool's `verified: true` into a stored claim (issue #575, PR #677) land
+// separately from this table, and they need ONE name and ONE implementation for
+// "somebody verified this" rather than a second copy that the two branches then
+// disagree about. A verified record is what a reader counts in
+// EvidenceCounts.Verified, so two spellings of it would be two different answers
+// to the same question.
+//
+// The stamp is the store's clock, not the caller's, for the reason every other
+// writer's timestamp is: a verifier that could date its own check could date it
+// before the thing it checked. The caller supplies only who checked, and NULL
+// there stays NULL — an anonymous verification is a real one, and the alternative
+// is inventing a verifier.
+func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, prov Provenance) error {
+	return appendEvidenceTx(ctx, tx, memoryID, evidenceVerified, prov, true)
+}
+
+// carryEvidenceTx copies the evidence of the memories an emission was derived
+// from onto the row that now holds their text, in ONE statement.
+//
+// It is a copy and not a fresh observation, and every field comes across
+// unchanged: the same kind, the same agent, the same session, the same reference,
+// the same confidence, the same observed_at. The observation really was made —
+// by that agent, about that content, at that time. What it was not made about is
+// the wording now on the row, and carried_from is what says so; a reader that
+// wants only first-hand support can filter on it, and one that wants the support a
+// consolidation consolidated gets the union.
+//
+// The sources' rows must still EXIST, which is why the caller runs this before the
+// delete: the foreign key takes them the moment the source row goes, and there is
+// no other copy. The snapshot is not a substitute — a restore would put them on the
+// ORIGINAL id, not on the rewrite.
+//
+// One statement for the whole set, because a merge names every one of its sources
+// and a per-source loop would make the statement count of a consolidation scale
+// with the corpus it is rewriting.
+func carryEvidenceTx(ctx context.Context, tx *sql.Tx, toMemoryID string, fromIDs []string) error {
+	if len(fromIDs) == 0 {
+		// A memory with no predecessor has no inherited support, and "none" is the
+		// honest answer. Inventing an observation for a brand-new row is the one
+		// thing this table must never do.
+		return nil
+	}
+	placeholders := make([]string, 0, len(fromIDs))
+	args := make([]any, 0, len(fromIDs)+1)
+	for _, id := range fromIDs {
+		if id == "" || id == toMemoryID {
+			continue // an id the caller did not give, and the row's own
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	if len(placeholders) == 0 {
+		return nil
+	}
+	args = append([]any{toMemoryID}, args...)
+	// ORDER BY, and it is there for reproducibility rather than for meaning: two
+	// agents reporting one fact have no first and second, and the set is far too
+	// small for the sort to register on a path that rewrites the corpus. What it
+	// buys is that two consolidations of the same corpus write the same records in
+	// the same order, so `ghost export` stays byte-identical between them — an
+	// engine-dependent order here would put a diff of two unchanged exports on the
+	// card. The order is by source id, NOT by the order the caller named its
+	// sources in, which is the one thing a per-source loop could have offered.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_provenance
+			(memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at, carried_from)
+		SELECT ?, kind, agent, session_id, source_ref, confidence, observed_at, verified_at, memory_id
+		FROM memory_provenance WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY memory_id, rowid`,
+		args...,
+	); err != nil {
+		return fmt.Errorf("carry evidence onto %s: %w", toMemoryID, err)
+	}
+	return nil
+}
+
+// restoreSnapshotEvidenceTx puts back the evidence a snapshot carried, for the
+// rows the restore re-created.
+//
+// Two statements and a hard replace, not an append, for three reasons. The rows
+// are being RESTORED rather than observed again, so a record that described the
+// moment of the restore would be a claim nobody made; the set is bounded by the
+// snapshot the restore already read, so nothing here can be repeated by running
+// the restore twice; and the destination rows are ones this transaction created,
+// so a pre-existing record on them would mean the restore put back more than the
+// snapshot held.
+func restoreSnapshotEvidenceTx(ctx context.Context, tx *sql.Tx, snapshotID string, memoryIDs []string) error {
+	const batch = 200 // well under SQLite's variable ceiling, two placeholders per id
+	for start := 0; start < len(memoryIDs); start += batch {
+		end := min(start+batch, len(memoryIDs))
+		chunk := memoryIDs[start:end]
+		ph := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			ph = append(ph, "?")
+			args = append(args, id)
+		}
+		list := strings.Join(ph, ",")
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM memory_provenance WHERE memory_id IN (`+list+`)`, args...,
+		); err != nil {
+			return fmt.Errorf("clear evidence before a restore: %w", err)
+		}
+		copyArgs := append([]any{snapshotID}, args...)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO memory_provenance
+				(memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
+			SELECT memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at
+			FROM memory_snapshot_evidence
+			WHERE snapshot_id = ? AND memory_id IN (`+list+`)`, copyArgs...,
+		); err != nil {
+			return fmt.Errorf("restore snapshot evidence: %w", err)
+		}
+	}
+	return nil
 }
 
 // validEvidenceKinds is the set memory_provenance.kind accepts, and is what the
@@ -226,7 +360,7 @@ func (s *Store) MemoryProvenance(ctx context.Context, memoryID string) ([]Eviden
 	// The pool is safe here: no transaction is open on this handle.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, memory_id, kind, agent, session_id, source_ref, confidence,
-		       observed_at, verified_at
+		       observed_at, verified_at, carried_from
 		FROM memory_provenance
 		WHERE memory_id = ?
 		ORDER BY rowid`, memoryID)
@@ -329,10 +463,10 @@ func evidenceCountsFor(ctx context.Context, db Queryer, ids []string) (map[strin
 // table.
 func scanEvidence(sc rowScanner) (Evidence, error) {
 	var e Evidence
-	var agent, sessionID, sourceRef, observedAt, verifiedAt sql.NullString
+	var agent, sessionID, sourceRef, observedAt, verifiedAt, carriedFrom sql.NullString
 	var confidence sql.NullFloat64
 	if err := sc.Scan(&e.ID, &e.MemoryID, &e.Kind, &agent, &sessionID, &sourceRef,
-		&confidence, &observedAt, &verifiedAt); err != nil {
+		&confidence, &observedAt, &verifiedAt, &carriedFrom); err != nil {
 		return Evidence{}, fmt.Errorf("scan memory provenance: %w", err)
 	}
 	e.Agent = agent.String
@@ -350,5 +484,6 @@ func scanEvidence(sc rowScanner) (Evidence, error) {
 		v := verifiedAt.String
 		e.VerifiedAt = &v
 	}
+	e.CarriedFrom = carriedFrom.String
 	return e, nil
 }

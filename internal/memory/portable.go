@@ -91,13 +91,23 @@ type PortableMemory struct {
 
 // PortableEvidence is one evidence record as the artifact carries it: the same
 // columns the table holds, minus memory_id, which the enclosing memory record
-// already names.
+// already names, and minus carried_from, for the reason below.
 //
 // A distinct type rather than Evidence because the artifact is a wire format and
 // not a view of a row: it is flat, it omits the memory id, and it is what a user
 // reads and hand-edits. Everything nullable stays nullable — an omitted field is
 // "the record does not say", and an import must not fill it in from the memory's
 // own columns, which would be a second claim nobody made.
+//
+// carried_from is dropped rather than carried, and it is the one field a transfer
+// cannot honestly move. It names the memory a consolidation carried the record
+// FROM — a row that was deleted, which is the whole reason the record was
+// carried — so the id resolves against nothing here, and the change log that could
+// have explained it is not in the artifact either. Carrying it would hand the
+// destination a pointer to a memory it has never heard of, and a reader would have
+// no way to tell that from a pointer it could follow. So the destination holds
+// these records as its own direct support, which is what they are: this store
+// learned the fact, with this support, from a file.
 type PortableEvidence struct {
 	ID         string   `json:"id,omitempty"`
 	Kind       string   `json:"kind"`
@@ -812,8 +822,10 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// The arrival is a claim no carried record makes: this store learned the fact
 	// from a file, and a restored corpus that kept only the origin machine's
 	// observations would say nothing about its own. Its verified_at is the memory's
-	// own, which the import preserves, so the support summary and the row cannot
-	// disagree about whether anybody checked this fact.
+	// own when the artifact recorded one — the import preserves that column, and
+	// the record is stamped with the store's own clock rather than the artifact's
+	// text, so the support summary and the row cannot disagree about whether
+	// anybody checked this fact, and no date is copied in from a file.
 	//
 	// TrustProvenance does not gate it, and neither does it gate the history row
 	// above: the flag governs what a row IS (its source, its pin), while who the
@@ -824,7 +836,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		SessionID:  m.SessionID,
 		SourceRef:  m.SourceRef,
 		Confidence: m.Confidence,
-	}, verifiedAtOrEmpty(m.VerifiedAt)); err != nil {
+	}, m.VerifiedAt != nil); err != nil {
 		return false, false, downgraded, err
 	}
 	if err := tx.Commit(); err != nil {
