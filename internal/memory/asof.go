@@ -28,11 +28,18 @@ import (
 //
 // The rest of the embedded Memory is the CURRENT row. That is not an oversight
 // and it is bounded: memory_history records exactly the five state columns
-// above plus the event's other end, so tags, scope, pin, age, access count,
+// above plus the event's other end, so tags, scope, pin, access count,
 // provenance and the validity triple were never versioned. They are read from
 // the row as it stands, and the doc on this type says so where a reader of the
 // value will see it. A deleted memory has no row at all, so those fields are
 // zero for it — the honest reading, since nothing records what they held.
+//
+// CreatedAt is the exception, and it is the one field here the decay measures an
+// age from: it is the row's own when that column can answer, and the version
+// row's recorded_at when it cannot (the row is gone, or its created_at is later
+// than the instant asked about). See asOfCreatedAt for why, and docs/
+// architecture.md's Historical retrieval section for the bias that would
+// otherwise reach a listing.
 type AsOfRow struct {
 	Memory
 
@@ -206,16 +213,38 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		    LEFT JOIN claim c ON c.memory_id = v.memory_id AND c.rn = 1
 		    WHERE v.rn = 1 AND v.phase <> '`+phaseDelete+`'
 		),
-		-- The unversioned rows: live memories that predate the table (or whose
-		-- history was purged) AND already existed at T. A row created after T
-		-- is not a gap in the record — Ghost had not written it yet — so it is
-		-- left out of both halves rather than reported.
+		-- The unversioned rows: the in-scope memories that existed at T and have
+		-- NO version recorded at or before it. Both halves of this are time-bounded,
+		-- which is the whole content of the test. An unbounded NOT EXISTS answered a
+		-- different question — "does this memory have history at all" — and a
+		-- pre-v17 memory that the lifecycle touched after the upgrade has history
+		-- (a resolve, a supersede, a delete, a reflection reuse: only UpdateMemory
+		-- files a baseline, and every other first write records the state it read),
+		-- so the memory was in neither half of the read and VANISHED from an answer
+		-- it belongs to. Left unsaid, a vanished memory is indistinguishable from a
+		-- memory that was never there.
+		--
+		-- The second half reaches the tombstones, because those have no row left to
+		-- select from: a delete takes the memory, so a pre-v17 memory deleted after T
+		-- has neither a live row nor a version at or before T, and reporting the gap
+		-- needs the tombstone's own project id. Its text is not used — a delete row
+		-- is dated D and says what the memory held at D, which is not a claim about
+		-- T. The two halves are disjoint (a tombstoned memory is not live), so the
+		-- UNION cannot double-count.
 		unrecorded AS (
 		    SELECT m.id AS memory_id, m.project_id, m.created_at
 		    FROM memories m
 		    WHERE m.created_at <= ?
-		      AND NOT EXISTS (SELECT 1 FROM memory_history h WHERE h.memory_id = m.id)
+		      AND NOT EXISTS (SELECT 1 FROM memory_history h
+		                      WHERE h.memory_id = m.id AND h.recorded_at <= ?)
 		      AND `+memoryScope+`
+		    UNION ALL
+		    SELECT h.memory_id, h.project_id, NULL
+		    FROM memory_history h
+		    WHERE h.phase = '`+phaseDelete+`'
+		      AND NOT EXISTS (SELECT 1 FROM memory_history v
+		                      WHERE v.memory_id = h.memory_id AND v.recorded_at <= ?)
+		      AND `+historyScope+`
 		)
 		SELECT memory_id, project_id, known, phase, recorded_at, content, category,
 		       importance, resolved_at, source, superseded_by,
@@ -239,7 +268,7 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		           m.valid_from, m.valid_until, m.verified_at, m.access_count,
 		           m.last_accessed, m.agent, m.session_id, m.source_ref, m.confidence
 		    FROM unrecorded u
-		    JOIN memories m ON m.id = u.memory_id
+		    LEFT JOIN memories m ON m.id = u.memory_id
 		)`, asOfArgs(stamp, clauseArgs)...)
 	if err != nil {
 		return nil, fmt.Errorf("read memories as of %s: %w", stamp, err)
@@ -275,7 +304,7 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		// version row does not carry. That is the honest reading — nothing
 		// records what the row held — and the decay treats it as ancient rather
 		// than fresh, so an unreadable age can never win a ranking.
-		r.CreatedAt = createdAt.String
+		r.CreatedAt = asOfCreatedAt(createdAt.String, recordedAt.String, t)
 		r.VersionPhase = phase.String
 		r.VersionRecordedAt = recordedAt.String
 		r.SupersededBy = supersededBy.String
@@ -335,18 +364,63 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 }
 
 // asOfArgs binds the statement's placeholders in the order they appear: the
-// statement is three CTEs, each with its own instant and its own copy of the
-// project predicate, so the arguments repeat with it. Written out rather than
-// built by a loop over the CTEs, because the order is the statement's and a
-// generated list would have to be kept in step with it by hand — the one thing
-// that would break silently, binding a scope argument to an instant.
-func asOfArgs(stamp string, scopeArgs []any) []any {
-	args := make([]any, 0, 3*(1+len(scopeArgs)))
-	for range 3 {
-		args = append(args, stamp)
-		args = append(args, scopeArgs...)
-	}
+// statement is four reads of the same scope and the same instant — the version
+// set, the supersede claim, the unversioned live rows, the unversioned
+// tombstones — so the arguments repeat with them.
+//
+// Written out rather than generated from the CTE list, because the order IS the
+// statement's and a generated list would have to be kept in step with it by hand:
+// binding a scope argument to an instant fails loudly, but binding one instant to
+// another bound fails as a plausible answer. The unversioned live half is the one
+// that takes two instants, because it bounds created_at by T and the "is there a
+// version at or before T" check by T as well.
+func asOfArgs(stamp string, scope []any) []any {
+	args := make([]any, 0, 7+3*len(scope))
+	args = append(args, stamp) // version set: the instant
+	args = append(args, scope...)
+	args = append(args, stamp) // supersede claim: the instant
+	args = append(args, scope...)
+	args = append(args, stamp, stamp) // unversioned live rows: created_at, then history
+	args = append(args, scope...)
+	args = append(args, stamp) // unversioned tombstones: the history bound
+	args = append(args, scope...)
 	return args
+}
+
+// asOfCreatedAt is the instant a memory's AGE is measured from at T.
+//
+// The row's own created_at is the right answer whenever it can give one: it is
+// set on INSERT and never rewritten (a snapshot restore carries the snapshot's
+// created_at back on both its UPDATE and its INSERT, which is what stopped a
+// restore from making an old memory read as new). Two cases it cannot answer, and
+// both fall back to the version row's own recorded_at — the last instant at which
+// the state this read is returning was established, which is a fact about the past
+// by construction, since the version row is at or before T by definition:
+//
+//   - The row is gone. A delete takes the memory and leaves the tombstone, so
+//     every current column is NULL and an empty created_at parses as the zero
+//     time: ageDays then reads as ~56,000 days and DecayFactor sits at its floor.
+//     A memory deleted yesterday was therefore pushed to the bottom of every
+//     listing covering the past year, on the strength of a column that says
+//     nothing about it.
+//   - created_at is LATER than T, which no current writer produces (an artifact
+//     that omits it imports with created_at = the import instant, which is its own
+//     version row's). It is refused rather than believed because ageDays clamps a
+//     negative age at 0, so a future-dated column is the single most favourable
+//     value a row can carry into a ranking of the past — a hand-edited store, or a
+//     future writer, would silently win every capped listing it appeared in.
+//
+// A version row that is itself absent (the gap rows) leaves both empty, which is
+// the honest reading for a row that is not in the set: nothing measures its age.
+func asOfCreatedAt(createdAt, versionRecordedAt string, at time.Time) string {
+	stamp := parseCreatedAt(createdAt)
+	if !stamp.IsZero() && !stamp.After(at) {
+		return createdAt
+	}
+	if versionRecordedAt == "" {
+		return createdAt
+	}
+	return versionRecordedAt
 }
 
 // optionalString reads a nullable text column into the *string the Memory type

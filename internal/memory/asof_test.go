@@ -552,6 +552,199 @@ func TestMemoriesAsOfFindsAMemoryTheStoreHasSinceDeleted(t *testing.T) {
 	}
 }
 
+// TestMemoriesAsOfReportsAMemoryWhoseFirstVersionIsAfterT: a memory can be live,
+// predate the history table, and still have a recorded version — and every one of
+// those versions can be dated after T. It is then in neither half of the read: the
+// version set needs a row at or before T, and the gap half asked only whether the
+// memory had history AT ALL, so "yes" answered it and the memory fell out of both.
+//
+// The gap is the common case, not an edge case. recordBaselineHistoryTx runs only
+// from UpdateMemory, and every other first write on a pre-v17 memory appends a row
+// dated to that write — so a resolve pass, a supersede, a delete or a reflection
+// reuse shortly after the upgrade is enough. A memory that vanishes from the answer
+// with nothing said is worse than one reported as a gap: the reader has no way to
+// tell a short set from a complete one.
+func TestMemoriesAsOfReportsAMemoryWhoseFirstVersionIsAfterT(t *testing.T) {
+	const content = "a memory written before the history table existed"
+
+	// Each case performs ONE first write on a memory that has no history, which is
+	// the shape a pre-v17 memory has when the lifecycle touches it after the
+	// upgrade.
+	for _, tc := range []struct {
+		name  string
+		first func(t *testing.T, s *Store, id string)
+	}{
+		{name: "resolve", first: func(t *testing.T, s *Store, id string) {
+			if _, err := s.SetResolved(context.Background(), []string{id}); err != nil {
+				t.Fatalf("SetResolved: %v", err)
+			}
+		}},
+		{name: "unresolve", first: func(t *testing.T, s *Store, id string) {
+			if _, err := s.SetResolved(context.Background(), []string{id}); err != nil {
+				t.Fatalf("SetResolved: %v", err)
+			}
+			if _, err := s.ClearResolved(context.Background(), testProject, []string{id}); err != nil {
+				t.Fatalf("ClearResolved: %v", err)
+			}
+		}},
+		{name: "delete", first: func(t *testing.T, s *Store, id string) {
+			if err := s.DeleteWithOptions(context.Background(), id, DeleteOptions{}); err != nil {
+				t.Fatalf("DeleteWithOptions: %v", err)
+			}
+		}},
+		{name: "supersede", first: func(t *testing.T, s *Store, id string) {
+			partner := mustSave(t, s, "the memory whose edge claims it")
+			if err := s.CreateLink(context.Background(), partner, id, "supersedes", 1.0, "auto"); err != nil {
+				t.Fatalf("CreateLink: %v", err)
+			}
+		}},
+		{name: "unsupersede", first: func(t *testing.T, s *Store, id string) {
+			partner := mustSave(t, s, "the memory whose edge claims it")
+			if err := s.CreateLink(context.Background(), partner, id, "supersedes", 1.0, "auto"); err != nil {
+				t.Fatalf("CreateLink: %v", err)
+			}
+			if _, err := s.InvalidateLink(context.Background(), partner, id, "supersedes"); err != nil {
+				t.Fatalf("InvalidateLink: %v", err)
+			}
+		}},
+		{name: "reflect reuse", first: func(t *testing.T, s *Store, id string) {
+			if _, err := s.ReplaceNonManual(context.Background(), testProject, []Memory{{
+				Category: "fact", Content: content, Source: "mcp", Importance: 0.5,
+			}}, ""); err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			id := mustSave(t, s, content)
+			dropHistory(t, s, id)
+			tc.first(t, s, id)
+			entries, err := s.MemoryHistory(context.Background(), id, 0)
+			if err != nil {
+				t.Fatalf("MemoryHistory: %v", err)
+			}
+			if len(entries) == 0 {
+				t.Fatalf("the first write recorded nothing, so this fixture is not the case under test")
+			}
+			stamps := make([]string, len(entries))
+			for i := range stamps {
+				stamps[i] = asOfStampLate
+			}
+			stampHistory(t, s, id, stamps...)
+
+			set := mustAsOf(t, s, asOfStampSave)
+			if _, ok := asOfContentByID(t, set)[id]; ok {
+				t.Errorf("the memory reads as known at %s, want it reported unknown: its only version is dated %s", asOfStampSave, asOfStampLate)
+			}
+			found := false
+			for _, row := range set.Unknown {
+				if row.ID == id {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("the memory is in neither the set (%d rows) nor the gap (%d rows), so it VANISHED from a read it belongs to:\n%s",
+					len(set.Rows), len(set.Unknown), set.UnknownNote())
+			}
+		})
+	}
+}
+
+// TestLegacyFirstWriteRecordsTheStateItReplaced: why no writer has to file a
+// baseline on these paths. Every write that touches a pre-v17 memory records the
+// state it read out of the memories row in the SAME transaction, so the text a
+// first write is about to stop holding is in the history either way — which is
+// why recordBaselineHistoryTx is needed only on UpdateMemory, the one write that
+// overwrites the text in place. A writer added to these paths later does not need
+// a baseline, and this test is what says so.
+func TestLegacyFirstWriteRecordsTheStateItReplaced(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const content = "the retention sweep runs at four in the morning"
+
+	id := mustSave(t, s, content)
+	dropHistory(t, s, id)
+	if _, err := s.SetResolved(ctx, []string{id}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("the resolve recorded %d rows, want 1", len(entries))
+	}
+	if entries[0].Content != content {
+		t.Errorf("the resolve row reads %q, want the text it replaced (%q): a first write that did not record the state it read would need a baseline instead",
+			entries[0].Content, content)
+	}
+}
+
+// TestMemoriesAsOfMeasuresAgeFromTheVersionWhenTheRowIsGone: a delete takes the
+// row and leaves the tombstone, so every current column is NULL — and an
+// unreadable created_at reads as ANCIENT. A memory deleted yesterday was therefore
+// pushed to the decay floor in every listing covering the past year, on the
+// strength of a column that says nothing. The version's own timestamp is a fact
+// about the past by construction: it is at or before T by definition.
+func TestMemoriesAsOfMeasuresAgeFromTheVersionWhenTheRowIsGone(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const content = "a memory that is deleted after the read"
+	id := mustSave(t, s, content)
+	if err := s.DeleteWithOptions(ctx, id, DeleteOptions{}); err != nil {
+		t.Fatalf("DeleteWithOptions: %v", err)
+	}
+	stampHistory(t, s, id, asOfStampSave, asOfStampRewrite)
+
+	row, ok := asOfContentByID(t, mustAsOf(t, s, asOfStampSave))[id]
+	if !ok {
+		t.Fatalf("at %s the memory is absent, want it live with %q", asOfStampSave, content)
+	}
+	if row.CreatedAt == "" {
+		t.Fatalf("CreatedAt is empty for a tombstoned row, so its age reads as ancient and its decay is at the floor")
+	}
+	if got, want := row.CreatedAt, asOfStampSave; got != want {
+		t.Errorf("CreatedAt = %q, want the version's own timestamp %q: the row is gone, so the current column cannot say when the memory existed", got, want)
+	}
+}
+
+// TestAsOfCreatedAtFallsBackWhenTheColumnCannotAnswer pins the rule itself, for
+// the case no current writer produces: a created_at LATER than T. ageDays clamps a
+// negative age at 0, so a future-dated column is the single most favourable value a
+// row can carry into a past ranking, and it has to be refused rather than believed.
+func TestAsOfCreatedAtFallsBackWhenTheColumnCannotAnswer(t *testing.T) {
+	at := asOfAt(t, asOfStampRewrite)
+	for _, tc := range []struct {
+		name      string
+		createdAt string
+		version   string
+		want      string
+	}{
+		{name: "usable column", createdAt: asOfStampSave, version: asOfStampRewrite, want: asOfStampSave},
+		{name: "unreadable column", createdAt: "", version: asOfStampSave, want: asOfStampSave},
+		{name: "unparseable column", createdAt: "not a timestamp", version: asOfStampSave, want: asOfStampSave},
+		{name: "column later than the instant", createdAt: asOfStampLate, version: asOfStampSave, want: asOfStampSave},
+		{name: "no version either", createdAt: "", version: "", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := asOfCreatedAt(tc.createdAt, tc.version, at); got != tc.want {
+				t.Errorf("asOfCreatedAt(%q, %q) = %q, want %q", tc.createdAt, tc.version, got, tc.want)
+			}
+		})
+	}
+}
+
+// mustSave is the fixture's save, returning the id.
+func mustSave(t *testing.T, s *Store, content string) string {
+	t.Helper()
+	id, _, _, err := s.UpsertWithProvenance(context.Background(), testProject, "fact", content, "mcp", 0.5, nil, Provenance{})
+	if err != nil {
+		t.Fatalf("UpsertWithProvenance: %v", err)
+	}
+	return id
+}
+
 // mustAsOf fails the test rather than returning an unusable set, so every
 // assertion below reads the set it asked for instead of re-checking the error.
 func mustAsOf(t *testing.T, s *Store, stamp string) *AsOfSet {
@@ -575,3 +768,9 @@ func theOnlyMemoryID(t *testing.T, s *Store, projectID string) string {
 	}
 	return all[0].ID
 }
+
+// asOfStampSaveOrLater is a compile-time reminder that the stamps above are the
+// only ones these fixtures may use: they are all in the future relative to a test
+// run, because created_at is stamped by SQLite at write time and cannot be
+// backdated through any public API.
+var _ = []string{asOfStampSave, asOfStampRewrite, asOfStampLate, asOfStampFarFuture}
