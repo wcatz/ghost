@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -364,6 +365,173 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 	return skipUnchanged && apply && stored != "" && stored == current
 }
 
+// promotionOutcome is what is knowable about --promote-globals at the moment the
+// reduction report is printed.
+//
+// It is a type rather than a bare count because zero kept is AMBIGUOUS: after an
+// apply it means every candidate became a _global row, and before one it means
+// nothing has been written at all. Inferring the state from the count produced a
+// report that told the operator a promotion "would" happen, printed after the
+// write that had already promoted all nine — the same untruth as the note this
+// replaced, pointing the other way. A count that is meaningful on its own cannot
+// also be the answer to "has this happened yet".
+type promotionOutcome struct {
+	// applied is whether ApplyReflection has run. False for a dry run, and for the
+	// pre-apply report on a run that will apply.
+	applied bool
+	// kept is how many candidates failed promotion and were written back into the
+	// project. Only meaningful once applied.
+	kept int
+}
+
+// keptInProject is how many candidates the project still holds. Before the apply
+// that is unknowable, so it is 0 and the report labels the count optimistic
+// rather than printing a number it cannot stand behind.
+func (o promotionOutcome) keptInProject() int {
+	if !o.applied {
+		return 0
+	}
+	return o.kept
+}
+
+// reflectRetained is how many memories the project ends up holding from one
+// applied result: its own project-scoped memories, plus the cross-project
+// candidates that did not become _global rows and were written back into the
+// project instead. It mirrors applyReflection's own rule rather than restating
+// it, so the reduction warning below measures the set the project actually ends
+// up with — the count that decides whether a memory survived. Reading
+// len(projectMems) alone understates retention by the whole candidate set and
+// fires the warning on rounds that lost nothing.
+func reflectRetained(projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotion promotionOutcome) int {
+	if promoteGlobals {
+		return len(projectMems) + promotion.keptInProject()
+	}
+	return len(projectMems) + len(globalMems)
+}
+
+// reductionWarnMinInput is the corpus size below which no ratio is reported.
+// A 4-memory corpus compressing to 1 is a 75% reduction and says nothing, and
+// a warning on nearly every such run is noise. The threshold is 6 for the same
+// reason the quality gate's is: the gate's smallest input is gateMinInput = 6,
+// so below it the gate judges nothing at all and this is the only signal there
+// is — which is exactly when a percentage is worth least.
+const reductionWarnMinInput = 6
+
+// reportDisposedClaims prints what the response CLAIMED it disposed of. Nothing
+// acts on these claims — an unattended reflect never deletes a memory on the
+// model's say-so alone (#549) — so this is the only place a person deciding
+// whether to pass --apply can see that the model tried to drop something.
+//
+// It deliberately does NOT say what became of a claim. The guarded-drop report
+// already prints the outcome, and a second opinion about it would be a second
+// implementation of the guard's decision waiting to disagree with the first. Read
+// the two together: this says what was claimed, that says what was kept or
+// deleted.
+//
+// Whether the claimed replacement survived into the result IS stated, because
+// that is a fact about the result rather than an opinion about the guard, and
+// because executeOps records Replacement.Text before the post-filters run:
+// dropForeignProjectMemories deletes a memory naming a project the input corpus
+// never mentioned. Printing a replacement this same run discarded would be the
+// one thing a report meant to inform an --apply decision must not do.
+//
+// It is a function taking a writer rather than an inline loop because runReflect
+// exits the process, so the loop is not reachable from a test.
+func reportDisposedClaims(w io.Writer, result reflection.ReflectionResult) {
+	if len(result.Replacements) == 0 {
+		return
+	}
+	inResult := make(map[string]bool, len(result.Memories))
+	for _, m := range result.Memories {
+		inResult[m.Content] = true
+	}
+	// Discarded on purpose, as everywhere else on this path: a write that fails
+	// cannot be reported through the same failed write, and the report lands on
+	// the stdout of a dry run a person is reading.
+	for _, r := range result.Replacements {
+		switch {
+		case r.Text == "":
+			_, _ = fmt.Fprintln(w, "  Disposed of (model's claim): (no replacement text recorded)")
+		case !inResult[r.Text]:
+			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): its replacement is NOT in this result — %s\n",
+				truncateForDisplay(r.Text, 80))
+		default:
+			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): replaced by %s\n", truncateForDisplay(r.Text, 80))
+		}
+	}
+}
+
+// reportReductionWarning prints the >50% reduction warning when a consolidation
+// kept less than half its consolidatable input, and prints nothing otherwise.
+//
+// It is called exactly once per run, and WHERE depends on what is knowable. A dry
+// run writes nothing so nothing can fail, so it reports before the (absent)
+// write. A run that applies with promotion off folds the cross-project candidates
+// back into the project either way, so the count cannot move and it also reports
+// before the write. A run that applies WITH promotion on can only know the count
+// afterwards, because a candidate may fail to become a _global row and land back
+// in the project instead — so that one reports after the write. The pre-apply
+// report is skipped rather than printed optimistically and corrected, because a
+// candidate set large enough to cross the 50% line would otherwise produce a
+// report of a reduction that did not happen, followed by silence about it.
+//
+// It takes the slices rather than two pre-counted numbers so the count it
+// reports is derived where it is printed: on the unattended lifecycle path this
+// line is the only report of a hard compression, so a wrong count here is a
+// warning that fires on rounds which lost nothing, and one that stays silent on
+// rounds that lost most of the corpus.
+//
+// The retained side is reflectRetained, not len(projectMems): with promotion off
+// applyReflection folds the cross-project candidates back into the project, so
+// they are survivors, and with promotion ON the ones that failed come back the
+// same way. The input side is len(live) — manual, builtin, pinned and resolved
+// rows are already excluded upstream, and every row left is one ReplaceNonManual
+// would delete.
+func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotion promotionOutcome) {
+	if len(live) < reductionWarnMinInput {
+		return
+	}
+	retained := reflectRetained(projectMems, globalMems, promoteGlobals, promotion)
+	// Doubled rather than len(live)/2: integer division rounds the half DOWN, so
+	// 3 of 7 reads as "at least half" and prints nothing, when 3/7 is a 57%
+	// reduction — more than the half the message names. The boundary is only
+	// reachable on an odd corpus, which is why it was easy to miss.
+	if retained*2 >= len(live) {
+		return
+	}
+	// os.Stderr is best-effort here, as it is for every other report on this
+	// path — a write that fails cannot be reported through the same failed write,
+	// and on the unattended lifecycle path this stream is the stderr of a
+	// detached process nobody reads. The guarded-drop report a few lines above
+	// discards its results the same way.
+	_, _ = fmt.Fprintf(w, "WARNING: consolidation left %d memories in the project vs %d consolidatable (>50%% reduction)\n",
+		retained, len(live))
+	if len(globalMems) == 0 {
+		return
+	}
+	// The note states only what is true at this point in the run, and the three
+	// states are distinguished by whether the apply has HAPPENED rather than by
+	// the kept count. Before it, a candidate is classified global and nothing
+	// more; calling them "promoted" there would claim a write that has not
+	// occurred, and calling the whole set survivors would be wrong the other way,
+	// since a candidate that promotes has left the project. After it, the split is
+	// known and a candidate that promoted really did leave the project, so it is
+	// not counted as retained and saying otherwise would overstate survival.
+	switch {
+	case !promoteGlobals:
+		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — kept project-scoped; check scope accuracy)\n", len(globalMems))
+	case !promotion.applied:
+		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — would be promoted to _global on apply; a failed promotion keeps them in the project; check scope accuracy)\n",
+			len(globalMems))
+	case promotion.kept > 0:
+		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — %d promoted to _global, %d could not be and are back in the project; check scope accuracy)\n",
+			len(globalMems), len(globalMems)-promotion.kept, promotion.kept)
+	default:
+		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — all %d promoted to _global; check scope accuracy)\n",
+			len(globalMems), len(globalMems))
+	}
+}
+
 // reflectMaySkip additionally honors the two flags that change what an apply
 // DOES rather than what it reads. The input signature describes the project
 // corpus, not what was done to it, so neither may inherit a prior default
@@ -466,6 +634,25 @@ Flags:
                    takes the next argument verbatim, so dash-prefixed names work.
 `
 
+// gatedLLMTier is the consolidator an explicitly-selected LLM backend runs
+// through, and it is a named seam because the decision is not the obvious one:
+// naming the backend outright used to also opt out of the quality gate, because
+// the bare LlmConsolidator is not where the gate lives — that is inside
+// reflection.TieredConsolidator, which the `auto` tier has always used. So the
+// default and the unattended lifecycle path were bounded while
+// `ghost reflect --tier cli --apply` applied a harness answer of any size, and
+// eval/cycle, which measures with `--tier opencode --apply`, was grading an
+// ungated consolidator while production ran a gated one (issue #549).
+//
+// The wrapper adds no fallback tier, so the selection still means "exactly this
+// backend"; it only makes a too-small answer a failed run, which is the honest
+// reading of that request when the answer came back truncated. It is a function
+// rather than an inline call because runReflect exits the process, so the tier
+// switch is not reachable from a test and the behaviour has to be pinned here.
+func gatedLLMTier(c reflection.Consolidator, logger *slog.Logger) reflection.Consolidator {
+	return reflection.NewGatedConsolidator(c, logger)
+}
+
 // runReflect manually triggers memory consolidation for a project.
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
@@ -562,7 +749,7 @@ func runReflect() {
 				fmt.Fprintf(os.Stderr, "error: cli tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
 				os.Exit(1)
 			}
-			consolidator = reflection.NewNamedConsolidator(ai.NewCLIClientWithBinary(binary), "cli")
+			consolidator = gatedLLMTier(reflection.NewNamedConsolidator(ai.NewCLIClientWithBinary(binary), "cli"), logger)
 		case "opencode":
 			binary := "opencode"
 			if cfg.CLI.OpenCodeBinary != "" {
@@ -576,7 +763,7 @@ func runReflect() {
 				fmt.Fprintf(os.Stderr, "error: opencode tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
 				os.Exit(1)
 			}
-			consolidator = reflection.NewNamedConsolidator(ai.NewOpenCodeClientWithBinary(binary), "opencode")
+			consolidator = gatedLLMTier(reflection.NewNamedConsolidator(ai.NewOpenCodeClientWithBinary(binary), "opencode"), logger)
 		case "sqlite":
 			if requireLLM {
 				fmt.Fprintln(os.Stderr, "error: --require-llm conflicts with --tier sqlite")
@@ -814,18 +1001,25 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-byte cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
 	}
 
-	var existingNonManual int
-	for _, m := range live {
-		if m.Source != "manual" {
-			existingNonManual++
-		}
-	}
-	if existingNonManual >= 6 && len(projectMems) < existingNonManual/2 {
-		fmt.Fprintf(os.Stderr, "WARNING: consolidation returned %d project memories vs %d existing non-manual (>50%% reduction)\n",
-			len(projectMems), existingNonManual)
-		if len(globalMems) > 0 {
-			fmt.Fprintf(os.Stderr, "  (%d memories classified as global — check scope accuracy)\n", len(globalMems))
-		}
+	// What the response claimed it disposed of, and whether the claimed
+	// replacement survived into the result. See reportDisposedClaims.
+	reportDisposedClaims(os.Stdout, result)
+
+	// The >50% reduction warning. On the unattended lifecycle path this is the
+	// only report of a hard compression, and it goes to the stderr of a process
+	// nobody reads while the exit status stays 0 — so the count it prints has to
+	// be the one that decides whether a memory survived.
+	//
+	// Reported here only when it cannot be wrong: a dry run writes nothing so
+	// nothing can fail, and promotion-off folds the candidates back in either way
+	// so the count cannot move. A run that applies WITH promotion on is reported
+	// after the write instead, because a candidate that fails to become a _global
+	// row lands back in the project, so a pre-apply count of projectMems alone
+	// understates retention by the whole candidate set — and when the candidates
+	// are enough to cross the 50% line, reporting it here would announce a
+	// reduction that did not happen and then say nothing about the real one.
+	if !apply || !parsed.promoteGlobals {
+		reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals, promotionOutcome{})
 	}
 
 	if !apply {
@@ -859,7 +1053,8 @@ func runReflect() {
 	// returns early and the recovery list was empty. applyReflection folds
 	// those candidates back into the project itself when promotion is off.
 	preserved, promoted, keptMems, err := applyReflection(
-		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals)
+		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals,
+		replacedIDsByText(&result))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
@@ -874,6 +1069,21 @@ func runReflect() {
 		if len(keptMems) > 0 {
 			fmt.Fprintln(os.Stderr, recoveryWarning(len(keptMems), len(globalMems)))
 		}
+	}
+
+	// The reduction warning, for the one case the pre-apply report had to skip:
+	// this run applies with promotion on, so only now is it knowable how many
+	// candidates stayed in the project. A candidate that failed promotion is a row
+	// the project still holds, so it counts as retained — the count that decides
+	// whether a memory survived, which is the whole point of the line. `applied` is
+	// what distinguishes this from the pre-apply call: with no failures kept is 0,
+	// and a bare 0 would read as "nothing has been written yet".
+	//
+	// Printed even when nothing failed, because the skipped pre-apply report means
+	// this run would otherwise say nothing at all about how hard it compressed.
+	if apply && parsed.promoteGlobals {
+		reportReductionWarning(os.Stderr, live, projectMems, globalMems, true,
+			promotionOutcome{applied: true, kept: len(keptMems)})
 	}
 
 	// A round that wrote something counts as applied, and that includes a

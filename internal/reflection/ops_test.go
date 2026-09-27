@@ -223,19 +223,26 @@ func TestDropOpEmitsNothingAndStaysUnderTheDropGuard(t *testing.T) {
 	}
 }
 
-// TestSupersededDropIsNotReAdded pins the drop-guard half of the contract. The
-// model said explicitly that this row is now stated better elsewhere and named
-// the id that states it, so re-adding the stale row beside its own successor is
-// the goduckbot defect in #639 ("three open issues" restored next to "have
-// been fixed"). The guard must honour the claim instead of re-adding.
-func TestSupersededDropIsNotReAdded(t *testing.T) {
+// TestSupersededDropKeepsTheStaleRowWhenTheSuccessorDoesNotExplainIt pins the
+// KEEP bias on the real ops path. The model said explicitly that this row is now
+// stated better elsewhere and named the id that states it, and the guard does not
+// take its word for it: an unattended reflect never deletes a memory on the
+// model's say-so alone, because a kept stale row is demotable by resolve and
+// supersede and a deleted one is not (#549).
+//
+// The fixture's successor shares nothing with the row it supersedes (0.000), so
+// the corpus cannot show the row is gone and it is retained. The successor is
+// still recorded, and still survives.
+func TestSupersededDropKeepsTheStaleRowWhenTheSuccessorDoesNotExplainIt(t *testing.T) {
 	in := opInput()
 	result := opRun(t, in,
 		`{"learned_context":"ctx","ops":["drop `+opID1+` reason: superseded by `+opID2+`","keep `+opID2+`"]}`)
 
 	if len(result.Memories) != 1 || result.Memories[0].Content != in.ExistingMemories[1].Content {
-		t.Fatalf("want only the surviving row, got %+v", result.Memories)
+		t.Fatalf("want only the surviving row emitted, got %+v", result.Memories)
 	}
+	// The claim is still recorded: a reader of the result should be able to see
+	// what the response said it was replacing, even though nothing acts on it.
 	if len(result.Replacements) != 1 {
 		t.Fatalf("replacements = %+v, want the one stated claim", result.Replacements)
 	}
@@ -243,18 +250,20 @@ func TestSupersededDropIsNotReAdded(t *testing.T) {
 		t.Errorf("replacement = %+v, want %q replaced by the text of %q", r, opID1, opID2)
 	}
 	drops := AuditGuardedDrops(in, result)
-	if len(drops) != 0 {
-		t.Fatalf("the explicitly superseded memory was re-added: %+v", drops)
+	if !auditContains(drops, in.ExistingMemories[0].Content) {
+		t.Fatalf("the superseded row was deleted on the response's say-so alone: %+v", drops)
+	}
+	if auditContains(drops, in.ExistingMemories[1].Content) {
+		t.Errorf("the successor was itself flagged: %+v", drops)
 	}
 }
 
 // TestExecuteOpsRecordsWhichIdsWereMergedOrRewritten pins the two id lists the
-// drop guard reads. A merge's sources are scored against the union of the outputs
-// (a merge may spread one source's substance), a rewrite's source is exempt (the
-// op replaced the row), and a dropped id is in neither (the guard still judges it).
-// Nothing else in the package records this, so a result arriving with empty lists
-// would silently restore the strict comparison for merges and re-add every
-// rewritten row beside its replacement.
+// result carries. A merge's sources are scored against the text of that merge,
+// and a rewrite or a drop is in neither list — the guard audits it like any other
+// row. Nothing else in the package records this, so a result arriving with empty
+// lists would score every merge source against a single output and re-add rows a
+// merge had legitimately absorbed.
 func TestExecuteOpsRecordsWhichIdsWereMergedOrRewritten(t *testing.T) {
 	in := opInput()
 	in.ExistingMemories[0].Content = "the ledger is reached from the office subnet"
@@ -269,7 +278,7 @@ func TestExecuteOpsRecordsWhichIdsWereMergedOrRewritten(t *testing.T) {
 		t.Fatalf("merges = %+v, want the one merge", result.Merges)
 	}
 	if result.Merges[0].Text != mergedText {
-		t.Errorf("merge text = %q, want %q — the witness is what the guard checks", result.Merges[0].Text, mergedText)
+		t.Errorf("merge text = %q, want %q — it is the text the sources are scored against", result.Merges[0].Text, mergedText)
 	}
 	merged := map[string]bool{}
 	for _, id := range result.Merges[0].IDs {
@@ -292,8 +301,8 @@ func TestExecuteOpsRecordsWhichIdsWereMergedOrRewritten(t *testing.T) {
 
 // TestRejectedRewriteClaimsNothing pins the other half: when the grounding check
 // refuses a rewrite its source is re-emitted verbatim, so the operation folded
-// nothing and replaced nothing. Recording it as rewritten anyway would exempt the
-// row from the guard on the strength of a change that never happened.
+// nothing and replaced nothing. Recording it as rewritten anyway would misreport
+// the response's own account of what it did.
 func TestRejectedRewriteClaimsNothing(t *testing.T) {
 	in := opInput()
 	in.ExistingMemories[0].Content = "SSH to the Hetzner bastion uses port 2222"
@@ -308,36 +317,42 @@ func TestRejectedRewriteClaimsNothing(t *testing.T) {
 	}
 }
 
-// TestRewrittenRowIsNotReAddedBesideItsReplacement is why a rewrite is exempt
-// from the drop guard. The replacement need not resemble the original — that is
-// the point of a rewrite — so a 45% overlap test would put the old text back
-// beside the new one, which is a duplicate rather than a save.
+// TestRewrittenRowIsNotReAddedBesideItsReplacement covers the rewrite that DOES
+// carry the memory's substance, which is the case the audit passes on its own: a
+// 45% overlap test is not applied to a rewrite's CLAIM at all any more (#549) —
+// the replacement is simply an output, and an output that explains the old row
+// stops the row being re-added beside it. Where the replacement says nothing of
+// the old row, which is the more common rewrite since changing the wording is the
+// point, the old row is KEPT; see TestRewrittenRowIsKeptWhenTheRewriteSaysNothingOfIt.
 func TestRewrittenRowIsNotReAddedBesideItsReplacement(t *testing.T) {
 	old := "bastion SSH uses port 2222 with a hardware key"
+	next := "bastion SSH on port 2222 is now opened with Cloudflare Access"
 	in := ReflectionInput{ExistingMemories: []memory.Memory{
 		{ID: opID1, Category: "gotcha", Content: old},
-		{ID: opID2, Category: "fact", Content: "operator access is now fronted by Cloudflare Access"},
+		{ID: opID2, Category: "fact", Content: "the ledger ingests batches over gRPC"},
 	}}
 	written, drops := passThroughResult(t, in, fmt.Sprintf(
-		`{"ops":["rewrite %s -> operator access is fronted by Cloudflare Access","keep %s"]}`, opID1, opID2))
+		`{"ops":["rewrite %s -> %s","keep %s"]}`, opID1, next, opID2))
 	if written[old] {
 		t.Errorf("the rewritten row was re-added beside its replacement: %v", written)
 	}
 	if len(drops) != 0 {
-		t.Errorf("a rewrite was flagged for re-add: %+v", drops)
+		t.Errorf("a rewrite carrying the substance was flagged for re-add: %+v", drops)
 	}
 }
 
-// TestSupersessionWitnessFollowsAMerge records the witness as the text the
-// successor actually carries, not its stored content: a successor folded into a
-// merge is replaced by the merge's text, and the claim is only checkable if it
-// points at what the result really holds.
-func TestSupersessionWitnessFollowsAMerge(t *testing.T) {
+// TestSupersessionRecordFollowsAMerge records the text the successor actually
+// carries, not its stored content: a successor folded into a merge is replaced by
+// the merge's text, and a record pointing at something the result does not hold
+// misreports what the response said. The record is not an exemption, so the
+// stale row's fate is decided by the audit either way — here the merge carries
+// the row's substance outright, at containment 1.000, so it is not re-added.
+func TestSupersessionRecordFollowsAMerge(t *testing.T) {
 	in := opInput()
 	in.ExistingMemories[0].Content = "the ledger is reached from the office subnet"
 	in.ExistingMemories = append(in.ExistingMemories,
 		opMem(opID3, "fact", "the bastion answers ping on 443", 0.5))
-	const merged = "Production in region fsn1 is fronted by Cloudflare and the bastion answers ping on 443"
+	const merged = "the ledger is reached from the office subnet, the bastion answers ping on 443, and production in region fsn1 is fronted by Cloudflare"
 	result := opRun(t, in,
 		`{"learned_context":"ctx","ops":["drop `+opID1+` reason: superseded by `+opID2+`","merge `+opID2+`,`+opID3+` -> `+merged+`"]}`)
 
@@ -345,10 +360,10 @@ func TestSupersessionWitnessFollowsAMerge(t *testing.T) {
 		t.Fatalf("replacements = %+v, want one", result.Replacements)
 	}
 	if got := result.Replacements[0].Text; got != merged {
-		t.Errorf("witness text = %q, want the merged text %q", got, merged)
+		t.Errorf("recorded text = %q, want the merged text %q", got, merged)
 	}
 	if drops := AuditGuardedDrops(in, result); len(drops) != 0 {
-		t.Fatalf("a supersession into a merge was undone: %+v", drops)
+		t.Fatalf("a successor the merge explained was still flagged: %+v", drops)
 	}
 }
 

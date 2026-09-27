@@ -371,10 +371,12 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 			// not passed through below, but the guard may still put it back.
 			continue
 		}
-		// The witness is the text the successor actually carries, which is the
-		// merge's text when the successor was folded into one. Recording the
-		// successor's stored content instead would let the guard honour a claim
-		// about text the result does not hold.
+		// The text the successor actually carries, which is the merge's text when
+		// the successor was folded into one. Recording the successor's stored
+		// content instead would misreport what the response said it was
+		// replacing. This is a record, not a permission: the drop guard audits a
+		// disposed row like any other, because a kept stale row is repairable by
+		// resolve and supersede and a deleted row is not (#549).
 		result.Replacements = append(result.Replacements,
 			Replacement{ID: op.ids[0], Text: emitted[op.target]})
 	}
@@ -389,11 +391,18 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 	// loss; an id the model never mentioned needs no inference at all.
 	//
 	// Consequence, deliberate: omission is no longer a deletion path for the LLM
-	// tier. A memory leaves the corpus when its id is named as a merge source,
-	// named for a rewrite, or named in a drop with a reason. --allow-drops keeps
-	// its meaning for what the guard still finds — an explicit drop it cannot
-	// corroborate, a merge that lost substance, and the SQLite tier's absorbed
-	// duplicates.
+	// tier. Naming an id is NECESSARY but not SUFFICIENT: a memory leaves the
+	// corpus when its id is named as a merge source, named for a rewrite, or
+	// named in a drop with a reason AND a surviving output accounts for it — the
+	// drop guard's 45% token containment, with a merge source measured against
+	// its own merge — or --allow-drops accepts the deletion. So this comment's
+	// record of what was named is not a record of what was removed (#549), and a
+	// rewrite whose replacement says nothing of the old row leaves that row in
+	// the corpus verbatim.
+	//
+	// --allow-drops keeps its meaning for what the guard still finds — an
+	// explicit drop it cannot corroborate, a merge that lost substance, and the
+	// SQLite tier's absorbed duplicates.
 	for _, m := range input.ExistingMemories {
 		if claimed[memIDKey(m.ID)] == 0 {
 			result.Memories = append(result.Memories, verbatimMemory(m))

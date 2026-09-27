@@ -261,6 +261,21 @@ type resolveCapableStore interface {
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
 }
 
+// historyCapableStore narrows provider.MemoryStore's concrete backing store to the
+// two methods ghost_memory_delete needs for the redaction half of its job, which
+// provider.MemoryStore does not carry. *memory.Store satisfies it.
+//
+// They are needed because the tool's other half is about a memory that is
+// already gone: a credential removed by deleting its memory is still in the
+// history, and a delete that requires a live row cannot reach it. MemoryHistory
+// supplies the project the tombstone belonged to — which is how ownership is
+// still verified for a row that is no longer there — and PurgeMemoryHistory
+// erases the text without inventing a row to erase.
+type historyCapableStore interface {
+	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
+	PurgeMemoryHistory(ctx context.Context, memoryID string) (int64, error)
+}
+
 // shortID truncates an ID to 8 characters for compact preview (used for both
 // memory and task IDs), mirroring cmd/ghost/main.go's local `short` closure.
 func shortID(id string) string {
@@ -657,6 +672,44 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	return fmt.Sprintf("Memory promoted to global scope (id: %s).", memoryID), nil
 }
 
+// purgeDeletedMemoryHistory answers ghost_memory_delete for an id whose row is
+// gone. It refuses when the caller did not ask to purge — a plain delete of
+// something that does not exist is still "not found", because there is
+// nothing to retire and the caller may simply have the wrong id.
+func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, requestedProjectID, resolvedProjectID string, purge bool) (*mcp.CallToolResult, any, error) {
+	if !purge {
+		return nil, nil, fmt.Errorf("memory %s not found", memoryID)
+	}
+	hist, ok := s.store.(historyCapableStore)
+	if !ok {
+		return nil, nil, fmt.Errorf("this store cannot reach a deleted memory's history; run 'ghost history purge %s' instead", memoryID)
+	}
+	entries, err := hist.MemoryHistory(ctx, memoryID, 1)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read history: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, nil, fmt.Errorf("memory %s not found, and no recorded history to purge", memoryID)
+	}
+	// The same ownership check a live row gets, against the project the
+	// tombstone was filed under. One entry is enough to name it.
+	if entries[0].ProjectID != resolvedProjectID {
+		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, requestedProjectID)
+	}
+	purged, err := hist.PurgeMemoryHistory(ctx, memoryID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("purge failed: %w", err)
+	}
+	s.notifyProjectResource(ctx, resolvedProjectID, "context")
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
+			"Memory %s was already deleted; purged the %d recorded version(s) of its text. "+
+				"reflection snapshot holding it. The memory itself is not restored, and a copy in a "+
+				"backup taken before this is not something this can reach.",
+			memoryID, purged)}},
+	}, nil, nil
+}
+
 func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
@@ -835,15 +888,16 @@ func (s *Server) registerTools() {
 		Category  string `json:"category,omitempty" jsonschema:"architecture|decision|pattern|convention|gotcha|dependency|preference|fact (default: fact)"`
 		// Importance/Tags: see coerce.go — untyped so stringified client
 		// values survive schema validation and are normalized in-handler.
-		Importance any `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
-		Tags       any `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
-		Scope      any `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
+		Importance any  `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
+		Tags       any  `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
+		Scope      any  `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
+		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to pin it to the top of project context. Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_save",
 		Title:       "Save Memory",
-		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
+		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Set pin=true for a non-negotiable rule, a security constraint or a core invariant: a later 'ghost reflect' consolidation may merge or rewrite any ordinary memory away, and nothing else protects one. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -892,7 +946,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
-		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{Provenance: provenanceFor(req), Scope: scope})
+		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{Provenance: provenanceFor(req), Scope: scope, Pin: args.Pin})
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -912,6 +966,16 @@ func (s *Server) registerTools() {
 		}
 		if notice := refused.Notice(); notice != "" {
 			msg += " — " + notice
+		}
+		// The pin has to be reported, not just applied: on a fold the row
+		// consolidation would absorb is the existing one, not the id this
+		// message just returned, so the caller cannot infer the pin took effect
+		// from the id alone.
+		if args.Pin {
+			msg += " — pinned, so consolidation will not rewrite it"
+			if duplicateOf != "" {
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is pinned too)", duplicateOf)
+			}
 		}
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
@@ -1070,14 +1134,15 @@ func (s *Server) registerTools() {
 
 	// ghost_memory_delete — delete a memory by ID.
 	type deleteArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
-		MemoryID  string `json:"memory_id" jsonschema:"ID of the memory to delete"`
+		ProjectID    string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
+		MemoryID     string `json:"memory_id" jsonschema:"ID of the memory to delete"`
+		PurgeHistory bool   `json:"purge_history,omitempty" jsonschema:"Also erase this memory's recorded history — use it to REDACT something (a credential, a token, a personal detail), not to retire a memory you merely want gone. The history keeps the text a memory used to hold, so without this a deleted secret survives in the database and is still readable with ghost history."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_delete",
 		Title:       "Delete Memory",
-		Description: "Permanently delete a memory by ID. Requires project_id to verify ownership — you cannot delete memories from other projects. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning.",
+		Description: "Permanently delete a memory by ID. Requires project_id to verify ownership — you cannot delete memories from other projects. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning. Pass purge_history: true when the memory must be ERASED rather than retired: every recorded version of its text goes with it in the same transaction — along with any reflection snapshot that could restore the row — which is the only way to redact a secret Ghost already stored. It works on a memory that is already deleted too, purging the recorded text without restoring the row.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			OpenWorldHint:   boolPtr(false),
@@ -1100,19 +1165,34 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("lookup failed: %w", err)
 		}
 		if len(mems) == 0 {
-			return nil, nil, fmt.Errorf("memory %s not found", args.MemoryID)
+			// A memory that is already deleted is not a failed delete — it is
+			// the second stage of a redaction, and the one a delete cannot
+			// perform. The history kept its text, so the request is still
+			// answerable, and the project it belonged to is still recorded there,
+			// so ownership is still checkable. Without this branch an agent told
+			// to redact a credential gets "not found" and the text stays exactly
+			// where it was.
+			return s.purgeDeletedMemoryHistory(ctx, args.MemoryID, args.ProjectID, resolvedProjectID, args.PurgeHistory)
 		}
 		if mems[0].ProjectID != resolvedProjectID {
 			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
 		}
 
-		if err := s.store.Delete(ctx, args.MemoryID); err != nil {
+		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{
+			PurgeHistory: args.PurgeHistory,
+		}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
 
+		text := "Memory deleted."
+		if args.PurgeHistory {
+			text = "Memory deleted, and the versions of its text this database recorded are gone. " +
+				"its recorded history, and the reflection snapshot that could have restored the row. " +
+				"A copy in a backup taken before this, or in another machine's store, is not something this can reach."
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Memory deleted."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 

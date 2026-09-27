@@ -92,39 +92,39 @@ func TestAuditGuardedDrops_RetainsEveryCategory(t *testing.T) {
 	}
 }
 
-// TestAuditGuardedDrops_MergedInputIsJudgedAgainstTheOutputUnion: a merge may
-// carry an input's substance across a survivor plus a sibling, and scoring it
-// against any one of them re-adds it verbatim beside the merge that had just
-// absorbed it — the paraphrase-duplicate class #639 measured on every project. A
-// merged source (result.MergedIDs) is therefore measured against the union of the
-// outputs.
+// TestAuditGuardedDrops_MergedInputIsJudgedAgainstItsOwnMerge: a merged source
+// is scored against the text of the merge that folded it in. It used to be
+// scored against the union of every output, which was sound before the
+// pass-through existed — when the union was a handful of survivors — but is not
+// now: the pass-through emits every id the response never named, so the union of
+// a real result is the whole project's vocabulary and a source whose substance
+// its own merge discarded passes on the strength of an unrelated memory sharing
+// its words (#549). See TestMergeSourceIsScoredAgainstItsOwnMerge for the
+// fixture that separates the two.
 //
-// The fixture straddles the threshold on purpose: no single output covers 45% of
-// the SSH note and the three together cover 86% of it, so the only thing the
-// assertion turns on is which set the input is scored against.
-func TestAuditGuardedDrops_MergedInputIsJudgedAgainstTheOutputUnion(t *testing.T) {
+// The merge text here carries both sources past the bar, so nothing is flagged.
+func TestAuditGuardedDrops_MergedInputIsJudgedAgainstItsOwnMerge(t *testing.T) {
 	ssh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH from the office is firewalled, so use port 2222"}
 	region := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1"}
-	kept := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "fact", Content: "ssh from the office is firewalled for the whole subnet"}
-	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region, kept}}
+	const merged = "bastion SSH from the office is firewalled, use port 2222, and production runs in region fsn1"
+	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region}}
 
-	// The merge folded the SSH and region notes together and dropped the words
-	// "from the office"; the memory it did not touch carries them.
 	result := ReflectionResult{
-		Memories: []ReflectMemory{
-			{Category: "gotcha", Content: "the bastion is reached on port 2222 from the region fsn1"},
-			{Category: "fact", Content: kept.Content},
-		},
-		Merges: []Merge{{IDs: []string{ssh.ID, region.ID}, Text: "the bastion is reached on port 2222 from the region fsn1"}},
-	}
-
-	strict := result
-	strict.Merges = nil
-	if drops := AuditGuardedDrops(input, strict); len(drops) != 1 || drops[0].Content != ssh.Content {
-		t.Fatalf("a single-output comparison should have flagged the SSH note, got %+v", drops)
+		Memories: []ReflectMemory{{Category: "gotcha", Content: merged}},
+		Merges:   []Merge{{IDs: []string{ssh.ID, region.ID}, Text: merged}},
 	}
 	if drops := AuditGuardedDrops(input, result); len(drops) != 0 {
-		t.Fatalf("a merged source spread across the output union was flagged: %+v", drops)
+		t.Fatalf("a merge carrying both sources lost one: %+v", drops)
+	}
+
+	// Take the merge away. Neither source is carried through and no output
+	// explains either, so both go back under the ordinary per-output audit.
+	filtered := result
+	filtered.Merges = nil
+	filtered.Memories = []ReflectMemory{{Category: "fact", Content: "the ledger ingests batches over gRPC"}}
+	drops := AuditGuardedDrops(input, filtered)
+	if len(drops) != 2 {
+		t.Fatalf("want both sources re-audited once the merge is gone, got %d: %+v", len(drops), drops)
 	}
 }
 
@@ -152,30 +152,21 @@ func TestAuditGuardedDrops_NonMergedInputIsStillJudgedAgainstOneOutput(t *testin
 	if len(drops) != 1 || drops[0].Content != redisNote {
 		t.Fatalf("an explicitly dropped memory was absorbed by the corpus-wide vocabulary: %+v", drops)
 	}
-
-	// The same fixture must be absorbed once the response merges it in, else it
-	// pins nothing: no single output reaches 45% and the three together reach 50%.
-	merged := result
-	merged.Merges = []Merge{{
-		IDs:  []string{"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"},
-		Text: "the OOM killer reaps any worker over 512mb during a batch window",
-	}}
-	if drops := AuditGuardedDrops(input, merged); len(drops) != 0 {
-		t.Fatalf("the same fixture must be absorbed once it was merged, else it pins nothing: %+v", drops)
-	}
 }
 
-// TestAuditGuardedDrops_HonoursAnExplicitSupersession: the guard cannot tell
-// "forgot" from "deliberately replaced", which is how a stale memory was
-// restored beside the memory that replaced it (#639). An input the harness
-// dropped as superseded by another input id, whose successor is still in the
-// result, is a decision with a witness, so the guard does not undo it — while an
-// input with no such claim is still audited, and the exemption is per-id rather
-// than global.
-func TestAuditGuardedDrops_HonoursAnExplicitSupersession(t *testing.T) {
-	// The superseded row and its successor share almost no vocabulary — an old
-	// access method replaced by a new one — so nothing but the explicit claim
-	// distinguishes "the harness said so" from "the harness forgot".
+// TestAuditGuardedDrops_SupersessionIsJudgedLikeAnyOtherDrop is the KEEP bias
+// (#549). An unattended reflect never deletes a memory on the model's say-so
+// alone, so a `drop X reason: superseded by Y` is audited exactly like an
+// `obsolete` drop: the corpus has to be able to SHOW that X is gone.
+//
+// The fixture is the original one, and it is the interesting one because the
+// successor is a real, carried-forward row that genuinely does replace the stale
+// one — operator access moved from a hardware key to Cloudflare Access. The two
+// share no tokens at all (0.000), so the audit cannot tell that Y supersedes X,
+// and X comes back. Demoting it afterwards is resolve and supersede's job, and
+// they run right after reflect in the lifecycle. The alternative was X deleted
+// from a corpus with nobody watching, and not repairable.
+func TestAuditGuardedDrops_SupersessionIsJudgedLikeAnyOtherDrop(t *testing.T) {
 	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH uses port 2222 with a hardware key"}
 	fixed := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "operator access is now fronted by Cloudflare Access"}
 	orphan := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "gotcha", Content: "the metrics endpoint is bound to 12798"}
@@ -186,20 +177,112 @@ func TestAuditGuardedDrops_HonoursAnExplicitSupersession(t *testing.T) {
 		Replacements: []Replacement{{ID: stale.ID, Text: fixed.Content}},
 	}
 	drops := AuditGuardedDrops(input, result)
-	if len(drops) != 1 || drops[0].Content != orphan.Content {
-		t.Fatalf("want only the unrelated input audited, got %+v", drops)
+
+	// The stale row is KEPT: no output explains it, so it comes back verbatim.
+	kept := map[string]bool{}
+	for _, d := range drops {
+		kept[d.Content] = true
+	}
+	if !kept[stale.Content] {
+		t.Fatalf("a supersession deleted a memory the corpus could not show was gone: %+v", drops)
+	}
+	// The successor is a survivor and must not be re-added, or the round would
+	// resurrect the thing that replaced it.
+	if kept[fixed.Content] {
+		t.Errorf("the successor was re-added: %+v", drops)
+	}
+	// And it is not a blanket "every named drop is kept": the memory nobody
+	// claimed is audited the same way it always was.
+	if !kept[orphan.Content] {
+		t.Errorf("an unclaimed memory stopped being audited: %+v", drops)
 	}
 }
 
-// TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone: a filter that
-// runs over the result after the operations can still remove the successor —
-// dropForeignProjectMemories deletes a memory naming a project the input corpus
-// never mentioned, and a merge is exactly such a memory. The stated supersession
-// then names nothing, and honouring it would delete the dropped row with no
-// replacement. The witness is the successor's text, so a claim whose text is no
-// longer in the result lapses and both rows go back under the audit: the stale
-// one is re-added, and so is the successor the filter removed.
-func TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone(t *testing.T) {
+// TestAuditGuardedDrops_SupersessionNearTheBarKeepsTheStaleRow is the case that
+// decides whether the rule is a rule or a threshold tuned to a fixture: a real
+// supersession from this repository's own history, where the successor is a
+// reworded description of the same change. It scores 0.429 against the bar, so
+// the stale row is kept. Someone reading "reflection calls the Anthropic HTTP API
+// client directly" beside "Reflection now classifies through the calling CLI
+// harness subprocess; no direct API client" can see that the first is stale; the
+// audit cannot, and erring towards keeping it is the whole point.
+func TestAuditGuardedDrops_SupersessionNearTheBarKeepsTheStaleRow(t *testing.T) {
+	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "fact", Content: "reflection calls the Anthropic HTTP API client directly"}
+	fresh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Reflection now classifies through the calling CLI harness subprocess; no direct API client"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fresh}}
+
+	result := ReflectionResult{
+		Memories:     []ReflectMemory{{Category: "fact", Content: fresh.Content}},
+		Replacements: []Replacement{{ID: stale.ID, Text: fresh.Content}},
+	}
+	if drops := AuditGuardedDrops(input, result); !auditContains(drops, stale.Content) {
+		t.Fatalf("a near-the-bar supersession disposed of the stale row: %+v", drops)
+	}
+}
+
+// TestAuditGuardedDrops_SupersessionTheCorpusDoesExplainStillPasses is the other
+// side, and it is what makes the removal of the exemption free rather than a
+// blanket refusal. A successor that DOES restate the fact scores past the bar, so
+// the ordinary audit finds it on its own and the stale row is not re-added. The
+// witness is not consulted at all; the row simply has a survivor. Containment
+// here is 0.714.
+func TestAuditGuardedDrops_SupersessionTheCorpusDoesExplainStillPasses(t *testing.T) {
+	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH on port 2222 is opened with a hardware key"}
+	fresh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "bastion SSH on port 2222 is now opened with Cloudflare Access"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fresh}}
+
+	result := ReflectionResult{
+		Memories:     []ReflectMemory{{Category: "fact", Content: fresh.Content}},
+		Replacements: []Replacement{{ID: stale.ID, Text: fresh.Content}},
+	}
+	if drops := AuditGuardedDrops(input, result); auditContains(drops, stale.Content) {
+		t.Fatalf("a successor that restates the fact should have kept the stale row out: %+v", drops)
+	}
+}
+
+// TestAuditGuardedDrops_AKeptStaleRowIsDemotableNotDeleted: the reason the
+// supersession exemption is gone, stated as the property it trades for. A
+// superseded row the corpus cannot explain is KEPT, and a kept row is repairable
+// — the lifecycle runs resolve and supersede straight after reflect, and
+// demoting a row that is genuinely stale is their job. Had the exemption stayed,
+// the row would have been deleted from a corpus with nobody watching, and
+// nothing downstream could bring it back.
+func TestAuditGuardedDrops_AKeptStaleRowIsDemotableNotDeleted(t *testing.T) {
+	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH uses port 2222 with a hardware key"}
+	fixed := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "operator access is now fronted by Cloudflare Access"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed}}
+	result := ReflectionResult{
+		Memories:     []ReflectMemory{{Category: "fact", Content: fixed.Content}},
+		Replacements: []Replacement{{ID: stale.ID, Text: fixed.Content}},
+	}
+
+	// Retaining the flagged drop is what puts the row back in the result, byte
+	// for byte, so ReplaceNonManual's exact-content reuse keeps its id, age,
+	// embedding and links (#452) — it is the same row, not a copy.
+	drops := AuditGuardedDrops(input, result)
+	result.Memories = append(result.Memories, RetainGuardedDrops(drops)...)
+	found := false
+	for _, m := range result.Memories {
+		if m.Content == stale.Content {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the stale row did not survive the round at all: %+v", result.Memories)
+	}
+	if remaining := AuditGuardedDrops(input, result); len(remaining) != 0 {
+		t.Fatalf("retaining the stale row left %d rows still uncovered: %+v", len(remaining), remaining)
+	}
+}
+
+// TestAuditGuardedDrops_AKeptSupersededRowIsDemotableNotDeleted is the same
+// property through the real ops path, and it is what a filter that removes the
+// successor used to be able to hide behind. dropForeignProjectMemories deletes a
+// memory naming a project the input corpus never mentioned, and a merge is
+// exactly such a memory; with the exemption gone there is nothing to lapse, and
+// the successor the filter removed is audited on its own merits like any other
+// row.
+func TestAuditGuardedDrops_AKeptSupersededRowIsDemotableNotDeleted(t *testing.T) {
 	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH uses port 2222 with a hardware key"}
 	fixed := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "operator access is now fronted by Cloudflare Access"}
 	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed}}
@@ -215,7 +298,7 @@ func TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone(t *testing.T
 		retained[d.Content] = true
 	}
 	if !retained[stale.Content] {
-		t.Fatalf("a supersession outlived its successor and let the stale row go: %+v", drops)
+		t.Fatalf("the stale row went when its successor was filtered away: %+v", drops)
 	}
 	if !retained[fixed.Content] {
 		t.Fatalf("the successor the filter removed was not itself re-added: %+v", drops)

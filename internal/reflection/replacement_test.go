@@ -8,15 +8,14 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestRewriteLapsesWhenAFilterRemovesTheReplacement drives the whole tier. The
-// rewrite passes the grounding check and the operations are resolved, so the
-// source is exempt from the drop guard on the strength of a replacement text —
-// and then dropForeignProjectMemories runs and removes that text, because it
-// names a project the input corpus never mentioned. Nothing re-checks the claim
-// afterwards, so the source row is disposed of with no replacement in the corpus
-// and nothing for --allow-drops to act on: a silent deletion, the same shape as
-// the supersession one, and for the same reason.
-func TestRewriteLapsesWhenAFilterRemovesTheReplacement(t *testing.T) {
+// TestRewriteKeepsTheSourceWhenAFilterRemovesTheReplacement drives the whole
+// tier. The rewrite passes the grounding check and the operations are resolved —
+// and then dropForeignProjectMemories runs and removes the rewritten text, because
+// it names a project the input corpus never mentioned. The source row is kept:
+// there is nothing left in the corpus that explains where its knowledge went, and
+// an unattended reflect never deletes a memory on the model's say-so alone
+// (#549). Demoting it later is resolve and supersede's job.
+func TestRewriteKeepsTheSourceWhenAFilterRemovesTheReplacement(t *testing.T) {
 	const (
 		source = "the metrics endpoint is served by the ingest service"
 		reword = "the metrics endpoint is served by the dingo sidecar"
@@ -51,9 +50,11 @@ func TestRewriteLapsesWhenAFilterRemovesTheReplacement(t *testing.T) {
 	}
 }
 
-// TestRewriteIsExemptOnlyWhileItsReplacementSurvives is the unit half of the same
-// rule, stated both ways so a change to either side is caught here.
-func TestRewriteIsExemptOnlyWhileItsReplacementSurvives(t *testing.T) {
+// TestRewriteIsNotReAddedOnlyWhileItsReplacementSurvives is the unit half of the
+// same rule, stated both ways so a change to either side is caught here. The
+// replacement is not an exemption — it is an output, and the row is simply
+// explained by it while it lasts.
+func TestRewriteIsNotReAddedOnlyWhileItsReplacementSurvives(t *testing.T) {
 	const (
 		old = "the metrics endpoint is served by the ingest service"
 		new = "the metrics endpoint is served by the billing service"
@@ -84,12 +85,14 @@ func TestRewriteIsExemptOnlyWhileItsReplacementSurvives(t *testing.T) {
 	}
 }
 
-// TestSupersessionAndRewriteShareOneExemption pins the unification: a rewrite and
-// a supersession are the same claim about the same thing — an input id the
-// response disposed of, and the text that stands in its place — so they share one
-// list and one witness check. Two code paths for one rule is how the rewrite came
-// to be trusted unconditionally while the supersession was not.
-func TestSupersessionAndRewriteShareOneExemption(t *testing.T) {
+// TestSupersessionAndRewriteAreRecordedTogether pins that a rewrite and a
+// supersession land in ONE list: both are an input id the response disposed of,
+// together with the text it says took its place, and a reader of the result
+// should see both by the same route. The list is a record — the drop guard reads
+// neither kind, and audits a disposed row like any other (#549) — but it is the
+// only place the response's own account of a disposal is visible, and a dry run
+// and a reader of a bug report both want it.
+func TestSupersessionAndRewriteAreRecordedTogether(t *testing.T) {
 	const (
 		old = "bastion SSH uses port 2222 with a hardware key"
 		new = "bastion SSH uses port 2222 with the hardware key fob"
@@ -109,43 +112,46 @@ func TestSupersessionAndRewriteShareOneExemption(t *testing.T) {
 		byID[memIDKey(r.ID)] = r.Text
 	}
 	if byID[memIDKey(seqID(1))] != new {
-		t.Errorf("the rewrite's witness = %q, want the rewritten text %q", byID[memIDKey(seqID(1))], new)
+		t.Errorf("the rewrite's recorded text = %q, want the rewritten text %q", byID[memIDKey(seqID(1))], new)
 	}
 	if byID[memIDKey(seqID(2))] != new {
-		t.Errorf("the supersession's witness = %q, want the successor's text %q", byID[memIDKey(seqID(2))], new)
+		t.Errorf("the supersession's recorded text = %q, want the successor's text %q", byID[memIDKey(seqID(2))], new)
 	}
+	// Both rows are explained by the rewritten text, which is an output, so the
+	// audit finds a survivor for each and neither is flagged.
 	if drops := AuditGuardedDrops(in, result); len(drops) != 0 {
-		t.Errorf("both rows are witnessed as replaced, yet %d were flagged: %+v", len(drops), drops)
+		t.Errorf("both rows are explained by an output, yet %d were flagged: %+v", len(drops), drops)
 	}
 
-	// One witness check for both: take the replacing text away and both rows go
-	// back under the audit.
+	// Take that output away and neither row has anything left explaining it.
 	filtered := result
 	filtered.Memories = nil
 	if drops := AuditGuardedDrops(in, filtered); len(drops) != 2 {
-		t.Fatalf("want both rows audited once the witness is gone, got %+v", drops)
+		t.Fatalf("want both rows audited once the explaining output is gone, got %+v", drops)
 	}
 }
 
-// TestReplacementWithNoWitnessIsNotAnExemption covers the degenerate case: a
-// claim with no text to check. executeOps only records a rewrite it actually
-// applied, so this cannot arise from the tier — but a result carrying one must
-// not be read as "this row is definitely gone".
-func TestReplacementWithNoWitnessIsNotAnExemption(t *testing.T) {
+// TestReplacementWithNoTextDisposesOfNothing covers the degenerate record: a
+// claim carrying no text at all. executeOps only records a rewrite it actually
+// applied and a successor that survives the response, so this cannot arise from
+// the tier — but a result carrying one must not read as "this row is definitely
+// gone". It is trivially true now that nothing reads the list, and is kept as a
+// guard on the record's shape.
+func TestReplacementWithNoTextDisposesOfNothing(t *testing.T) {
 	const old = "the ledger ingests through the bastion on port 2222"
 	in := ReflectionInput{ExistingMemories: []memory.Memory{{ID: seqID(1), Category: "fact", Content: old}}}
 	result := ReflectionResult{Replacements: []Replacement{{ID: seqID(1)}}}
 
 	drops := AuditGuardedDrops(in, result)
 	if len(drops) != 1 || drops[0].Content != old {
-		t.Fatalf("a witness-less replacement disposed of the row: %+v", drops)
+		t.Fatalf("a text-less replacement disposed of the row: %+v", drops)
 	}
 }
 
-// TestRewriteOfASourceAFilterKeptIsStillExempt guards the fix from over-reaching:
-// the common case must not start re-adding rewritten rows, or every rewrite
-// becomes a duplicate.
-func TestRewriteOfASourceAFilterKeptIsStillExempt(t *testing.T) {
+// TestRewriteOfASourceAFilterKeptIsStillExplained guards the rule from
+// over-reaching: the common case must not start re-adding rewritten rows, or every
+// rewrite becomes a duplicate.
+func TestRewriteOfASourceAFilterKeptIsStillExplained(t *testing.T) {
 	const (
 		old = "the metrics endpoint is served by the ingest service"
 		new = "the metrics endpoint is served by the billing service"
@@ -216,11 +222,13 @@ func TestMergeLapsesWhenAFilterRemovesIt(t *testing.T) {
 		t.Fatalf("want the two passed-through rows left, got %+v", result.Memories)
 	}
 
-	// Only the union explains either source here, which is the shape the union
-	// branch exists for — and the reason this fixture is the one that can catch the
-	// mutation. The surviving-merge case is pinned separately, by
-	// TestMergedSourceIsStillScoredAgainstTheUnion, so the fix cannot be bought by
-	// dropping the union comparison altogether.
+	// No output explains either source, so with the merge gone both have to come
+	// back. The merge-text witness is what is being tested here: a filter can
+	// remove the merge after the ids are recorded, and a source still claiming a
+	// merge that is not there has nothing left to be scored against. The
+	// surviving-merge case is pinned separately, by
+	// TestMergedSourceIsStillScoredAgainstItsOwnMerge, so this cannot be satisfied
+	// by refusing to record merges at all.
 	drops := AuditGuardedDrops(in, result)
 	for _, want := range []string{ingest, export} {
 		if !auditContains(drops, want) {
@@ -229,40 +237,44 @@ func TestMergeLapsesWhenAFilterRemovesIt(t *testing.T) {
 	}
 }
 
-// TestMergedSourceIsStillScoredAgainstTheUnion guards the fix from
-// over-reaching: a merge that survived must keep the union comparison, or a
-// source whose substance the merge spread across siblings comes back beside the
-// merge that absorbed it.
-func TestMergedSourceIsStillScoredAgainstTheUnion(t *testing.T) {
+// TestMergedSourceIsStillScoredAgainstItsOwnMerge guards the fix from
+// over-reaching: a merge that survived must still absorb its sources, or a
+// source whose substance the merge carried comes back beside the merge that
+// absorbed it. Scoring is against the merge's own text (#549), so the merge text
+// has to actually carry each source — that is the whole witness available, since
+// a merge source is consumed by its merge and its own text is never in the
+// result.
+func TestMergedSourceIsStillScoredAgainstItsOwnMerge(t *testing.T) {
 	ssh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH from the office is firewalled, so use port 2222"}
 	region := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1"}
-	kept := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "fact", Content: "ssh from the office is firewalled for the whole subnet"}
-	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region, kept}}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region}}
+	const merged = "bastion SSH from the office is firewalled, use port 2222, and production runs in region fsn1"
 
 	result := ReflectionResult{
-		Memories: []ReflectMemory{
-			{Category: "gotcha", Content: "the bastion is reached on port 2222 from the region fsn1"},
-			{Category: "fact", Content: kept.Content},
-		},
-		Merges: []Merge{{IDs: []string{ssh.ID, region.ID}, Text: "the bastion is reached on port 2222 from the region fsn1"}},
+		Memories: []ReflectMemory{{Category: "gotcha", Content: merged}},
+		Merges:   []Merge{{IDs: []string{ssh.ID, region.ID}, Text: merged}},
 	}
 	if drops := AuditGuardedDrops(input, result); len(drops) != 0 {
 		t.Fatalf("a surviving merge still lost a source: %+v", drops)
 	}
 
-	// The same result with the merge taken away. The union now holds only the
-	// memory that was not part of the merge, so the SSH note — which the union
-	// used to carry and no single survivor explains — has to come back.
+	// The same result with the merge taken away. Nothing carries the sources now,
+	// and the only surviving memory is a stranger to both, so both must come back.
 	filtered := result
-	filtered.Memories = result.Memories[1:]
-	if drops := AuditGuardedDrops(input, filtered); !auditContains(drops, ssh.Content) {
-		t.Fatalf("want the SSH source re-added once its merge is gone, got %+v", drops)
+	filtered.Merges = nil
+	filtered.Memories = []ReflectMemory{{Category: "fact", Content: "the ledger ingests batches over gRPC"}}
+	if drops := AuditGuardedDrops(input, filtered); len(drops) != 2 {
+		t.Fatalf("want both sources re-added once their merge is gone, got %d: %+v", len(drops), drops)
 	}
 }
 
-// TestSupersessionLapsesWhenAFilterRemovesItsSuccessor is the supersession half,
-// kept alongside the rewrite half because they are one rule and one list now.
-func TestSupersessionLapsesWhenAFilterRemovesItsSuccessor(t *testing.T) {
+// TestSupersessionKeepsTheStaleRowWhenAFilterRemovesItsSuccessor is the
+// supersession half of the rewrite rule above, kept beside it because the two
+// share a list and, now, a verdict: the successor is folded into a merge that
+// names a project the input corpus never mentioned, so the filter removes the
+// whole merge and nothing in the corpus explains the stale row any more. It is
+// kept.
+func TestSupersessionKeepsTheStaleRowWhenAFilterRemovesItsSuccessor(t *testing.T) {
 	const (
 		stale = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
 		fresh = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"

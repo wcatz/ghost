@@ -671,8 +671,8 @@ func TestTieredConsolidator_QualityGateAcceptsLargeBacklogConsolidation(t *testi
 }
 
 // TestTieredConsolidator_QualityGateRejectsTruncatedBacklog keeps the
-// truncation backstop: 200 -> 2 is 1%, below even the backlog floor (5%), so it
-// is still rejected.
+// truncation backstop: 200 -> 2 is 1%, below even the backlog floor, so it is
+// still rejected.
 func TestTieredConsolidator_QualityGateRejectsTruncatedBacklog(t *testing.T) {
 	inputs := make([]memory.Memory, 200)
 	for i := range inputs {

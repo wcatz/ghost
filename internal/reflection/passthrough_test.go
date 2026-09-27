@@ -138,10 +138,23 @@ func TestOnlyAnExplicitOperationRemovesAMemory(t *testing.T) {
 			present: false,
 		},
 		{
-			// A rewrite replaces the row whatever its wording: re-adding the old
-			// text beside the new one would be a duplicate, not a save.
-			name:    "rewritten away",
+			// A rewrite whose text says nothing of the old row does NOT remove
+			// it (#549): the row is kept and demoting it afterwards is resolve
+			// and supersede's job. The rewrite here moves the row to a service
+			// that has nothing to do with a hardware key, so the audit cannot
+			// show the old text is gone.
+			name:    "rewritten into unrelated wording is kept",
 			reply:   fmt.Sprintf(`{"ops":["rewrite %s -> bastion access is handled by the billing service","keep %s"]}`, seqID(1), seqID(2)),
+			present: true,
+		},
+		{
+			// The same rewrite, but the new text carries the row's substance
+			// (the port and the bastion), so the audit finds a survivor and the
+			// old row is not re-added beside it. This is the paraphrase-duplicate
+			// case, and it is why the rule is a token audit rather than a
+			// blanket refusal to dispose of anything.
+			name:    "rewritten into wording that carries the substance",
+			reply:   fmt.Sprintf(`{"ops":["rewrite %s -> bastion SSH on port 2222 is now opened with Cloudflare Access","keep %s"]}`, seqID(1), seqID(2)),
 			present: false,
 		},
 		{

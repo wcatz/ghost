@@ -27,6 +27,16 @@ var symmetricRelations = map[string]bool{"related": true}
 // CreateLink inserts an edge between two memories. Idempotent: re-inserting
 // an existing (source, target, relation) keeps the higher strength and
 // clears any invalidation.
+//
+// A `supersedes` edge is also recorded in the target's history: it is the claim
+// "this memory is no longer current", and it is a change to that memory's
+// standing even though none of its columns move. The edge lands on the target
+// alone — the source's state did not change, and a history row filed under it
+// would be a record of a write that did not happen. The row is written when the
+// edge BECOMES active, not on every re-write of an edge that already is (see
+// below). A `related` edge from the linker is not recorded at all: nothing about
+// either memory's currency is asserted by an edge the linker adds on cosine
+// similarity alone.
 func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error {
 	if sourceID == targetID {
 		return fmt.Errorf("create link: self-links not allowed (id %s)", sourceID)
@@ -38,17 +48,99 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.ExecContext(ctx, `
+	if relation == "supersedes" {
+		// One transaction for the edge and its history row: a supersedes edge
+		// with no record of it, or a record of one that was never written, are
+		// both states this call must not be able to commit.
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin create link: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		// Whether the edge is already active is read inside the transaction,
+		// which holds the write lock from its first statement, so the decision
+		// below cannot be overtaken by another process between the read and the
+		// write. It is read rather than inferred from RowsAffected because the
+		// upsert must keep raising an existing edge's strength even when the
+		// edge's validity does not change — a guard in the conflict clause
+		// would have had to choose one of the two.
+		active, err := linkIsActive(ctx, tx, sourceID, targetID, relation)
+		if err != nil {
+			return err
+		}
+		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source); err != nil {
+			return err
+		}
+		// Only when the edge BECOMES active. `ghost supersede` re-writes a pair
+		// whose endpoint moved since the edge was written, and re-writing a
+		// live edge changes nothing about either memory: a history row would
+		// repeat the previous state byte-for-byte, spend one of the
+		// per-memory version slots, and — after enough passes — prune the real
+		// save/update/reflect versions this table exists to keep. Re-activating
+		// an invalidated edge IS a change, and is recorded.
+		if !active {
+			// relatedID is the memory whose edge makes the claim — the one that
+			// replaced this row. Without it a history says a memory went stale
+			// without saying to what, which is the half of the sentence an audit
+			// is asking for.
+			if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
+				phase:     phaseSupersede,
+				relatedID: sourceID,
+			}}, []string{targetID}); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit create link: %w", err)
+		}
+		return nil
+	}
+
+	_, err := s.db.ExecContext(ctx, linkInsertSQL,
+		sourceID, targetID, relation, strength, source)
+	if err != nil {
+		return fmt.Errorf("create link: %w", err)
+	}
+	return nil
+}
+
+// linkInsertSQL is the upsert CreateLink performs: re-inserting an existing
+// (source, target, relation) keeps the higher strength and clears any
+// invalidation. Shared by the autocommit path and the transaction the
+// supersede history row shares, so the two cannot record different edges.
+const linkInsertSQL = `
 		INSERT INTO memory_links (source_id, target_id, relation, strength, source)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
 			strength = MAX(strength, excluded.strength),
 			invalidated_at = NULL
-	`, sourceID, targetID, relation, strength, source)
-	if err != nil {
+`
+
+// insertLinkTx is linkInsertSQL inside an open transaction.
+func insertLinkTx(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation string, strength float32, source string) error {
+	if _, err := tx.ExecContext(ctx, linkInsertSQL,
+		sourceID, targetID, relation, strength, source); err != nil {
 		return fmt.Errorf("create link: %w", err)
 	}
 	return nil
+}
+
+// linkIsActive reports whether a live (not invalidated) edge already exists for
+// this exact (source, target, relation). Served by the primary key, so it is one
+// index lookup.
+func linkIsActive(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation string) (bool, error) {
+	var live int
+	err := tx.QueryRowContext(ctx, `
+		SELECT 1 FROM memory_links
+		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
+	`, sourceID, targetID, relation).Scan(&live)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read existing link: %w", err)
+	}
+	return live == 1, nil
 }
 
 // GetLinks returns all valid (non-invalidated) links touching a memory,
@@ -335,18 +427,70 @@ func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE memory_links SET invalidated_at = datetime('now')
-		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
-	`, sourceID, targetID, relation)
+	if relation != "supersedes" {
+		res, err := s.db.ExecContext(ctx, linkInvalidateSQL, sourceID, targetID, relation)
+		if err != nil {
+			return 0, fmt.Errorf("invalidate link: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			// A driver that cannot report the count is not a reason to fail: the
+			// invalidation itself already committed.
+			return 0, nil
+		}
+		return n, nil
+	}
+
+	// Withdrawing a supersession is a change in the target's standing, exactly as
+	// asserting one was, and the history has to say so: a corpus whose audit shows
+	// a supersede and no withdrawal reads as though the stale claim is still
+	// live. The edge and its row share a transaction, and the row is written only
+	// when the edge was live — the same guard the UPDATE applies, so a re-run
+	// that changes nothing records nothing.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin invalidate link: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	active, err := linkIsActive(ctx, tx, sourceID, targetID, relation)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, linkInvalidateSQL, sourceID, targetID, relation)
 	if err != nil {
 		return 0, fmt.Errorf("invalidate link: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		// A driver that cannot report the count is not a reason to fail: the
-		// invalidation itself already committed.
-		return 0, nil
+		// The error, not a zero count. In the autocommit statement above, "the
+		// invalidation itself already committed" made swallowing this honest;
+		// inside this transaction it has not committed, so returning 0 would fall
+		// through to the deferred rollback, discard the stamp, and tell the
+		// caller the edge is still live — which is what internal/supersede then
+		// branches on, four call sites deep. A driver that cannot report a count
+		// is one this build has not met, and failing the call is the answer that
+		// does not claim something the database may have done.
+		return 0, fmt.Errorf("invalidate link rows: %w", err)
+	}
+	if n > 0 && active {
+		if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
+			phase:     phaseUnsupersede,
+			relatedID: sourceID,
+		}}, []string{targetID}); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit invalidate link: %w", err)
 	}
 	return n, nil
 }
+
+// linkInvalidateSQL is the soft delete InvalidateLink performs: a timestamp, never
+// a row removal, so the graph keeps the edge that was there. The guard on
+// invalidated_at IS NULL is what makes the count a real graph change rather than
+// a re-stamp.
+const linkInvalidateSQL = `
+		UPDATE memory_links SET invalidated_at = datetime('now')
+		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
+	`
