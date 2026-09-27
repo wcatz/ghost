@@ -2347,20 +2347,49 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// CreateFromCorpus inserts a memory from a third-party benchmark dataset,
+// without the credential guard Create applies.
+//
+// It exists because a public eval corpus contains real credentials and a
+// benchmark that refuses to load one cannot run. Measured on longmemeval-s
+// (500 records, ~25k conversation turns) at the time this was written: three
+// distinct lines fire, and all three are genuine leaked credentials — a
+// `dckr_pat_` Docker Hub token, a `gho_` GitHub OAuth token, and a 40-character
+// hex SparkPost key. The detector is right about all three; the harness still
+// has to ingest them, because the measurement is about retrieval over the
+// corpus as published.
+//
+// That is why this is a named function rather than a flag. The guard exists
+// because stored text is embedded, replayed into every later session's context,
+// mirrored to the Obsidian vault and quoted into the next reflect prompt — a
+// corpus row in a scratch database that is deleted when the run ends has none
+// of those exposures. Nothing in a normal session may reach this: it is not on
+// provider.MemoryStore, it is not in the MCP surface, and its only callers are
+// the three dataset seeders under bench/.
+//
+// It is also the second false positive this round found, in the opposite
+// direction from the first: the earlier claim that guarding Create cost nothing
+// was true only of the corpora in this repository, and a downloaded corpus
+// proved it wrong on the first CI run.
+func (s *Store) CreateFromCorpus(ctx context.Context, projectID string, m Memory) (string, error) {
+	return s.insertMemory(ctx, projectID, m)
+}
+
 // Create inserts a new memory and returns its ID. The insert and the history
 // row that records it share one transaction, so a memory cannot exist without
 // its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
-	// Guarded here rather than waved through as bench-only. The reach note in
-	// secret_guard.go used to argue that a caller reading provider.MemoryStore
-	// is hypothetical; it is what every implementor does, and the cost of
-	// guarding it measured out at nothing — every corpus this repository can
-	// seed from produced zero hits. The three corpora the bench harness
-	// downloads at run time are the one residual, and a benchmark that refuses a
-	// credential-shaped record has reached the right answer.
 	if err := rejectSecret("content", m.Content); err != nil {
 		return "", err
 	}
+	return s.insertMemory(ctx, projectID, m)
+}
+
+// insertMemory is Create's statement, with the credential guard and nothing
+// else above it. Split out so CreateFromCorpus is the same write rather than a
+// second copy of an INSERT that has to stay in step with the schema — a worse
+// failure mode than a less obvious call graph.
+func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

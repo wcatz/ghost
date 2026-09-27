@@ -438,7 +438,7 @@ func rankSessionsForQuestion(ctx context.Context, q question, condition string, 
 			if t.Content == "" {
 				continue
 			}
-			id, err := store.Create(ctx, project, memory.Memory{
+			id, err := store.CreateFromCorpus(ctx, project, memory.Memory{
 				Category: "fact", Content: t.Content, Importance: 0.7, Source: "mcp",
 			})
 			if err != nil {

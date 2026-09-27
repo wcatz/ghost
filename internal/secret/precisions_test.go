@@ -93,10 +93,57 @@ func TestDetectAllowsHelmAndKubernetesCredentialVocabulary(t *testing.T) {
 			was:  "openai-key",
 		},
 
-		// The four below are not Helm or Kubernetes vocabulary. They are here
-		// because each is stopped by exactly ONE of the rule's gates, and a gate
-		// no case depends on is a gate nobody has measured. Each was confirmed
-		// RED against the version of the rule with that one gate removed.
+		// The five below are pasted code and pasted documentation, taken from a
+		// public benchmark corpus that the detector is also run over as a check
+		// on itself. That corpus contains real credentials, so it is both a
+		// source of shapes the rule must refuse and a source of the leaks it
+		// exists to catch — see TestDetectRejectsCredentialValues for the
+		// three genuine hits it produces.
+		{
+			// A key is named, not held: the markers are the thing you paste, and
+			// a sentence about a key file is a sentence about a key.
+			name: "documentation naming both pem markers in one line",
+			text: "the file must contain the lines -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY-----",
+			was:  "pem-private-key",
+		},
+		{
+			// A shell variable assigned a derived value. The $ is the signal.
+			name: "powershell variable assigned a cmdlet",
+			text: `$domainAdminPassword = ConvertTo-SecureString "{1}" -AsPlainText -Force`,
+			was:  "assigned-secret, shell-variable key",
+		},
+		{
+			name: "powershell variable assigned another variable",
+			text: `$securePassword = ConvertTo-SecureString -String $domainPassword -AsPlainText -Force`,
+			was:  "assigned-secret, shell-variable key",
+		},
+		{
+			// A handler threading a property through. The value contains the
+			// key's own name, which a credential never does.
+			name: "js handler assigning a request body field",
+			text: "accessToken: req.body.accessToken,",
+			was:  "assigned-secret, self-naming value",
+		},
+		{
+			name: "token assigned a function call",
+			text: `token = PasswordResetTokenGenerator().make\_token(user) # Generate token`,
+			was:  "assigned-secret, expression characters",
+		},
+
+		// The four below are not Helm or Kubernetes vocabulary either. They are
+		// here because each is stopped by exactly ONE of the rule's gates, and a
+		// gate no case depends on is a gate nobody has measured. Each was
+		// confirmed RED against the version with that one gate removed.
+		{
+			// Only the expression gate stops this: the call's result does not
+			// contain the key's own name, so the self-naming gate cannot see it,
+			// and every component of the value is short or mixed-case, so the
+			// word gate cannot either. A helper call is the commonest thing a
+			// pasted config snippet puts after a credential field.
+			name: "credential field assigned a helper call",
+			text: "api_key: fetchCredentialFromVault(ENV)",
+			was:  "assigned-secret, expression gate only",
+		},
 		{
 			// Only the key test stops this. The value is 20 characters of
 			// high-entropy mixed case with no template, no URL and no word
@@ -241,7 +288,7 @@ func TestKeyAndValueGatesAreIndependentlyLoadBearing(t *testing.T) {
 			{value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", material: true},
 		}
 		for _, tc := range cases {
-			if got := looksLikeCredentialMaterial(tc.value); got != tc.material {
+			if got := looksLikeCredentialMaterial("some_field", tc.value); got != tc.material {
 				t.Errorf("looksLikeCredentialMaterial(%q) = %v, want %v (refused by %s)",
 					tc.value, got, tc.material, tc.refusedBy)
 			}

@@ -205,6 +205,15 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			label: "URL with inline credentials",
 		},
 		{
+			// A backslash in a value is a markdown escape, not code — this one is
+			// a real Docker Hub token from the benchmark corpus, and the
+			// expression-character gate deliberately excludes a backslash for it.
+			name:  "markdown-escaped credential in a pasted token",
+			text:  `password: dckr\_pat\_QfMnjESK8cyTT6FTQ2tXbEeTubs`,
+			rule:  "assigned-secret",
+			label: "assigned credential value",
+		},
+		{
 			name: "aws secret access key",
 			// The access key ID has its own prefix rule, but the secret half is
 			// plain 64-char base64ish hex with no marker, so this is the case

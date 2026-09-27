@@ -583,6 +583,44 @@ func TestCreateRefusesCredentialContent(t *testing.T) {
 	}
 }
 
+// TestCreateFromCorpusSkipsTheGuard pins the one deliberate hole, because a
+// hole with a test is a decision and a hole without one is an oversight.
+//
+// The longmemeval-s corpus is a public dataset of ~25,000 conversation turns and
+// it contains real leaked credentials — a Docker Hub personal access token, a
+// GitHub OAuth token, a SparkPost key. The detector is right about all three,
+// and a retrieval benchmark that cannot ingest the corpus as published cannot
+// measure anything, so the three bench seeders write through here instead. The
+// reason that is sound rather than a convenience is in CreateFromCorpus's
+// comment: corpus text is never embedded, injected, mirrored or sent to a model,
+// and the scratch database is deleted when the run ends.
+func TestCreateFromCorpusSkipsTheGuard(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, err := s.CreateFromCorpus(ctx, testProject, Memory{
+		Category: "fact", Content: "password: dckr\\_pat\\_QfMnjESK8cyTT6FTQ2tXbEeTubs", Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("CreateFromCorpus refused a corpus row: %v", err)
+	}
+	// It is a real row, not a silently dropped one: the benchmark's recall
+	// floors are measured over exactly what landed.
+	if got := storedContent(t, s, id); !strings.Contains(got, "dckr") {
+		t.Errorf("the corpus row did not store its content: %q", got)
+	}
+	if n := projectMemoryCount(t, s); n != 1 {
+		t.Errorf("store holds %d memories, want 1", n)
+	}
+	// Create still refuses the same content, so the carve-out is the named
+	// function and not a change of default.
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "password: dckr\\_pat\\_QfMnjESK8cyTT6FTQ2tXbEeTubs", Source: "mcp", Importance: 0.7,
+	}); !errors.Is(err, ErrSecretContent) {
+		t.Errorf("Create accepted what CreateFromCorpus allowed: %v", err)
+	}
+}
+
 // TestSecretRefusalCarriesNoStoreWrites is the atomicity claim behind the
 // per-path count assertions above, stated once: whichever write path refuses,
 // the refusal happens before the statement rather than as a compensating

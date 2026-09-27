@@ -167,14 +167,20 @@ var rules = []rule{
 		re:    regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`),
 	},
 	{
-		// The BEGIN and END markers are both required, and the body is matched
-		// across newlines. A lone BEGIN line is how a memory refers to a key
-		// ("the node reads PRIVATE_KEY=-----BEGIN PRIVATE KEY----- from
-		// disk"), and refusing that would be refusing the documentation of
-		// where the key lives. A block is a key.
+		// A real block, not a mention of one. The earlier form matched
+		// `-----BEGIN … -----` through to a later `-----END … -----` anywhere in
+		// the text, which caught a Snowflake help page that says "replace
+		// <PRIVATE_KEY> … the file must contain the lines -----BEGIN PRIVATE
+		// KEY----- and -----END PRIVATE KEY-----". So BEGIN has to end its
+		// line, END has to start one, and a base64 body line has to sit between
+		// them — which is what a key file is and what a sentence about a key
+		// file is not.
 		name:  "pem-private-key",
 		label: "PEM private key block",
-		re:    regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`),
+		re: regexp.MustCompile(
+			`(?m)^-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[ \t]*\r?\n` +
+				`(?:[A-Za-z0-9+/=]{16,}[ \t]*\r?\n)+` +
+				`-----END [A-Z0-9 ]*PRIVATE KEY-----[ \t]*$`),
 	},
 	{
 		name:  "putty-private-key",
@@ -316,15 +322,21 @@ func looksLikeKeyMaterial(run string) bool {
 // password_changed_at, token: secrets.GITHUB_TOKEN. So the key is captured whole
 // and judged, and the value is judged separately, and BOTH have to hold.
 //
+// shellVarPrefix captures a `$` immediately before the key. A key that carries
+// one is a shell or PowerShell *variable* — `$domainAdminPassword =
+// ConvertTo-SecureString …` — which is an assignment of a derived value to a
+// local, not a secret in a config. From the same third-party corpus.
+//
 // The value class excludes whitespace, quotes, commas and semicolons, so a
 // quoted scalar matches without its quotes and an English phrase after the colon
 // never starts a match.
 var assignmentRe = regexp.MustCompile(
-	`(?i)\b([a-z0-9_.-]{1,64})\s*[:=]\s*["']?([^\s"',;]{` + strconv.Itoa(assignedSecretFloor) + `,})`)
+	`(?i)(\$?)\b([a-z0-9_.-]{1,64})\s*[:=]\s*["']?([^\s"',;]{` + strconv.Itoa(assignedSecretFloor) + `,})`)
 
 const (
-	assignmentKey   = 1
-	assignmentValue = 2
+	assignmentShellVar = 1
+	assignmentKey      = 2
+	assignmentValue    = 3
 	// assignedSecretFloor is the shortest value worth looking at. It is 20
 	// rather than 16 because every false positive that motivated the raise
 	// landed between 16 and 19: grafana-admin-v2 is 16, wildcard-tls-2024 is 17,
@@ -347,6 +359,18 @@ const (
 	// "secret", "grafana" and "GITHUB" clear and "token", "tls" and "v2" do not.
 	wordSegmentFloor = 6
 )
+
+// expressionChars are the characters a credential literal cannot contain and an
+// expression always can. Base16, base64, base64url, hex and an alphanumeric
+// password are made of letters, digits and `- _ . + / = ~`; a parenthesis or a
+// dollar sign means the value is code — a call, a variable, a template
+// expression — and code describes where a value lives rather than being one.
+//
+// The line that made this necessary came out of a third-party benchmark corpus:
+// `token = PasswordResetTokenGenerator().make\_token(user)`, a code snippet
+// someone pasted into a chat. A markdown-escaped `dckr\_pat\_…` also contains a
+// backslash and is a real token, so a backslash is deliberately NOT in this set.
+const expressionChars = "()$"
 
 // placeholderChars are the characters that mark a value as a template rather
 // than a secret: ${VAR} and {{VAR}} substitutions, <angle> placeholders, and
@@ -428,12 +452,13 @@ func keyWords(key string) []string {
 // keyNamesSecret reports whether a key names a credential field rather than
 // pointing at one.
 //
-// Two tests, and either can refuse. The key must contain a secret noun as a
+// Three tests, and any can refuse. The key must contain a secret noun as a
 // whole word — `client_secret` and `api_key` pass, `notsecret` does not, because
-// there the noun is part of a longer word rather than being one. And the key must
+// there the noun is part of a longer word rather than being one. The key must
 // contain no descriptor word anywhere: `secretName` and `existingSecret` each
 // carry `secret` as a whole word, and are refused because what they name is a
-// name.
+// name. And the key must not be a shell variable, which assignmentRe reports
+// separately.
 func keyNamesSecret(key string) bool {
 	words := keyWords(key)
 	for _, w := range words {
@@ -455,25 +480,37 @@ func keyNamesSecret(key string) bool {
 }
 
 // looksLikeCredentialMaterial reports whether an assigned value is a credential
-// rather than a reference to one, a placeholder for one, or a description of
-// where one lives.
+// rather than a reference to one, a placeholder for one, a piece of code, or a
+// description of where one lives.
 //
-// Four tests, all required:
+// Five tests, all required:
 //
 //   - not a template (see placeholderChars);
 //   - not a URL, because a secret is not a URL;
+//   - not code: a parenthesis or a dollar sign means a call or a variable (see
+//     expressionChars);
 //   - not a name. A value split on its separators that contains an all-lower or
 //     all-upper run of wordSegmentFloor or more letters is naming something:
 //     `secrets.GITHUB_TOKEN`, `grafana-admin-v2`, `wildcard-tls-2024`. Key
 //     material is base16 or base64 of random bytes and mixes case, so it does
 //     not produce a six-letter single-case run;
-//   - and it has to pass the length/entropy bar, which is what separates a
+//   - and it has to clear the length/entropy bar, which is what separates a
 //     20-character random password from a 20-character word chain.
-func looksLikeCredentialMaterial(value string) bool {
+//
+// key is the field the value was assigned to, because one of the reference
+// shapes is only visible against it: a handler that assigns
+// `accessToken: req.body.accessToken` is wiring a property, not storing one.
+func looksLikeCredentialMaterial(key, value string) bool {
 	if strings.ContainsAny(value, placeholderChars) {
 		return false
 	}
 	if urlValuePrefix.MatchString(value) {
+		return false
+	}
+	if strings.ContainsAny(value, expressionChars) {
+		return false
+	}
+	if namesItsOwnKey(key, value) {
 		return false
 	}
 	if hasWordSegment(value) {
@@ -485,6 +522,28 @@ func looksLikeCredentialMaterial(value string) bool {
 	entropy := entropyPerChar(value)
 	return (len(value) >= assignedSecretFloor && entropy >= minEntropyFloor) ||
 		(len(value) >= longValueFloor && entropy >= minEntropyLoose)
+}
+
+// namesItsOwnKey reports whether a value contains the name of the field it is
+// assigned to, which means the value is a reference to that field rather than
+// something stored in it.
+//
+// The comparison is on the alphanumerics alone, so `accessToken` and
+// `req.body.accessToken` match, and so would `api-key` and `MY_API_KEY`. A
+// credential is not a superset of its own field name; a property being threaded
+// through a handler always is. From the same third-party corpus.
+func namesItsOwnKey(key, value string) bool {
+	strip := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	needle, hay := strip(key), strip(value)
+	return needle != "" && strings.Contains(hay, needle)
 }
 
 // hasWordSegment reports whether value names something: a separator-delimited
@@ -621,7 +680,10 @@ func Detect(text string) (Finding, bool) {
 		}
 	}
 	for _, m := range assignmentRe.FindAllStringSubmatch(text, -1) {
-		if keyNamesSecret(m[assignmentKey]) && looksLikeCredentialMaterial(m[assignmentValue]) {
+		if m[assignmentShellVar] != "" {
+			continue
+		}
+		if keyNamesSecret(m[assignmentKey]) && looksLikeCredentialMaterial(m[assignmentKey], m[assignmentValue]) {
 			return Finding{Rule: assignedSecretRule, Label: assignedSecretLabel}, true
 		}
 	}
@@ -689,35 +751,3 @@ var bip39Words = sync.OnceValue(func() map[string]struct{} {
 	}
 	return words
 })
-
-// looksAssignedSecret reports whether an assigned value is a value rather than
-// a description. The regex has already established a credential-shaped name and
-// a value of at least assignedSecretFloor characters; two tests remain:
-//
-//   - it is not a template (see placeholderChars);
-//   - it draws on at least two of the three character classes, so a
-//     single-class run of letters or digits — a hostname, a flag name, a long
-//     filename, a spelled-out word — is a note about a setting, not a key.
-func looksAssignedSecret(value string) bool {
-	if strings.ContainsAny(value, placeholderChars) {
-		return false
-	}
-	var lower, upper, digit bool
-	for _, r := range value {
-		switch {
-		case r >= 'a' && r <= 'z':
-			lower = true
-		case r >= 'A' && r <= 'Z':
-			upper = true
-		case r >= '0' && r <= '9':
-			digit = true
-		}
-	}
-	classes := 0
-	for _, present := range []bool{lower, upper, digit} {
-		if present {
-			classes++
-		}
-	}
-	return classes >= 2
-}
