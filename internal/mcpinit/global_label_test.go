@@ -3,7 +3,15 @@ package mcpinit
 import (
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
+
+// builtinSeedText is the frozen shipped rule Ghost writes into the global
+// project. memory keeps its own unexported copy; this one is spelled out here
+// so a change to the shipped text fails these tests instead of silently
+// redefining "correct" alongside the code.
+const builtinSeedText = "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user."
 
 // TestSessionContextDoesNotClaimReflectionGlobalsAreYours: session start used
 // to open every global section with "the user's own saved cross-project
@@ -79,24 +87,71 @@ func TestSessionContextDoesNotClaimReflectionGlobalsAreYours(t *testing.T) {
 	}
 }
 
+// TestSessionContextDoesNotClaimLegacyShapedBuiltinSeed: a row still in the
+// shape a pre-v15 build wrote — the shipped seed recorded as source='manual' —
+// must render as the Ghost-shipped rule it is, whichever build reads it. The
+// row is global by construction, so it carries the global project as its own.
+func TestSessionContextDoesNotClaimLegacyShapedBuiltinSeed(t *testing.T) {
+	out := formatSessionContext(
+		"p1", "ghost", nil, "", nil, nil, 1, 0, true,
+		[]sessionMemory{{ID: "1", ProjectID: memory.GlobalProjectID, Category: "preference", Content: builtinSeedText, Source: "manual"}},
+		1, true,
+	)
+	if strings.Contains(out, "the user's own saved cross-project preferences") {
+		t.Errorf("legacy-shaped builtin seed was presented as user-authored:\n%s", out)
+	}
+	if !strings.Contains(out, "(builtin)") {
+		t.Errorf("legacy-shaped builtin seed was not labelled builtin:\n%s", out)
+	}
+}
+
+// TestSessionContextGuidanceNamesTheLegacyShapedBuiltinSeed: the guidance
+// sentence enumerates the origin labels the rows above it actually carry, so
+// it has to read the same canonicalized source the renderer does.
+//
+// It used to read sessionMemory.Source directly. On a store holding only the
+// manual-shaped shipped seed that produced a self-contradicting block: the row
+// rendered "(builtin)" while the guidance said no row had "any recorded
+// automated origin" — telling the agent to trust a label it was also told
+// does not exist.
+func TestSessionContextGuidanceNamesTheLegacyShapedBuiltinSeed(t *testing.T) {
+	cases := []struct {
+		name    string
+		globals []sessionMemory
+		want    string
+	}{
+		{
+			name:    "a lone legacy-shaped seed is named as builtin",
+			globals: []sessionMemory{{ID: "1", ProjectID: memory.GlobalProjectID, Category: "preference", Content: builtinSeedText, Source: "manual"}},
+			want:    "parenthesized tags (builtin)",
+		},
+		{
+			name: "a legacy-shaped seed beside a reflected row names both",
+			globals: []sessionMemory{
+				{ID: "1", ProjectID: memory.GlobalProjectID, Category: "preference", Content: builtinSeedText, Source: "manual"},
+				{ID: "2", ProjectID: memory.GlobalProjectID, Category: "fact", Content: "Derived by a summariser.", Source: "reflection"},
+			},
+			want: "parenthesized tags (builtin, reflection)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := formatSessionContext("p1", "ghost", nil, "", nil, nil, 1, 0, true, tc.globals, len(tc.globals), true)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("guidance must name %q:\n%s", tc.want, out)
+			}
+			if strings.Contains(out, "no recorded automated origin") {
+				t.Errorf("guidance denies a recorded origin the rows above it carry:\n%s", out)
+			}
+		})
+	}
+}
+
 // TestSessionContextTagsEveryNonManualGlobal: the per-item tag has to name the
 // actual source rather than a generic "not yours", because reflection-derived
 // and agent-written rows deserve different suspicion — one came from a model
 // summarising possibly-untrusted content, the other from an explicit save.
-func TestSessionContextDoesNotClaimUnmigratedBuiltinSeed(t *testing.T) {
-	out := formatSessionContext(
-		"p1", "ghost", nil, "", nil, nil, 1, 0, true,
-		[]sessionMemory{{ID: "1", Category: "preference", Content: "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.", Source: "manual"}},
-		1, true,
-	)
-	if strings.Contains(out, "the user's own saved cross-project preferences") {
-		t.Errorf("unmigrated builtin seed was presented as user-authored:\n%s", out)
-	}
-	if !strings.Contains(out, "(builtin)") {
-		t.Errorf("unmigrated builtin seed was not labelled builtin:\n%s", out)
-	}
-}
-
 func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 	out := formatSessionContext(
 		"p1", "ghost", nil, "", nil, nil, 1, 0, true,

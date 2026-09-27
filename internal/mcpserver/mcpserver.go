@@ -2170,7 +2170,7 @@ func formatMemories(memories []memory.Memory) string {
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), sourceLabelForContent(m.Source, m.Content), quoteData(m.Content))
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), sourceLabelForMemory(m), quoteData(m.Content))
 	}
 	return sb.String()
 }
@@ -2211,10 +2211,14 @@ func scopeLabel(scope map[string]string) string {
 	return b.String()
 }
 
-// sourceLabelForContent applies the read-only compatibility correction for a
-// legacy builtin row that has not yet passed the schema migration.
-func sourceLabelForContent(source, content string) string {
-	return sourceLabel(memory.CanonicalOriginSource(source, content))
+// sourceLabelForMemory names who wrote a row, applying the read-only
+// compatibility correction for a row still in the shape a pre-v15 build wrote
+// it. It takes the whole memory so the project id travels with the content:
+// memory.CanonicalOriginSourceForProject scopes the rewrite to
+// memory.GlobalProjectID, and a project row that happens to contain the
+// shipped words is the user's own material and keeps the untagged marker.
+func sourceLabelForMemory(m memory.Memory) string {
+	return sourceLabel(memory.CanonicalOriginSourceForProject(m.ProjectID, m.Source, m.Content))
 }
 
 // sourceLabel names who wrote a row, or nothing when it was direct user

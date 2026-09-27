@@ -215,7 +215,11 @@ func globalOriginGuidance(globals []sessionMemory) string {
 	seen := make(map[string]bool)
 	labels := make([]string, 0, len(globals))
 	for _, m := range globals {
-		_, label := memory.OriginClass(m.Source)
+		// The same canonicalized source the row renderer uses above: reading
+		// the raw source here made the guidance contradict its own block,
+		// telling the agent no row had a recorded origin while the rows it was
+		// describing rendered "(builtin)".
+		_, label := memory.OriginClass(memory.CanonicalOriginSourceForProject(m.ProjectID, m.Source, m.Content))
 		if label == "" || seen[label] {
 			continue
 		}
@@ -246,7 +250,7 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 		// something authoritative (issue #545).
 		allOwn := true
 		for _, m := range globals {
-			source := memory.CanonicalOriginSource(m.Source, m.Content)
+			source := memory.CanonicalOriginSourceForProject(m.ProjectID, m.Source, m.Content)
 			own, _ := memory.OriginClass(source)
 			if !own {
 				allOwn = false
@@ -262,7 +266,7 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 			fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
 		}
 		for _, m := range globals {
-			source := memory.CanonicalOriginSource(m.Source, m.Content)
+			source := memory.CanonicalOriginSourceForProject(m.ProjectID, m.Source, m.Content)
 			_, label := memory.OriginClass(source)
 			origin := ""
 			if label != "" {
@@ -397,25 +401,28 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	}
 	defer db.Close() //nolint:errcheck
 
-	if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE project_id = '_global' AND resolved_at IS NULL`).Scan(&totalCount); err == nil {
+	// Both global queries bind the same sentinel the store persists, so this
+	// read path cannot drift onto a different project than the one the seeds
+	// were written into.
+	if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL`, memory.GlobalProjectID).Scan(&totalCount); err == nil {
 		totalCountKnown = true
 	}
 
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, source FROM memories
-		WHERE project_id = '_global' AND resolved_at IS NULL
+		SELECT id, category, content, pinned, source, project_id FROM memories
+		WHERE project_id = ? AND resolved_at IS NULL
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT ?
-	`, globalsCap*2)
+	`, memory.GlobalProjectID, globalsCap*2)
 	if err != nil {
 		return nil, totalCount, totalCountKnown
 	}
 	defer rows.Close() //nolint:errcheck
 
 	for rows.Next() {
-		var id, cat, content, source string
+		var id, cat, content, source, projectID string
 		var pinnedInt int
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source); err != nil {
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source, &projectID); err != nil {
 			continue
 		}
 		// 300 bytes here vs. 200 for project memories below is deliberate,
@@ -423,7 +430,13 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		// count (globalsCap=8), so a larger per-item byte budget still
 		// keeps the total globals-section bytes low.
 		content = truncateUTF8(content, 300)
-		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, Source: source})
+		// project_id is selected rather than filled in from the WHERE clause
+		// so the row carries the project it is actually stored under. The
+		// filter means it is always the sentinel today, but the origin label
+		// for a legacy-shaped seed is decided by this field — stamping a
+		// value here would make that decision depend on a constant instead of
+		// the row.
+		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, ProjectID: projectID, Source: source})
 	}
 
 	// Dedup: unlike project memories (where StableDemote only reorders and
@@ -468,6 +481,13 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 type sessionMemory struct {
 	ID, Category, Content string
 	Pinned                bool
+	// ProjectID is the project this row is actually stored under, never the
+	// project the session resolved to: the globals loader scans it from the
+	// row, and the project loader fills it with the project it queried.
+	// memory.CanonicalOriginSourceForProject can only recognise Ghost's
+	// shipped seed as a global row from its own project — a project row
+	// carrying the same text is the user's own.
+	ProjectID string
 	// Source identifies who wrote or imported this row. memory.OriginClass
 	// owns the trust classification; the renderer uses its label rather than
 	// repeating a second source policy here.
@@ -567,7 +587,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 			t = now
 		}
 		cands = append(cands, candidate{
-			mem:        sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1},
+			mem:        sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, ProjectID: projectID},
 			importance: importance,
 			createdAt:  t,
 		})
