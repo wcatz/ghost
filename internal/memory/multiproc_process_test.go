@@ -192,6 +192,12 @@ type multiprocPaths struct {
 	home    string
 }
 
+// writerLabels names the load's writers, so the maintenance process knows whose
+// post-announcement write to wait for. The parent's own spawn list is the source of
+// truth; an empty value makes the maintenance process skip that wait, which is
+// only correct for a role that is not the lifecycle writer.
+var writerLabels string
+
 func (c *child) start(ctx context.Context, t *testing.T, p multiprocPaths, role, project, label string, extra ...string) {
 	t.Helper()
 	args := []string{
@@ -201,12 +207,12 @@ func (c *child) start(ctx context.Context, t *testing.T, p multiprocPaths, role,
 		"-project", project,
 		"-label", label,
 		"-load", multiprocLoadPrefix,
-		"-load-project", multiprocLoadProject,
 		"-seed", multiprocSeedPrefix,
 		"-replaced", multiprocReplacedPrefix,
 		"-query", multiprocQuery,
 		"-batch", fmt.Sprint(multiprocBatchRows),
 		"-after", fmt.Sprint(multiprocLoadAfter),
+		"-writers", writerLabels,
 	}
 	args = append(args, extra...)
 	c.name = role + "/" + label
@@ -367,6 +373,8 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 
 	// The steady-state load: two MCP servers and two CLI children writing, and
 	// two read-only processes searching the rows they are rewriting.
+	loadLabels := []string{"mcp0", "mcp1", "cli0", "cli1", "probe"}
+	writerLabels = strings.Join(loadLabels, ",")
 	load := []*child{
 		spawn(&child{}, "mcp", multiprocLoadProject, "mcp0"),
 		spawn(&child{}, "mcp", multiprocLoadProject, "mcp1"),
@@ -476,9 +484,9 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 	// vary; what must not vary is that they are not near zero. The dedup column
 	// is expected to be non-zero: the fixture's rows really are near-identical,
 	// which is what makes the rewrite phase able to catch a stale index entry.
-	t.Logf("multi-process run: %d writes (%d of them open when the batch was announced), %d rewrites, "+
+	t.Logf("multi-process run: %d writes (%d issued after the batch was announced), %d rewrites, "+
 		"%d reads, %d dedup hits across %d processes; batch of %d rows; poller sampled %d times and saw %v",
-		totalInt(reports, "writes"), totalInt(reports, "writes_overlapping_commit"),
+		totalInt(reports, "writes"), totalInt(reports, "writes_after_announce"),
 		totalInt(reports, "rewrites"), totalInt(reports, "reads"),
 		totalInt(reports, "duplicates"), len(children), multiprocBatchRows,
 		reports["poller/poller"].count("samples"), reports["poller/poller"].Observed)
@@ -727,28 +735,25 @@ func assertConnectionContract(t *testing.T, reports map[string]procReport) {
 	}
 }
 
-// assertLoadWasLive checks the run was not vacuous: a writer's write transaction
-// has to have been open when the lifecycle process announced it was committing
-// its batch.
+// assertLoadWasLive checks the run was not vacuous: every writer must have issued
+// a write after the lifecycle process announced its batch.
 //
-// The structural guarantee is the barrier protocol — the batch waits for every
-// writer to report its wrote-<label> file, and writers keep writing until the
-// batch releases them, so they are mid-stream by construction. This is the
-// observable half: the batch holds SQLite's write lock for its whole transaction,
-// so no writer can commit *during* it, and a row count taken on either side would
-// measure the two gaps around the lock rather than the contention. A writer reads
-// the announcement either side of its own write, so a write in flight at that
-// moment is counted.
+// The structural guarantee is the barrier protocol — the maintenance process waits
+// for each writer's announced-<label> file, so the batch cannot commit until every
+// writer has come back around its loop and written again — and this is the
+// observable half, checking that each file was really a write rather than a stray
+// one. It matters because the batch holds SQLite's write lock for its whole
+// transaction, so nothing can commit *during* it: a row count taken either side
+// would measure the two gaps around the lock, and a writer reading the
+// announcement flag around its own write cannot tell a write that straddled the
+// instant from one that ran entirely after it.
 func assertLoadWasLive(t *testing.T, reports map[string]procReport) {
 	t.Helper()
-	after := 0
 	for _, name := range []string{"mcp/mcp0", "mcp/mcp1", "cli/probe", "cli/cli0", "cli/cli1"} {
-		after += reports[name].count("writes_overlapping_commit")
-	}
-	if after == 0 {
-		t.Errorf("no writer issued a write after the lifecycle process announced its batch, so the batch " +
-			"committed against a load that had already gone quiet and the overlap the contract promises was " +
-			"never exercised. Raise multiprocLoadWrites, or check that nothing is starving the writers")
+		if reports[name].count("writes_after_announce") == 0 {
+			t.Errorf("%s reported no write issued after the batch was announced, so the batch never met a "+
+				"live writer and the overlap the contract promises was not exercised", name)
+		}
 	}
 }
 

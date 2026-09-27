@@ -149,13 +149,11 @@ type options struct {
 	seed     string
 	replaced string
 	load     string
-	// loadProject is the project the steady-state writers own. The maintenance
-	// role needs it to tell whether a writer committed across its batch.
-	loadProject string
-	query       string
-	probe       bool
-	batch       int
-	after       int
+	query    string
+	probe    bool
+	batch    int
+	after    int
+	writers  string
 }
 
 func parseFlags() options {
@@ -168,11 +166,11 @@ func parseFlags() options {
 	flag.StringVar(&o.seed, "seed", "", "content prefix of the batch's pre-state rows")
 	flag.StringVar(&o.replaced, "replaced", "", "content prefix of the batch's post-state rows")
 	flag.StringVar(&o.load, "load", "", "content prefix for this role's steady-state writes")
-	flag.StringVar(&o.loadProject, "load-project", "", "project the steady-state writers own")
 	flag.StringVar(&o.query, "query", "", "FTS query the reader roles use")
 	flag.BoolVar(&o.probe, "probe", false, "run the _txlock=immediate probe before joining the load")
 	flag.IntVar(&o.batch, "batch", 0, "rows in the maint role's reflection batch")
 	flag.IntVar(&o.after, "after", 0, "writes a load role completes before it reports itself in step")
+	flag.StringVar(&o.writers, "writers", "", "comma-separated labels of the load's writers (maint role)")
 	flag.Parse()
 	return o
 }
@@ -477,22 +475,33 @@ func probeImmediateTxLock(ctx context.Context, dbPath string) (bool, error) {
 // roles
 // ---------------------------------------------------------------------------
 
-// noteWriteOverlap records that this write transaction was open across the moment
-// the lifecycle process announced its batch. It is how the run proves the load was
-// live at the batch, which nothing else observes: the batch holds SQLite's write
-// lock for its whole transaction, so no writer can commit *during* it, and a row
-// count taken either side would measure the two gaps around the lock rather than
-// the contention.
-func noteWriteOverlap(rep *report, announcingBefore bool, b barriers) {
-	if announcingBefore || b.signalled(committing) {
-		rep.put("writes_overlapping_commit", fmt.Sprint(rep.count("writes_overlapping_commit")+1))
+// announceWrite is what a writer calls once, after a write it issued following
+// the batch's announcement. The batch waits for this barrier from every writer, so
+// "the load was live when the batch was announced" is a fact the run establishes
+// with a file rather than one it infers from a timestamp.
+//
+// Nothing weaker works. The batch holds SQLite's write lock for its whole
+// transaction, so no writer can commit *during* it; a row count taken either side
+// measures the two gaps around the lock, and a writer checking the announcement
+// flag on both sides of its own write cannot tell a write that straddled the
+// instant from one that ran entirely after it. Waiting for a post-announcement
+// write is the only ordering that is unambiguous, and it costs one write round.
+func announceWrite(b barriers, rep *report, label string) error {
+	if err := b.signal(announcedLabel(label)); err != nil {
+		return err
 	}
+	rep.put("writes_after_announce", fmt.Sprint(rep.count("writes_after_announce")+1))
+	return nil
 }
 
 // wroteLabel is the barrier a load process writes once it has completed its
 // -after writes. Naming the barrier after the writer rather than a step count is
 // what lets the batch wait for progress instead of for a clock.
 func wroteLabel(label string) string { return "wrote-" + label }
+
+// announcedLabel is the barrier a writer writes after a write it issued following
+// the batch's announcement.
+func announcedLabel(label string) string { return "announced-" + label }
 
 func openStore(dbPath string) (*sql.DB, *memory.Store, error) {
 	db, err := memory.OpenDB(dbPath)
@@ -509,19 +518,18 @@ func openStore(dbPath string) (*sql.DB, *memory.Store, error) {
 // and the character class accepts either case.
 var savedID = regexp.MustCompile(`\(id: ([0-9A-Fa-f]{32})\)`)
 
-// A load role spends its write budget and then keeps reading until the batch
-// commits. The bound is the point, not a throttle.
+// A load role writes on every iteration until the batch releases it, which is
+// what a live MCP server or CLI child does and what puts four writers against one
+// write lock for the whole run.
 //
-// The contract's busy timeout is a bound and not a guarantee — a transaction
-// held longer than 5s still fails its writer — so what a test asserts has to be
-// that ordinary contention is ridden out, not that any amount of it is. A writer
-// looping until the batch arrives issues an unbounded number of write
-// transactions against a corpus that grows with every one, and each transaction
-// gets slower as the near-duplicate scan inside it widens; on a loaded runner
-// that eventually pushes a single write transaction past the very timeout whose
-// sufficiency the test is checking, and the run then fails on the environment
-// rather than on the contract. A fixed budget holds the corpus, and with it the
-// transaction duration, roughly constant.
+// What keeps that from becoming a measurement of the corpus is the trigger, not a
+// throttle: the batch waits for every writer to report -after writes and then ends
+// the load within a write or two of committing, so the run is over before the
+// corpus is large. The alternative — a writer looping while something *else*
+// decided when the batch would come — is what grows the corpus without limit, and
+// each write transaction then widens the near-duplicate scan inside it until one
+// outlasts the very busy timeout whose sufficiency the test is checking, and the
+// run fails on the environment rather than on the contract.
 func runMCP(ctx context.Context, o options, rep *report) error {
 	db, store, err := openStore(o.dbPath)
 	if err != nil {
@@ -540,13 +548,10 @@ func runMCP(ctx context.Context, o options, rep *report) error {
 
 	b := barriers{dir: o.barrier}
 	writes := 0
+	announced := false
 	return loadLoop(ctx, rep, b, func(i int) error {
 		content := fmt.Sprintf("%s mcp-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
-		// The commit signal is read on both sides of the save: the window
-		// between the batch's announcement and its completion is shorter than one
-		// save, so a save that merely started before the announcement is the
-		// common case and a save that only started after it may never happen.
-		announcing := b.signalled(committing)
+		announcing := b.signalled(committing) && !announced
 		res, err := session.CallTool(ctx, &mcp.CallToolParams{
 			Name:      "ghost_memory_save",
 			Arguments: map[string]any{"project_id": o.project, "content": content, "category": "fact"},
@@ -561,12 +566,17 @@ func runMCP(ctx context.Context, o options, rep *report) error {
 		if match == nil {
 			return fmt.Errorf("ghost_memory_save reported no memory id: %s", textOf(res.Content))
 		}
-		noteWriteOverlap(rep, announcing, b)
 		rep.IDs = append(rep.IDs, match[1])
 		writes++
 		rep.put("writes", fmt.Sprint(writes))
 		if writes == o.after {
 			if err := b.signal(wroteLabel(o.label)); err != nil {
+				return err
+			}
+		}
+		if announcing {
+			announced = true
+			if err := announceWrite(b, rep, o.label); err != nil {
 				return err
 			}
 		}
@@ -691,15 +701,14 @@ func runCLI(ctx context.Context, o options, rep *report, b barriers) error {
 	// read-then-write can collide with a commit in between.
 	var created []string
 	writes := 0
+	announced := false
 	return loadLoop(ctx, rep, b, func(i int) error {
 		content := fmt.Sprintf("%s cli-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
-		// Read on both sides of the write: see noteWriteOverlap.
-		announcing := b.signalled(committing)
+		announcing := b.signalled(committing) && !announced
 		id, duplicateOf, _, err := store.Upsert(ctx, o.project, "fact", content, "mcp", 0.5, []string{"concurrency"})
 		if err != nil {
 			return fmt.Errorf("Upsert: %w", err)
 		}
-		noteWriteOverlap(rep, announcing, b)
 		// A dedup hit is counted, not failed: Upsert inserts the incoming text as
 		// its own row and links it to the near-duplicate it folded onto, so the
 		// write is neither lost nor a second copy of one row. Reported so a
@@ -713,6 +722,12 @@ func runCLI(ctx context.Context, o options, rep *report, b barriers) error {
 		created = append(created, id)
 		if writes == o.after {
 			if err := b.signal(wroteLabel(o.label)); err != nil {
+				return err
+			}
+		}
+		if announcing {
+			announced = true
+			if err := announceWrite(b, rep, o.label); err != nil {
 				return err
 			}
 		}
@@ -819,6 +834,18 @@ func runMaintenance(ctx context.Context, o options, rep *report, b barriers) err
 	// batch that was never sampled at all.
 	if err := b.wait(sampled, time.Now().Add(barrierDeadline)); err != nil {
 		return err
+	}
+	// …and does not start until every writer has issued a write *after* that
+	// announcement. This is what makes "the batch met a live load" a fact rather
+	// than a hope: the batch cannot commit until each of them has come back
+	// around its loop, so each one was writing across the announcement.
+	for _, label := range strings.Split(o.writers, ",") {
+		if label == "" {
+			continue
+		}
+		if err := b.wait(announcedLabel(label), time.Now().Add(barrierDeadline)); err != nil {
+			return err
+		}
 	}
 
 	batch := make([]memory.Memory, 0, o.batch)
@@ -984,6 +1011,13 @@ func runPoller(ctx context.Context, o options, rep *report, b barriers) error {
 		}
 		if round >= maxPollRounds {
 			return fmt.Errorf("polled %d times without seeing the batch commit", maxPollRounds)
+		}
+		// The batch can give up without ever committing — a barrier it waits for
+		// never arrives — and a sampler that keeps polling until its round cap
+		// would turn that into minutes of nothing. The abort marker ends it, and
+		// names why.
+		if reason, ok := b.aborted(); ok {
+			return barrierError{fmt.Sprintf("gave up polling after %d samples: %s", rep.count("samples"), reason)}
 		}
 	}
 	rep.Observed = order
