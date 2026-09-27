@@ -8,6 +8,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // reflectionApplier is the single write boundary for `ghost reflect`. Keeping
@@ -22,10 +23,28 @@ type reflectionApplier interface {
 // invokes the store apply boundary. Promotion is not nested under a
 // project-memory guard: a result containing only cross-project candidates is
 // precisely the case where an explicit promotion request must still run.
+//
+// This is also where a credential-shaped proposal is dropped, and the position
+// is the point. The write boundary is the only place every path passes through,
+// and it is reached AFTER the drop guard's audit: the audit asks which inputs the
+// output failed to account for, and executeOps emits every unclaimed input
+// verbatim, so a memory the tier carried forward is byte-identical to the output
+// that carried it. Dropping it earlier makes that input look unaccounted for,
+// and both outcomes are wrong — RetainGuardedDrops re-adds it verbatim and the
+// credential is written back (making the drop a no-op, after the audit has
+// already printed its content to stderr), or some other output happens to cover
+// 45% of its tokens and ReplaceNonManual deletes the stored row with no
+// --allow-drops, the one deletion path the drop guard exists to close. Here it is
+// still accounted for, so it is neither re-added nor deleted, and it simply never
+// reaches the store.
 func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
 	if !promoteGlobals && len(globalMems) > 0 {
 		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		globalMems = nil
+	}
+	projectMems, globalMems, dropped := dropCredentialProposals(projectMems, globalMems)
+	if dropped > 0 {
+		fmt.Printf("note: %d consolidation proposal(s) held a credential value and were not applied\n", dropped)
 	}
 	projectRows := reflectMemoriesToMemory(projectID, projectMems, replaced)
 	globalRows := reflectMemoriesToMemory("_global", globalMems, replaced)
@@ -33,6 +52,25 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		return nil, 0, nil, nil
 	}
 	return store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
+}
+
+// dropCredentialProposals removes the proposals whose content holds a
+// credential, from both lists, and reports how many it removed.
+func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory) (keptProject, keptGlobal []reflection.ReflectMemory, dropped int) {
+	keep := func(in []reflection.ReflectMemory) (out []reflection.ReflectMemory, n int) {
+		out = in[:0]
+		for _, m := range in {
+			if _, ok := secret.Detect(m.Content); ok {
+				n++
+				continue
+			}
+			out = append(out, m)
+		}
+		return out, n
+	}
+	keptProject, n := keep(projectMems)
+	keptGlobal, m := keep(globalMems)
+	return keptProject, keptGlobal, n + m
 }
 
 // reflectMemoriesToMemory converts proposals to store rows. replaced maps an

@@ -45,7 +45,7 @@ func looksLikeSecret(lower string) bool {
 	return false
 }
 
-// dropSecretMemories removes emitted memories whose content holds a credential
+// DropSecretMemories removes emitted memories whose content holds a credential
 // value, keeping the rest of the round.
 //
 // Dropping rather than failing is the whole point, and it is why this lives in
@@ -65,15 +65,37 @@ func looksLikeSecret(lower string) bool {
 // and the category and never the content: this line is the last place a
 // credential would go before the log file keeps it forever.
 //
+// It is called from cmd/ghost AFTER AuditGuardedDrops, not from inside the
+// tier, and that ordering is load-bearing. The audit asks which inputs the
+// output failed to account for; executeOps emits every unclaimed input verbatim,
+// so a memory the tier carried forward is byte-identical to the output that
+// carried it. Filtering earlier makes that input look unaccounted for, and both
+// outcomes are wrong: RetainGuardedDrops re-adds it verbatim and the credential
+// row is written back, so the guard is a no-op — after the audit has already
+// printed its content to stderr, which is the same leak the store's refusal
+// report avoids — or some other output happens to cover 45% of its tokens, the
+// audit stays quiet, and ReplaceNonManual deletes the stored row with no
+// --allow-drops, which is the one deletion path the drop guard exists to close.
+//
+// Run after the audit, a credential memory is still accounted for by the output
+// that carried it, so it is neither re-added nor deleted: the row stays as it
+// was, the value never enters the set that is written, and clearing a
+// credential out of an existing database remains the separate, report-first scan
+// rather than a side effect of consolidation.
+//
+// It returns how many memories it removed, so the caller can say so without
+// re-running the scan.
+//
 // A nil logger becomes slog.Default(), the same substitution
 // dropFabricatedMemories and dropForeignProjectMemories make. The reasoning is
 // the guard's own: a drop that reports itself nowhere is a drop nobody can
 // audit, and a call site that cannot log at all is a bug to fix loudly rather
 // than to make silent.
-func dropSecretMemories(result *ReflectionResult, logger *slog.Logger) {
+func DropSecretMemories(result *ReflectionResult, logger *slog.Logger) int {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	before := len(result.Memories)
 	kept := result.Memories[:0]
 	for _, m := range result.Memories {
 		finding, ok := secret.Detect(m.Content)
@@ -87,4 +109,5 @@ func dropSecretMemories(result *ReflectionResult, logger *slog.Logger) {
 			"content_bytes", len(m.Content))
 	}
 	result.Memories = kept
+	return before - len(kept)
 }

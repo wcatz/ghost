@@ -431,6 +431,18 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	if err := s.projectCollision(ctx, p); err != nil {
 		return false, err
 	}
+	// Same window as the other three importers: after the presence check, before
+	// the apply=false return. A project's name and path are caller-supplied text
+	// from the same untrusted artifact, and both are replayed into every later
+	// session's digest and returned by ghost_project_list. repo_remote is not
+	// guarded because NormalizeRepoRemote strips the userinfo, so it cannot carry
+	// a password.
+	if err := rejectSecretFields(
+		secretField{"name", p.Name},
+		secretField{"path", p.Path},
+	); err != nil {
+		return false, fmt.Errorf("project %s: %w", p.ID, err)
+	}
 	if !apply {
 		return true, nil
 	}

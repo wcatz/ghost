@@ -2,13 +2,9 @@ package reflection
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"strings"
 	"testing"
-
-	"github.com/wcatz/ghost/internal/ai"
-	"github.com/wcatz/ghost/internal/memory"
 )
 
 const credentialFixture = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"
@@ -41,7 +37,7 @@ func TestDropSecretMemoriesRemovesCredentialOutput(t *testing.T) {
 		},
 	}
 	capture := &logCapture{}
-	dropSecretMemories(&result, capture.logger())
+	DropSecretMemories(&result, capture.logger())
 
 	if len(result.Memories) != 2 {
 		t.Fatalf("got %d memories, want 2: %+v", len(result.Memories), result.Memories)
@@ -64,7 +60,7 @@ func TestDropSecretMemoriesLogsTheFormatNotTheValue(t *testing.T) {
 		{Category: "gotcha", Content: "the token is " + credentialFixture},
 	}}
 	capture := &logCapture{}
-	dropSecretMemories(&result, capture.logger())
+	DropSecretMemories(&result, capture.logger())
 
 	out := capture.buf.String()
 	if out == "" {
@@ -98,7 +94,7 @@ func TestDropSecretMemoriesToleratesNilLogger(t *testing.T) {
 		{Category: "fact", Content: "the relay listens on 2222"},
 		{Category: "gotcha", Content: "the token is " + credentialFixture},
 	}}
-	dropSecretMemories(&result, nil)
+	DropSecretMemories(&result, nil)
 
 	if len(result.Memories) != 1 {
 		t.Fatalf("got %d memories, want 1: %+v", len(result.Memories), result.Memories)
@@ -122,63 +118,9 @@ func TestDropSecretMemoriesKeepsProseAboutCredentials(t *testing.T) {
 		{Category: "gotcha", Content: "The tokenizer keeps a 30k vocabulary and drops unknown words."},
 	}}
 	capture := &logCapture{}
-	dropSecretMemories(&result, capture.logger())
+	DropSecretMemories(&result, capture.logger())
 
 	if len(result.Memories) != 3 {
 		t.Errorf("got %d memories, want all 3: %+v", len(result.Memories), result.Memories)
-	}
-}
-
-// scriptedReflector is a harness stand-in: it returns a fixed reply, so the test
-// exercises Ghost's own pipeline with no subprocess and no billable call (#548).
-type scriptedReflector struct{ reply string }
-
-func (s scriptedReflector) Reflect(context.Context, string) (string, ai.TokenUsage, error) {
-	return s.reply, ai.TokenUsage{}, nil
-}
-
-// TestLlmConsolidatorDropsCredentialOutput pins the call site rather than the
-// helper: a guard that nothing invokes is indistinguishable from a guard that
-// does not exist, and this is the only place the LLM tier's output becomes
-// store rows.
-//
-// The reply is in the per-id operation contract the tier speaks under #639.
-//
-// The credential is in the INPUT, not in the model's text, because that is the
-// only way it reaches this guard: a rewrite is checked for grounding first, and
-// a new token is by definition absent from the source, so a model cannot
-// introduce a credential by rewriting — it can only carry one forward from a row
-// that already holds one. That row is the real case (a database written before
-// the store guard existed) and the reason this guard sits in the tier at all.
-func TestLlmConsolidatorDropsCredentialOutput(t *testing.T) {
-	const (
-		cleanID  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
-		dirtyID  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"
-		cleanMem = "the relay listens on 2222"
-	)
-	input := ReflectionInput{ProjectName: "ghost", ExistingMemories: []memory.Memory{
-		{ID: cleanID, Category: "fact", Content: cleanMem},
-		{ID: dirtyID, Category: "gotcha", Content: "the deploy token is " + credentialFixture},
-	}}
-	// `keep` emits the stored text verbatim, so the credential the input already
-	// holds is what lands in the result for the guard to remove.
-	reply := `{"ops":["keep ` + cleanID + `","keep ` + dirtyID + `"]}`
-
-	result, err := NewLlmConsolidator(scriptedReflector{reply: reply}).
-		Consolidate(context.Background(), input)
-	if err != nil {
-		t.Fatalf("Consolidate: %v", err)
-	}
-
-	if len(result.Memories) != 1 {
-		t.Fatalf("got %d memories, want the one clean keep: %+v", len(result.Memories), result.Memories)
-	}
-	for _, m := range result.Memories {
-		if strings.Contains(m.Content, credentialFixture) {
-			t.Errorf("a credential survived the tier: %q", m.Content)
-		}
-	}
-	if result.Memories[0].Content != cleanMem {
-		t.Errorf("the surviving memory is not the clean one: %q", result.Memories[0].Content)
 	}
 }
