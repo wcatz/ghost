@@ -481,9 +481,10 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 type sessionMemory struct {
 	ID, Category, Content string
 	Pinned                bool
-	// ProjectID is the project this row is actually stored under, never the
-	// project the session resolved to: the globals loader scans it from the
-	// row, and the project loader fills it with the project it queried.
+	// ProjectID is the project this row is stored under, which both loaders
+	// reach differently: the globals loader scans it out of the row, the
+	// project loader stamps the id it filtered on — which is the row's own
+	// project_id by construction, since that is the column the query matched.
 	// memory.CanonicalOriginSourceForProject can only recognise Ghost's
 	// shipped seed as a global row from its own project — a project row
 	// carrying the same text is the user's own.
