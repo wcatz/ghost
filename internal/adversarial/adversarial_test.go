@@ -4,6 +4,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -127,26 +128,24 @@ func TestSnapshotAndAssertions(t *testing.T) {
 
 	t.Run("escaping component", func(t *testing.T) {
 		fake := &testing.T{}
-		Tree{"sub/../../escape.md": ""}.AssertTreeInside(fake, "crawler", root)
+		Tree{"sub/../../escape.md": {kind: entryFile, content: "x"}}.AssertTreeInside(fake, "crawler", root)
 		if !fake.Failed() {
 			t.Error("an entry whose components climb out must be reported")
 		}
 	})
 }
 
-// TestSnapshotPinsItsPlaceholders covers the three entries Snapshot records as
-// something other than content — an unreadable file, a directory, and a
-// non-regular entry — because all three are blind spots a fixture author has to
-// know about, and because the unreadable placeholder's whole reason for existing
-// is that it must NOT vary with how the root was spelled.
+// TestSnapshotPinsItsPlaceholders covers the three kinds Snapshot records with
+// no content — an unreadable file, a directory, and a non-regular entry —
+// because all three are blind spots a fixture author has to know about, and
+// because an unreadable file's whole reason for recording a kind and nothing
+// else is that what it failed at must NOT vary with how the root was spelled.
 func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 	t.Run("unreadable_file", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("a mode-0000 file is still readable by root, so there is nothing to pin")
-		}
+		skipWithoutPOSIXModes(t)
 		// Two roots with the same relative structure and the same contents. The
-		// reason the placeholder is a constant is this: a value carrying the
-		// path it failed at would differ between two trees that are the same,
+		// reason the unreadable entry records no cause is this: a value carrying
+		// the path it failed at would differ between two trees that are the same,
 		// and AssertUnchanged would report a rewrite of a file nobody touched.
 		build := func() string {
 			root := t.TempDir()
@@ -163,46 +162,49 @@ func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 		first := Snapshot(t, build())
 		second := Snapshot(t, build())
 
-		if got := first["locked.md"]; got != "<unreadable>" {
-			t.Errorf("unreadable file recorded as %q, want the constant placeholder", got)
+		if got := first["locked.md"]; got.kind != entryUnreadable {
+			t.Errorf("unreadable file recorded as %v, want kind entryUnreadable", got)
 		}
-		// Compared over the whole trees, so the property covers every value and
-		// not only the locked file's placeholder: the added readable.md is what
-		// makes this more than a one-key check.
+		// Compared over the whole trees, so the property covers every entry and
+		// not only the locked file's kind: the added readable.md is what makes
+		// this more than a one-key check.
 		if !maps.Equal(first, second) {
 			t.Errorf("two identical trees snapshotted differently:\n  first:  %v\n  second: %v", first, second)
 		}
 	})
 
-	t.Run("empty_file_and_empty_directory_are_distinguishable", func(t *testing.T) {
-		// Both would record as the empty string if a directory were not given a
-		// literal of its own, and a name that swaps between the two is a change
-		// this assertion exists to report.
-		fileRoot := t.TempDir()
-		if err := os.WriteFile(filepath.Join(fileRoot, "swapped"), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		dirRoot := t.TempDir()
-		if err := os.Mkdir(filepath.Join(dirRoot, "swapped"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		fileTree := Snapshot(t, fileRoot)
-		dirTree := Snapshot(t, dirRoot)
-		if fileTree["swapped"] == dirTree["swapped"] {
-			t.Errorf("an empty file and an empty directory both record as %q, so a swap between them is invisible",
-				fileTree["swapped"])
-		}
-		if dirTree["swapped"] != dirEntry {
-			t.Errorf("a directory records as %q, want %q", dirTree["swapped"], dirEntry)
+	t.Run("content_can_never_be_mistaken_for_a_kind", func(t *testing.T) {
+		// The kind is a separate field, so a file whose body is exactly the text
+		// a placeholder used to be spelled with is still a file. A name that
+		// swaps between a directory and such a file is a change this assertion
+		// exists to report.
+		for _, body := range []string{"", "<dir>", "<unreadable>", "L---------", "dir"} {
+			fileRoot := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fileRoot, "swapped"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dirRoot := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dirRoot, "swapped"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fileTree := Snapshot(t, fileRoot)
+			dirTree := Snapshot(t, dirRoot)
+			if fileTree["swapped"] == dirTree["swapped"] {
+				t.Errorf("a file whose body is %q and a directory both record as %v, so a swap is invisible",
+					body, fileTree["swapped"])
+			}
+			if fileTree["swapped"].kind != entryFile {
+				t.Errorf("a file whose body is %q recorded with kind %v, want entryFile", body, fileTree["swapped"].kind)
+			}
 		}
 	})
 
 	t.Run("non_regular_entry", func(t *testing.T) {
-		// The third placeholder, as a literal rather than derived from
+		// The third kind, with the type as a literal rather than derived from
 		// fs.FileMode.String(): the property Snapshot documents is that a symlink
-		// records as its type and never as its target's content, and both "not
-		// the target" and a derived expectation would move with any change to
-		// how the type is rendered instead of failing.
+		// records as its type and never as its target's content, and a derived
+		// expectation would move with any change to how the type is rendered
+		// instead of failing.
 		outside := t.TempDir()
 		if err := os.WriteFile(filepath.Join(outside, "target.md"), []byte("not ours"), 0o600); err != nil {
 			t.Fatal(err)
@@ -215,16 +217,14 @@ func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 		// "L" then nine dashes: fs.FileMode.String() spells the type and then the
 		// permission bits, and a DirEntry's Type() carries only the type, so the
 		// permission half is always unknown.
-		const want = "<L--------->"
+		want := entry{kind: entryOther, content: "L---------"}
 		if got["link.md"] != want {
-			t.Errorf("a symlink records as %q, want %q", got["link.md"], want)
+			t.Errorf("a symlink records as %v, want %v", got["link.md"], want)
 		}
 	})
 
 	t.Run("unwalkable_subtree", func(t *testing.T) {
-		if os.Geteuid() == 0 {
-			t.Skip("a mode-0000 directory is still readable by root, so there is nothing to pin")
-		}
+		skipWithoutPOSIXModes(t)
 		root := t.TempDir()
 		locked := filepath.Join(root, "locked")
 		if err := os.MkdirAll(locked, 0o700); err != nil {
@@ -257,6 +257,26 @@ func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 	})
 }
 
+// skipWithoutPOSIXModes skips a fixture that needs a mode bit to actually deny
+// access.
+//
+// Two hosts have to be excluded, and only one of them is obvious. Root reads a
+// mode-0000 file whatever its bits say. Windows is the other: os.Geteuid returns
+// -1 there, so an euid check alone does not fire, and os.Chmod there only sets
+// FILE_ATTRIBUTE_READONLY, which blocks neither a read nor a directory listing —
+// so both reads and listings succeed and the fixture fails. The repo's other
+// mode-bit tests gate this with a //go:build !windows tag on the file; these
+// subtests share a function with two that run everywhere, so the check is here.
+func skipWithoutPOSIXModes(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits do not deny a read or a listing on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("a mode-0000 path is still readable by root, so there is nothing to pin")
+	}
+}
+
 func TestSnapshotOfMissingRootIsEmpty(t *testing.T) {
 	if got := Snapshot(t, filepath.Join(t.TempDir(), "never-created")); len(got) != 0 {
 		t.Errorf("snapshot of a missing root = %v, want empty", got)
@@ -277,7 +297,8 @@ func TestSnapshotRecordsSymlinkWithoutFollowingIt(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	got := Snapshot(t, root)
-	if v, ok := got["link.md"]; !ok || v == "not ours" {
-		t.Errorf("Snapshot followed the symlink: %q (present=%v)", v, ok)
+	v, ok := got["link.md"]
+	if !ok || v.kind == entryFile || v.content == "not ours" {
+		t.Errorf("Snapshot followed the symlink: %v (present=%v)", v, ok)
 	}
 }

@@ -29,6 +29,7 @@ package adversarial
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -163,14 +164,52 @@ func AssertLocalName(t testing.TB, what, name string) {
 	}
 }
 
-// Tree is a snapshot of every entry under a root: its path relative to the
-// root, and for a regular file its contents.
-type Tree map[string]string
+// Tree is a snapshot of every entry under a root: its path relative to the root,
+// and what was recorded there.
+type Tree map[string]entry
 
-// dirEntry is what a directory records as. A literal rather than the empty
-// string, because an empty file records as the empty string and a name that
-// swaps between the two is a change a containment assertion should report.
-const dirEntry = "<dir>"
+// entryKind is what an entry is. It is a separate field rather than a marker
+// inside the content because a marker is reachable from real content: a file
+// whose entire body is the five bytes `<dir>` is a file, and recording it as a
+// string that also spells "this is a directory" makes a directory replaced by
+// that file compare equal — the same false negative this helper exists to
+// remove, one payload over.
+type entryKind uint8
+
+const (
+	// entryFile is a regular file whose contents were read.
+	entryFile entryKind = iota
+	// entryDir is a directory, whether or not it could be listed.
+	entryDir
+	// entryOther is a non-regular entry — a symlink, a socket, a device.
+	entryOther
+	// entryUnreadable is a regular file whose contents could not be read.
+	entryUnreadable
+)
+
+// entry is one recorded path. Comparable, so a Tree comparison is a value
+// comparison with no rendering step in it.
+type entry struct {
+	kind entryKind
+	// content is the file's bytes for entryFile, and the entry's type for
+	// entryOther. Empty for the other two, which record no content at all.
+	content string
+}
+
+func (e entry) String() string {
+	switch e.kind {
+	case entryFile:
+		return "file " + strconv.Quote(e.content)
+	case entryDir:
+		return "dir"
+	case entryOther:
+		return e.content
+	case entryUnreadable:
+		return "unreadable file"
+	default:
+		return "unknown"
+	}
+}
 
 // Snapshot walks root and records it. Entries are keyed by slash-separated
 // path relative to root, so a comparison does not depend on how the root itself
@@ -181,17 +220,12 @@ const dirEntry = "<dir>"
 // read-only importer has to satisfy. Pair it with AssertTreeInside for the
 // writes case.
 //
-// A readable regular file records its contents; everything else records one of
-// three placeholders, and each is a blind spot rather than a finding: a file
-// whose contents could not be read, a directory — every directory, not only one
-// that could not be listed — and a non-regular entry such as a symlink, whose
-// target is deliberately not read. The first two are logged with their path and
-// cause. A fixture that needs an assertion over one of them has to make the tree
-// readable, or the entry a real file, first.
-//
-// The directory placeholder exists so that a name which swaps between an empty
-// file and an empty directory is reported, rather than comparing equal on two
-// entries that only look alike.
+// Three kinds record no content, and each is a blind spot rather than a finding:
+// a file whose contents could not be read, a directory that could not be listed,
+// and a non-regular entry such as a symlink, whose target is deliberately not
+// read. The first two are logged with their path and cause. A fixture that needs
+// an assertion over one of them has to make the tree readable, or the entry a
+// real file, first.
 func Snapshot(t testing.TB, root string) Tree {
 	t.Helper()
 	out := Tree{}
@@ -221,7 +255,7 @@ func Snapshot(t testing.TB, root string) Tree {
 		}
 		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
-			out[rel] = dirEntry
+			out[rel] = entry{kind: entryDir}
 			return nil
 		}
 		// A symlink's own name and type are the entry; its target is not read,
@@ -229,7 +263,7 @@ func Snapshot(t testing.TB, root string) Tree {
 		// containment assertion into an assertion about someone else's tree.
 		// Repointing a link is therefore a change this comparison cannot see.
 		if !d.Type().IsRegular() {
-			out[rel] = "<" + d.Type().String() + ">"
+			out[rel] = entry{kind: entryOther, content: d.Type().String()}
 			return nil
 		}
 		data, rerr := os.ReadFile(p) // #nosec G304 -- the path came from walking root
@@ -238,17 +272,14 @@ func Snapshot(t testing.TB, root string) Tree {
 			// is reported as rewritten rather than as removed. A file unreadable
 			// in both snapshots compares equal, because its content is not
 			// observable from either side — that is a blind spot, not a claim
-			// about the contents, and no fixture should depend on it. The
-			// placeholder carries no path: the map key already names the file,
-			// and a value that varied with how root was spelled would break the
-			// independence Snapshot's keys are there to provide. The cause is
-			// reported out of band instead, so a fixture that trips this blind
-			// spot says which file and why rather than passing silently.
+			// about the contents, and no fixture should depend on it. The cause is
+			// reported out of band, so a fixture that trips this blind spot says
+			// which file and why rather than passing silently.
 			t.Logf("adversarial: %s recorded as unreadable: %v", rel, rerr)
-			out[rel] = "<unreadable>"
+			out[rel] = entry{kind: entryUnreadable}
 			return nil //nolint:nilerr // recorded as unreadable just above
 		}
-		out[rel] = string(data)
+		out[rel] = entry{kind: entryFile, content: string(data)}
 		return nil
 	})
 	if err != nil {
@@ -258,36 +289,40 @@ func Snapshot(t testing.TB, root string) Tree {
 }
 
 // AssertUnchanged asserts a second snapshot names exactly the first one's
-// entries with exactly the first one's contents. A surface that documents
-// itself as read-only has to satisfy this against a tree full of hostile
-// filenames.
+// entries, with the same kind and the same recorded contents at each. A surface
+// that documents itself as read-only has to satisfy this against a tree full of
+// hostile filenames.
 //
 // Three blind spots, deliberate, and all of them the same shape: something the
 // snapshot does not record, so there is nothing here to compare it. A file
-// Snapshot could not read is recorded as the same placeholder on both sides, so
-// a rewrite of a file that is unreadable throughout compares equal; a directory
-// it could not list is recorded as a directory with nothing in it, so a change
-// inside an unreadable subtree is invisible; and a symlink records as its type
-// rather than its target — a target Snapshot deliberately does not read, so a
-// link repointed elsewhere compares equal even though the target is perfectly
-// observable to anything that cares to call Readlink. Snapshot logs the first
-// two with their path and cause, and the answer to a fixture that trips any of
-// them is to make the tree readable, or the entry a real file, rather than to
-// believe this.
+// Snapshot could not read is recorded as unreadable on both sides, so a rewrite
+// of a file that is unreadable throughout compares equal; a directory it could
+// not list is recorded as a directory with nothing in it, so a change inside an
+// unreadable subtree is invisible; and a symlink records as its type rather than
+// its target — a target Snapshot deliberately does not read, so a link repointed
+// elsewhere compares equal even though the target is perfectly observable to
+// anything that cares to call Readlink. Snapshot logs the first two with their
+// path and cause, and the answer to a fixture that trips any of them is to make
+// the tree readable, or the entry a real file, rather than to believe this.
+//
+// The kind is a separate field rather than a marker inside the recorded
+// contents, so no file's bytes can be mistaken for a directory, a symlink or an
+// unreadable entry. That is what keeps "a directory was replaced by a file whose
+// body happens to say it is one" out of this list.
 func (before Tree) AssertUnchanged(t testing.TB, what string, after Tree) {
 	t.Helper()
-	for path, content := range after {
+	for path, now := range after {
 		was, ok := before[path]
 		switch {
 		case !ok:
-			t.Errorf("%s: created %s\n  contents: %q", what, path, content)
-		case was != content:
-			t.Errorf("%s: rewrote %s\n  before: %q\n  after:  %q", what, path, was, content)
+			t.Errorf("%s: created %s\n  now: %s", what, path, now)
+		case was != now:
+			t.Errorf("%s: rewrote %s\n  before: %s\n  after:  %s", what, path, was, now)
 		}
 	}
-	for path, content := range before {
+	for path, was := range before {
 		if _, ok := after[path]; !ok {
-			t.Errorf("%s: removed %s (was %q)", what, path, content)
+			t.Errorf("%s: removed %s (was %s)", what, path, was)
 		}
 	}
 }
