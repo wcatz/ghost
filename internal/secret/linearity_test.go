@@ -22,9 +22,20 @@ import (
 // canaries rather than limits. A quadratic scan that is invisible at 4 KB is
 // tens of seconds at 256 KB, and this fails in a second.
 func TestDetectIsLinearInLineLength(t *testing.T) {
-	// One long line, so the cost is per-line rather than per-record, and enough
-	// `$var=` assignments per line to make a per-match rescan expensive.
-	shape := "the relay resolves $relay_addr and $relay_port, then $relay_tls and $relay_ca, "
+	// One long line, so the cost is per-line rather than per-record — and built
+	// from REAL ASSIGNMENTS, which is the correction. This fixture used to repeat
+	// a sentence of `$relay_addr`-style *references* with no `=` or `:` anywhere
+	// in it, so assignmentRe matched nothing, the two passes this paragraph is
+	// about were never called, and the ratio below was timing the rules table and
+	// the mnemonic walk instead. The same mistake made the cost test's
+	// predecessor pass with the quadratic code in place. A performance test that
+	// does not execute what it bounds cannot fail.
+	//
+	// Each repetition is a complete `$relay_addr = <24 characters> -asPlainText`
+	// assignment, so the candidate list is long AND every candidate reaches both
+	// per-match lookups — the flag test, which needs a `-Flag` after the value, and
+	// the quoted-argument scan.
+	shape := "$relay_addr = Kq9Xm2pL7wRt4Zb1XyZaQ3 -asPlainText "
 	build := func(n int) string {
 		return "$host" + strings.Repeat(shape, n/len(shape)+1)
 	}
@@ -69,14 +80,15 @@ func TestDetectIsLinearInLineLength(t *testing.T) {
 }
 
 // TestDetectHandlesOneVeryLongLine states the same property as a floor rather
-// than a ratio, for the shape the ratio cannot see: a single line, which is where
-// the per-match rescan was quadratic.
+// than a ratio, for the shape the ratio cannot see: a single line. Its fixture is
+// assignments too, for the reason above — a line of bare words would not reach
+// either pass.
 func TestDetectHandlesOneVeryLongLine(t *testing.T) {
-	text := strings.Repeat("$a $b $c $relay_addr $relay_port $relay_tls 2222 ", 8000)
+	text := strings.Repeat("$relay_addr = Kq9Xm2pL7wRt4Zb1XyZaQ3 -asPlainText ", 8000)
 	if len(text) < 100_000 {
 		t.Fatalf("fixture is only %d bytes", len(text))
 	}
-	Detect(strings.Repeat("warm up the regex machine 2222 ", 100))
+	Detect(strings.Repeat("$relay_addr = Kq9Xm2pL7wRt4Zb1XyZaQ3 -asPlainText ", 50))
 	start := time.Now()
 	Detect(text)
 	elapsed := time.Since(start)

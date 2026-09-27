@@ -480,7 +480,14 @@ func cardanoKeyWalk(text string, li *lineIndex) (Finding, bool) {
 			// plus a 32-byte chain code, so the public half is 64 bytes and
 			// carries the same tag as the private half. Refusing the tag
 			// unconditionally refused a wallet memory.
-			if cardanoVerificationKey.MatchString(text) {
+			// The LINE, not the whole text. A memory that records a pool's
+			// published verification key — a phrase a block producer writes
+			// constantly — must not thereby excuse an extended SIGNING key pasted
+			// elsewhere in the same save, and one memory is exactly one
+			// ghost_memory_save. The 32-byte branch below already tests the line;
+			// this one did not, and matching the whole text is what made the tag
+			// safe to refuse unconditionally before.
+			if cardanoVerificationKey.MatchString(line) {
 				continue
 			}
 			return cardanoFinding(), true
@@ -1109,8 +1116,37 @@ func isIdentifierPath(value string) bool {
 	if len(segments) < 2 {
 		return false
 	}
+	// A NAME has a short lower-case segment in it: the package, the receiver, the
+	// namespace — `opts.OAuthClientSecretFromVault`, `secrets.GITHUB_TOKEN`,
+	// `req.body.accessToken`. A human-chosen password with separators in it does
+	// not: `Nq8e.Rt0y.Xk9q.Zm2r.Tv4b.Lp6w` is 29 characters, mixed case, over
+	// the length floor and above the entropy bar, and every one of its segments
+	// is an identifier.
+	//
+	// Without this the exemption is shape-only and runs BEFORE the length,
+	// character-class and entropy gates, so any dotted value of any length or
+	// randomness is accepted. That is a new exemption with only its accept side
+	// measured, which is the gap the load-bearing-gate table exists to prevent.
+	shortLower := false
 	for _, segment := range segments {
 		if segment == "" || !isIdentifier(segment) {
+			return false
+		}
+		if len(segment) >= 3 && len(segment) <= 8 && isAllLower(segment) {
+			shortLower = true
+		}
+	}
+	return shortLower
+}
+
+// isAllLower reports whether s is a lower-case letter-led run, which is what a
+// package or namespace segment looks like and what a random group does not.
+func isAllLower(s string) bool {
+	if s == "" || s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 'a' || s[i] > 'z' {
 			return false
 		}
 	}

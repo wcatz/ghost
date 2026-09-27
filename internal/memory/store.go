@@ -2385,11 +2385,36 @@ func (s *Store) CreateFromCorpus(ctx context.Context, projectID string, m Memory
 	return s.insertMemory(ctx, projectID, m)
 }
 
+// secretTagFields is the guard's view of a memory's tags.
+//
+// Tags are guarded, and the reason is worth keeping in one place because an
+// earlier version of secret_guard.go claimed they were not worth guarding: they
+// are marshalled into the row ghost_memory_search returns, and
+// BuildReflectionPrompt writes them into the prompt sent to a CLI harness — so a
+// token pasted as a tag is embedded, returned and quoted into a model exactly as
+// a token in the body would be. validateTags permits ten tags of 64 characters,
+// which is more than room for every provider token format.
+// secretContentAndTags is the guard's field list for a memory write: the body and
+// every tag, in that order, so the refusal names whichever was contaminated.
+func secretContentAndTags(content string, tags []string) []secretField {
+	out := make([]secretField, 0, len(tags)+1)
+	out = append(out, secretField{"content", content})
+	return append(out, secretTagFields(tags)...)
+}
+
+func secretTagFields(tags []string) []secretField {
+	out := make([]secretField, 0, len(tags))
+	for i, tag := range tags {
+		out = append(out, secretField{fmt.Sprintf("tags[%d]", i), tag})
+	}
+	return out
+}
+
 // Create inserts a new memory and returns its ID. The insert and the history
 // row that records it share one transaction, so a memory cannot exist without
 // its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
-	if err := rejectSecret("content", m.Content); err != nil {
+	if err := rejectSecretFields(secretContentAndTags(m.Content, m.Tags)...); err != nil {
 		return "", err
 	}
 	return s.insertMemory(ctx, projectID, m)
@@ -2647,7 +2672,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// caller's transaction this error rolls that caller's work back too, which
 	// is the correct outcome — the secret is not stored, and the caller's
 	// caller is told why.
-	if err := rejectSecret("content", content); err != nil {
+	if err := rejectSecretFields(secretContentAndTags(content, tags)...); err != nil {
 		return "", "", 0, err
 	}
 	parentTx, inTx := storeTxFromContext(ctx)

@@ -121,16 +121,22 @@ func rejectSecretList(field string, values []string) error {
 //     report-first job described below rather than a side effect of
 //     consolidation.
 //   - A project's NAME, PATH and repo_remote on the MCP save path, and the
-//     tags, agent, session_id and source_ref beside a saved memory. The project
-//     name and path are the real gap and they are structural: a save calls
-//     EnsureProjectWithRepo BEFORE the guard, because the guard's field list
-//     does not include them, so moving it earlier means deciding whether a
-//     project may be created before its name is known to be safe — a behaviour
-//     change on every save, for a field an operator sets once. Not taken here.
-//     The tags and provenance fields are on the same list for a different
-//     reason: they are not returned by search, not embedded, and are a handful
-//     of short words chosen by the caller rather than pasted from a log, so the
-//     exposure the guard exists for is not there.
+//     agent, session_id and source_ref beside a saved memory.
+//
+//     The project name and path are the real gap and they are structural: a save
+//     calls EnsureProjectWithRepo BEFORE the guard, so covering them means
+//     deciding whether a project may be created before its name is known to be
+//     safe — a behaviour change on every save, for a field an operator sets
+//     once. Not taken here.
+//
+//     The tags were on this list too, on the claim that they are not returned by
+//     search and not quoted into a harness prompt. That claim was false and I
+//     should have checked it rather than asserted it: assemble.Item.Line
+//     marshals the tag list into the row that ghost_memory_search returns, and
+//     BuildReflectionPrompt writes `, tags:[…]` into the prompt sent to a CLI
+//     harness talking to a third-party model. validateTags allows ten tags of 64
+//     characters, so a 40-character token fits in one. They are guarded now, and
+//     the three remaining fields are not reached by any of those paths.
 //   - Content already in the database. This guard reads what a caller is
 //     trying to write; it does not sweep rows a previous version stored. Doing
 //     that is a separate, report-first job — a detection pass over existing
