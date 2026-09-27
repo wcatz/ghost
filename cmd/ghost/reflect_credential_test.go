@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -38,11 +38,11 @@ func TestCredentialIsDroppedAfterTheGuardAuditNotBefore(t *testing.T) {
 	f := &fakeReflectionApplier{}
 
 	stderr := captureStderr(t, func() {
-		_, _, _, err := applyReflection(
+		_, _, _, _, err := applyReflection(
 			context.Background(), f, "p1",
 			projectMemories("the relay listens on 2222", "the deploy token is "+credential),
 			nil, "since", false,
-		)
+			nil)
 		if err != nil {
 			t.Fatalf("applyReflection: %v", err)
 		}
@@ -73,23 +73,41 @@ func TestCredentialIsDroppedAfterTheGuardAuditNotBefore(t *testing.T) {
 	}
 }
 
-// captureStderr runs fn with os.Stderr redirected, so a test can assert on what
-// a command prints without the process's own output carrying the value.
 func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
-	r, w, err := os.Pipe()
+	var out strings.Builder
+	captureOutput(t, &out, &out, fn)
+	return out.String()
+}
+
+// captureOutput runs fn with both standard streams redirected into w, so a test
+// can assert on everything a command reports. The proposal listing, the "Applied"
+// summary and the restore hint are stdout; the drop and signature notes are
+// stderr, and a guarantee about "the report" has to cover both.
+func captureOutput(t *testing.T, stdout, stderr io.Writer, fn func()) {
+	t.Helper()
+	rOut, wOut, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("pipe: %v", err)
+		t.Fatalf("pipe stdout: %v", err)
 	}
-	prev := os.Stderr
-	os.Stderr = w
-	var buf bytes.Buffer
-	done := make(chan struct{})
-	go func() { _, _ = buf.ReadFrom(r); close(done) }()
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	prevOut, prevErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = wOut, wErr
+
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(stdout, rOut); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(stderr, rErr); done <- struct{}{} }()
+
 	fn()
-	os.Stderr = prev
-	_ = w.Close()
+
+	os.Stdout, os.Stderr = prevOut, prevErr
+	_ = wOut.Close()
+	_ = wErr.Close()
 	<-done
-	_ = r.Close()
-	return buf.String()
+	<-done
+	_ = rOut.Close()
+	_ = rErr.Close()
 }

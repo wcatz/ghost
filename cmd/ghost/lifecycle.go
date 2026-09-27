@@ -1050,9 +1050,8 @@ func runReflect() {
 	// project by the replace and then written nowhere at all, because promotion
 	// returns early and the recovery list was empty. applyReflection folds
 	// those candidates back into the project itself when promotion is off.
-	preserved, promoted, keptMems, err := applyReflection(
-		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals,
-		replacedIDsByText(&result))
+	preserved, promoted, keptMems, applied, err := applyReflection(
+		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
@@ -1069,17 +1068,37 @@ func runReflect() {
 		}
 	}
 
-	// The reduction warning, for the one case the pre-apply report had to skip:
-	// this run applies with promotion on, so only now is it knowable how many
-	// candidates stayed in the project. A candidate that failed promotion is a row
-	// the project still holds, so it counts as retained — the count that decides
-	// whether a memory survived, which is the whole point of the line. `applied` is
-	// what distinguishes this from the pre-apply call: with no failures kept is 0,
-	// and a bare 0 would read as "nothing has been written yet".
+	// Nothing was written, and the reason has to be stated rather than left to
+	// inference. A round whose only proposals held credentials is dropped
+	// down to nothing, applyReflection returns without calling the store, and
+	// the corpus is byte-identical to what it was — so a report that went on to
+	// say "Applied" and record the skip fingerprint would be telling the
+	// operator the round landed while the value is still in the store, still
+	// injected into every later session, and now pinned by a signature that
+	// makes --skip-unchanged skip the project forever. That is the worst
+	// possible outcome for this control, and it is one branch below the one
+	// that is careful.
 	//
-	// Printed even when nothing failed, because the skipped pre-apply report means
-	// this run would otherwise say nothing at all about how hard it compressed.
-	if apply && parsed.promoteGlobals {
+	// The reduction report is the else-if rather than a second if because the two
+	// contradict each other in this case: nothing was applied, so kept is 0, and
+	// a reduction report would announce "0 retained" immediately after the line
+	// explaining that every proposal held a credential. #664's condition and its
+	// output are untouched in every case that already existed; the only
+	// behaviour this adds is in the !applied case, which did not exist before.
+	if !applied {
+		fmt.Println("Applied: nothing — every consolidation proposal this round held a credential value and was dropped")
+		fmt.Println("  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
+	} else if apply && parsed.promoteGlobals {
+		// The reduction warning, for the one case the pre-apply report had to skip:
+		// this run applies with promotion on, so only now is it knowable how many
+		// candidates stayed in the project. A candidate that failed promotion is a row
+		// the project still holds, so it counts as retained — the count that decides
+		// whether a memory survived, which is the whole point of the line. `applied` is
+		// what distinguishes this from the pre-apply call: with no failures kept is 0,
+		// and a bare 0 would read as "nothing has been written yet".
+		//
+		// Printed even when nothing failed, because the skipped pre-apply report means
+		// this run would otherwise say nothing at all about how hard it compressed.
 		reportReductionWarning(os.Stderr, live, projectMems, globalMems, true,
 			promotionOutcome{applied: true, kept: len(keptMems)})
 	}
@@ -1093,7 +1112,7 @@ func runReflect() {
 	// Keying this on the project-memory count alone dropped both the summary
 	// and the learned context for a promotion-only round — exactly the round
 	// the flag was added for.
-	if promoted > 0 || len(keptMems) > 0 || len(projectMems) > 0 || len(globalMems) > 0 {
+	if applied && (promoted > 0 || len(keptMems) > 0 || len(projectMems) > 0 || len(globalMems) > 0) {
 		// Everything the project ends up holding, which is projectMems plus the
 		// candidates that landed back in it: all of them when promotion is off,
 		// and the kept subset when it is on. appliedSummary counts rows, so
@@ -1149,7 +1168,14 @@ func runReflect() {
 	// fingerprint over the post-apply corpus would absorb that survivor and make
 	// --skip-unchanged skip the merge, so record nothing when one happened; the
 	// next run re-consolidates and merges it.
-	if len(preserved) > 0 {
+	if !applied {
+		// Not "no preserved survivors" — nothing at all was replaced, so the
+		// corpus still holds whatever it held. Recording a fingerprint over an
+		// unchanged corpus is what would make --skip-unchanged skip this project
+		// permanently, which is how a stored credential stops being revisited at
+		// all. The round did not happen; it must not be recorded as having.
+		fmt.Fprintln(os.Stderr, "note: nothing was written this round, so no skip fingerprint is recorded — the next run will reconsider this project")
+	} else if len(preserved) > 0 {
 		fmt.Fprintf(os.Stderr, "note: %d memory(ies) were saved during consolidation and preserved; not recording the skip fingerprint so the next run merges them\n", len(preserved))
 	} else if postMemories, err := store.GetAll(ctx, projectID, -1); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: record reflect signature: reload memories: %v\n", err)

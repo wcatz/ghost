@@ -40,7 +40,13 @@ type reflectionApplier interface {
 // longer does, so the replace DELETES any stored memory it was carrying forward.
 // Both halves are consequences of the same position, and neither is a surprise:
 // the row is the value.
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
+// `applied` is false when there was nothing to write, which is not the same as
+// a successful write of nothing. The caller needs the difference: an
+// unattendented round that writes nothing must not print "Applied", must not
+// offer a restore hint, and above all must not record the skip fingerprint over
+// an unchanged corpus — because then --skip-unchanged skips the project
+// forever, and a stored row holding a credential is never revisited.
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (preserved []string, promoted int, keptMems []memory.Memory, applied bool, err error) {
 	if !promoteGlobals && len(globalMems) > 0 {
 		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		globalMems = nil
@@ -54,25 +60,31 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		// above, and saying so here is the point — a removal claim printed before
 		// anyone knows whether a replace runs closes the incident in the
 		// operator's head while the value sits in the database.
-		return nil, 0, nil, nil
+		return nil, 0, nil, false, nil
 	}
 	preserved, promoted, kept, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, false, err
 	}
-	// Reported here, after a replace that ran, and only then. A proposal dropped
-	// for holding a credential is no longer in the emitted set, so the replace
-	// treats any stored memory it was carrying forward as unmatched and DELETES
-	// it. That is the right outcome — the row is the value, and leaving it is the
-	// leak — and it is a deletion, so it is named as one after the fact rather
-	// than predicted in a per-drop line. --allow-drops does not gate it: that
-	// flag is the operator authorising what the MODEL chose to drop.
-	if dropped > 0 {
-		fmt.Fprintf(os.Stderr,
-			"note: %d stored memory(ies) this round carried forward were REMOVED by the project replace, because the proposal that carried them held a credential value\n",
-			dropped)
+	// Two things have to be true for a carried-forward row to be gone, and this
+	// note says only what holds. A proposal dropped for holding a credential is
+	// no longer in the emitted set, so the replace treats the stored memory it
+	// was carrying as unmatched and deletes it — but only if a project replace
+	// ran (len(projectMems) > 0 in the store), and only for a row the replace
+	// can reach. A manual, builtin, pinned or resolved row is excluded from its
+	// candidate query, and a fresh merge or rewrite carried nothing. So the note
+	// states the mechanism and where to look rather than a number of deletions:
+	// a count of dropped proposals is not a count of deleted rows, in either
+	// direction, and the only number available here is the first.
+	//
+	// --allow-drops does not gate the removal: that flag is the operator
+	// authorising what the MODEL chose to drop, and this is Ghost removing a row
+	// that is itself the value.
+	if dropped > 0 && len(projectRows) > 0 {
+		fmt.Fprintln(os.Stderr,
+			"note: the project replace has just removed any stored memory the dropped proposal(s) were carrying forward, because it held a credential value. A manual, builtin, pinned or resolved row is not replaceable and would still be there: check the project")
 	}
-	return preserved, promoted, kept, nil
+	return preserved, promoted, kept, true, nil
 }
 
 // displayProposal renders a proposal or a guarded drop for the operator's own
@@ -118,8 +130,13 @@ func displayProposal(content, category string, limit int) string {
 // through --allow-drops: that flag is the operator authorising what the MODEL
 // chose to drop.
 func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory) (keptProject, keptGlobal []reflection.ReflectMemory, dropped int) {
+	// A fresh slice, not in[:0]. The caller LISTS these and COUNTS them after
+	// this returns, and in-place filtering would leave it holding the pre-drop
+	// length over a backing array it can no longer read correctly — so the
+	// "Applied: N memories consolidated" line would count a proposal that was
+	// never written.
 	keep := func(in []reflection.ReflectMemory) (out []reflection.ReflectMemory, n int) {
-		out = in[:0]
+		out = make([]reflection.ReflectMemory, 0, len(in))
 		for _, m := range in {
 			finding, ok := secret.Detect(m.Content)
 			if !ok {
