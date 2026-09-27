@@ -218,12 +218,20 @@ const maxRenderedConflictPairs = 5
 // for every row, so a caller can already see what a future multiplier would act
 // on. Both contributions are zero while the weight is 1.0, which is what makes a
 // seeded confidence value unable to change the order.
+//
+// The evidence counts are recorded here too, because this is the stage that owns
+// what a memory is supported BY. They come from the retriever's candidate rather
+// than from the store -- the assembler may reach the store through one read, and
+// that read already carries them (#673) -- and they are recorded, not weighed: a
+// memory no evidence names is not demoted for it, and a memory three agents
+// reported is not promoted.
 func runProvenance(p *pipeline) {
 	for id, sig := range p.trace.Signals {
 		sig.Confidence = p.confidenceOf(id)
 		sig.ConfidenceContribution = 0
 		sig.ProvenanceWeight = provenanceWeight
 		sig.ProvenanceContribution = 0
+		sig.Evidence = p.evidenceOf(id)
 		p.trace.Signals[id] = sig
 	}
 	p.trace.record(stageProvenance, len(p.rows), len(p.rows), nil, false,
@@ -461,6 +469,18 @@ func (p *pipeline) confidenceOf(id string) *float64 {
 		}
 	}
 	return nil
+}
+
+// evidenceOf is confidenceOf's counterpart for the support counts. An id no row
+// carries reads as no evidence, which is the honest zero: a signal recorded for a
+// row this stage did not admit is not a claim about a memory.
+func (p *pipeline) evidenceOf(id string) memory.EvidenceCounts {
+	for i := range p.rows {
+		if p.rows[i].ID == id {
+			return p.rows[i].Evidence
+		}
+	}
+	return memory.EvidenceCounts{}
 }
 
 // notes is the bounded diagnostic note list, in the order the reader needs it:

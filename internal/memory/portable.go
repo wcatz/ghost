@@ -75,6 +75,38 @@ type PortableMemory struct {
 	SourceRef    string            `json:"source_ref,omitempty"`
 	Confidence   *float64          `json:"confidence,omitempty"`
 	Scope        map[string]string `json:"scope,omitempty"`
+
+	// Evidence are the memory_provenance records this memory has: every agent that
+	// reported it, every session, every reference, in the order they were
+	// reported. It is the reason the artifact is version 2 — a record gained a
+	// nested list, which is a shape change rather than another optional field.
+	//
+	// Nested under the memory rather than written as records of their own type,
+	// because a bare evidence line cannot be attributed: memory_provenance names
+	// its memory, and the memory is what the artifact orders first. An artifact
+	// from a v1 build has none, and the import still works — which is the whole
+	// reason v1 is still accepted.
+	Evidence []PortableEvidence `json:"evidence,omitempty"`
+}
+
+// PortableEvidence is one evidence record as the artifact carries it: the same
+// columns the table holds, minus memory_id, which the enclosing memory record
+// already names.
+//
+// A distinct type rather than Evidence because the artifact is a wire format and
+// not a view of a row: it is flat, it omits the memory id, and it is what a user
+// reads and hand-edits. Everything nullable stays nullable — an omitted field is
+// "the record does not say", and an import must not fill it in from the memory's
+// own columns, which would be a second claim nobody made.
+type PortableEvidence struct {
+	ID         string   `json:"id,omitempty"`
+	Kind       string   `json:"kind"`
+	Agent      string   `json:"agent,omitempty"`
+	SessionID  string   `json:"session_id,omitempty"`
+	SourceRef  string   `json:"source_ref,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	ObservedAt *string  `json:"observed_at,omitempty"`
+	VerifiedAt *string  `json:"verified_at,omitempty"`
 }
 
 // ImportOptions is what one import run is doing with the records it is given.
@@ -230,14 +262,96 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 	defer rows.Close() //nolint:errcheck
 
 	var out []PortableMemory
+	ids := make([]string, 0, 64)
 	for rows.Next() {
 		m, err := scanPortableMemory(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, m)
+		ids = append(ids, m.ID)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("portable memories: %w", err)
+	}
+	// The evidence is a SECOND read, after the rows are closed: the handle is
+	// pinned to one connection, so a query issued while these rows are still open
+	// would wait for the connection this loop is holding. The memories' own ids
+	// bound it, so nothing outside the exported set is read.
+	evidence, err := portableEvidence(ctx, s.db, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Evidence = evidence[out[i].ID]
+	}
+	return out, nil
+}
+
+// portableEvidence reads the evidence records of a set of memories, keyed by
+// memory id and ordered oldest-first per memory so the artifact is
+// byte-reproducible: an unordered read would emit the same records in a
+// different order on each run and every diff of two exports would show churn.
+func portableEvidence(ctx context.Context, db *sql.DB, ids []string) (map[string][]PortableEvidence, error) {
+	out := make(map[string][]PortableEvidence, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	for start := 0; start < len(ids); start += edgeChunkIDs {
+		end := min(start+edgeChunkIDs, len(ids))
+		chunk := ids[start:end]
+		ph := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk))
+		for i, id := range chunk {
+			ph[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := db.QueryContext(ctx, `
+			SELECT memory_id, id, kind, agent, session_id, source_ref, confidence,
+			       observed_at, verified_at
+			FROM memory_provenance
+			WHERE memory_id IN (`+strings.Join(ph, ",")+`)
+			ORDER BY memory_id, rowid`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("portable evidence: %w", err)
+		}
+		for rows.Next() {
+			var memoryID string
+			var e PortableEvidence
+			var agent, sessionID, sourceRef, observedAt, verifiedAt sql.NullString
+			var confidence sql.NullFloat64
+			if err := rows.Scan(&memoryID, &e.ID, &e.Kind, &agent, &sessionID, &sourceRef,
+				&confidence, &observedAt, &verifiedAt); err != nil {
+				rows.Close() //nolint:errcheck
+				return nil, fmt.Errorf("portable evidence: %w", err)
+			}
+			e.Agent = agent.String
+			e.SessionID = sessionID.String
+			e.SourceRef = sourceRef.String
+			if confidence.Valid {
+				c := confidence.Float64
+				e.Confidence = &c
+			}
+			if observedAt.Valid {
+				v := observedAt.String
+				e.ObservedAt = &v
+			}
+			if verifiedAt.Valid {
+				v := verifiedAt.String
+				e.VerifiedAt = &v
+			}
+			out[memoryID] = append(out[memoryID], e)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close() //nolint:errcheck
+			return nil, fmt.Errorf("portable evidence: %w", err)
+		}
+		rows.Close() //nolint:errcheck
+	}
+	return out, nil
 }
 
 // projectCollision reports whether a *different* project already records p's
@@ -518,6 +632,17 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if !IsValidSource(m.Source) {
 		return false, false, false, fmt.Errorf("memory %s: invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.ID, m.Source)
 	}
+	// The evidence records are validated here, before anything is written, for the
+	// reason the two fields above are: a hand-edited artifact must be rejected by
+	// name, and in the dry run too. A record whose kind this build cannot store is
+	// not a record to drop — dropping it would import a memory with less support
+	// than the file claims, silently, and the reader of the restored store would
+	// have no way to tell.
+	for i, e := range m.Evidence {
+		if !IsValidEvidenceKind(e.Kind) {
+			return false, false, false, fmt.Errorf("memory %s: evidence record %d has invalid kind %q — must be one of: observed, imported, verified, legacy", m.ID, i, e.Kind)
+		}
+	}
 
 	content, cut := ClampContent(m.Content)
 	// A stated importance is clamped to [0,1], the same bound a normal save
@@ -656,6 +781,32 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		Agent:     m.Agent,
 		SessionID: m.SessionID,
 	}); err != nil {
+		return false, false, downgraded, err
+	}
+	// The evidence the artifact itself carried, then the record of the arrival.
+	// The order is the order they happened in, and MemoryProvenance reads forwards:
+	// the observations came first, on the machine the artifact was exported from.
+	for _, e := range m.Evidence {
+		if err := importEvidenceTx(ctx, tx, m.ID, e); err != nil {
+			return false, false, downgraded, err
+		}
+	}
+	// The arrival is a claim no carried record makes: this store learned the fact
+	// from a file, and a restored corpus that kept only the origin machine's
+	// observations would say nothing about its own. Its verified_at is the memory's
+	// own, which the import preserves, so the support summary and the row cannot
+	// disagree about whether anybody checked this fact.
+	//
+	// TrustProvenance does not gate it, and neither does it gate the history row
+	// above: the flag governs what a row IS (its source, its pin), while who the
+	// artifact says observed the fact is the artifact's claim about its own
+	// contents, kept as such.
+	if err := appendEvidenceTx(ctx, tx, m.ID, evidenceImported, Provenance{
+		Agent:      m.Agent,
+		SessionID:  m.SessionID,
+		SourceRef:  m.SourceRef,
+		Confidence: m.Confidence,
+	}, verifiedAtOrEmpty(m.VerifiedAt)); err != nil {
 		return false, false, downgraded, err
 	}
 	if err := tx.Commit(); err != nil {

@@ -2453,6 +2453,12 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, provenanceFromMemory(m)); err != nil {
 		return "", err
 	}
+	// The evidence record shares this transaction for the same reason, and its
+	// kind is observed because that is what a save is: something reported this
+	// fact and the store kept what it reported about itself.
+	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, provenanceFromMemory(m), ""); err != nil {
+		return "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit create: %w", err)
 	}
@@ -3006,6 +3012,18 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			} else if err := appendHistoryTx(ctx, tx, existingID, phaseMerge, opts.Provenance); err != nil {
 				return "", "", 0, err
 			}
+			// A second REPORT of the same fact, which is not the same thing as a
+			// second memory: the survivor is the row the corpus keeps, so the
+			// evidence the fold was about has to land on it. Before this the folding
+			// agent and session went with the incoming wording, and the store could
+			// say who wrote a memory first but never that a second agent later
+			// agreed with it.
+			//
+			// Appended for FoldOnly too, and that path needs it more: it stores no
+			// row of its own, so without this the report would leave no trace.
+			if err := appendEvidenceTx(ctx, tx, existingID, evidenceObserved, opts.Provenance, ""); err != nil {
+				return "", "", 0, err
+			}
 		}
 
 		if opts.FoldOnly && existingID != "" {
@@ -3040,6 +3058,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
 		}
 		if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
+			return "", "", 0, err
+		}
+		// Evidence for the row just inserted, in the same transaction. The stored
+		// copy carries its own observation even on a fold, because it is a row of
+		// its own with its own text; the fold's SECOND report is the one that goes on
+		// the survivor above.
+		if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, ""); err != nil {
 			return "", "", 0, err
 		}
 
@@ -3097,6 +3122,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
+		return "", "", 0, err
+	}
+	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, ""); err != nil {
 		return "", "", 0, err
 	}
 	if err = commit(); err != nil {

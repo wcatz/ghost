@@ -1475,13 +1475,17 @@ func TestImportRefusesAnIDThatStillHasHistory(t *testing.T) {
 	ctx := context.Background()
 
 	id := "AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD"
-	if _, _, _, err := s.Upsert(ctx, testProject, "fact", "a fact that was deleted here", "mcp", 0.5, nil); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	// Rename the live row to the id the artifact will carry, then delete it, so
-	// the id is free but its history is not.
-	if _, err := s.db.Exec(`UPDATE memories SET id = ? WHERE content = ?`, id, "a fact that was deleted here"); err != nil {
-		t.Fatalf("rename: %v", err)
+	// Seeded under the id the artifact will carry, by a direct INSERT rather than
+	// an Upsert and a rename: memory_provenance cascades FROM memories with no ON
+	// UPDATE, so a row that carries evidence can no longer be renamed. That is
+	// right — the id IS the memory, and its evidence names it — and it means a
+	// fixture wanting a chosen id inserts it. The delete then frees the id while
+	// its history stays.
+	if _, err := s.db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source)
+		 VALUES (?, ?, 'fact', 'a fact that was deleted here', 'mcp')`, id, testProject,
+	); err != nil {
+		t.Fatalf("seed the row to be deleted: %v", err)
 	}
 	if err := s.Delete(ctx, id); err != nil {
 		t.Fatalf("Delete: %v", err)

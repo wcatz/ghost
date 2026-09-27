@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 17
+const schemaVersion = 18
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -60,6 +60,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV15,
 	migrateV16,
 	migrateV17,
+	migrateV18,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1063,6 +1064,64 @@ func migrateV17(tx *sql.Tx) error {
 		// while every fresh one had one, which is the sort of difference only a
 		// test comparing the two paths would catch.
 		`CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, recorded_at)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%q: %w", stmt[:min(40, len(stmt))], err)
+		}
+	}
+	return nil
+}
+
+// migrateV18 adds memory_provenance, the append-only EVIDENCE table (schema v18,
+// issue #673). The step creates the table under the name that was reserved for
+// exactly this concept: several rows per memory, one per observation, answering
+// "who or what supports this memory" — which memory_history, the change log v17
+// added, does not answer at all.
+//
+// The seed is one INSERT ... SELECT over memories, and it is deliberately
+// conditional. A memory that recorded none of agent, session_id, source_ref or
+// confidence gets NO row: an evidence row with nothing in it still says "this
+// was observed", and for a memory nobody ever attributed there was no
+// observation to record. Backfilling a row for it would make every memory in a
+// store report one observation, which is the same fabrication as inventing a
+// session id — a count that means nothing, made to look like support.
+//
+// verified_at comes across when the memory holds one, because a memory a human
+// verified by hand is corroborated and dropping the stamp would understate what
+// the store already knows. It does not on its own justify a row: the stamp is
+// still on the memory, and the row exists to carry a provenance claim.
+//
+// observed_at is left NULL by the seed and is nullable for the same reason
+// memories' own provenance columns are (migrateV10): the migration can say what
+// the columns hold now, and cannot say when the fact was first observed. Stamping
+// the migration's own clock would be a claim about the past that nobody made.
+//
+// The seed is idempotent through NOT EXISTS, so a database an operator has
+// already created and partly populated the table in is stamped without doubling
+// its rows. Like every step it runs with foreign_keys=OFF, so the seed does not
+// depend on the pragma for its own consistency — and the cascade it installs is
+// the store's, not the migration's.
+func migrateV18(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memory_provenance (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL
+                CHECK (kind IN ('observed', 'imported', 'verified', 'legacy')),
+    agent       TEXT,
+    session_id  TEXT,
+    source_ref  TEXT,
+    confidence  REAL,
+    observed_at TEXT,
+    verified_at TEXT
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id)`,
+		`INSERT INTO memory_provenance (memory_id, kind, agent, session_id, source_ref, confidence, verified_at)
+SELECT id, 'legacy', agent, session_id, source_ref, confidence, verified_at
+FROM memories
+WHERE (agent IS NOT NULL OR session_id IS NOT NULL OR source_ref IS NOT NULL OR confidence IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM memory_provenance p WHERE p.memory_id = memories.id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {

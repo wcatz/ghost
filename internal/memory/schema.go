@@ -317,14 +317,14 @@ CREATE TABLE IF NOT EXISTS link_scans (
 -- paths call) and PromoteToGlobal both do this; a new writer that moves a memory
 -- between projects has to as well.
 --
--- The NAME is a reservation, not a description. This table is a change log: one
+-- The NAME is a distinction, not a description. This table is a change log: one
 -- row per write, holding the state the memory had once that write landed. The
--- name memory_provenance is held for a different and later concept -- EVIDENCE
+-- name memory_provenance went to a different and later concept -- EVIDENCE
 -- records, several per memory (kind, agent, session_id, source_ref, confidence,
--- observed_at, verified_at) answering "who or what supports this memory" -- and
--- this table answers a different question, so it must not take that name. A
--- schema name is permanent once released, and the two concepts are easy to
--- confuse in prose while being unrelated in fact.
+-- observed_at, verified_at) answering "who or what supports this memory", created
+-- by migrateV18 below -- and this table answers a different question, which is
+-- why it did not take that name. A schema name is permanent once released, and
+-- the two concepts are easy to confuse in prose while being unrelated in fact.
 CREATE TABLE IF NOT EXISTS memory_history (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     memory_id   TEXT NOT NULL,
@@ -382,6 +382,57 @@ CREATE TABLE IF NOT EXISTS memory_history (
 -- insert to keep it current: measured at a fifth of the cost of writing the
 -- history row at all, on the write path's critical section.
 CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, recorded_at);
+
+-- Evidence records: SEVERAL rows per memory, each one an observation that
+-- supports it (schema v18, issue #673). This is the table the name
+-- memory_provenance was reserved for, and it is NOT memory_history: the change
+-- log above answers "how did this row change", one row per write, and this one
+-- answers "who or what supports this memory", one row per observation. A fact
+-- claude-code reported in one session, codex reported in another, and a human
+-- verified is three rows here and one row of mutable columns on memories, which
+-- can only remember the last.
+--
+-- A fold is the case that makes the table worth having: a near-duplicate save
+-- used to be a discard, so the second agent's report vanished with the incoming
+-- wording. It now appends to the memory that SURVIVED.
+--
+-- The columns are the evidence itself, and every one of them is nullable except
+-- kind: NULL means Ghost does not know, which is the truth, while "" would
+-- claim a value that happens to be empty and a guessed agent or session would be
+-- a provenance claim nobody made. observed_at is nullable for the same reason --
+-- it is when Ghost recorded the observation, and a row migrated from a memory's
+-- own columns cannot know that.
+--
+-- memory_id CASCADES, unlike memory_history's deliberately FK-free memory_id.
+-- That asymmetry is the point of the two tables: the audit of a deletion must
+-- outlive the row (so a hard DELETE leaves a tombstone), while evidence without
+-- its memory means nothing -- "3 observations support this" is a claim about a
+-- memory, and once the memory is gone the claim is about nothing. A purge
+-- removes these rows explicitly as well, because PurgeMemoryHistory leaves the
+-- memory in place and no cascade fires for a row that stays. And a consolidation
+-- that REPLACES a memory takes its records with it, which is the cascade working
+-- as specified: the evidence belonged to that row, and the replacement is a new
+-- claim that needs its own observations.
+CREATE TABLE IF NOT EXISTS memory_provenance (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    -- What kind of evidence this is. observed: a write path recorded what the
+    -- host reported. imported: the fact arrived through a portable artifact.
+    -- verified: somebody checked it (no writer yet -- the validity writers own
+    -- that), so the kind is reserved rather than absent. legacy: migrateV18's
+    -- seed of a memory that already held these values in its own columns.
+    -- A CHECK rather than a convention, for the reason the history table's phase
+    -- is one: a kind no reader knows is a kind no reader can filter.
+    kind        TEXT NOT NULL
+                CHECK (kind IN ('observed', 'imported', 'verified', 'legacy')),
+    agent       TEXT,
+    session_id  TEXT,
+    source_ref  TEXT,
+    confidence  REAL,
+    observed_at TEXT,
+    verified_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id);
 
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),

@@ -1469,6 +1469,208 @@ func TestMigrateV17AddsMemoryHistory(t *testing.T) {
 	}
 }
 
+// TestMigrateV18SeedsEvidenceFromTheColumnsMemoriesAlreadyHeld: the one-shot
+// upgrade every existing v17 database takes. migrateV18 creates
+// memory_provenance and seeds it from the per-row provenance columns, because a
+// store that has been recording `agent` for months would otherwise start
+// reporting "no recorded evidence" about rows whose authorship it already knows.
+//
+// Three properties of the seed are the whole test, and each is a way a
+// hand-written backfill goes wrong:
+//
+//   - a memory with NONE of agent/session_id/source_ref/confidence gets NO row.
+//     A row that says nothing asserts an observation, and there was none.
+//   - a memory with some of them gets a row holding exactly those, with the rest
+//     NULL. The seed copies; it never fills a gap.
+//   - verified_at comes across when the memory has one, because a memory someone
+//     verified by hand IS corroborated, and dropping the stamp would understate
+//     the support the store already records.
+func TestMigrateV18SeedsEvidenceFromTheColumnsMemoriesAlreadyHeld(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v17 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	for _, drop := range []string{
+		`DROP INDEX idx_provenance_memory`,
+		`DROP TABLE memory_provenance`,
+	} {
+		if _, err := db.Exec(drop); err != nil {
+			t.Fatalf("%s: %v", drop, err)
+		}
+	}
+	seed := []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v18-p1', 'p1')`,
+		// Full provenance, plus a hand verification.
+		`INSERT INTO memories (id, project_id, category, content, source, agent, session_id, source_ref, confidence, verified_at)
+		 VALUES ('m-full', 'p1', 'fact', 'a fully attributed fact', 'mcp', 'claude-code', 'ses_a', 'docs/x.md:L3', 0.8, '2026-01-02 03:04:05')`,
+		// One field only: the row is worth making, and the other three stay NULL.
+		`INSERT INTO memories (id, project_id, category, content, source, agent)
+		 VALUES ('m-agent', 'p1', 'fact', 'a fact with only an agent', 'mcp', 'codex')`,
+		// A confidence with no agent: still evidence, still not a session.
+		`INSERT INTO memories (id, project_id, category, content, source, confidence)
+		 VALUES ('m-conf', 'p1', 'fact', 'a fact with only a confidence', 'mcp', 0.4)`,
+		// Verified, but nothing else: no provenance claim to carry, and the stamp
+		// is already on the memory itself.
+		`INSERT INTO memories (id, project_id, category, content, source, verified_at)
+		 VALUES ('m-verified', 'p1', 'fact', 'a verified fact with no provenance', 'manual', '2026-02-03 04:05:06')`,
+		// Nothing recorded at all: no row.
+		`INSERT INTO memories (id, project_id, category, content, source)
+		 VALUES ('m-bare', 'p1', 'fact', 'a fact nobody attributed', 'mcp')`,
+		`PRAGMA user_version = 17`,
+	}
+	for _, s := range seed {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v17 db (%s): %v", s, err)
+		}
+	}
+
+	if err := migrate(db, 17); err != nil {
+		t.Fatalf("migrate v17->v18: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	for _, obj := range []struct{ typ, name string }{
+		{"table", "memory_provenance"},
+		{"index", "idx_provenance_memory"},
+	} {
+		var n int
+		if err := db.QueryRow(
+			`SELECT count(*) FROM sqlite_master WHERE type=? AND name=?`, obj.typ, obj.name,
+		).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s %s after migrateV18: n=%d err=%v, want 1", obj.typ, obj.name, n, err)
+		}
+	}
+
+	// One index and no more, asserted on the migration path: initSQL and
+	// migrateV18 are two copies of one DDL, and when they disagree the fresh
+	// install and the upgraded store get different schemas. Every append would
+	// pay a b-tree insert per extra index, inside the write transaction.
+	var stray int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM sqlite_master
+		WHERE type='index' AND tbl_name='memory_provenance'
+		  AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_provenance_memory'`,
+	).Scan(&stray); err != nil {
+		t.Fatalf("count evidence indexes: %v", err)
+	}
+	if stray != 0 {
+		t.Errorf("migrateV18 left %d index(es) on memory_provenance that nothing reads", stray)
+	}
+
+	// The full-provenance row, read back field by field through IS NULL so an
+	// empty string cannot pass for an honest absence.
+	var (
+		kind, agent, sessionID, sourceRef string
+		confidence                        float64
+		verifiedAt                        sql.NullString
+		observedAt                        sql.NullString
+	)
+	if err := db.QueryRow(`
+		SELECT kind, agent, session_id, source_ref, confidence, verified_at, observed_at
+		FROM memory_provenance WHERE memory_id = 'm-full'`,
+	).Scan(&kind, &agent, &sessionID, &sourceRef, &confidence, &verifiedAt, &observedAt); err != nil {
+		t.Fatalf("read the seeded row: %v", err)
+	}
+	if kind != "legacy" {
+		t.Errorf("kind = %q, want legacy — the seed is not an observation this build made", kind)
+	}
+	if agent != "claude-code" || sessionID != "ses_a" || sourceRef != "docs/x.md:L3" || confidence != 0.8 {
+		t.Errorf("seeded row = (%q, %q, %q, %v), want the memory's own columns", agent, sessionID, sourceRef, confidence)
+	}
+	if !verifiedAt.Valid || verifiedAt.String != "2026-01-02 03:04:05" {
+		t.Errorf("verified_at = %v, want the memory's own stamp", verifiedAt)
+	}
+	// The seed states no moment: it read the columns at migration time, and
+	// stamping that as when the fact was observed would be a claim about the
+	// past nobody made.
+	if observedAt.Valid {
+		t.Errorf("observed_at = %q, want NULL — the migration cannot know when the fact was observed", observedAt.String)
+	}
+
+	// The one-field row exists, and the other three are absent rather than empty.
+	var nulls int
+	if err := db.QueryRow(`
+		SELECT (session_id IS NULL) + (source_ref IS NULL) + (confidence IS NULL)
+		FROM memory_provenance WHERE memory_id = 'm-agent'`,
+	).Scan(&nulls); err != nil {
+		t.Fatalf("read the agent-only row: %v", err)
+	}
+	if nulls != 3 {
+		t.Errorf("%d of session_id/source_ref/confidence are NULL on the agent-only row, want 3", nulls)
+	}
+	if err := db.QueryRow(
+		`SELECT agent FROM memory_provenance WHERE memory_id = 'm-agent'`,
+	).Scan(&agent); err != nil {
+		t.Fatalf("read the agent-only row's agent: %v", err)
+	}
+	if agent != "codex" {
+		t.Errorf("agent = %q, want codex", agent)
+	}
+
+	// A confidence with no agent is still a claim somebody made, and the agent
+	// stays unknown.
+	if err := db.QueryRow(`
+		SELECT (agent IS NULL) + (session_id IS NULL) + (source_ref IS NULL), confidence
+		FROM memory_provenance WHERE memory_id = 'm-conf'`,
+	).Scan(&nulls, &confidence); err != nil {
+		t.Fatalf("read the confidence-only row: %v", err)
+	}
+	if nulls != 3 || confidence != 0.4 {
+		t.Errorf("confidence-only row = (%d nulls, %v), want 3 nulls and 0.4", nulls, confidence)
+	}
+
+	// A memory that recorded no provenance gets no evidence row, and the memory
+	// carrying only a verification stamp does not either: the stamp is on the
+	// memory, and the row exists to carry a provenance claim.
+	var seeded int
+	if err := db.QueryRow(`SELECT count(*) FROM memory_provenance`).Scan(&seeded); err != nil {
+		t.Fatalf("count seeded rows: %v", err)
+	}
+	if seeded != 3 {
+		t.Errorf("seeded %d evidence rows, want 3 — a row for a memory that recorded nothing is an observation nobody made", seeded)
+	}
+	for _, id := range []string{"m-bare", "m-verified"} {
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM memory_provenance WHERE memory_id = ?`, id).Scan(&n); err != nil {
+			t.Fatalf("count rows for %s: %v", id, err)
+		}
+		if n != 0 {
+			t.Errorf("%s got %d evidence row(s), want none", id, n)
+		}
+	}
+
+	// The memories themselves are untouched: the step is additive.
+	var memories int
+	if err := db.QueryRow(`SELECT count(*) FROM memories`).Scan(&memories); err != nil || memories != 5 {
+		t.Errorf("memories after migration: n=%d err=%v, want 5", memories, err)
+	}
+
+	// The seeded table takes what the writers send, and refuses what no writer
+	// can mean. A migration that delivered a table with a different CHECK would
+	// fail on the first real save, in production, on somebody's data.
+	if _, err := db.Exec(`
+		INSERT INTO memory_provenance (memory_id, kind, agent, observed_at)
+		VALUES ('m-full', 'observed', 'claude-code', datetime('now'))`); err != nil {
+		t.Fatalf("insert after migrateV18: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO memory_provenance (memory_id, kind) VALUES ('m-full', 'guessed')`); err == nil {
+		t.Error("the kind CHECK accepted a value no writer emits; a phase nothing reads is a phase no filter can use")
+	}
+	// The cascade is not asserted here: this fixture's handle was opened with a
+	// bare DSN, so foreign_keys is off and the pragma cannot show anything about
+	// it. TestDeleteCascadesEvidenceAndKeepsTheHistoryTombstone proves the
+	// cascade on a handle that has it on.
+}
+
 // TestMigrateFreshDBHasMemoryHistory: a brand-new database (initSQL path, no
 // migration involved) must have memory_history and its indexes from the start
 // — guards against the table silently dropping out of initSQL while migrateV17
@@ -1508,5 +1710,53 @@ func TestMigrateFreshDBHasMemoryHistory(t *testing.T) {
 	}
 	if stray != 0 {
 		t.Errorf("memory_history carries %d index(es) nothing reads; each is a b-tree insert on every write", stray)
+	}
+}
+
+// TestMigrateFreshDBHasMemoryProvenance: a brand-new database (initSQL path, no
+// migration involved) must have memory_provenance and its index from the start —
+// guards against the table silently dropping out of initSQL while migrateV18 still
+// exists to paper over it on upgraded databases.
+func TestMigrateFreshDBHasMemoryProvenance(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`SELECT id, memory_id, kind, agent, session_id, source_ref,
+		confidence, observed_at, verified_at FROM memory_provenance LIMIT 0`); err != nil {
+		t.Fatalf("memory_provenance columns missing on fresh db: %v", err)
+	}
+	var idx string
+	if err := db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_provenance_memory'`,
+	).Scan(&idx); err != nil {
+		t.Errorf("idx_provenance_memory missing on fresh db: %v", err)
+	}
+	// One index, asserted as an absence for the reason the history table keeps
+	// one: every append pays a b-tree insert per index, inside the write
+	// transaction that holds the write lock.
+	var stray int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='memory_provenance'
+		 AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_provenance_memory'`,
+	).Scan(&stray); err != nil {
+		t.Fatalf("count evidence indexes: %v", err)
+	}
+	if stray != 0 {
+		t.Errorf("memory_provenance carries %d index(es) nothing reads; each is a b-tree insert on every save", stray)
+	}
+	// The foreign key is the reason a delete takes the evidence with it, so its
+	// absence would be invisible until a delete silently left rows behind.
+	var fkSQL string
+	if err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_provenance'`,
+	).Scan(&fkSQL); err != nil {
+		t.Fatalf("read memory_provenance DDL: %v", err)
+	}
+	if !strings.Contains(fkSQL, "REFERENCES memories(id) ON DELETE CASCADE") {
+		t.Errorf("memory_provenance.memory_id does not cascade from memories: %s", fkSQL)
 	}
 }

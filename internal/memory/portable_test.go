@@ -215,8 +215,24 @@ func TestImportMemoryRoundTripsEveryColumn(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("destination holds %d memories, want 1", len(got))
 	}
-	if !reflect.DeepEqual(got[0], memories[0]) {
-		t.Errorf("round trip changed the row:\n got %+v\nwant %+v", got[0], memories[0])
+	// The row itself must come back identical in every column. The evidence is
+	// compared apart, because it is the one field an import deliberately changes:
+	// the source row was seeded by a direct INSERT and so carries no records,
+	// while the destination holds the record of the arrival itself.
+	wantRow, gotRow := memories[0], got[0]
+	wantEvidence, gotEvidence := wantRow.Evidence, gotRow.Evidence
+	wantRow.Evidence, gotRow.Evidence = nil, nil
+	if !reflect.DeepEqual(gotRow, wantRow) {
+		t.Errorf("round trip changed the row:\n got %+v\nwant %+v", gotRow, wantRow)
+	}
+	if len(wantEvidence) != 0 {
+		t.Errorf("the seeded row carries %d evidence record(s), want none", len(wantEvidence))
+	}
+	if len(gotEvidence) != 1 || gotEvidence[0].Kind != "imported" {
+		t.Fatalf("destination evidence = %+v, want the single record of the import's own arrival", gotEvidence)
+	}
+	if gotEvidence[0].Agent != "opencode" || gotEvidence[0].SessionID != "sess-1" {
+		t.Errorf("the arrival record = %+v, want it attributed to the artifact's agent", gotEvidence[0])
 	}
 	// The identity is the exported one, not a fresh hex id — a second import
 	// of the same artifact has to be recognised as already present.
@@ -235,10 +251,13 @@ func TestImportSkipsAnExistingIDAndNeverOverwrites(t *testing.T) {
 	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
-	if _, err := store.Create(ctx, "p1", Memory{Category: "fact", Content: "newer local text", Source: "manual"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET id = 'm1' WHERE content = 'newer local text'`); err != nil {
+	// Inserted under the id the artifact will carry rather than created and
+	// renamed: memory_provenance cascades from memories with no ON UPDATE, so a
+	// row carrying evidence cannot be renamed, and this fixture needs an id the
+	// import will recognise as already present.
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO memories (id, project_id, category, content, source)
+		VALUES ('m1', 'p1', 'fact', 'newer local text', 'manual')`); err != nil {
 		t.Fatalf("force id: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET content = 'local wins', pinned = 1 WHERE id = 'm1'`); err != nil {

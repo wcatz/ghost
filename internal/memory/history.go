@@ -436,6 +436,10 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 //     can sit on a history row that names a different memory. Those cells are
 //     redacted rather than their rows deleted: the event (which memory, when,
 //     which agent) is worth keeping, and the text is what the purge is for.
+//   - memory_provenance. The evidence records are deleted outright rather than
+//     kept as a record: they carry no text of the memory, but they name the
+//     agents, sessions and references that reported it, and the reason a purge
+//     was asked for is this memory, not the row that quotes it.
 //
 // The texts are collected before anything is deleted, because afterwards there
 // is nothing left to search for. The caller runs this in the same transaction as
@@ -489,6 +493,19 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_snapshots WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge memory snapshots: %w", err)
+	}
+
+	// The evidence records go with the history, and the delete is explicit rather
+	// than left to the foreign key. The cascade covers the delete-time purge, but
+	// PurgeMemoryHistory leaves the memory in place, so no cascade fires there —
+	// and a purge whose completeness depended on a connection's foreign_keys
+	// pragma would be a purge that can report success over rows still in the
+	// table. These rows name the agents and sessions that reported a fact about a
+	// memory whose text is being erased; keeping them would leave the erased
+	// memory's story behind with the memory itself gone.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM memory_provenance WHERE memory_id = ?`, memoryID); err != nil {
+		return 0, fmt.Errorf("purge memory evidence: %w", err)
 	}
 
 	res, err := tx.ExecContext(ctx,
