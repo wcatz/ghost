@@ -405,7 +405,10 @@ func TestExpiredRowsAreReportedAsWithheldNotAbsent(t *testing.T) {
 	if !strings.Contains(out, "out of date") {
 		t.Errorf("every row was withheld as expired, but the answer does not say so: %s", out)
 	}
-	if !strings.Contains(out, "No matching memories found") {
-		t.Logf("answer: %s", out)
+	// The absence sentence is not merely accompanied by the explanation, it is
+	// not there: a caller who reads only the first line must not be told these
+	// memories do not exist when they were found and withheld.
+	if strings.Contains(out, "No matching memories found") {
+		t.Errorf("a withheld answer leads with an absence claim: %s", out)
 	}
 }

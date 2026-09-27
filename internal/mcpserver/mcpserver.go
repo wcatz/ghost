@@ -43,19 +43,24 @@ type embedderDiagnostics interface {
 	Model() string
 }
 
-// emptyWhy explains an empty result that is not an absence. It returns "" for a
-// plain no-match, where the leading sentence is already true and the caveat
-// covers the window. Every other reason names the stage that emptied the set, in
-// the words that tell the caller what to do differently: a row withheld as out of
-// date is refreshed, a row cut by a cap is the cap raised, a row removed by a
-// filter is the filter dropped.
+// emptyWhy explains an empty result that is not an absence, and returns "" for a
+// plain no-match — where the leading sentence is true and the caveat covers the
+// window. Every other reason names what happened to the rows, in the words that
+// tell the caller what to do differently: a row withheld as out of date is
+// refreshed, a row cut by a cap is the cap raised. The reasons not listed here
+// belong to stages that do not run in this version, and a version that cannot
+// explain an empty answer says the absence sentence rather than inventing one.
+//
+// This text is read by an agent, not by a reviewer of this repository: it names
+// what happened to the rows and what to do about it, and nothing else. Design
+// vocabulary ("stage 2", "Decision 3") stays in the comments.
 func emptyWhy(result assemble.Result) string {
 	switch result.Reason {
 	case "all_invalid":
-		return "Every matching memory was withheld as out of date — its validity window has closed or has not opened yet (Decision 3's stage 2). " +
-			"Nothing is wrong with the query; the answer is withheld, not absent."
+		return "Every matching memory was withheld as out of date: its validity window has closed or has not opened yet. " +
+			"The query was not wrong — the answer is withheld, not absent."
 	case "all_over_budget":
-		return "Every matching memory was cut by the assembler's item budget. Raise the limit to see them."
+		return "Every matching memory was cut by the item budget. Raise the limit to see them."
 	}
 	return ""
 }
@@ -765,14 +770,17 @@ func (s *Server) registerTools() {
 		maybeIncomplete := (args.Category != "" || len(scopeFilter) > 0) && len(result.Items) < args.Limit
 
 		if len(result.Items) == 0 {
-			// An empty answer is only an absence claim when nothing filtered the
-			// rows out. The assembler knows which stage emptied the set, and rows
-			// that were found and then withheld — as out of date, or over a
-			// budget — must not read as memories that do not exist. The reason
-			// line is what keeps that distinction in front of the caller.
+			// "No matching memories found." is an absence claim, and it is only
+			// true when nothing removed a row that was found. The assembler knows
+			// which stage emptied the set, so when a stage did, the answer leads
+			// with that instead: a row withheld as out of date is a different
+			// instruction to the caller (refresh it) from a row that does not
+			// exist (ask about something else), and leading with the absence
+			// sentence would bury the difference under the line a caller stops
+			// reading at.
 			text := "No matching memories found."
 			if why := emptyWhy(result); why != "" {
-				text += "\n\n" + why
+				text = why
 			}
 			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
 				text += "\n\n" + caveat

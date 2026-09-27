@@ -74,11 +74,9 @@ func runValidity(p *pipeline) {
 		for _, raw := range v.unparseable {
 			// A value nobody can read is not a claim, and it is not "valid"
 			// either. It is reported so a caller can see the row's claim is
-			// unreadable rather than absent.
+			// unreadable rather than absent — as a note, which is true of the row
+			// whether it survives or not.
 			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%q), treated as unset", shortID(c.ID), raw))
-			// Kept, not excluded: an unreadable value is no claim at all, so the
-			// row stays and the trace says the claim was unreadable.
-			p.trace.keep(c.ID, stageValidity, "validity_unparseable", c.Score)
 		}
 		if v.state == validityExpired || v.state == validityFuture {
 			dropped = append(dropped, c.ID)
@@ -86,6 +84,14 @@ func runValidity(p *pipeline) {
 			p.droppedBy[stageValidity]++
 			p.trace.decide(c.ID, stageValidity, v.state, c.Score)
 			continue
+		}
+		if len(v.unparseable) > 0 {
+			// Kept, not excluded — and only on this path. A row can be both
+			// expired and carry an unreadable value, and then it has one fate
+			// (dropped); recording a kept decision for it too would leave two
+			// contradictory entries for the same row at the same stage, which is
+			// the one thing the Decision record is documented not to hold.
+			p.trace.keep(c.ID, stageValidity, "validity_unparseable", c.Score)
 		}
 		it := itemOf(c)
 		it.ValidityState = v.state

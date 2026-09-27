@@ -967,3 +967,37 @@ func TestTraceDoesNotReportAKeptRowAsExcluded(t *testing.T) {
 		t.Errorf("decisions = %d kept / %d excluded, want 1/0: an unreadable value is recorded, not an exclusion", kept, excluded)
 	}
 }
+
+// TestTraceRecordsOneFatePerRowPerStage: Decision documents itself as one row's
+// fate at one stage, and the trace is what explain will project as "the reason
+// this candidate was left out". A row that is both dropped for expiry and carries
+// an unreadable value is one fate — dropped — so recording a "kept" decision for
+// it as well would leave two contradictory entries for the same pair.
+func TestTraceRecordsOneFatePerRowPerStage(t *testing.T) {
+	expired, unreadable := "2020-01-01 00:00:00", "whenever the reviewer got to it"
+	rows := []memory.Candidate{candidate("BOTH", "proj", "fact", "expired and unreadable", 0.9)}
+	rows[0].ValidUntil = &expired
+	rows[0].VerifiedAt = &unreadable
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
+
+	if len(res.Items) != 0 {
+		t.Fatalf("the row was kept, so there is nothing to check: %v", itemIDs(res.Items))
+	}
+	for _, d := range res.Trace.Decisions {
+		if d.ID == "BOTH" && d.Kept {
+			t.Errorf("a row dropped for expiry also carries a kept decision at %s: %+v", d.Stage, d)
+		}
+	}
+	seen := map[string]int{}
+	for _, d := range res.Trace.Decisions {
+		seen[d.ID+"/"+d.Stage]++
+	}
+	for pair, n := range seen {
+		if n > 1 {
+			t.Errorf("%s has %d decisions: one row has one fate at one stage", pair, n)
+		}
+	}
+}
