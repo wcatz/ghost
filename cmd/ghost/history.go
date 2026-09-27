@@ -96,7 +96,12 @@ and source the memory held once that write landed.
   --json      One JSON object per entry, for scripting
 
 The history survives the memory it describes: a deleted memory's last state is
-still readable here, and nothing is written by this command.
+still readable here.
+
+This command writes no memory, history or project row. It does open the store
+read-write, the same open 'ghost maintenance status' and 'ghost backup' use, so
+a database predating the history table is migrated by the open — and that
+migration first writes the pre-migration backup copy it always takes.
 `
 
 // historyView is everything `ghost history` prints. A value the printer takes,
@@ -189,10 +194,17 @@ func printHistoryJSON(w io.Writer, entries []memory.HistoryEntry) error {
 	return nil
 }
 
-// runHistory implements `ghost history <memory-id>`. Read-only in effect: the
-// store is opened with OpenDB, which is what every other report-style command
-// does (and which migrates a store that predates the history table — a
-// diagnostic that could not read a v16 store would be useless on one).
+// runHistory implements `ghost history <memory-id>`.
+//
+// The store is opened with memory.OpenDB, like every other report-style command
+// (`ghost maintenance status`, `ghost backup`). That is a read-write open and is
+// not described as anything else: a store predating the history table is
+// migrated, and migration writes a full pre-migration backup beside the database
+// first. The alternative — the strictly read-only transfer opener — would refuse
+// exactly the store a user is most likely to ask this question about (one they
+// just upgraded and have not run a session against yet), so the command migrates
+// instead of failing, and says so in its help rather than promising to write
+// nothing.
 func runHistory() {
 	opts, err := parseHistoryArgs(os.Args[2:])
 	if err != nil {

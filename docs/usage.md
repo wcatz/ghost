@@ -140,7 +140,7 @@ ghost history <memory-id> --limit 5
 ghost history <memory-id> --json
 ```
 
-Every write to a memory is appended to its history in the same transaction, so `ghost history` can answer what a memory used to say, which pass or agent changed it, and when — including after the memory itself is gone, which is the case where the recorded text is all that is left. The command writes nothing.
+Every write to a memory is appended to its history in the same transaction, so `ghost history` can answer what a memory used to say, which pass or agent changed it, and when — including after the memory itself is gone, which is the case where the recorded text is all that is left. The command writes no memory, history or project row; like `ghost maintenance status` it opens the store read-write, so a database predating the history table is migrated by the open.
 
 ## Automatic lifecycle work
 

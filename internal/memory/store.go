@@ -3628,19 +3628,31 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 // already-global memory (project_id = '_global') also fails this ownership
 // match, which is desired: re-promotion is rejected with a
 // not-found-in-project error, not a silently accepted no-op.
+//
+// The memory's history moves with it, in the same transaction. It has to:
+// memory_provenance.project_id is ON DELETE CASCADE, so history rows left
+// naming the project the memory just left are taken by the next
+// `ghost project delete` of that project — while the promoted memory, now in
+// _global, survives with no recorded past at all.
 func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin promote: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')
 		ON CONFLICT(id) DO NOTHING
 	`); err != nil {
 		return fmt.Errorf("ensure _global project: %w", err)
 	}
-	_, _ = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
+	_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
 
-	res, err := s.db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE memories SET project_id = '_global', updated_at = datetime('now')
 		WHERE id = ? AND project_id = ?
 	`, id, projectID)
@@ -3654,7 +3666,12 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 	if n == 0 {
 		return fmt.Errorf("memory %s not found in project %s", id, projectID)
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE memory_provenance SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
+	); err != nil {
+		return fmt.Errorf("promote memory history: %w", err)
+	}
+	return tx.Commit()
 }
 
 // TogglePin sets or clears the pinned flag.

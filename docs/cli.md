@@ -447,8 +447,9 @@ that write landed.
 
 The history outlives the memory: a deleted memory's last state is still readable
 here, and a report that finds neither a row nor a history says so instead of
-printing nothing. Nothing is written by this command; a store predating the
-history table is migrated by the open, like every other report command.
+printing nothing.
+
+The command writes no memory, history or project row. It does open the store read-write — the same open `ghost maintenance status` and `ghost backup` use — so a database predating the history table is migrated by the open, and that migration first writes the full pre-migration backup copy it always takes. The strictly read-only opener is not used here because it refuses a store behind the current schema, which is exactly the store someone is most likely to run this against after upgrading.
 
 Entries are kept per the growth policy in [architecture.md](architecture.md#memory-history): the newest 50 versions of one memory, and the newest 20 000 rows in the store.
 

@@ -847,3 +847,48 @@ func TestMemoryHistorySurvivesARepoClaimMerge(t *testing.T) {
 		t.Fatal("the repository-claim merge destroyed the memory's history")
 	}
 }
+
+// TestMemoryHistoryFollowsAMemoryPromotedToGlobal: the same cascade hazard as
+// the merge, reached by promotion. A promoted memory leaves its project but
+// keeps its id, and its history rows name the project it left — so deleting
+// that project afterwards takes the recorded past of a memory that is still
+// live in _global. Promotion has to move the history with the memory.
+func TestMemoryHistoryFollowsAMemoryPromotedToGlobal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, _, _, err := s.Upsert(ctx, testProject, "fact", "a rule worth injecting everywhere", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.PromoteToGlobal(ctx, testProject, id); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	promoted, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(promoted) != 1 {
+		t.Fatalf("the promotion did not keep the memory: %v %v", promoted, err)
+	}
+	if promoted[0].ProjectID != GlobalProjectID {
+		t.Fatalf("memory project = %q, want %s", promoted[0].ProjectID, GlobalProjectID)
+	}
+
+	// The ordinary follow-up: the project it left is deleted.
+	if _, err := s.DeleteProject(ctx, testProject, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+	stillThere, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(stillThere) != 1 {
+		t.Fatalf("deleting the old project took the promoted memory: %v %v", stillThere, err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("deleting the project a memory was promoted out of destroyed its history — the rows still named the project it left")
+	}
+	if entries[0].Content != "a rule worth injecting everywhere" {
+		t.Errorf("the surviving history lost the text: %q", entries[0].Content)
+	}
+}
