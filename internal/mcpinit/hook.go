@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
@@ -444,10 +445,19 @@ const scopeColumnFloor = 12
 // caller that swallowed the difference would render a block with no scope on it
 // and no filter behind it, and the user would have no way to tell that from a
 // store that has none.
+//
+// Reported once per process, because both loaders probe and one session start
+// runs both. The same rule config.warnf follows for a reason that applies here: a
+// repeated identical warning trains its reader to skip it, and a hook that prints
+// on every session is the place a line is read least.
+var scopeVersionWarned sync.Once
+
 func scopeColumnExpr(db *sql.DB) (expr string, hasScope bool) {
 	v, err := memory.DBUserVersion(db)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "ghost: could not read the store's schema version:", err)
+		scopeVersionWarned.Do(func() {
+			fmt.Fprintln(os.Stderr, "ghost: could not read the store's schema version:", err)
+		})
 		return "NULL AS scope", false
 	}
 	if v < scopeColumnFloor {
