@@ -95,11 +95,13 @@ func TestGatedLLMTierAddsNoFallbackTier(t *testing.T) {
 }
 
 // TestGatedLLMTierKeepsTheTierName: the operator selected a backend and the
-// `Consolidator:` line reports it back, so the wrapper must not relabel it.
+// `Consolidator:` line reports it back, so wrapping it in the gate must not
+// relabel it into `tiered:cli` — that would silently break any script or saved
+// log-grep keyed on the old label.
 func TestGatedLLMTierKeepsTheTierName(t *testing.T) {
 	for _, name := range []string{"cli", "opencode"} {
-		if got := gatedLLMTier(&gatedTierStub{name: name}, slog.Default()).Name(); got != "tiered:"+name {
-			t.Errorf("Name() = %q, want %q", got, "tiered:"+name)
+		if got := gatedLLMTier(&gatedTierStub{name: name}, slog.Default()).Name(); got != name {
+			t.Errorf("Name() = %q, want %q — the explicit selection must not be relabelled", got, name)
 		}
 	}
 }

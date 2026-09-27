@@ -54,11 +54,23 @@ func TestNewGatedConsolidator_ExplicitLLMTierIsStillGated(t *testing.T) {
 	}
 }
 
-// TestNewGatedConsolidator_KeepsTheTierName: the selected tier is what the
-// operator asked for and what `Consolidator:` prints, so wrapping must not
-// relabel it into something they did not select.
+// TestNewGatedConsolidator_KeepsTheTierName: the operator named a backend on
+// the command line and `ghost reflect` prints this back as
+// `Consolidator: <name>`. Wrapping a tier is a change in how it is BOUNDED, not
+// in which one runs, so the label must not gain the "tiered:" prefix the `auto`
+// path uses — a script or a saved log-grep keyed on `Consolidator: cli` has to
+// keep matching.
 func TestNewGatedConsolidator_KeepsTheTierName(t *testing.T) {
 	g := NewGatedConsolidator(&stubConsolidator{name: "opencode", available: true}, slog.Default())
+	if got := g.Name(); got != "opencode" {
+		t.Errorf("Name() = %q, want %q — the explicit selection must not be relabelled", got, "opencode")
+	}
+}
+
+// TestNewTieredConsolidator_StillPrefixesTheAutoPath is the other side: the
+// `auto` tier really does choose between several, so its label keeps saying so.
+func TestNewTieredConsolidator_StillPrefixesTheAutoPath(t *testing.T) {
+	g := NewTieredConsolidator([]Consolidator{&stubConsolidator{name: "opencode", available: true}}, slog.Default())
 	if got := g.Name(); got != "tiered:opencode" {
 		t.Errorf("Name() = %q, want %q", got, "tiered:opencode")
 	}

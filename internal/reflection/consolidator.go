@@ -35,6 +35,10 @@ type TieredConsolidator struct {
 	tiers  []Consolidator
 	active atomic.Int32
 	logger *slog.Logger
+	// gated marks the single-tier form built by NewGatedConsolidator. It changes
+	// only the reported name (see Name), never the gate: the gate is keyed on
+	// tier.Mechanical() and the tier list, both of which are the same here.
+	gated bool
 }
 
 // NewTieredConsolidator creates a consolidator that tries each tier in order.
@@ -54,12 +58,23 @@ func NewTieredConsolidator(tiers []Consolidator, logger *slog.Logger) *TieredCon
 	}
 }
 
+// Name reports the active tier, prefixed with "tiered:" because the `auto` path
+// really did choose between several. A consolidator built by
+// NewGatedConsolidator reports its one tier UNPREFIXED: the operator named that
+// backend on the command line, and `ghost reflect` prints this as
+// `Consolidator: <name>` — wrapping it is a change in how the tier is bounded,
+// not in which tier runs, so a script or a saved log-grep keyed on
+// `Consolidator: cli` must keep matching.
 func (t *TieredConsolidator) Name() string {
 	idx := int(t.active.Load())
-	if idx >= 0 && idx < len(t.tiers) {
-		return "tiered:" + t.tiers[idx].Name()
+	prefix := "tiered:"
+	if t.gated {
+		prefix = ""
 	}
-	return "tiered:none"
+	if idx >= 0 && idx < len(t.tiers) {
+		return prefix + t.tiers[idx].Name()
+	}
+	return prefix + "none"
 }
 
 // Mechanical is false: a tiered consolidator may contain LLM tiers, so its
@@ -144,8 +159,13 @@ func gateMinOutput(inputCount int) int {
 // fails — which is the honest reading of "use exactly this tier" when the
 // answer came back truncated. A mechanical tier is still exempt inside the
 // wrapper, so a caller that gates a Jaccard tier keeps today's behaviour.
+//
+// It reports the tier's own name rather than the "tiered:" prefix, so
+// `Consolidator: cli` still prints `cli` (see Name).
 func NewGatedConsolidator(c Consolidator, logger *slog.Logger) *TieredConsolidator {
-	return NewTieredConsolidator([]Consolidator{c}, logger)
+	t := NewTieredConsolidator([]Consolidator{c}, logger)
+	t.gated = true
+	return t
 }
 
 func (t *TieredConsolidator) Available(ctx context.Context) bool {
