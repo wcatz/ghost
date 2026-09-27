@@ -114,9 +114,38 @@ func TestPromptTellsTheModelARewriteMayComeBack(t *testing.T) {
 
 	// The supersession bullet is the one the hole was reached through, so it must
 	// carry the signal too and not only inherit it from the rewrite bullet.
-	sup := prompt[strings.Index(prompt, `"drop <id> reason: superseded by <id>"`):]
-	if !strings.Contains(sup[:strings.Index(sup, "\n")], "puts that row back verbatim") {
+	const marker = `"drop <id> reason: superseded by <id>"`
+	_, sup, ok := strings.Cut(prompt, marker)
+	if !ok {
+		t.Fatalf("the prompt has no %s bullet at all", marker)
+	}
+	bullet, _, ok := strings.Cut(sup, "\n")
+	if !ok {
+		t.Fatalf("the %s bullet is the last line, so it cannot be delimited; check the test", marker)
+	}
+	if !strings.Contains(bullet, "puts that row back verbatim") {
 		t.Errorf("the supersession bullet still reads as final; it needs the same warning as a rewrite")
+	}
+}
+
+// TestPromptDoesNotPromiseAReAddUnderAllowDrops is the mode half, and it exists
+// because the first version of that sentence was emitted in both modes. Under
+// --allow-drops the verbatim re-add is skipped entirely, so a prompt that says
+// "the apply puts that row back verbatim" there promises a save the run never
+// makes — on the path eval/cycle measures, which passes --apply --allow-drops
+// for every reflect. The grader would be told a rewrite is free when the row is
+// in fact deleted.
+func TestPromptDoesNotPromiseAReAddUnderAllowDrops(t *testing.T) {
+	memories := []memory.Memory{{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "the bastion is reached on port 2222"}}
+	dropping := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: memories, AllowDrops: true})
+
+	for _, unwanted := range []string{"puts that row back verbatim", "is put back verbatim, so state one only"} {
+		if strings.Contains(dropping, unwanted) {
+			t.Errorf("--allow-drops prompt promises a re-add the apply skips: %q", unwanted)
+		}
+	}
+	if !strings.Contains(dropping, "the input is DELETED, and yours is the last version of it") {
+		t.Error("--allow-drops prompt does not tell the model the replaced row is deleted when nothing accounts for it")
 	}
 }
 

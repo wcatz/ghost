@@ -911,12 +911,28 @@ func runReflect() {
 	// of the guard's decision waiting to disagree with the first. Read the two
 	// together — this says what was claimed, that says what was retained or
 	// deleted.
+	//
+	// Whether the claimed replacement is still in the RESULT is a fact about the
+	// result, not an opinion about the guard, so it is safe to state here — and it
+	// has to be: executeOps records the text before the post-filters run, and
+	// dropForeignProjectMemories deletes a memory naming a project the input
+	// corpus never mentioned. Printing a replacement the same run discarded would
+	// be the one thing this report must never do, since it exists so a person can
+	// decide whether to apply.
+	inResult := make(map[string]bool, len(result.Memories))
+	for _, m := range result.Memories {
+		inResult[m.Content] = true
+	}
 	for _, r := range result.Replacements {
-		if r.Text == "" {
+		switch {
+		case r.Text == "":
 			fmt.Println("  Disposed of (model's claim): (no replacement text recorded)")
-			continue
+		case !inResult[r.Text]:
+			fmt.Printf("  Disposed of (model's claim): its replacement is NOT in this result — %s\n",
+				truncateForDisplay(r.Text, 80))
+		default:
+			fmt.Printf("  Disposed of (model's claim): replaced by %s\n", truncateForDisplay(r.Text, 80))
 		}
-		fmt.Printf("  Disposed of (model's claim): replaced by %s\n", truncateForDisplay(r.Text, 80))
 	}
 
 	// The >50% reduction warning. On the unattended lifecycle path this is the

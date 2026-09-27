@@ -248,6 +248,8 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"kept verbatim",
 		"undone by that re-add",
 		"a memory you do not name is carried through unchanged",
+		"puts that row back verbatim",
+		"is put back verbatim, so state one only",
 	} {
 		if !strings.Contains(retained, want) {
 			t.Errorf("retention prompt missing %q", want)
@@ -257,6 +259,7 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"DELETES every input",
 		"a drop nothing explains is a real deletion",
 		"There is no protected category",
+		"the input is DELETED, and yours is the last version of it",
 	} {
 		if strings.Contains(retained, unwanted) {
 			t.Errorf("retention prompt leaks the --allow-drops wording %q", unwanted)
@@ -269,6 +272,13 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"a drop nothing explains is a real deletion",
 		"a real deletion",
 		"the input is deleted even though you mentioned it",
+		// The two operations that REPLACE a row carry the same warning as a
+		// merge, and under --allow-drops the re-add never happens — the row is
+		// simply deleted. This is the path eval/cycle measures on, so a prompt
+		// promising a re-add there is telling the grader a consolidation is
+		// cheaper than it is (#549).
+		"the input is DELETED, and yours is the last version of it",
+		"it is a real deletion, so state one only when a survivor really does replace it",
 	} {
 		if !strings.Contains(dropping, want) {
 			t.Errorf("--allow-drops prompt missing %q", want)
@@ -278,6 +288,8 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"Dropping is not deletion",
 		"EVERY category is protected",
 		"undone by that re-add",
+		"puts that row back verbatim",
+		"is put back verbatim, so state one only",
 	} {
 		if strings.Contains(dropping, unwanted) {
 			t.Errorf("--allow-drops prompt still promises retention: %q", unwanted)
