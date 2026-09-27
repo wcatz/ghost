@@ -368,8 +368,18 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 }
 
 // Close closes the underlying database.
+// Close releases the store's handles. The injected read handle is a second
+// connection this Store owns, so it is closed too: leaving it open holds a WAL
+// reader for the life of the process, which is exactly what the read handle
+// exists to avoid holding during a retrieval.
 func (s *Store) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	if s.readDB != nil {
+		if readErr := s.readDB.Close(); err == nil {
+			err = readErr
+		}
+	}
+	return err
 }
 
 // ListProjects returns all registered projects.

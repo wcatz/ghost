@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -905,5 +906,90 @@ func TestOpenReadDBRefusesAMissingDatabase(t *testing.T) {
 	}
 	if _, err := os.Stat(missing); !os.IsNotExist(err) {
 		t.Error("OpenReadDB created the database it was asked to report about")
+	}
+}
+
+// TestStoreCloseClosesTheInjectedReadHandle: the read handle is a second
+// database connection this Store opened, so closing the Store has to close it.
+// Leaving it open holds a WAL reader for the life of the process, which is
+// what the read handle exists to avoid holding during a retrieval.
+func TestStoreCloseClosesTheInjectedReadHandle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ghost.db")
+	db, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	readDB, err := OpenReadDB(path)
+	if err != nil {
+		t.Fatalf("OpenReadDB: %v", err)
+	}
+
+	s := NewStoreWithRead(db, readDB, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := readDB.PingContext(context.Background()); err == nil {
+		t.Error("the injected read handle is still open after Store.Close")
+	}
+}
+
+// TestCandidatesErrorsWhenEveryApplicableLegFails: a total retrieval failure is
+// an error, not an empty set. The zero CandidateSet is reserved for the case
+// where one leg failed and another completed — a partial retrieval, which the
+// caller reports as incomplete. When nothing ran, there is no result to report
+// at all, and returning an empty set would let a broken keyword index read as
+// "this store has no memory matching that".
+func TestCandidatesErrorsWhenEveryApplicableLegFails(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	makeMemory(t, s, "kubernetes readiness probe misconfiguration")
+
+	// Both retrieval tables gone: neither leg can run.
+	for _, table := range []string{"memories_fts", "memory_embeddings"} {
+		if _, err := s.db.ExecContext(ctx, "DROP TABLE "+table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
+	}
+
+	set, err := s.Candidates(ctx, candidateRequest("kubernetes readiness probe", 10, time.Now().UTC()))
+	if err == nil {
+		t.Fatalf("Candidates returned a set with %d rows instead of an error: set=%+v", len(set.Rows), set.Legs)
+	}
+	if !strings.Contains(err.Error(), "retrieval") {
+		t.Errorf("error = %q, want it to name the retrieval failure", err)
+	}
+}
+
+// TestCandidatesReturnsStatusesForAPartialLegFailure: one leg failed and the
+// other completed with nothing, so the caller can say "the search was
+// incomplete" rather than "nothing matched". This is the case the zero set is
+// for, and it must not be an error.
+func TestCandidatesReturnsStatusesForAPartialLegFailure(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	makeMemory(t, s, "kubernetes readiness probe misconfiguration")
+
+	// Only the keyword index is gone: the vector leg can still run, and finds
+	// nothing because no embedding exists.
+	if _, err := s.db.ExecContext(ctx, "DROP TABLE memories_fts"); err != nil {
+		t.Fatalf("drop memories_fts: %v", err)
+	}
+	req := candidateRequest("kubernetes readiness probe", 10, time.Now().UTC())
+	req.Condition = CondHybrid
+	req.QueryVec = []float32{1, 0, 0}
+
+	set, err := s.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: a partial failure must return statuses, not an error: %v", err)
+	}
+	if len(set.Rows) != 0 {
+		t.Errorf("rows = %d, want none", len(set.Rows))
+	}
+	if set.Legs["fts"].Err == "" {
+		t.Error("the failed leg reports no error, so the caller cannot tell an incomplete search from an empty one")
+	}
+	if !set.Legs["vector"].Attempted || !set.Legs["vector"].Available {
+		t.Errorf("vector leg = %+v, want it attempted and available: it ran, it simply found nothing", set.Legs["vector"])
 	}
 }

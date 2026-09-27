@@ -646,17 +646,32 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 
+		// One request, built before the branches below, so explain and the
+		// formatted path cannot disagree about the window: explain reports the
+		// ranking of a window, and the only honest window to report is the one
+		// the tool searches.
+		searchRequest := assemble.Request{
+			ProjectID: args.ProjectID,
+			Query:     args.Query,
+			QueryVec:  queryVec,
+			Scope:     scopeFilter,
+			Category:  args.Category,
+			Source:    assemble.SourceSearch,
+			Budget:    assemble.Budget{MaxItems: args.Limit},
+			Condition: assemble.CondHybrid,
+			Now:       time.Now().UTC(),
+		}
 		// explain returns the store's ranking diagnosis instead of the
-		// formatted list. It reports the pre-category window: the explain
-		// projection of the assembler's trace replaces this branch once the
-		// stages carry it.
+		// formatted list. The explain projection of the assembler's trace
+		// replaces this branch once the stages carry it.
 		if args.Explain {
-			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec, args.Limit, scopeFilter)
+			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec,
+				assemble.RetrievalWindow(searchRequest), scopeFilter)
 			if xErr != nil {
 				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
 			}
 			if args.Category != "" {
-				ex.Notes = append(ex.Notes, "a category filter is not evaluated here: the rows below are the unfiltered window of the requested limit, while the formatted path for the same request applies the filter inside a retrieval window of up to three times that limit (max 100 rows), so an included row here may not be in that answer")
+				ex.Notes = append(ex.Notes, "a category filter is not applied to these rows: they are the retrieval window the formatted path searches, before the category filter runs, so a row marked included may not be in that answer")
 			}
 			payload, mErr := json.MarshalIndent(ex, "", "  ")
 			if mErr != nil {
@@ -677,19 +692,13 @@ func (s *Server) registerTools() {
 		if !ok {
 			return nil, nil, fmt.Errorf("ghost_memory_search: store does not support candidate retrieval")
 		}
-		result, err := assemble.Run(ctx, candidates, assemble.Request{
-			ProjectID: args.ProjectID,
-			Query:     args.Query,
-			QueryVec:  queryVec,
-			Scope:     scopeFilter,
-			Category:  args.Category,
-			Source:    assemble.SourceSearch,
-			Budget:    assemble.Budget{MaxItems: args.Limit},
-			Condition: assemble.CondHybrid,
-			Now:       time.Now().UTC(),
-		})
+		result, err := assemble.Run(ctx, candidates, searchRequest)
 		if err != nil {
-			return nil, nil, fmt.Errorf("search failed: %w", err)
+			// A failed retrieval and an empty result are the two answers an
+			// agent acts on oppositely — one says retry, the other says there
+			// is no such memory. The error says which, in the words the caller
+			// needs, and carries the cause so the failure is diagnosable.
+			return nil, nil, fmt.Errorf("search could not be completed, so it is unknown whether anything matches (the answer is incomplete, not empty \u2014 retry, or read the log): %w", err)
 		}
 		// The shared item renderer, one line per admitted memory. Search keeps
 		// its own framing: this surface's answer is the listing plus, when a

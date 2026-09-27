@@ -51,17 +51,23 @@ func NotYetValidAt(from *time.Time, now time.Time) bool {
 	return from != nil && from.After(now)
 }
 
-// ScopeContradicts reports whether two scopes assert different places for the
-// same key. Silence is not disagreement: a row that does not mention a key
-// contradicts nothing, which is the rule that keeps unscoped knowledge eligible
-// for every request.
+// ScopeContradicts reports whether a row's scope asserts a different place than
+// the request asked for. Silence is not disagreement: a row that does not mention
+// a key contradicts nothing, which is the rule that keeps unscoped knowledge
+// eligible for every request.
+//
+// It is a named negation of memory.ScopeMatches rather than a second
+// implementation of the same rule. The two questions are asked by two different
+// consumers — this one by stage 3's predicate, the other by the linker, the
+// fusion scope narrowing and every save-time check — and the only way they can
+// be guaranteed to agree is for there to be one rule. A copy here would be a
+// second answer to "may this row be used", free to drift from the first the
+// moment either is edited: a linker that keeps a contradicting pair apart while
+// a block shows both, or a leak metric that scores a contradicting row clean.
+// ScopeContradicts and ScopeMatches are not independent decisions, so they are
+// not independent code.
 func ScopeContradicts(scope, want map[string]string) bool {
-	for key, wantVal := range want {
-		if got, mentioned := scope[key]; mentioned && got != wantVal {
-			return true
-		}
-	}
-	return false
+	return !memory.ScopeMatches(scope, want)
 }
 
 // BucketUnexpected reports whether a row is in a bucket the request did not ask

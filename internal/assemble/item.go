@@ -111,8 +111,15 @@ func quoteData(s string) string {
 
 // itemOf materialises one item from a candidate. The fields are copied, not
 // re-read, so an item cannot disagree with the row that produced it.
+//
+// ResolvedAt is non-nil exactly when the column is set, and its value is the
+// parsed stamp or the zero time when the text is unreadable. That asymmetry is
+// deliberate: the marker and every leak predicate ask "was this row resolved",
+// which is a fact about the column, and SQLite wrote that column — so a value
+// this build cannot parse still means a resolved row. Reading it as live would
+// be the opposite claim, on the strength of a formatting problem.
 func itemOf(c memory.Candidate) Item {
-	return Item{
+	it := Item{
 		ID:         c.ID,
 		Category:   c.Category,
 		Content:    c.Content,
@@ -128,6 +135,10 @@ func itemOf(c memory.Candidate) Item {
 		Agent:      c.Agent,
 		Score:      c.Score,
 		Source:     c.Source,
-		ResolvedAt: parseStampPtr(c.ResolvedAt),
 	}
+	if c.ResolvedAt != nil {
+		resolved := parseStamp(*c.ResolvedAt)
+		it.ResolvedAt = &resolved
+	}
+	return it
 }

@@ -174,6 +174,15 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 		droppedBy: map[string]int{},
 		dropped:   map[string]string{},
 	}
+	// A leg that errored is named before the stages run, so every later
+	// statement about the result carries the reason it is partial. `retrieval_
+	// <leg> failed` is the note form Decision 3's reasons are drawn from.
+	for _, name := range []string{"fts", "vector"} {
+		leg := set.Legs[name]
+		if leg.Applicable && leg.Attempted && !leg.Available {
+			p.noteBuf = append(p.noteBuf, formatNote("retrieval_%s leg failed (%s): this search is incomplete, so an empty result does not mean nothing matched", name, leg.Err))
+		}
+	}
 	for _, st := range stages {
 		st.run(p)
 	}
@@ -219,6 +228,13 @@ func resolvedParams(req Request) memory.SearchParams {
 	}
 	return memory.DefaultSearchParams()
 }
+
+// RetrievalWindow is the window Run will ask the retriever for on this request.
+// Exported so a caller whose own path has to describe the same window asks here
+// instead of repeating the rule: explain mode reports the ranking of a window,
+// and a diagnosis of a window the tool does not use describes nothing. It
+// returns 0 for a request with no budget, which Run rejects as invalid anyway.
+func RetrievalWindow(req Request) int { return retrievalWindow(req) }
 
 // retrievalWindow is how wide the retrieval window is. It is the caller's total
 // item budget, widened for a category predicate, and never smaller than the

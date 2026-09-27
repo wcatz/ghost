@@ -253,6 +253,12 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 
 	set := &CandidateSet{Legs: map[string]LegStatus{}}
 	fts, vec := cand.runCandidateLegs(ctx, req, p, ftsTopK, vecTopK, set)
+	// A leg the condition made applicable but the request could not run (a
+	// hybrid search with no query vector) is a skip, not a failure, so it does
+	// not count towards "every leg failed".
+	if err := set.totalLegFailure(); err != nil {
+		return nil, err
+	}
 
 	pool := scopeEligiblePool(fuseCandidatePool(fts.rows, vec.rows, p), p)
 	if len(pool) == 0 {
@@ -295,6 +301,33 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	edges, status := cand.loadCandidateEdges(ctx, edgeScopeIDs(rows, req.Fetch.Limit))
 	set.Edges, set.EdgesStatus = edges, status
 	return set, nil
+}
+
+// totalLegFailure reports an error when every leg that actually ran failed.
+//
+// The distinction is the whole point. One leg failing while another completes is
+// a partial retrieval: the zero set goes back with both statuses, and the caller
+// says the search was incomplete. Every applicable leg failing is not a result
+// at all — there is nothing to report — and an empty set for it would let a
+// dropped keyword index read as "this store holds no memory matching that".
+func (c *CandidateSet) totalLegFailure() error {
+	attempted, failed := 0, 0
+	var causes []string
+	for _, name := range []string{"fts", "vector"} {
+		leg := c.Legs[name]
+		if !leg.Attempted {
+			continue
+		}
+		attempted++
+		if !leg.Available {
+			failed++
+			causes = append(causes, name+" leg: "+leg.Err)
+		}
+	}
+	if attempted == 0 || failed < attempted {
+		return nil
+	}
+	return fmt.Errorf("candidates: every applicable retrieval leg failed (%s)", strings.Join(causes, "; "))
 }
 
 // validateCandidateRequest rejects a request the store cannot serve honestly,

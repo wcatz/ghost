@@ -757,3 +757,108 @@ func joinedLen(notes []string) int {
 	}
 	return total
 }
+
+// TestPartialLegFailureReportsRetrievalFailed: one applicable leg errored and
+// the other completed with no rows. That is a partial retrieval, so the result
+// is empty with the reason `retrieval_failed` — not `no_candidates`, which
+// claims nothing matched over complete coverage, and not a success.
+func TestPartialLegFailureReportsRetrievalFailed(t *testing.T) {
+	set := setOf()
+	set.Legs = map[string]memory.LegStatus{
+		"fts":    {Applicable: true, Attempted: true, Available: false, Err: "no such table: memories_fts"},
+		"vector": {Applicable: true, Attempted: true, Available: true},
+	}
+	res := run(t, &fakeRetriever{set: set}, baseRequest())
+
+	if res.Outcome != OutcomeEmpty {
+		t.Errorf("outcome = %q, want empty", res.Outcome)
+	}
+	if res.Reason != "retrieval_failed" {
+		t.Errorf("reason = %q, want retrieval_failed: an errored leg means the search was incomplete", res.Reason)
+	}
+	if !hasNote(res.Notes, "memories_fts") {
+		t.Errorf("notes %v do not name the leg that failed", res.Notes)
+	}
+}
+
+// TestTotalLegFailureIsAnErrorNotAnOutcome: when every applicable leg errored
+// there is no retrieval at all, and the retriever returns that as an error. Run
+// must pass it through rather than rendering an empty block, which is the
+// difference between "nothing matched" and "nothing was searched".
+func TestTotalLegFailureIsAnErrorNotAnOutcome(t *testing.T) {
+	boom := errors.New("every applicable retrieval leg failed")
+	if _, err := Run(context.Background(), &fakeRetriever{err: boom}, baseRequest()); !errors.Is(err, boom) {
+		t.Fatalf("Run error = %v, want the retriever's error", err)
+	}
+}
+
+// TestResolvedMarkerFollowsTheColumnNotItsParsing: the [resolved] marker is a
+// statement about the row — this memory was resolved — so it must depend on
+// resolved_at being set, not on its text being readable. SQLite wrote that
+// column, so a value this build cannot parse still means a resolved row, and
+// dropping the marker would tell a reader the opposite of what the store says.
+func TestResolvedMarkerFollowsTheColumnNotItsParsing(t *testing.T) {
+	unreadable := "whenever the reviewer got to it"
+	rows := []memory.Candidate{candidate("A1", "proj", "fact", "one", 0.9)}
+	rows[0].ResolvedAt = &unreadable
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
+
+	if !strings.Contains(res.Items[0].Line(), "[resolved]") {
+		t.Errorf("line = %q, want the resolved marker: resolved_at is set, whatever its text says", res.Items[0].Line())
+	}
+	if res.Items[0].ResolvedAt == nil {
+		t.Error("ResolvedAt is nil, so every consumer that reads the column to decide whether a row is resolved would call it live")
+	}
+}
+
+// TestResolvedMarkerIsAbsentWhenTheColumnIsNull: the other half. A row that was
+// never resolved must not be marked, and nil is the only reading that says so.
+func TestResolvedMarkerIsAbsentWhenTheColumnIsNull(t *testing.T) {
+	res := run(t, &fakeRetriever{set: setOf(candidate("A1", "proj", "fact", "one", 0.9))}, baseRequest())
+	if strings.Contains(res.Items[0].Line(), "[resolved]") {
+		t.Errorf("line = %q, want no marker for a row with no resolved_at", res.Items[0].Line())
+	}
+}
+
+// TestScopeContradictsMatchesTheStoreRule pins ScopeContradicts to the rule the
+// rest of the system already applies. It exists here (Decision 5) so the
+// assembler's stage 3 and the context metric's contamination arm share one leaf
+// rather than each carrying a copy that can drift — which makes "identical" a
+// claim that has to be checked, not one that follows from naming. Every case
+// below is a disagreement or a silence, and a divergence on any of them would
+// mean a memory the linker considers in scope is excluded from a block, or a
+// contradicting one is measured as clean.
+func TestScopeContradictsMatchesTheStoreRule(t *testing.T) {
+	cases := []struct {
+		name         string
+		have, want   map[string]string
+		contradicted bool
+	}{
+		{"both unscoped", nil, nil, false},
+		{"unscoped row, scoped request", nil, map[string]string{"environment": "production"}, false},
+		{"scoped row, unscoped request", map[string]string{"environment": "production"}, nil, false},
+		{"same value", map[string]string{"environment": "production"}, map[string]string{"environment": "production"}, false},
+		{"different value", map[string]string{"environment": "development"}, map[string]string{"environment": "production"}, true},
+		{"row silent on the requested key", map[string]string{"component": "api"}, map[string]string{"environment": "production"}, false},
+		{"row names another key with a different value", map[string]string{"component": "worker"}, map[string]string{"environment": "production"}, false},
+		{"one shared key agrees, another disagrees", map[string]string{"environment": "production", "component": "worker"}, map[string]string{"environment": "production", "component": "api"}, true},
+		{"one shared key agrees, another unmentioned by the request", map[string]string{"environment": "production", "component": "api"}, map[string]string{"environment": "production"}, false},
+		{"empty value still counts as a claim", map[string]string{"environment": ""}, map[string]string{"environment": "production"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ScopeContradicts(tc.have, tc.want); got != tc.contradicted {
+				t.Errorf("ScopeContradicts(%v, %v) = %v, want %v", tc.have, tc.want, got, tc.contradicted)
+			}
+			// The same question the other way round: memory.ScopeMatches asks
+			// "may this row be used", so a contradiction is its negation.
+			if matches := memory.ScopeMatches(tc.have, tc.want); matches == tc.contradicted {
+				t.Errorf("ScopeContradicts(%v, %v) = %v but memory.ScopeMatches says %v: the two rules disagree",
+					tc.have, tc.want, tc.contradicted, matches)
+			}
+		})
+	}
+}

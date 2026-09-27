@@ -464,7 +464,8 @@ What exists now:
 What the remaining stages will add, in pipeline order: conflict recording and
 dedup reordering (stage 5-6, where `contradicts` is recorded and not acted on),
 diversity (7, off by default), the budget byte caps and the `response_fit`
-post-pass (8), and abstention as an outcome (3, [#580](https://github.com/wcatz/ghost/issues/580)).
+post-pass (8), and abstention as an outcome (Decision 3,
+[#580](https://github.com/wcatz/ghost/issues/580)).
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
 

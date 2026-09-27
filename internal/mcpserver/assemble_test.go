@@ -1,10 +1,17 @@
 package mcpserver
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/provider"
 )
 
 // TestCategorySearchReachesRowsBeyondTheWindow is the half of #573 that
@@ -148,4 +155,98 @@ func searchWithCategory(t *testing.T, session *mcp.ClientSession, query, categor
 		t.Fatalf("search failed: %s", resultText(res))
 	}
 	return resultText(res)
+}
+
+// failingCandidateStore is a store whose retrieval cannot run, so the tool's
+// rendering of a failed search can be asserted without breaking a database.
+type failingCandidateStore struct {
+	provider.MemoryStore
+	err error
+}
+
+func (f failingCandidateStore) Candidates(context.Context, memory.CandidateRequest) (*memory.CandidateSet, error) {
+	return nil, f.err
+}
+
+// TestRetrievalFailureIsNotAnAbsence: when retrieval itself fails, the tool has
+// to say the search was incomplete, not that nothing matched. Those are the two
+// answers an agent acts on oppositely — one retries, the other concludes there
+// is no such memory and moves on.
+func TestRetrievalFailureIsNotAnAbsence(t *testing.T) {
+	store := testStore(t)
+	boom := errors.New("candidates: every applicable retrieval leg failed (fts leg: no such table: memories_fts)")
+	srv := New(failingCandidateStore{MemoryStore: store, err: boom},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	session := connectedClient(t, srv)
+
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "database configuration",
+	})
+
+	if !res.IsError {
+		t.Fatalf("a failed retrieval returned a successful result: %s", resultText(res))
+	}
+	out := resultText(res)
+	if strings.Contains(out, "No matching memories found") {
+		t.Errorf("a failed retrieval reported absence: %s", out)
+	}
+	if !strings.Contains(out, "incomplete") {
+		t.Errorf("error text does not tell the caller the search was incomplete rather than empty: %s", out)
+	}
+	if !strings.Contains(out, "memories_fts") {
+		t.Errorf("error text drops the underlying cause: %s", out)
+	}
+}
+
+// TestExplainUsesTheFormattedPathsWindow: explain reports the ranking of a
+// window, so the window it explains has to be the one the formatted path
+// searches. A category filter widens that window, and explain used to be given
+// the widened width before this branch; narrowing it there made the diagnosis
+// describe a window the tool no longer uses, which is the one thing an
+// explanation cannot do.
+func TestExplainUsesTheFormattedPathsWindow(t *testing.T) {
+	_, session := newCapSession(t)
+	for i, content := range []string{
+		"database configuration pooling timeout alpha",
+		"database configuration charset collation beta",
+		"database configuration vacuum analyze gamma",
+	} {
+		res := callTool(t, session, "ghost_memory_save", map[string]any{
+			"project_id": "test-project", "content": content, "category": "gotcha",
+		})
+		if res.IsError {
+			t.Fatalf("save %d: %s", i, resultText(res))
+		}
+	}
+
+	tests := []struct {
+		name              string
+		limit, wantWindow int
+	}{
+		{"category widens the window", 2, 6},
+		{"the widening is capped", 100, 100},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := callTool(t, session, "ghost_memory_search", map[string]any{
+				"project_id": "test-project",
+				"query":      "database configuration",
+				"category":   "gotcha",
+				"limit":      tc.limit,
+				"explain":    true,
+			})
+			if res.IsError {
+				t.Fatalf("explain failed: %s", resultText(res))
+			}
+			var ex memory.SearchExplain
+			if err := json.Unmarshal([]byte(resultText(res)), &ex); err != nil {
+				t.Fatalf("explain response is not JSON: %v", err)
+			}
+			if ex.Limit != tc.wantWindow {
+				t.Errorf("explained window = %d, want %d (the window the formatted path searches)",
+					ex.Limit, tc.wantWindow)
+			}
+		})
+	}
 }
