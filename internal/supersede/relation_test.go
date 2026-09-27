@@ -452,13 +452,14 @@ func TestRelationClassifierLive(t *testing.T) {
 	// verdict. That makes a run in which EVERY reply was unparseable report
 	// 0/0, which is a vacuous measurement rather than a score — so it fails
 	// instead, and says how many replies it could not read.
-	if correct+unparsed == 0 {
+	scored := len(liveRelationCases) - unparsed
+	if scored == 0 {
 		t.Fatalf("no labeled case produced a parseable verdict (%d unparseable of %d); the run is vacuous, not a score",
 			unparsed, len(liveRelationCases))
 	}
-	acc := float64(correct) / float64(correct+unparsed)
+	acc := float64(correct) / float64(scored)
 	t.Logf("relation classifier accuracy on labeled set: %d/%d = %.2f (%d unparseable, excluded)",
-		correct, correct+unparsed, acc, unparsed)
+		correct, scored, acc, unparsed)
 	if acc < 0.75 {
 		t.Errorf("classifier accuracy %.2f below 0.75 — prompt may need work", acc)
 	}
