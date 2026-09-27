@@ -61,7 +61,12 @@ var stages = []stage{
 func runValidity(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string
-	kept := p.rows[:0]
+	// A fresh slice, not p.rows[:0]: the candidate set is the retriever's
+	// return value and the contract says it is the widened untrimmed result, so
+	// compacting into its backing array would leave the caller holding
+	// duplicated, stale rows. A later stage or a caller with the same set would
+	// read corruption instead of the retrieval that produced it.
+	kept := make([]memory.Candidate, 0, len(p.rows))
 	for _, c := range p.rows {
 		v := readValidity(c, p.req.Now)
 		sig := p.signal(c)

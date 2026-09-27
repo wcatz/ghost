@@ -140,11 +140,19 @@ type LegStatus struct {
 	Err                  string
 	Truncated            bool
 	Applicable           bool
-	// Expected is how many rows the leg could have seen, Indexed how many of
-	// them carry an embedding, and Unembedded how many carry none. DimMismatch
-	// counts the rows the vector leg could not compare against the query
-	// vector, whether the width differs or the vector belongs to another
-	// recorded space. Eligible counts what the leg returned.
+	// Eligible counts what the leg returned. DimMismatch counts the rows the
+	// vector leg could not compare against the query vector, whether the width
+	// differs or the vector belongs to another recorded space — free, because
+	// the scan already counted them.
+	//
+	// Expected, Indexed, Unembedded and CoverageComplete are the coverage
+	// reconciliation, and they are zero and false in v1 on purpose. Filling them
+	// means two COUNT(*) scans over the project on every vector search, for a
+	// field nothing reads until the abstention work may claim absence; a row
+	// with no embedding is invisible to the leg's own scan, so the counts cannot
+	// be derived from what it already read. A leg that cannot support a coverage
+	// claim must not make one, which is why the field is false rather than
+	// optimistically true.
 	Expected, Indexed, Eligible, DimMismatch, Unembedded int
 	CoverageComplete                                     bool
 }
@@ -241,7 +249,10 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// run a different search than the one it is standing in for: without the
 	// embedding identity the vector leg here scores the foreign-space vectors
 	// the real search excludes, and without the floor or the demotion threshold
-	// the rows it returns are ones no caller could reproduce.
+	// the rows it returns are ones no caller could reproduce. The foreign-vector
+	// warning gate crosses for the mirror-image reason: it is process state
+	// whose whole point is that a re-embed is reported once, and a store with a
+	// fresh gate would repeat the line on every search that skips those rows.
 	cand := &Store{
 		db:                  s.db,
 		snapshot:            tx,
@@ -249,6 +260,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		demotionThreshold:   demotion,
 		vectorMinSimilarity: floor,
 		embeddingIdentity:   identity,
+		foreignWarned:       s.foreignWarned,
 	}
 
 	set := &CandidateSet{Legs: map[string]LegStatus{}}
@@ -445,20 +457,24 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 			// DimMismatch counts the rows the leg could not compare against the
 			// query vector: a different width, or a recorded identity from
 			// another vector space (a model or task-prefix change). Both leave
-			// the leg silent about that row, which is what coverage has to
-			// account for — and after a model change it is every row.
+			// the leg silent about that row. It is free — the scan already
+			// counted them — so it is reported even though nothing reads it
+			// yet.
 			vecStatus.DimMismatch = facts.mismatched + facts.foreign
-			// The counts are what make coverage decidable rather than
-			// assumed: a leg that could not see every row cannot support a
-			// claim that nothing matched.
-			vecStatus.Expected, vecStatus.Indexed = s.vectorCoverage(ctx, req)
-			vecStatus.Unembedded = vecStatus.Expected - vecStatus.Indexed
-			if vecStatus.Unembedded < 0 {
-				vecStatus.Unembedded = 0
-			}
 			vecStatus.Eligible = len(kept)
-			vecStatus.CoverageComplete = vecStatus.Available && !vecStatus.Truncated &&
-				vecStatus.DimMismatch == 0 && vecStatus.Unembedded == 0
+			// CoverageComplete stays false on purpose, and the reason is a cost
+			// decision rather than an oversight. Reconciling it needs the rows
+			// the leg could have seen against the rows that carry a vector —
+			// two COUNT(*) scans over the project on every hybrid search, on
+			// the live tool path, for a field no consumer in the tree reads yet.
+			// What is missing is not derivable from the scan: a row with no
+			// embedding is invisible to it, so "every row I looked at was
+			// usable" says nothing about the rows I never saw. A leg that cannot
+			// support a coverage claim must not make one, which is why this
+			// reads false while the counts read zero. The reconciliation lands
+			// with the abstention work, the first thing that may claim absence
+			// — at which point the scans are worth their two COUNT(*).
+			vecStatus.CoverageComplete = false
 			vec.index = make(map[string]candidateLegFact, len(kept))
 			for i, sm := range kept {
 				vec.index[sm.MemoryID] = candidateLegFact{rank: i, score: float64(sm.Score)}
@@ -468,41 +484,6 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 	}
 	set.Legs["vector"] = vecStatus
 	return out, vec
-}
-
-// vectorCoverage counts the rows the vector leg could have seen and how many
-// carry an embedding, in one round trip. A skipped row is a row the leg is
-// silent about, so both numbers are part of its status.
-func (s *Store) vectorCoverage(ctx context.Context, req CandidateRequest) (expected, indexed int) {
-	pred, args := coveragePredicate(req)
-	// The predicate names its arguments in both subqueries, so they are bound
-	// twice.
-	bound := make([]any, 0, len(args)*2)
-	bound = append(bound, args...)
-	bound = append(bound, args...)
-	row := s.queryDB().QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM memories WHERE `+pred+`),
-			(SELECT COUNT(*) FROM memory_embeddings e JOIN memories m ON m.id = e.memory_id WHERE `+pred+`)
-	`, bound...)
-	if err := row.Scan(&expected, &indexed); err != nil {
-		// An uncountable coverage is not complete coverage.
-		return 0, 0
-	}
-	return expected, indexed
-}
-
-// coveragePredicate is the row set one leg can see, as SQL plus its arguments.
-// A leg that cannot name its own scope has no coverage claim to make.
-func coveragePredicate(req CandidateRequest) (string, []any) {
-	switch req.Mode {
-	case AllProjects:
-		return "1 = 1", nil
-	case GlobalOnly:
-		return "project_id = '_global'", nil
-	default:
-		return "(project_id = ? OR project_id = '_global')", []any{req.ProjectID}
-	}
 }
 
 // poolIDsOf lists the fused pool in rank order, which is the order a window

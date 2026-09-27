@@ -617,8 +617,10 @@ func TestCandidatesReportsLegStatuses(t *testing.T) {
 		t.Errorf("vector leg = %+v, want not attempted for an FTS-only request", vec)
 	}
 
-	// Hybrid with embeddings: both legs applicable, and the unembedded rows
-	// are counted so coverage can be reasoned about rather than assumed.
+	// Hybrid with a query vector: both legs applicable, and the leg reports
+	// what it did and did not look at. The coverage reconciliation stays
+	// unclaimed in v1 — see the LegStatus doc — so what is asserted here is
+	// that the leg ran, and that it makes no coverage claim it cannot support.
 	withVec := candidateRequest("sqlite wal mode checkpoint note", 10, time.Now().UTC())
 	withVec.Condition = CondHybrid
 	withVec.QueryVec = []float32{1, 0, 0}
@@ -627,20 +629,18 @@ func TestCandidatesReportsLegStatuses(t *testing.T) {
 		t.Fatalf("Candidates hybrid: %v", err)
 	}
 	vec = set.Legs["vector"]
-	if !vec.Applicable || !vec.Attempted {
-		t.Errorf("vector leg = %+v, want applicable and attempted", vec)
-	}
-	if vec.Expected <= 0 {
-		t.Errorf("vector leg expected = %d, want the number of rows it could see", vec.Expected)
-	}
-	if vec.Unembedded <= 0 {
-		t.Errorf("vector leg unembedded = %d, want the rows it could not see counted", vec.Unembedded)
-	}
-	if vec.CoverageComplete {
-		t.Error("a vector leg that skipped unembedded rows cannot be complete coverage")
+	if !vec.Applicable || !vec.Attempted || !vec.Available {
+		t.Errorf("vector leg = %+v, want applicable, attempted and available", vec)
 	}
 	if vec.DimMismatch != 0 {
 		t.Errorf("dim mismatch = %d, want 0: every stored embedding has the query's dimensions", vec.DimMismatch)
+	}
+	if vec.CoverageComplete {
+		t.Error("a leg that cannot see unembedded rows must not claim complete coverage, and v1 does not pay for the counts that would let it")
+	}
+	if vec.Expected != 0 || vec.Indexed != 0 || vec.Unembedded != 0 {
+		t.Errorf("coverage counts = %d/%d/%d, want zero: nothing reconciles them yet, and two COUNT(*) scans per search is not worth a field with no reader",
+			vec.Expected, vec.Indexed, vec.Unembedded)
 	}
 }
 
@@ -991,5 +991,35 @@ func TestCandidatesReturnsStatusesForAPartialLegFailure(t *testing.T) {
 	}
 	if !set.Legs["vector"].Attempted || !set.Legs["vector"].Available {
 		t.Errorf("vector leg = %+v, want it attempted and available: it ran, it simply found nothing", set.Legs["vector"])
+	}
+}
+
+// TestCandidatesWarnsOncePerRetiredIdentity: the foreign-vector warning is
+// gated so a re-embed — which lasts many queries — reports each retired
+// identity once per process rather than once per search. The gate is shared
+// state, so the snapshot store Candidates builds has to carry it: a store with
+// no gate reports every time, and since the formatted search path now runs
+// through Candidates, every search after a model change would repeat the line.
+func TestCandidatesWarnsOncePerRetiredIdentity(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	var logs strings.Builder
+	store.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	store.SetEmbeddingIdentity(identityCurrent)
+	current, _ := seedIdentityRows(t, store, ctx)
+	_ = current
+
+	req := candidateRequest("configured", 10, time.Now().UTC())
+	req.ProjectID = "test-proj"
+	req.QueryVec = []float32{1, 0, 0}
+	req.Condition = CondHybrid
+	for range 3 {
+		if _, err := store.Candidates(ctx, req); err != nil {
+			t.Fatalf("Candidates: %v", err)
+		}
+	}
+
+	if n := strings.Count(logs.String(), "another vector space"); n != 1 {
+		t.Errorf("foreign-vector warning appeared %d times over three searches, want 1: "+
+			"the snapshot store is not sharing the process's warning gate", n)
 	}
 }

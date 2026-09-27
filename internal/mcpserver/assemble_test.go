@@ -250,3 +250,51 @@ func TestExplainUsesTheFormattedPathsWindow(t *testing.T) {
 		})
 	}
 }
+
+// partialFailureStore is a store where one leg failed and the other completed
+// with nothing: the retriever's partial case, which is not an error and must not
+// be rendered as one either. What it must never be rendered as is an absence.
+type partialFailureStore struct {
+	provider.MemoryStore
+}
+
+func (partialFailureStore) Candidates(context.Context, memory.CandidateRequest) (*memory.CandidateSet, error) {
+	set := &memory.CandidateSet{Legs: map[string]memory.LegStatus{
+		"fts":    {Applicable: true, Attempted: true, Available: false, Err: "search memories: no such table: memories_fts"},
+		"vector": {Applicable: true, Attempted: true, Available: true},
+	}}
+	return set, nil
+}
+
+// TestPartialRetrievalFailureIsNotAnAbsence: a leg that errored while the other
+// completed comes back as a zero-row set with statuses, not an error — and the
+// handler used to read only len(Items), so the agent received "No matching
+// memories found." for a search that never ran its keyword leg. With a filter
+// set it received the filter caveat too, blaming the filter for rows the
+// retriever never produced.
+func TestPartialRetrievalFailureIsNotAnAbsence(t *testing.T) {
+	store := testStore(t)
+	srv := New(partialFailureStore{MemoryStore: store},
+		slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	session := connectedClient(t, srv)
+
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "database configuration",
+		"category":   "fact",
+	})
+
+	if !res.IsError {
+		t.Fatalf("a search whose keyword leg failed returned a successful result: %s", resultText(res))
+	}
+	out := resultText(res)
+	if strings.Contains(out, "No matching memories found") {
+		t.Errorf("a partial retrieval failure reported absence: %s", out)
+	}
+	if strings.Contains(out, "category filter") {
+		t.Errorf("a partial retrieval failure blamed the category filter for rows the retriever never produced: %s", out)
+	}
+	if !strings.Contains(out, "memories_fts") {
+		t.Errorf("error text does not name the leg that failed: %s", out)
+	}
+}

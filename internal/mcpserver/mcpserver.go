@@ -43,6 +43,23 @@ type embedderDiagnostics interface {
 	Model() string
 }
 
+// failedLegs names the retrieval legs the assembler recorded as errored, or ""
+// when every applicable leg ran. A leg the request made applicable but could not
+// run (a hybrid search with no query vector) is not a failure and is not named.
+func failedLegs(result assemble.Result) string {
+	if result.Trace == nil {
+		return ""
+	}
+	var failed []string
+	for _, name := range []string{"fts", "vector"} {
+		leg := result.Trace.Legs[name]
+		if leg.Applicable && leg.Attempted && !leg.Available {
+			failed = append(failed, name+" leg: "+leg.Err)
+		}
+	}
+	return strings.Join(failed, "; ")
+}
+
 func boolPtr(b bool) *bool { return &b }
 
 // detectCallingSource is the process/env harness detection used when the MCP
@@ -700,6 +717,16 @@ func (s *Server) registerTools() {
 			// needs, and carries the cause so the failure is diagnosable.
 			return nil, nil, fmt.Errorf("search could not be completed, so it is unknown whether anything matches (the answer is incomplete, not empty \u2014 retry, or read the log): %w", err)
 		}
+		// A leg that errored is an incomplete search whatever the assembler
+		// managed to return, and "incomplete" and "empty" are the two answers an
+		// agent acts on oppositely. The assembler records it in the reason and
+		// the notes; this is the projection, and it deliberately suppresses the
+		// filter caveat — that caveat would blame the caller's filter for rows
+		// the retriever never produced.
+		if failed := failedLegs(result); failed != "" {
+			return nil, nil, fmt.Errorf("search was incomplete, so it is unknown whether anything matches (a retrieval leg failed, so this is not an empty result — retry, or read the log): %s", failed)
+		}
+
 		// The shared item renderer, one line per admitted memory. Search keeps
 		// its own framing: this surface's answer is the listing plus, when a
 		// filter left it short, the caveat below.

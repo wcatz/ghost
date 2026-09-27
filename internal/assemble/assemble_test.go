@@ -862,3 +862,39 @@ func TestScopeContradictsMatchesTheStoreRule(t *testing.T) {
 		})
 	}
 }
+
+// rows2items projects candidates onto their ids, so a test can compare the
+// retriever's set before and after the pipeline.
+func rows2items(rows []memory.Candidate) []Item {
+	items := make([]Item, len(rows))
+	for i, c := range rows {
+		items[i] = Item{ID: c.ID}
+	}
+	return items
+}
+
+// TestStagesDoNotMutateTheRetrievedSet: the candidate set is the retriever's
+// return value, and the retriever contract says it is the widened untrimmed
+// result. A stage that filters by compacting in place corrupts it: drop the
+// first row and the set reads as duplicated and stale entries. Nothing in this
+// package reads it after stage 1 today, so only a caller holding the same set
+// would notice — which is precisely the contract being broken.
+func TestStagesDoNotMutateTheRetrievedSet(t *testing.T) {
+	expired := "2020-01-01 00:00:00"
+	rows := []memory.Candidate{
+		candidate("expired", "proj", "fact", "expired row", 0.9),
+		candidate("live1", "proj", "fact", "first live row", 0.8),
+		candidate("live2", "proj", "fact", "second live row", 0.7),
+	}
+	rows[0].ValidUntil = &expired
+	set := setOf(rows...)
+	before := itemIDs(rows2items(set.Rows))
+
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	run(t, &fakeRetriever{set: set}, req)
+
+	if after := itemIDs(rows2items(set.Rows)); !eq(after, before) {
+		t.Errorf("the retrieved set changed from %v to %v: a stage filtered by compacting in place", before, after)
+	}
+}
