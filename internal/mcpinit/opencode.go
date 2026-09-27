@@ -187,12 +187,16 @@ func opencodeConfigDir() (string, error) {
 	return filepath.Join(home, ".config", "opencode"), nil
 }
 
-// opencodeMCPConfigNames are opencode's own config file names, examined in
-// this order. opencode accepts either spelling of the same schema, so status
-// reports on the first file present on disk rather than assuming one
-// extension: a registration the user edited into the other file must not read
-// as missing.
-var opencodeMCPConfigNames = []string{"opencode.jsonc", "opencode.json"}
+// opencodeMCPConfigNames are the two config spellings opencode accepts in its
+// config directory, listed in opencode's own precedence order. Both are layers,
+// not alternatives: the global-dir loader maps over this whole list and keeps
+// every document that parsed, and later documents win a conflicting key
+// (opencode v2.0.15 — the discovery list is ["opencode.json","opencode.jsonc"]
+// and resolution takes the last document that sets a key), so an unrelated
+// opencode.jsonc must not hide an entry in opencode.json, and opencode.jsonc is
+// the layer that wins a conflict. opencode.jsonc is also the file opencode
+// writes by default, which is where a missing entry is pointed.
+var opencodeMCPConfigNames = []string{"opencode.json", "opencode.jsonc"}
 
 // opencodeConfig is the slice of opencode's config schema the registration
 // check reads — only the mcp map. Every other key opencode supports is
@@ -248,8 +252,10 @@ func opencodeConfigSources() ([]opencodeMCPConfigSource, string, error) {
 		candidate := filepath.Join(base, name)
 		if _, err := os.Stat(candidate); err == nil {
 			sources = append(sources, opencodeMCPConfigSource{label: candidate, path: candidate})
+			// Both spellings are layers, so every existing one is read; the
+			// last is the file a repair belongs in, because that is the
+			// spelling opencode writes and the one that wins.
 			primary = candidate
-			break
 		}
 	}
 	if custom := os.Getenv("OPENCODE_CONFIG"); custom != "" {
@@ -265,11 +271,11 @@ func opencodeConfigSources() ([]opencodeMCPConfigSource, string, error) {
 	}
 	if primary == "" {
 		// Nothing exists on disk: name the custom path when the user
-		// declared one, else the default file opencode reads.
+		// declared one, else the spelling opencode writes by default.
 		if custom := os.Getenv("OPENCODE_CONFIG"); custom != "" {
 			primary = custom
 		} else {
-			primary = filepath.Join(base, opencodeMCPConfigNames[0])
+			primary = filepath.Join(base, opencodeMCPConfigNames[len(opencodeMCPConfigNames)-1])
 		}
 	}
 	return sources, primary, nil

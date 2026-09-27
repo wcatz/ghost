@@ -1088,6 +1088,116 @@ func TestStatusOpencode_OPENCODEConfigDir(t *testing.T) {
 	})
 }
 
+// TestStatusOpencode_ConfigDirBothFiles pins that the two config spellings in
+// opencode's config directory are BOTH layers, not an either/or choice.
+// Confirmed in opencode v2.0.15: the config-file list is
+// ["opencode.json","opencode.jsonc"], the global-dir loader maps over that
+// list and keeps every document that parsed, and the loader returns them in
+// that order with later documents winning — so an unrelated opencode.jsonc
+// must never hide an mcp.ghost that lives in opencode.json, and opencode.jsonc
+// is the one that wins a conflict. (Hermetic probe: with both files present
+// `opencode debug config` lists two documents, one per file.)
+func TestStatusOpencode_ConfigDirBothFiles(t *testing.T) {
+	t.Run("entry in opencode.json, unrelated opencode.jsonc", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		writeOpencodeMCPConfig(t, "opencode.json", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+		// A JSONC file the user edits for comments, carrying no MCP block at
+		// all. Stopping the layer walk here would report the entry missing
+		// for a server opencode starts.
+		writeOpencodeMCPConfig(t, "opencode.jsonc", "{\n  // my notes\n  \"autoupdate\": false,\n}\n")
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+			t.Errorf("the opencode.json entry must be judged even with an unrelated opencode.jsonc present, got:\n%s", output)
+		}
+		if strings.Contains(output, "ghost MCP server missing from") {
+			t.Errorf("must not report the entry missing when opencode.json carries it, got:\n%s", output)
+		}
+		// The run stays red only because this subtest installs no lifecycle
+		// plugin; the registration check itself must pass.
+		if healthy {
+			t.Errorf("healthy = true without a lifecycle plugin, got:\n%s", output)
+		}
+	})
+
+	t.Run("entry in opencode.jsonc, unrelated opencode.json", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		writeOpencodeMCPConfig(t, "opencode.json", `{"model": "anthropic/claude-sonnet-4-5"}`)
+		writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+			t.Errorf("the opencode.jsonc entry must be judged with an unrelated opencode.json present, got:\n%s", output)
+		}
+		if healthy {
+			t.Errorf("healthy = true without a lifecycle plugin, got:\n%s", output)
+		}
+	})
+
+	t.Run("opencode.jsonc wins the conflicting key", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		// The full entry below, one flipped key above: later layers override
+		// earlier ones, so the disable in opencode.jsonc is the effective one.
+		writeOpencodeMCPConfig(t, "opencode.json", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+		jsonc := writeOpencodeMCPConfig(t, "opencode.jsonc", `{"mcp": {"ghost": {"enabled": false}}}`)
+
+		var out bytes.Buffer
+		if _, err := StatusOpencode(&out); err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		line := statusLineContaining(output, "ghost MCP server disabled")
+		if !strings.HasPrefix(line, "  ✗ ") {
+			t.Fatalf("opencode.jsonc overrides opencode.json, so the disable must fail the run, got %q (full output:\n%s)", line, output)
+		}
+		if !strings.Contains(line, jsonc) {
+			t.Errorf("the disable lives in %q, so that is the file to name, got %q", jsonc, line)
+		}
+	})
+
+	t.Run("opencode.json keeps the keys opencode.jsonc does not set", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		// Merge is per key, not per file: the higher layer sets only `type`,
+		// so the command and the disabled flag below it both survive and the
+		// failure must point at the file that carries `enabled: false`.
+		json := writeOpencodeMCPConfig(t, "opencode.json", fmt.Sprintf(
+			`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": false}}}`,
+			stubPath(binDir, "ghost")))
+		writeOpencodeMCPConfig(t, "opencode.jsonc", `{"mcp": {"ghost": {"type": "local"}}}`)
+
+		var out bytes.Buffer
+		if _, err := StatusOpencode(&out); err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		line := statusLineContaining(output, "ghost MCP server disabled")
+		if !strings.HasPrefix(line, "  ✗ ") {
+			t.Fatalf("expected the merged entry to be disabled, got %q (full output:\n%s)", line, output)
+		}
+		if !strings.Contains(line, json) {
+			t.Errorf("`enabled: false` lives in %q, so that is the file to name, got %q", json, line)
+		}
+	})
+}
+
 // TestStatusOpencode_OPENCODEConfigContentEnv pins inline config: when
 // $OPENCODE_CONFIG_CONTENT supplies configuration with no file on disk at
 // all, status must judge the mcp.ghost entry it carries — passing when the
