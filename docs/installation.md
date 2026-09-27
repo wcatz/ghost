@@ -176,6 +176,8 @@ ghost version
 ghost mcp init --client claude
 ```
 
+A binary installed this way upgrades itself with `ghost upgrade` (see the [CLI reference](cli.md#ghost-upgrade)), which also handles the fact that Windows will not let a running executable be replaced in place. Note that the script itself verifies only against the release's `checksums.txt`, a file published in the same release as the binary it vouches for; `ghost upgrade` additionally checks the digest GitHub reports for the asset. Signature verification is not implemented on either path.
+
 For the Claude Code plugin on native Windows, choose the architecture-specific entry shown above.
 
 ## Docker

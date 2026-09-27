@@ -524,15 +524,29 @@ This command exists for the backlog that predates that isolation.
 
 ### `ghost upgrade`
 
-Checks GitHub Releases and replaces a standalone binary after verifying the release checksum:
+Checks GitHub Releases and replaces a standalone binary after verifying the release:
 
 ```bash
 ghost upgrade
+ghost upgrade --allow-downgrade   # install a release older than this binary
 ```
 
 A plugin-managed binary refuses this path because the plugin manager owns it; use `/plugin update` in Claude Code instead.
 
-The release tag and the running version are compared as semantic versions, so a release older than the one already installed is refused rather than installed. A version that cannot be ordered — a `dev` build, a tag that is not a semver — keeps upgrading unless it is identical to the release tag (ignoring a leading `v`), which reports up to date as before; the checksum still has to agree before anything is replaced. Requests carry a deadline (30s for the release lookup, 10 minutes for the archive) and every response is size-capped — 4 MiB of release metadata, 1 MiB of `checksums.txt`, 200 MiB of archive — so a stalled or oversized download fails instead of hanging. The archive cap bounds what is transferred; the binary extracted from it is not separately capped.
+**What is verified.** The downloaded archive has to agree with two things the release publishes before a single byte reaches the installed binary:
+
+1. the `digest` GitHub reports for that asset in the releases API (`sha256:<hex>`) — a digest GitHub computed for the bytes it holds, rather than one uploaded beside them. A missing digest, a digest for an algorithm this binary cannot compute, and a mismatch are all refusals, not warnings;
+2. the release's `checksums.txt`, which every ghost release carries. The two checks are independent: `checksums.txt` is a second file in the same release, so whoever can replace the archive can replace the manifest that vouches for it.
+
+The archive is checked before it is unpacked, so a substituted release is refused without its bytes ever being decompressed. Cryptographic *signature* verification (cosign, minisign, or GitHub artifact attestations against a key shipped in the binary) is not implemented — a digest from the release API proves the download matches what GitHub holds, not who published it.
+
+**Ordering.** The release tag and the running version are compared as semantic versions, so a release older than the one already installed is refused rather than installed. `--allow-downgrade` turns that refusal into a deliberate install (with a warning on stderr) for a release that was withdrawn, or a build that has to be pinned while a newer one is investigated; it does not re-install the release you already have. A version that cannot be ordered — a `dev` build, a tag that is not a semver — keeps upgrading unless it is identical to the release tag (ignoring a leading `v`), which reports up to date as before; the digests still have to agree before anything is replaced.
+
+**Bounds.** Every request carries a context deadline (30s for the release lookup, 10 minutes for an asset transfer) that a caller can shorten or cancel, and every response is size-capped — 4 MiB of release metadata, 1 MiB of `checksums.txt`, 200 MiB of archive, 128 MiB of the binary inside the archive. A stalled connection, a hung server or an oversized body fails the command instead of hanging or exhausting memory.
+
+**Archive formats.** Windows releases ship a `.zip` and everything else a `.tar.gz`; both are unpacked, and the container decides which, not the file name. Only an archive-root `ghost` or `ghost.exe` is accepted.
+
+**Replacing a running binary on Windows.** Windows holds a running executable's image open, so a new binary cannot be renamed over it. The old one is renamed to `<binary>.old` first — which Windows does allow — and the new one takes the path it vacates. If the second step fails, the old binary is moved back, so a failed upgrade cannot leave an install with no binary. The `.old` file is this process's own image and cannot be deleted until the process exits, so it stays until the next upgrade reuses the name; delete it once no `ghost` is running. Unix renames over the target atomically and leaves nothing behind.
 
 ### `ghost version`
 

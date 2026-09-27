@@ -91,7 +91,7 @@ func dispatchCommand(argv []string) int {
 			fmt.Fprint(os.Stderr, projectUsage)
 			return 1
 		case "upgrade":
-			runUpgrade()
+			runUpgrade(argv[1:])
 			return 0
 		case "backup":
 			runBackup()
@@ -189,7 +189,9 @@ Commands:
                                whose id already exists; imported memories are
                                downgraded to source "onboarding" and unpinned
                                unless --trust-provenance)
-  upgrade                     Update ghost to the latest release
+  upgrade [--allow-downgrade]
+                              Update ghost to the latest release (refuses an older
+                              release unless --allow-downgrade is given)
   version                     Print version
 
 Flags (reflect):
