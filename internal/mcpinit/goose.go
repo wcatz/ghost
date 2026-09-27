@@ -245,6 +245,8 @@ func goosePackageFiles(ghostBin string) []goosePackageFile {
 // rendered with the resolved ghost binary path. Idempotent: identical files
 // are left untouched; missing or drifted files are overwritten with the
 // rendered content (byte-compare, same semantics as installOpencodePlugin).
+// Every write goes through writeFileAtomic, so a file goose is reading while
+// the package is refreshed is swapped in by rename rather than truncated.
 func installGoosePackage(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	dir, err := goosePluginDir()
 	if err != nil {
@@ -268,7 +270,7 @@ func installGoosePackage(w io.Writer, ghostBin string, dryRun bool) (bool, error
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return changed, fmt.Errorf("create plugin dir: %w", err)
 		}
-		if err := os.WriteFile(path, []byte(f.want), 0644); err != nil {
+		if err := writeFileAtomic(path, []byte(f.want), 0644); err != nil {
 			return changed, fmt.Errorf("write %s: %w", f.label, err)
 		}
 		_, _ = fmt.Fprintf(w, "  + installed %s (%s)\n", f.label, path)

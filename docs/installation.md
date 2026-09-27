@@ -105,7 +105,7 @@ ollama pull nomic-embed-text:v1.5
 ghost mcp init --client codex
 ```
 
-The initializer merges `[mcp_servers.ghost]` into `~/.codex/config.toml` textually, so comments and formatting survive: a repair rewrites only the table's own `command` and `args` keys, and leaves sub-tables such as `[mcp_servers.ghost.env]`, any other key, and the rest of the file untouched, adding only the managed comment above the table header and any `command`/`args` key the table is missing. It also writes the SessionStart, Stop, and SessionEnd entries in `~/.codex/hooks.json`.
+The initializer merges `[mcp_servers.ghost]` into `~/.codex/config.toml` textually, so comments and formatting survive: a repair rewrites only the table's own `command` and `args` keys, and leaves sub-tables such as `[mcp_servers.ghost.env]`, any other key, and the rest of the file untouched, adding only the managed comment above the table header and any `command`/`args` key the table is missing. It also writes the SessionStart, Stop, and SessionEnd entries in `~/.codex/hooks.json`, merging them alongside the hooks you already have. Both files are written through a temporary file and a rename, so a run interrupted part way leaves your existing file as it was rather than half-written, and your permissions on it are kept. Only `~/.claude/settings.json` gets a `.bak` copy, captured once, so a `hooks.json` you edited by hand is recoverable from version control rather than from a backup ghost keeps.
 
 Any spelling of the table header is recognised and repaired in place, including a trailing comment (`[mcp_servers.ghost] # mine`), quoted key parts (`["mcp_servers"."ghost"]`) and spacing (`[ mcp_servers . ghost ]`).
 
