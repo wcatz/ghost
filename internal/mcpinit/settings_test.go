@@ -2,8 +2,10 @@ package mcpinit
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -760,4 +762,278 @@ func TestCreateTempWithModeNames(t *testing.T) {
 		t.Errorf("temp name %q should end in hex random bytes, got %q", base, suffix)
 	}
 	assertFileMode(t, firstName, 0600)
+}
+
+// errFlush is a stand-in for a filesystem that cannot flush: the durability
+// step fails on demand, so what the write published is observable.
+var errFlush = errors.New("flush refused by the test")
+
+// recordSyncs replaces both durability steps with recorders that still call the
+// real fsync, and restores them when the test ends. A write holds no lock of its
+// own and these tests are not parallel, so a package var is the seam; nothing
+// else in the package assigns them.
+func recordSyncs(t *testing.T, onTemp func(*os.File) error, onDir func(string) error) (events *[]string) {
+	t.Helper()
+	realTemp, realDir := syncTempFile, syncParentDir
+	seen := &[]string{}
+	t.Cleanup(func() { syncTempFile, syncParentDir = realTemp, realDir })
+	syncTempFile = func(f *os.File) error {
+		*events = append(*events, "flush temp")
+		if onTemp != nil {
+			return onTemp(f)
+		}
+		return realTemp(f)
+	}
+	syncParentDir = func(dir string) error {
+		*events = append(*events, "flush dir")
+		if onDir != nil {
+			return onDir(dir)
+		}
+		return realDir(dir)
+	}
+	return seen
+}
+
+// readFileOr returns the content of path, or "<unreadable: err>" — a recorder
+// runs inside the write, so it cannot Fatalf out of a nested call.
+func readFileOr(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "<unreadable: " + err.Error() + ">"
+	}
+	return string(data)
+}
+
+// TestWriteFileAtomicFlushesAroundTheRename pins the durability contract of
+// every user-owned config write. Neither flush leaves any trace in the finished
+// file — the content, the mode and the inode are the same with or without them
+// — so the only thing that can be tested is WHEN each ran: the temp file's
+// bytes have to reach the disk while the file is still a temp file, and the
+// directory entry the rename created has to reach the disk after it. A write
+// that syncs after the rename, or never syncs the directory, can still be
+// interrupted into a config that is empty, truncated, or simply gone.
+func TestWriteFileAtomicFlushesAroundTheRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("a = 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var tempPath, tempContent string
+	events := recordSyncs(t, func(f *os.File) error {
+		tempPath, tempContent = f.Name(), readFileOr(f.Name())
+		if got := readFileOr(path); got != "a = 1\n" {
+			t.Errorf("the temp file was flushed at %s, after the rename had already replaced the config with %q", f.Name(), got)
+		}
+		return nil
+	}, func(d string) error {
+		if got := readFileOr(path); got != "b = 2\n" {
+			t.Errorf("the parent directory was flushed while %s still held %q; the rename is the edit that directory flush has to carry", path, got)
+		}
+		return nil
+	})
+
+	if err := writeFileAtomic(path, []byte("b = 2\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+
+	want := []string{"flush temp", "flush dir"}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("durability steps ran as %v, want %v", *events, want)
+	}
+	if tempPath == "" {
+		t.Fatal("the temp file was never flushed, so a power cut before the rename could leave the config empty or truncated")
+	}
+	if tempContent != "b = 2\n" {
+		t.Errorf("the flushed temp file %s held %q, want the new document: the flush happened before the bytes were written", tempPath, tempContent)
+	}
+	assertFileContent(t, path, "b = 2\n")
+	assertFileMode(t, path, 0600)
+}
+
+// TestWriteFileAtomicFailedFlushPublishesNothing is the other half: a flush that
+// fails is not a write that quietly happened anyway. Renaming a temp file whose
+// bytes were never on the disk is the one way this path can still leave a
+// truncated config, so the failure has to stop the write, report itself, and
+// leave the user's config and their directory exactly as they were.
+func TestWriteFileAtomicFailedFlushPublishesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("a = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	recordSyncs(t, func(*os.File) error { return errFlush }, nil)
+
+	err := writeFileAtomic(path, []byte("b = 2\n"), 0644)
+	if !errors.Is(err, errFlush) {
+		t.Fatalf("writeFileAtomic error = %v, want it to report the failed flush (errFlush)", err)
+	}
+	assertFileContent(t, path, "a = 1\n")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.toml" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("a write that published nothing left files behind: %v", names)
+	}
+}
+
+// TestWriteFileAtomicCreatesNothingDurableWhenTheFlushFails covers the create
+// case, which takes a different branch through writeFileMode: there is no
+// target whose mode to keep, so the flush failure is the only thing standing
+// between an unflushed temp file and a rename that publishes it.
+func TestWriteFileAtomicCreatesNothingDurableWhenTheFlushFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fresh.toml")
+	recordSyncs(t, func(*os.File) error { return errFlush }, nil)
+
+	if err := writeFileAtomic(path, []byte("a = 1\n"), 0644); !errors.Is(err, errFlush) {
+		t.Fatalf("writeFileAtomic (create) error = %v, want it to report the failed flush (errFlush)", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("a create whose flush failed left %v behind, want nothing", names)
+	}
+}
+
+// TestWriteFileAtomicPrivateAlsoFlushes pins that the 0600-clamping flavour gets
+// the same durability: it is a different mode policy on the same write path, and
+// a settings.json that is not flushed is the one config a crash leaves empty.
+func TestWriteFileAtomicPrivateAlsoFlushes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	events := recordSyncs(t, nil, nil)
+
+	if err := writeFileAtomicPrivate(path, []byte(`{"a":1}`), 0600); err != nil {
+		t.Fatalf("writeFileAtomicPrivate: %v", err)
+	}
+	want := []string{"flush temp", "flush dir"}
+	if !reflect.DeepEqual(*events, want) {
+		t.Errorf("durability steps ran as %v, want %v", *events, want)
+	}
+	assertFileContent(t, path, `{"a":1}`)
+}
+
+// TestWriteFileAtomicReplacesADanglingSymlink pins the one symlink case that
+// cannot be written through, so the doc comment above writeFileAtomic cannot
+// drift into claiming every link survives. EvalSymlinks cannot resolve a link
+// whose target is not there, so the write lands on the link's own name: the
+// link is replaced by a regular file holding the new document, and nothing
+// appears at the path it pointed at. A dotfiles repo whose checkout has not been
+// cloned yet is exactly this.
+func TestWriteFileAtomicReplacesADanglingSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "dotfiles", "config.toml")
+	link := filepath.Join(root, "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("the fixture's target exists, so the link is not dangling: %v", err)
+	}
+
+	if err := writeFileAtomic(link, []byte("a = 1\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic over a dangling symlink: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("the dangling link was kept; the documented behaviour is that it is replaced by a regular file")
+	}
+	assertFileContent(t, link, "a = 1\n")
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Errorf("a write replaced the dangling link with a file, so nothing should have been created at the path it pointed at: %v", err)
+	}
+}
+
+// TestSettingsFileSaveWritesThroughASymlinkedConfig is the caller-level half of
+// the same contract, through the write a user's `ghost mcp init` actually makes:
+// a settings.json that is a symlink into a dotfiles checkout has to keep being a
+// symlink, the merge has to land in the file it points at, and the file it
+// points at has to come back clamped to 0600. Without the link surviving, the
+// user gets a regular file in ~/.claude and an untracked copy in their dotfiles
+// repo, and every later edit through the repo silently diverges.
+func TestSettingsFileSaveWritesThroughASymlinkedConfig(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	target := filepath.Join(home, "dotfiles", "claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"effortLevel":"high"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	link, err := settingsPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	sf, err := loadSettings(link)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	if _, err := sf.addPermissions(ghostPermissions); err != nil {
+		t.Fatalf("addPermissions: %v", err)
+	}
+	if err := sf.save(); err != nil {
+		t.Fatalf("save through the symlink: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("%s was replaced by a regular file (%v); the user's dotfiles link is gone and the merge went somewhere untracked", link, info.Mode())
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read the dotfiles target: %v", err)
+	}
+	if !strings.Contains(string(data), `"effortLevel": "high"`) {
+		t.Errorf("the merge did not land in the file the link points at:\n%s", data)
+	}
+	if !strings.Contains(string(data), "mcp__ghost__ghost_memory_save") {
+		t.Errorf("the ghost permissions are missing from the file the link points at:\n%s", data)
+	}
+	assertFileMode(t, target, 0600)
+
+	// A second init is the shape that catches a link replaced by a regular file:
+	// it would read and rewrite the regular file and the dotfiles copy would go
+	// on being stale.
+	if err := sf.save(); err != nil {
+		t.Fatalf("second save through the symlink: %v", err)
+	}
+	info, err = os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the second save replaced the symlink with a regular file: init is not idempotent for a linked config")
+	}
 }
