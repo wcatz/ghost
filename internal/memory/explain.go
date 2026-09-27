@@ -116,7 +116,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		foreignWarned:       s.foreignWarned,
 		// Shares the corpus scratch pool: this store runs the same vector leg,
 		// and a pool of its own would allocate per explain run and go with it.
-		vectorRowsPool: s.vectorRowsPool,
+		scratch: s.scratch,
 	}
 
 	// Membership comes from the same production search the formatted path uses,

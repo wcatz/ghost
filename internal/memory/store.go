@@ -162,20 +162,19 @@ type Store struct {
 	// real search already reported.
 	foreignWarned *foreignWarnGate
 
-	// vectorRowsPool recycles the per-search scratch a vector search copies
-	// candidate rows into (vectorRows). Concurrent searches each take their
-	// own, and the pool exists so that a steady-state search refills the
-	// column buffers it grew last time instead of allocating the whole corpus
-	// again per query — see #556.
+	// scratch recycles the per-search corpus snapshot a vector search copies
+	// candidate rows into. Concurrent searches each take their own, and the pool
+	// exists so that a steady-state search refills the column buffers it grew last
+	// time instead of allocating the whole corpus again per query — see #556.
 	//
 	// A pointer, not a value, because a Store literal standing in for another
 	// store — the snapshot Candidates builds, the trace store ExplainSearch
-	// builds — must share the pool rather than bring its own. sync.Pool must not
-	// be copied after use, and a per-store pool on a literal is a pool of one
-	// that is garbage the moment the literal goes out of scope: the corpus
-	// snapshot would be allocated per query and dropped with the store, which is
-	// the cost this pool exists to avoid.
-	vectorRowsPool *sync.Pool
+	// builds — must share it rather than bring its own. A sync.Pool must not be
+	// copied after use, and a pool of its own on a literal is a pool of one that is
+	// garbage the moment the literal goes out of scope: the corpus snapshot would
+	// be allocated per query and dropped with the store, which is the cost this
+	// exists to avoid.
+	scratch *vectorScratch
 }
 
 // foreignWarnGate is the per-identity warning gate: the set of retired
@@ -259,7 +258,7 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	s := &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold, foreignWarned: &foreignWarnGate{warned: make(map[string]bool)}}
-	s.vectorRowsPool = &sync.Pool{New: func() any { return &vectorRows{} }}
+	s.scratch = newVectorScratch()
 	return s
 }
 

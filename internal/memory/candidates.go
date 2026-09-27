@@ -275,7 +275,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		// real vector leg, and a pool of its own would be a pool of one that is
 		// garbage the moment this retrieval returns — a corpus-sized allocation
 		// on every search, which is what the pool exists to avoid.
-		vectorRowsPool: s.vectorRowsPool,
+		scratch: s.scratch,
 	}
 
 	set := &CandidateSet{Legs: map[string]LegStatus{}}

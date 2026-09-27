@@ -9,6 +9,7 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"sync"
 	"sync/atomic"
 )
 
@@ -509,33 +510,23 @@ const maxRetainedVectorBytes = 32 << 20
 // A store built as a literal (ExplainSearch's trace store) has no pool
 // function, so the nil case is a real one rather than a bug to assert away.
 func (s *Store) borrowVectorRows() *vectorRows {
-	// A store literal built without a pool gets a fresh snapshot rather than a
-	// nil dereference. That is the pre-#556 behaviour and the expensive one, so
-	// the literals that stand in for a store share the real store's pool instead
-	// (see the field comment); this branch is what a store that nobody wired up
-	// gets, and it is correct rather than fast.
-	if s.vectorRowsPool == nil {
-		v := &vectorRows{}
-		v.reset()
-		return v
+	// A store literal built without scratch gets a fresh snapshot rather than a nil
+	// dereference. That is the pre-#556 behaviour and the expensive one, so the
+	// literals that stand in for a store share the real store's scratch instead
+	// (see the field comment); this branch is what a store nobody wired up gets,
+	// and it is correct rather than fast.
+	if s.scratch == nil {
+		return &vectorRows{}
 	}
-	v, _ := s.vectorRowsPool.Get().(*vectorRows)
-	if v == nil {
-		v = &vectorRows{}
-	}
-	v.reset()
-	return v
+	return s.scratch.borrow()
 }
 
 // returnVectorRows hands the scratch back for the next search to reuse.
 func (s *Store) returnVectorRows(v *vectorRows) {
-	if cap(v.embeds) > maxRetainedVectorBytes {
-		v.embeds = nil
-	}
-	if s.vectorRowsPool == nil {
+	if s.scratch == nil {
 		return
 	}
-	s.vectorRowsPool.Put(v)
+	s.scratch.put(v)
 }
 
 // scopeProbe answers "may this row be compared against a scope request" without
@@ -612,4 +603,60 @@ func quoteScopeKey(key string) []byte {
 	quoted = append(quoted, '"')
 	quoted = append(quoted, key...)
 	return append(quoted, '"')
+}
+
+// vectorScratch is the pool of per-search corpus snapshots, plus the one number
+// worth watching: how many snapshots had to be allocated rather than recycled.
+//
+// The counter is the point. A sync.Pool's contents are per-processor and are
+// dropped at every collection, so "is the pool empty" is not a property a test can
+// assert on — it passes on one P and fails under parallel execution. Counting the
+// allocations instead is deterministic, and it is the actual cost: a snapshot
+// standing in for a store with a pool of its own allocates one per query and
+// returns it to a pool that is immediately garbage.
+type vectorScratch struct {
+	pool   sync.Pool
+	allocs atomic.Int64
+}
+
+func newVectorScratch() *vectorScratch {
+	s := &vectorScratch{}
+	s.pool.New = func() any {
+		s.allocs.Add(1)
+		return &vectorRows{}
+	}
+	return s
+}
+
+// allocs reports how many corpus snapshots have been allocated. A steady-state
+// search on an unchanged corpus stops moving it.
+func (s *vectorScratch) allocationCount() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.allocs.Load()
+}
+
+func (s *vectorScratch) borrow() *vectorRows {
+	v, _ := s.pool.Get().(*vectorRows)
+	if v == nil {
+		// Reached only when the pool is emptied between the New and the Get,
+		// which a collection between them can do. Counted here too, so the number
+		// is every allocation and not only the ones that came from New.
+		v = s.newSnapshot()
+	}
+	v.reset()
+	return v
+}
+
+func (s *vectorScratch) newSnapshot() *vectorRows {
+	s.allocs.Add(1)
+	return &vectorRows{}
+}
+
+func (s *vectorScratch) put(v *vectorRows) {
+	if cap(v.embeds) > maxRetainedVectorBytes {
+		v.embeds = nil
+	}
+	s.pool.Put(v)
 }

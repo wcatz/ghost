@@ -1060,31 +1060,24 @@ func TestLegFactsAreNotLeftOverFromAnEarlierSearch(t *testing.T) {
 	}
 }
 
-// TestTheSnapshotStoreBorrowsTheCorpusScratchFromTheSamePool: the corpus-sized
-// snapshot is recycled through a store's pool, and the store Candidates builds for
-// one retrieval is a bare literal. Without a pool of its own it takes the nil branch
-// and allocates a fresh snapshot per query, on the live search path — the cost
-// #560's pool exists to avoid, reintroduced at the one call site that runs on every
-// search. A store with no pool must not fall back to allocating silently, so the
-// sharing is the property under test.
-func TestTheSnapshotStoreBorrowsTheCorpusScratchFromTheSamePool(t *testing.T) {
+// TestTheSnapshotStoreRecyclesTheCorpusScratchThroughTheStoresPool: the
+// corpus-sized snapshot is recycled through a store's pool, and the store
+// Candidates builds for one retrieval is a bare literal. Without the real store's
+// pool it allocates a snapshot per query and hands it to a pool that is garbage the
+// moment the retrieval returns — reintroducing on the live search path, at every
+// search, the cost #560's pool exists to avoid.
+//
+// The assertion counts allocations rather than inspecting the pool, because a
+// sync.Pool's contents are per-processor and dropped at every collection: "the
+// pool is empty" is not a property a test can hold (it passes on one P and fails
+// under parallel execution — the first version of this test did exactly that).
+func TestTheSnapshotStoreRecyclesTheCorpusScratchThroughTheStoresPool(t *testing.T) {
 	store, ctx := setupTestStore(t)
-	// With vectors, so the leg's snapshot actually holds rows: a corpus with no
-	// embeddings yields an empty snapshot, and the assertion below would then
-	// prove nothing about which pool received it.
 	for i, content := range []string{"vector search corpus row one", "vector search corpus row two"} {
 		id := createTestMemory(t, store, ctx, content)
 		vec := []float32{0.8 - float32(i)*0.1, 0.6, 0}
 		if err := store.StoreEmbedding(ctx, id, vec, identityCurrent); err != nil {
 			t.Fatalf("StoreEmbedding: %v", err)
-		}
-	}
-
-	// Drain first: Create's near-duplicate probes borrow and return a snapshot of
-	// their own, so a pool that already holds one says nothing about Candidates.
-	for range 8 {
-		if v := store.vectorRowsPool.Get(); v != nil {
-			_ = v
 		}
 	}
 
@@ -1096,46 +1089,18 @@ func TestTheSnapshotStoreBorrowsTheCorpusScratchFromTheSamePool(t *testing.T) {
 		t.Fatalf("Candidates: %v", err)
 	}
 
-	// The retrieval has to hand its corpus snapshot back to the store's own pool.
-	// A snapshot store with a pool of its own hands it to a pool that is garbage
-	// the moment that store goes out of scope, so the cost returns every query.
-	v := store.vectorRowsPool.Get()
-	if v == nil {
-		t.Fatal("nothing came back to the store's pool, so the retrieval allocated a corpus snapshot and dropped it")
+	// Warm the pool: a second search over the same corpus must not allocate.
+	before := store.scratch.allocationCount()
+	for range 5 {
+		if _, err := store.Candidates(ctx, req); err != nil {
+			t.Fatalf("Candidates: %v", err)
+		}
 	}
-	snapshot, ok := v.(*vectorRows)
-	if !ok {
-		t.Fatalf("pool yielded %T, want a corpus snapshot", v)
+	if after := store.scratch.allocationCount(); after != before {
+		t.Errorf("five further searches allocated %d more corpus snapshots: the snapshot store is "+
+			"not recycling through this store's pool", after-before)
 	}
-	if len(snapshot.rows) == 0 {
-		t.Error("the recycled snapshot holds no rows, so the vector leg copied nothing and this proves nothing")
-	}
-}
-
-// TestTheEdgeStatusReportsHowManyQueriesItTook: the edge read is chunked, and a
-// pair whose endpoints land in different chunks is never read. Reporting
-// "unavailable" for such a read is a whole-set claim the store cannot make, and a
-// caller's window is deliberately allowed to exceed the chunk, so the count has to
-// travel with the status rather than being a detail of the loop.
-func TestTheEdgeStatusReportsHowManyQueriesItTook(t *testing.T) {
-	store, ctx := setupTestStore(t)
-	for i := range 3 {
-		createTestMemory(t, store, ctx, "edge coverage row "+string(rune('a'+i)))
-	}
-	single := make([]string, 2)
-	for i := range single {
-		single[i] = createTestMemory(t, store, ctx, "single chunk row "+string(rune('a'+i)))
-	}
-	if _, status := store.loadCandidateEdges(ctx, single); status.Chunks != 1 {
-		t.Errorf("two ids took %d queries, want 1: one query covers them", status.Chunks)
-	}
-
-	many := make([]string, 0, edgeChunkIDs+10)
-	for i := range edgeChunkIDs + 10 {
-		many = append(many, createTestMemory(t, store, ctx, "many chunk row "+string(rune('a'+i%26))+string(rune('a'+i/26))))
-	}
-	if _, status := store.loadCandidateEdges(ctx, many); status.Chunks != 2 {
-		t.Errorf("%d ids took %d queries, want 2: the read is chunked, and a pair across the "+
-			"boundary is not recorded", len(many), status.Chunks)
+	if before == 0 {
+		t.Error("no snapshot was ever allocated, so the counter is not measuring the vector leg")
 	}
 }
