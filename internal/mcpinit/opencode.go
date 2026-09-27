@@ -232,9 +232,11 @@ type opencodeMCPConfigSource struct {
 // ($OPENCODE_CONFIG_DIR when set, else $XDG_CONFIG_HOME/opencode), the custom
 // path in $OPENCODE_CONFIG, and finally inline $OPENCODE_CONFIG_CONTENT. A
 // layer that doesn't mention mcp.ghost must not hide the one below it, so
-// every existing layer is read rather than only the first. Per-checkout
+// every existing layer is read rather than only the first. A per-checkout
 // `opencode.json` and the `.opencode` directory layers are deliberately out
-// of scope: status has no project cwd to resolve them from.
+// of scope: including them would make one run's verdict depend on the
+// directory it was typed in, and status reports the config a user carries
+// between projects.
 func opencodeConfigSources() ([]opencodeMCPConfigSource, string, error) {
 	base, err := opencodeConfigDir()
 	if err != nil {
@@ -282,20 +284,29 @@ func opencodeConfigSources() ([]opencodeMCPConfigSource, string, error) {
 // found — the ways opencode ends up running without ghost's tools while the
 // lifecycle plugin sits installed and green.
 //
-// judged is false when no verdict was reached at all: the config directory
-// could not be resolved, or a layer could not be read or parsed. That is a
+// unjudgeable is non-empty when no verdict was reached at all, and names why:
+// opencodeMCPUnreadable for a layer that could not be read or parsed, or
+// opencodeMCPNoConfigDir for a config directory that could not be resolved
+// (no $HOME and no $XDG_CONFIG_HOME or $OPENCODE_CONFIG_DIR). That is a
 // different state from a broken entry — opencode drops a layer it cannot
 // parse (probed on v2.0.15: `opencode debug config` lists no document for
-// it), so the entry in such a layer is inert but unknown here, and the
-// caller must not report it as covered by the plugin's registration.
-func opencodeMCPEntryStatus(ghostBin string) (bool, string, bool) {
+// it), so the entry in such a layer is inert but unknown here, and the caller
+// must not report it as covered by the plugin's registration. The two
+// reasons are kept apart because only one of them names a file the user can
+// repair: an unresolvable config directory has no file at all.
+const (
+	opencodeMCPUnreadable  = "config file"
+	opencodeMCPNoConfigDir = "config directory"
+)
+
+func opencodeMCPEntryStatus(ghostBin string) (bool, string, string) {
 	sources, primary, err := opencodeConfigSources()
 	if err != nil {
-		return false, err.Error(), false
+		return false, err.Error(), opencodeMCPNoConfigDir
 	}
 	if len(sources) == 0 {
 		return false, fmt.Sprintf("no opencode config file — add %s to %s",
-			opencodeMCPEntryHint(ghostBin), primary), true
+			opencodeMCPEntryHint(ghostBin), primary), ""
 	}
 	var merged opencodeMCPEntry
 	found := false
@@ -305,12 +316,12 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string, bool) {
 		if data == nil {
 			var readErr error
 			if data, readErr = os.ReadFile(src.path); readErr != nil {
-				return false, fmt.Sprintf("cannot read %s: %v", src.label, readErr), false
+				return false, fmt.Sprintf("cannot read %s: %v", src.label, readErr), opencodeMCPUnreadable
 			}
 		}
 		cfg, err := parseOpencodeConfig(data)
 		if err != nil {
-			return false, fmt.Sprintf("cannot parse %s as opencode config: %v", src.label, err), false
+			return false, fmt.Sprintf("cannot parse %s as opencode config: %v", src.label, err), opencodeMCPUnreadable
 		}
 		entry, ok := cfg.MCP["ghost"]
 		if !ok {
@@ -335,10 +346,10 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string, bool) {
 		from = src.label
 	}
 	if !found {
-		return false, fmt.Sprintf("ghost MCP server missing from %s — add %s", primary, opencodeMCPEntryHint(ghostBin)), true
+		return false, fmt.Sprintf("ghost MCP server missing from %s — add %s", primary, opencodeMCPEntryHint(ghostBin)), ""
 	}
 	ok, msg := opencodeMCPEntryVerdict(merged, from, ghostBin)
-	return ok, msg, true
+	return ok, msg, ""
 }
 
 // opencodeMCPEntryVerdict classifies the merged mcp.ghost entry. path is the

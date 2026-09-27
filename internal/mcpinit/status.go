@@ -207,12 +207,21 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	// registration says nothing about an entry status could not judge, and
 	// opencode drops such a layer outright, so it fails the run under both
 	// gates and the footer points at the file rather than at the entry.
-	mcpOK, mcpFail, mcpJudged := opencodeMCPEntryStatus(ghostBin)
+	mcpOK, mcpFail, unjudgeable := opencodeMCPEntryStatus(ghostBin)
 	mcpFix := "" // footer line naming how to repair what failed above
 	switch {
 	case mcpOK:
 		check(true, "ghost MCP server registered in opencode config", "")
-	case !mcpJudged:
+	case unjudgeable != "":
+		// Nothing about the registration can be asserted, so the run is red
+		// under both gates — but the remediation depends on why. A config
+		// directory that cannot be resolved has no file to repair and the
+		// plugin check above already reports that root cause; only a layer
+		// that exists and cannot be read or parsed names a file.
+		if unjudgeable == opencodeMCPNoConfigDir {
+			check(false, "", mcpFail)
+			break
+		}
 		mcpFix = "The opencode config file shown above could not be read or parsed — repair it in place (`ghost mcp init` never writes that file)."
 		check(false, "", mcpFail)
 	case pluginOK:
@@ -233,9 +242,13 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	if healthy {
 		_, _ = fmt.Fprintln(w, "All checks passed.")
 	} else {
-		_, _ = fmt.Fprintln(w, "Run `ghost mcp init --client opencode` to fix issues.")
+		// One remediation per failure, never two adjacent ones that
+		// contradict: "run ghost mcp init" is the wrong advice for a
+		// config repair, because init never writes that file.
 		if mcpFix != "" {
 			_, _ = fmt.Fprintln(w, mcpFix)
+		} else {
+			_, _ = fmt.Fprintln(w, "Run `ghost mcp init --client opencode` to fix issues.")
 		}
 	}
 	return healthy, nil

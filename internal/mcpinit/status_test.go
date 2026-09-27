@@ -617,6 +617,7 @@ func TestStatusOpencode_MCPRegistration(t *testing.T) {
 						if !strings.Contains(output, "could not be read or parsed") {
 							t.Errorf("%s: expected the config-repair footer for an unreadable layer, got:\n%s", name, output)
 						}
+						assertNoInitFooter(t, name, output)
 						return
 					}
 					// The plugin registers ghost at startup and overrides the
@@ -651,9 +652,6 @@ func TestStatusOpencode_MCPRegistration(t *testing.T) {
 				if strings.Contains(output, "All checks passed.") {
 					t.Errorf("%s: must not report \"All checks passed.\", got:\n%s", name, output)
 				}
-				if !strings.Contains(output, "Run `ghost mcp init --client opencode` to fix issues.") {
-					t.Errorf("%s: expected actionable footer, got:\n%s", name, output)
-				}
 				wantFooter := "mcp.ghost entry shown above is a config edit"
 				if tc.cannotJudge {
 					wantFooter = "could not be read or parsed"
@@ -661,7 +659,61 @@ func TestStatusOpencode_MCPRegistration(t *testing.T) {
 				if !strings.Contains(output, wantFooter) {
 					t.Errorf("%s: expected the footer %q, got:\n%s", name, wantFooter, output)
 				}
+				assertNoInitFooter(t, name, output)
 			})
+		}
+	}
+}
+
+// assertNoInitFooter pins that a registration failure prints exactly one
+// remediation, never two contradictory ones. `ghost mcp init --client
+// opencode` writes the lifecycle adapter and never the user's opencode
+// config, so telling the user to run it is wrong advice for every failure
+// that reports a config repair — the two lines sit adjacent and contradict
+// ("run mcp init" above "…apply it to opencode's config file (`ghost mcp
+// init` never writes that file)").
+func assertNoInitFooter(t *testing.T, name, output string) {
+	t.Helper()
+	if strings.Contains(output, "Run `ghost mcp init --client opencode` to fix issues.") {
+		t.Errorf("%s: a config repair must not also print \"run ghost mcp init\" advice, got:\n%s", name, output)
+	}
+}
+
+// TestStatusOpencode_UnresolvableConfigDir pins the unjudgeable path that
+// involves no config file at all: with no $HOME and no XDG_CONFIG_HOME or
+// $OPENCODE_CONFIG_DIR, opencode's config directory cannot be resolved. The
+// run is still red — nothing about the registration can be asserted — but the
+// footer must not tell the user to repair a config file, because no file was
+// ever named. The plugin check above already reports the same root cause.
+func TestStatusOpencode_UnresolvableConfigDir(t *testing.T) {
+	statusEnv(t)
+	binDir := writeStubGhost(t)
+	t.Setenv("PATH", binDir)
+	// An empty config dir string is a real failure mode (a service manager
+	// or a container that exports neither), not a test-only contrivance.
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	setHome(t, "") // both vars os.UserHomeDir reads, so the resolution fails everywhere
+
+	var out bytes.Buffer
+	healthy, err := StatusOpencode(&out)
+	if err != nil {
+		t.Fatalf("StatusOpencode: %v", err)
+	}
+	output := out.String()
+	if healthy {
+		t.Errorf("healthy = true with no resolvable config directory, got:\n%s", output)
+	}
+	if !strings.Contains(output, "home dir") {
+		t.Errorf("expected the root cause named on a check line, got:\n%s", output)
+	}
+	for _, wrong := range []string{
+		"could not be read or parsed",
+		"is a config edit",
+		"no opencode config file",
+	} {
+		if strings.Contains(output, wrong) {
+			t.Errorf("%q must not be reported when no config file was ever named, got:\n%s", wrong, output)
 		}
 	}
 }
@@ -706,9 +758,9 @@ func TestStatusOpencode_DocumentedPluginOnlyInstallStaysHealthy(t *testing.T) {
 // on, merged over the global file the way opencode merges config layers: a
 // higher layer overriding `enabled` wins, a higher layer without the entry
 // must not hide the global one, and a higher layer that empties a key
-// overrides it rather than inheriting it. Per-checkout `opencode.json` and
-// the `.opencode` directory layers are out of scope — status judges the
-// config sources it can resolve without knowing a project's cwd.
+// overrides it rather than inheriting it. A per-checkout `opencode.json` and
+// the `.opencode` directory are deliberately not judged: either would make
+// the verdict depend on the directory the command was typed in.
 func TestStatusOpencode_OPENCODEConfigEnv(t *testing.T) {
 	t.Run("custom path overriding enabled wins", func(t *testing.T) {
 		statusEnv(t)
