@@ -417,11 +417,26 @@ type BindingRefusal struct {
 }
 
 // Notice renders the refusal for whoever asked for the save: what kept the
-// name, where the memory went, and the one command that repairs the split if
-// the two projects are the same project after all. Empty for no refusal, so a
-// caller can append it to every save result without a nil check.
+// name, where the memory went, and what — if anything — the reader can run to
+// make the split go away. Empty for no refusal, so a caller can append it to
+// every save result without a nil check.
 //
-// The merge command is quoted rather than bare because a project id is often a
+// What each kind can be repaired by is not the same, and a command that does
+// not repair it is worse than no command: a reader who follows advice that
+// does not work is further from a fix than one who was told there is nothing
+// to run. Only RefusedPathMismatch has a repair, and it takes two commands in
+// a fixed order — a merge on its own deletes the project the save landed in
+// and with it the repository it recorded, so the next save from that checkout
+// is refused again and opens a second project; the bind is what puts the
+// checkout and its repository on the project that kept the name. The merge
+// comes first because the bind is refused while the other project still
+// records that directory.
+//
+// RefusedDifferentRemote has none: two projects that claim two different
+// repositories are not a split to be closed, and the project this save used
+// already records the checkout, so the next save finds it by id.
+//
+// Commands are quoted rather than bare because a project id is often a
 // checkout path, and a path with a space in it is a command that does not run.
 func (r *BindingRefusal) Notice() string {
 	if r == nil {
@@ -443,20 +458,20 @@ func (r *BindingRefusal) Notice() string {
 	}
 	switch r.Kind {
 	case RefusedAmbiguousName:
-		return fmt.Sprintf("%d projects are named %q (%s), so the repository could not be bound to any of them; saved to %s instead — save under a project id to choose one, and fold the duplicates with: ghost project merge <duplicate-id> <survivor-id>",
+		return fmt.Sprintf("%d projects are named %q (%s), so the repository could not be bound to any of them; saved to %s instead, which records this checkout and its repository, so the next save from here lands there — save under a project id to choose one instead; if two of the same-named projects are duplicates of each other, fold them with: ghost project merge <duplicate-id> <survivor-id> (the survivor keeps its own recorded checkout and repository, so pick the one whose is right)",
 			matched, r.Name, namedCandidates(r.ProjectIDs, matched), saved)
 	case RefusedDifferentRemote:
-		return fmt.Sprintf("project %q already belongs to a different repository (%s); saved to %s instead — save under that project by name or id to write into it, and merge the two with: ghost project merge %q %q if they are one project",
-			r.Name, r.RecordedRemote, saved, saved, held)
+		return fmt.Sprintf("project %q already belongs to a different repository (%s); saved to %s instead — those are two different repositories, so they are two different projects, and a merge would leave one of them without the repository it was verified against. Nothing needs repairing here: %s records this checkout, so the next save from it lands there. But a save under the name goes to the other repository's project, so address the one you meant by id (%s) or by path (%s), and \"ghost project list\" shows all of them",
+			r.Name, r.RecordedRemote, saved, saved, held, saved)
 	case RefusedPathMismatch:
-		return fmt.Sprintf("project %q already exists at %s; saved to %s instead — save under that project by name or id to write into it, and merge the two with: ghost project merge %q %q if they are one project",
-			r.Name, r.RecordedPath, saved, saved, held)
+		return fmt.Sprintf("project %q already exists at %s; saved to %s instead — to write into that project rather than this one, save under %q by name or id. To make this checkout part of it instead, run both, in this order: ghost project merge %q %q (moves what was just saved here into it) then ghost project bind %q %q (records this checkout and its repository on it, so the next save from here lands there instead of splitting again)",
+			r.Name, r.RecordedPath, saved, r.Name, saved, held, held, saved)
 	default:
 		// A kind added later renders here rather than borrowing another
-		// kind's sentence, which would name a checkout or a repository this
-		// refusal never looked at.
-		return fmt.Sprintf("project %q was not bound to this repository (%s); saved to %s instead — save under that project by name or id to write into it, and merge the two with: ghost project merge %q %q if they are one project",
-			r.Name, r.Kind, saved, saved, held)
+		// kind's sentence, which would suggest commands that repair a split
+		// this refusal never described.
+		return fmt.Sprintf("project %q was not bound to this repository (%s); saved to %s instead — save under the project you meant, by name, id or path",
+			r.Name, r.Kind, saved)
 	}
 }
 

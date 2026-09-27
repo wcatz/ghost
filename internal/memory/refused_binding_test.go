@@ -40,6 +40,13 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 		holdIDs  []string
 		recorded string
 		remote   string
+		// advice is what the notice must tell the reader to run, in the order
+		// it must appear in: the order is part of the claim, because one of
+		// the two orders of the merge and the bind fails.
+		advice []string
+		// forbidden is what the notice must not suggest, and why each would be
+		// wrong for this kind.
+		forbidden map[string]string
 	}{
 		{
 			name: "recorded path elsewhere",
@@ -52,6 +59,12 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 			kind:     RefusedPathMismatch,
 			holdIDs:  []string{"real-infra"},
 			recorded: recorded,
+			// Both commands, in this order. The merge collects what was saved
+			// into the project this checkout opened; the bind is what makes it
+			// last, because the merge deletes that project along with the
+			// repository it recorded — so a merge on its own leaves the next
+			// save from this checkout refusing again and splitting once more.
+			advice: []string{`ghost project merge "SAVED" "real-infra"`, `ghost project bind "real-infra" "SAVED"`},
 		},
 		{
 			name: "ambiguous name",
@@ -65,6 +78,13 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 			saving:  existingDir(t, "Downloads", "infra"),
 			kind:    RefusedAmbiguousName,
 			holdIDs: []string{"first", "second"},
+			// No bind here, and there must not be one: the project this save
+			// used already records the checkout and the repository, so nothing
+			// about this save's routing is left to repair. Which candidates are
+			// duplicates of each other is the reader's to judge, so the merge
+			// is between them and names neither.
+			advice:    []string{"ghost project merge <duplicate-id> <survivor-id>"},
+			forbidden: map[string]string{"ghost project bind": "the project this save used already records the checkout"},
 		},
 		{
 			name: "already another repository",
@@ -80,6 +100,17 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 			// recorded path is not what the conflict turns on.
 			holdIDs: []string{"real-infra"},
 			remote:  otherCan,
+			advice:  []string{},
+			// No command at all. These are two repositories: a merge would
+			// either hand one project's memories to a project that claims the
+			// other repository, or drop the repository this save came from.
+			// Nothing here needs repairing either — the project this save used
+			// records this checkout and is found by id on the next save — so
+			// the answer is which project the reader meant, not how to join them.
+			forbidden: map[string]string{
+				"ghost project merge": "two different repositories must stay two projects",
+				"ghost project bind":  "the project this save used already records this checkout and repository",
+			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -136,6 +167,25 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 			}
 			if tc.remote != "" && !strings.Contains(notice, tc.remote) {
 				t.Errorf("notice does not mention the recorded remote %q: %q", tc.remote, notice)
+			}
+
+			// Advice is a claim about what the reader should run, so it is
+			// asserted as one: those commands, in that order, and nothing the
+			// kind must not name. "SAVED" stands for the project this save went
+			// to, which is a filesystem path and so is quoted in the notice.
+			rest := notice
+			for _, want := range tc.advice {
+				at := strings.Index(rest, strings.ReplaceAll(want, "SAVED", canonical))
+				if at < 0 {
+					t.Errorf("notice does not suggest %q, or not in that order: %q", want, notice)
+					continue
+				}
+				rest = rest[at+len(want):]
+			}
+			for unwanted, why := range tc.forbidden {
+				if strings.Contains(notice, unwanted) {
+					t.Errorf("notice suggests %q, which is wrong here because %s: %q", unwanted, why, notice)
+				}
 			}
 
 			// Reported, not changed: the fallback project carries the
