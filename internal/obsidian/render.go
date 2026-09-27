@@ -160,13 +160,18 @@ func needsYAMLQuote(s string, flow bool) bool {
 
 // fm writes one frontmatter line.
 //
-// Invariant for every renderer: ghost_id must be the first frontmatter key
-// and every value must occupy exactly one line — prune's hasGhostID scan
-// depends on it. Values are rendered through yamlScalar, which flattens
-// newlines and quotes anything that would break YAML. Fixed-vocabulary values
-// — category, source, and task/decision status are all CHECK-constrained in
-// memory/schema.go — plus type, numerics, bools, and dates take yamlScalar's
-// plain path and emit unquoted.
+// Invariant for every renderer: every value must occupy exactly one line, and
+// ghost_id must be the first frontmatter key.
+//
+// The one-line rule is what hasGhostID relies on: it scans to the first `---`
+// and takes the one `ghost_id:` line it finds, so a value carrying a newline
+// would either split the block or push a second key out of it. Putting ghost_id
+// first is the convention a reader sees, not something the scan needs. Values
+// are rendered through yamlScalar, which flattens newlines and quotes anything
+// that would break YAML. Fixed-vocabulary values — category, source, and
+// task/decision status are all CHECK-constrained in memory/schema.go — plus
+// type, numerics, bools, and dates take yamlScalar's plain path and emit
+// unquoted.
 func fm(b *strings.Builder, key, val string) {
 	fmt.Fprintf(b, "%s: %s\n", key, yamlScalar(val, false))
 }

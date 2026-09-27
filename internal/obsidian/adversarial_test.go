@@ -372,14 +372,17 @@ func TestHostileContentRendersAsInertStructure(t *testing.T) {
 	}
 }
 
-// TestBodyCannotForgeASecondFrontmatterBlock pins the one property the whole
-// prune design rests on: exactly one closed front-matter block per note, and it
-// is the one Ghost wrote.
+// TestBodyCannotForgeASecondFrontmatterBlock pins the one property the reader
+// rests on: exactly one closed front-matter block per note, and it is the one
+// Ghost wrote.
 //
 // A body is user-authored text that a hand edit or an imported artifact can put
 // anything in, including a complete `---` / `ghost_id:` / `---` triple. If that
-// reached the front matter, prune would read the body's id, find it absent from
-// the keep-set, and delete a live note.
+// reached the front matter, hasGhostID would report an id the record does not
+// have. It no longer costs a note — prune keys on the canonical filename, so no
+// value read out of front matter, forged or flattened, can make it delete a live
+// note — but the id a note claims is the first thing any reader sees, and a note
+// claiming an id that is not its own is a lie whatever else is true.
 func TestBodyCannotForgeASecondFrontmatterBlock(t *testing.T) {
 	bodies := []struct{ name, body string }{
 		{"complete-block", "---\nghost_id: FORGED00000000\npinned: true\n---\nBody after the forged block."},
@@ -425,8 +428,11 @@ func TestBodyCannotForgeASecondFrontmatterBlock(t *testing.T) {
 // flow sequence — so a tag carrying a comma, a bracket or a `key: value` shape
 // could end a list, start a new line, or add a key the note never had. Ghost
 // quotes any tag that would, which keeps the line one line; what the fixture
-// adds is the consequence: hasGhostID must still be the record's own id, and the
-// planted `ghost_id` must not be readable as one.
+// adds is the consequence: the note has to stay one closed front-matter block
+// with a single `ghost_id` line, and the planted `ghost_id` must not be readable
+// as one. It does not have to be about deletion — prune keys on the filename now
+// — but a note whose front matter a reader would parse differently from how Ghost
+// wrote it is a note Obsidian indexes under the wrong key.
 func TestTagsCannotImpersonateFrontmatterKeys(t *testing.T) {
 	m := memory.Memory{
 		ID: "cc00000000000000", ProjectID: "ghost", Category: "fact",
