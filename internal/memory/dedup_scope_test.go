@@ -240,3 +240,146 @@ func TestDedupScopeConflictAcrossCategory(t *testing.T) {
 		t.Errorf("cross-category probe folded across a scope conflict (duplicateOf=%s)", dup)
 	}
 }
+
+// conflictCutText is stored byte-identically by every row of the corpus below,
+// so each row ties on FTS rank and only importance decides the window.
+const conflictCutText = "the api listen port is 8443"
+
+// seedConflictCutCorpus stores one production memory and fifteen development
+// memories whose text is byte-identical to it, and returns the production id
+// and the development ids.
+//
+// Both probes order candidates `ORDER BY rank, m.importance DESC LIMIT 15`, and
+// rank is a function of the indexed text alone — so fifteen identical rows tie
+// at the top of the window and, seeded at a higher importance than the
+// production row, occupy all fifteen slots. The production row is then the
+// sixteenth candidate the unfiltered window returns: precisely the rank a scope
+// check applied AFTER that cut could never see. Rows are created directly
+// rather than through Upsert, because fifteen restatements of one sentence are
+// what the probe is meant to absorb and seeding them through the fold path
+// would collapse the corpus this test depends on.
+func seedConflictCutCorpus(t *testing.T, s *Store, ctx context.Context) (compatible string, conflicting []string) {
+	t.Helper()
+	dev := map[string]string{"environment": "development"}
+	for i := range 15 {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: conflictCutText, Source: "manual", Importance: 0.9, Scope: dev,
+		})
+		if err != nil {
+			t.Fatalf("seed conflicting memory %d: %v", i, err)
+		}
+		conflicting = append(conflicting, id)
+	}
+	compatible = makeScopedMemory(t, s, conflictCutText, "production")
+	return compatible, conflicting
+}
+
+// accessCounts reads access_count for ids, keyed by id.
+//
+// The fold path is the only writer that bumps access_count, and it bumps it on
+// the row it chose and on no other, so this is how a test sees which candidate
+// a probe picked when duplicateOf alone would not say.
+func accessCounts(t *testing.T, s *Store, ctx context.Context, ids []string) map[string]int {
+	t.Helper()
+	ms, err := s.GetByIDs(ctx, ids)
+	if err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	}
+	out := make(map[string]int, len(ms))
+	for _, m := range ms {
+		out[m.ID] = m.AccessCount
+	}
+	return out
+}
+
+// TestDedupFoldsCompatibleDuplicateBelowTheConflictCut is the cost of deciding
+// scope after the candidate window instead of inside it (issue #665).
+//
+// A save's scope can disagree with the fifteen best FTS matches it retrieves
+// while agreeing with the sixteenth. When the check ran after the cut, those
+// fifteen rows consumed the whole budget, every one of them was skipped as
+// conflicting, and the probe reported no match — so a production fact that
+// _global already knew was written a second time, unlinked, next to the row it
+// restates. Scope has to be a condition of the query, not a filter over what
+// the query already decided to return.
+func TestDedupFoldsCompatibleDuplicateBelowTheConflictCut(t *testing.T) {
+	s, ctx := newDedupStore(t)
+	compatible, conflicting := seedConflictCutCorpus(t, s, ctx)
+	before := accessCounts(t, s, ctx, conflicting)
+
+	id, dup, score, err := s.UpsertWithOptions(ctx, testProject, "fact",
+		conflictCutText, "manual", 0.7, nil,
+		UpsertOptions{Scope: map[string]string{"environment": "production"}})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if dup != compatible {
+		t.Fatalf("duplicateOf = %q, want the compatible production row %q: fifteen development rows ranked above it filled the candidate window, and a duplicate that loses the cut is stored a second time instead",
+			dup, compatible)
+	}
+	if id == "" || id == compatible {
+		t.Errorf("id = %q, want a new linked copy rather than a rewrite of the fold target", id)
+	}
+	if score <= 0 {
+		t.Errorf("score = %v, want the match score that chose the fold", score)
+	}
+
+	// The new row is the caller's wording, which the default fold always
+	// stores — so what makes this a fold rather than a second copy is the
+	// 'duplicate' edge joining it to the compatible row, the thing the
+	// duplicate penalty and the next re-save both read.
+	links, err := s.GetLinks(ctx, id)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	found := false
+	for _, l := range links {
+		if l.Relation == "duplicate" && (l.TargetID == compatible || l.SourceID == compatible) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("links on the new row %+v carry no 'duplicate' edge to the compatible row %q: the restatement was stored as an independent memory", links, compatible)
+	}
+
+	// The over-correction guard: narrowing the window must not make the fifteen
+	// conflicting rows foldable. Nothing may be strengthened except the target.
+	for _, conflictingID := range conflicting {
+		after := accessCounts(t, s, ctx, []string{conflictingID})[conflictingID]
+		if after != before[conflictingID] {
+			t.Errorf("conflicting development row %s was strengthened (access_count %d, was %d): scope still has to refuse it, and refusing it is not the same as excluding it from the window",
+				conflictingID, after, before[conflictingID])
+		}
+	}
+}
+
+// TestCrossCategoryDedupFoldsCompatibleDuplicateBelowTheConflictCut is the same
+// defect in the cross-category probe, which carries its own statement and its
+// own window. Its stricter Jaccard gate changes nothing here: identical wording
+// scores 1.0 whatever the category, so scope is the only thing that separates
+// the candidates, and it has to be asked before the cut there too.
+func TestCrossCategoryDedupFoldsCompatibleDuplicateBelowTheConflictCut(t *testing.T) {
+	s, ctx := newDedupStore(t)
+	compatible, conflicting := seedConflictCutCorpus(t, s, ctx)
+	before := accessCounts(t, s, ctx, conflicting)
+
+	// A different category, so the same-category probe cannot reach any of the
+	// seeded rows and only the cross-category probe can find the compatible one.
+	_, dup, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
+		conflictCutText, "manual", 0.7, nil,
+		UpsertOptions{Scope: map[string]string{"environment": "production"}})
+	if err != nil {
+		t.Fatalf("cross-category save: %v", err)
+	}
+	if dup != compatible {
+		t.Errorf("duplicateOf = %q, want the compatible production row %q: the cross-category window spent itself on fifteen development rows ranked above it",
+			dup, compatible)
+	}
+	for _, conflictingID := range conflicting {
+		after := accessCounts(t, s, ctx, []string{conflictingID})[conflictingID]
+		if after != before[conflictingID] {
+			t.Errorf("conflicting development row %s was strengthened (access_count %d, was %d): the cross-category probe must still refuse the fold across environments",
+				conflictingID, after, before[conflictingID])
+		}
+	}
+}

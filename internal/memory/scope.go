@@ -125,12 +125,12 @@ func ScopesConflict(a, b map[string]string) bool {
 // expression that is 1 (true) exactly when ScopesConflict is true for the two
 // stored scopes.
 //
-// It is a second statement of one rule, and that is a cost with a purpose. The
-// statements that need it — the two fold-target liveness checks — choose their
-// candidate set with the same statement's LIMIT, so a scope check applied after
-// the cut would spend the candidate budget on rows the caller may not fold into
-// and miss a compatible one ranked just below. A second statement is the only
-// way to decide inside the cut.
+// It is a second statement of one rule, and that is a cost with a purpose. Every
+// statement that needs it chooses its candidates with its own LIMIT — Upsert's
+// two dedup probes and the two fold-target liveness checks — so a scope check
+// applied after the cut would spend the candidate budget on rows the caller may
+// not fold into and miss a compatible one ranked just below (#665). A second
+// statement is the only way to decide inside the cut.
 //
 // Two copies of a rule drift, so TestScopesConflictSQLAgreesWithScopesConflict
 // runs both forms over the same table and requires they answer identically,
@@ -167,6 +167,11 @@ func scopesConflictSQL(a, b string) string {
 // own: scopeJSON never writes one (an empty scope is stored as NULL), but a row
 // written before that convention, or by an import, can carry '{}', and parseScope
 // already reads it as no scope.
+//
+// It names its expression TWICE, so a caller that passes a bound parameter ("?")
+// as the expression must bind that argument to both placeholders it produces —
+// a query that binds it once fails to prepare, which the probe reads as "no
+// candidate" rather than as the error it is.
 func scopeJSONExpr(scopeExpr string) string {
 	return `CASE WHEN json_valid(` + scopeExpr + `) THEN ` + scopeExpr + ` ELSE '{}' END`
 }

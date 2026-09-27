@@ -2526,16 +2526,32 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// duplicate — the OR-probe alone treats a single shared word as a match,
 	// which silently swallowed unrelated saves.
 	ftsQuery := sanitizeFTSN(content, 30)
+	// A candidate that names a shared key differently is a different fact about
+	// a different place, not a second wording of this one, so it is not a
+	// candidate at all — and "not a candidate" has to be decided before the
+	// window is cut, not after. This statement's LIMIT chooses the rows the fold
+	// is made from, so a conflicting row that spent one of the fifteen slots
+	// cost a compatible duplicate ranked just below them the fold, and a save
+	// that restated a fact already stored was written a second time, unlinked
+	// (issue #665). Stated in SQL and held to ScopesConflict by
+	// TestScopesConflictSQLAgreesWithScopesConflict, so the rule is asked once.
+	//
+	// The incoming scope is a bound parameter, not text spliced into the
+	// statement, and scopeJSONExpr names its expression twice — inside
+	// json_valid and as the value — so the predicate's two placeholders take
+	// the same argument.
+	incomingScope := scopeJSON(opts.Scope)
 	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.content, m.scope
+		SELECT m.id, m.content
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE m.project_id = ?
 		  AND m.category = ?
+		  AND NOT `+scopesConflictSQL("m.scope", "?")+`
 		  AND memories_fts MATCH ?
 		ORDER BY rank, m.importance DESC
 		LIMIT 15
-	`, projectID, category, ftsQuery)
+	`, projectID, category, incomingScope, incomingScope, ftsQuery)
 	if err == nil {
 		// Token-free content (punctuation/single-char words only) can still
 		// FTS-match — sanitizeFTS keeps single-char words that tokenizeContent
@@ -2544,15 +2560,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		var bestSim float64
 		for len(newTokens) > 0 && rows.Next() {
 			var candID, candContent string
-			var candScope sql.NullString
-			if scanErr := rows.Scan(&candID, &candContent, &candScope); scanErr != nil {
-				continue
-			}
-			// A candidate that names a shared key differently is a different
-			// fact about a different place, not a second wording of this one.
-			// Skipping rather than stopping keeps looking for a compatible
-			// candidate among the remaining matches.
-			if ScopesConflict(opts.Scope, parseScope(candScope)) {
+			if scanErr := rows.Scan(&candID, &candContent); scanErr != nil {
 				continue
 			}
 			candTokens := tokenizeContent(candContent)
@@ -2607,9 +2615,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// insert a duplicate. The check is inside the statement because this
 	// statement's LIMIT chooses the candidates — filtering after it would spend
 	// the budget on rows no fold may use.
+	//
+	// The candidate's own scope is excluded the same way, and for the same
+	// reason: near-identical wording across environments scores high whatever
+	// the category, so scope is the only thing that separates these
+	// candidates, and a conflicting row that reached the window ahead of a
+	// compatible duplicate cost that duplicate the fold (issue #665). Only rows
+	// a fold may use are counted against the fifteen.
 	if existingID == "" {
 		crossRows, crossErr := db.QueryContext(ctx, `
-			SELECT m.id, m.content, m.scope
+			SELECT m.id, m.content
 			FROM memories m
 			JOIN memories_fts f ON f.rowid = m.rowid
 			WHERE m.project_id = ?
@@ -2624,10 +2639,11 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			        AND l.invalidated_at IS NULL
 			        AND NOT `+scopesConflictSQL("s.scope", "m.scope")+`
 			  )
+			  AND NOT `+scopesConflictSQL("m.scope", "?")+`
 			  AND memories_fts MATCH ?
 			ORDER BY rank, m.importance DESC
 			LIMIT 15
-		`, projectID, category, ftsQuery)
+		`, projectID, category, incomingScope, incomingScope, ftsQuery)
 		if crossErr == nil {
 			// Same empty-token guard as the same-category probe: token-free
 			// content can still FTS-match, and jaccard(∅,∅) scores 1.0.
@@ -2635,14 +2651,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			var bestJaccard float64
 			for len(newTokens) > 0 && crossRows.Next() {
 				var candID, candContent string
-				var candScope sql.NullString
-				if scanErr := crossRows.Scan(&candID, &candContent, &candScope); scanErr != nil {
-					continue
-				}
-				// The stricter Jaccard gate does not help here: near-identical
-				// wording across environments scores high regardless of
-				// category, so scope is what separates them.
-				if ScopesConflict(opts.Scope, parseScope(candScope)) {
+				if scanErr := crossRows.Scan(&candID, &candContent); scanErr != nil {
 					continue
 				}
 				candTokens := tokenizeContent(candContent)
