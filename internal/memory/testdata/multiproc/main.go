@@ -550,7 +550,7 @@ func runMCP(ctx context.Context, o options, rep *report) error {
 	b := barriers{dir: o.barrier}
 	writes := 0
 	announced := false
-	return loadLoop(ctx, rep, b, func(i int) error {
+	return loadLoop(ctx, rep, b, true, func(i int) error {
 		content := fmt.Sprintf("%s mcp-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
 		announcing := b.signalled(committing) && !announced
 		res, err := session.CallTool(ctx, &mcp.CallToolParams{
@@ -703,7 +703,7 @@ func runCLI(ctx context.Context, o options, rep *report, b barriers) error {
 	var created []string
 	writes := 0
 	announced := false
-	return loadLoop(ctx, rep, b, func(i int) error {
+	return loadLoop(ctx, rep, b, true, func(i int) error {
 		content := fmt.Sprintf("%s cli-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
 		announcing := b.signalled(committing) && !announced
 		id, duplicateOf, _, err := store.Upsert(ctx, o.project, "fact", content, "mcp", 0.5, []string{"concurrency"})
@@ -777,7 +777,7 @@ func runReadOnly(ctx context.Context, o options, rep *report, b barriers) error 
 	// reader's searches inside the window the writers are colliding over, which
 	// is the point of having them: they must not be stalled by it.
 	reads := 0
-	return loadLoop(ctx, rep, b, func(i int) error {
+	return loadLoop(ctx, rep, b, false, func(i int) error {
 		rows, err := store.SearchFTS(ctx, o.project, o.query, 5)
 		if err != nil {
 			return fmt.Errorf("SearchFTS: %w", err)
@@ -1070,11 +1070,27 @@ func batchCounts(ctx context.Context, q interface {
 // timer, and the writers keep writing until the batch releases them, so they are
 // live when it commits without the run having to hope they still are.
 //
-// The iteration cap is a backstop: the loop stays bounded even if the barrier
-// protocol is broken, and it says so in the report rather than spinning.
-func loadLoop(ctx context.Context, rep *report, b barriers, body func(int) error) error {
-	const maxIterations = 20000
-	for i := 0; i < maxIterations; i++ {
+// The cap is a backstop: the loop stays bounded even if the barrier protocol
+// is broken, and it says so in the report rather than spinning. It is a wall
+// clock, not an iteration count, because a paced writer's iteration costs
+// milliseconds: 20000 of them would outlast the parent's 60 s wait for its
+// children, and a broken stop signal would then surface as a list of process
+// names instead of this report. 40 s sits inside both that wait and the
+// child's own 90 s context.
+//
+// pace is for writers only. SQLite's busy handler polls with sleeps and keeps
+// no queue, so writers that loop with no pause take every gap in the write
+// lock before a sleeping waiter wakes: on a loaded runner one writer waited
+// over 5 s for BEGIN IMMEDIATE while 66-283 other writes committed, none
+// holding the lock longer than 44 ms (#671). That is starvation by the
+// fixture, not a lock held too long, and it made the verdict depend on runner
+// speed. A 1-4 ms jitter between a writer's iterations gives a sleeping waiter
+// a turn; the writers still overlap every barrier the test waits on, and the
+// readers keep their full rate inside the window the writers collide over.
+func loadLoop(ctx context.Context, rep *report, b barriers, pace bool, body func(int) error) error {
+	const loadCap = 40 * time.Second
+	deadline := time.Now().Add(loadCap)
+	for i := 0; time.Now().Before(deadline); i++ {
 		if b.signalled(stopSignal) {
 			rep.put("stopped_by", "signal")
 			return nil
@@ -1085,19 +1101,12 @@ func loadLoop(ctx context.Context, rep *report, b barriers, body func(int) error
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("load loop: %w", err)
 		}
-		// Pace the loop. SQLite's busy handler polls with sleeps and keeps no
-		// queue, so writers that loop with no pause take every gap in the
-		// write lock before a sleeping waiter wakes: on a loaded runner one
-		// writer waited over 5 s for BEGIN IMMEDIATE while 66-283 other writes
-		// committed, none holding the lock longer than 44 ms (#671). That is
-		// starvation by the fixture, not a lock held too long, and it made
-		// the test's verdict depend on runner speed. A few milliseconds of
-		// jitter keep lock utilization well below saturation while the
-		// writers still overlap every barrier the test waits on.
-		time.Sleep(time.Duration(1000+rand.IntN(3000)) * time.Microsecond)
+		if pace {
+			time.Sleep(time.Duration(1000+rand.IntN(3000)) * time.Microsecond)
+		}
 	}
-	rep.put("stopped_by", "iteration-cap")
-	return fmt.Errorf("load loop reached its %d-iteration cap without a stop signal", maxIterations)
+	rep.put("stopped_by", "time-cap")
+	return fmt.Errorf("load loop ran for its %s cap without a stop signal", loadCap)
 }
 
 // checkNotTorn requires that every row a search returned really holds the text
