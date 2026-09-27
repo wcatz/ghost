@@ -179,15 +179,59 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	// corrupted or hand-mangled file must not read healthy, and `ghost mcp
 	// init --client opencode` repairs any drift in place.
 	pluginPath, perr := opencodePluginPath()
+	pluginOK := false
 	if perr != nil {
 		check(false, "", fmt.Sprintf("lifecycle plugin: %v", perr))
 	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == renderOpencodeGhostPlugin(findBinary("ghost")) {
+		pluginOK = true
 		check(true, fmt.Sprintf("lifecycle plugin installed: %s", pluginPath), "")
 	} else {
 		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
 	}
 
-	// 3. Embedding & linking health — silent embed failures leave vector
+	// 3. MCP server registration — the mcp.ghost entry across the config
+	// layers opencode reads (the file in its config directory —
+	// $OPENCODE_CONFIG_DIR when set — then $OPENCODE_CONFIG, then inline
+	// $OPENCODE_CONFIG_CONTENT). Health weight follows check 2: the current
+	// plugin registers ghost at startup (config hook in V1,
+	// ctx.mcp.transform in V2) and overrides whatever the file says, so with
+	// the plugin in place a broken or absent entry is inert — reported as
+	// the fallback it is, never failed, or every documented plugin-only
+	// install (init writes no config file) would exit red on a working
+	// integration. When the plugin is missing the file is the only
+	// registration surface, and a missing, disabled or wrong-path entry
+	// fails the run with the edit that repairs it — validated against the
+	// resolved binary the way StatusCodex validates config.toml.
+	//
+	// A layer that could not be read or parsed is neither: the plugin's
+	// registration says nothing about an entry status could not judge, and
+	// opencode drops such a layer outright, so it fails the run under both
+	// gates and the footer points at the file rather than at the entry.
+	mcpOK, mcpFail, unjudgeable := opencodeMCPEntryStatus(ghostBin)
+	mcpFix := "" // footer line naming how to repair what failed above
+	switch {
+	case mcpOK:
+		check(true, "ghost MCP server registered in opencode config", "")
+	case unjudgeable != "":
+		// Nothing about the registration can be asserted, so the run is red
+		// under both gates — but the remediation depends on why. A config
+		// directory that cannot be resolved has no file to repair and the
+		// plugin check above already reports that root cause; only a layer
+		// that exists and cannot be read or parsed names a file.
+		if unjudgeable == opencodeMCPNoConfigDir {
+			check(false, "", mcpFail)
+			break
+		}
+		mcpFix = "The opencode config file shown above could not be read or parsed — repair it in place (`ghost mcp init` never writes that file)."
+		check(false, "", mcpFail)
+	case pluginOK:
+		_, _ = fmt.Fprintf(w, "  - %s (the lifecycle plugin registers ghost at startup; the file entry is only the fallback)\n", mcpFail)
+	default:
+		mcpFix = "The mcp.ghost entry shown above is a config edit — apply it to opencode's config file (`ghost mcp init` never writes that file)."
+		check(false, "", mcpFail)
+	}
+
+	// 4. Embedding & linking health — silent embed failures leave vector
 	// search and memory linking inactive.
 	store := checkStoreHealth(w, check)
 	if store != nil {
@@ -198,7 +242,14 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	if healthy {
 		_, _ = fmt.Fprintln(w, "All checks passed.")
 	} else {
-		_, _ = fmt.Fprintln(w, "Run `ghost mcp init --client opencode` to fix issues.")
+		// One remediation per failure, never two adjacent ones that
+		// contradict: "run ghost mcp init" is the wrong advice for a
+		// config repair, because init never writes that file.
+		if mcpFix != "" {
+			_, _ = fmt.Fprintln(w, mcpFix)
+		} else {
+			_, _ = fmt.Fprintln(w, "Run `ghost mcp init --client opencode` to fix issues.")
+		}
 	}
 	return healthy, nil
 }
@@ -272,7 +323,7 @@ func ReportStaleIntegrations(w io.Writer) {
 	// existing opencode config dir warrants a hint. A missing plugin with no
 	// opencode dir at all means opencode isn't in use — leave it to
 	// `ghost mcp status --client opencode`.
-	if _, statErr := os.Stat(filepath.Join(opencodeDirOrEmpty(), "opencode")); statErr == nil {
+	if _, statErr := os.Stat(opencodeDirOrEmpty()); statErr == nil {
 		stale := true
 		if pluginPath, perr := opencodePluginPath(); perr == nil {
 			want := renderOpencodeGhostPlugin(findBinary("ghost"))
@@ -335,8 +386,9 @@ func ReportStaleIntegrations(w io.Writer) {
 	}
 }
 
-// opencodeDirOrEmpty returns the base config dir that opencode reads
-// ($XDG_CONFIG_HOME or ~/.config), or "" when it cannot be resolved.
+// opencodeDirOrEmpty returns the config directory opencode itself resolves
+// ($OPENCODE_CONFIG_DIR, else $XDG_CONFIG_HOME/opencode, else
+// ~/.config/opencode), or "" when it cannot be resolved.
 func opencodeDirOrEmpty() string {
 	dir, err := opencodeConfigDir()
 	if err != nil {

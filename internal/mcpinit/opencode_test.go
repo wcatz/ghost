@@ -20,6 +20,9 @@ func setupOpencodeTestEnv(t *testing.T) (home, xdg string) {
 	xdg = t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
+	// A $OPENCODE_CONFIG_DIR leaked from the host would move every path this
+	// test asserts on: opencode resolves exactly one config directory.
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
 
 	binDir := filepath.Join(home, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
@@ -79,6 +82,90 @@ func TestRenderOpencodeGhostPlugin_ConfigSessionListIsBounded(t *testing.T) {
 	src := renderOpencodeGhostPlugin("/usr/local/bin/ghost")
 	if !strings.Contains(src, "withTimeout(client.session.list()") {
 		t.Error("client.session.list() in config() must be wrapped in a timeout — an unbounded await there deadlocks opencode's own startup (config() never returns, so ghost's MCP entry is never even read)")
+	}
+}
+
+// TestStripJSONC pins the reduction that lets status read opencode's config:
+// comments and trailing commas are dropped, string literals are content —
+// "//" and "," inside a quoted value, an escaped quote before a comment —
+// and the newlines a removed comment spanned survive, so a parse error after
+// a comment still names the right line.
+func TestStripJSONC(t *testing.T) {
+	cases := map[string]struct{ in, want string }{
+		"line comment keeps its newline": {
+			in:   "{\n  // c\n  \"a\": 1\n}",
+			want: "{\n  \n  \"a\": 1\n}",
+		},
+		"line comment at EOF adds no newline": {
+			in:   "{\"a\": 1} // tail",
+			want: "{\"a\": 1} ",
+		},
+		"block comment keeps only its newlines": {
+			in:   "{\"a\": 1 /* c\nc2 */,\n\"b\": 2}",
+			want: "{\"a\": 1 \n,\n\"b\": 2}",
+		},
+		"unterminated block comment swallows the rest": {
+			in:   "{\"a\": 1 /* never closed",
+			want: "{\"a\": 1 ",
+		},
+		"trailing commas dropped": {
+			in:   `{"a": [1, 2,],}`,
+			want: `{"a": [1, 2]}`,
+		},
+		"slashes and commas inside a string are content": {
+			in:   `{"u": "http://x//y", "s": "a, b"}`,
+			want: `{"u": "http://x//y", "s": "a, b"}`,
+		},
+		"escaped quote does not close the string": {
+			in:   `{"a": "say \"// not a comment"} // gone`,
+			want: `{"a": "say \"// not a comment"} `,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := string(stripJSONC([]byte(tc.in))); got != tc.want {
+				t.Errorf("stripJSONC(%q)\n  =  %q\n  want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseOpencodeConfig_MCPEntry verifies the parser reads the registration
+// out of a JSONC file — comments, trailing commas and unrelated opencode keys
+// included — and that a disabled shorthand entry classifies as disabled
+// rather than as a parse failure.
+func TestParseOpencodeConfig_MCPEntry(t *testing.T) {
+	cfg, err := parseOpencodeConfig([]byte(`{
+  // ghost's registration
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ghost": {
+      "type": "local",
+      "command": ["/opt/ghost/ghost", "mcp"],
+      "enabled": true,
+    },
+  },
+}`))
+	if err != nil {
+		t.Fatalf("parseOpencodeConfig: %v", err)
+	}
+	entry := cfg.MCP["ghost"]
+	if entry.Command == nil || len(*entry.Command) != 2 || (*entry.Command)[0] != "/opt/ghost/ghost" || (*entry.Command)[1] != "mcp" {
+		t.Errorf("command = %v, want [/opt/ghost/ghost mcp]", entry.Command)
+	}
+	if entry.Type == nil || *entry.Type != "local" {
+		t.Errorf("type = %v, want local", entry.Type)
+	}
+	if entry.Enabled == nil || !*entry.Enabled {
+		t.Errorf("enabled = %v, want true", entry.Enabled)
+	}
+
+	disabled, err := parseOpencodeConfig([]byte(`{"mcp": {"ghost": {"enabled": false}}}`))
+	if err != nil {
+		t.Fatalf("parseOpencodeConfig (shorthand): %v", err)
+	}
+	if e := disabled.MCP["ghost"]; e.Enabled == nil || *e.Enabled {
+		t.Errorf("shorthand entry enabled = %v, want false", e.Enabled)
 	}
 }
 
@@ -194,7 +281,7 @@ func TestRunOpencode_DryRunWritesNothing(t *testing.T) {
 }
 
 // TestRunOpencode_InstallsLifecyclePlugin verifies init writes the embedded
-// adapter to <config>/opencode/plugins/ and that a second run is a no-op
+// adapter to <config-dir>/plugins/ and that a second run is a no-op
 // reporting "already installed".
 func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
 	home, xdg := setupOpencodeTestEnv(t)

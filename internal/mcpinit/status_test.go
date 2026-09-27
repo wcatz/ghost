@@ -42,6 +42,39 @@ func writePluginFile(t *testing.T, content string) {
 	}
 }
 
+// writeOpencodeMCPConfig writes opencode config content under the test's
+// XDG_CONFIG_HOME — the file `ghost mcp status --client opencode` reads for
+// the mcp.ghost registration. name is "opencode.jsonc" or "opencode.json".
+func writeOpencodeMCPConfig(t *testing.T, name, content string) string {
+	t.Helper()
+	path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir opencode config dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
+// opencodeMCPRegistration renders the current, enabled mcp.ghost entry for
+// ghostBin — the shape the opencode registration check must accept.
+func opencodeMCPRegistration(ghostBin string) string {
+	return fmt.Sprintf(`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": true}}}`, ghostBin)
+}
+
+// statusLineContaining returns the first output line containing want, so a
+// test can assert how the message was rendered (✗ failure vs - info) rather
+// than only that the text appeared somewhere.
+func statusLineContaining(output, want string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	return ""
+}
+
 // TestReportStaleIntegrations pins the post-upgrade wiring check: stale
 // Claude hooks and a drifted opencode plugin each produce an actionable
 // hint; current wiring produces no output at all.
@@ -257,6 +290,12 @@ func statusEnv(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
+	// opencode's env config layers must be empty by default: the tests that
+	// need them set them explicitly, and a leaked value from the host would
+	// otherwise decide which config file the registration check reads.
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
 	orig := systemBinDirs
 	systemBinDirs = nil
 	t.Cleanup(func() { systemBinDirs = orig })
@@ -317,15 +356,18 @@ func TestStatusOpencode_GhostMissing(t *testing.T) {
 }
 
 // TestStatusOpencode_CleanSetupHealthy verifies a clean opencode setup — a
-// ghost binary on PATH and the lifecycle plugin installed — is fully healthy
-// and prints "All checks passed." without a Claude binary. The plugin is the
-// whole integration: it registers MCP via its config hook and bridges stop
-// events, so no opencode.json check exists anymore.
+// ghost binary on PATH, the lifecycle plugin installed, and an enabled
+// mcp.ghost registration in the opencode config — is fully healthy and
+// prints "All checks passed." without a Claude binary. The plugin is what
+// bridges stop events, but it is not the only thing status verifies: the
+// registration opencode reads from its own config must be there too.
 func TestStatusOpencode_CleanSetupHealthy(t *testing.T) {
 	statusEnv(t)
 	binDir := writeStubGhost(t)
 	t.Setenv("PATH", binDir)
-	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
+	ghostBin := stubPath(binDir, "ghost")
+	installOpencodePluginFile(t, ghostBin)
+	writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(ghostBin))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
@@ -338,8 +380,9 @@ func TestStatusOpencode_CleanSetupHealthy(t *testing.T) {
 
 	output := out.String()
 	for _, want := range []string{
-		"✓ ghost binary: " + stubPath(binDir, "ghost"),
+		"✓ ghost binary: " + ghostBin,
 		"✓ lifecycle plugin installed: ",
+		"✓ ghost MCP server registered in opencode config",
 		"- no Ghost database (run ghost first)",
 		"All checks passed.",
 	} {
@@ -369,7 +412,11 @@ func TestStatusOpencode_PluginMissing(t *testing.T) {
 	for name, seed := range cases {
 		t.Run(name, func(t *testing.T) {
 			statusEnv(t)
-			t.Setenv("PATH", writeStubGhost(t))
+			binDir := writeStubGhost(t)
+			t.Setenv("PATH", binDir)
+			// The registration is seeded too, so this table isolates the
+			// plugin check: exactly one check may fail per case.
+			writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(stubPath(binDir, "ghost")))
 			seed(t)
 
 			var out bytes.Buffer
@@ -387,6 +434,819 @@ func TestStatusOpencode_PluginMissing(t *testing.T) {
 			}
 			if strings.Contains(output, "All checks passed.") {
 				t.Errorf("%s: must not report \"All checks passed.\", got:\n%s", name, output)
+			}
+		})
+	}
+}
+
+// TestStatusOpencode_MCPRegistration pins the opencode registration check
+// (#631): a present, enabled mcp.ghost entry whose command resolves to an
+// executable ghost binary passes — in either config spelling opencode reads,
+// JSONC comments and trailing commas included — while a missing, disabled or
+// wrong-path registration is always reported, naming the file and the edit
+// that repairs it. Health weight follows the lifecycle plugin: with the
+// plugin current, it registers ghost at startup and overrides whatever the
+// file says, so the line is informational and the run stays green (the
+// documented plugin-only install must never fail here); with the plugin
+// missing, the file is the only registration surface, so the same line fails
+// the run and the footer names the config edit — init never writes it.
+func TestStatusOpencode_MCPRegistration(t *testing.T) {
+	cases := map[string]struct {
+		// seed writes the opencode config the case needs and returns the
+		// failure substring the status output must carry, or "" when the
+		// registration check must pass.
+		seed func(t *testing.T, ghostBin string) string
+		// cannotJudge marks the cases where status never reaches a verdict
+		// about the entry — a config layer it could not read or parse. Those
+		// fail the run under *both* gates: opencode drops a layer it cannot
+		// parse, so the plugin's registration does not make the entry known,
+		// only unjudged.
+		cannotJudge bool
+	}{
+		"present in opencode.jsonc": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(ghostBin))
+			return ""
+		}},
+		"present in opencode.json": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.json", opencodeMCPRegistration(ghostBin))
+			return ""
+		}},
+		"jsonc with comments and trailing commas": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.jsonc", fmt.Sprintf(`{
+  // Ghost's own registration; opencode allows comments and trailing commas.
+  /* the lifecycle plugin bridges stop events */
+  "mcp": {
+    "ghost": {
+      "type": "local",
+      "command": [%q, "mcp"],
+      "enabled": true,
+    },
+  },
+}`, ghostBin))
+			return ""
+		}},
+		"jsonc preferred over a stale opencode.json": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(ghostBin))
+			writeOpencodeMCPConfig(t, "opencode.json", `{"mcp": {"ghost": {"enabled": false}}}`)
+			return ""
+		}},
+		"no config file at all": {seed: func(t *testing.T, ghostBin string) string {
+			return "no opencode config file"
+		}},
+		"config without an mcp.ghost entry": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.jsonc", `{"model": "anthropic/claude-sonnet-4-5"}`)
+			return "ghost MCP server missing from"
+		}},
+		"disabled": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.jsonc", fmt.Sprintf(
+				`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": false}}}`, ghostBin))
+			return "ghost MCP server disabled"
+		}},
+		"points at a different binary": {seed: func(t *testing.T, ghostBin string) string {
+			// A second executable that resolves — but is not the ghost on
+			// PATH: resolving at all is not enough, it must be the right one.
+			other := writeStub(t, t.TempDir(), "ghost-old")
+			writeOpencodeMCPConfig(t, "opencode.jsonc", fmt.Sprintf(
+				`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": true}}}`, other))
+			return "not the ghost binary"
+		}},
+		"command path does not exist": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.jsonc", fmt.Sprintf(
+				`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": true}}}`,
+				filepath.Join(t.TempDir(), "ghost")))
+			return "is not an executable file"
+		}},
+		"command does not run ghost mcp": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.jsonc", fmt.Sprintf(
+				`{"mcp": {"ghost": {"type": "local", "command": [%q], "enabled": true}}}`, ghostBin))
+			return "ghost MCP server command in"
+		}},
+		"unparseable config": {seed: func(t *testing.T, ghostBin string) string {
+			writeOpencodeMCPConfig(t, "opencode.jsonc", `{"mcp": {"ghost": `)
+			return "cannot parse"
+		}, cannotJudge: true},
+		"unreadable config": {seed: func(t *testing.T, ghostBin string) string {
+			// A directory where opencode.jsonc belongs: stat finds it, read
+			// fails for every user (EISDIR), so status reaches no verdict.
+			path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode", "opencode.jsonc")
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				t.Fatalf("mkdir config path: %v", err)
+			}
+			return "cannot read"
+		}, cannotJudge: true},
+	}
+
+	for name, tc := range cases {
+		for _, pluginCurrent := range []bool{true, false} {
+			gate := "plugin current"
+			if !pluginCurrent {
+				gate = "plugin missing"
+			}
+			t.Run(name+" / "+gate, func(t *testing.T) {
+				statusEnv(t)
+				binDir := writeStubGhost(t)
+				t.Setenv("PATH", binDir)
+				ghostBin := stubPath(binDir, "ghost")
+				if pluginCurrent {
+					installOpencodePluginFile(t, ghostBin)
+				}
+				wantFail := tc.seed(t, ghostBin)
+
+				var out bytes.Buffer
+				healthy, err := StatusOpencode(&out)
+				if err != nil {
+					t.Fatalf("StatusOpencode: %v", err)
+				}
+				output := out.String()
+
+				if wantFail == "" {
+					if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+						t.Errorf("%s: expected a passing registration check, got:\n%s", name, output)
+					}
+					if pluginCurrent {
+						if !healthy {
+							t.Errorf("%s: healthy = false, want true with a current registration, got:\n%s", name, output)
+						}
+						if !strings.Contains(output, "All checks passed.") {
+							t.Errorf("%s: expected \"All checks passed.\", got:\n%s", name, output)
+						}
+						if strings.Contains(output, "✗") {
+							t.Errorf("%s: a current registration must be the only registration line, got:\n%s", name, output)
+						}
+						return
+					}
+					// Plugin missing: the plugin check alone fails the run,
+					// and a passing registration adds no config-edit advice.
+					if healthy {
+						t.Errorf("%s: healthy = true, want false without a lifecycle plugin, got:\n%s", name, output)
+					}
+					if !strings.Contains(output, "✗ lifecycle plugin missing or outdated") {
+						t.Errorf("%s: expected failed plugin check, got:\n%s", name, output)
+					}
+					if strings.Contains(output, "config edit") {
+						t.Errorf("%s: a passing registration must not produce the config-edit footer, got:\n%s", name, output)
+					}
+					return
+				}
+
+				if !strings.Contains(output, wantFail) {
+					t.Errorf("%s: expected failure %q, got:\n%s", name, wantFail, output)
+				}
+				line := statusLineContaining(output, wantFail)
+
+				if pluginCurrent {
+					if tc.cannotJudge {
+						// A layer status could not read or parse is not a
+						// state the plugin's registration papers over: the
+						// layer's contents never reach opencode, so status
+						// cannot claim the entry is covered — it could not
+						// judge it. The run must stay red either way.
+						if healthy {
+							t.Errorf("%s: plugin current — an unreadable config layer must fail the run, got:\n%s", name, output)
+						}
+						if !strings.HasPrefix(line, "  ✗ ") {
+							t.Errorf("%s: expected a failed \"  ✗ \" check line for %q, got line %q (full output:\n%s)",
+								name, wantFail, line, output)
+						}
+						if strings.Contains(output, "All checks passed.") {
+							t.Errorf("%s: must not report \"All checks passed.\", got:\n%s", name, output)
+						}
+						if strings.Contains(output, "the file entry is only the fallback") {
+							t.Errorf("%s: an unjudged config layer must not be reported as the covered fallback, got:\n%s", name, output)
+						}
+						if !strings.Contains(output, "could not be read or parsed") {
+							t.Errorf("%s: expected the config-repair footer for an unreadable layer, got:\n%s", name, output)
+						}
+						assertNoInitFooter(t, name, output)
+						return
+					}
+					// The plugin registers ghost at startup and overrides the
+					// file, so a broken entry is reported but never failed —
+					// this is the documented plugin-only install staying green.
+					if !healthy {
+						t.Errorf("%s: plugin current — a broken file entry must not fail the run, got:\n%s", name, output)
+					}
+					if !strings.HasPrefix(line, "  - ") {
+						t.Errorf("%s: expected an informational \"  - \" line for %q, got line %q (full output:\n%s)",
+							name, wantFail, line, output)
+					}
+					if strings.Contains(output, "✗") {
+						t.Errorf("%s: plugin current — no check may fail, got:\n%s", name, output)
+					}
+					if !strings.Contains(output, "All checks passed.") {
+						t.Errorf("%s: expected \"All checks passed.\", got:\n%s", name, output)
+					}
+					return
+				}
+
+				// Plugin missing: the file is the only registration surface,
+				// so the same message fails the run — with a footer that says
+				// how to repair it, since init never writes this file.
+				if healthy {
+					t.Errorf("%s: healthy = true, want false without a valid registration, got:\n%s", name, output)
+				}
+				if !strings.HasPrefix(line, "  ✗ ") {
+					t.Errorf("%s: expected a failed \"  ✗ \" check line for %q, got line %q (full output:\n%s)",
+						name, wantFail, line, output)
+				}
+				if strings.Contains(output, "All checks passed.") {
+					t.Errorf("%s: must not report \"All checks passed.\", got:\n%s", name, output)
+				}
+				wantFooter := "mcp.ghost entry shown above is a config edit"
+				if tc.cannotJudge {
+					wantFooter = "could not be read or parsed"
+				}
+				if !strings.Contains(output, wantFooter) {
+					t.Errorf("%s: expected the footer %q, got:\n%s", name, wantFooter, output)
+				}
+				assertNoInitFooter(t, name, output)
+			})
+		}
+	}
+}
+
+// assertNoInitFooter pins that a registration failure prints exactly one
+// remediation, never two contradictory ones. `ghost mcp init --client
+// opencode` writes the lifecycle adapter and never the user's opencode
+// config, so telling the user to run it is wrong advice for every failure
+// that reports a config repair — the two lines sit adjacent and contradict
+// ("run mcp init" above "…apply it to opencode's config file (`ghost mcp
+// init` never writes that file)").
+func assertNoInitFooter(t *testing.T, name, output string) {
+	t.Helper()
+	if strings.Contains(output, "Run `ghost mcp init --client opencode` to fix issues.") {
+		t.Errorf("%s: a config repair must not also print \"run ghost mcp init\" advice, got:\n%s", name, output)
+	}
+}
+
+// TestStatusOpencode_UnresolvableConfigDir pins the unjudgeable path that
+// involves no config file at all: with no $HOME and no XDG_CONFIG_HOME or
+// $OPENCODE_CONFIG_DIR, opencode's config directory cannot be resolved. The
+// run is still red — nothing about the registration can be asserted — but the
+// footer must not tell the user to repair a config file, because no file was
+// ever named. The plugin check above already reports the same root cause.
+func TestStatusOpencode_UnresolvableConfigDir(t *testing.T) {
+	statusEnv(t)
+	binDir := writeStubGhost(t)
+	t.Setenv("PATH", binDir)
+	// An empty config dir string is a real failure mode (a service manager
+	// or a container that exports neither), not a test-only contrivance.
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	setHome(t, "") // both vars os.UserHomeDir reads, so the resolution fails everywhere
+
+	var out bytes.Buffer
+	healthy, err := StatusOpencode(&out)
+	if err != nil {
+		t.Fatalf("StatusOpencode: %v", err)
+	}
+	output := out.String()
+	if healthy {
+		t.Errorf("healthy = true with no resolvable config directory, got:\n%s", output)
+	}
+	if !strings.Contains(output, "home dir") {
+		t.Errorf("expected the root cause named on a check line, got:\n%s", output)
+	}
+	for _, wrong := range []string{
+		"could not be read or parsed",
+		"is a config edit",
+		"no opencode config file",
+	} {
+		if strings.Contains(output, wrong) {
+			t.Errorf("%q must not be reported when no config file was ever named, got:\n%s", wrong, output)
+		}
+	}
+}
+
+// TestStatusOpencode_DocumentedPluginOnlyInstallStaysHealthy pins the review
+// gate on #631: `ghost mcp init --client opencode` installs only the
+// lifecycle plugin — never an opencode config file — and that plugin
+// registers ghost at startup (config hook in V1, ctx.mcp.transform in V2),
+// overriding whatever the file says. The documented install therefore has no
+// mcp.ghost entry at all, and status must stay green, reporting the absent
+// entry as the fallback it is instead of failing the run on it.
+func TestStatusOpencode_DocumentedPluginOnlyInstallStaysHealthy(t *testing.T) {
+	statusEnv(t)
+	binDir := writeStubGhost(t)
+	t.Setenv("PATH", binDir)
+	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
+
+	var out bytes.Buffer
+	healthy, err := StatusOpencode(&out)
+	if err != nil {
+		t.Fatalf("StatusOpencode: %v", err)
+	}
+	if !healthy {
+		t.Errorf("StatusOpencode: healthy = false — the documented plugin-only install must stay green, got:\n%s", out.String())
+	}
+
+	output := out.String()
+	if strings.Contains(output, "✗") {
+		t.Errorf("a documented plugin-only install must have no failed checks, got:\n%s", output)
+	}
+	if !strings.Contains(output, "All checks passed.") {
+		t.Errorf("expected \"All checks passed.\", got:\n%s", output)
+	}
+	line := statusLineContaining(output, "no opencode config file")
+	if !strings.HasPrefix(line, "  - ") {
+		t.Errorf("expected the absent entry as an informational line, got line %q (full output:\n%s)", line, output)
+	}
+}
+
+// TestStatusOpencode_OPENCODEConfigEnv pins that the custom config path
+// opencode itself honors ($OPENCODE_CONFIG) is part of what status reports
+// on, merged over the global file the way opencode merges config layers: a
+// higher layer overriding `enabled` wins, a higher layer without the entry
+// must not hide the global one, and a higher layer that empties a key
+// overrides it rather than inheriting it. A per-checkout `opencode.json` and
+// the `.opencode` directory are deliberately not judged: either would make
+// the verdict depend on the directory the command was typed in.
+func TestStatusOpencode_OPENCODEConfigEnv(t *testing.T) {
+	t.Run("custom path overriding enabled wins", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		// No plugin: the gate is hard, so the verdict must come from the
+		// merged config files rather than the plugin's runtime registration.
+		writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+		custom := filepath.Join(t.TempDir(), "custom-opencode.jsonc")
+		if err := os.WriteFile(custom, []byte(`{"mcp": {"ghost": {"enabled": false}}}`), 0o644); err != nil {
+			t.Fatalf("write custom config: %v", err)
+		}
+		t.Setenv("OPENCODE_CONFIG", custom)
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if healthy {
+			t.Errorf("healthy = true — $OPENCODE_CONFIG disabling ghost must fail the run, got:\n%s", output)
+		}
+		line := statusLineContaining(output, "ghost MCP server disabled")
+		if !strings.HasPrefix(line, "  ✗ ") {
+			t.Errorf("expected a failed check line, got %q (full output:\n%s)", line, output)
+		}
+		if !strings.Contains(line, custom) {
+			t.Errorf("expected the failure to name $OPENCODE_CONFIG %q, got %q", custom, line)
+		}
+	})
+
+	t.Run("custom path enabling a disabled global entry wins", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		// The documented override pattern: the lower layer carries the whole
+		// entry but disabled, the higher layer flips only `enabled` — the
+		// command below must survive the merge.
+		writeOpencodeMCPConfig(t, "opencode.jsonc", fmt.Sprintf(
+			`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": false}}}`,
+			stubPath(binDir, "ghost")))
+		custom := filepath.Join(t.TempDir(), "enable-ghost.jsonc")
+		if err := os.WriteFile(custom, []byte(`{"mcp": {"ghost": {"enabled": true}}}`), 0o644); err != nil {
+			t.Fatalf("write custom config: %v", err)
+		}
+		t.Setenv("OPENCODE_CONFIG", custom)
+
+		var out bytes.Buffer
+		if _, err := StatusOpencode(&out); err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+			t.Errorf("the custom layer must enable the merged entry without losing the command, got:\n%s", output)
+		}
+	})
+
+	t.Run("custom path without the entry keeps the global one", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+		// A policy-style override file carrying no mcp key at all — opencode
+		// merges it with the global file, so the entry below still applies.
+		custom := filepath.Join(t.TempDir(), "policy-only.jsonc")
+		if err := os.WriteFile(custom, []byte(`{"permissions": {"*": "ask"}}`), 0o644); err != nil {
+			t.Fatalf("write custom config: %v", err)
+		}
+		t.Setenv("OPENCODE_CONFIG", custom)
+
+		var out bytes.Buffer
+		if _, err := StatusOpencode(&out); err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+			t.Errorf("the global entry must survive a $OPENCODE_CONFIG file without one, got:\n%s", output)
+		}
+		if strings.Contains(output, "ghost MCP server missing from") {
+			t.Errorf("must not report the entry missing when the global file provides it, got:\n%s", output)
+		}
+	})
+
+	t.Run("a merged failure names the layer that carries the offending key",
+		func(t *testing.T) {
+			cases := map[string]struct {
+				// global is the lower layer; custom the higher one, and only
+				// one of the two carries the key the verdict complains about.
+				global  func(ghostBin string) string
+				custom  func(ghostBin string) string
+				wantMsg string
+			}{
+				"the disabled flag is below, the command is overridden above": {
+					global: func(ghostBin string) string {
+						return fmt.Sprintf(
+							`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": false}}}`, ghostBin)
+					},
+					custom: func(ghostBin string) string {
+						return fmt.Sprintf(`{"mcp": {"ghost": {"command": [%q, "mcp"]}}}`, ghostBin)
+					},
+					wantMsg: "ghost MCP server disabled",
+				},
+				"the stale command is below, only enabled is flipped above": {
+					global: func(ghostBin string) string {
+						return fmt.Sprintf(
+							`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": true}}}`,
+							filepath.Join(t.TempDir(), "ghost"))
+					},
+					custom:  func(ghostBin string) string { return `{"mcp": {"ghost": {"enabled": true}}}` },
+					wantMsg: "is not an executable file",
+				},
+			}
+			for name, tc := range cases {
+				t.Run(name, func(t *testing.T) {
+					statusEnv(t)
+					binDir := writeStubGhost(t)
+					t.Setenv("PATH", binDir)
+					ghostBin := stubPath(binDir, "ghost")
+					// The offending key lives in the global file; the custom
+					// file merely mentions the entry. Sending the user to the
+					// wrong file is the one thing these messages must not do,
+					// because the entry there is already correct.
+					global := writeOpencodeMCPConfig(t, "opencode.jsonc", tc.global(ghostBin))
+					custom := filepath.Join(t.TempDir(), "mentions-ghost.jsonc")
+					if err := os.WriteFile(custom, []byte(tc.custom(ghostBin)), 0o644); err != nil {
+						t.Fatalf("write custom config: %v", err)
+					}
+					t.Setenv("OPENCODE_CONFIG", custom)
+
+					var out bytes.Buffer
+					if _, err := StatusOpencode(&out); err != nil {
+						t.Fatalf("StatusOpencode: %v", err)
+					}
+					output := out.String()
+					line := statusLineContaining(output, tc.wantMsg)
+					if !strings.HasPrefix(line, "  ✗ ") {
+						t.Fatalf("expected a failed check line for %q, got %q (full output:\n%s)", tc.wantMsg, line, output)
+					}
+					if !strings.Contains(line, global) {
+						t.Errorf("the failing key is in the global file %q, so the message must name it, got %q", global, line)
+					}
+					if strings.Contains(line, custom) {
+						t.Errorf("the custom layer carries no offending key, so it must not be named: %q", line)
+					}
+				})
+			}
+		})
+
+	t.Run("custom path with an empty command overrides the global entry", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		// A higher layer that *sets* a key to an empty value still wins:
+		// opencode overrides conflicting keys rather than treating an
+		// explicitly empty array as absent, so the merged entry has no
+		// command at all and cannot be spawned.
+		writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+		custom := filepath.Join(t.TempDir(), "empty-command.jsonc")
+		if err := os.WriteFile(custom, []byte(`{"mcp": {"ghost": {"command": []}}}`), 0o644); err != nil {
+			t.Fatalf("write custom config: %v", err)
+		}
+		t.Setenv("OPENCODE_CONFIG", custom)
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if healthy {
+			t.Errorf("healthy = true — the custom layer emptied the command, got:\n%s", output)
+		}
+		line := statusLineContaining(output, "ghost MCP server command in")
+		if !strings.HasPrefix(line, "  ✗ ") {
+			t.Errorf("expected a failed check line, got %q (full output:\n%s)", line, output)
+		}
+		if !strings.Contains(line, custom) {
+			t.Errorf("expected the failure to name the layer that emptied the command %q, got %q", custom, line)
+		}
+	})
+
+	t.Run("unset custom path file falls back to the global file", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+		t.Setenv("OPENCODE_CONFIG", filepath.Join(t.TempDir(), "does-not-exist.json"))
+
+		var out bytes.Buffer
+		if _, err := StatusOpencode(&out); err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+			t.Errorf("a $OPENCODE_CONFIG pointing at no file must not hide the global entry, got:\n%s", output)
+		}
+	})
+}
+
+// TestStatusOpencode_OPENCODEConfigDir pins the config *directory* opencode
+// resolves through $OPENCODE_CONFIG_DIR (probed on opencode v2.0.15: `opencode
+// debug paths` reports config = $OPENCODE_CONFIG_DIR when it is set and
+// <XDG_CONFIG_HOME>/opencode otherwise, and `opencode debug config` lists the
+// document from the one it chose). Status must judge the file opencode
+// actually reads — otherwise it reports on, and names as the repair target, a
+// file opencode never opens.
+func TestStatusOpencode_OPENCODEConfigDir(t *testing.T) {
+	t.Run("config dir file replaces the XDG file", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		ghostBin := stubPath(binDir, "ghost")
+		// The XDG file opencode ignores when OPENCODE_CONFIG_DIR is set
+		// carries a perfect registration; the file opencode does read
+		// disables ghost. A verdict from the wrong file would pass here.
+		writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(ghostBin))
+		configDir := t.TempDir()
+		t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+		dirFile := filepath.Join(configDir, "opencode.jsonc")
+		if err := os.WriteFile(dirFile, []byte(fmt.Sprintf(
+			`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": false}}}`, ghostBin)), 0o644); err != nil {
+			t.Fatalf("write config dir file: %v", err)
+		}
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if healthy {
+			t.Errorf("healthy = true — the $OPENCODE_CONFIG_DIR file disables ghost, got:\n%s", output)
+		}
+		line := statusLineContaining(output, "ghost MCP server disabled")
+		if !strings.HasPrefix(line, "  ✗ ") {
+			t.Errorf("expected a failed check line, got %q (full output:\n%s)", line, output)
+		}
+		if !strings.Contains(line, dirFile) {
+			t.Errorf("expected the failure to name the $OPENCODE_CONFIG_DIR file %q, got %q", dirFile, line)
+		}
+		if strings.Contains(line, filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode")) {
+			t.Errorf("the XDG file is not the config layer opencode reads here, got %q", line)
+		}
+	})
+
+	t.Run("missing entry names the config dir file", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		configDir := t.TempDir()
+		t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if healthy {
+			t.Errorf("healthy = true with no registration at all, got:\n%s", output)
+		}
+		want := filepath.Join(configDir, "opencode.jsonc")
+		line := statusLineContaining(output, "no opencode config file")
+		if !strings.Contains(line, want) {
+			t.Errorf("expected the repair target to be the $OPENCODE_CONFIG_DIR file %q, got %q", want, line)
+		}
+	})
+
+	t.Run("plugin is read from the config dir", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		ghostBin := stubPath(binDir, "ghost")
+		configDir := t.TempDir()
+		t.Setenv("OPENCODE_CONFIG_DIR", configDir)
+		// opencode loads plugins from the directory it resolved as its
+		// config dir, so that is where init must place the adapter and
+		// where status must look for it.
+		installOpencodePluginFile(t, ghostBin)
+		pluginPath := filepath.Join(configDir, "plugins", "ghost-opencode.ts")
+		if _, err := os.Stat(pluginPath); err != nil {
+			t.Fatalf("the lifecycle plugin must be installed under the $OPENCODE_CONFIG_DIR tree: %v", err)
+		}
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if !strings.Contains(output, "lifecycle plugin installed: "+pluginPath) {
+			t.Errorf("expected status to report the plugin under the config dir, got:\n%s", output)
+		}
+		if !healthy || !strings.Contains(output, "All checks passed.") {
+			t.Errorf("a plugin installed where opencode loads it must stay healthy, got:\n%s", output)
+		}
+	})
+
+	t.Run("plugin left in the XDG tree is not loaded", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		ghostBin := stubPath(binDir, "ghost")
+		// Seed the adapter at the default XDG location only, then point
+		// opencode at another config dir: opencode resolves one config
+		// directory, so an adapter outside it never loads and status must
+		// not bless it as current.
+		writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(ghostBin))
+		writePluginFile(t, renderOpencodeGhostPlugin(ghostBin))
+		t.Setenv("OPENCODE_CONFIG_DIR", t.TempDir())
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if healthy {
+			t.Errorf("healthy = true with the adapter outside opencode's config dir, got:\n%s", output)
+		}
+		if !strings.Contains(output, "lifecycle plugin missing or outdated") {
+			t.Errorf("expected the out-of-tree adapter to be reported missing, got:\n%s", output)
+		}
+	})
+}
+
+// TestStatusOpencode_ConfigDirBothFiles pins that the two config spellings in
+// opencode's config directory are BOTH layers, not an either/or choice.
+// Confirmed in opencode v2.0.15: the config-file list is
+// ["opencode.json","opencode.jsonc"], the global-dir loader maps over that
+// list and keeps every document that parsed, and the loader returns them in
+// that order with later documents winning — so an unrelated opencode.jsonc
+// must never hide an mcp.ghost that lives in opencode.json, and opencode.jsonc
+// is the one that wins a conflict. (Hermetic probe: with both files present
+// `opencode debug config` lists two documents, one per file.)
+func TestStatusOpencode_ConfigDirBothFiles(t *testing.T) {
+	t.Run("entry in opencode.json, unrelated opencode.jsonc", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		writeOpencodeMCPConfig(t, "opencode.json", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+		// A JSONC file the user edits for comments, carrying no MCP block at
+		// all. Stopping the layer walk here would report the entry missing
+		// for a server opencode starts.
+		writeOpencodeMCPConfig(t, "opencode.jsonc", "{\n  // my notes\n  \"autoupdate\": false,\n}\n")
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+			t.Errorf("the opencode.json entry must be judged even with an unrelated opencode.jsonc present, got:\n%s", output)
+		}
+		if strings.Contains(output, "ghost MCP server missing from") {
+			t.Errorf("must not report the entry missing when opencode.json carries it, got:\n%s", output)
+		}
+		// The run stays red only because this subtest installs no lifecycle
+		// plugin; the registration check itself must pass.
+		if healthy {
+			t.Errorf("healthy = true without a lifecycle plugin, got:\n%s", output)
+		}
+	})
+
+	t.Run("entry in opencode.jsonc, unrelated opencode.json", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		writeOpencodeMCPConfig(t, "opencode.json", `{"model": "anthropic/claude-sonnet-4-5"}`)
+		writeOpencodeMCPConfig(t, "opencode.jsonc", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+
+		var out bytes.Buffer
+		healthy, err := StatusOpencode(&out)
+		if err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+			t.Errorf("the opencode.jsonc entry must be judged with an unrelated opencode.json present, got:\n%s", output)
+		}
+		if healthy {
+			t.Errorf("healthy = true without a lifecycle plugin, got:\n%s", output)
+		}
+	})
+
+	t.Run("opencode.jsonc wins the conflicting key", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		// The full entry below, one flipped key above: later layers override
+		// earlier ones, so the disable in opencode.jsonc is the effective one.
+		writeOpencodeMCPConfig(t, "opencode.json", opencodeMCPRegistration(stubPath(binDir, "ghost")))
+		jsonc := writeOpencodeMCPConfig(t, "opencode.jsonc", `{"mcp": {"ghost": {"enabled": false}}}`)
+
+		var out bytes.Buffer
+		if _, err := StatusOpencode(&out); err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		line := statusLineContaining(output, "ghost MCP server disabled")
+		if !strings.HasPrefix(line, "  ✗ ") {
+			t.Fatalf("opencode.jsonc overrides opencode.json, so the disable must fail the run, got %q (full output:\n%s)", line, output)
+		}
+		if !strings.Contains(line, jsonc) {
+			t.Errorf("the disable lives in %q, so that is the file to name, got %q", jsonc, line)
+		}
+	})
+
+	t.Run("opencode.json keeps the keys opencode.jsonc does not set", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		// Merge is per key, not per file: the higher layer sets only `type`,
+		// so the command and the disabled flag below it both survive and the
+		// failure must point at the file that carries `enabled: false`.
+		json := writeOpencodeMCPConfig(t, "opencode.json", fmt.Sprintf(
+			`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": false}}}`,
+			stubPath(binDir, "ghost")))
+		writeOpencodeMCPConfig(t, "opencode.jsonc", `{"mcp": {"ghost": {"type": "local"}}}`)
+
+		var out bytes.Buffer
+		if _, err := StatusOpencode(&out); err != nil {
+			t.Fatalf("StatusOpencode: %v", err)
+		}
+		output := out.String()
+		line := statusLineContaining(output, "ghost MCP server disabled")
+		if !strings.HasPrefix(line, "  ✗ ") {
+			t.Fatalf("expected the merged entry to be disabled, got %q (full output:\n%s)", line, output)
+		}
+		if !strings.Contains(line, json) {
+			t.Errorf("`enabled: false` lives in %q, so that is the file to name, got %q", json, line)
+		}
+	})
+}
+
+// TestStatusOpencode_OPENCODEConfigContentEnv pins inline config: when
+// $OPENCODE_CONFIG_CONTENT supplies configuration with no file on disk at
+// all, status must judge the mcp.ghost entry it carries — passing when the
+// content registers ghost, failing with the content named when it disables
+// it — instead of reporting "no opencode config file".
+func TestStatusOpencode_OPENCODEConfigContentEnv(t *testing.T) {
+	cases := map[string]struct {
+		content  func(ghostBin string) string
+		wantFail string
+	}{
+		"content registers ghost": {
+			content:  opencodeMCPRegistration,
+			wantFail: "",
+		},
+		"content disables ghost": {
+			content: func(ghostBin string) string {
+				return fmt.Sprintf(
+					`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": false}}}`, ghostBin)
+			},
+			wantFail: "ghost MCP server disabled in $OPENCODE_CONFIG_CONTENT",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			statusEnv(t)
+			binDir := writeStubGhost(t)
+			t.Setenv("PATH", binDir)
+			ghostBin := stubPath(binDir, "ghost")
+			t.Setenv("OPENCODE_CONFIG_CONTENT", tc.content(ghostBin))
+
+			var out bytes.Buffer
+			healthy, err := StatusOpencode(&out)
+			if err != nil {
+				t.Fatalf("StatusOpencode: %v", err)
+			}
+			output := out.String()
+
+			if tc.wantFail == "" {
+				if !strings.Contains(output, "✓ ghost MCP server registered in opencode config") {
+					t.Errorf("expected the inline config's registration to pass, got:\n%s", output)
+				}
+				return
+			}
+			if healthy {
+				t.Errorf("healthy = true, want false when the inline config disables ghost, got:\n%s", output)
+			}
+			line := statusLineContaining(output, tc.wantFail)
+			if !strings.HasPrefix(line, "  ✗ ") {
+				t.Errorf("expected a failed check line naming $OPENCODE_CONFIG_CONTENT, got %q (full output:\n%s)", line, output)
 			}
 		})
 	}
@@ -423,6 +1283,7 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
 	}
 
 	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
+	writeOpencodeMCPConfig(t, "opencode.json", opencodeMCPRegistration(stubPath(binDir, "ghost")))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
