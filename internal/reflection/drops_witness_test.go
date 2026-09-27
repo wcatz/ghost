@@ -167,14 +167,27 @@ func TestPromptTellsTheModelARewriteMayComeBack(t *testing.T) {
 		t.Errorf("the obsolete bullet runs its two spliced clauses together: %q", obsolete)
 	}
 
-	// The second staleTail splice site, in the RULES section — the mirror of the
-	// --allow-drops assertion in the test below. staleTail appears twice in the
-	// retention prompt (this line and the obsolete bullet), and only the obsolete
-	// bullet was checked, so replacing this splice with the other mode's tail or a
-	// hardcoded literal would have left the whole suite green: the prompt would
-	// tell the model a stale memory is re-added in one place and deleted in the
-	// other, and the per-bullet assertions would each pass on the bullet they
-	// were written against.
+	// The RULES-section "- Drop stale situational memories" line is the SECOND of
+	// the two sites that splice the mode-dependent staleTail, and it is pinned in
+	// the retention direction here for one narrow reason, which is worth stating
+	// precisely because most mutations here are already caught elsewhere.
+	//
+	// What is ALREADY covered without these two assertions, each verified by
+	// mutation: rewording staleTail's retention value (the sentence-boundary
+	// assertion above reads the same variable through the obsolete bullet);
+	// splicing the other mode's tail in (fabrication_test.go rejects
+	// "a drop nothing explains is a real deletion" from the retention prompt
+	// prompt-wide); a neutral hardcoded literal, or countTail, spliced in (the
+	// --allow-drops per-bullet assertion below reads this same line, and a
+	// template-line literal renders in both modes).
+	//
+	// What only these catch: a tail for this line that is CORRECT under
+	// --allow-drops and wrong in the retention prompt. Because the allow-drops
+	// assertions already pin this bullet's other-mode rendering, a
+	// mode-dependent tail written fresh for this line passes them while the
+	// retention prompt tells the model something the guard does not do — the
+	// prompt would re-add in the obsolete bullet and hedge in the rules
+	// section, and every other assertion in the package would stay green.
 	stale := bullet(t, prompt, "- Drop stale situational memories")
 	if !strings.Contains(stale, "since a drop nothing explains is undone by the verbatim re-add.") {
 		t.Errorf("the stale-memories rule does not carry the retention staleTail: %q", stale)

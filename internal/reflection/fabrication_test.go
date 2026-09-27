@@ -291,11 +291,11 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		// The mode-dependent tail spliced into the obsolete bullet and into the
 		// "drop stale situational memories" rule is staleTail, so this is the
 		// wording a leaked DEFAULT tail would carry. obsoleteTail's own text
-		// cannot do the job in either direction: it is byte-identical in both
-		// modes, so it is present whether or not a tail leaked, and its absence
-		// would say nothing about the mode. (It IS in the prompt — asserted in
-		// the retention branch above — which is the other half of why an
-		// obsoleteTail literal here is a no-op.)
+		// cannot do this job in either direction: it is byte-identical in both
+		// modes, so it is present whether or not a tail leaked — its presence
+		// detects nothing, and its absence would say nothing about the mode
+		// either. (It IS in the prompt, asserted in the retention branch above,
+		// which is the other half of why a literal drawn from it is a no-op here.)
 		"since a drop nothing explains is undone by the verbatim re-add",
 	} {
 		if strings.Contains(dropping, unwanted) {
