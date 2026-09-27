@@ -3,11 +3,14 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -291,7 +294,10 @@ for name in AWS_SECRET_ACCESS_KEY GITHUB_TOKEN GHOST_API_KEY GHOST_DATABASE_URL;
   eval "value=\${$name-}"
   [ -z "$value" ] || { echo "leaked $name" >&2; exit 1; }
 done
-[ "$GOOSE_PATH_ROOT" = "/decoy/goose" ] || { echo "missing Goose root" >&2; exit 1; }
+# GOOSE_PATH_ROOT is the variable goose consults FIRST, so the child must not
+# keep the real one: the decoy /decoy/goose is a real plugin root, and passing
+# it through is what let the child find Ghost's own package.
+case "$GOOSE_PATH_ROOT" in "/decoy/goose") echo "GOOSE_PATH_ROOT passed through unconfined" >&2; exit 1;; esac
 [ -z "$OPENCODE_API_KEY" ] || { echo "OpenCode key leaked to Goose" >&2; exit 1; }
 args="$*"
 case "$args" in *" --no-profile"*) ;; *) echo "missing --no-profile" >&2; exit 1;; esac
@@ -306,6 +312,643 @@ printf '%s' 'KEEP'
 	if text != "KEEP" {
 		t.Fatalf("stdout = %q", text)
 	}
+}
+
+// TestFirstExistingAncestor: the walk's two bounds are load-bearing. It must
+// start at the path itself, or the contract in its own comment is a lie; and it
+// must stop at a CLEANED home, because a HOME that is not already clean (a
+// trailing separator is set by launchers and systemd units) would never match
+// and the walk would climb above the home — where a file can be found and an
+// unused platform location blamed for it.
+func TestFirstExistingAncestor(t *testing.T) {
+	home := t.TempDir()
+	deep := filepath.Join(home, "Library", "Application Support", "goose")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("starts at the path itself", func(t *testing.T) {
+		got, info, err := firstExistingAncestor(deep, home, os.Stat)
+		if err != nil {
+			t.Fatalf("firstExistingAncestor: %v", err)
+		}
+		if got != deep {
+			t.Errorf("walk started at %q, want the path itself %q", got, deep)
+		}
+		if info == nil || !info.IsDir() {
+			t.Errorf("info = %v, want the directory at %q", info, deep)
+		}
+	})
+
+	t.Run("an unclean home still bounds the walk", func(t *testing.T) {
+		outer := t.TempDir()
+		inner := filepath.Join(outer, "home")
+		if err := os.MkdirAll(inner, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// The home reports absent, so the bound is the only thing that can stop
+		// the walk — and an unclean bound never matches, because the walk's
+		// values come from filepath.Dir and are always cleaned while
+		// HOME=/home/user/ (a trailing separator is set by launchers and
+		// systemd units) is not. Escaping the bound lets a location that is
+		// merely unused be refused, or blamed on an unrelated file above it.
+		missing := filepath.Join(inner, "no-such-dir", "goose")
+		visited := make(map[string]bool)
+		probe := func(name string) (os.FileInfo, error) {
+			visited[name] = true
+			if name == inner {
+				return nil, fs.ErrNotExist
+			}
+			return os.Lstat(name)
+		}
+		if _, _, err := firstExistingAncestor(missing, inner+string(os.PathSeparator), probe); err != nil {
+			t.Fatalf("firstExistingAncestor: %v", err)
+		}
+		for name := range visited {
+			clean := filepath.Clean(name)
+			if clean != inner && !strings.HasPrefix(clean, inner+string(os.PathSeparator)) {
+				t.Errorf("walk probed %q, outside the home %q — the bound did not hold", name, inner)
+			}
+		}
+	})
+}
+
+// A symlinked ancestor is a directory, not the fault this walk looks for. A
+// home that is entirely a symlink, or a ~/.config pointing into a dotfiles
+// repo, is ordinary — and treating the symlink as a non-directory would refuse
+// a perfectly good location and fail every goose call on those machines, for a
+// user who has simply never run `goose configure`.
+func TestGooseConfigRootToleratesASymlinkedAncestor(t *testing.T) {
+	real := t.TempDir()
+	realConfig := filepath.Join(real, "config")
+	if err := os.MkdirAll(realConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	link := filepath.Join(home, ".config")
+	if err := os.Symlink(realConfig, link); err != nil {
+		t.Skipf("this host cannot create a symlink: %v", err)
+	}
+	// No <link>/goose: the leaf is genuinely absent, which is the state that
+	// sent the walk climbing in the first place.
+	//
+	// Called through the production wrapper, not with probes spelled out here,
+	// so the wiring is what is under test: the two probes differ on purpose
+	// (Lstat for the leaf, Stat for the walk) and a test that passes them
+	// explicitly would keep passing if the wrapper regressed.
+	if err := linkGooseConfigDirs(t.TempDir(), []string{"HOME=" + home}, home); err != nil {
+		t.Fatalf("a symlinked ~/.config was refused: %v", err)
+	}
+}
+
+// TestGooseIsolationNamesTheDirectoryItCouldNotProbe: the failure this branch
+// reports is the only thing pointing at the cause, so it has to name the
+// directory the walk actually failed on. Reporting the leaf's error instead
+// says "no such file or directory" for a directory that exists and cannot be
+// read — a reader, or errors.Is against fs.ErrNotExist, would conclude the
+// location is merely unpopulated, which is the misreading this branch exists to
+// prevent.
+func TestGooseIsolationNamesTheDirectoryItCouldNotProbe(t *testing.T) {
+	home := t.TempDir()
+	blocked := filepath.Join(home, "Library", "Application Support")
+	if err := os.MkdirAll(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(name string) (os.FileInfo, error) {
+		if name == blocked {
+			return nil, &fs.PathError{Op: "lstat", Path: name, Err: syscall.EACCES}
+		}
+		return os.Lstat(name)
+	}
+
+	err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + home}, home, probe, probe)
+	if err == nil {
+		t.Fatal("an unreadable directory above the config root was skipped")
+	}
+	if !strings.Contains(err.Error(), blocked) {
+		t.Errorf("error %q does not name the directory that could not be probed (%s)", err, blocked)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error %q reads as 'not there' when the fault is an unreadable directory", err)
+	}
+}
+
+// TestGooseChildCannotDiscoverGhostsOwnPluginUnderPathRoot: goose resolves its
+// plugin directory from GOOSE_PATH_ROOT FIRST, before any home variable. In
+// goose's own Paths::get_dir, path_root() short-circuits the whole match, so
+// when that variable is set the child reads
+// $GOOSE_PATH_ROOT/.agents/plugins and home_dir() is never consulted — which
+// means an isolated HOME confines nothing.
+//
+// The allowlist passes GOOSE_PATH_ROOT through, so a user who sets it (a CI
+// environment, or GOOSE_PATH_ROOT=$HOME to relocate goose's own data) keeps
+// pointing the child at the real plugin root, and `ghost mcp init --client
+// goose` put Ghost's MCP server there. This drives the real spawn-env builder
+// rather than the isolation helper, because the wiring is the claim: the
+// variable has to be rewritten to a root inside the scratch home, and the real
+// config has to travel with it.
+func TestGooseChildCannotDiscoverGhostsOwnPluginUnderPathRoot(t *testing.T) {
+	realRoot := t.TempDir()
+	// The package `ghost mcp init --client goose` would have installed, and
+	// the config the child authenticates from.
+	plantPlugin(t, filepath.Join(realRoot, ".agents", "plugins", "ghost"))
+	plantGooseConfig(t, filepath.Join(realRoot, "config"))
+
+	bin := fakeHarnessPolicyBinary(t, "goose", `
+root="$GOOSE_PATH_ROOT"
+[ -e "$root/.agents/plugins/ghost/mcp.json" ] && { echo "goose child discovered Ghost's own plugin under GOOSE_PATH_ROOT=$root" >&2; exit 1; }
+[ -r "$root/config/config.yaml" ] || { echo "goose child lost the config it authenticates from" >&2; exit 1; }
+case "$root" in "$GHOST_SCRATCH_DIR"/*) ;; *) echo "GOOSE_PATH_ROOT not confined: $root" >&2; exit 1;; esac
+printf '%s' 'KEEP'
+`)
+
+	t.Setenv("HOME", realRoot)
+	t.Setenv("USERPROFILE", realRoot)
+	t.Setenv("GOOSE_PATH_ROOT", realRoot)
+
+	text, _, err := (&GooseClient{binary: bin}).Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if text != "KEEP" {
+		t.Fatalf("stdout = %q", text)
+	}
+}
+
+// TestGooseSubprocessEnvFallsBackToTempDirWhenScratchUnavailable covers the goose
+// fallback specifically: an unusable scratch root must not fail the run, and the
+// child still gets an isolated HOME — and an isolated GOOSE_PATH_ROOT, which is
+// the one that governs plugin discovery — inside a private MkdirTemp tree that
+// the returned cleanup removes.
+//
+// It mirrors TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable for
+// opencode. The fallback is the branch that runs when a user's data dir is
+// broken, which is exactly when nobody is watching for a boundary quietly
+// reopening, so the boundary has to be asserted here rather than assumed.
+func TestGooseSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(blocker, "scratch"))
+	tmp := t.TempDir()
+	for _, key := range tempDirKeys {
+		t.Setenv(key, tmp)
+	}
+
+	realHome := t.TempDir()
+	plantPlugin(t, filepath.Join(realHome, ".agents", "plugins", "ghost"))
+	// Only the path-root layout: GOOSE_PATH_ROOT is set, so that is the config
+	// the child reads.
+	plantGooseConfig(t, filepath.Join(realHome, "config"))
+	t.Setenv("HOME", realHome)
+	t.Setenv("USERPROFILE", realHome)
+	t.Setenv("GOOSE_PATH_ROOT", realHome)
+	// Pinned empty, because an inherited XDG_CONFIG_HOME changes which layout
+	// this asserts: the child would read it instead of $ROOT/config. A test
+	// that passes on a laptop and fails in CI over an ambient variable is not
+	// a test of the fallback.
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	client := &GooseClient{binary: "goose"}
+	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run", "-q"})
+	if err != nil {
+		t.Fatalf("subprocessEnv: %v", err)
+	}
+	defer cleanup()
+
+	if !strings.Contains(cmd.Dir, "ghost-goose-") {
+		t.Fatalf("fallback cmd.Dir = %q, want a private ghost-goose- tree", cmd.Dir)
+	}
+	for _, key := range []string{"HOME", "GOOSE_PATH_ROOT"} {
+		got := envValue(cmd.Env, key)
+		if got == "" {
+			t.Errorf("%s is empty in the fallback child", key)
+			continue
+		}
+		if got == realHome {
+			t.Errorf("%s = %q — the fallback restored the real home", key, got)
+		}
+		if !strings.HasPrefix(got, cmd.Dir+string(os.PathSeparator)) {
+			t.Errorf("%s = %q, want it inside the fallback dir %q", key, got, cmd.Dir)
+		}
+	}
+	for _, key := range tempDirKeys {
+		if got := envValue(cmd.Env, key); got != cmd.Dir {
+			t.Errorf("%s = %q, want the fallback dir %q", key, got, cmd.Dir)
+		}
+	}
+	// The config the child authenticates from has to have travelled. With
+	// GOOSE_PATH_ROOT set, goose reads $ROOT/config and the home-relative roots
+	// are deliberately not reproduced — path_root() short-circuits before any
+	// home variable — so this asserts the one layout the child will use.
+	if _, err := os.Stat(filepath.Join(envValue(cmd.Env, "GOOSE_PATH_ROOT"), "config", "config.yaml")); err != nil {
+		t.Errorf("fallback child lost the path-root config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(envValue(cmd.Env, "GOOSE_PATH_ROOT"), "config", "secrets.yaml")); err != nil {
+		t.Errorf("fallback child lost the credentials it authenticates with: %v", err)
+	}
+}
+
+// plantPlugin writes the package `ghost mcp init --client goose` installs.
+func plantPlugin(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plantGooseConfig writes a config directory with the files goose reads, one of
+// which carries the credentials the child needs to authenticate.
+func plantGooseConfig(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"config.yaml":  "provider: openai\n",
+		"secrets.yaml": "token: carried\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A relative GOOSE_PATH_ROOT is not a plugin root at all: goose's
+// validated_path_root drops anything that is not absolute, so the child falls
+// back to the home variables this code already confines. Rewriting it would be
+// changing a variable the child ignores, and would repoint it at a scratch path
+// in case some build stops filtering.
+func TestGooseIsolationLeavesARelativePathRootAlone(t *testing.T) {
+	home := t.TempDir()
+	cmd := &exec.Cmd{Dir: t.TempDir(), Env: []string{"HOME=" + home, "GOOSE_PATH_ROOT=relative/goose"}}
+	if err := configureGooseIsolation(cmd); err != nil {
+		t.Fatalf("configureGooseIsolation: %v", err)
+	}
+	if got := envValue(cmd.Env, "GOOSE_PATH_ROOT"); got != "relative/goose" {
+		t.Errorf("GOOSE_PATH_ROOT = %q, want the value left untouched", got)
+	}
+	// The home is still confined, so the fallback the relative value triggers
+	// cannot reach the real plugin root.
+	if got := envValue(cmd.Env, "HOME"); got == home {
+		t.Error("HOME was not confined alongside a relative path root")
+	}
+}
+
+// TestGooseChildCannotDiscoverGhostsOwnPlugin: goose discovers user-scope
+// Agent Plugins under $HOME/.agents/plugins/, and that is home-relative BY
+// SPECIFICATION rather than XDG-relative. `ghost mcp init --client goose`
+// installs a package there whose mcp.json registers the Ghost stdio MCP server
+// and whose hooks/hooks.json run `ghost hook <event> --source goose` as shell
+// commands. The goose child needs the real HOME to read ~/.config/goose and
+// authenticate, so without an explicit boundary it also finds that package and
+// starts Ghost's own server from inside a reflect/resolve/supersede call.
+// --no-profile does not close this: it governs the configured profile, not
+// plugin discovery.
+func TestGooseChildCannotDiscoverGhostsOwnPlugin(t *testing.T) {
+	realHome := t.TempDir()
+	// The package `ghost mcp init --client goose` would have installed.
+	pluginDir := filepath.Join(realHome, ".agents", "plugins", "ghost")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setHarnessPolicyParentEnv(t)
+	// After the shared decoys, so these are the values the child inherits.
+	t.Setenv("HOME", realHome)
+	t.Setenv("USERPROFILE", realHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(realHome, ".config"))
+
+	// The other half of the contract: the config the child authenticates from
+	// must still be where goose looks, or the isolation just breaks the call.
+	gooseConfig := filepath.Join(realHome, ".config", "goose")
+	if err := os.MkdirAll(gooseConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gooseConfig, "config.yaml"), []byte("provider: openai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := fakeHarnessPolicyBinary(t, "goose", `
+[ -e "$HOME/.agents/plugins/ghost/mcp.json" ] && { echo "goose child discovered Ghost's own MCP plugin" >&2; exit 1; }
+# HOME itself must be confined, not merely happen to miss the plugin path: an
+# unset or wrong HOME would also pass the test above.
+case "$HOME" in "$GHOST_SCRATCH_DIR"/*) ;; *) echo "goose home not isolated: $HOME" >&2; exit 1;; esac
+[ -r "$XDG_CONFIG_HOME/goose/config.yaml" ] || { echo "goose child lost the config it authenticates from" >&2; exit 1; }
+printf '%s' 'KEEP'
+`)
+
+	text, _, err := (&GooseClient{binary: bin}).Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if text != "KEEP" {
+		t.Fatalf("stdout = %q", text)
+	}
+}
+
+// TestConfigureGooseIsolationFailsClosed: the two states in which the security
+// boundary cannot be established must not report success. A child that runs
+// with the real HOME finds Ghost's own MCP plugin again, so "isolation
+// skipped" is not a safe degradation — it is the vulnerability. Both cases
+// return an error, which fails the call rather than the boundary.
+func TestConfigureGooseIsolationFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	config := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "config.yaml"), []byte("provider: openai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("no scratch directory", func(t *testing.T) {
+		cmd := &exec.Cmd{Env: []string{"HOME=" + home}}
+		if err := configureGooseIsolation(cmd); err == nil {
+			t.Fatal("isolation reported success with no directory to confine the child to")
+		}
+	})
+
+	t.Run("no home and no config root", func(t *testing.T) {
+		cmd := &exec.Cmd{Dir: t.TempDir(), Env: []string{"PATH=/usr/bin"}}
+		if err := configureGooseIsolation(cmd); err == nil {
+			t.Fatal("isolation reported success with nothing to confine")
+		}
+	})
+
+	// The positive case, so the table cannot pass by always erroring. No
+	// XDG_CONFIG_HOME here, so this exercises the home-relative fallback that
+	// goose uses when the variable is unset — the branch where the config links
+	// have to be created, and where pointing HOME straight at the config
+	// directory would silently miss.
+	t.Run("resolves and confines", func(t *testing.T) {
+		dir := t.TempDir()
+		cmd := &exec.Cmd{Dir: dir, Env: []string{"HOME=" + home}}
+		if err := configureGooseIsolation(cmd); err != nil {
+			t.Fatalf("configureGooseIsolation: %v", err)
+		}
+		got := envValue(cmd.Env, "HOME")
+		if got != filepath.Join(dir, "goose-home") {
+			t.Fatalf("HOME = %q, want the isolated home", got)
+		}
+		// Resolved the way goose resolves it, not the way the code built it.
+		data, err := os.ReadFile(filepath.Join(got, ".config", "goose", "config.yaml"))
+		if err != nil {
+			t.Fatalf("isolated home does not reach the real config: %v", err)
+		}
+		if string(data) != "provider: openai\n" {
+			t.Fatalf("config through the isolated home = %q", data)
+		}
+		// And the plugin root really is gone, rather than merely unpopulated
+		// by accident of this fixture.
+		if _, err := os.Stat(filepath.Join(got, ".agents")); !os.IsNotExist(err) {
+			t.Errorf("isolated home exposes an .agents directory: %v", err)
+		}
+		// Only the roots that exist are reproduced: this fixture configures
+		// .config, so the macOS root must not be conjured into the home.
+		if _, err := os.Stat(filepath.Join(got, "Library")); !os.IsNotExist(err) {
+			t.Errorf("isolated home carries a macOS config root that was never there: %v", err)
+		}
+	})
+
+	// macOS does not set XDG_CONFIG_HOME, and goose documents both
+	// ~/.config/goose and ~/Library/Application Support/goose there. Carrying
+	// only the first moves the config out from under a child that resolves the
+	// second, which would break a call that worked before this branch.
+	t.Run("carries the macOS config root", func(t *testing.T) {
+		macHome := t.TempDir()
+		macConfig := filepath.Join(macHome, "Library", "Application Support", "goose")
+		if err := os.MkdirAll(macConfig, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(macConfig, "config.yaml"), []byte("model: gpt\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := &exec.Cmd{Dir: t.TempDir(), Env: []string{"HOME=" + macHome}}
+		if err := configureGooseIsolation(cmd); err != nil {
+			t.Fatalf("configureGooseIsolation: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(
+			envValue(cmd.Env, "HOME"), "Library", "Application Support", "goose", "config.yaml"))
+		if err != nil {
+			t.Fatalf("isolated home does not carry the macOS config root: %v", err)
+		}
+		if string(data) != "model: gpt\n" {
+			t.Fatalf("macOS config through the isolated home = %q", data)
+		}
+	})
+
+	// With XDG_CONFIG_HOME set the child reads an absolute path and HOME plays
+	// no part, so no link may be invented — exporting a synthesized value here
+	// is exactly the macOS/Windows misdirection this design avoids.
+	t.Run("explicit config root is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		env := []string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config")}
+		cmd := &exec.Cmd{Dir: dir, Env: env}
+		if err := configureGooseIsolation(cmd); err != nil {
+			t.Fatalf("configureGooseIsolation: %v", err)
+		}
+		if got := envValue(cmd.Env, "XDG_CONFIG_HOME"); got != filepath.Join(home, ".config") {
+			t.Fatalf("XDG_CONFIG_HOME = %q, want the parent's value", got)
+		}
+		got := envValue(cmd.Env, "HOME")
+		if got != filepath.Join(dir, "goose-home") {
+			t.Fatalf("HOME = %q, want the isolated home", got)
+		}
+		// HOME must EXIST, not merely be named: a child with a missing home
+		// fails to start on some platforms, and this branch creates no .config
+		// link, so nothing else would have created the directory.
+		if info, err := os.Stat(got); err != nil {
+			t.Fatalf("isolated home does not exist: %v", err)
+		} else if !info.IsDir() {
+			t.Fatalf("isolated home is not a directory: %s", got)
+		}
+	})
+}
+
+// TestCarryGooseConfigDirFallsBackToCopy: a Windows host without Developer Mode
+// cannot create a symlink, and that is the NORMAL path there because
+// XDG_CONFIG_HOME is rarely set. A hard dependency on a privileged filesystem
+// operation would fail every goose call on a supported platform, so a refused
+// symlink has to degrade to a copy — and the copy has to carry the same files.
+func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "goose")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "config.yaml"), []byte("provider: openai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "secrets.yaml"), []byte("token: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A subdirectory is not copied: it is not a file, and following it would
+	// let a config directory pull a tree into the child.
+	if err := os.MkdirAll(filepath.Join(source, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A dotfiles-managed config is the common case and reports a symlink
+	// dirent type, so reading the dirent type alone would drop it and leave a
+	// directory that reports success and holds nothing goose can use.
+	//
+	// Creating the link can itself be refused — it is the same privilege this
+	// test exists for — so the expectation is built conditionally instead of
+	// skipping. Skipping would abandon the whole copy branch on exactly the
+	// host that needs it, which is where a regression would be invisible.
+	managed := filepath.Join(t.TempDir(), "goose-config.yaml")
+	if err := os.WriteFile(managed, []byte("provider: managed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked := os.Symlink(managed, filepath.Join(source, "managed.yaml")) == nil
+	if !linked {
+		t.Log("this host cannot create a symlink; asserting the two plain files only")
+	}
+
+	target := filepath.Join(t.TempDir(), "goose")
+	denied := func(string, string) error { return errors.New("symlink privilege not held") }
+	if err := carryGooseConfigDirWith(source, target, denied); err != nil {
+		t.Fatalf("carryGooseConfigDirWith: %v", err)
+	}
+
+	want := map[string]string{
+		"config.yaml":  "provider: openai\n",
+		"secrets.yaml": "token: x\n",
+	}
+	if linked {
+		want["managed.yaml"] = "provider: managed\n" // reached through a symlink
+	}
+	for name, contents := range want {
+		got, err := os.ReadFile(filepath.Join(target, name))
+		if err != nil {
+			t.Fatalf("copied config missing %s: %v", name, err)
+		}
+		if string(got) != contents {
+			t.Errorf("copied %s = %q, want %q", name, got, contents)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, "sessions")); !os.IsNotExist(err) {
+		t.Errorf("copy carried a subdirectory: %v", err)
+	}
+}
+
+// TestGooseConfigRootProbeClassifiesFailures: only "not there" may be passed
+// over when a candidate config root is probed, because that is how a platform's
+// unused location is recognised. A root that exists but is not usable must
+// fail instead: skipping it would hand the child a home with no configuration
+// and no indication that Ghost dropped it, and the child would then
+// authenticate against goose's defaults while the user saw a provider error
+// pointing nowhere.
+//
+// The classification is injected rather than reproduced from the filesystem,
+// because the interesting case is not buildable everywhere: Windows reports "a
+// file where a directory belongs" as ERROR_PATH_NOT_FOUND and maps ENOTDIR to
+// that same constant, so on that host this case legitimately classifies as
+// absent. The platform's own answer is honoured either way; what is pinned is
+// that a non-ENOENT failure is never skipped, which EACCES states on every
+// platform.
+func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
+	home := t.TempDir()
+	config := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "config.yaml"), []byte("provider: openai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	isolated := t.TempDir()
+
+	t.Run("absent is skipped", func(t *testing.T) {
+		probe := func(name string) (os.FileInfo, error) {
+			if strings.Contains(name, "Library") {
+				return nil, fs.ErrNotExist
+			}
+			return os.Lstat(name)
+		}
+		if err := linkGooseConfigDirsWith(isolated, []string{"HOME=" + home}, home, probe, probe); err != nil {
+			t.Fatalf("a missing root must be skipped, not refused: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(isolated, ".config", "goose", "config.yaml")); err != nil {
+			t.Fatalf("the present root was not carried: %v", err)
+		}
+	})
+
+	t.Run("unusable is refused", func(t *testing.T) {
+		// EACCES, not ENOTDIR: on Windows syscall.ENOTDIR is
+		// ERROR_PATH_NOT_FOUND, which Go maps to fs.ErrNotExist, so a test
+		// using it asserts a different rule on that platform. EACCES is not
+		// ErrNotExist on any of them.
+		probe := func(name string) (os.FileInfo, error) {
+			if strings.Contains(name, "Library") {
+				return nil, &fs.PathError{Op: "lstat", Path: name, Err: syscall.EACCES}
+			}
+			return os.Lstat(name)
+		}
+		if err := linkGooseConfigDirsWith(isolated, []string{"HOME=" + home}, home, probe, probe); err == nil {
+			t.Fatal("a root that exists but is unusable was skipped as if absent")
+		}
+	})
+
+	// A file where the config root's PARENT belongs — "~/.config is a file" —
+	// must fail closed on every platform, so the shape is arranged on the real
+	// filesystem rather than mocked. A mocked leaf plus a real parent probe
+	// would pass on Linux and fail on Windows, where the same shape is reported
+	// as ERROR_PATH_NOT_FOUND and maps to ErrNotExist.
+	t.Run("non-directory parent is refused", func(t *testing.T) {
+		shapedHome := t.TempDir()
+		if err := os.WriteFile(filepath.Join(shapedHome, ".config"), []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat, os.Stat); err == nil {
+			t.Fatal("a config root behind a non-directory parent was skipped as if absent")
+		}
+	})
+
+	// The ordinary case the ancestor walk must not break: ~/.config exists,
+	// the user has never run `goose configure`, so there is no config dir. A
+	// machine in exactly this state — no goose config at all — has to keep
+	// working, and its config comes from the environment.
+	t.Run("unpopulated leaf behind a real directory is skipped", func(t *testing.T) {
+		shapedHome := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(shapedHome, ".config"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat, os.Stat); err != nil {
+			t.Fatalf("a location the user has not populated must be skipped, not refused: %v", err)
+		}
+	})
+
+	// The conflation reaches deeper than the leaf, which is why a one-level
+	// parent check is not enough. With ~/Library a file, Windows reports
+	// ~/Library/Application Support/goose as not-found, and so reports
+	// ~/Library/Application Support as not-found too — so walking up one level
+	// sees nothing and the fault goes unreported. The walk has to keep going
+	// until something actually exists, and then ask whether it is a directory.
+	t.Run("a file above the parent is still found", func(t *testing.T) {
+		shapedHome := t.TempDir()
+		if err := os.WriteFile(filepath.Join(shapedHome, "Library"), []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// Model the Windows errno for the paths THROUGH the blocking file,
+		// which is what it collapses to not-found; the file itself still
+		// stats, and that is exactly what the walk has to find.
+		probe := func(name string) (os.FileInfo, error) {
+			if strings.Contains(name, filepath.Join("Library", "Application Support")) {
+				return nil, fs.ErrNotExist
+			}
+			return os.Lstat(name)
+		}
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, probe, probe); err == nil {
+			t.Fatal("a file above the parent was walked past as if the location were simply unused")
+		}
+	})
 }
 
 func TestOpenCodeClientUsesNoToolPolicy(t *testing.T) {
