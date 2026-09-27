@@ -2395,6 +2395,52 @@ type UpsertOptions struct {
 	// #544). Those rows cost window slots and resolve and supersede work,
 	// and 93 active duplicate links were needed just to sink them again.
 	FoldOnly bool
+
+	// Pin exempts the memory this save is about from consolidation, in the same
+	// call that stores it. It is the opt-out the save path otherwise lacks:
+	// nothing an agent writes carries a source reflection excludes (seeds are
+	// 'builtin', agent saves 'mcp', reflection writes 'reflection'), so until
+	// this option the only way to protect a memory from `ghost reflect` was a
+	// SECOND call — ghost_memory_pin — and every window between the two left
+	// the memory consolidatable (issue #549).
+	//
+	// A fold pins BOTH rows: the copy inserted here, and the existing row the
+	// caller's text was merged into. The existing row is the one the corpus
+	// already holds and the one a later consolidation is most likely to absorb,
+	// so pinning only the new row would leave the fact the caller asked to
+	// protect fully consolidatable; pinning only the existing row would leave
+	// the wording that was just stored exempt from nothing. FoldOnly stores no
+	// row of its own, so there the target is the only thing the request can
+	// mean — a promotion that reported success without pinning would have
+	// stored nothing and protected nothing.
+	Pin bool
+}
+
+// boolToInt is SQLite's boolean: the pinned column is an INTEGER and every
+// writer supplies it explicitly rather than leaving the DEFAULT to apply, so
+// a false must be a 0 and not a missing value.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// pinMemoryTx marks one row pinned inside the caller's write transaction. It is
+// a no-op for a false pin or an empty id, so the fold paths can call it
+// unconditionally. updated_at is deliberately NOT touched: this is part of a
+// save that has already decided what it is writing, and the row's age and
+// timestamp are load-bearing for decay and for the --skip-unchanged fingerprint
+// (see reusePreservesAge) — the same reason the strengthen UPDATE leaves them
+// alone.
+func pinMemoryTx(ctx context.Context, ex sqlExecutor, id string, pin bool) error {
+	if !pin || id == "" {
+		return nil
+	}
+	if _, err := ex.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("pin memory: %w", err)
+	}
+	return nil
 }
 
 // foldTargetStillLive re-verifies, inside the write transaction, that the row a
@@ -2790,6 +2836,14 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// is still the right outcome: the duplicate is evidence the fact
 			// keeps recurring, and throwing that away would make promotion
 			// lose the signal. Only the UPDATE is wanted.
+			//
+			// A Pin still has to land here: this path stores no row of its own,
+			// so the target is the only thing the request can mean, and a fold
+			// that reported success without it would leave the memory the
+			// caller asked to protect fully consolidatable.
+			if err = pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
+				return "", "", 0, err
+			}
 			if err = commit(); err != nil {
 				return "", "", 0, err
 			}
@@ -2798,14 +2852,23 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 
 		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags,
-			                      agent, session_id, source_ref, confidence, scope)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			                      agent, session_id, source_ref, confidence, scope, pinned)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
 		`, projectID, category, content, source, importance, string(tagsJSON),
 			nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 			nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
-			scopeJSON(opts.Scope)).Scan(&id); err != nil {
+			scopeJSON(opts.Scope), boolToInt(opts.Pin)).Scan(&id); err != nil {
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
+		}
+
+		// The row this save folded into is the one a later consolidation can
+		// absorb — it is the text the corpus already holds, and the copy inserted
+		// above is only linked to it — so Pin has to reach it too. Same
+		// transaction as the strengthen and the link, or a failure here would
+		// report a successful save whose request was silently dropped.
+		if err = pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
+			return "", "", 0, err
 		}
 
 		// CreateLink takes s.mu itself — calling it here would deadlock, since
@@ -2843,13 +2906,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// another writer between that decision and the row.
 	if err = db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
-		                      agent, session_id, source_ref, confidence, scope)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      agent, session_id, source_ref, confidence, scope, pinned)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, category, content, source, importance, string(tagsJSON),
 		nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 		nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
-		scopeJSON(opts.Scope)).Scan(&id); err != nil {
+		scopeJSON(opts.Scope), boolToInt(opts.Pin)).Scan(&id); err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if err = commit(); err != nil {

@@ -364,6 +364,59 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 	return skipUnchanged && apply && stored != "" && stored == current
 }
 
+// reflectRetained is how many memories the project ends up holding from one
+// applied result: its own project-scoped memories plus, when promotion is off,
+// the cross-project candidates applyReflection folds back into it. It mirrors
+// applyReflection's own rule rather than restating it, so the reduction
+// warning below measures the set the project actually ends up with — the count
+// that decides whether a memory survived. Reading len(projectMems) instead
+// understates retention by the whole candidate set and fires the warning on
+// rounds that lost nothing.
+func reflectRetained(projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool) int {
+	if promoteGlobals {
+		return len(projectMems)
+	}
+	return len(projectMems) + len(globalMems)
+}
+
+// reductionWarnMinInput is the corpus size below which no ratio is reported.
+// A 4-memory corpus compressing to 1 is a 75% reduction and says nothing: the
+// count is small enough that the strict 30% branch of the quality gate has
+// already judged the result, and a warning on every such run is noise.
+const reductionWarnMinInput = 6
+
+// reportReductionWarning prints the >50% reduction warning when an applied
+// consolidation kept less than half its consolidatable input, and prints
+// nothing otherwise. It takes the slices rather than two pre-counted numbers so
+// the count it reports is derived where it is printed: on the unattended
+// lifecycle path this line is the only report of a hard compression, so a wrong
+// count here is a warning that fires on rounds which lost nothing, and one that
+// stays silent on rounds that lost most of the corpus.
+//
+// The retained side is reflectRetained, not len(projectMems): with promotion off
+// applyReflection folds the cross-project candidates back into the project, so
+// they are survivors. The input side is len(consolidatable) — manual, builtin,
+// pinned and resolved rows are already excluded upstream, and every row left is
+// one ReplaceNonManual would delete.
+func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool) {
+	if len(live) < reductionWarnMinInput {
+		return
+	}
+	retained := reflectRetained(projectMems, globalMems, promoteGlobals)
+	if retained >= len(live)/2 {
+		return
+	}
+	fmt.Fprintf(w, "WARNING: consolidation left %d memories in the project vs %d consolidatable (>50%% reduction)\n",
+		retained, len(live))
+	if len(globalMems) > 0 {
+		note := "kept project-scoped"
+		if promoteGlobals {
+			note = "promoted to _global"
+		}
+		fmt.Fprintf(w, "  (%d memories classified as global — %s; check scope accuracy)\n", len(globalMems), note)
+	}
+}
+
 // reflectMaySkip additionally honors the two flags that change what an apply
 // DOES rather than what it reads. The input signature describes the project
 // corpus, not what was done to it, so neither may inherit a prior default
@@ -814,19 +867,11 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-byte cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
 	}
 
-	var existingNonManual int
-	for _, m := range live {
-		if m.Source != "manual" {
-			existingNonManual++
-		}
-	}
-	if existingNonManual >= 6 && len(projectMems) < existingNonManual/2 {
-		fmt.Fprintf(os.Stderr, "WARNING: consolidation returned %d project memories vs %d existing non-manual (>50%% reduction)\n",
-			len(projectMems), existingNonManual)
-		if len(globalMems) > 0 {
-			fmt.Fprintf(os.Stderr, "  (%d memories classified as global — check scope accuracy)\n", len(globalMems))
-		}
-	}
+	// The >50% reduction warning. On the unattended lifecycle path this is the
+	// only report of a hard compression, and it goes to the stderr of a process
+	// nobody reads while the exit status stays 0 — so the count it prints has to
+	// be the one that decides whether a memory survived.
+	reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals)
 
 	if !apply {
 		fmt.Println("Dry run complete. Re-run with --apply to save these results.")

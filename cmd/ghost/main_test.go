@@ -921,6 +921,55 @@ func TestReflectMaySkipDoesNotSkipExplicitAllowDrops(t *testing.T) {
 	}
 }
 
+// TestReportReductionWarningCountsWhatTheProjectEndsUpHolding: the >50%
+// reduction warning is the only signal an unattended apply compressed hard, and
+// it used to read len(projectMems) alone. applyReflection folds the cross-project
+// candidates back into the project when promotion is off, so a round that
+// emitted 5 project-scoped and 7 cross-project memories for a 20-memory corpus
+// kept 12 of 20 (60%) while the warning reported "5 vs 20" and cried >50%
+// reduction. A warning that fires on rounds that lost nothing trains the reader
+// to ignore it — the opposite of what an unattended path needs.
+func TestReportReductionWarningCountsWhatTheProjectEndsUpHolding(t *testing.T) {
+	live := make([]memory.Memory, 20)
+	project := make([]reflection.ReflectMemory, 5)
+	candidates := make([]reflection.ReflectMemory, 7)
+
+	var buf bytes.Buffer
+	reportReductionWarning(&buf, live, project, candidates, false)
+	if buf.Len() != 0 {
+		t.Errorf("promotion off keeps all 12 of 20, so nothing was lost; got:\n%s", buf.String())
+	}
+
+	// Promotion on is the same result with a different destination, and it does
+	// lose the candidates from this project — so the warning is right to fire.
+	buf.Reset()
+	reportReductionWarning(&buf, live, project, candidates, true)
+	if !strings.Contains(buf.String(), "left 5 memories in the project vs 20") {
+		t.Errorf("promotion on leaves 5 of 20 in the project; got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "promoted to _global") {
+		t.Errorf("warning misreports where the 7 candidates went; got:\n%s", buf.String())
+	}
+
+	// A real compression with no candidates at all: the message has to name the
+	// count that survived, not the count of one scope.
+	buf.Reset()
+	reportReductionWarning(&buf, live, []reflection.ReflectMemory{{}, {}}, nil, false)
+	if !strings.Contains(buf.String(), "left 2 memories in the project vs 20") {
+		t.Errorf("got:\n%s", buf.String())
+	}
+}
+
+// TestReportReductionWarningStaysQuietOnSmallCorpora: below six consolidatable
+// rows a ratio warning fires on almost every run and means nothing.
+func TestReportReductionWarningStaysQuietOnSmallCorpora(t *testing.T) {
+	var buf bytes.Buffer
+	reportReductionWarning(&buf, make([]memory.Memory, reductionWarnMinInput-1), []reflection.ReflectMemory{{}}, nil, false)
+	if buf.Len() != 0 {
+		t.Errorf("a %d-memory corpus must not raise a reduction warning; got:\n%s", reductionWarnMinInput-1, buf.String())
+	}
+}
+
 func TestConsolidatableFilters(t *testing.T) {
 	now := "2026-09-21 00:00:00"
 	mems := []memory.Memory{

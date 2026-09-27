@@ -88,12 +88,13 @@ const (
 	gateStrictRetentionFloor = 0.30
 	// gateBacklogMinOutput is the absolute minimum number of memories a large
 	// backlog consolidation must return. It is absolute, not a fraction: the
-	// prompt targets 10-25 memories regardless of input size, so a percentage
-	// floor would demand more output than the prompt ever asks for once the
-	// backlog is large (5% of 1000 = 50 > 25) and reject every valid run,
-	// stranding it in the O(n^2) SQLite tier. The anti-hallucination work at
-	// this scale is done by dropFabricatedMemories (which runs on every LLM
-	// result, tier_llm.go) and the non-empty guarantee.
+	// prompt targets a fixed set of memories regardless of input size, so a
+	// percentage floor would demand more output than the prompt ever asks for
+	// once the backlog is large (5% of 1000 = 50, well above what the prompt
+	// caps at) and reject every valid run, stranding it in the O(n^2) SQLite
+	// tier. The anti-hallucination work at this scale is done by
+	// dropFabricatedMemories (which runs on every LLM result, tier_llm.go) and
+	// the non-empty guarantee.
 	gateBacklogMinOutput = 5
 	// gateStrictInputMinOutput is the output the strict floor demands at
 	// gateStrictInputMax (0.30 x 60 = 18) — the anchor for interpolation.
@@ -104,7 +105,7 @@ const (
 // must return to pass the quality gate for a given input size. It is strict
 // (30% of input) on small inputs, where a sliver means a truncated response,
 // and relaxes to a small absolute minimum on a large backlog, where the prompt
-// itself aims for 10-25 memories no matter how many went in.
+// itself aims for a fixed set of memories no matter how many went in.
 func gateMinOutput(inputCount int) int {
 	if inputCount <= gateStrictInputMax {
 		return int(math.Ceil(float64(inputCount) * gateStrictRetentionFloor))
