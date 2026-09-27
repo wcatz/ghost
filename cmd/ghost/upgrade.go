@@ -214,7 +214,10 @@ func installRelease(ctx context.Context, out io.Writer, rel *selfupdate.Release,
 		return err
 	}
 
-	fmt.Fprintf(out, "Downloading %s...\n", asset.Name)
+	// Progress, not a result: a stdout that has gone away (a closed pipe, a
+	// redirect to a full disk) is not a reason to refuse an upgrade whose
+	// verification has already passed.
+	_, _ = fmt.Fprintf(out, "Downloading %s...\n", asset.Name)
 	archive, err := downloadCapped(ctx, asset.BrowserDownloadURL, selfupdate.ReadArchive)
 	if err != nil {
 		return fmt.Errorf("downloading %s: %w", asset.Name, err)
