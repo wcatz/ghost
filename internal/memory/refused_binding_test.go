@@ -248,8 +248,14 @@ func TestAmbiguousNameRefusalNamesAtMostFiveCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
 	}
-	if refused == nil || len(refused.ProjectIDs) != 7 {
-		t.Fatalf("refusal = %+v, want all 7 candidates", refused)
+	// The read that finds the candidates is bounded, so the refusal carries
+	// the true count beside the few it names: the notice has to be able to say
+	// "7 projects" while listing five.
+	if refused == nil || refused.CandidateCount != 7 {
+		t.Fatalf("refusal = %+v, want a count of all 7 candidates", refused)
+	}
+	if len(refused.ProjectIDs) != maxNamedCandidates {
+		t.Fatalf("refusal named %d candidates, want the cap of %d", len(refused.ProjectIDs), maxNamedCandidates)
 	}
 	notice := refused.Notice()
 	for i := 1; i <= 5; i++ {
