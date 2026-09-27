@@ -135,8 +135,25 @@ func rejectSecretList(field string, values []string) error {
 //     marshals the tag list into the row that ghost_memory_search returns, and
 //     BuildReflectionPrompt writes `, tags:[…]` into the prompt sent to a CLI
 //     harness talking to a third-party model. validateTags allows ten tags of 64
-//     characters, so a 40-character token fits in one. They are guarded now, and
-//     the three remaining fields are not reached by any of those paths.
+//     characters, so a 40-character token fits in one.
+//
+//     Guarding them took two rounds and the second one is the useful part: the
+//     first guarded Create and UpsertWithOptions and then said "they are guarded
+//     now", which read as the general claim and was true of two of the four
+//     tag-bearing writers. A guard's reach is a set, and a claim about it has to
+//     enumerate the set rather than assert it — so the writers that take a tag
+//     list are: Create, UpsertWithOptions, UpdateMemory, RecordDecision (which
+//     marshals tags into BOTH the decisions row and a companion memory row, and
+//     the companion is an ordinary memory), and the portable importers, whose
+//     tags column came straight out of an artifact file. All five, each before
+//     its lock, and TestEveryTagBearingWriterIsGuarded is the table.
+//
+//     The three remaining unguarded fields — agent, session_id, source_ref
+//     beside a saved memory, and a project's name and path — are not reached by
+//     either path above. source_ref IS checked, on the portable import, which is
+//     the one route where it is a file's content rather than the harness's own
+//     identity. The other three are the real gap and it is structural: see
+//     above.
 //   - Content already in the database. This guard reads what a caller is
 //     trying to write; it does not sweep rows a previous version stored. Doing
 //     that is a separate, report-first job — a detection pass over existing

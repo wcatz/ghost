@@ -355,6 +355,82 @@ var cardanoKeyWithContext = regexp.MustCompile(
 // chain code — and refusing it would refuse a memory about a wallet.
 var cardanoVerificationKey = regexp.MustCompile(`(?i)[A-Za-z0-9_-]*VerificationKey`)
 
+// cardanoValueLabel is the label that ties a value to key material inside its
+// own envelope: the `cborHex` of a cardano-cli envelope, or the `k` and `v` of a
+// ledger one. It is a second condition rather than part of the first because
+// either alone is satisfied by a document that merely mentions the other — a
+// note field naming the vkey type while an unrelated blob sits beside it.
+var cardanoValueLabel = regexp.MustCompile(`(?i)"?(?:cborHex|k|v)"?\s*[:=]`)
+
+// cardanoEnvelopeMax is how far above a hex run the opening brace of its
+// enclosing object may be: 4 KB. A JSON object in a memory — including a
+// pretty-printed one, which is what any indented document is — is far smaller,
+// and the bound is what stops a `{` on line 1 of a note from exempting a value
+// 900 lines down. It is also the only part of the walk that reads backwards off
+// the line, so it is the part that needs a fence.
+const cardanoEnvelopeMax = 4096
+
+// cardanoEnclosingObject returns the JSON object a run at offset sits inside,
+// bounded by that object's own braces, or "" when nothing encloses it.
+//
+// The backward scan is the interesting half. It stops at the NEAREST brace that
+// is an opening one, and gives up at a closing one — because a `}` above the
+// value means the nearest object has already closed, so the value is not inside
+// it. That is what separates two objects in one memory from one object in one
+// memory: a published vkey envelope and a signing value pasted after it look the
+// same to a search for the nearest `{`, and are not the same to this scan.
+//
+// A closing brace is also required AFTER the value, which is what rejects a
+// truncated document. The conservative answer to a malformed envelope is to
+// refuse, because the alternative is an exemption nothing can check.
+func cardanoEnclosingObject(text string, offset int) string {
+	lo := offset - cardanoEnvelopeMax
+	if lo < 0 {
+		lo = 0
+	}
+	open := -1
+scan:
+	for i := offset - 1; i >= lo; i-- {
+		switch text[i] {
+		case '{':
+			open = i
+			break scan
+		case '}':
+			return ""
+		}
+	}
+	if open < 0 {
+		return ""
+	}
+	end := strings.IndexByte(text[offset:], '}')
+	if end < 0 {
+		return ""
+	}
+	return text[open : offset+end+1]
+}
+
+// cardanoEnvelopeExempts reports whether the object enclosing a 64-byte value
+// PUBLISHES it: the envelope names a verification key and labels something as
+// key material.
+//
+// The ENVELOPE, and that is the third scope this exemption has had. It started
+// as the whole text, which made it a property of the memory rather than of the
+// value: one save recording a pool's published vkey excused an extended signing
+// key pasted anywhere else in it, and one memory is exactly one
+// ghost_memory_save. Scoping it to the LINE fixed that and broke pretty-printed
+// envelopes, where `"type"` and `"cborHex"` are on separate lines — which is
+// what any indented document is. The object is the scope that holds both: a JSON
+// document's fields are the envelope, so a vkey name on the line above its own
+// value describes that value, and a name in a DIFFERENT object does not.
+func cardanoEnvelopeExempts(text string, offset int) bool {
+	envelope := cardanoEnclosingObject(text, offset)
+	if envelope == "" {
+		return false
+	}
+	return cardanoVerificationKey.MatchString(envelope) &&
+		cardanoValueLabel.MatchString(envelope)
+}
+
 // cardanoKeyMinRun is the shortest hex run the Cardano walk will look at: 68,
 // not 64, and the two characters are the whole difference between a transaction
 // hash and a key. A 32-byte hash is 64 hex characters; a key's cborHex carries a
@@ -480,14 +556,12 @@ func cardanoKeyWalk(text string, li *lineIndex) (Finding, bool) {
 			// plus a 32-byte chain code, so the public half is 64 bytes and
 			// carries the same tag as the private half. Refusing the tag
 			// unconditionally refused a wallet memory.
-			// The LINE, not the whole text. A memory that records a pool's
-			// published verification key — a phrase a block producer writes
-			// constantly — must not thereby excuse an extended SIGNING key pasted
-			// elsewhere in the same save, and one memory is exactly one
-			// ghost_memory_save. The 32-byte branch below already tests the line;
-			// this one did not, and matching the whole text is what made the tag
-			// safe to refuse unconditionally before.
-			if cardanoVerificationKey.MatchString(line) {
+			// The ENCLOSING OBJECT, for the reasons in cardanoEnvelopeExempts.
+			// The 32-byte branch below reads the line, and should keep doing so:
+			// a 32-byte value is a signing key or a verification key with nothing
+			// in the envelope to tell them apart, so the line is the widest scope
+			// that can carry a decision.
+			if cardanoEnvelopeExempts(text, loc[0]) {
 				continue
 			}
 			return cardanoFinding(), true

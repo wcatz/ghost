@@ -573,6 +573,15 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	); err != nil {
 		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
 	}
+	// The tags too, and before the apply check so a dry run classifies exactly as
+	// the apply run it previews. An artifact's tags column is untrusted input
+	// from a file and was being written raw; the record it lands in is an
+	// ordinary memory, so it is assembled into every search row and quoted into
+	// the next reflect prompt like any other.
+	if err := rejectSecretList("tags", m.Tags); err != nil {
+		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
+
 	// A free id is not necessarily a NEW id. A memory deleted locally leaves its
 	// recorded history behind (that is what the history is for), and the artifact
 	// carries ids verbatim, so importing into an id that still has history would

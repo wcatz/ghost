@@ -79,37 +79,38 @@ func TestDetectDoesNotRescanTheLinePerAssignment(t *testing.T) {
 }
 
 // TestDetectAllocatesBoundedBytes is the mutation check for the mnemonic
-// splitter, and it is a BYTES assertion rather than an allocation COUNT because
-// a count cannot see this regression at all.
+// splitter, and getting a trustworthy instrument for it took three attempts,
+// which is why the helper has a long comment.
 //
 // strings.FieldsFunc returns one slice no matter how many words it finds, so
-// collecting the candidates costs exactly one extra allocation over walking them.
-// What it costs is SIZE: the slice holds every word of the content, which is what
-// put 67% of Detect's allocations and about 10 KB per 4 KB save into a pass that
-// stops at the first non-word. The same shape in the same content measures 51,760
-// B/op here against 232 B/op for the walking form.
+// collecting the candidates costs exactly one extra allocation over walking them
+// — an allocation COUNT cannot see the regression at all. Nor can an absolute
+// byte bound: race instrumentation alone moves the same code by two and a half
+// orders of magnitude, so a bound tight enough to be meaningful locally fails on
+// a loaded runner.
 //
-// The assertion is the RATIO of bytes per call at 32 KB against bytes per call at
-// 4 KB, not an absolute bound, and that is for the same reason the linearity
-// test is a ratio: the absolute numbers are not portable. Race instrumentation
-// alone moves the same code from 232 B/op to 182,079 B/op, so any bound tight
-// enough to be meaningful locally fails on a loaded runner — and a test that does
-// that gets deleted rather than loosened until it proves nothing.
+// What it costs is SIZE — the slice holds every word of the content, which is
+// what put 67% of Detect's allocations and about 10 KB per 4 KB save into a pass
+// that stops at the first non-word. The regression therefore scales with the WORD
+// COUNT, and the fixed form's cost does not scale with anything. So the assertion
+// is a RATIO: eight times the content must not cost more than 1.5x the bytes per
+// call.
 //
-// The ratio is still the assertion, and the bar is set from what the two forms
-// actually measure rather than from a round number. Four measurements, two
-// instrumentations, 8x the content:
+// The four measurements the bar comes from, 8x the content:
 //
 //	                     plain          -race
-//	walking (current)   1.1x           0.3x
-//	collecting          ~8x            2.7x
+//	walking (current)   1.0x           0.3x
+//	collecting          10.6x          2.7x
 //
-// The bar is 2.0x. That is roughly 1.8x of headroom on both sides, and it is
-// set here because those are the numbers — an absolute bound cannot work (race
-// alone moves the same code from 472 to 165,762 B/op) and a loose bound would not
-// separate. If a future change moves any of those four numbers by more than about
-// half, this bar is the thing to re-measure, and the four values are written
-// down here so the reason is visible rather than remembered.
+// 1.5x is roughly even between the two sides, and all four are written down so a
+// future change to the number is visible rather than remembered.
+//
+// The plain-run figure is now exact rather than sampled: 129 B/op at 4 KB and 129
+// B/op at 32 KB, 1.0x, identical across eight consecutive runs. It was
+// measurement noise before — the 4 KB figure read 569, 8975, 3582, 569, 8975
+// across six runs and the 32 KB figure was bimodal at 421 or 4,203 — so this
+// assertion used to fail intermittently and I would have shipped a flaky gate
+// describing it as verified. See allocatedBytesPerCall for the two causes.
 func TestDetectAllocatesBoundedBytes(t *testing.T) {
 	// Words with spaces throughout, which is the shape that made FieldsFunc
 	// build a slice per word. ~480 words at 4 KB, ~3,840 at 32 KB.
@@ -121,15 +122,21 @@ func TestDetectAllocatesBoundedBytes(t *testing.T) {
 		t.Fatalf("fixtures are %d and %d bytes, want at least 4000 and 32000", len(small), len(big))
 	}
 
-	smallB := benchmarkDetect(small)
-	bigB := benchmarkDetect(big)
+	// Different call counts, deliberately: the small fixture allocates ~500 bytes
+	// per call and the large one ~420, so a fixed count large enough for the
+	// first would make the second unnecessarily slow. The ratio is per call, so
+	// the two counts do not have to match — what they have to do is each put its
+	// own signal above the process's allocation floor.
+	smallB := allocatedBytesPerCall(100, func() { Detect(small) })
+	bigB := allocatedBytesPerCall(8, func() { Detect(big) })
 	t.Logf("%.0f B/op at %d bytes, %.0f B/op at %d bytes (%.1fx for 8x the input)",
 		smallB.bytesPerOp, len(small), bigB.bytesPerOp, len(big),
 		ratio(bigB.bytesPerOp, smallB.bytesPerOp))
 
-	// Confirm the small fixture is the shape it claims: a walk that stops at the
-	// first non-word must not cost more as the content grows.
-	if bigB.bytesPerOp > 2*smallB.bytesPerOp {
+	// A walk that stops at the first non-word must not cost more as the content
+	// grows. Both figures are per call, so the two fixtures' different call counts
+	// cancel.
+	if bigB.bytesPerOp > 1.5*smallB.bytesPerOp {
 		t.Errorf("8x the content cost %.1fx the allocated bytes — something is "+
 			"materialising the content, and the mnemonic pass collecting every "+
 			"word is the shape that does it", ratio(bigB.bytesPerOp, smallB.bytesPerOp))

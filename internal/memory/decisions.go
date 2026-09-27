@@ -50,6 +50,15 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	if err := rejectSecretList("alternatives", alternatives); err != nil {
 		return "", "", false, err
 	}
+	// And the tags, which are not a lesser field for being short: a decision's
+	// tag list is marshalled into BOTH the decisions row and the companion memory
+	// row built from the same three fields, and that companion is an ordinary
+	// memory — assembled into every search row and quoted into the next reflect
+	// prompt. So a token pasted as a tag here is exposed on exactly the two paths
+	// the guard above exists for.
+	if err := rejectSecretList("tags", tags); err != nil {
+		return "", "", false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

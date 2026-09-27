@@ -3764,6 +3764,15 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 			return err
 		}
 	}
+	// The tags, unconditionally, and that unconditional part is the point: this
+	// method is reachable with tags and nil content, so a content-only guard
+	// skips exactly the call that carries them. validateTags upstream caps the
+	// shape at ten tags of 64 characters and nothing else, and a tag is returned
+	// by search and quoted into the next reflect prompt — so the exposure is the
+	// same one the body has.
+	if err := rejectSecretList("tags", tags); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
