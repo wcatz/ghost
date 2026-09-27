@@ -396,11 +396,19 @@ func TestMemoryHistoryCapsTheTable(t *testing.T) {
 	historyRowsCap = 10
 	t.Cleanup(func() { historyRowsCap = restore })
 
+	// The last id is captured as it is returned, not recovered from a listing:
+	// GetAll orders by importance and created_at, and 25 rows written in the same
+	// second with the same importance have no defined order among themselves, so
+	// "the most recent" read back out of it is a guess that changes with timing.
+	// (It did: this assertion only failed under -race.)
+	var lastID string
 	for i := 0; i < 25; i++ {
-		if _, _, _, err := s.Upsert(ctx, testProject, "fact",
-			"distinct fact number "+string(rune('a'+i%26))+itoa(i), "mcp", 0.5, nil); err != nil {
+		id, _, _, err := s.Upsert(ctx, testProject, "fact",
+			"a durable fact numbered "+itoa(i)+" about subsystem "+itoa(i%7), "mcp", 0.5, nil)
+		if err != nil {
 			t.Fatalf("Upsert %d: %v", i, err)
 		}
+		lastID = id
 	}
 
 	var total int
@@ -411,18 +419,8 @@ func TestMemoryHistoryCapsTheTable(t *testing.T) {
 		t.Errorf("table holds %d rows, want at most the cap of %d", total, historyRowsCap)
 	}
 	// The newest rows are the ones kept: the last memory written is still
-	// readable, the first is not.
-	all, err := s.GetAll(ctx, testProject, 100)
-	if err != nil {
-		t.Fatalf("GetAll: %v", err)
-	}
-	var newest string
-	for _, m := range all {
-		if strings.Contains(m.Content, "distinct fact number") {
-			newest = m.ID
-		}
-	}
-	entries, err := s.MemoryHistory(ctx, newest, 0)
+	// readable.
+	entries, err := s.MemoryHistory(ctx, lastID, 0)
 	if err != nil {
 		t.Fatalf("MemoryHistory: %v", err)
 	}
@@ -663,5 +661,189 @@ func TestMemoryHistoryRecordsRestore(t *testing.T) {
 	}
 	if entries[2].Content != "search falls back to FTS when Ollama is down" {
 		t.Errorf("the restore row records %q, want the text the snapshot held", entries[2].Content)
+	}
+}
+
+// TestMemoryHistorySurvivesAProjectMerge: a merge KEEPS the corpus — it
+// reassigns every child row and then deletes only the projects row. A history
+// table whose project_id cascades would therefore lose the whole recorded past
+// of every memory the merge moved, leaving live rows whose `ghost history` says
+// they were never written. The merge has to carry the history with the memories.
+func TestMemoryHistorySurvivesAProjectMerge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "old-project", "/tmp/old", "old-project"); err != nil {
+		t.Fatalf("EnsureProject(old): %v", err)
+	}
+	if err := s.EnsureProject(ctx, "new-project", "/tmp/new", "new-project"); err != nil {
+		t.Fatalf("EnsureProject(new): %v", err)
+	}
+	id, _, _, err := s.Upsert(ctx, "old-project", "fact", "a fact the old project owned", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	if err := s.MergeProject(ctx, "old-project", "new-project"); err != nil {
+		t.Fatalf("MergeProject: %v", err)
+	}
+
+	moved, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(moved) != 1 {
+		t.Fatalf("the merge did not keep the memory: %v %v", moved, err)
+	}
+	if moved[0].ProjectID != "new-project" {
+		t.Errorf("memory project = %q, want new-project", moved[0].ProjectID)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("the merge destroyed the memory's history — the projects-row cascade took rows the merge itself was meant to carry")
+	}
+	if entries[0].Content != "a fact the old project owned" {
+		t.Errorf("the surviving history lost the text: %q", entries[0].Content)
+	}
+}
+
+// TestMemoryHistorySkipsAnAlreadyActiveSupersedeEdge: `ghost supersede` re-links
+// a pair whenever an endpoint changed since the edge was written, and the
+// upsert usually changes nothing. A row repeating the previous state would
+// burn one of the per-memory version slots on every pass until the real
+// save/update/reflect versions are pruned away, so a changelog would fill with
+// identical entries.
+func TestMemoryHistorySkipsAnAlreadyActiveSupersedeEdge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	newer, _, _, err := s.Upsert(ctx, testProject, "fact", "the retry budget is three attempts with jitter", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert newer: %v", err)
+	}
+	older, _, _, err := s.Upsert(ctx, testProject, "fact", "the deploy pipeline runs on a weekly schedule", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert older: %v", err)
+	}
+
+	// First link: the edge becomes active, so the target's currency changed.
+	if err := s.CreateLink(ctx, newer, older, "supersedes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	// The same edge again, as a re-classified pass writes it — already active.
+	if err := s.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink (re-link): %v", err)
+	}
+
+	entries, err := s.MemoryHistory(ctx, older, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if got := phasesOf(t, entries); !equalStrings(got, []string{"save:", "supersede:"}) {
+		t.Fatalf("phases = %v, want [save supersede] — a re-link of a live edge changes nothing about the memory", got)
+	}
+
+	// Re-activating an invalidated edge IS a state change, so it is recorded.
+	if err := s.InvalidateLink(ctx, newer, older, "supersedes"); err != nil {
+		t.Fatalf("InvalidateLink: %v", err)
+	}
+	if err := s.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink (re-activate): %v", err)
+	}
+	entries, err = s.MemoryHistory(ctx, older, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if got := phasesOf(t, entries); !equalStrings(got, []string{"save:", "supersede:", "supersede:"}) {
+		t.Fatalf("phases = %v, want [save supersede supersede] — re-activating the edge is a change", got)
+	}
+}
+
+// TestMemoryHistorySurvivesARepositoryAutoMerge: the same cascade, reached
+// without a command. A save that names a repository another project already
+// owns merges the named project into that owner, and the reassignment runs
+// through the OTHER of main's two merge implementations — so this is the case a
+// test that only calls MergeProject cannot see.
+func TestMemoryHistorySurvivesARepositoryAutoMerge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const remote = "git@github.com:acme/widgets.git"
+	if err := s.EnsureProjectWithRepo(ctx, "alpha", "/tmp/alpha", "alpha", remote); err != nil {
+		t.Fatalf("EnsureProjectWithRepo(alpha): %v", err)
+	}
+	if err := s.EnsureProject(ctx, "beta", "/tmp/beta", "beta"); err != nil {
+		t.Fatalf("EnsureProject(beta): %v", err)
+	}
+	id, _, _, err := s.Upsert(ctx, "beta", "fact", "a fact only the beta checkout knew", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// A second project claiming the same remote is folded into the owner.
+	if err := s.EnsureProjectWithRepo(ctx, "beta", "/tmp/beta", "beta", remote); err != nil {
+		t.Fatalf("EnsureProjectWithRepo(beta): %v", err)
+	}
+
+	moved, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(moved) != 1 {
+		t.Fatalf("the auto-merge did not keep the memory: %v %v", moved, err)
+	}
+	if moved[0].ProjectID != "alpha" {
+		t.Fatalf("memory project = %q, want alpha — the merge this test needs did not happen", moved[0].ProjectID)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("the repository auto-merge destroyed the memory's history")
+	}
+}
+
+// TestMemoryHistorySurvivesARepoClaimMerge: the third route into a merge, and
+// the only one that reaches main's SECOND reassignment implementation. A save
+// that names an existing project with no recorded repository, from a directory
+// whose remote another project already owns, folds the named project into that
+// owner — with no command, no MergeProject, and no project-merge list this test
+// could mistake for the one under test.
+func TestMemoryHistorySurvivesARepoClaimMerge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const remote = "git@github.com:acme/gadgets.git"
+	if err := s.EnsureProjectWithRepo(ctx, "owner", "/tmp/owner", "owner", remote); err != nil {
+		t.Fatalf("EnsureProjectWithRepo(owner): %v", err)
+	}
+	if err := s.EnsureProject(ctx, "named", "/tmp/named", "named"); err != nil {
+		t.Fatalf("EnsureProject(named): %v", err)
+	}
+	id, _, _, err := s.Upsert(ctx, "named", "fact", "a fact the named project recorded", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// The save path: the named project exists, records no repository, and the
+	// saving directory's remote is already claimed by "owner".
+	resolved, _, err := s.ResolveOrCreateRepoProject(ctx, "named", "named", "named", "/tmp/named", "named", remote)
+	if err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
+	}
+	if resolved != "owner" {
+		t.Fatalf("resolved project = %q, want owner — the merge this test needs did not happen", resolved)
+	}
+	moved, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(moved) != 1 {
+		t.Fatalf("the merge did not keep the memory: %v %v", moved, err)
+	}
+	if moved[0].ProjectID != "owner" {
+		t.Fatalf("memory project = %q, want owner", moved[0].ProjectID)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("the repository-claim merge destroyed the memory's history")
 	}
 }

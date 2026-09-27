@@ -357,7 +357,7 @@ the **same transaction** as the write, so history cannot diverge from state:
 | `update` | `UpdateMemory` | the edited row (a content change may also clear `resolved_at`) |
 | `reflect` | `ReplaceNonManual` — reuse, rewrite and fresh insert alike | the row as the consolidation left it |
 | `resolve` / `unresolve` | `SetResolved` / `ClearResolved` | the row with the new `resolved_at`, or without it |
-| `supersede` | `CreateLink` with a `supersedes` edge | the **target**'s state — the row the edge declares stale |
+| `supersede` | `CreateLink` with a `supersedes` edge, when the edge becomes active | the **target**'s state — the row the edge declares stale |
 | `restore` | `RestoreSnapshot` | the row as the snapshot put it back |
 | `import` | `ImportMemory` | the imported row, attributed to the artifact's agent |
 | `delete` | `Delete`, the replace's bulk delete, the restore's cleanup | the state the row held immediately before it went |
@@ -379,13 +379,22 @@ Three properties are deliberate:
   a cascading history table would be empty exactly when the audit is asked — the
   `delete` row is the tombstone, and it carries the text the memory held.
   `project_id` *does* cascade: deleting a project is meant to take its corpus
-  with it.
+  with it. That makes `project_id` reassignment on a project *merge* load-bearing
+  rather than cosmetic — a merge keeps the memories and deletes only the
+  `projects` row, so a `memory_provenance` row left behind would be taken by that
+  cascade while the memory it describes survived with no recorded past. Both of
+  main's merge reassignment lists (there are two, one per implementation) carry
+  the table.
 
 Writes that move none of the recorded columns append nothing: `Touch`
 (`access_count`, `last_accessed`), `TogglePin`, `PromoteToGlobal` and
 `MergeProject` (`project_id`), and the resolve KEEP cache. A row repeating the
 previous state would record that nothing happened, at the cost of one row per
-recall.
+recall. The same rule decides the `supersede` row: `ghost supersede` re-writes a
+pair whenever an endpoint moved since the edge was written, and re-writing an
+already-active edge changes nothing about the target, so the row is written when
+the edge *becomes* active — an insert, or a re-activation after an invalidation
+— and not on every re-write.
 
 **Growth policy.** The table is append-only, not unbounded, and both bounds are
 applied in the appending transaction — so neither needs a background job or a

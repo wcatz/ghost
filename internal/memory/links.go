@@ -32,9 +32,11 @@ var symmetricRelations = map[string]bool{"related": true}
 // "this memory is no longer current", and it is a change to that memory's
 // standing even though none of its columns move. The edge lands on the target
 // alone — the source's state did not change, and a history row filed under it
-// would be a record of a write that did not happen. A `related` edge from the
-// linker is not recorded: nothing about either memory's currency is asserted by
-// an edge the linker adds on cosine similarity alone.
+// would be a record of a write that did not happen. The row is written when the
+// edge BECOMES active, not on every re-write of an edge that already is (see
+// below). A `related` edge from the linker is not recorded at all: nothing about
+// either memory's currency is asserted by an edge the linker adds on cosine
+// similarity alone.
 func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error {
 	if sourceID == targetID {
 		return fmt.Errorf("create link: self-links not allowed (id %s)", sourceID)
@@ -55,11 +57,31 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 			return fmt.Errorf("begin create link: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
+		// Whether the edge is already active is read inside the transaction,
+		// which holds the write lock from its first statement, so the decision
+		// below cannot be overtaken by another process between the read and the
+		// write. It is read rather than inferred from RowsAffected because the
+		// upsert must keep raising an existing edge's strength even when the
+		// edge's validity does not change — a guard in the conflict clause
+		// would have had to choose one of the two.
+		active, err := linkIsActive(ctx, tx, sourceID, targetID, relation)
+		if err != nil {
+			return err
+		}
 		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source); err != nil {
 			return err
 		}
-		if err := appendHistoryTx(ctx, tx, targetID, phaseSupersede, Provenance{}); err != nil {
-			return err
+		// Only when the edge BECOMES active. `ghost supersede` re-writes a pair
+		// whose endpoint moved since the edge was written, and re-writing a
+		// live edge changes nothing about either memory: a history row would
+		// repeat the previous state byte-for-byte, spend one of the
+		// per-memory version slots, and — after enough passes — prune the real
+		// save/update/reflect versions this table exists to keep. Re-activating
+		// an invalidated edge IS a change, and is recorded.
+		if !active {
+			if err := appendHistoryTx(ctx, tx, targetID, phaseSupersede, Provenance{}); err != nil {
+				return err
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit create link: %w", err)
@@ -94,6 +116,24 @@ func insertLinkTx(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation 
 		return fmt.Errorf("create link: %w", err)
 	}
 	return nil
+}
+
+// linkIsActive reports whether a live (not invalidated) edge already exists for
+// this exact (source, target, relation). Served by the primary key, so it is one
+// index lookup.
+func linkIsActive(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation string) (bool, error) {
+	var live int
+	err := tx.QueryRowContext(ctx, `
+		SELECT 1 FROM memory_links
+		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
+	`, sourceID, targetID, relation).Scan(&live)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read existing link: %w", err)
+	}
+	return live == 1, nil
 }
 
 // GetLinks returns all valid (non-invalidated) links touching a memory,

@@ -1508,6 +1508,17 @@ func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 	return s.mergeProjectLocked(ctx, oldID, newID)
 }
 
+// projectMergeStatements reassigns every child table from the outgoing project
+// to the survivor. Both project_id columns that CASCADE — memory_snapshots and
+// memory_provenance — must be in this list: a merge KEEPS the corpus and deletes
+// only the projects row, so a table missing here loses every row it holds to
+// that DELETE, and the memories it describes survive with their past erased.
+//
+// This list and the identical one inside the s.mergeProjectTx method are two
+// copies of the same reassignment, left duplicated on main since #565 because
+// the bind-recovery paths call the method and the merge/migration paths call the
+// function. Both are updated here deliberately rather than deduplicated in a
+// provenance change; collapsing them is a separate, mechanical cleanup.
 var projectMergeStatements = []string{
 	`UPDATE memories SET project_id = ? WHERE project_id = ?`,
 	`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
@@ -1515,6 +1526,7 @@ var projectMergeStatements = []string{
 	`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
 	`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
 	`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
+	`UPDATE memory_provenance SET project_id = ? WHERE project_id = ?`,
 	`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
 }
 
@@ -1641,6 +1653,12 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		// omitting this would let the DELETE FROM projects below silently
 		// destroy the merged project's entire undo history.
 		`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
+		// And the append-only history, for the same reason and with a sharper
+		// edge: a merge KEEPS the memories, so a cascade here would leave live
+		// rows whose recorded past is gone — `ghost history <id>` reporting a
+		// memory that was never written. The history travels with the corpus it
+		// describes, and the rows' own project_id is only how a reader filters.
+		`UPDATE memory_provenance SET project_id = ? WHERE project_id = ?`,
 		`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {

@@ -206,13 +206,12 @@ func runHistory() {
 		os.Exit(1)
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")
-	view := historyView{MemoryID: opts.MemoryID}
 	if _, err := os.Stat(dbPath); err != nil {
 		if !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "error: database: %v\n", err)
 			os.Exit(1)
 		}
-		view.NoDatabase = true
+		view := historyView{MemoryID: opts.MemoryID, NoDatabase: true}
 		if opts.JSON {
 			// Not an empty stream: a script that piped a no-database run into a
 			// loop would otherwise see zero lines and conclude the memory has no
@@ -237,23 +236,54 @@ func runHistory() {
 
 	ctx := context.Background()
 	s := memory.NewStore(db, nil)
-	entries, err := s.MemoryHistory(ctx, opts.MemoryID, opts.Limit)
+	view, err := readHistoryView(ctx, s, opts.MemoryID, opts.Limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
-	}
-	view.Entries = entries
-	// The live row is read to say whether the last entry is current or a
-	// tombstone. A miss is not an error: a deleted memory's history is exactly
-	// what a reader is here for.
-	if live, err := s.GetByIDs(ctx, []string{opts.MemoryID}); err == nil && len(live) > 0 {
-		view.Live = &live[0]
 	}
 
 	if err := printHistory(os.Stdout, view, opts.JSON); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// readHistoryView gathers what the printer needs from an open store: the memory
+// id it is reporting on, its recorded history, and whether the row is still
+// live.
+//
+// The two reads are kept apart on purpose. A MISS is not an error — a deleted
+// memory's history is exactly what a reader is here for — but a failed read is,
+// because "no live row" is the only other thing Live distinguishes, and a report
+// that cannot tell them apart would state the wrong one: a read failure would
+// print "no longer live" about a memory that is still there. So the liveness
+// read's error is returned rather than folded into an empty result.
+//
+// It is a function rather than inline code in runHistory so that error is
+// testable at all: runHistory ends in os.Exit.
+func readHistoryView(ctx context.Context, s *memory.Store, memoryID string, limit int) (historyView, error) {
+	entries, err := s.MemoryHistory(ctx, memoryID, limit)
+	if err != nil {
+		return historyView{}, err
+	}
+	return withLiveness(ctx, s, memoryID, entries)
+}
+
+// withLiveness is the second read on its own, so the rule it has to keep — a
+// MISS is fine, a FAILURE is not — is one function a test can drive on its own.
+// Folding it back into readHistoryView would put it behind a read that fails
+// first under the same conditions, which is exactly how a swallowed error hides:
+// the test would still see an error, from the wrong read.
+func withLiveness(ctx context.Context, s *memory.Store, memoryID string, entries []memory.HistoryEntry) (historyView, error) {
+	live, err := s.GetByIDs(ctx, []string{memoryID})
+	if err != nil {
+		return historyView{}, err
+	}
+	view := historyView{MemoryID: memoryID, Entries: entries}
+	if len(live) > 0 {
+		view.Live = &live[0]
+	}
+	return view, nil
 }
 
 // printHistoryJSONError writes the one shape of --json output that is not a

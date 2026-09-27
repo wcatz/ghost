@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -233,5 +234,106 @@ func TestPrintHistoryJSONErrorIsDistinguishable(t *testing.T) {
 	}
 	if got.MemoryID != "" || got.RecordedAt != "" {
 		t.Errorf("the refusal also carries entry fields (%q, %q) — a consumer cannot tell the two shapes apart", got.MemoryID, got.RecordedAt)
+	}
+}
+
+// TestMemoryHistoryLiveFlagDecidesTheHeader: the header's live / no-longer-live
+// distinction comes from Live alone, so a reader who misreads it is told the
+// wrong thing about a memory that is still there. This pins which combinations
+// produce which sentence, because the printer cannot tell "the read failed" from
+// "the row is gone" — runHistory refuses on the former instead.
+func TestMemoryHistoryLiveFlagDecidesTheHeader(t *testing.T) {
+	entry := historyEntry("save", "claude-code", "a fact worth keeping", "2026-09-26 10:00:00")
+
+	var live bytes.Buffer
+	if err := printMemoryHistory(&live, historyView{
+		MemoryID: "m1",
+		Live:     &memory.Memory{ID: "m1", Category: "gotcha", Source: "mcp"},
+		Entries:  []memory.HistoryEntry{entry},
+	}); err != nil {
+		t.Fatalf("printMemoryHistory: %v", err)
+	}
+	if !strings.Contains(live.String(), "live)") || strings.Contains(live.String(), "no longer live") {
+		t.Errorf("a live memory is not reported as live:\n%s", live.String())
+	}
+
+	var gone bytes.Buffer
+	if err := printMemoryHistory(&gone, historyView{
+		MemoryID: "m1",
+		Entries:  []memory.HistoryEntry{entry},
+	}); err != nil {
+		t.Fatalf("printMemoryHistory: %v", err)
+	}
+	if !strings.Contains(gone.String(), "no longer live") {
+		t.Errorf("a memory with no live row is not reported as gone:\n%s", gone.String())
+	}
+}
+
+// TestReadHistoryViewReportsAFailedLivenessRead: the header distinguishes "still
+// live" from "no longer live" and nothing else, so a liveness read that FAILS
+// must not be reported as a memory that is gone. runHistory ends in os.Exit, so
+// the read is a function and this is its test: a closed database is a real read
+// failure, and it must surface as an error rather than as an empty result.
+func TestReadHistoryViewReportsAFailedLivenessRead(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	s := memory.NewStore(db, nil)
+	if err := s.EnsureProject(context.Background(), "p", "/tmp/p", "p"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// The liveness read is driven on its own, with a history that did succeed:
+	// a failure of BOTH reads is easy to produce, and it would pass even if the
+	// liveness error were swallowed again.
+	entries := []memory.HistoryEntry{{MemoryID: "m1", Phase: "save", Content: "text"}}
+	view, err := withLiveness(context.Background(), s, "m1", entries)
+	if err == nil {
+		t.Fatalf("a failed liveness read returned a view instead of an error: %+v", view)
+	}
+	if view.Live != nil {
+		t.Error("a failed liveness read produced a claim; the printer would have said the memory is gone")
+	}
+}
+
+// TestReadHistoryViewCarriesTheLiveRow: the ordinary path — a live memory's
+// history is reported as live, and a memory that is not there is not an error.
+func TestReadHistoryViewCarriesTheLiveRow(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	s := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p", "/tmp/p", "p"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, "p", memory.Memory{Category: "fact", Content: "a live fact", Source: "mcp", Importance: 0.5})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	view, err := readHistoryView(ctx, s, id, 0)
+	if err != nil {
+		t.Fatalf("readHistoryView: %v", err)
+	}
+	if view.Live == nil {
+		t.Error("a live memory was reported as not live")
+	}
+	if view.MemoryID != id || len(view.Entries) == 0 {
+		t.Errorf("view = %+v, want the id and its history", view)
+	}
+
+	gone, err := readHistoryView(ctx, s, "no-such-memory", 0)
+	if err != nil {
+		t.Fatalf("a memory that was never written must not be an error: %v", err)
+	}
+	if gone.Live != nil || len(gone.Entries) != 0 {
+		t.Errorf("view for an unknown id = %+v, want empty and not live", gone)
 	}
 }
