@@ -30,11 +30,18 @@ func TestDetectDoesNotMaterialiseTheText(t *testing.T) {
 
 	allocs := testing.AllocsPerRun(20, func() { Detect(text) })
 	t.Logf("%d bytes, %.1f allocations per Detect", len(text), allocs)
-	// The current implementation allocates once, for the match slices. Anything
-	// that scales with the word count is the FieldsFunc regression back — with
-	// roughly 480 words here, a collecting implementation lands in the hundreds.
-	if allocs > 8 {
-		t.Errorf("Detect on %d bytes allocated %.1f times per call, want at most 8 — "+
+	// The bound is loose on purpose. This measures 1.0 on a workstation and
+	// 40.0 under race instrumentation, because the instrumentation itself
+	// allocates; a threshold tight enough to be exact is a threshold that fails
+	// on someone else's machine.
+	//
+	// What it still separates is the thing worth separating. The text holds
+	// roughly 480 words, so the collecting implementation this replaced lands in
+	// the hundreds, and nothing else in Detect scales with the word count. A
+	// bound of 150 sits an order of magnitude below the regression and an order
+	// of magnitude above the instrumented baseline.
+	if allocs > 150 {
+		t.Errorf("Detect on %d bytes allocated %.1f times per call, want at most 150 — "+
 			"something is materialising the text again", len(text), allocs)
 	}
 }
