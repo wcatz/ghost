@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -139,18 +138,6 @@ func (s *Store) GetMemoryContent(ctx context.Context, id string) (string, error)
 	return content, err
 }
 
-// vecEntry holds a memory ID and its embedding for similarity search.
-type vecEntry struct {
-	memoryID  string
-	embedding []float32
-	scope     map[string]string
-	// projectID and resolved travel with the row for status demotion inside
-	// fusion — the scan already joins memories, so carrying them costs no
-	// extra read.
-	projectID string
-	resolved  bool
-}
-
 // SearchVector performs brute-force cosine similarity search against stored embeddings.
 // Returns memory IDs sorted by descending similarity.
 func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]ScoredMemory, error) {
@@ -167,7 +154,8 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 // does not mention a requested key stays eligible — which is a per-key
 // comparison over decoded JSON, and re-expressing it in SQL would duplicate the
 // rule the linker and fusion already share. The scan is brute force over the
-// project's embeddings either way, so filtering after it costs nothing.
+// project's embeddings either way, so deciding per row during the scan costs
+// nothing that deciding on the results would not have cost either.
 func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
 	return s.searchVector(ctx, projectID, queryVec, limit, scope)
 }
@@ -178,59 +166,21 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	// blocks that writer's readers — including this one, forever.
 	identity := s.configuredEmbeddingIdentity()
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	rows := s.borrowVectorRows()
+	defer s.returnVectorRows(rows)
 
-	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT e.memory_id, e.embedding, e.model, m.scope, m.project_id, m.resolved_at
-		FROM memory_embeddings e
-		JOIN memories m ON m.id = e.memory_id
+	// Everything the cosine pass needs is copied out of SQLite here, under the
+	// read lock and the store's single connection, and the corpus scan is the
+	// only part that needs either of them. Scoring then runs with both released
+	// — which is the point: the cosine pass is O(corpus × dims) of float
+	// arithmetic, and holding a read lock across it blocked every writer on the
+	// store for the length of the whole corpus.
+	if err := s.snapshotVectors(ctx, vectorScanColumns+`
 		WHERE m.project_id = ? OR m.project_id = '_global'
-	`, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("load embeddings: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-
-	entries, err := s.usableVectorEntries(rows, queryVec, identity)
-	if err != nil {
+	`, []any{projectID}, queryVec, identity, rows); err != nil {
 		return nil, err
 	}
-
-	// Compute cosine similarity for each entry, dropping non-positive scores: a
-	// cosine of 0 or below is not a match, and RRF awards weight by rank alone,
-	// so a meaningless rank-1 candidate would otherwise claim the full vector
-	// weight and enter the fused window.
-	scored := make([]ScoredMemory, 0, len(entries))
-	for _, e := range entries {
-		if sim := cosineSimilarity(queryVec, e.embedding); sim > minVectorSimilarity {
-			scored = append(scored, ScoredMemory{
-				MemoryID: e.memoryID, Score: sim, Scope: e.scope,
-				ProjectID: e.projectID, Resolved: e.resolved,
-			})
-		}
-	}
-
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].Score > scored[j].Score
-	})
-
-	// Narrow before the cut, so `limit` counts candidates the caller may
-	// actually use rather than rows a post-filter would discard.
-	if len(scope) > 0 {
-		eligible := scored[:0]
-		for _, sm := range scored {
-			if ScopeMatches(sm.Scope, scope) {
-				eligible = append(eligible, sm)
-			}
-		}
-		scored = eligible
-	}
-
-	if len(scored) > limit {
-		scored = scored[:limit]
-	}
-	return scored, nil
+	return rows.search(queryVec, limit, scope), nil
 }
 
 // warnForeignOnce claims the store's foreign-vector warning for storedIdentity
@@ -254,86 +204,6 @@ func (s *Store) warnForeignOnce(storedIdentity string) bool {
 	}
 	s.foreignWarned.warned[storedIdentity] = true
 	return true
-}
-
-// usableVectorEntries reads an open embeddings query and keeps only the rows
-// this search may compare against queryVec: a row whose recorded identity is
-// not the configured one belongs to another vector space (a model, dimension
-// or task-prefix change — see embedding.VectorIdentity), and one whose width
-// differs was written by a model that does not produce queryVec. Both are
-// skipped rather than scored, and neither is dropped silently: silently
-// dropping them turns a reconfiguration into "vector search found nothing"
-// with no explanation, and a reconfiguration is exactly when the operator is
-// watching the log.
-//
-// identity is passed in rather than read here: both callers hold the store's
-// read lock, and taking it again would risk the RWMutex recursive-read deadlock
-// documented at searchVector. An empty identity disables the identity check
-// (a store with no embedding model configured).
-//
-// The foreign-identity warning is logged once per retired identity
-// (warnForeignOnce)
-// rather than once per search: during a re-embed every search skips the same
-// rows, and a line per query buries the state it reports. The dimension
-// warning keeps its per-search reporting — it cannot repeat during a re-embed,
-// because the identity check above it takes those rows first.
-func (s *Store) usableVectorEntries(rows *sql.Rows, queryVec []float32, identity string) ([]vecEntry, error) {
-	var entries []vecEntry
-	// foreign counts skipped rows per stored identity rather than as one
-	// total: retirements OVERLAP (the model changes again before the first
-	// re-embed finishes), and a single total reported against whichever
-	// identity the planner yielded first would absorb the newer retirement —
-	// both would be folded into one line naming only the older one, which is
-	// exactly the diagnosis the operator needs at that moment.
-	foreign := make(map[string]int)
-	mismatched, mismatchedModel := 0, ""
-	for rows.Next() {
-		var id, model, rowProject string
-		var blob []byte
-		var scopeCol, resolvedCol sql.NullString
-		if err := rows.Scan(&id, &blob, &model, &scopeCol, &rowProject, &resolvedCol); err != nil {
-			return nil, err
-		}
-		if identity != "" && model != identity {
-			foreign[model]++
-			continue
-		}
-		vec := bytesToFloat32s(blob)
-		if len(vec) != len(queryVec) {
-			mismatched++
-			if mismatchedModel == "" {
-				mismatchedModel = model
-			}
-			continue
-		}
-		entries = append(entries, vecEntry{
-			memoryID: id, embedding: vec, scope: parseScope(scopeCol),
-			projectID: rowProject, resolved: resolvedCol.Valid && resolvedCol.String != "",
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if s.logger != nil && len(foreign) > 0 {
-		// Sorted so a log is deterministic whichever row order the planner
-		// happened to yield.
-		models := make([]string, 0, len(foreign))
-		for m := range foreign {
-			models = append(models, m)
-		}
-		sort.Strings(models)
-		for _, m := range models {
-			if s.warnForeignOnce(m) {
-				s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",
-					"skipped", foreign[m], "usable", len(entries), "configured_identity", identity, "stored_identity", m)
-			}
-		}
-	}
-	if s.logger != nil && mismatched > 0 {
-		s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
-			"skipped", mismatched, "usable", len(entries), "query_dims", len(queryVec), "stored_model", mismatchedModel)
-	}
-	return entries, nil
 }
 
 // minVectorSimilarity is the cosine floor below which a vector candidate is
@@ -1082,38 +952,16 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit int) ([]ScoredMemory, error) {
 	identity := s.configuredEmbeddingIdentity()
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	rows := s.borrowVectorRows()
+	defer s.returnVectorRows(rows)
 
-	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT e.memory_id, e.embedding, e.model, m.scope, m.project_id, m.resolved_at
-		FROM memory_embeddings e
-		JOIN memories m ON m.id = e.memory_id
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("load embeddings: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-
-	entries, err := s.usableVectorEntries(rows, queryVec, identity)
-	if err != nil {
+	// The same snapshot, the same scoring pass and the same bounded window as
+	// the project leg — the only difference is the query, which here has no
+	// WHERE clause at all.
+	if err := s.snapshotVectors(ctx, vectorScanColumns, nil, queryVec, identity, rows); err != nil {
 		return nil, err
 	}
-
-	scored := make([]ScoredMemory, 0, len(entries))
-	for _, e := range entries {
-		if sim := cosineSimilarity(queryVec, e.embedding); sim > minVectorSimilarity {
-			scored = append(scored, ScoredMemory{
-				MemoryID: e.memoryID, Score: sim, Scope: e.scope,
-				ProjectID: e.projectID, Resolved: e.resolved,
-			})
-		}
-	}
-	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
-	if len(scored) > limit {
-		scored = scored[:limit]
-	}
-	return scored, nil
+	return rows.search(queryVec, limit, nil), nil
 }
 
 // SearchHybridAll combines FTS5 and vector search across ALL projects using RRF.

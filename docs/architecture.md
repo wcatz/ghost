@@ -156,6 +156,42 @@ The cooldown exists because the hook fires once per turn, so a chain per turn is
 - Directed memory links
 - Snapshots, audit history, tasks, decisions, and usage data
 
+### The vector scan
+
+Both vector legs are brute force over the project's embeddings, and they run as
+two phases in `internal/memory/vector_scan.go`. `snapshotVectors` copies every
+candidate row out of SQLite and returns; `vectorRows.search` then scores the
+copy. The split is what the phase boundary is for: the copy is the only part
+that needs the store's read lock and its single connection, and the cosine pass
+— O(corpus × dims) of float arithmetic — needs neither, so a search no longer
+blocks writers for the length of the corpus. It matters most for `ghost
+supersede`, which runs one search per memory.
+
+The copy keeps the bytes as the database handed them over rather than decoding
+them, and the score loop reads the little-endian `float32`s back out of the
+blob in place (`cosineFromBytes`, bit-identical to decoding first). The scope
+column is kept as text and parsed only for a row that wins a slot. A search
+decides scope eligibility per row with a `scopeProbe`, which skips the
+`json.Unmarshal` for a row whose stored text cannot mention a requested key —
+`ScopeMatches` only ever excludes a row that names a requested key and disagrees
+with it, so the substring test can save a parse but never decides membership.
+
+Ranking holds a bounded window rather than the corpus: candidates are offered to
+a min-heap whose root is the worst row held, so a row that cannot win a slot
+costs one comparison, and the order is imposed once at the end over at most
+`limit` rows. The order is total — cosine descending, ties broken by scan
+position — so the answer is a function of the stored data and not of the order
+the query planner happened to return the rows in.
+
+The scratch is recycled through a `sync.Pool` on the store, so a steady-state
+search refills buffers it grew last time; an oversized embedding buffer is
+dropped on return rather than retained for a query that may not return. What a
+query still allocates is the database driver: `modernc.org/sqlite` copies every
+BLOB and every TEXT column into a fresh Go allocation per row, which is the
+floor for any `database/sql` scan and is the reason the next step here is a
+decoded-vector cache invalidated by `PRAGMA data_version` rather than more work
+on the scoring loop ([#556](https://github.com/wcatz/ghost/issues/556)).
+
 ### Hybrid fusion and window selection
 
 Window selection lives in `internal/memory/vector.go` as three steps:
@@ -297,7 +333,7 @@ are four, deliberately separate by caller:
 
 | Rule | Site | Applies to |
 |---|---|---|
-| may this stored vector enter a search? | `usableVectorEntries` | both vector scans (`SearchVector`, `SearchVectorAll`) |
+| may this stored vector enter a search? | `loadVectorRows` | both vector scans (`SearchVector`, `SearchVectorAll`), which share one snapshot and one scoring pass |
 | may this stored vector act as a *query* vector? | `GetEmbedding` (returns nil) | the link worker and `ghost supersede`, which both search from a stored vector |
 | may this memory be compared at all yet? | `UnscannedEmbeddedMemoryIDs` | the link worker's queue, so a foreign row is neither paired across spaces nor marked scanned |
 | is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed — and split the uncovered rows into stale (a vector under a retired identity) and unembedded (no vector at all), since only the first kind has something to rewrite |
@@ -311,8 +347,8 @@ produced — nothing deletes the old `related` rows (only `supersede` calls
 edge whose new-space similarity is lower keeps the strength the old space gave
 it; retiring those edges is a separate decision this change does not make. The
 failure ordering of the delete and the upsert fails safe in both directions, so
-they need no transaction. The foreign-vector warning in `usableVectorEntries`
-is likewise logged once per retired identity rather than once per search — a
+they need no transaction. The foreign-vector warning in `loadVectorRows` is
+likewise logged once per retired identity rather than once per search — a
 process that reconfigures twice warns about both retirements.
 
 The query-side rules matter because the filter only guards the *rows*: a stale
