@@ -136,21 +136,34 @@ func TestAuditGuardedDrops_AddressedInputIsJudgedAgainstTheOutputUnion(t *testin
 // somewhere else, deleting it with no --allow-drops and no warning. That is the
 // unattended loss #337/#549 exist to prevent, so an input nothing in the
 // response accounted for must be explained by ONE survivor.
+//
+// The fixture straddles the threshold deliberately, and the test states both
+// sides of the rule: no single output covers 45% of the Redis note and the three
+// together cover 50% of it, so the same result flags the note as omitted and
+// would absorb it if the response had addressed it. The region note is covered
+// outright by one survivor, so the only thing under test is the Redis one.
 func TestAuditGuardedDrops_OmittedInputIsStillJudgedAgainstOneOutput(t *testing.T) {
+	redisNote := "Redis maxmemory must stay at 512mb in production or the OOM killer reaps the pod"
+	regionNote := "Cloudflare fronts the production region fsn1"
 	input := ReflectionInput{ExistingMemories: []memory.Memory{
-		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "Redis maxmemory must stay at 512mb in production"},
-		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1 behind Cloudflare"},
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: redisNote},
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: regionNote},
 	}}
-	// No single output covers 45% of the Redis note; the two together cover all
-	// of it, word by word.
 	result := ReflectionResult{Memories: []ReflectMemory{
-		{Category: "fact", Content: "the ingest workers read the region fsn1 stream"},
-		{Category: "fact", Content: "Cloudflare fronts fsn1, so production is public"},
+		{Category: "fact", Content: "redis is the only stateful service"},
+		{Category: "fact", Content: regionNote},
+		{Category: "gotcha", Content: "the OOM killer reaps any worker over 512mb during a batch window"},
 	}}
 
 	drops := AuditGuardedDrops(input, result)
-	if len(drops) != 1 || drops[0].Content != input.ExistingMemories[0].Content {
+	if len(drops) != 1 || drops[0].Content != redisNote {
 		t.Fatalf("an omitted memory was absorbed by the corpus-wide vocabulary: %+v", drops)
+	}
+
+	addressed := result
+	addressed.AddressedIDs = []string{"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"}
+	if drops := AuditGuardedDrops(input, addressed); len(drops) != 0 {
+		t.Fatalf("the same fixture must be absorbed once the response addressed it, else it pins nothing: %+v", drops)
 	}
 }
 
