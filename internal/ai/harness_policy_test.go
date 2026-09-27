@@ -308,6 +308,57 @@ printf '%s' 'KEEP'
 	}
 }
 
+// TestGooseChildCannotDiscoverGhostsOwnPlugin: goose discovers user-scope
+// Agent Plugins under $HOME/.agents/plugins/, and that is home-relative BY
+// SPECIFICATION rather than XDG-relative. `ghost mcp init --client goose`
+// installs a package there whose mcp.json registers the Ghost stdio MCP server
+// and whose hooks/hooks.json run `ghost hook <event> --source goose` as shell
+// commands. The goose child needs the real HOME to read ~/.config/goose and
+// authenticate, so without an explicit boundary it also finds that package and
+// starts Ghost's own server from inside a reflect/resolve/supersede call.
+// --no-profile does not close this: it governs the configured profile, not
+// plugin discovery.
+func TestGooseChildCannotDiscoverGhostsOwnPlugin(t *testing.T) {
+	realHome := t.TempDir()
+	// The package `ghost mcp init --client goose` would have installed.
+	pluginDir := filepath.Join(realHome, ".agents", "plugins", "ghost")
+	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "mcp.json"), []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setHarnessPolicyParentEnv(t)
+	// After the shared decoys, so these are the values the child inherits.
+	t.Setenv("HOME", realHome)
+	t.Setenv("USERPROFILE", realHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(realHome, ".config"))
+
+	// The other half of the contract: the config the child authenticates from
+	// must still be where goose looks, or the isolation just breaks the call.
+	gooseConfig := filepath.Join(realHome, ".config", "goose")
+	if err := os.MkdirAll(gooseConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gooseConfig, "config.yaml"), []byte("provider: openai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := fakeHarnessPolicyBinary(t, "goose", `
+[ -e "$HOME/.agents/plugins/ghost/mcp.json" ] && { echo "goose child discovered Ghost's own MCP plugin" >&2; exit 1; }
+[ -r "$XDG_CONFIG_HOME/goose/config.yaml" ] || { echo "goose child lost the config it authenticates from" >&2; exit 1; }
+printf '%s' 'KEEP'
+`)
+
+	text, _, err := (&GooseClient{binary: bin}).Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if text != "KEEP" {
+		t.Fatalf("stdout = %q", text)
+	}
+}
+
 func TestOpenCodeClientUsesNoToolPolicy(t *testing.T) {
 	setHarnessPolicyParentEnv(t)
 	bin := fakeHarnessPolicyBinary(t, "opencode", `
