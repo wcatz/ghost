@@ -70,16 +70,27 @@ func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, 
 // drop that named a witness), the ids it disposed of, keyed by the text that
 // replaced them. A drop naming no witness contributes nothing — an obsolete drop
 // has no successor, and inventing one would put a false pointer on a delete row.
+//
+// The key is the CLAMPED text, and that is load-bearing. clampReflectMemories runs
+// before this and rewrites every emission in place, so an emission over
+// memory.MaxContentLen reaches the store truncated while the operation list still
+// holds the original — keying on the original matched nothing, and the ids of
+// exactly the largest merges (the ones with the most sources to point at) were
+// silently dropped. Clamping the key with the same function the emission went
+// through puts both sides in the same space without mutating the result or
+// threading a second copy of the clamped emissions through.
 func replacedIDsByText(result *reflection.ReflectionResult) map[string][]string {
 	out := map[string][]string{}
 	if result == nil {
 		return out
 	}
 	for _, m := range result.Merges {
-		out[m.Text] = append(out[m.Text], m.IDs...)
+		key, _ := memory.ClampContent(m.Text)
+		out[key] = append(out[key], m.IDs...)
 	}
 	for _, r := range result.Replacements {
-		out[r.Text] = append(out[r.Text], r.ID)
+		key, _ := memory.ClampContent(r.Text)
+		out[key] = append(out[key], r.ID)
 	}
 	return out
 }
