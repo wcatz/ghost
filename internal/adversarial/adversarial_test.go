@@ -134,11 +134,11 @@ func TestSnapshotAndAssertions(t *testing.T) {
 	})
 }
 
-// TestSnapshotPinsItsTwoPlaceholders covers the entries Snapshot records as
-// something other than content, because both are blind spots a fixture author
-// has to know about — and because the unreadable placeholder's whole reason for
-// existing is that it must NOT vary with how the root was spelled.
-func TestSnapshotPinsItsTwoPlaceholders(t *testing.T) {
+// TestSnapshotPinsItsPlaceholders covers the three entries Snapshot records as
+// something other than content, because all three are blind spots a fixture
+// author has to know about — and because the unreadable placeholder's whole
+// reason for existing is that it must NOT vary with how the root was spelled.
+func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 	t.Run("unreadable_file", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("a mode-0000 file is still readable by root, so there is nothing to pin")

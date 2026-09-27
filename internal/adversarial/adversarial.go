@@ -181,16 +181,17 @@ const dirEntry = "<dir>"
 // read-only importer has to satisfy. Pair it with AssertTreeInside for the
 // writes case.
 //
-// Every entry records something other than its content, and three of those are
-// placeholders rather than findings: a file whose contents could not be read, a
-// directory that could not be listed, and a non-regular entry such as a symlink,
-// whose target is deliberately not read. The first two are logged with their
-// path and cause. A fixture that needs an assertion over one of them has to make
-// the tree readable, or the entry a real file, first.
+// A readable regular file records its contents; everything else records one of
+// three placeholders, and each is a blind spot rather than a finding: a file
+// whose contents could not be read, a directory — every directory, not only one
+// that could not be listed — and a non-regular entry such as a symlink, whose
+// target is deliberately not read. The first two are logged with their path and
+// cause. A fixture that needs an assertion over one of them has to make the tree
+// readable, or the entry a real file, first.
 //
-// A directory records as dirEntry rather than as the empty string, so a name that
-// swaps between an empty file and an empty directory is reported rather than
-// comparing equal on two entries that only look alike.
+// The directory placeholder exists so that a name which swaps between an empty
+// file and an empty directory is reported, rather than comparing equal on two
+// entries that only look alike.
 func Snapshot(t testing.TB, root string) Tree {
 	t.Helper()
 	out := Tree{}
