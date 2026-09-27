@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1084,6 +1085,16 @@ func loadLoop(ctx context.Context, rep *report, b barriers, body func(int) error
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("load loop: %w", err)
 		}
+		// Pace the loop. SQLite's busy handler polls with sleeps and keeps no
+		// queue, so writers that loop with no pause take every gap in the
+		// write lock before a sleeping waiter wakes: on a loaded runner one
+		// writer waited over 5 s for BEGIN IMMEDIATE while 66-283 other writes
+		// committed, none holding the lock longer than 44 ms (#671). That is
+		// starvation by the fixture, not a lock held too long, and it made
+		// the test's verdict depend on runner speed. A few milliseconds of
+		// jitter keep lock utilization well below saturation while the
+		// writers still overlap every barrier the test waits on.
+		time.Sleep(time.Duration(1000+rand.IntN(3000)) * time.Microsecond)
 	}
 	rep.put("stopped_by", "iteration-cap")
 	return fmt.Errorf("load loop reached its %d-iteration cap without a stop signal", maxIterations)
