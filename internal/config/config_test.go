@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -634,6 +635,63 @@ func TestInjectionConfigDefaults(t *testing.T) {
 	if cfg.Injection.CategoryCaps["gotcha"] != 4 {
 		t.Errorf("category_caps[gotcha] = %d, want 4", cfg.Injection.CategoryCaps["gotcha"])
 	}
+	// Unset by design: an absent session_scope means today's behaviour, which is
+	// to render scope and filter nothing. A compiled default of {} would be the
+	// same rule, but a non-nil default would be indistinguishable from a scope
+	// somebody chose.
+	if len(cfg.Injection.SessionScope) != 0 {
+		t.Errorf("session_scope default should be empty, got %v", cfg.Injection.SessionScope)
+	}
+}
+
+// TestLoad_SessionScopeFromYAML is the config half of #577's second half: the
+// session scope is a setting, and a setting that only a GHOST_* variable can
+// reach is not one an operator can write down. The key must therefore bind a
+// nested map, and bind nothing at all when the file omits it.
+func TestLoad_SessionScopeFromYAML(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, strings.Join([]string{
+		"injection:",
+		"  session_scope:",
+		"    environment: development",
+		"    component: api",
+		"",
+	}, "\n"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Injection.SessionScope; got["environment"] != "development" || got["component"] != "api" || len(got) != 2 {
+		t.Errorf("injection.session_scope = %v, want environment:development component:api", got)
+	}
+}
+
+// TestLoad_SessionScopeEmptyYAMLValueIsRefused: an empty (or whitespace-only)
+// value in the YAML form is not a no-op — it would exclude every memory naming
+// the key — and dropping it would widen the rest of the scope, so Load refuses
+// the file the way the env form refuses the same pair.
+func TestLoad_SessionScopeEmptyYAMLValueIsRefused(t *testing.T) {
+	for name, value := range map[string]string{"empty": `""`, "whitespace": `" "`} {
+		t.Run(name, func(t *testing.T) {
+			isolateConfig(t)
+			writeUserConfig(t, strings.Join([]string{
+				"injection:",
+				"  session_scope:",
+				"    environment: " + value,
+				"    component: api",
+				"",
+			}, "\n"))
+
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("Load accepted an empty session_scope value; session_scope = %v", cfg.Injection.SessionScope)
+			}
+			if !strings.Contains(err.Error(), "injection.session_scope: empty value for environment") {
+				t.Errorf("Load error = %q, want it to name injection.session_scope and environment", err)
+			}
+		})
+	}
 }
 
 func TestScratchDefaults(t *testing.T) {
@@ -780,6 +838,47 @@ func TestLoadForHook_MalformedYAMLFallsBackWithWarning(t *testing.T) {
 	}
 	if got := warnings.String(); !strings.Contains(got, path) {
 		t.Errorf("warning %q must name the file that failed to parse (%q)", got, path)
+	}
+}
+
+// TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped pins the hook-path
+// cost of refusing an empty session_scope value: the whole file is dropped and
+// the session is not scope-filtered, and the warning says why. A
+// GHOST_INJECTION_SESSION_SCOPE replaces the file's session_scope map whole
+// before the check runs, so that file is not refused and the env scope applies.
+func TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped(t *testing.T) {
+	for name, tc := range map[string]struct {
+		env      string
+		want     map[string]string
+		wantWarn bool
+	}{
+		"no env scope": {wantWarn: true},
+		// The file's component: api does not survive: the env override is loaded
+		// as one map value for the key injection.session_scope, and koanf's Load
+		// replaces that key's value whole instead of merging it entry by entry.
+		// This case is the pin; if the override ever merges per entry, want
+		// gains component:api and this fails.
+		"env scope set": {env: "environment=development", want: map[string]string{"environment": "development"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolateConfig(t)
+			if tc.env != "" {
+				t.Setenv("GHOST_INJECTION_SESSION_SCOPE", tc.env)
+			}
+			writeUserConfig(t, "injection:\n  session_scope:\n    environment: \"\"\n    component: api\n")
+			warnings := captureConfigWarnings(t)
+
+			cfg := LoadForHook()
+			if cfg == nil {
+				t.Fatal("LoadForHook() = nil; the hook path must always be given a config")
+			}
+			if !maps.Equal(cfg.Injection.SessionScope, tc.want) {
+				t.Errorf("injection.session_scope = %v, want %v", cfg.Injection.SessionScope, tc.want)
+			}
+			if got := warnings.String(); strings.Contains(got, "injection.session_scope: empty value for environment") != tc.wantWarn {
+				t.Errorf("warnings = %q, want a refusal warning: %v", got, tc.wantWarn)
+			}
+		})
 	}
 }
 
@@ -1231,6 +1330,8 @@ func TestLoad_AllKnownKeysDoNotWarn(t *testing.T) {
 		"    gotcha: 1.2",
 		"  category_caps:",
 		"    gotcha: 4",
+		"  session_scope:",
+		"    environment: development",
 		"search:",
 		"  min_similarity: 0.0",
 		"obsidian:",
@@ -1297,6 +1398,7 @@ func TestLoad_InjectionEnvOverrides(t *testing.T) {
 	t.Setenv("GHOST_INJECTION_BEHAVIOR_CATEGORIES", "gotcha, decision")
 	t.Setenv("GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha=1.2,decision=1.5")
 	t.Setenv("GHOST_INJECTION_CATEGORY_CAPS", "gotcha=2,decision=1")
+	t.Setenv("GHOST_INJECTION_SESSION_SCOPE", "environment=development, component=api")
 
 	cfg, err := Load()
 	if err != nil {
@@ -1316,6 +1418,11 @@ func TestLoad_InjectionEnvOverrides(t *testing.T) {
 	if got := cfg.Injection.CategoryCaps; got["gotcha"] != 2 || got["decision"] != 1 {
 		t.Errorf("injection.category_caps = %v, want gotcha:2 decision:1", got)
 	}
+	// A map is not a string and a bare "environment=development" is not YAML, so
+	// this key needs the same explicit parse the other two maps need.
+	if got := cfg.Injection.SessionScope; got["environment"] != "development" || got["component"] != "api" || len(got) != 2 {
+		t.Errorf("injection.session_scope = %v, want environment:development component:api", got)
+	}
 }
 
 // TestLoad_MalformedEnvOverrideIsAnError pins that a GHOST_ value which cannot
@@ -1329,6 +1436,11 @@ func TestLoad_MalformedEnvOverrideIsAnError(t *testing.T) {
 		{"category weights missing value", "GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha"},
 		{"category weights bad value", "GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha=high"},
 		{"category caps bad value", "GHOST_INJECTION_CATEGORY_CAPS", "gotcha=four"},
+		{"session scope missing value", "GHOST_INJECTION_SESSION_SCOPE", "environment"},
+		// An empty value parses as a string, so nothing rejects it by failing —
+		// and it is a filter rather than a no-op: it excludes every row that
+		// names the key with any other value.
+		{"session scope empty value", "GHOST_INJECTION_SESSION_SCOPE", "environment="},
 		{"demotion threshold", "GHOST_LINKING_DEMOTION_THRESHOLD", "high"},
 	}
 	for _, tc := range cases {

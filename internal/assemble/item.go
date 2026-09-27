@@ -75,15 +75,22 @@ func (i Item) Line() string {
 		origin = " source=" + label
 	}
 	return "- [" + i.Category + "] `" + i.ID + "` (" +
-		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + scopeLabel(i.Scope) + origin +
+		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) + origin +
 		") " + quoteData(i.Content)
 }
 
-// scopeLabel renders a memory's scope for a listing, or "" when unscoped.
+// ScopeLabel renders a memory's scope for a listing, or "" when unscoped.
 // Keys are sorted: map iteration order is random in Go, so an unsorted rendering
 // would show the same scope in a different order on each read and look like the
 // scope itself was changing.
-func scopeLabel(scope map[string]string) string {
+//
+// It is exported because the label is what makes scope legible, and a surface
+// that re-derived it would be free to spell it differently: the search line and
+// the session-start block would then show the same scope in two forms, and
+// neither reader could be sure the two are the same claim. The value carries a
+// leading space, so a caller places it wherever its own line puts an item's
+// attributes.
+func ScopeLabel(scope map[string]string) string {
 	if len(scope) == 0 {
 		return ""
 	}
@@ -99,12 +106,39 @@ func scopeLabel(scope map[string]string) string {
 		if i > 0 {
 			b.WriteString(" ")
 		}
-		b.WriteString(k)
+		b.WriteString(scopeToken(k))
 		b.WriteString("=")
-		b.WriteString(scope[k])
+		b.WriteString(scopeToken(scope[k]))
 	}
 	b.WriteString("}")
 	return b.String()
+}
+
+// scopeToken renders one scope key or value. The label is printed OUTSIDE the
+// «...» data delimiters, and a scope is text Ghost did not author (a save
+// argument, an imported artifact), so a value is written bare only when every
+// character is one a scope name plausibly uses. Anything else is written as an
+// ASCII-only Go quoted string: a newline cannot start a line of its own, a `}`
+// cannot close the label early, and a «, » or other non-ASCII rune cannot open
+// a data block of its own.
+func scopeToken(s string) string {
+	if s == "" {
+		return `""`
+	}
+	for _, r := range s {
+		if !isScopeNameRune(r) {
+			return strconv.QuoteToASCII(s)
+		}
+	}
+	return s
+}
+
+func isScopeNameRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	}
+	return strings.ContainsRune("._-:/@+", r)
 }
 
 // quoteData wraps untrusted stored text in «...» data delimiters, first

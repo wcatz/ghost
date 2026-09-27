@@ -220,6 +220,16 @@ type InjectionConfig struct {
 	BehaviorCategories []string           `koanf:"behavior_categories"`
 	CategoryWeights    map[string]float64 `koanf:"category_weights"`
 	CategoryCaps       map[string]int     `koanf:"category_caps"`
+	// SessionScope is the scope the injected block is selected under
+	// (injection.session_scope). It is empty by default and deliberately has no
+	// compiled default: unset means the session-start surface applies no scope
+	// predicate and shows every scoped row it would otherwise have shown. A
+	// non-empty value is a request scope, and is matched with memory.ScopeMatches
+	// — the rule search applies, through assemble.ScopeContradicts — so a memory
+	// that does not mention a requested key still applies. The linker and the
+	// dedup folds ask the two-row question instead, memory.ScopesConflict, which
+	// is the same rule read the other way round.
+	SessionScope map[string]string `koanf:"session_scope"`
 }
 
 // DefaultInjectionConfig returns the compiled injection defaults. It mirrors the
@@ -320,7 +330,38 @@ func Load() (*Config, error) {
 	if err := k.Unmarshal("", cfg); err != nil {
 		return nil, err
 	}
+	if err := checkScopeValues(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+// checkScopeValues refuses an injection.session_scope key whose value is empty
+// or only whitespace, the way the env form does (stringMap, which trims through
+// commaPairs). An empty value is not a no-op: it is a filter that excludes every
+// row naming that key with any other value.
+//
+// Refusing is chosen for being loud and consistent with the env form, not for
+// keeping rows out: it is not a narrowing guarantee. The CLI subcommands fail on
+// it, but LoadForHook falls back to the compiled defaults plus GHOST_*. The
+// defaults carry no session_scope, so the session-start block for that session
+// is not scope-filtered at all. A GHOST_INJECTION_SESSION_SCOPE replaces the
+// file's whole session_scope map before this check, so that file is not refused
+// and the env scope applies (both cases pinned by TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped). Dropping
+// only the bad key would have kept the others filtering, but silently, and left
+// the file and env forms disagreeing about the same input.
+func checkScopeValues(cfg *Config) error {
+	keys := make([]string, 0, len(cfg.Injection.SessionScope))
+	for key, value := range cfg.Injection.SessionScope {
+		if strings.TrimSpace(value) == "" {
+			keys = append(keys, key)
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	slices.Sort(keys)
+	return fmt.Errorf("injection.session_scope: empty value for %s", strings.Join(keys, ", "))
 }
 
 // loadEnvLayer applies the GHOST_* environment variables to k: the generic
@@ -718,8 +759,8 @@ func isKnownKey(key string) bool {
 //
 //   - a koanf tag that itself contains "_" (obsidian.vault_dir), which the
 //     transformer would split into obsidian.vault.dir; and
-//   - a non-scalar field (injection.behavior_categories and the two injection
-//     maps), which koanf's weakly-typed decode cannot build from a bare string:
+//   - a non-scalar field (injection.behavior_categories and the injection maps),
+//     which koanf's weakly-typed decode cannot build from a bare string:
 //     "gotcha,decision" would arrive as the single element ["gotcha,decision"],
 //     and a string never becomes a map at all.
 type envOverride struct {
@@ -826,6 +867,32 @@ func intMap(s string) (interface{}, error) {
 	return out, nil
 }
 
+// stringMap parses "key=value,..." into the map[string]string a config key
+// expects. A scope is a set of strings, so nothing here can fail to convert and
+// the only checks available are the pair syntax commaPairs names and the value.
+//
+// An empty value is an error, as it is in the two numeric maps above — where
+// ParseFloat and Atoi reject it by failing — and for the same reason: nothing
+// else here can reject it, and a request key whose value is the empty string is
+// a filter rather than a no-op. It excludes every row that names the key with
+// any other value, so a trailing "=" would quietly leave a session with an
+// unexplained subset of its store. The YAML form decodes an empty value rather
+// than failing, so Load refuses it after decoding (checkScopeValues).
+func stringMap(s string) (interface{}, error) {
+	pairs, err := commaPairs(s)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		if p[1] == "" {
+			return nil, fmt.Errorf("%s: empty value", p[0])
+		}
+		out[p[0]] = p[1]
+	}
+	return out, nil
+}
+
 // envOverrides is a slice rather than a map so the order the variables are
 // applied in is fixed instead of randomized by map iteration.
 var envOverrides = []envOverride{
@@ -860,6 +927,7 @@ var envOverrides = []envOverride{
 	{"GHOST_INJECTION_BEHAVIOR_CATEGORIES", "injection.behavior_categories", commaList},
 	{"GHOST_INJECTION_CATEGORY_WEIGHTS", "injection.category_weights", floatMap},
 	{"GHOST_INJECTION_CATEGORY_CAPS", "injection.category_caps", intMap},
+	{"GHOST_INJECTION_SESSION_SCOPE", "injection.session_scope", stringMap},
 }
 
 // DataDirPath returns the ghost data directory path WITHOUT creating it, so

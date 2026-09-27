@@ -151,6 +151,13 @@
 #                                  # every guaranteed slot with gotchas
 #                                  # (env: GHOST_INJECTION_CATEGORY_CAPS,
 #                                  #  comma-separated: "gotcha=4")
+#   session_scope:                 # the scope the injected block is selected
+#     environment: development     # under; a memory scoped to another
+#                                  # environment is not injected. Empty (the
+#                                  # default) filters nothing. A memory that
+#                                  # does not name a key here still applies
+#                                  # (env: GHOST_INJECTION_SESSION_SCOPE,
+#                                  #  comma-separated: "environment=development")
 
 # --- Session routing ---
 # Sessions started in your home directory or at the filesystem root match no

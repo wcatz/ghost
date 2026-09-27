@@ -12,8 +12,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	_ "modernc.org/sqlite"
@@ -159,7 +161,12 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		cwd = resolved
 	}
 
-	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd)
+	// One config load for the whole handler, handed to both loaders below: this
+	// path reads the config files and the environment, and the digest's two
+	// halves are the same session. A broken config therefore reports once, not
+	// once per half.
+	cfg := config.LoadForHook()
+	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd, cfg)
 
 	// Surface a failed auto-consolidation chain from an earlier session as
 	// ONE labeled line ahead of the context block (after plugin finalize in
@@ -191,7 +198,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		}
 	}
 
-	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals()
+	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals(cfg)
 
 	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown))
 }
@@ -199,12 +206,15 @@ func runSessionStart(data []byte, stdout io.Writer) {
 // loadGlobals reads the cross-project global memories for context rendering.
 // It is the shared, read-only global-section loader used by both the
 // SessionStart hook and the `ghost context` command.
-func loadGlobals() (globals []sessionMemory, totalCount int, totalCountKnown bool) {
+// It takes the config its caller has already loaded rather than reading it a
+// second time: the two entry points load once and hand the same value to both
+// halves of the digest.
+func loadGlobals(cfg *config.Config) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
 	}
-	return loadGlobalMemories(filepath.Join(dataDir, "ghost.db"))
+	return loadGlobalMemories(filepath.Join(dataDir, "ghost.db"), cfg.Injection.SessionScope)
 }
 
 // globalOriginGuidance explains the origin labels actually present in the
@@ -272,7 +282,12 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 			if label != "" {
 				origin = " (" + label + ")"
 			}
-			fmt.Fprintf(&gsb, "- [%s] %s%s\n", m.Category, quoteData(m.Content), origin)
+			// The scope label is the one assemble.ScopeLabel writes into a
+			// search line, so a global preference reads here exactly as it does
+			// in ghost_memories_list. Empty for an unscoped row, which is what
+			// keeps this line byte-identical for every store written before the
+			// column existed.
+			fmt.Fprintf(&gsb, "- [%s]%s %s%s\n", m.Category, assemble.ScopeLabel(m.Scope), quoteData(m.Content), origin)
 		}
 	}
 	globalSection := gsb.String()
@@ -305,7 +320,12 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
 		for _, m := range memories {
-			fmt.Fprintf(&sb, "- [%s] %s\n", m.Category, quoteData(m.Content))
+			// The scope label is the one assemble.ScopeLabel writes into a
+			// search line. A row that carries scope has to say so here, or the
+			// injected block is the one surface where an agent cannot see the
+			// axis every other surface shows; a row that does not renders
+			// exactly as it did before, because the label is empty.
+			fmt.Fprintf(&sb, "- [%s]%s %s\n", m.Category, assemble.ScopeLabel(m.Scope), quoteData(m.Content))
 		}
 	}
 
@@ -359,7 +379,8 @@ func RenderSessionContext(cwd string) string {
 	// entry point that must. Both are best-effort and idempotent.
 	ensureObsidianSyncRunning()
 
-	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd)
+	cfg := config.LoadForHook()
+	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd, cfg)
 	if projectID != "" {
 		if dataDir, err := config.DataDir(); err == nil {
 			if n := bumpSessionCount(filepath.Join(dataDir, "ghost.db"), projectID); n > 0 {
@@ -367,7 +388,7 @@ func RenderSessionContext(cwd string) string {
 			}
 		}
 	}
-	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals()
+	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals(cfg)
 	// Nothing to surface — don't inject an empty/decorative block.
 	if projectID == "" && len(globals) == 0 {
 		return ""
@@ -391,7 +412,91 @@ const globalsDemotionThreshold = 0.85
 // the session digest bounded while preserving the most useful memories.
 const sessionMemoriesCap = 15
 
-func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
+// scopeColumnFloor is the schema version that added memories.scope
+// (internal/memory/migrate.go, migrateV12). The session-start loaders read the
+// column, and they read it through a handle that runs no migration.
+const scopeColumnFloor = 12
+
+// scopeColumnExpr is the memories.scope column for a store at or past
+// scopeColumnFloor, and a NULL literal for one below it. The second result says
+// which of the two it is, because a caller that filters on the column cannot name
+// it in a WHERE clause it is not selecting.
+//
+// memory.OpenReadDB opens a store exactly as it is — it refuses to create a
+// missing one, and it cannot make a current one current because it is
+// read-only. So naming the column on a store that predates it fails the whole
+// query with SQLite's "no such column", and both loaders read a failed query as
+// no rows: the digest would render its header, and its tasks, and its decisions,
+// with no memories and nothing saying why, where the same store rendered its
+// memories before this column was selected. NULL is the value every row in such a
+// store carries by definition, so the label is empty and the filter is inert —
+// the block a pre-v12 store produced, reached without a second spelling of either
+// query.
+//
+// A store the hook has never opened read-write is behind only until the first
+// command or MCP server migrates it, so this is a transient window rather than a
+// lasting one; the check is here because that first session is the one a user
+// would notice.
+//
+// A store that is behind is the expected reading, so it is silent. A pragma that
+// could not be READ is not: this falls back to the same unscoped rendering, which
+// is the one outcome the key exists to prevent and which nothing else would say
+// out loud — so it goes to stderr, like the neighbouring demotion lookups. A
+// caller that swallowed the difference would render a block with no scope on it
+// and no filter behind it, and the user would have no way to tell that from a
+// store that has none.
+func scopeColumnExpr(db *sql.DB) (expr string, hasScope bool) {
+	v, err := memory.DBUserVersion(db)
+	if err != nil {
+		// Keyed on the error, not once per process: both loaders probe, so a bare
+		// once would print the line twice for one failure, and a first TRANSIENT
+		// one — a locked store, an unreadable header — would consume the only
+		// warning the process makes and mask the later persistent one behind it. A
+		// distinct diagnosis is still reported once. The same rule, and the same
+		// reason, as config.warnf and Store.warnForeignOnce.
+		if warnScopeVersionOnce(err) {
+			fmt.Fprintln(os.Stderr, "ghost: could not read the store's schema version:", err)
+		}
+		return "NULL AS scope", false
+	}
+	if v < scopeColumnFloor {
+		return "NULL AS scope", false
+	}
+	return "scope", true
+}
+
+// scopeVersionWarned is the per-diagnosis record behind warnScopeVersionOnce, a
+// package var because the process is the scope of the warning: the hook is its
+// own short-lived process, and RenderSessionContext can render many blocks in one.
+var scopeVersionWarned = struct {
+	mu     sync.Mutex
+	warned map[string]bool
+}{warned: map[string]bool{}}
+
+// warnScopeVersionOnce reports whether this diagnosis has not been printed yet in
+// this process.
+func warnScopeVersionOnce(err error) bool {
+	scopeVersionWarned.mu.Lock()
+	defer scopeVersionWarned.mu.Unlock()
+	if scopeVersionWarned.warned[err.Error()] {
+		return false
+	}
+	scopeVersionWarned.warned[err.Error()] = true
+	return true
+}
+
+// resetScopeVersionWarned forgets the record, so a test can assert the line
+// without depending on which package test ran before it.
+func resetScopeVersionWarned() {
+	scopeVersionWarned.mu.Lock()
+	defer scopeVersionWarned.mu.Unlock()
+	scopeVersionWarned.warned = map[string]bool{}
+}
+
+// sessionScope is injection.session_scope, handed down by loadGlobals from the
+// config its caller loaded. An empty scope narrows nothing, and the fetch below is
+// then the statement that shipped.
+func loadGlobalMemories(dbPath string, sessionScope map[string]string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
 	// memory.OpenReadDB is the tree's read-only constructor: it refuses a
 	// missing database rather than creating a phantom empty one, and it is the
 	// same handle a Store takes for snapshot reads.
@@ -408,9 +513,19 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		totalCountKnown = true
 	}
 
+	// The session scope narrows the fetch, not the rows it returns: the 16-row
+	// over-fetch, the dedup pass and the 8-item cap below are one budget, and a
+	// production row that spent any of it would have hidden a development row
+	// the session asked for. With no scope configured the clause is absent, so
+	// it cannot change the plan, the fetch or the ranking.
+	scopeColumn, hasScope := scopeColumnExpr(db)
+	scopeClause := ""
+	if hasScope && len(sessionScope) > 0 {
+		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", sessionScope)
+	}
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, source, project_id FROM memories
-		WHERE project_id = ? AND resolved_at IS NULL
+		SELECT id, category, content, pinned, source, project_id, `+scopeColumn+` FROM memories
+		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT ?
 	`, memory.GlobalProjectID, globalsCap*2)
@@ -422,7 +537,8 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	for rows.Next() {
 		var id, cat, content, source, projectID string
 		var pinnedInt int
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source, &projectID); err != nil {
+		var rawScope []byte
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source, &projectID, &rawScope); err != nil {
 			continue
 		}
 		// 300 bytes here vs. 200 for project memories below is deliberate,
@@ -436,7 +552,11 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		// for a legacy-shaped seed is decided by this field — stamping a
 		// value here would make that decision depend on a constant instead of
 		// the row.
-		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, ProjectID: projectID, Source: source})
+		globals = append(globals, sessionMemory{
+			ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
+			ProjectID: projectID, Source: source,
+			Scope: memory.ParseScopeJSON(rawScope),
+		})
 	}
 
 	// Dedup: unlike project memories (where StableDemote only reorders and
@@ -481,6 +601,11 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 type sessionMemory struct {
 	ID, Category, Content string
 	Pinned                bool
+	// Scope is the row's machine-readable scope, decoded with
+	// memory.ParseScopeJSON. It is what the renderer labels the line with and
+	// what the session-scope filter decides on, so both halves read the same
+	// column through the same decoder.
+	Scope map[string]string
 	// ProjectID is the project this row is stored under, which both loaders
 	// reach differently: the globals loader scans it out of the row, the
 	// project loader stamps the id it filtered on — which is the row's own
@@ -495,7 +620,10 @@ type sessionMemory struct {
 	Source string
 }
 
-func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
+// cfg is the caller's already-loaded configuration, for the reason loadGlobals
+// states: the session-start path reads the config once and hands the same value
+// to both halves of the digest.
+func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -525,6 +653,16 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		`SELECT learned_context FROM ghost_state WHERE project_id = ?`, projectID,
 	).Scan(&learned)
 
+	// cfg arrives from the entry point, which loads it with LoadForHook — not
+	// Load, because this runs inside the host's editor session and a broken
+	// config must not fail it. LoadForHook reports the failure on stderr and
+	// returns the environment plus the compiled defaults, which pin the same
+	// injection.* and linking.demotion_threshold values the two former
+	// fallbacks did. Every key read below comes from that one load: the memory
+	// query is shaped by injection.session_scope, and the two-pass selection
+	// below it by the behavioral-floor keys.
+	injection := cfg.Injection
+
 	// Total count (pre-truncation) so the rendered context can flag how many
 	// memories weren't shown instead of silently dropping them — see the
 	// "N not shown" line in runSessionStart. A failed COUNT is reported
@@ -547,9 +685,25 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// without under-returning. importance and created_at are fetched (not
 	// just id/category/content/pinned) so pass-1's behavioral ordering can
 	// re-score with memory.DecayFactor and category weights in Go.
+	//
+	// The session scope narrows the fetch, not the rows it returns: the 45-row
+	// over-fetch, the 15-item cap and the demotion pass below are one budget,
+	// and a row the session excluded must not spend any of it. With no scope
+	// configured the clause is absent, so it cannot change the plan, the fetch
+	// or the ranking.
+	//
+	// memory.ScopeMatchesSQL is the SQL statement of the rule the assembler
+	// applies in Go, held to it by a test that runs both forms over the same
+	// rows — the two exist because this query and the assembler's differ in one
+	// respect that matters: the LIMIT below chooses which rows are read at all.
+	scopeColumn, hasScope := scopeColumnExpr(db)
+	scopeClause := ""
+	if hasScope && len(injection.SessionScope) > 0 {
+		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", injection.SessionScope)
+	}
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, importance, created_at FROM memories
-		WHERE project_id = ? AND resolved_at IS NULL
+		SELECT id, category, content, pinned, importance, created_at, `+scopeColumn+` FROM memories
+		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
 		ORDER BY (`+memory.DecayRankingSQL+`) DESC, importance DESC, created_at DESC, id
 		LIMIT ?
 	`, projectID, sessionMemoriesCap*3)
@@ -573,7 +727,8 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		var id, cat, content, createdAt string
 		var pinnedInt int
 		var importance float64
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt); err != nil {
+		var rawScope []byte
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt, &rawScope); err != nil {
 			continue
 		}
 		// 200 bytes per item (vs. globals' 300 above) — project memories
@@ -589,7 +744,10 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 			t = now
 		}
 		cands = append(cands, candidate{
-			mem:        sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, ProjectID: projectID},
+			mem: sessionMemory{
+				ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
+				ProjectID: projectID, Scope: memory.ParseScopeJSON(rawScope),
+			},
 			importance: importance,
 			createdAt:  t,
 		})
@@ -604,14 +762,6 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// rank-only ordering. behavior_floor=0 disables the bias entirely and
 	// reproduces the historical rank-only selection.
 	behaviorFloor := 0
-	// LoadForHook, not Load: this runs inside the host's editor session, so a
-	// broken config must not fail it. LoadForHook reports the failure on stderr
-	// and returns the environment plus the compiled defaults, which pin the same
-	// injection.* and linking.demotion_threshold values the two former
-	// fallbacks did. Loaded once and reused — it reads the config files and the
-	// environment, and this is the session-start hot path.
-	cfg := config.LoadForHook()
-	injection := cfg.Injection
 	if injection.BehaviorFloor > 0 {
 		behaviorFloor = injection.BehaviorFloor
 		if behaviorFloor > sessionMemoriesCap {

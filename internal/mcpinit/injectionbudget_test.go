@@ -116,7 +116,7 @@ func TestBenchInjectionBudget(t *testing.T) {
 	representativeCorpus(t, db, "p1")
 	_ = db.Close()
 
-	_, project, memories, _, _, _, _, _, totalKnown := loadSessionContext(projDir)
+	_, project, memories, _, _, _, _, _, totalKnown := loadSessionContext(projDir, config.LoadForHook())
 	if project != "myproj" {
 		t.Fatalf("project = %q, want myproj", project)
 	}

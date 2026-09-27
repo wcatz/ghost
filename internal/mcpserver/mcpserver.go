@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -2394,7 +2393,7 @@ func formatMemories(memories []memory.Memory) string {
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), sourceLabelForMemory(m), quoteData(m.Content))
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, assemble.ScopeLabel(m.Scope), sourceLabelForMemory(m), quoteData(m.Content))
 	}
 	return sb.String()
 }
@@ -2404,35 +2403,6 @@ func formatMemories(memories []memory.Memory) string {
 // terminate the data block early and smuggle text back out as instructions.
 func quoteData(s string) string {
 	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
-}
-
-// scopeLabel renders a memory's scope for the listing, or "" when unscoped.
-//
-// Keys are sorted: map iteration order is random in Go, so an unsorted
-// rendering would show the same scope in a different order on each read and
-// look like the scope itself was changing.
-func scopeLabel(scope map[string]string) string {
-	if len(scope) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(scope))
-	for k := range scope {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var b strings.Builder
-	b.WriteString(" scope{")
-	for i, k := range keys {
-		if i > 0 {
-			b.WriteString(" ")
-		}
-		b.WriteString(k)
-		b.WriteString("=")
-		b.WriteString(scope[k])
-	}
-	b.WriteString("}")
-	return b.String()
 }
 
 // sourceLabelForMemory names who wrote a row, applying the read-only
