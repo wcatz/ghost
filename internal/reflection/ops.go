@@ -356,7 +356,7 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 				result.Replacements = append(result.Replacements,
 					Replacement{ID: op.ids[0], Text: op.text})
 			} else {
-				result.MergedIDs = append(result.MergedIDs, op.ids...)
+				result.Merges = append(result.Merges, Merge{IDs: op.ids, Text: op.text})
 			}
 
 		case opDrop:

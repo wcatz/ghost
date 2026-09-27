@@ -262,20 +262,27 @@ func TestExecuteOpsRecordsWhichIdsWereMergedOrRewritten(t *testing.T) {
 		opMem(opID3, "fact", "the bastion answers ping on 443", 0.5),
 		opMem(opID4, "fact", "region fsn1 fronts every ingest worker", 0.4))
 
-	result := opRun(t, in, `{"learned_context":"ctx","ops":["keep `+opID1+`","drop `+opID2+` reason: obsolete","merge `+opID3+`,`+opID4+` -> the bastion in region fsn1 answers ping on 443"]}`)
+	const mergedText = "the bastion in region fsn1 answers ping on 443"
+	result := opRun(t, in, `{"learned_context":"ctx","ops":["keep `+opID1+`","drop `+opID2+` reason: obsolete","merge `+opID3+`,`+opID4+` -> `+mergedText+`"]}`)
 
+	if len(result.Merges) != 1 {
+		t.Fatalf("merges = %+v, want the one merge", result.Merges)
+	}
+	if result.Merges[0].Text != mergedText {
+		t.Errorf("merge text = %q, want %q — the witness is what the guard checks", result.Merges[0].Text, mergedText)
+	}
 	merged := map[string]bool{}
-	for _, id := range result.MergedIDs {
+	for _, id := range result.Merges[0].IDs {
 		merged[memIDKey(id)] = true
 	}
 	for _, want := range []string{opID3, opID4} {
 		if !merged[memIDKey(want)] {
-			t.Errorf("%s was merged but not recorded: merged=%v", want, result.MergedIDs)
+			t.Errorf("%s was merged but not recorded: %+v", want, result.Merges)
 		}
 	}
 	for _, unwanted := range []string{opID1, opID2} {
 		if merged[memIDKey(unwanted)] {
-			t.Errorf("%s was kept or dropped but recorded as merged: %v", unwanted, result.MergedIDs)
+			t.Errorf("%s was kept or dropped but recorded as merged: %+v", unwanted, result.Merges)
 		}
 	}
 	if len(result.Replacements) != 0 {

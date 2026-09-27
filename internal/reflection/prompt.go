@@ -33,20 +33,32 @@ type ReflectionInput struct {
 type ReflectionResult struct {
 	LearnedContext string          `json:"learned_context"`
 	Memories       []ReflectMemory `json:"memories"`
-	// MergedIDs are the input ids a merge folded in. The drop guard scores them
-	// against the union of the output memories rather than against any single
-	// output, because a merge may carry one source's substance across a survivor
-	// plus a sibling; an id outside this set is measured against a single output,
-	// because there the guard is asking whether the response accounted for the
-	// memory at all (#639).
-	MergedIDs []string `json:"merged_ids,omitempty"`
+	// Merges are the merges the response performed, each with the ids it folded in
+	// and the text that came out. The drop guard scores a merged source against the
+	// union of the output memories rather than against any single output, because
+	// a merge may carry one source's substance across a survivor plus its
+	// siblings; an id outside a merge is measured against a single output, because
+	// there the guard is asking whether the response accounted for the memory at
+	// all (#639). The text is what makes the claim checkable after the fact — see
+	// Replacement for why an id alone is not enough.
+	Merges []Merge `json:"merges,omitempty"`
 	// Replacements are the input ids a response disposed of, each with the text
 	// that stands in its place: a rewrite's own new text, or the emitted text of
 	// the successor a supersession named. They share one list because they are one
 	// claim — "this row no longer needs carrying, that text says it instead" — and
-	// the drop guard treats them identically. See Replacement for why the text is
-	// part of the record rather than implied.
+	// the drop guard treats them identically.
 	Replacements []Replacement `json:"replacements,omitempty"`
+}
+
+// Merge is one merge operation and what it produced. Text and not just the ids for
+// the same reason Replacement carries its text: a filter that runs over the result
+// after the operations are resolved can remove the merge, and a source still
+// claiming a merge that is not there is scored against a union that has nothing to
+// do with it — which, with the pass-through emitting every unclaimed input, is the
+// rest of the project.
+type Merge struct {
+	IDs  []string
+	Text string
 }
 
 // Replacement is an input id the response disposed of together with the text that

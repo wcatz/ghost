@@ -64,11 +64,14 @@ const dropContainmentThreshold = 0.45
 // the "absorbed" direction a silent deletion with no warning and no
 // --allow-drops. An id the model never mentioned needs no inference at all.
 //
-// Which output set an input is compared against is the remaining choice. A
-// MERGED source (result.MergedIDs) is measured against the union of every output,
-// because a merge may carry its substance across a survivor plus its siblings;
-// everything else is measured against a single output. The SQLite fallback names
-// no ids, so every one of its inputs is measured the strict way.
+// Which output set an input is compared against is the remaining choice, and it is
+// witnessed the same way. A MERGED source (result.Merges) is measured against the
+// union of every output, because a merge may carry its substance across a survivor
+// plus its siblings — but only while the merge that folded it in is still in the
+// result, since with the pass-through above the union of a result whose merge was
+// removed is the rest of the project. Everything else is measured against a single
+// output. The SQLite fallback names no ids, so every one of its inputs is measured
+// the strict way.
 //
 // Uses the package's tokenize (numeric-retaining, stopword-filtered) so merged
 // rewrites that preserve substance — including ports and versions — are
@@ -92,9 +95,21 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 			replaced[memIDKey(r.ID)] = true
 		}
 	}
-	merged := make(map[string]bool, len(result.MergedIDs))
-	for _, id := range result.MergedIDs {
-		merged[memIDKey(id)] = true
+	// A merged source is scored against the union only while the merge that folded
+	// it in is still in the result. A merge a post-filter removed leaves the union
+	// as the rest of the project — the pass-through emits every unclaimed input —
+	// so a source whose words recur elsewhere would pass containment against a
+	// vocabulary that has nothing to do with it, and be neither re-added nor
+	// reported. A lapsed claim falls back to the strict per-output test, which is
+	// the right question once there is no merge to be spread across.
+	merged := make(map[string]bool, len(result.Merges))
+	for _, m := range result.Merges {
+		if m.Text == "" || !present[m.Text] {
+			continue
+		}
+		for _, id := range m.IDs {
+			merged[memIDKey(id)] = true
+		}
 	}
 
 	var drops []DroppedGuarded

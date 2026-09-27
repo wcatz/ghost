@@ -168,6 +168,98 @@ func TestRewriteOfASourceAFilterKeptIsStillExempt(t *testing.T) {
 	}
 }
 
+// TestMergeLapsesWhenAFilterRemovesIt is the same failure as the rewrite's, one
+// step further out. A merge's sources take the union branch on the strength of
+// the merge, and once the merge is gone the union is the rest of the project —
+// the pass-through emits every unclaimed input — so a source whose words recur
+// across two unrelated survivors passes 45% containment against a vocabulary that
+// has nothing to do with it, and is neither re-added nor reported: two rows
+// deleted with nothing replacing them, silently.
+//
+// The fixture splits the two sources' tokens across two pass-throughs, each
+// holding well under the bar on its own: no single output explains either source,
+// and only the union does. That is the shape the union branch exists for, which is
+// why the mutation it guards against is invisible without it.
+func TestMergeLapsesWhenAFilterRemovesIt(t *testing.T) {
+	const (
+		ingest = "the ledger ingests batches through the bastion relay on port 2222 every night"
+		export = "the ledger exports batches through the bastion relay on port 2222"
+		ping   = "the bastion relay answers ping on 443 from the office"
+		purge  = "batches are purged after they pass through the ledger"
+	)
+	in := ReflectionInput{
+		ProjectName:       "ghost",
+		OtherProjectNames: []string{"dingo"},
+		ExistingMemories: []memory.Memory{
+			{ID: seqID(1), Category: "gotcha", Content: ingest},
+			{ID: seqID(2), Category: "fact", Content: export},
+			{ID: seqID(3), Category: "gotcha", Content: ping},
+			{ID: seqID(4), Category: "fact", Content: purge},
+		},
+	}
+	// The merge text names a project the input corpus never mentions, so the
+	// contamination filter removes it — after the ids are recorded as merged. The
+	// two sources it folded in are then scored against the ping note and the purge
+	// note, which together explain them and neither does alone.
+	const merged = "the ledger ingests and exports batches through the dingo bastion relay on port 2222"
+	llm := NewLlmConsolidator(&fakeReflector{reply: fmt.Sprintf(
+		`{"ops":["merge %s,%s -> %s"]}`, seqID(1), seqID(2), merged)})
+
+	result, err := llm.Consolidate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	if _, ok := findMemory(result, merged); ok {
+		t.Fatalf("the contaminating merge survived the filter: %+v", result.Memories)
+	}
+	if len(result.Memories) != 2 {
+		t.Fatalf("want the two passed-through rows left, got %+v", result.Memories)
+	}
+
+	// Only the union explains either source here, which is the shape the union
+	// branch exists for — and the reason this fixture is the one that can catch the
+	// mutation. The surviving-merge case is pinned separately, by
+	// TestMergedSourceIsStillScoredAgainstTheUnion, so the fix cannot be bought by
+	// dropping the union comparison altogether.
+	drops := AuditGuardedDrops(in, result)
+	for _, want := range []string{ingest, export} {
+		if !auditContains(drops, want) {
+			t.Errorf("source %q was silently deleted by a merge that is not there: %+v", want, drops)
+		}
+	}
+}
+
+// TestMergedSourceIsStillScoredAgainstTheUnion guards the fix from
+// over-reaching: a merge that survived must keep the union comparison, or a
+// source whose substance the merge spread across siblings comes back beside the
+// merge that absorbed it.
+func TestMergedSourceIsStillScoredAgainstTheUnion(t *testing.T) {
+	ssh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH from the office is firewalled, so use port 2222"}
+	region := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1"}
+	kept := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "fact", Content: "ssh from the office is firewalled for the whole subnet"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region, kept}}
+
+	result := ReflectionResult{
+		Memories: []ReflectMemory{
+			{Category: "gotcha", Content: "the bastion is reached on port 2222 from the region fsn1"},
+			{Category: "fact", Content: kept.Content},
+		},
+		Merges: []Merge{{IDs: []string{ssh.ID, region.ID}, Text: "the bastion is reached on port 2222 from the region fsn1"}},
+	}
+	if drops := AuditGuardedDrops(input, result); len(drops) != 0 {
+		t.Fatalf("a surviving merge still lost a source: %+v", drops)
+	}
+
+	// The same result with the merge taken away. The union now holds only the
+	// memory that was not part of the merge, so the SSH note — which the union
+	// used to carry and no single survivor explains — has to come back.
+	filtered := result
+	filtered.Memories = result.Memories[1:]
+	if drops := AuditGuardedDrops(input, filtered); !auditContains(drops, ssh.Content) {
+		t.Fatalf("want the SSH source re-added once its merge is gone, got %+v", drops)
+	}
+}
+
 // TestSupersessionLapsesWhenAFilterRemovesItsSuccessor is the supersession half,
 // kept alongside the rewrite half because they are one rule and one list now.
 func TestSupersessionLapsesWhenAFilterRemovesItsSuccessor(t *testing.T) {

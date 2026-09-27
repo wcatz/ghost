@@ -115,11 +115,11 @@ func TestAuditGuardedDrops_MergedInputIsJudgedAgainstTheOutputUnion(t *testing.T
 			{Category: "gotcha", Content: "the bastion is reached on port 2222 from the region fsn1"},
 			{Category: "fact", Content: kept.Content},
 		},
-		MergedIDs: []string{ssh.ID, region.ID},
+		Merges: []Merge{{IDs: []string{ssh.ID, region.ID}, Text: "the bastion is reached on port 2222 from the region fsn1"}},
 	}
 
 	strict := result
-	strict.MergedIDs = nil
+	strict.Merges = nil
 	if drops := AuditGuardedDrops(input, strict); len(drops) != 1 || drops[0].Content != ssh.Content {
 		t.Fatalf("a single-output comparison should have flagged the SSH note, got %+v", drops)
 	}
@@ -156,7 +156,10 @@ func TestAuditGuardedDrops_NonMergedInputIsStillJudgedAgainstOneOutput(t *testin
 	// The same fixture must be absorbed once the response merges it in, else it
 	// pins nothing: no single output reaches 45% and the three together reach 50%.
 	merged := result
-	merged.MergedIDs = []string{"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"}
+	merged.Merges = []Merge{{
+		IDs:  []string{"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"},
+		Text: "the OOM killer reaps any worker over 512mb during a batch window",
+	}}
 	if drops := AuditGuardedDrops(input, merged); len(drops) != 0 {
 		t.Fatalf("the same fixture must be absorbed once it was merged, else it pins nothing: %+v", drops)
 	}
@@ -203,7 +206,7 @@ func TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone(t *testing.T
 
 	result := ReflectionResult{
 		Memories:     nil, // the successor was removed from the result
-		MergedIDs:    []string{fixed.ID},
+		Merges:       []Merge{{IDs: []string{fixed.ID}, Text: fixed.Content}},
 		Replacements: []Replacement{{ID: stale.ID, Text: fixed.Content}},
 	}
 	drops := AuditGuardedDrops(input, result)
