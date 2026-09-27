@@ -2412,10 +2412,13 @@ type UpsertOptions struct {
 // not: a development row never replaced a production one. Reading such an edge
 // as a verdict blocks every fold of that row — so each re-save of the exact text
 // inserts a second copy instead of folding, and a fact that should occupy one
-// row fills the store with restatements. The exemption is asked inside the
-// statement because the probe that chose the row is this statement's sibling and
-// both are decided under the same LIMIT (see scopesConflictSQL). The edge is not
-// deleted; it is merely not a reason to refuse a fold.
+// row fills the store with restatements. The exemption is asked in the same
+// statement that reads the row, so the answer arrives with the row instead of in
+// a second read that could disagree with it: it is a property of the edge this
+// statement already reads, not of the row. (Unlike Upsert's two dedup probes,
+// there is no candidate window here to protect — this statement names one row by
+// id — and a Go-side check would have been possible; see scopesConflictSQL.) The
+// edge is not deleted; it is merely not a reason to refuse a fold.
 func foldTargetStillLive(ctx context.Context, tx *sql.Tx, projectID, id string) (bool, error) {
 	if id == "" {
 		return false, nil
@@ -2526,16 +2529,53 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// duplicate — the OR-probe alone treats a single shared word as a match,
 	// which silently swallowed unrelated saves.
 	ftsQuery := sanitizeFTSN(content, 30)
+	// A candidate that names a shared key differently is a different fact about
+	// a different place, not a second wording of this one, so it is not a
+	// candidate at all — and "not a candidate" has to be decided before the
+	// window is cut, not after. This statement's LIMIT chooses the rows the fold
+	// is made from, so a conflicting row that spent one of the fifteen slots
+	// cost a compatible duplicate ranked just below them the fold, and a save
+	// that restated a fact already stored was written a second time, unlinked
+	// (issue #665). Stated in SQL and held to ScopesConflict by
+	// TestScopesConflictSQLAgreesWithScopesConflict, so the rule is asked once.
+	//
+	// The incoming scope is a bound parameter, not text spliced into the
+	// statement, and scopeJSONExpr names its expression twice — inside
+	// json_valid and as the value — so the predicate's two placeholders take
+	// the same argument.
+	//
+	// A save with no scope conflicts with nothing (ScopesConflict needs a key
+	// both sides name), so the predicate — a correlated subquery over two
+	// json_each scans, run once per FTS match — is only added when the save
+	// carries one. Most saves carry none.
+	incomingScope := scopeJSON(opts.Scope)
+	scopeClause := ""
+	scopeArgs := []any{}
+	if incomingScope != nil {
+		scopeClause = "AND NOT " + scopesConflictSQL("m.scope", "?")
+		scopeArgs = []any{incomingScope, incomingScope}
+	}
+	probeArgs := func(lead ...any) []any {
+		args := append([]any{}, lead...)
+		args = append(args, scopeArgs...)
+		return append(args, ftsQuery)
+	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.content, m.scope
+		SELECT m.id, m.content
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE m.project_id = ?
 		  AND m.category = ?
+		  `+scopeClause+`
 		  AND memories_fts MATCH ?
 		ORDER BY rank, m.importance DESC
 		LIMIT 15
-	`, projectID, category, ftsQuery)
+	`, probeArgs(projectID, category)...)
+	if err != nil {
+		// Upsert treats a failed probe as "no candidate" and inserts, so a
+		// broken statement would switch dedup off silently. Say so.
+		s.logger.Warn("upsert dedup probe failed; saving without dedup", "probe", "same-category", "err", err)
+	}
 	if err == nil {
 		// Token-free content (punctuation/single-char words only) can still
 		// FTS-match — sanitizeFTS keeps single-char words that tokenizeContent
@@ -2544,15 +2584,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		var bestSim float64
 		for len(newTokens) > 0 && rows.Next() {
 			var candID, candContent string
-			var candScope sql.NullString
-			if scanErr := rows.Scan(&candID, &candContent, &candScope); scanErr != nil {
-				continue
-			}
-			// A candidate that names a shared key differently is a different
-			// fact about a different place, not a second wording of this one.
-			// Skipping rather than stopping keeps looking for a compatible
-			// candidate among the remaining matches.
-			if ScopesConflict(opts.Scope, parseScope(candScope)) {
+			if scanErr := rows.Scan(&candID, &candContent); scanErr != nil {
 				continue
 			}
 			candTokens := tokenizeContent(candContent)
@@ -2607,9 +2639,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// insert a duplicate. The check is inside the statement because this
 	// statement's LIMIT chooses the candidates — filtering after it would spend
 	// the budget on rows no fold may use.
+	//
+	// The candidate's own scope is excluded the same way, and for the same
+	// reason: near-identical wording across environments scores high whatever
+	// the category, so scope is the only thing that separates these
+	// candidates, and a conflicting row that reached the window ahead of a
+	// compatible duplicate cost that duplicate the fold (issue #665). Only rows
+	// a fold may use are counted against the fifteen.
 	if existingID == "" {
 		crossRows, crossErr := db.QueryContext(ctx, `
-			SELECT m.id, m.content, m.scope
+			SELECT m.id, m.content
 			FROM memories m
 			JOIN memories_fts f ON f.rowid = m.rowid
 			WHERE m.project_id = ?
@@ -2624,10 +2663,14 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			        AND l.invalidated_at IS NULL
 			        AND NOT `+scopesConflictSQL("s.scope", "m.scope")+`
 			  )
+			  `+scopeClause+`
 			  AND memories_fts MATCH ?
 			ORDER BY rank, m.importance DESC
 			LIMIT 15
-		`, projectID, category, ftsQuery)
+		`, probeArgs(projectID, category)...)
+		if crossErr != nil {
+			s.logger.Warn("upsert dedup probe failed; saving without dedup", "probe", "cross-category", "err", crossErr)
+		}
 		if crossErr == nil {
 			// Same empty-token guard as the same-category probe: token-free
 			// content can still FTS-match, and jaccard(∅,∅) scores 1.0.
@@ -2635,14 +2678,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			var bestJaccard float64
 			for len(newTokens) > 0 && crossRows.Next() {
 				var candID, candContent string
-				var candScope sql.NullString
-				if scanErr := crossRows.Scan(&candID, &candContent, &candScope); scanErr != nil {
-					continue
-				}
-				// The stricter Jaccard gate does not help here: near-identical
-				// wording across environments scores high regardless of
-				// category, so scope is what separates them.
-				if ScopesConflict(opts.Scope, parseScope(candScope)) {
+				if scanErr := crossRows.Scan(&candID, &candContent); scanErr != nil {
 					continue
 				}
 				candTokens := tokenizeContent(candContent)

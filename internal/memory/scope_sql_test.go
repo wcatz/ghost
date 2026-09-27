@@ -8,13 +8,16 @@ import (
 // TestScopesConflictSQLAgreesWithScopesConflict is the pin that makes the
 // duplicated rule safe.
 //
-// ScopesConflict is one rule, and it is a Go function. Two fold-target
-// liveness checks have to ask the same question from inside a single SQL
-// statement, because the candidate set is chosen by that statement's LIMIT —
-// filtering after the cut would spend the candidate budget on rows the caller
-// may not fold into, which is the defect the store-side narrowing exists to
-// avoid. So the rule is stated a second time, in SQL, over the same two scope
-// columns.
+// ScopesConflict is one rule, and it is a Go function. Three statements ask the
+// same question from inside SQL: Upsert's two dedup probes, which cannot filter
+// afterwards because their own LIMIT chooses the candidates, and
+// foldTargetStillLive, which has no window to protect and carries the rule
+// because a scope-conflicting 'supersedes' edge is not a verdict the row may be
+// acted on. Each states the rule over two scope expressions, and the two that
+// compare stored rows do it over two persisted columns — foldTargetStillLive's,
+// and the cross-category probe's 'supersedes' exclusion — while the dedup filter
+// in each probe takes one side as the incoming save's scope, bound as a
+// parameter.
 //
 // Two copies of one rule drift. This test is what stops them: every case the
 // Go table covers is run through the SQL predicate too, so a change to either
