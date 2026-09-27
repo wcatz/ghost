@@ -2,6 +2,7 @@ package reflection
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
@@ -80,6 +81,56 @@ func TestDropForeignProjectMemories_NoOtherNames(t *testing.T) {
 	if len(result.Memories) != 1 {
 		t.Fatalf("guard must be a no-op without OtherProjectNames, got %d", len(result.Memories))
 	}
+}
+
+// TestSupersessionLapsesWhenAFilterRemovesItsSuccessor drives the whole tier: the
+// operations are executed, the contamination filter then removes a merged
+// survivor for naming a project the input corpus never mentioned, and the
+// supersession that pointed at it has to lapse with it. Honouring it would delete
+// the dropped row with nothing replacing it — the exact outcome the "target must
+// be carried forward" rule exists to prevent, reached through a filter that runs
+// after the operations are resolved.
+func TestSupersessionLapsesWhenAFilterRemovesItsSuccessor(t *testing.T) {
+	const (
+		stale = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
+		fresh = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"
+		other = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3"
+	)
+	in := ReflectionInput{
+		ProjectName:       "ghost",
+		OtherProjectNames: []string{"dingo"},
+		ExistingMemories: []memory.Memory{
+			{ID: stale, Category: "gotcha", Content: "the ledger is reached from the office subnet"},
+			{ID: fresh, Category: "fact", Content: "Production runs in region fsn1 behind Cloudflare"},
+			{ID: other, Category: "fact", Content: "the bastion answers ping on 443"},
+		},
+	}
+	llm := NewLlmConsolidator(&fakeReflector{reply: `{"ops":["drop ` + stale + ` reason: superseded by ` + fresh + `","merge ` +
+		fresh + `,` + other + ` -> Production in region fsn1 is fronted by Cloudflare and the dingo bastion answers ping on 443"]}`})
+
+	result, err := llm.Consolidate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Consolidate: %v", err)
+	}
+	if len(result.Memories) != 0 {
+		t.Fatalf("the contaminating merge survived the filter: %+v", result.Memories)
+	}
+	if len(result.Supersessions) != 1 {
+		t.Fatalf("supersessions = %+v, want the one stated claim", result.Supersessions)
+	}
+	if drops := AuditGuardedDrops(in, result); !auditContains(drops, in.ExistingMemories[0].Content) {
+		t.Fatalf("a supersession outlived the successor the filter removed, so the stale row would be deleted: %+v", drops)
+	}
+}
+
+// auditContains reports whether the audit would re-add this exact content.
+func auditContains(drops []DroppedGuarded, content string) bool {
+	for _, d := range drops {
+		if d.Content == content {
+			return true
+		}
+	}
+	return false
 }
 
 // TestDropForeignProjectMemories_WordBoundary: "go" must not match inside

@@ -92,39 +92,75 @@ func TestAuditGuardedDrops_RetainsEveryCategory(t *testing.T) {
 	}
 }
 
-// TestAuditGuardedDrops_MeasuresContainmentAcrossTheOutputUnion: containment
-// used to be measured against a SINGLE output memory, so a memory whose
-// substance a merge split across two survivors looked unreferenced and came
-// back verbatim beside the merge that had already replaced it. That
-// paraphrase-beside-its-own-successor pair is what the drop guard produced
-// across every project in the #639 benchmark. The inputs' substance survives
-// where it survives, so the question is whether it survives anywhere in the
-// result, not whether one memory explains all of it.
-func TestAuditGuardedDrops_MeasuresContainmentAcrossTheOutputUnion(t *testing.T) {
-	input := ReflectionInput{ExistingMemories: []memory.Memory{
-		mem("gotcha", "Bastion SSH needs port 2222 because port 22 is firewalled from the office"),
-	}}
-	// No single output holds 45% of the input's tokens; the union does.
-	result := ReflectionResult{Memories: []ReflectMemory{
-		{Category: "gotcha", Content: "The office firewall blocks port 22 outbound"},
-		{Category: "fact", Content: "Use port 2222 for bastion SSH instead"},
-	}}
+// TestAuditGuardedDrops_AddressedInputIsJudgedAgainstTheOutputUnion: a merge
+// may carry an input's substance across a survivor plus a sibling, and scoring
+// it against any one of them re-adds it verbatim beside the merge that had just
+// absorbed it — the paraphrase-duplicate class #639 measured on every project.
+// An input the response named (kept, merged, rewritten) is therefore measured
+// against the union of the outputs.
+//
+// The fixture straddles the threshold on purpose: no single output covers 45% of
+// the SSH note and the two together cover 86% of it, so the only thing the
+// assertion turns on is which set the input is scored against.
+func TestAuditGuardedDrops_AddressedInputIsJudgedAgainstTheOutputUnion(t *testing.T) {
+	ssh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH from the office is firewalled, so use port 2222"}
+	region := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1"}
+	kept := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "fact", Content: "ssh from the office is firewalled for the whole subnet"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region, kept}}
 
-	each := AuditGuardedDrops(input, ReflectionResult{Memories: result.Memories[:1]})
-	if len(each) != 1 {
-		t.Fatalf("single-output containment should not have recognized the input, got %d", len(each))
+	// The merge folded the SSH and region notes together and dropped the words
+	// "from the office"; the memory it did not touch carries them.
+	result := ReflectionResult{
+		Memories: []ReflectMemory{
+			{Category: "gotcha", Content: "the bastion is reached on port 2222 from the region fsn1"},
+			{Category: "fact", Content: kept.Content},
+		},
+		AddressedIDs: []string{ssh.ID, region.ID},
+	}
+
+	strict := result
+	strict.AddressedIDs = nil
+	if drops := AuditGuardedDrops(input, strict); len(drops) != 1 || drops[0].Content != ssh.Content {
+		t.Fatalf("a single-output comparison should have flagged the SSH note, got %+v", drops)
 	}
 	if drops := AuditGuardedDrops(input, result); len(drops) != 0 {
-		t.Fatalf("a survivor spread across the output union was flagged: %+v", drops)
+		t.Fatalf("an addressed input spread across the output union was flagged: %+v", drops)
+	}
+}
+
+// TestAuditGuardedDrops_OmittedInputIsStillJudgedAgainstOneOutput is the other
+// half, and the reason the union is not applied to everything. Under the per-id
+// contract an unnamed id is an expected, explicitly cheap outcome, so this guard
+// is now mostly asking "did the model absorb this memory or forget it" — and a
+// corpus-wide union answers "absorbed" for any memory whose words also occur
+// somewhere else, deleting it with no --allow-drops and no warning. That is the
+// unattended loss #337/#549 exist to prevent, so an input nothing in the
+// response accounted for must be explained by ONE survivor.
+func TestAuditGuardedDrops_OmittedInputIsStillJudgedAgainstOneOutput(t *testing.T) {
+	input := ReflectionInput{ExistingMemories: []memory.Memory{
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "Redis maxmemory must stay at 512mb in production"},
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1 behind Cloudflare"},
+	}}
+	// No single output covers 45% of the Redis note; the two together cover all
+	// of it, word by word.
+	result := ReflectionResult{Memories: []ReflectMemory{
+		{Category: "fact", Content: "the ingest workers read the region fsn1 stream"},
+		{Category: "fact", Content: "Cloudflare fronts fsn1, so production is public"},
+	}}
+
+	drops := AuditGuardedDrops(input, result)
+	if len(drops) != 1 || drops[0].Content != input.ExistingMemories[0].Content {
+		t.Fatalf("an omitted memory was absorbed by the corpus-wide vocabulary: %+v", drops)
 	}
 }
 
 // TestAuditGuardedDrops_HonoursAnExplicitSupersession: the guard cannot tell
 // "forgot" from "deliberately replaced", which is how a stale memory was
 // restored beside the memory that replaced it (#639). An input the harness
-// dropped as superseded by another input id is a decision with a witness, so
-// the guard does not undo it — while an input with no such claim is still
-// audited, and the exemption is per-id rather than global.
+// dropped as superseded by another input id, whose successor is still in the
+// result, is a decision with a witness, so the guard does not undo it — while an
+// input with no such claim is still audited, and the exemption is per-id rather
+// than global.
 func TestAuditGuardedDrops_HonoursAnExplicitSupersession(t *testing.T) {
 	// The superseded row and its successor share almost no vocabulary — an old
 	// access method replaced by a new one — so nothing but the explicit claim
@@ -135,12 +171,45 @@ func TestAuditGuardedDrops_HonoursAnExplicitSupersession(t *testing.T) {
 	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed, orphan}}
 
 	result := ReflectionResult{
-		Memories:      []ReflectMemory{{Category: "fact", Content: fixed.Content}},
-		SupersededIDs: []string{stale.ID},
+		Memories: []ReflectMemory{{Category: "fact", Content: fixed.Content}},
+		Supersessions: []Supersession{{
+			DroppedID: stale.ID, TargetID: fixed.ID, TargetText: fixed.Content,
+		}},
 	}
 	drops := AuditGuardedDrops(input, result)
 	if len(drops) != 1 || drops[0].Content != orphan.Content {
 		t.Fatalf("want only the unrelated input audited, got %+v", drops)
+	}
+}
+
+// TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone: a filter that
+// runs over the result after the operations can still remove the successor —
+// dropForeignProjectMemories deletes a memory naming a project the input corpus
+// never mentioned, and a merge is exactly such a memory. The stated supersession
+// then names nothing, and honouring it would delete the dropped row with no
+// replacement. The witness is the successor's text, so a claim whose text is no
+// longer in the result lapses and both rows go back under the audit: the stale
+// one is re-added, and so is the successor the filter removed.
+func TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone(t *testing.T) {
+	stale := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH uses port 2222 with a hardware key"}
+	fixed := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "operator access is now fronted by Cloudflare Access"}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{stale, fixed}}
+
+	result := ReflectionResult{
+		Memories:      nil, // the successor was removed from the result
+		AddressedIDs:  []string{fixed.ID},
+		Supersessions: []Supersession{{DroppedID: stale.ID, TargetID: fixed.ID, TargetText: fixed.Content}},
+	}
+	drops := AuditGuardedDrops(input, result)
+	retained := map[string]bool{}
+	for _, d := range drops {
+		retained[d.Content] = true
+	}
+	if !retained[stale.Content] {
+		t.Fatalf("a supersession outlived its successor and let the stale row go: %+v", drops)
+	}
+	if !retained[fixed.Content] {
+		t.Fatalf("the successor the filter removed was not itself re-added: %+v", drops)
 	}
 }
 

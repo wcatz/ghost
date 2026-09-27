@@ -24,6 +24,7 @@ const (
 	opID1 = "D20E133860CC4AFE38B485AD5371BA59"
 	opID2 = "4FB5503C3BD92A6A3CACF854EE097A47"
 	opID3 = "A639E7A7654D2FF555008CE53674BE19"
+	opID4 = "03AB1E23FED1D2318894E4BF95BC54A8"
 )
 
 // opInput is a two-memory corpus: one that must survive untouched and one that
@@ -181,8 +182,8 @@ func TestDropOpEmitsNothingAndStaysUnderTheDropGuard(t *testing.T) {
 	if len(result.Memories) != 0 {
 		t.Fatalf("a drop emitted %d memories, want 0: %+v", len(result.Memories), result.Memories)
 	}
-	if len(result.SupersededIDs) != 0 {
-		t.Errorf("an obsolete drop claimed supersession: %v", result.SupersededIDs)
+	if len(result.Supersessions) != 0 {
+		t.Errorf("an obsolete drop claimed supersession: %+v", result.Supersessions)
 	}
 }
 
@@ -199,9 +200,71 @@ func TestSupersededDropIsNotReAdded(t *testing.T) {
 	if len(result.Memories) != 1 || result.Memories[0].Content != in.ExistingMemories[1].Content {
 		t.Fatalf("want only the surviving row, got %+v", result.Memories)
 	}
+	if len(result.Supersessions) != 1 {
+		t.Fatalf("supersessions = %+v, want the one stated claim", result.Supersessions)
+	}
+	if s := result.Supersessions[0]; s.DroppedID != opID1 || s.TargetID != opID2 ||
+		s.TargetText != in.ExistingMemories[1].Content {
+		t.Errorf("supersession = %+v, want %q superseded by %q carrying %q",
+			s, opID1, opID2, in.ExistingMemories[1].Content)
+	}
 	drops := AuditGuardedDrops(in, result)
 	if len(drops) != 0 {
 		t.Fatalf("the explicitly superseded memory was re-added: %+v", drops)
+	}
+}
+
+// TestExecuteOpsRecordsWhichIdsWereAddressed pins the input the drop guard reads
+// to decide which output set an input is scored against. Kept, merged and
+// rewritten ids are addressed; a dropped one is not — an obsolete drop names no
+// successor, so the guard still judges it against a single output, and a
+// supersession is judged by its own witness instead. Nothing else in the package
+// records this, so a result that arrived with an empty list would silently
+// restore the strict comparison for merges the harness did perform.
+func TestExecuteOpsRecordsWhichIdsWereAddressed(t *testing.T) {
+	in := opInput()
+	in.ExistingMemories[0].Content = "the ledger is reached from the office subnet"
+	in.ExistingMemories = append(in.ExistingMemories,
+		opMem(opID3, "fact", "the bastion answers ping on 443", 0.5),
+		opMem(opID4, "fact", "region fsn1 fronts every ingest worker", 0.4))
+
+	result := opRun(t, in, `{"learned_context":"ctx","ops":["keep `+opID1+`","drop `+opID2+` reason: obsolete","merge `+opID3+`,`+opID4+` -> the bastion in region fsn1 answers ping on 443"]}`)
+
+	addressed := map[string]bool{}
+	for _, id := range result.AddressedIDs {
+		addressed[memIDKey(id)] = true
+	}
+	for _, want := range []string{opID1, opID3, opID4} {
+		if !addressed[memIDKey(want)] {
+			t.Errorf("%s was kept or merged but not recorded as addressed: %v", want, result.AddressedIDs)
+		}
+	}
+	if addressed[memIDKey(opID2)] {
+		t.Errorf("a dropped id was recorded as addressed: %v", result.AddressedIDs)
+	}
+}
+
+// TestSupersessionWitnessFollowsAMerge records the witness as the text the
+// successor actually carries, not its stored content: a successor folded into a
+// merge is replaced by the merge's text, and the claim is only checkable if it
+// points at what the result really holds.
+func TestSupersessionWitnessFollowsAMerge(t *testing.T) {
+	in := opInput()
+	in.ExistingMemories[0].Content = "the ledger is reached from the office subnet"
+	in.ExistingMemories = append(in.ExistingMemories,
+		opMem(opID3, "fact", "the bastion answers ping on 443", 0.5))
+	const merged = "Production in region fsn1 is fronted by Cloudflare and the bastion answers ping on 443"
+	result := opRun(t, in,
+		`{"learned_context":"ctx","ops":["drop `+opID1+` reason: superseded by `+opID2+`","merge `+opID2+`,`+opID3+` -> `+merged+`"]}`)
+
+	if len(result.Supersessions) != 1 {
+		t.Fatalf("supersessions = %+v, want one", result.Supersessions)
+	}
+	if got := result.Supersessions[0].TargetText; got != merged {
+		t.Errorf("witness text = %q, want the merged text %q", got, merged)
+	}
+	if drops := AuditGuardedDrops(in, result); len(drops) != 0 {
+		t.Fatalf("a supersession into a merge was undone: %+v", drops)
 	}
 }
 

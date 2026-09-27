@@ -86,7 +86,7 @@ ghost reflect myproject --apply
 | `--apply` | Save the consolidated result. |
 | `--restore` | Restore the most recent consolidation snapshot. |
 | `--require-llm` | Fail instead of falling back to the offline SQLite/Jaccard tier. |
-| `--allow-drops` | Apply even when memories would be removed without a merge. Every category is under the drop guard, so without this flag any input memory the consolidation never referenced is re-added verbatim instead of deleted. An input the harness dropped as `superseded by <id>` is not re-added — the successor it names is carried forward in the same response. |
+| `--allow-drops` | Apply even when memories would be removed without a merge. Every category is under the drop guard, so without this flag any input memory the consolidation never referenced is re-added verbatim instead of deleted. An input the harness dropped as `superseded by <id>` is not re-added, as long as the successor it names is still in the result. |
 | `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
 | `--skip-unchanged` | Skip the LLM call when the consolidatable set is unchanged since the last applied pass. |
 | `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. |

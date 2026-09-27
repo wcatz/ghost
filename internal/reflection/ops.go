@@ -238,10 +238,10 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 	}
 	byID := make(map[string]memory.Memory, len(input.ExistingMemories))
 	for _, m := range input.ExistingMemories {
-		byID[strings.ToUpper(strings.TrimSpace(m.ID))] = m
+		byID[memIDKey(m.ID)] = m
 	}
 	resolve := func(id string) (memory.Memory, bool) {
-		m, ok := byID[strings.ToUpper(strings.TrimSpace(id))]
+		m, ok := byID[memIDKey(id)]
 		return m, ok
 	}
 
@@ -268,11 +268,11 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 			}
 		}
 		for _, id := range op.ids {
-			upper := strings.ToUpper(id)
-			if first, dup := claimed[upper]; dup {
+			key := memIDKey(id)
+			if first, dup := claimed[key]; dup {
 				return ReflectionResult{}, fmt.Errorf("ops[%d] %q: id %q already appears in ops[%d] — each id takes exactly one operation", i+1, clipOpLine(line), id, first)
 			}
-			claimed[upper] = i + 1
+			claimed[key] = i + 1
 		}
 		ops = append(ops, op)
 	}
@@ -283,7 +283,7 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 	for _, op := range ops {
 		if op.kind != opDrop {
 			for _, id := range op.ids {
-				carried[strings.ToUpper(id)] = true
+				carried[memIDKey(id)] = true
 			}
 		}
 	}
@@ -295,11 +295,19 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 	}
 
 	result := ReflectionResult{LearnedContext: resp.LearnedContext}
+	// emitted maps an input id to the text that id contributes to the result, so a
+	// supersession can name the witness its claim depends on. Drops are resolved
+	// after the loop because a target may appear later in the operation list than
+	// the drop that names it.
+	emitted := make(map[string]string, len(input.ExistingMemories))
+	var dropped []memOp
 	for _, op := range ops {
 		switch op.kind {
 		case opKeep:
 			m, _ := resolve(op.ids[0])
 			result.Memories = append(result.Memories, verbatimMemory(m))
+			result.AddressedIDs = append(result.AddressedIDs, op.ids[0])
+			emitted[memIDKey(op.ids[0])] = m.Content
 
 		case opMerge, opRewrite:
 			sources := make([]memory.Memory, 0, len(op.ids))
@@ -319,20 +327,32 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 					"preview", previewContent(op.text))
 				for _, m := range sources {
 					result.Memories = append(result.Memories, verbatimMemory(m))
+					emitted[memIDKey(m.ID)] = m.Content
 				}
-				continue
+			} else {
+				result.Memories = append(result.Memories, mergedMemory(sources, op.text))
+				for _, id := range op.ids {
+					emitted[memIDKey(id)] = op.text
+				}
 			}
-			result.Memories = append(result.Memories, mergedMemory(sources, op.text))
+			result.AddressedIDs = append(result.AddressedIDs, op.ids...)
 
 		case opDrop:
-			if op.obsolete {
-				// Nothing to emit and nothing to exempt. An obsolete claim names
-				// no successor, so the drop guard still audits the row and decides
-				// whether the corpus can show it is gone.
-				continue
-			}
-			result.SupersededIDs = append(result.SupersededIDs, op.ids[0])
+			dropped = append(dropped, op)
 		}
+	}
+	for _, op := range dropped {
+		if op.obsolete {
+			// Nothing to emit and nothing to exempt. An obsolete claim names no
+			// successor, so the drop guard still audits the row and decides
+			// whether the corpus can show it is gone.
+			continue
+		}
+		result.Supersessions = append(result.Supersessions, Supersession{
+			DroppedID:  op.ids[0],
+			TargetID:   op.target,
+			TargetText: emitted[op.target],
+		})
 	}
 	return result, nil
 }

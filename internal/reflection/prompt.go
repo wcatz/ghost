@@ -33,13 +33,33 @@ type ReflectionInput struct {
 type ReflectionResult struct {
 	LearnedContext string          `json:"learned_context"`
 	Memories       []ReflectMemory `json:"memories"`
-	// SupersededIDs are the input memory ids a harness dropped as superseded by
-	// another input id that the same response carries forward. The drop guard
-	// honours them instead of re-adding the stale row beside its own successor:
-	// an input the harness named and explained is not one it forgot (#639). An
-	// obsolete drop is NOT listed — that claim names no successor, so the token
-	// audit still governs it.
-	SupersededIDs []string `json:"superseded_ids,omitempty"`
+	// AddressedIDs are the input ids the response kept, merged or rewrote. The
+	// drop guard measures an addressed input against the union of the output
+	// rather than against any single output, because a merge may carry its
+	// substance across more than one survivor; an input the response never named
+	// is still measured against a single output, because there the guard is
+	// asking whether the model absorbed the memory or forgot it (#639).
+	AddressedIDs []string `json:"addressed_ids,omitempty"`
+	// Supersessions are the supersessions the response stated: an input id it
+	// dropped as superseded by another input id, the id it named, and the text
+	// that successor carries into the result. The drop guard honours one only
+	// while that text is still in the result — a successor one of the result's
+	// own post-filters removed is no successor — and never re-adds the dropped
+	// row, which is how a memory reading "three issues are still open" survived
+	// beside "the three open issues have all been fixed". An obsolete drop is
+	// NOT recorded: it names no successor, so the token audit governs it.
+	Supersessions []Supersession `json:"supersessions,omitempty"`
+}
+
+// Supersession is one stated supersession and the text its successor carries
+// forward. TargetText is what makes the claim checkable after the fact: the
+// guards that run over the result can still remove a survivor, and a supersession
+// whose successor is gone must fall back to the ordinary audit rather than
+// delete a memory with nothing replacing it.
+type Supersession struct {
+	DroppedID  string
+	TargetID   string
+	TargetText string
 }
 
 // ReflectMemory is a discrete memory extracted during reflection.
