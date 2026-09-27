@@ -35,21 +35,44 @@ type reflectionApplier interface {
 // credential is written back (making the drop a no-op, after the audit has
 // already printed its content to stderr), or some other output happens to cover
 // 45% of its tokens and ReplaceNonManual deletes the stored row with no
-// --allow-drops, the one deletion path the drop guard exists to close. Here it is
-// still accounted for, so it is neither re-added nor deleted, and it simply never
-// reaches the store.
+// --allow-drops, the one deletion path the drop guard exists to close. Here the
+// audit still accounts for it, so it is not re-added; and the emitted set no
+// longer does, so the replace DELETES any stored memory it was carrying forward.
+// Both halves are consequences of the same position, and neither is a surprise:
+// the row is the value.
 func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
 	if !promoteGlobals && len(globalMems) > 0 {
 		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		globalMems = nil
 	}
-	projectMems, globalMems = dropCredentialProposals(projectMems, globalMems)
+	projectMems, globalMems, dropped := dropCredentialProposals(projectMems, globalMems)
 	projectRows := reflectMemoriesToMemory(projectID, projectMems, replaced)
 	globalRows := reflectMemoriesToMemory("_global", globalMems, replaced)
 	if len(projectRows) == 0 && len(globalRows) == 0 {
+		// Nothing to write, so nothing is replaced: no deleteIds are computed and
+		// no stored row is touched. The dropped proposals are still reported
+		// above, and saying so here is the point — a removal claim printed before
+		// anyone knows whether a replace runs closes the incident in the
+		// operator's head while the value sits in the database.
 		return nil, 0, nil, nil
 	}
-	return store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
+	preserved, promoted, kept, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	// Reported here, after a replace that ran, and only then. A proposal dropped
+	// for holding a credential is no longer in the emitted set, so the replace
+	// treats any stored memory it was carrying forward as unmatched and DELETES
+	// it. That is the right outcome — the row is the value, and leaving it is the
+	// leak — and it is a deletion, so it is named as one after the fact rather
+	// than predicted in a per-drop line. --allow-drops does not gate it: that
+	// flag is the operator authorising what the MODEL chose to drop.
+	if dropped > 0 {
+		fmt.Fprintf(os.Stderr,
+			"note: %d stored memory(ies) this round carried forward were REMOVED by the project replace, because the proposal that carried them held a credential value\n",
+			dropped)
+	}
+	return preserved, promoted, kept, nil
 }
 
 // displayProposal renders a proposal or a guarded drop for the operator's own
@@ -94,8 +117,8 @@ func displayProposal(content, category string, limit int) string {
 // Ghost-owned removal rather than a model decision, which is why it does not go
 // through --allow-drops: that flag is the operator authorising what the MODEL
 // chose to drop.
-func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory) (keptProject, keptGlobal []reflection.ReflectMemory) {
-	keep := func(in []reflection.ReflectMemory) (out []reflection.ReflectMemory, dropped int) {
+func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory) (keptProject, keptGlobal []reflection.ReflectMemory, dropped int) {
+	keep := func(in []reflection.ReflectMemory) (out []reflection.ReflectMemory, n int) {
 		out = in[:0]
 		for _, m := range in {
 			finding, ok := secret.Detect(m.Content)
@@ -103,17 +126,16 @@ func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory)
 				out = append(out, m)
 				continue
 			}
-			dropped++
+			n++
 			fmt.Fprintf(os.Stderr,
-				"note: consolidation proposal not applied — it holds a credential value (format=%s category=%s scope=%s bytes=%d);"+
-					" any stored memory it carried forward is REMOVED from the project\n",
+				"note: consolidation proposal not applied — it holds a credential value (format=%s category=%s scope=%s bytes=%d)\n",
 				finding.Label, m.Category, m.Scope, len(m.Content))
 		}
-		return out, dropped
+		return out, n
 	}
-	keptProject, _ = keep(projectMems)
-	keptGlobal, _ = keep(globalMems)
-	return keptProject, keptGlobal
+	keptProject, n := keep(projectMems)
+	keptGlobal, m := keep(globalMems)
+	return keptProject, keptGlobal, n + m
 }
 
 // reflectMemoriesToMemory converts proposals to store rows. replaced maps an

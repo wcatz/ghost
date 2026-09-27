@@ -1,9 +1,12 @@
 package reflection
 
 import (
+	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
+
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // shaLikeRe matches candidate git-SHA-shaped tokens: 7-40 hex chars,
@@ -99,7 +102,21 @@ func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput, log
 // log output, so a dropped memory can be identified without dumping the whole
 // body into the log. Truncation is by rune, not byte, so the cut never lands
 // mid-rune and emits invalid UTF-8 (memory content is arbitrary text).
+// A preview is a log line, and in the autonomous path the log is an append-only
+// file the process writes and nothing ever prunes. So a 160-rune prefix is a
+// copy of the content into storage that outlives the run, and the three callers
+// (fabrication, contamination, grounding) all run INSIDE the tier — before
+// cmd/ghost sees anything, and therefore before the credential drop at the write
+// boundary. A proposal that trips one of those guards would have its value
+// written to the log verbatim and never reach the boundary at all.
+//
+// The check is here, in the one function all three share, rather than at the
+// call sites: a guard that has to be remembered at three places is a guard that
+// is one refactor away from not existing.
 func previewContent(content string) string {
+	if finding, ok := secret.Detect(content); ok {
+		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(content))
+	}
 	const max = 160
 	flat := strings.Join(strings.Fields(content), " ")
 	if r := []rune(flat); len(r) > max {
