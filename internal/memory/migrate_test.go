@@ -1357,3 +1357,113 @@ func TestMigrateFreshDBHasMaintenanceRuns(t *testing.T) {
 		t.Fatalf("idx_maintenance_runs_at index missing on fresh db: %v", err)
 	}
 }
+
+// TestMigrateV17AddsMemoryProvenance exercises the one-shot upgrade every
+// existing v16 database takes: migrateV17 must create memory_provenance and
+// both of its indexes, stamp the version, and leave existing rows untouched.
+// The fixture drops what initSQL would create and stamps user_version=16 to
+// simulate a real pre-migration database, and migrate() is called directly —
+// bypassing OpenDB's unconditional initSQL run — so the step's own DDL is what
+// the test proves.
+func TestMigrateV17AddsMemoryProvenance(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v16 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	for _, drop := range []string{
+		`DROP INDEX idx_provenance_memory`,
+		`DROP INDEX idx_provenance_recorded`,
+		`DROP TABLE memory_provenance`,
+	} {
+		if _, err := db.Exec(drop); err != nil {
+			t.Fatalf("%s: %v", drop, err)
+		}
+	}
+	seed := []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v17-p1', 'p1')`,
+		`INSERT INTO memories (project_id, category, content, source) VALUES ('p1', 'fact', 'a pre-v17 fact', 'mcp')`,
+		`PRAGMA user_version = 16`,
+	}
+	for _, s := range seed {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v16 db (%s): %v", s, err)
+		}
+	}
+
+	if err := migrate(db, 16); err != nil {
+		t.Fatalf("migrate v16->v17: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	for _, obj := range []struct{ typ, name string }{
+		{"table", "memory_provenance"},
+		{"index", "idx_provenance_memory"},
+		{"index", "idx_provenance_recorded"},
+	} {
+		var n int
+		if err := db.QueryRow(
+			`SELECT count(*) FROM sqlite_master WHERE type=? AND name=?`, obj.typ, obj.name,
+		).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s %s after migrateV17: n=%d err=%v, want 1", obj.typ, obj.name, n, err)
+		}
+	}
+
+	// The migrated table is usable, and its phase vocabulary is the one the
+	// writers send — a migration that delivered a table with a different CHECK
+	// would fail on the first real save, in production, on somebody's data.
+	if _, err := db.Exec(`
+		INSERT INTO memory_provenance (memory_id, project_id, phase, content, category, importance, source)
+		SELECT id, project_id, 'save', content, category, importance, source FROM memories
+	`); err != nil {
+		t.Fatalf("insert after migrateV17: %v", err)
+	}
+	var phase, content string
+	if err := db.QueryRow(
+		`SELECT phase, content FROM memory_provenance LIMIT 1`,
+	).Scan(&phase, &content); err != nil {
+		t.Fatalf("select from memory_provenance: %v", err)
+	}
+	if phase != "save" || content != "a pre-v17 fact" {
+		t.Errorf("row = (%q, %q), want (save, a pre-v17 fact)", phase, content)
+	}
+
+	// The pre-migration memory survived the additive step untouched.
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM memories`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("memories after migration: n=%d err=%v, want 1", n, err)
+	}
+}
+
+// TestMigrateFreshDBHasMemoryProvenance: a brand-new database (initSQL path, no
+// migration involved) must have memory_provenance and its indexes from the start
+// — guards against the table silently dropping out of initSQL while migrateV17
+// still exists to paper over it on upgraded databases.
+func TestMigrateFreshDBHasMemoryProvenance(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`SELECT memory_id, phase, agent, session_id, content, category,
+		importance, resolved_at, source FROM memory_provenance LIMIT 0`); err != nil {
+		t.Fatalf("memory_provenance columns missing on fresh db: %v", err)
+	}
+	for _, name := range []string{"idx_provenance_memory", "idx_provenance_recorded"} {
+		var idx string
+		if err := db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name,
+		).Scan(&idx); err != nil {
+			t.Errorf("%s index missing on fresh db: %v", name, err)
+		}
+	}
+}

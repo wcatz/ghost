@@ -132,6 +132,16 @@ A `reversed` verdict — the classifier says the older note holds the current va
 
 All three maintenance operations route through the calling harness when no explicit `--source` is supplied. Ghost fails rather than silently switching to a different harness or billing path. See the [CLI reference](cli.md#memory-maintenance) for all flags.
 
+### Read a memory's history
+
+```bash
+ghost history <memory-id>
+ghost history <memory-id> --limit 5
+ghost history <memory-id> --json
+```
+
+Every write to a memory is appended to its history in the same transaction, so `ghost history` can answer what a memory used to say, which pass or agent changed it, and when — including after the memory itself is gone, which is the case where the recorded text is all that is left. The command writes nothing.
+
 ## Automatic lifecycle work
 
 The Stop hook can spawn a detached `ghost lifecycle <project>` process after a session. Each enabled phase runs in order:

@@ -349,14 +349,14 @@ A dry run is not a separate code path: every record goes through the same valida
 - Because it cannot migrate, a store from an **older** Ghost is refused with a message naming both versions rather than failing on a missing column:
 
   ```text
-  error: the database at ~/.local/share/ghost/ghost.db is at schema v11 and this Ghost reads v16
+  error: the database at ~/.local/share/ghost/ghost.db is at schema v11 and this Ghost reads v17
          — start a session, or run ghost mcp init, to migrate it before exporting it or
          previewing an import into it
   ```
 
   A store from a **newer** Ghost gets a different message — upgrade Ghost — because migrating backwards is not the fix. Both are checked by reading `PRAGMA user_version` on the read-only connection, so the check never writes.
 
-  The check is strict: the store must be at exactly this Ghost's schema version, not merely at or above some floor. The only columns `export` and a dry run select that postdate v10 are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12–v15 store would in fact query fine — but a floor would hardcode which columns exist at which version, and the day a reader selects a newer column it would quietly admit a store that fails with a missing-column error again. So a v12–v15 store is asked to run one read-write open first, which is `ghost mcp init` or any session. `ghost backup` runs no version check of its own, but it is itself a read-write open: it reaches the store through the same path as a session, so it migrates and seeds the store it copies, and a store from a newer Ghost is refused outright. That makes it one way to *pay* this cost — run it once, then the export works — rather than a way around it. It is safe to run against a live MCP server, which is why it uses `VACUUM INTO` at all.
+  The check is strict: the store must be at exactly this Ghost's schema version, not merely at or above some floor. The only columns `export` and a dry run select that postdate v10 are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12–v16 store would in fact query fine — but a floor would hardcode which columns exist at which version, and the day a reader selects a newer column it would quietly admit a store that fails with a missing-column error again. So a v12–v16 store is asked to run one read-write open first, which is `ghost mcp init` or any session. `ghost backup` runs no version check of its own, but it is itself a read-write open: it reaches the store through the same path as a session, so it migrates and seeds the store it copies, and a store from a newer Ghost is refused outright. That makes it one way to *pay* this cost — run it once, then the export works — rather than a way around it. It is safe to run against a live MCP server, which is why it uses `VACUUM INTO` at all.
 
 ### Imported provenance
 
@@ -425,6 +425,32 @@ ghost context --cwd /path/to/project
 ```
 
 This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response.
+
+### `ghost history <memory-id>`
+
+Prints one memory's append-only history: every insert, edit, reflection rewrite,
+duplicate fold, resolve, supersession, restore, import and deletion, oldest
+first.
+
+```bash
+ghost history <memory-id>                    # human-readable changelog
+ghost history <memory-id> --limit 5          # the newest 5 entries
+ghost history <memory-id> --json | jq .phase # one JSON object per entry
+```
+
+Each entry names when it happened, which write path made it (`save`, `update`,
+`reflect`, `merge`, `resolve`, `unresolve`, `supersede`, `restore`, `import`,
+`delete`), which agent and session performed it when the write path knew — the
+lifecycle passes do not, and the entry says so rather than inventing one — and
+the content, category, importance, `resolved_at` and source the memory held once
+that write landed.
+
+The history outlives the memory: a deleted memory's last state is still readable
+here, and a report that finds neither a row nor a history says so instead of
+printing nothing. Nothing is written by this command; a store predating the
+history table is migrated by the open, like every other report command.
+
+Entries are kept per the growth policy in [architecture.md](architecture.md#memory-history): the newest 50 versions of one memory, and the newest 20 000 rows in the store.
 
 ### `ghost bench`
 

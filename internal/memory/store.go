@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	pathpkg "path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -362,16 +363,42 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 		}
 
 		tags, _ := json.Marshal(seed.Tags)
-		_, err = s.db.ExecContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags, pinned)
-			VALUES ('_global', ?, ?, 'builtin', ?, ?, 1)
-		`, seed.Category, seed.Content, seed.Importance, string(tags))
-		if err != nil {
+		// One transaction per seed, and a failed seed stays a warning rather
+		// than aborting the rest: this runs on every open, and a store missing
+		// a builtin rule must not be a store with no rules at all. The history
+		// row goes in the same transaction, so "which rows did Ghost ship
+		// itself" is answerable from the same table as everything else.
+		if err := s.seedMemoryTx(ctx, seed, string(tags)); err != nil {
 			s.logger.Warn("seed memory insert failed", "content", seed.Content, "error", err)
 		}
 	}
 
 	return nil
+}
+
+// seedMemoryTx inserts one builtin seed and its first history row in a single
+// transaction. A seed is a memory like any other, so it gets a recorded origin:
+// the phase is save rather than a seed-specific value because the row's own
+// source column already says `builtin`, and a phase nothing reads is a phase no
+// filter can use.
+func (s *Store) seedMemoryTx(ctx context.Context, seed seedGlobalMemory, tagsJSON string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin seed tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var id string
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO memories (project_id, category, content, source, importance, tags, pinned)
+		VALUES ('_global', ?, ?, 'builtin', ?, ?, 1)
+		RETURNING id
+	`, seed.Category, seed.Content, seed.Importance, tagsJSON).Scan(&id); err != nil {
+		return err
+	}
+	if err := appendHistoryTx(ctx, tx, id, phaseSave, Provenance{}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Close closes the underlying database.
@@ -2291,15 +2318,23 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
-// Create inserts a new memory and returns its ID.
+// Create inserts a new memory and returns its ID. The insert and the history
+// row that records it share one transaction, so a memory cannot exist without
+// its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tags, _ := json.Marshal(m.Tags)
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin create: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
 	var id string
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
 		                      agent, session_id, source_ref, confidence, scope)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2309,6 +2344,12 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope)).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create memory: %w", err)
+	}
+	if err := appendHistoryTx(ctx, tx, id, phaseSave, provenanceFromMemory(m)); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit create: %w", err)
 	}
 	if s.onSave != nil {
 		s.onSave(projectID)
@@ -2782,6 +2823,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if affected == 0 {
 				return "", "", 0, fmt.Errorf("fold target %s disappeared during the update", existingID)
 			}
+			// The fold is a write to the target — it raises its importance and
+			// access count — so it gets its own history entry, attributed to the
+			// agent whose save did the folding rather than to whoever wrote the
+			// row first.
+			if err := appendHistoryTx(ctx, tx, existingID, phaseMerge, opts.Provenance); err != nil {
+				return "", "", 0, err
+			}
 		}
 
 		if opts.FoldOnly && existingID != "" {
@@ -2806,6 +2854,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
 			scopeJSON(opts.Scope)).Scan(&id); err != nil {
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
+		}
+		if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
+			return "", "", 0, err
 		}
 
 		// CreateLink takes s.mu itself — calling it here would deadlock, since
@@ -2851,6 +2902,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
 		scopeJSON(opts.Scope)).Scan(&id); err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
+	}
+	if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
+		return "", "", 0, err
 	}
 	if err = commit(); err != nil {
 		return "", "", 0, err
@@ -3137,6 +3191,12 @@ func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Mem
 // updated_at is deliberately untouched: nothing about the memory's content or
 // authorship changed, only resolve's verdict about it, and bumping freshness
 // would perturb the reflect signature and decay ranking for every repaired note.
+//
+// The transaction also records one history row per row it changed, so both
+// verdicts stay readable: a memory stamped resolved by one pass and cleared by a
+// later --reassess says so. The ids are read inside the transaction, which has
+// held the write lock since its first statement, so the set a row is recorded
+// for is exactly the set the UPDATE changed.
 func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -3165,6 +3225,18 @@ func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []strin
 			args = append(args, id)
 		}
 		args = append(args, projectID)
+		changed, err := selectIDs(ctx, tx, `
+			SELECT id FROM memories
+			WHERE id IN (`+strings.Join(placeholders, ",")+`)
+			  AND project_id = ?
+			  AND resolved_at IS NOT NULL
+			  AND pinned = 0`, args...)
+		if err != nil {
+			return 0, fmt.Errorf("select rows to unresolve: %w", err)
+		}
+		if len(changed) == 0 {
+			continue
+		}
 		q := `UPDATE memories SET resolved_at = NULL
 		      WHERE id IN (` + strings.Join(placeholders, ",") + `)
 		        AND project_id = ?
@@ -3179,6 +3251,9 @@ func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []strin
 			return 0, fmt.Errorf("clear resolved rows affected: %w", err)
 		}
 		total += int(n)
+		if err := appendHistoryForIDsTx(ctx, tx, changed, phaseUnresolve, Provenance{}); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit clear resolved: %w", err)
@@ -3198,12 +3273,24 @@ const setResolvedBatchSize = 500
 // time — a candidate pinned or recategorized during the classify loop is
 // excluded rather than stamped anyway. Returns the count actually stamped,
 // which callers should report instead of len(ids). A no-op on an empty slice.
+//
+// Every batch runs in one transaction (it used to be an independent statement
+// each) and records one history row per row it stamped, so "which pass resolved
+// this, and when" is answerable from the database. The transaction is what makes
+// the history exact: it has held the write lock since its first statement, so
+// the ids read inside it are the ids the UPDATE goes on to change.
 func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin set resolved: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 
 	total := 0
 	for len(ids) > 0 {
@@ -3219,12 +3306,24 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 			placeholders[i] = "?"
 			args[i] = id
 		}
+		changed, err := selectIDs(ctx, tx, `
+			SELECT id FROM memories
+			WHERE id IN (`+strings.Join(placeholders, ",")+`)
+			  AND resolved_at IS NULL
+			  AND pinned = 0
+			  AND category NOT IN ('convention', 'preference')`, args...)
+		if err != nil {
+			return 0, fmt.Errorf("select rows to resolve: %w", err)
+		}
+		if len(changed) == 0 {
+			continue
+		}
 		q := `UPDATE memories SET resolved_at = datetime('now')
 		      WHERE id IN (` + strings.Join(placeholders, ",") + `)
 		        AND resolved_at IS NULL
 		        AND pinned = 0
 		        AND category NOT IN ('convention', 'preference')`
-		result, err := s.db.ExecContext(ctx, q, args...)
+		result, err := tx.ExecContext(ctx, q, args...)
 		if err != nil {
 			return total, fmt.Errorf("set resolved: %w", err)
 		}
@@ -3233,6 +3332,12 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 			return total, fmt.Errorf("set resolved rows affected: %w", err)
 		}
 		total += int(n)
+		if err := appendHistoryForIDsTx(ctx, tx, changed, phaseResolve, Provenance{}); err != nil {
+			return total, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return total, fmt.Errorf("commit set resolved: %w", err)
 	}
 	return total, nil
 }
@@ -3368,12 +3473,30 @@ func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, chec
 	return tx.Commit()
 }
 
-// Delete removes a specific memory.
+// Delete removes a specific memory. The row's last state is recorded first, in
+// the same transaction: memory_provenance.memory_id deliberately has no foreign
+// key, so a delete leaves behind a tombstone carrying the text the memory held
+// — the only remaining record of it, and the reason a cascading history table
+// would be empty exactly when the audit is asked.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	result, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Before the DELETE, because afterwards there is nothing left to read. A
+	// missing row is not this call's error to report: the DELETE below says
+	// "memory not found" in its own words, and a bad id must produce that.
+	if err := appendHistoryTx(ctx, tx, id, phaseDelete, Provenance{}); err != nil &&
+		!errors.Is(err, errHistoryNoMemory) {
+		return err
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete memory: %w", err)
 	}
@@ -3381,7 +3504,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if n == 0 {
 		return fmt.Errorf("memory not found: %s", id)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // UpdateMemory applies a partial update to a memory. Nil content/category/
@@ -3462,6 +3585,13 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 			`DELETE FROM link_scans WHERE memory_id = ?`, id); err != nil {
 			return fmt.Errorf("invalidate link scan: %w", err)
 		}
+	}
+	// The text the row held before this edit is only in the history now, and
+	// #647 (as_of retrieval) cannot be built without it. No Provenance: this
+	// call carries no agent or session, and inventing one would be the
+	// fabricated provenance the agent columns exist to avoid.
+	if err := appendHistoryTx(ctx, tx, id, phaseUpdate, Provenance{}); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -3789,6 +3919,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 	if len(deleteIDs) > 0 {
+		// Recorded before the rows go, and in the same transaction, so the
+		// consolidation's dropped memories keep the text that explains why
+		// they are missing. This is the writer that makes an unbounded history
+		// a real concern rather than a theoretical one: one applied reflect can
+		// drop and rewrite the whole non-manual corpus at once.
+		if err := appendHistoryForIDsTx(ctx, tx, deleteIDs, phaseDelete, Provenance{}); err != nil {
+			return nil, err
+		}
 		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
 		if err != nil {
 			return nil, fmt.Errorf("prepare delete replaced memory: %w", err)
@@ -3803,6 +3941,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 
 	reused := 0
+	// Every row this pass wrote, collected so the history appends happen in one
+	// place at the end: the ids of the fresh inserts are only known as they are
+	// made, and interleaving the two statements per row would triple the
+	// statement count for no gain.
+	var reflected []string
 	for i, m := range memories {
 		tags, _ := json.Marshal(m.Tags)
 		if stored, reusedRow := reuseFor[i]; reusedRow {
@@ -3846,15 +3989,24 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				return nil, fmt.Errorf("update reused memory: %w", err)
 			}
 			reused++
+			reflected = append(reflected, id)
 			continue
 		}
-		_, err = tx.ExecContext(ctx, `
+		var newID string
+		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags, scope)
 			VALUES (?, ?, ?, 'reflection', ?, ?, ?)
-		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope))
-		if err != nil {
+			RETURNING id
+		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope)).Scan(&newID); err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
+		reflected = append(reflected, newID)
+	}
+	// One append for every row this pass wrote, reused and fresh alike: from
+	// outside, a reflection rewrite and the row it rewrote are the same event,
+	// and phaseReflect is what answers "which consolidation run touched this".
+	if err := appendHistoryForIDsTx(ctx, tx, reflected, phaseReflect, Provenance{}); err != nil {
+		return nil, err
 	}
 
 	if s.logger != nil && (reused > 0 || len(concurrent) > 0) {
@@ -3943,6 +4095,27 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// deleting it had no way back.
 	//
 	// Pinned and resolved rows stay excluded throughout (issue #318).
+	//
+	// The rows going are selected before they are deleted, by the identical
+	// predicate, so the delete tombstones in memory_provenance name exactly the
+	// rows this statement removes. One transaction has held the write lock
+	// since its first statement, so the two selects cannot disagree.
+	removedIDs, err := selectIDs(ctx, tx, `
+		SELECT id FROM memories
+		WHERE project_id = ? AND source = 'reflection' AND pinned = 0 AND resolved_at IS NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM memory_snapshots s
+		      WHERE s.snapshot_id = ?
+		        AND ((s.memory_id IS NOT NULL AND s.memory_id = memories.id)
+		             OR (s.memory_id IS NULL
+		                 AND s.content = memories.content AND s.source = memories.source))
+		  )`, projectID, snapshotID)
+	if err != nil {
+		return 0, fmt.Errorf("find replace output to remove: %w", err)
+	}
+	if err := appendHistoryForIDsTx(ctx, tx, removedIDs, phaseDelete, Provenance{}); err != nil {
+		return 0, err
+	}
 	del, err := tx.ExecContext(ctx, `
 		DELETE FROM memories
 		WHERE project_id = ? AND source = 'reflection' AND pinned = 0 AND resolved_at IS NULL
@@ -4005,7 +4178,11 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// ids were never recorded. Those match on content instead: that can only
 	// add a row that is missing and never overwrites a live one, so a repeated
 	// restore stays a no-op rather than duplicating what it just wrote.
-	res, err := tx.ExecContext(ctx, `
+	//
+	// RETURNING rather than RowsAffected because the history rows below need
+	// the ids, and a pre-v13 snapshot mints a fresh one per restored row — so
+	// they cannot be known before the statement runs.
+	insertedRows, err := tx.QueryContext(ctx, `
 		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
 		                      created_at, updated_at, access_count, last_accessed,
 		                      agent, session_id, source_ref, confidence,
@@ -4031,11 +4208,55 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		                           WHERE m.project_id = memory_snapshots.project_id
 		                             AND m.content = memory_snapshots.content
 		                             AND m.source = memory_snapshots.source)))
+		RETURNING id
 	`, snapshotID)
 	if err != nil {
 		return 0, fmt.Errorf("restore snapshot: %w", err)
 	}
-	insertedN, _ := res.RowsAffected()
+	var reinserted []string
+	for insertedRows.Next() {
+		var id string
+		if err := insertedRows.Scan(&id); err != nil {
+			insertedRows.Close() //nolint:errcheck
+			return 0, fmt.Errorf("scan restored memory id: %w", err)
+		}
+		reinserted = append(reinserted, id)
+	}
+	if err := insertedRows.Err(); err != nil {
+		insertedRows.Close() //nolint:errcheck
+		return 0, fmt.Errorf("iterate restored memories: %w", err)
+	}
+	insertedRows.Close() //nolint:errcheck
+	insertedN := int64(len(reinserted))
+
+	// One history row per row this restore put back, in the same transaction:
+	// without them the corpus reads as though the replace never happened, and
+	// the state a restore reverted FROM is unrecoverable from the history. The
+	// in-place restorers are the snapshot's own ids, and the reinserted rows
+	// report theirs above — a pre-v13 snapshot mints a fresh id per restored
+	// row, so the two sets cannot be read from anywhere else.
+	restoredIDs, err := selectIDs(ctx, tx, `
+		SELECT s.memory_id FROM memory_snapshots s
+		JOIN memories m ON m.id = s.memory_id
+		WHERE s.snapshot_id = ? AND s.memory_id IS NOT NULL
+		  AND m.pinned = 0 AND m.resolved_at IS NULL`, snapshotID)
+	if err != nil {
+		return 0, fmt.Errorf("find restored rows: %w", err)
+	}
+	restored := make([]string, 0, len(restoredIDs)+len(reinserted))
+	restored = append(restored, restoredIDs...)
+	for _, id := range reinserted {
+		// An id can be in both sets only if the INSERT re-created a row the
+		// UPDATE had just restored, which the mutually exclusive predicates
+		// above make impossible — and a duplicate would append the same event
+		// twice, so it is dropped rather than assumed away.
+		if !slices.Contains(restoredIDs, id) {
+			restored = append(restored, id)
+		}
+	}
+	if err := appendHistoryForIDsTx(ctx, tx, restored, phaseRestore, Provenance{}); err != nil {
+		return 0, err
+	}
 
 	// The snapshot is deliberately kept. Restore is idempotent — re-running
 	// it produces the same state — so deleting it only meant a second attempt

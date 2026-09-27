@@ -106,6 +106,7 @@ var usageByCommand = map[string]string{
 	"opencode cleanup-sessions": opencodeUsage,
 	"backup":                    backupUsage,
 	"export":                    exportUsage,
+	"history":                   historyUsage,
 	"import":                    importUsage,
 	"bench":                     benchUsage,
 	"upgrade":                   upgradeUsage,

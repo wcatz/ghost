@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 16
+const schemaVersion = 17
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -59,6 +59,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV14,
 	migrateV15,
 	migrateV16,
+	migrateV17,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1003,6 +1004,42 @@ FROM memory_snapshots`,
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
+	}
+	return nil
+}
+
+// migrateV17 adds memory_provenance, the append-only per-memory history
+// (schema v17, issue #578). The DDL is CREATE ... IF NOT EXISTS throughout, so
+// a database an operator has already created the table in is stamped without
+// harm — the step has no data to correct, and no backfill is attempted: a
+// history row Ghost never observed would be a claim about the past nobody made.
+func migrateV17(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memory_provenance (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    phase       TEXT NOT NULL
+                CHECK (phase IN (
+                    'save', 'update', 'reflect', 'merge', 'resolve',
+                    'unresolve', 'supersede', 'restore', 'import', 'delete'
+                )),
+    agent       TEXT,
+    session_id  TEXT,
+    content     TEXT,
+    category    TEXT,
+    importance  REAL,
+    resolved_at TEXT,
+    source      TEXT
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id, recorded_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_provenance_recorded ON memory_provenance(recorded_at)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%q: %w", stmt[:min(40, len(stmt))], err)
 		}
 	}
 	return nil

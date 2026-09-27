@@ -292,7 +292,7 @@ The four axes are named in [`architecture.md`](architecture.md#memory-axes). Val
 |---|---|
 | [#581](https://github.com/wcatz/ghost/issues/581) | The target pipeline: retrieve → validity → scope → provenance → conflicts → dedup → diversity → budget → render, with a per-stage trace |
 | [#583](https://github.com/wcatz/ghost/issues/583) | Explain reports the pipeline's own computations (validity, confidence, scope, contradiction, diversity) instead of only RRF mechanics |
-| [#578](https://github.com/wcatz/ghost/issues/578) | Append-only `memory_provenance`: who changed what, when — provenance is a mutable column with no history today |
+| [#578](https://github.com/wcatz/ghost/issues/578) | Append-only `memory_provenance`: who changed what, when. **Landed (schema v17):** every write appends a version row in the same transaction, bounded per memory and per store, readable via `Store.MemoryHistory` and `ghost history <memory-id>`. Still open: `as_of` retrieval on top of it ([#647](https://github.com/wcatz/ghost/issues/647)), an MCP tool, and the provenance rows in `ghost_memory_search` `explain:true` |
 | [#584](https://github.com/wcatz/ghost/issues/584) | Stress the documented multi-process contract with the real entry points (MCP + CLI + maintenance), including read-snapshot-across-write and batch atomicity |
 | [#585](https://github.com/wcatz/ghost/issues/585) | Adversarial fixtures for the import, host-event, and Obsidian parse paths, defending the fixes in #545/#546/#552/#553 |
 

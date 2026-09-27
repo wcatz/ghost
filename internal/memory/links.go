@@ -27,6 +27,14 @@ var symmetricRelations = map[string]bool{"related": true}
 // CreateLink inserts an edge between two memories. Idempotent: re-inserting
 // an existing (source, target, relation) keeps the higher strength and
 // clears any invalidation.
+//
+// A `supersedes` edge is also recorded in the target's history: it is the claim
+// "this memory is no longer current", and it is a change to that memory's
+// standing even though none of its columns move. The edge lands on the target
+// alone — the source's state did not change, and a history row filed under it
+// would be a record of a write that did not happen. A `related` edge from the
+// linker is not recorded: nothing about either memory's currency is asserted by
+// an edge the linker adds on cosine similarity alone.
 func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error {
 	if sourceID == targetID {
 		return fmt.Errorf("create link: self-links not allowed (id %s)", sourceID)
@@ -38,14 +46,51 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.ExecContext(ctx, `
+	if relation == "supersedes" {
+		// One transaction for the edge and its history row: a supersedes edge
+		// with no record of it, or a record of one that was never written, are
+		// both states this call must not be able to commit.
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin create link: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source); err != nil {
+			return err
+		}
+		if err := appendHistoryTx(ctx, tx, targetID, phaseSupersede, Provenance{}); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit create link: %w", err)
+		}
+		return nil
+	}
+
+	_, err := s.db.ExecContext(ctx, linkInsertSQL,
+		sourceID, targetID, relation, strength, source)
+	if err != nil {
+		return fmt.Errorf("create link: %w", err)
+	}
+	return nil
+}
+
+// linkInsertSQL is the upsert CreateLink performs: re-inserting an existing
+// (source, target, relation) keeps the higher strength and clears any
+// invalidation. Shared by the autocommit path and the transaction the
+// supersede history row shares, so the two cannot record different edges.
+const linkInsertSQL = `
 		INSERT INTO memory_links (source_id, target_id, relation, strength, source)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
 			strength = MAX(strength, excluded.strength),
 			invalidated_at = NULL
-	`, sourceID, targetID, relation, strength, source)
-	if err != nil {
+`
+
+// insertLinkTx is linkInsertSQL inside an open transaction.
+func insertLinkTx(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation string, strength float32, source string) error {
+	if _, err := tx.ExecContext(ctx, linkInsertSQL,
+		sourceID, targetID, relation, strength, source); err != nil {
 		return fmt.Errorf("create link: %w", err)
 	}
 	return nil

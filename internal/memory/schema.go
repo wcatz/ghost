@@ -286,6 +286,61 @@ CREATE TABLE IF NOT EXISTS link_scans (
     scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Append-only history: one row per mutation of a memory (schema v17, issue
+-- #578). Every writer appends a row in the SAME transaction as the mutation, so
+-- history cannot diverge from state.
+--
+-- Each row is a version: the state the memory HELD once that write landed, not
+-- the state it was about to have. The prior content of any write is therefore
+-- the previous row's content, and a reader who wants "what did Ghost know at
+-- time T" takes the newest row at or before T — a query the live memories table
+-- cannot answer at all, because it keeps only the last value. Recording the
+-- state AFTER the write is also the only shape an insert can have: an inserted
+-- row has no prior state to record.
+--
+-- memory_id carries NO foreign key, deliberately. The one event whose value is
+-- destroyed by the mutation it records is the delete — a hard DELETE takes the
+-- row with it, so a cascading history table would be empty exactly when the
+-- audit is asked for. Nothing reuses a memory id (ids come from
+-- hex(randomblob(16)) and a snapshot restore reinstates the id it recorded), so
+-- an orphaned history row cannot be read as some other memory's. project_id
+-- DOES cascade: deleting a project is meant to take the whole corpus with it.
+CREATE TABLE IF NOT EXISTS memory_provenance (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Which write path touched the row: save (a new row), update (an edit),
+    -- reflect (a consolidation rewrite, reuse or insert), merge (a near-
+    -- duplicate fold strengthening an existing row), resolve / unresolve
+    -- (resolved_at stamped or cleared), supersede (an active supersedes edge
+    -- now points at this memory), restore (a snapshot restore), import (a
+    -- portable artifact), delete (the row is being removed). A CHECK rather
+    -- than a convention: a phase no reader knows is a phase that can never be
+    -- filtered, and a typo must not create a new one silently.
+    phase       TEXT NOT NULL
+                CHECK (phase IN (
+                    'save', 'update', 'reflect', 'merge', 'resolve',
+                    'unresolve', 'supersede', 'restore', 'import', 'delete'
+                )),
+    -- Who PERFORMED the write, when the write path knows: the save/merge/import
+    -- paths carry a Provenance, the lifecycle passes (reflect, resolve,
+    -- supersede) and Delete do not. NULL means the actor is not known, which is
+    -- not a claim that nobody acted.
+    agent       TEXT,
+    session_id  TEXT,
+    -- The state this memory held once the write landed. nullable because a
+    -- delete row is written from the last live state and an older build could
+    -- leave gaps, not because a memory has no state.
+    content     TEXT,
+    category    TEXT,
+    importance  REAL,
+    resolved_at TEXT,
+    source      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_provenance_recorded ON memory_provenance(recorded_at);
+
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     kind                 TEXT NOT NULL,

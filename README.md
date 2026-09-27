@@ -111,8 +111,7 @@ Alongside memories, GhostMem stores:
 
 - **Tasks** with `pending`, `active`, `done`, and `blocked` states.
 - **Decision records** with the chosen direction, rationale, alternatives, and status.
-
-Both are available through MCP tools and are included in project context where useful.
+- **An append-only history per memory**: every save, edit, consolidation rewrite, duplicate fold, resolve, supersession, restore, import and deletion, with the content and importance the memory held at the time. `ghost history <memory-id>` prints it, and it outlives the memory — a deleted memory's last state is still readable.
 
 See the [usage guide](docs/usage.md) for the complete mental model.
 

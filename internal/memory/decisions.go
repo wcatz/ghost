@@ -68,6 +68,13 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 		return "", "", false, fmt.Errorf("record decision memory: %w", err)
 	}
 
+	// The companion memory is a memory like any other, so its first history row
+	// is written in the transaction that created it — otherwise a decision log
+	// would be the one part of the corpus with no recorded origin.
+	if err := appendHistoryTx(ctx, tx, memoryID, phaseSave, Provenance{}); err != nil {
+		return "", "", false, fmt.Errorf("record decision memory history: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return "", "", false, fmt.Errorf("record decision: commit: %w", err)
 	}

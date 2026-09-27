@@ -36,6 +36,7 @@ ghost backup                      Snapshot the live database (VACUUM INTO)
 ghost export                      Write the store as a portable JSONL artifact
 ghost import <file> [--apply]     Load a JSONL artifact (dry-run by default)
 ghost context                     Render passive session context
+ghost history <memory-id>         Print one memory's append-only history
 ghost bench [--sweep]             Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
 ghost version                     Print the version
@@ -324,6 +325,7 @@ The main schema tables are:
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
 | `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
+| `memory_provenance` | Append-only per-memory history (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)): one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
@@ -338,6 +340,70 @@ When embeddings are available, search combines:
 - Targeted demotion when a present memory is superseded by another present memory
 
 Without Ollama, the same API remains available with FTS5-only results. Search membership is not discarded solely because of age; decay changes ordering.
+
+### Memory history
+
+`memory_provenance` is the append-only record of how a memory reached its current
+state ([#578](https://github.com/wcatz/ghost/issues/578)). `memories` holds only
+the last value of everything, so "which reflection run changed this", "what did
+it say before" and "why is this here with this confidence" were all unanswerable
+from the database. Every write that changes a memory's state appends one row, in
+the **same transaction** as the write, so history cannot diverge from state:
+
+| Phase | Appended by | What the row records |
+|---|---|---|
+| `save` | `Create`, `Upsert` (new row or linked copy), the decision companion memory, the shipped seeds | the row as inserted |
+| `merge` | `Upsert`'s near-duplicate fold | the target after its importance and access count were raised |
+| `update` | `UpdateMemory` | the edited row (a content change may also clear `resolved_at`) |
+| `reflect` | `ReplaceNonManual` — reuse, rewrite and fresh insert alike | the row as the consolidation left it |
+| `resolve` / `unresolve` | `SetResolved` / `ClearResolved` | the row with the new `resolved_at`, or without it |
+| `supersede` | `CreateLink` with a `supersedes` edge | the **target**'s state — the row the edge declares stale |
+| `restore` | `RestoreSnapshot` | the row as the snapshot put it back |
+| `import` | `ImportMemory` | the imported row, attributed to the artifact's agent |
+| `delete` | `Delete`, the replace's bulk delete, the restore's cleanup | the state the row held immediately before it went |
+
+Three properties are deliberate:
+
+- **Each row is a version, not a diff.** It holds the content, category,
+  importance, `resolved_at` and source the memory *had once that write landed*.
+  The prior content of any write is therefore the previous row's content, and
+  "what did Ghost know at time T" is the newest row at or before T — a query
+  `memories` cannot answer at all. Recording the state *after* the write is also
+  the only shape an insert can have: an inserted row has no prior state.
+- **`agent` and `session_id` are the performer, not the memory's own stored
+  provenance.** The save, merge and import paths carry a `Provenance`; the
+  lifecycle passes (`reflect`, `resolve`, `supersede`) and `Delete` know no
+  session and leave both empty. An empty field is an admission, not a claim that
+  nobody acted.
+- **`memory_id` has no foreign key.** A hard `DELETE` takes the row with it, so
+  a cascading history table would be empty exactly when the audit is asked — the
+  `delete` row is the tombstone, and it carries the text the memory held.
+  `project_id` *does* cascade: deleting a project is meant to take its corpus
+  with it.
+
+Writes that move none of the recorded columns append nothing: `Touch`
+(`access_count`, `last_accessed`), `TogglePin`, `PromoteToGlobal` and
+`MergeProject` (`project_id`), and the resolve KEEP cache. A row repeating the
+previous state would record that nothing happened, at the cost of one row per
+recall.
+
+**Growth policy.** The table is append-only, not unbounded, and both bounds are
+applied in the appending transaction — so neither needs a background job or a
+clock, and neither can be lost to a crash between the write and its cleanup:
+
+1. **Per memory**, only the newest 50 versions survive
+   (`historyVersionsPerMemory`). The oldest go: the recent past is what an audit
+   and an `as_of` read ([#647](https://github.com/wcatz/ghost/issues/647)) are
+   for.
+2. **Across the store**, only the newest 20 000 rows survive (`historyRowsCap`).
+   The per-memory bound cannot do this job — every created-then-dropped memory is
+   a distinct `memory_id` with a couple of rows of its own, and one applied
+   reflection can churn the whole non-manual corpus. The cap is a rowid window
+   rather than an `ORDER BY` over the table: an implicit rowid is `max(rowid)+1`
+   and is never reused, so rowid order *is* insertion order.
+
+`Store.MemoryHistory` reads one memory's history oldest first — a changelog, not
+a log tail — and `ghost history <memory-id>` prints it.
 
 A vector candidate is only scored when its stored vector belongs to the vector
 space this process embeds into. Every embedding records that identity — model,
@@ -394,10 +460,10 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
-| **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `audit_log` | Partial — no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
+| **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_provenance`, `audit_log` | Partial — `memory_provenance` now records every state change and who made it, but nothing reads it during retrieval; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
 | **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — the columns are read into `memory.Memory` and stage 2 of the assembler evaluates them against the request clock, so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)). No MCP writer exists yet (PR 3), so a store nobody has restored or imported reads every row as unset and the evaluation is corpus-neutral; `Store.Restore` and `Store.ImportMemory` both carry the triple, which is where a non-NULL window first comes from ([#575](https://github.com/wcatz/ghost/issues/575)) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate) |
-| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref` | Inert — written on some paths, never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)); history is missing entirely ([#578](https://github.com/wcatz/ghost/issues/578)) |
+| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_provenance` records who performed each write | Inert — `confidence` is written on some paths and never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)), and the history has no reader yet: `ghost history <memory-id>` and `Store.MemoryHistory` are the only two, and no retrieval path consults them |
 
 Axis interaction rules:
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
@@ -405,7 +471,7 @@ Axis interaction rules:
 - **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Not yet enforced: stage 5 of the assembler *records* a co-occurring `contradicts` pair and leaves both rows in place, because the existing contract requires a contradicted row to survive while a duplicate restatement sinks. Separating the pair needs its own contract change ([#581](https://github.com/wcatz/ghost/issues/581)).
 - **A scope conflict blocks the relation, and is not repaired by deleting it.** Two memories naming `environment=production` and `environment=development` are two claims about two places, so no relation may be proposed or created between them — not `duplicate` (at save time), not `related` (at link time), not `supersedes` (at supersede time), because each of those writers is the only one that can see both scopes at the moment it decides. An edge that already exists stays in the graph and is exempt at read time instead: every reader ignores it, and none deletes a row to reach that verdict. The exemption is stated where the decision is made, and every writer that chooses between candidates states it *inside* the query, because the same `LIMIT` chooses them: a conflict decided after the cut spends the budget on rows the caller may not use and misses a compatible candidate ranked just below ([#665](https://github.com/wcatz/ghost/issues/665)). The two cosine writers narrow inside the query (`SearchVectorScoped`), so a neighbour budget counts only rows a memory may relate to. `Upsert`'s two dedup probes and `foldTargetStillLive` each carry a second, SQL statement of the rule (`scopesConflictSQL`, held to the Go one by a test that runs both over the same table), for two different reasons: the probes because their own `LIMIT 15` chooses the candidates — so a save whose fifteen best FTS matches all name another environment still finds the compatible duplicate at rank 16 — and `foldTargetStillLive` because it has no window to protect, names one row by id, and carries the rule to keep a scope-conflicting `supersedes` edge from being read as a verdict on it.
 - **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes.
-- **Provenance is history, not a weight.** `agent`/`session_id`/`source_ref` describe who wrote a row; append-only history of those changes is [#578](https://github.com/wcatz/ghost/issues/578).
+- **Provenance is history, not a weight.** `agent`/`session_id`/`source_ref` describe who wrote a row, and `memory_provenance` ([#578](https://github.com/wcatz/ghost/issues/578)) records who performed each write since — but neither is a ranking input, and a confidence value is not a verdict anything computes.
 
 ## Context assembly (target design)
 
@@ -565,7 +631,7 @@ Provenance is a per-run policy, not a per-record one, and it lives in `memory.Im
 
 Read-only therefore carries two obligations the read-write path does not, and both are in `openReadOnlyTransferStore` because it is the only read-only open the transfer commands use. It must not create the database, and it must not read a schema it cannot query: `PRAGMA user_version` is read off the open connection through `memory.DBUserVersion` and compared with `memory.SchemaVersion()`, and a store behind or ahead is refused before the first query. Without that check the failure is SQLite's `no such column: repo_remote`, which names a column rather than the version mismatch and lands on exactly the machine the docs tell a user to prepare. The check reads and never writes, so a version check cannot itself become the migration it is reporting the absence of.
 
-Strict on both sides — equal and only equal passes — which is stricter than the failure it replaces needs to be. The only post-v10 columns these readers select are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12-v15 store is perfectly queryable and a floor would have kept `ghost export` working on one. A floor is not chosen because it hardcodes an assumption about which columns exist at which version, nothing enforces that assumption, and the day a reader selects a column added in a later migration the floor admits a store that fails with `no such column` again — with nothing in the suite asserting about the old versions to notice. Equality is self-maintaining: the store is refused unless it provably carries every column this build selects. The cost is one read-write open for a v12-v15 user before an export works. It can be `ghost mcp init`, any session, or `ghost backup` — and `ghost backup` is reached through `bootstrap()` itself, so it migrates and seeds the store it copies, and `OpenDB` refuses a store from a newer Ghost exactly as it refuses one to any read-write opener. It runs no version check of its own, but that makes it a way to *pay* this cost rather than a way around it: there is no read-only way in this build to get a copy, and describing `ghost backup` as one would tell a user that a command which writes has read their store. Read-write is kept for it deliberately, because a store behind the current schema is exactly the store a user most wants a restorable copy of, and a read-only open would refuse it. `openReadOnlyTransferStoreUnchecked` exists only so a test can prove the strictness is about the version: it opens a behind store, shows it queries fine, and shows the checked opener refusing it anyway.
+Strict on both sides — equal and only equal passes — which is stricter than the failure it replaces needs to be. The only post-v10 columns these readers select are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12-v16 store is perfectly queryable and a floor would have kept `ghost export` working on one. A floor is not chosen because it hardcodes an assumption about which columns exist at which version, nothing enforces that assumption, and the day a reader selects a column added in a later migration the floor admits a store that fails with `no such column` again — with nothing in the suite asserting about the old versions to notice. Equality is self-maintaining: the store is refused unless it provably carries every column this build selects. The cost is one read-write open for a v12-v16 user before an export works. It can be `ghost mcp init`, any session, or `ghost backup` — and `ghost backup` is reached through `bootstrap()` itself, so it migrates and seeds the store it copies, and `OpenDB` refuses a store from a newer Ghost exactly as it refuses one to any read-write opener. It runs no version check of its own, but that makes it a way to *pay* this cost rather than a way around it: there is no read-only way in this build to get a copy, and describing `ghost backup` as one would tell a user that a command which writes has read their store. Read-write is kept for it deliberately, because a store behind the current schema is exactly the store a user most wants a restorable copy of, and a read-only open would refuse it. `openReadOnlyTransferStoreUnchecked` exists only so a test can prove the strictness is about the version: it opens a behind store, shows it queries fine, and shows the checked opener refusing it anyway.
 
 Import never overwrites a record whose id already exists, and that is the property the rest of its behaviour rests on. The artifact is the older of the two copies by construction, so an overwrite would restore stale data over live data — and making re-running a no-op is what lets a rejected record be repaired by fixing the file and running the import again. A record that cannot be imported is rejected individually and the run continues, because one hand-edited line must not abandon ten thousand good ones; the rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
 

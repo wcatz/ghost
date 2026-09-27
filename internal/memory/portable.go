@@ -564,7 +564,17 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// invisible to recall while looking perfectly present in the store. So the
 	// COALESCE is here, as it already is in the three sibling importers, and a
 	// record that omits either field takes the column's own default.
-	_, err = s.db.ExecContext(ctx, `
+	//
+	// The insert and the history row that records it share a transaction, so an
+	// imported memory cannot land without its origin. phaseImport rather than
+	// phaseSave because the artifact is a file that arrived from somewhere, and
+	// the audit has to be able to tell those rows apart from Ghost's own saves.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, false, downgraded, fmt.Errorf("import memory %s: begin tx: %w", m.ID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memories (id, project_id, category, content, importance, access_count,
 			last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
 			valid_from, valid_until, verified_at, agent, session_id, source_ref,
@@ -581,6 +591,15 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		m.Confidence, scopeJSON(m.Scope))
 	if err != nil {
 		return false, false, downgraded, fmt.Errorf("import memory %s: %w", m.ID, err)
+	}
+	if err := appendHistoryTx(ctx, tx, m.ID, phaseImport, Provenance{
+		Agent:     m.Agent,
+		SessionID: m.SessionID,
+	}); err != nil {
+		return false, false, downgraded, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, false, downgraded, fmt.Errorf("import memory %s: commit: %w", m.ID, err)
 	}
 	if s.onSave != nil {
 		// The embedding worker is told there is something new to vectorize. A
