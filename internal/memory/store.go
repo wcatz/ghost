@@ -2101,16 +2101,50 @@ func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
 	parentTx, inTx := storeTxFromContext(ctx)
-	db := sqlExecutor(s.db)
-	if inTx {
-		db = parentTx
-	} else {
+	if !inTx {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 	}
 
+	// One write transaction covers the duplicate probe AND the writes the
+	// probe decides on. It is opened before the probe, and the DSN asks for
+	// BEGIN IMMEDIATE, so the write lock is held while the probe reads.
+	//
+	// Probing outside this transaction (issue #560) left a window between the
+	// probe and the write that any other ghost process could use: a row it
+	// strengthened in that window was overwritten by this save's arithmetic
+	// on a value read before the fact, and a row it committed in that window
+	// was invisible to the probe, so two saves of one fact became two
+	// unlinked rows. Both were cross-process races, and s.mu — a per-Store
+	// lock — cannot close either one.
+	tx := parentTx
+	ownTx := !inTx
+	if ownTx {
+		if tx, err = s.db.BeginTx(ctx, nil); err != nil {
+			return "", "", 0, fmt.Errorf("begin upsert tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+	}
+	// Every read and write below goes through the transaction. Note the pool
+	// must not be used here: OpenDB pins one connection per handle, so a pool
+	// query inside an open transaction on that same handle deadlocks.
+	db := sqlExecutor(tx)
+	commit := func() error {
+		if !ownTx {
+			return nil
+		}
+		// Commit only a transaction this call opened. When the upsert arrives
+		// inside a caller's transaction, committing here would end it: every
+		// later statement of the caller fails with "transaction has already
+		// been committed or rolled back", and the caller's own deferred
+		// Rollback can no longer undo the partial work.
+		if cerr := tx.Commit(); cerr != nil {
+			return fmt.Errorf("commit upsert tx: %w", cerr)
+		}
+		return nil
+	}
+
 	var existingID string
-	var existingImportance float32
 
 	// Two-stage duplicate detection. Stage 1 (recall): the FTS OR-probe over
 	// the first 30 words retrieves merge candidates cheaply. Stage 2
@@ -2119,7 +2153,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// which silently swallowed unrelated saves.
 	ftsQuery := sanitizeFTSN(content, 30)
 	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.importance, m.content, m.scope
+		SELECT m.id, m.content, m.scope
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE m.project_id = ?
@@ -2136,9 +2170,8 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		var bestSim float64
 		for len(newTokens) > 0 && rows.Next() {
 			var candID, candContent string
-			var candImportance float32
 			var candScope sql.NullString
-			if scanErr := rows.Scan(&candID, &candImportance, &candContent, &candScope); scanErr != nil {
+			if scanErr := rows.Scan(&candID, &candContent, &candScope); scanErr != nil {
 				continue
 			}
 			// A candidate that names a shared key differently is a different
@@ -2163,7 +2196,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if sim > 0 && sim > bestSim {
 				bestSim = sim
 				existingID = candID
-				existingImportance = candImportance
 			}
 		}
 		if rowsErr := rows.Err(); rowsErr != nil {
@@ -2196,7 +2228,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// insertion is taken instead when the probe named a dead row.
 	if existingID == "" {
 		crossRows, crossErr := db.QueryContext(ctx, `
-			SELECT m.id, m.importance, m.content, m.scope
+			SELECT m.id, m.content, m.scope
 			FROM memories m
 			JOIN memories_fts f ON f.rowid = m.rowid
 			WHERE m.project_id = ?
@@ -2219,9 +2251,8 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			var bestJaccard float64
 			for len(newTokens) > 0 && crossRows.Next() {
 				var candID, candContent string
-				var candImportance float32
 				var candScope sql.NullString
-				if scanErr := crossRows.Scan(&candID, &candImportance, &candContent, &candScope); scanErr != nil {
+				if scanErr := crossRows.Scan(&candID, &candContent, &candScope); scanErr != nil {
 					continue
 				}
 				// The stricter Jaccard gate does not help here: near-identical
@@ -2246,7 +2277,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				if j >= upsertCrossCategoryThreshold && j > bestJaccard {
 					bestJaccard = j
 					existingID = candID
-					existingImportance = candImportance
 				}
 			}
 			if rowsErr := crossRows.Err(); rowsErr != nil {
@@ -2272,61 +2302,59 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// source='manual' targets while still reporting a merge, and would
 		// recategorize a pinned/canonical fold target. The inserted copy
 		// carries the incoming category unchanged.
-		newImportance := existingImportance + (importance * 0.2)
-		if newImportance > 1.0 {
-			newImportance = 1.0
-		}
-
-		// The UPDATE (strengthen), INSERT (new row), and INSERT (link) must
-		// all succeed or none should — otherwise a failure partway through
-		// leaves the new memory row orphaned: unlinked, un-embedded (onSave
-		// never fires), and invisible. Same tx pattern as mergeProjectLocked.
-		tx := parentTx
-		ownTx := !inTx
-		if ownTx {
-			var txErr error
-			tx, txErr = s.db.BeginTx(ctx, nil)
-			if txErr != nil {
-				return "", "", 0, fmt.Errorf("begin upsert tx: %w", txErr)
-			}
-			defer tx.Rollback() //nolint:errcheck
-		}
+		//
+		// The UPDATE (strengthen), INSERT (new row), and INSERT (link) all run
+		// in the transaction opened above, so a failure partway through cannot
+		// leave the new memory row orphaned: unlinked, un-embedded (onSave
+		// never fires), and invisible.
 
 		if opts.FoldOnly {
-			// Re-check the chosen target inside the transaction. This does not
-			// prevent a concurrent process from inserting the same fact between
-			// the probe and the write — at worst that leaves one redundant row,
-			// never a lost one.
+			// Re-verify the chosen target before folding into it, and take the
+			// insert path instead when the probe named a row that is not a fold
+			// target. The cross-category probe already excludes resolved and
+			// superseded rows, but the same-category probe deliberately does not
+			// (a re-save of resolved text is meant to strengthen it and leave it
+			// resolved — TestUnresolveOnWrite), so a FoldOnly save can still be
+			// handed a dead target.
 			//
-			// A target that has been resolved, superseded or deleted since the
-			// probe is not a fold target either: re-verify it here and, if it
-			// is gone, fall through to the insert path so the promotion still
-			// leaves a live row behind.
+			// This is a statement about the row the probe named, not a race
+			// guard: the probe ran in this same transaction, which has held the
+			// write lock since before it, so nothing can have changed in
+			// between. Before the probe moved inside the transaction it was
+			// explicitly not a race guard either — a concurrent process could
+			// insert the same fact between probe and write, leaving one
+			// redundant row, never a lost one (issue #560 closed that window by
+			// moving the probe in).
 			live, liveErr := foldTargetStillLive(ctx, tx, projectID, existingID)
 			if liveErr != nil {
 				return "", "", 0, fmt.Errorf("re-verify fold target: %w", liveErr)
 			}
 			if !live {
-				existingID, newImportance = "", 0
+				existingID = ""
 			}
 		}
 
 		if existingID != "" {
+			// The increment is added in SQL, against the value the row holds
+			// when this statement runs, and not computed from an importance
+			// read earlier: with the read outside the write transaction, any
+			// save that strengthened this row in between was silently
+			// overwritten (issue #560). MIN(1.0, …) is the same cap the Go
+			// arithmetic applied.
 			res, updateErr := tx.ExecContext(ctx, `
 				UPDATE memories
-				SET importance = ?, access_count = access_count + 1
+				SET importance = MIN(1.0, importance + ?), access_count = access_count + 1
 				WHERE id = ? AND project_id = ?
-			`, newImportance, existingID, projectID)
+			`, importance*0.2, existingID, projectID)
 			if updateErr != nil {
 				return "", "", 0, fmt.Errorf("strengthen memory: %w", updateErr)
 			}
-			// A target deleted or moved between the in-transaction re-check and
-			// the write leaves zero rows affected. Reporting that as a
-			// successful fold would count a promotion that stored nothing.
-			// The re-check makes it unreachable — this transaction has held the
-			// write lock since before it ran — so it is a check on the
-			// statement's own report, not a race guard, and there is no
-			// schedule that reaches it.
+			// A target that this transaction's own re-check did not clear can
+			// still report zero rows affected if it was deleted or moved by an
+			// earlier statement in the same transaction. Reporting that as a
+			// successful fold would count a promotion that stored nothing, so
+			// it is a check on the statement's own report rather than a race
+			// guard: no other writer can run between the two.
 			affected, affectedErr := res.RowsAffected()
 			if affectedErr != nil {
 				return "", "", 0, fmt.Errorf("strengthen memory rows: %w", affectedErr)
@@ -2342,19 +2370,8 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// is still the right outcome: the duplicate is evidence the fact
 			// keeps recurring, and throwing that away would make promotion
 			// lose the signal. Only the UPDATE is wanted.
-			//
-			// Commit only a transaction this call opened. When the upsert
-			// arrives inside a caller's transaction, committing here would end
-			// it: every later statement of the caller fails with "transaction
-			// has already been committed or rolled back", and the caller's own
-			// deferred Rollback can no longer undo the partial work. The default
-			// path below already guards its commit with ownTx; the early return
-			// has to hold the same rule, or the guard is a property of one exit
-			// rather than of the function.
-			if ownTx {
-				if err = tx.Commit(); err != nil {
-					return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
-				}
+			if err = commit(); err != nil {
+				return "", "", 0, err
 			}
 			return existingID, existingID, score, nil
 		}
@@ -2391,10 +2408,8 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			}
 		}
 
-		if ownTx {
-			if err = tx.Commit(); err != nil {
-				return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
-			}
+		if err = commit(); err != nil {
+			return "", "", 0, err
 		}
 
 		if !inTx && s.onSave != nil {
@@ -2403,8 +2418,10 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return id, existingID, score, nil
 	}
 
-	// No match — create new.
-	err = db.QueryRowContext(ctx, `
+	// No match — create new, in the same transaction as the probe that found
+	// nothing: a save that decides to create must not be interleaved with
+	// another writer between that decision and the row.
+	if err = db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
 		                      agent, session_id, source_ref, confidence, scope)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2412,9 +2429,11 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	`, projectID, category, content, source, importance, string(tagsJSON),
 		nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 		nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
-		scopeJSON(opts.Scope)).Scan(&id)
-	if err != nil {
+		scopeJSON(opts.Scope)).Scan(&id); err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
+	}
+	if err = commit(); err != nil {
+		return "", "", 0, err
 	}
 	if !inTx && s.onSave != nil {
 		s.onSave(projectID)

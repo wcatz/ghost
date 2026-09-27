@@ -155,9 +155,18 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 		return "", err
 	}
 	args = append(args, extraArgs...)
-	args = append(args, prompt)
+	// The prompt goes on stdin, never as an argv element (issue #560). Linux
+	// caps one argument at 32 pages — 128 KiB on a 4 KiB-page x86, 512 KiB on a
+	// 16 KiB-page one — and a reflect prompt is built from up to 2000 memories
+	// of 8000 bytes, so a large project produced a prompt that failed the spawn
+	// outright with E2BIG. claude -p reads the prompt from stdin when no
+	// positional prompt is given, which is what "-p ... useful for pipes"
+	// documents. --system-prompt stays an argument: it is small and fixed, and
+	// keeping it out of the piped text is what stops it being confused with
+	// user content.
 	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessClaude)
 	defer release()
+	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
