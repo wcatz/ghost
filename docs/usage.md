@@ -179,7 +179,22 @@ This complements structured workflows such as [Superpowers](https://github.com/o
 The SQLite database is the source of truth. Back it up before destructive maintenance:
 
 ```bash
-cp "$HOME/.local/share/ghost/ghost.db" ghost.db.backup
+ghost backup
 ```
+
+That takes a consistent snapshot of the live database with SQLite's `VACUUM INTO`, so it is safe to run while a session is active — which a hand-rolled `cp` of `ghost.db` is not, because a WAL database's recent writes live in the `-wal` file beside it. It prints the path and the row count of each table it counted.
+
+For a copy you can read, diff and keep in version control, or to move memories to another machine:
+
+```bash
+ghost export --out ghost-export.jsonl   # JSONL, one record per line
+ghost import ghost-export.jsonl         # dry run: reports what it would do
+ghost import ghost-export.jsonl --apply --trust-provenance
+                                      # restoring your own export
+```
+
+The dry run writes nothing and opens the database read-only, so it cannot migrate or seed the store either — which means it also needs a store that is already at this Ghost's schema version, and says so plainly if it is not. Without `--trust-provenance` the imported memories are stamped `source = "onboarding"` and unpinned whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules — pass the flag when the artifact is your own export.
+
+Both commands, and the restore procedure, are documented in the [CLI reference](cli.md#backup-export-and-import).
 
 To remove a single memory, use the corresponding MCP delete tool. To remove an entire project, use `ghost project delete <name>` without `--apply` first. The CLI then requires the project name to be retyped before permanent deletion; see the [CLI reference](cli.md#project-operations).

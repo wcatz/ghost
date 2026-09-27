@@ -102,7 +102,10 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	// describes a search this process would not run: without the identity the
 	// vector leg here scores the foreign vectors the real search excluded, and
 	// the per-row ranks it reports describe a result set the caller cannot
-	// reproduce — which is the one thing an explain call promises.
+	// reproduce — which is the one thing an explain call promises. The
+	// foreign-warning gate travels for the same reason in reverse: shared, one
+	// explain during a re-embed costs no second copy of the warning the real
+	// search already logged.
 	traceStore := &Store{
 		db:                  s.db,
 		snapshot:            tx,
@@ -110,6 +113,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		demotionThreshold:   demotionThreshold,
 		vectorMinSimilarity: floor,
 		embeddingIdentity:   identity,
+		foreignWarned:       s.foreignWarned,
 	}
 
 	// Membership comes from the same production search the formatted path uses,

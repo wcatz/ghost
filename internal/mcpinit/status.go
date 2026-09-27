@@ -426,19 +426,30 @@ func reportConfigFile(w io.Writer) {
 // are inactive. Partial coverage is reported as such rather than as a bare
 // fraction: with an identity configured, the gap is rows waiting to be
 // re-embedded after a model, dimension or task-prefix change, and they are
-// excluded from the vector leg until they are. Shared by Status and
-// StatusOpencode.
-func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, total int) {
+// excluded from the vector leg until they are.
+//
+// That gap has two halves with different diagnoses — stale rows (a vector
+// exists, under a retired identity: the re-embed worker has the work queued)
+// and unembedded rows (no vector has ever existed: nothing has run, or
+// embedding was only just enabled) — so when any of the gap is stale it is
+// named. When nothing is stale the ordinary "(N awaiting re-embed)" line
+// stands: "0 stale" beside the ordinary first-embed gap would read as a
+// diagnosis that does not apply. Shared by Status and StatusOpencode.
+func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, stale, total int) {
 	if total == 0 {
 		check(true, "embeddings: 0 memories (store empty)", "")
 		return
 	}
+	detail := ""
+	if gap := total - embedded; gap > 0 && stale > 0 {
+		detail = fmt.Sprintf(": %d stale, %d unembedded", stale, gap-stale)
+	}
 	pass := fmt.Sprintf("embeddings: %d/%d memories", embedded, total)
 	if embedded > 0 && embedded < total {
-		pass = fmt.Sprintf("embeddings: %d/%d memories (%d awaiting re-embed)", embedded, total, total-embedded)
+		pass = fmt.Sprintf("embeddings: %d/%d memories (%d awaiting re-embed%s)", embedded, total, total-embedded, detail)
 	}
 	check(embedded > 0, pass,
-		fmt.Sprintf("embeddings: %d/%d memories — vector search and linking inactive", embedded, total))
+		fmt.Sprintf("embeddings: %d/%d memories — vector search and linking inactive%s", embedded, total, detail))
 }
 
 // checkStoreHealth runs the database, Ollama, embedding, and linking health
@@ -499,8 +510,8 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	store.SetEmbeddingIdentity(embedding.VectorIdentity(cfg.Embedding.Model, cfg.Embedding.Dimensions))
 	if cfg.Embedding.Enabled {
 		ctx := context.Background()
-		if embedded, total, sErr := store.EmbeddingStats(ctx); sErr == nil {
-			checkEmbeddingStats(check, embedded, total)
+		if embedded, stale, total, sErr := store.EmbeddingStats(ctx); sErr == nil {
+			checkEmbeddingStats(check, embedded, stale, total)
 		}
 		if links, scans, lErr := store.LinkStats(ctx); lErr == nil {
 			_, _ = fmt.Fprintf(w, "  - memory links: %d links, %d memories scanned\n", links, scans)

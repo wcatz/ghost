@@ -82,12 +82,17 @@ func TestEmbeddingStatsCountsOnlyUsableVectors(t *testing.T) {
 
 	_, _ = seedIdentityRows(t, store, ctx)
 
-	embedded, total, err := store.EmbeddingStats(ctx)
+	embedded, stale, total, err := store.EmbeddingStats(ctx)
 	if err != nil {
 		t.Fatalf("EmbeddingStats: %v", err)
 	}
 	if embedded != 1 || total != 2 {
 		t.Fatalf("EmbeddingStats = %d/%d, want 1/2: only the current-identity row is searchable", embedded, total)
+	}
+	// The stale row is reported rather than silently folded into the gap: it
+	// is the half of "awaiting re-embed" the re-embed worker already owns.
+	if stale != 1 {
+		t.Errorf("EmbeddingStats stale = %d, want 1: the retired-identity row must be reported as stale", stale)
 	}
 }
 
@@ -98,12 +103,40 @@ func TestEmbeddingStatsIdentityUnsetCountsEveryRow(t *testing.T) {
 
 	_, _ = seedIdentityRows(t, store, ctx)
 
-	embedded, total, err := store.EmbeddingStats(ctx)
+	embedded, stale, total, err := store.EmbeddingStats(ctx)
 	if err != nil {
 		t.Fatalf("EmbeddingStats: %v", err)
 	}
 	if embedded != 2 || total != 2 {
 		t.Fatalf("EmbeddingStats with no configured identity = %d/%d, want 2/2", embedded, total)
+	}
+	if stale != 0 {
+		t.Errorf("EmbeddingStats stale with no configured identity = %d, want 0: nothing is retired when nothing is configured", stale)
+	}
+}
+
+// TestEmbeddingStatsSplitsStaleFromUnembedded: the gap the coverage line
+// reports has two halves that mean different things — a stale row has a vector
+// under a retired identity, so the re-embed worker has the work queued; an
+// unembedded row has never had a vector, so nothing has run for it. `ghost mcp
+// status` and `ghost_health` print both, so the arithmetic has to hold: stale
+// is a subset of the gap, never part of the covered count.
+func TestEmbeddingStatsSplitsStaleFromUnembedded(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	store.SetEmbeddingIdentity(identityCurrent)
+
+	_, _ = seedIdentityRows(t, store, ctx)
+	createTestMemory(t, store, ctx, "memory that never had a vector")
+
+	embedded, stale, total, err := store.EmbeddingStats(ctx)
+	if err != nil {
+		t.Fatalf("EmbeddingStats: %v", err)
+	}
+	if embedded != 1 || stale != 1 || total != 3 {
+		t.Fatalf("EmbeddingStats = embedded %d, stale %d, total %d, want 1, 1, 3", embedded, stale, total)
+	}
+	if unembedded := total - embedded - stale; unembedded != 1 {
+		t.Errorf("unembedded = %d, want 1: the gap minus the stale rows is what has never been embedded", unembedded)
 	}
 }
 

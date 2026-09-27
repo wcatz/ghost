@@ -320,7 +320,7 @@ func openStore(ctx context.Context, project string, sessions []locoSession, cond
 				return nil, nil, nil, fmt.Errorf("ingest: %w", err)
 			}
 			if condition != "fts" {
-				vec, err := embedder.Embed(ctx, content)
+				vec, err := embedder.EmbedDocument(ctx, content)
 				if err != nil {
 					cleanup()
 					return nil, nil, nil, fmt.Errorf("embed turn: %w", err)
@@ -363,7 +363,7 @@ func rankTurns(ctx context.Context, store *memory.Store, project, question, cond
 			rankedIDs = append(rankedIDs, m.ID)
 		}
 	case "vector":
-		qv, err := embedder.Embed(ctx, question)
+		qv, err := embedder.EmbedQuery(ctx, question)
 		if err != nil {
 			return nil, fmt.Errorf("embed question: %w", err)
 		}
@@ -375,7 +375,7 @@ func rankTurns(ctx context.Context, store *memory.Store, project, question, cond
 			rankedIDs = append(rankedIDs, sm.MemoryID)
 		}
 	case "hybrid":
-		qv, err := embedder.Embed(ctx, question)
+		qv, err := embedder.EmbedQuery(ctx, question)
 		if err != nil {
 			return nil, fmt.Errorf("embed question: %w", err)
 		}

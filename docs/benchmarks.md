@@ -6,9 +6,9 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 
 | Evaluation | What it measures | Headline result |
 |---|---|---|
-| LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions |
+| LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions (measured pre-task-prefix — re-baseline pending, see Phase 1) |
 | `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 547 memories |
-| LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions |
+| LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
 | Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000** while the recency-trap case stays **0.929** |
 
 These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, and a staleness fixture answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
@@ -42,8 +42,8 @@ hybrid      0.532   0.930   0.973   0.901   0.903     one-time local embedding ~
 - **The lift lands exactly where the architecture predicts.** FTS alone nearly solves keyword-friendly classes (`single-session-user` R@10 1.000) but fails vocabulary-mismatch classes; embeddings fix precisely those: `single-session-assistant` R@10 **0.607 → 1.000**, `temporal-reasoning` 0.767 → 0.938.
 - **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the current v2 `ghost bench` dataset, hybrid beats vector (NDCG 0.818 vs 0.801) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
 - **Remaining headroom is at R@1** (0.532 overall; `multi-session` 0.371, `temporal-reasoning` 0.379) — R@10 is close to saturated, so the next win is ranking, not recall.
-- Reproduce: `go run ./bench/longmemeval --data <longmemeval_s_cleaned.json> --condition fts|vector|hybrid --embed-cache <cache.jsonl>`. The append-only content-hash cache makes reruns and interruptions cheap.
-- **CI gating:** only the **fts** floor (`R@5 ≥ 0.74`, `NDCG@10 ≥ 0.72`) is enforced automatically on PRs — it needs no Ollama and finishes fast. The **hybrid** floor (`R@5 ≥ 0.91`, `NDCG@10 ≥ 0.89`) is run **manually** (`workflow_dispatch`) or locally, not on a schedule: the cold embedding pass is CPU-bound (the ~12h above), too slow for any CI cap. Because `nomic-embed-text:v1.5` is deterministic, a cold run computes the same vectors as a warm one, so those hybrid floors are fully established by the warm local numbers here — CI need not re-derive them.
+- Reproduce: `go run ./bench/longmemeval --data <longmemeval_s_cleaned.json> --condition fts|vector|hybrid --embed-cache <cache.jsonl>`. The append-only content-hash cache makes reruns and interruptions cheap. The hash is taken over the **prefixed** input (`search_document: ` / `search_query: `, the same two the production client applies), so since the bench harnesses started applying those prefixes, cache entries written by older builds hash differently and are never hit again — an old cache file is inert, not wrong, and the first prefixed run re-embeds the corpus once.
+- **CI gating:** only the **fts** floor (`R@5 ≥ 0.74`, `NDCG@10 ≥ 0.72`) is enforced automatically on PRs — it needs no Ollama and finishes fast. The **hybrid** floor (`R@5 ≥ 0.91`, `NDCG@10 ≥ 0.89`) is run **manually** (`workflow_dispatch`) or locally, not on a schedule: the cold embedding pass is CPU-bound (the ~12h above), too slow for any CI cap. Because `nomic-embed-text:v1.5` is deterministic, a cold run computes the same vectors as a warm one, so the manual gate is justified by the warm local numbers here without CI re-deriving them — **but those numbers were measured before the harness adopted the task prefixes, and that space has since changed, so until the hybrid run below is re-baselined the manual hybrid gate is a floor-check, not a valid regression signal**: it can tell you a prefixed run is below a bar, not that this change made it worse (see the re-baseline note below). **Re-baseline pending:** the results table, the per-class claims above and the committed per-question logs predate the harness adopting the `search_document: `/`search_query: ` prefixes (the vector space the published numbers were measured in can no longer be reproduced by this harness), so a prefixed hybrid run measures a different space than the one that set these floors — re-run it to re-baseline the hybrid numbers, then restore the gate's regression meaning.
 
 ## Phase 1b — end-to-end anchors (for later comparison)
 
@@ -220,6 +220,8 @@ The recorded run used the OpenCode Go endpoint; provider pricing and usage limit
 
 Results (2026-08-20, DeepSeek v4 Pro as both generator and judge, **500 questions** including 30 abstention, `topk_context=5`):
 
+The hybrid leg's retrieval comes from the same `bench/longmemeval` hybrid path as Phase 1, so it was measured in the pre-task-prefix vector space; the hybrid retrieval numbers here are re-baseline pending alongside Phase 1's (`fts-only` is unaffected — it never embeds).
+
 ```text
 condition   blended(500)  non-abstention(470)  abstention(30)
 hybrid      96.2%         96.8%                86.7%
@@ -243,12 +245,14 @@ Not leaderboard-comparable (DeepSeek v4 Pro, not GPT-4o), but the retrieval → 
 
 | System | Score | Generator | Source |
 |--------|-------|-----------|--------|
-| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo |
+| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo — retrieval leg pre-task-prefix, re-baseline pending (see Phase 4)¹ |
 | Mem0 | 94.4% | Not specified | [mem0.ai/research](https://mem0.ai/research) — "managed platform, proprietary optimizations not in OSS SDK" |
 | Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818), [benchmarks](https://benchmarks.hindsight.vectorize.io/) — independently validated by Virginia Tech + Washington Post |
 | Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
 
 **Read carefully:** These numbers are **not directly comparable** across rows. Each uses a different generator model and (in Ghost's case) a different judge. Within the same generator+judge pair, differences are meaningful — across pairs, they're directional only. Ghost's self-judged score carries the same caveat as every other system that judges its own output.
+
+¹ Ghost's row additionally rests on retrieval measured before `bench/longmemeval` adopted the task prefixes, so the gap to the rows below it is not a like-for-like current measurement of Ghost's retrieval — re-baseline pending (see Phase 4).
 
 ### Cost
 
@@ -293,6 +297,8 @@ Hit@k is a question-level hit rate — 1 when any gold `dia_id` lands in the top
 |---|---|---|---|---|---|---|
 | FTS | 0.265 | 0.484 | 0.581 | 0.362 | 0.384 | 0.823 |
 | Hybrid | 0.380 | 0.653 | 0.758 | 0.497 | 0.522 | 0.886 |
+
+This run (2026-08-21) predates `bench/locomo` adopting the `search_document: `/`search_query: ` task prefixes, so the Hybrid row is measured in the pre-prefix vector space and is re-baseline pending like Phase 1's hybrid numbers (the FTS row is unaffected — it never embeds).
 
 Per category (hybrid): temporal Hit@5 0.719 / open-domain 0.668 / single-hop 0.598 / multi-hop 0.449. Multi-hop is the known hard tail.
 

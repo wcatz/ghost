@@ -93,6 +93,15 @@ func dispatchCommand(argv []string) int {
 		case "upgrade":
 			runUpgrade()
 			return 0
+		case "backup":
+			runBackup()
+			return 0
+		case "export":
+			runExport()
+			return 0
+		case "import":
+			runImport()
+			return 0
 		case "obsidian":
 			runObsidian()
 			return 0
@@ -170,6 +179,16 @@ Commands:
                               to delete, --grace 1h, --limit 20000)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
                               --sweep grid-searches the fusion parameters
+  backup [--out <path>]       Snapshot the live database — consistent, safe
+                               while the MCP server runs; prints path and row counts
+  export [--project <name>]   Write memories, tasks, decisions and projects as JSONL
+    [--out <file.jsonl>]      (--out - for stdout; embeddings are not exported)
+  import <file.jsonl> [--apply] [--trust-provenance]
+                              Load a JSONL artifact (dry-run by default over a
+                               read-only connection; never overwrites a record
+                               whose id already exists; imported memories are
+                               downgraded to source "onboarding" and unpinned
+                               unless --trust-provenance)
   upgrade                     Update ghost to the latest release
   version                     Print version
 

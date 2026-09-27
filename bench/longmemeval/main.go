@@ -412,9 +412,13 @@ func rankSessionsForQuestion(ctx context.Context, q question, condition string, 
 
 	// Batch-resolve every embedding this question needs before ingestion, so a
 	// cold cache costs a handful of batched Ollama calls instead of one round
-	// trip per turn.
+	// trip per turn. The question is deliberately not in the batch: it is
+	// embedded per search through EmbedQuery, and seeding it here would embed
+	// it in the document space and cache that vector under the question's own
+	// text — a vector no search ever looks up — while the query embed paid for
+	// a second one anyway.
 	if condition != "fts" {
-		texts := []string{q.Question}
+		var texts []string
 		for _, session := range q.Sessions {
 			for _, t := range session {
 				if t.Content != "" {
@@ -441,7 +445,7 @@ func rankSessionsForQuestion(ctx context.Context, q question, condition string, 
 				return nil, fmt.Errorf("ingest: %w", err)
 			}
 			if condition != "fts" {
-				vec, err := embedder.Embed(ctx, t.Content)
+				vec, err := embedder.EmbedDocument(ctx, t.Content)
 				if err != nil {
 					return nil, fmt.Errorf("embed turn: %w", err)
 				}
@@ -464,7 +468,7 @@ func rankSessionsForQuestion(ctx context.Context, q question, condition string, 
 			rankedMemoryIDs = append(rankedMemoryIDs, m.ID)
 		}
 	case "vector":
-		qv, err := embedder.Embed(ctx, q.Question)
+		qv, err := embedder.EmbedQuery(ctx, q.Question)
 		if err != nil {
 			return nil, fmt.Errorf("embed question: %w", err)
 		}
@@ -476,7 +480,7 @@ func rankSessionsForQuestion(ctx context.Context, q question, condition string, 
 			rankedMemoryIDs = append(rankedMemoryIDs, sm.MemoryID)
 		}
 	case "hybrid":
-		qv, err := embedder.Embed(ctx, q.Question)
+		qv, err := embedder.EmbedQuery(ctx, q.Question)
 		if err != nil {
 			return nil, fmt.Errorf("embed question: %w", err)
 		}
