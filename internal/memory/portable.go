@@ -573,6 +573,14 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	); err != nil {
 		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
 	}
+	// And the length, for the same reason the writers apply it: the reference is
+	// printed as a labelled field on every listing, so an artifact is a way to
+	// plant a value that reaches every answer touching the row. Refused rather
+	// than clamped — a truncated path is a different path — and before the
+	// apply check, so a dry run classifies exactly as the apply run it previews.
+	if _, err := boundedSourceRef(m.SourceRef); err != nil {
+		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
 	// The tags too, and before the apply check so a dry run classifies exactly as
 	// the apply run it previews. An artifact's tags column is untrusted input
 	// from a file and was being written raw; the record it lands in is an

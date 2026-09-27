@@ -101,6 +101,18 @@ func AgentLabel(agent string) string {
 	return " agent=" + quoteData(agent)
 }
 
+// MaxRenderedSourceRefLen bounds what a listing prints of a reference. It is a
+// DISPLAY bound, not a claim about what the column holds: every writer this build
+// controls refuses a longer one at write time (memory.MaxSourceRefLen), and this
+// covers what they cannot — a store written before that cap, a snapshot table
+// edited by hand, a row restored from one. It is here rather than only at the
+// writers because the renderer is the one place that cannot assume its input came
+// from a writer that enforces the cap.
+//
+// The value is truncated, not refused, because at this point the row already holds
+// whatever it holds and refusing to show it would be worse than showing part of it.
+const MaxRenderedSourceRefLen = 512
+
 // SourceRefLabel renders the reference a claim was read from, or "" when the row
 // records none. Free text on its way into a tool answer, so it is delimited: a
 // path or URL carrying « or » would otherwise close the data block early and let
@@ -108,6 +120,9 @@ func AgentLabel(agent string) string {
 func SourceRefLabel(ref string) string {
 	if ref == "" {
 		return ""
+	}
+	if len(ref) > MaxRenderedSourceRefLen {
+		ref = ref[:MaxRenderedSourceRefLen] + "…[reference truncated]"
 	}
 	return " source_ref=" + quoteData(ref)
 }

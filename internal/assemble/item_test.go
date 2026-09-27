@@ -191,6 +191,26 @@ func TestValidityLabelRendersStoredStampsAndIgnoresUnreadableOnes(t *testing.T) 
 	}
 }
 
+// A reference the writers would have refused can still be in a store that
+// predates the cap, and the renderer is the only place that cannot assume its
+// input came from a writer that enforces it. A megabyte of reference in every
+// answer that touches the row is the failure the bound exists for.
+func TestSourceRefLabelBoundsWhatItPrints(t *testing.T) {
+	huge := strings.Repeat("docs/", 500)
+	line := Item{Category: "fact", ID: "A1B2", Content: "a fact", Importance: 0.5, SourceRef: huge}.Line()
+	if !strings.Contains(line, "reference truncated") {
+		t.Errorf("a %d-byte reference is printed whole: %s", len(huge), line)
+	}
+	if len(line) > 2000 {
+		t.Errorf("line is %d bytes, want the reference bounded", len(line))
+	}
+	// Truncation is a display concern: the marker says so, rather than the line
+	// ending mid-path as though that were the whole reference.
+	if strings.Contains(line, strings.TrimSuffix(huge, "docs/")) {
+		t.Errorf("the line presents the truncated value as a complete reference: %s", line)
+	}
+}
+
 func ptr(s string) *string { return &s }
 
 // A browsing surface has not run stage 2, so a closed window is about to be

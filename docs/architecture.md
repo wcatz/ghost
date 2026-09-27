@@ -674,7 +674,7 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
 | **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — `memory_history` now records every state change and who made it, but nothing reads it during retrieval; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
-| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memory_search` is the only surface that runs the pipeline, so it is the only one that filters a closed window out — the browsing surfaces still show it, marked `expired`, and the session-start block shows it with no marker at all because it renders its own rows (see the assembler section below). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way |
+| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memory_search` is the only surface that runs the pipeline, so it is the only one that filters a closed window out — the browsing surfaces still show it, marked `expired`, and the session-start block shows it with no marker at all because it renders its own rows (see the assembler section below). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way. A bare date is a whole day, and a `valid_until` is the END of it (see the assembler section) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate) |
 | **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write | Inert for ranking, visible to the reader — the three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four, but stage 4's multiplier stays pinned at `1.0` and nothing scores on them. The history has no reader yet: `ghost history <memory-id>` and `Store.MemoryHistory` are the only two, and no retrieval path consults them |
 
@@ -753,11 +753,22 @@ What exists now:
   onto the pipeline with the rest of the PR plan; until then, a window that has
   closed is a fact only search acts on.
 - **A stamp can be replaced but not removed.** The write path stores NULL for an
-  absent value and refuses an empty string, so a claim recorded by mistake is
-  corrected by writing a different one rather than by retracting it. The
-  alternative — an explicit clear — would give the column a third state
-  ("stated, then withdrawn") that retrieval would have to interpret, and nothing
-  consumes one today.
+  absent value and treats an empty string as the same request — "no claim" — so
+  a claim recorded by mistake is corrected by writing a different one rather than
+  by retracting it. The alternative, an explicit clear, would give the column a
+  third state ("stated, then withdrawn") that retrieval would have to interpret,
+  and nothing consumes one today.
+- **A bare date is a whole day, and which end of it depends on the field.** A
+  `valid_from` is the start of the named day, at midnight; a `valid_until` is the
+  end of it, at 23:59:59. The asymmetry is the point rather than an artefact:
+  `assemble.ExpiredAt` is a strict "before now", so a `valid_until` stored at
+  midnight would retire the claim from the first instant of the day the caller said
+  it was true through, and `assemble.stampText` prints a date back for the
+  boundary a date stands for — midnight on a start and a verification, 23:59:59 on
+  an end — so the rendered label and the filter cannot disagree about which day a
+  claim covers. Two equal dates are therefore a one-day window; two equal instants
+  are refused. A stamp the writer did not produce — one an artifact or a restored
+  snapshot left — is printed at the instant it is stored.
 
 - **The session-start surface shows and applies scope.** The two session-start
   loaders select `memories.scope`, print it with `assemble.ScopeLabel` — the same

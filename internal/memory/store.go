@@ -2440,6 +2440,9 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 	if err := rejectSecretFields(secretSourceRefField(m.SourceRef)...); err != nil {
 		return "", err
 	}
+	if _, err := boundedSourceRef(m.SourceRef); err != nil {
+		return "", err
+	}
 	return s.insertMemory(ctx, projectID, m)
 }
 
@@ -2500,6 +2503,25 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 // under a manual-sourced target (or any target) is never silently discarded.
 // If no candidate scores above the applicable bar, it creates a new,
 // unlinked row.
+
+// MaxSourceRefLen is the byte cap on a write-time source reference, at the store
+// rather than at the tool boundary.
+//
+// The column is caller-supplied text that the shared item line prints as a labelled
+// field on every listing and every browsing surface, so an unbounded one is a
+// megabyte echoed into every answer that touches the row — and that is a property
+// of the column, not of the MCP tools. Store.Create, UpsertWithOptions,
+// UpdateMemoryWithOptions, ImportMemory and RestoreSnapshot all write it, and only
+// the first three were reachable through an argument resolver, so the cap lives
+// here where every writer of the column passes it. The tools keep their own check
+// as a caller-facing error, because a refusal naming the argument is a better
+// answer than the same refusal arriving from the middle of a write.
+//
+// A reference is a path, a commit, a URL or a ticket — a few hundred bytes at the
+// outside — and it is NOT clamped the way content is: ClampContent cuts prose and
+// leaves a marker in its place, while a truncated path or URL is a different
+// reference, and a wrong one that looks right is worse than an error.
+const MaxSourceRefLen = 512
 
 // StoredStampLayout is the layout a writer stores a validity stamp in: SQLite's
 // own datetime() shape, in UTC.
@@ -2679,6 +2701,20 @@ func nullIfEmptyPtr(s *string) any {
 	return *s
 }
 
+// boundedSourceRef applies MaxSourceRefLen, refusing rather than truncating, and
+// maps an empty reference to NULL on the way through. Every statement that writes
+// the column reaches it by this, so no writer can be the one that skipped the
+// bound.
+func boundedSourceRef(s string) (any, error) {
+	if s == "" {
+		return nil, nil
+	}
+	if len(s) > MaxSourceRefLen {
+		return nil, fmt.Errorf("source_ref must be at most %d bytes, got %d — it is a file path, commit or URL, not a document", MaxSourceRefLen, len(s))
+	}
+	return s, nil
+}
+
 // Upsert stores a memory with no provenance, exactly as before.
 // UpsertOptions carries the optional facts about one save. Provenance, scope
 // and validity are orthogonal — where a memory came from, where it applies, and
@@ -2845,6 +2881,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return "", "", 0, err
 	}
 	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
+		return "", "", 0, err
+	}
+	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
 		return "", "", 0, err
 	}
 	parentTx, inTx := storeTxFromContext(ctx)
@@ -4008,6 +4047,9 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
 		return err
 	}
+	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -4041,11 +4083,22 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 		return fmt.Errorf("lookup memory: %w", err)
 	}
 
-	if err := CheckWindowOrder(opts.Validity, Validity{
-		ValidFrom:  nullStringPtr(curFrom),
-		ValidUntil: nullStringPtr(curUntil),
-	}); err != nil {
-		return err
+	//
+	// Only when the caller supplied a boundary, which is the only way an edit can
+	// change the window. With nothing supplied the stored pair is judged against
+	// itself, and a row whose own window was written out of order — Store.Create,
+	// ImportMemory and RestoreSnapshot all pass the stamps through with no order
+	// check, and that is deliberate — would refuse an unrelated content or tag
+	// edit over a defect the caller cannot see or fix without restating a window
+	// they never touched. An edit that only moves verified_at is not a window
+	// edit either, and is not refused.
+	if opts.Validity.ValidFrom != nil || opts.Validity.ValidUntil != nil {
+		if err := CheckWindowOrder(opts.Validity, Validity{
+			ValidFrom:  nullStringPtr(curFrom),
+			ValidUntil: nullStringPtr(curUntil),
+		}); err != nil {
+			return err
+		}
 	}
 
 	newContent, newCategory, newImportance, newTags := curContent, curCategory, curImportance, curTags
