@@ -359,6 +359,10 @@ provenance is a separate concept and is not this table: that is a future
 "who or what supports this memory" rather than "how did this row change". The two
 are easy to confuse in prose and unrelated in fact, and a schema name is
 permanent once released, so this table is named for what it is.
+A development store built from a pre-rename commit of #664 can hold a
+`memory_provenance` table from that build, which Ghost neither reads nor purges.
+No release ever created it, and Ghost does not drop it because the name is
+reserved: remove it by hand with `sqlite3 <db> 'DROP TABLE memory_provenance'`.
 
 | Phase | Appended by | What the row records |
 |---|---|---|
