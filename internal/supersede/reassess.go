@@ -80,11 +80,10 @@ type ReassessResult struct {
 	Reversed     int // came back REVERSED: the edge runs against the pair, so it goes
 	Unclassified int // unparseable verdict; the edge is left alone and re-offered
 	Withdrawn    int // supersedes edges actually invalidated (0 in dry-run)
-	// CausesWithdrawn counts the 'causes' edges the other-relation sweep moved
-	// (0 in a dry run, where WithdrawnEdge.CausesSwept predicts them per row).
-	// A concurrent pass can take one first, so under --apply it can read lower
-	// than the dry run's prediction — the same relationship Withdrawn has to the
-	// list of rows.
+	// CausesWithdrawn counts the 'causes' edges the other-relation sweep moved,
+	// or would move in a dry run. A concurrent pass can take one first, so under
+	// --apply it can read lower than the dry run's prediction — the same
+	// relationship Withdrawn has to the list of rows.
 	CausesWithdrawn int
 }
 
@@ -332,6 +331,16 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	}
 	if fail != nil {
 		return res, withdrawn, fail
+	}
+	if !apply {
+		// Nothing was moved, so the count is the PREDICTION — the same number an
+		// --apply run reports unless a concurrent pass takes one of those edges
+		// first. A dry run whose summary said 0 above rows marked [+1 causes
+		// edge] would be the invisibility the per-row marker exists to remove,
+		// one line up.
+		for _, w := range withdrawn {
+			res.CausesWithdrawn += w.CausesSwept
+		}
 	}
 	return res, withdrawn, nil
 }

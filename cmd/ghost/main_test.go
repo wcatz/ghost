@@ -1451,14 +1451,15 @@ func TestSupersedeReassessReport(t *testing.T) {
 		{NewerID: "1122334455667788", OlderID: "8877665544332211", Reason: "neither: both notes are still true"},
 	}
 	dry := supersedeReassessReport("proj", supersede.ReassessResult{
-		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Neither: 1, Unclassified: 1, Withdrawn: 0,
+		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Neither: 1, Unclassified: 1,
+		Withdrawn: 0, CausesWithdrawn: 1, // what the pass predicts for a dry run
 	}, false, edges, 2)
 	for _, want := range []string{
 		// The per-outcome numbers add up to Loaded, the withdrawal count is the
 		// two edges below it rather than the (dry-run-zero) Withdrawn field, and
 		// the sweep is PREDICTED here — it is a second graph row the operator is
 		// about to delete, so a dry run that hid it would be deciding for them.
-		"proj: 5 live supersedes edge(s), 1 not judged, 1 vetoed, 1 still supersedes, 1 neither, 0 causes, 0 reversed, 1 UNKNOWN, would withdraw 2, would sweep 0 causes edge(s) (2 classify call(s))",
+		"proj: 5 live supersedes edge(s), 1 not judged, 1 vetoed, 1 still supersedes, 1 neither, 0 causes, 0 reversed, 1 UNKNOWN, would withdraw 2, would sweep 1 causes edge(s) (2 classify call(s))",
 		"  would withdraw  abcdef01 -> 98765432  [veto, no harness call]  [+1 causes edge]  vetoed:",
 		"  would withdraw  11223344 -> 88776655  [classifier]  neither: both notes are still true",
 		"Re-run with --apply to withdraw these edges.",

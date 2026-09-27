@@ -190,6 +190,25 @@ func TestReassessSweepsTheOtherRelationOnASelfContradictingVerdict(t *testing.T)
 			if err := store.CreateLink(ctx, older, newer, string(RelationCauses), 0.9, "llm"); err != nil {
 				t.Fatal(err)
 			}
+			// The dry run comes FIRST, as an operator runs it: it has to predict
+			// the sweep, or the summary says 0 above rows marked [+1 causes
+			// edge] — and it has to see the edge at all, which it cannot once the
+			// apply below has withdrawn it.
+			dryRes, dryWithdrawn, err := Reassess(ctx, store, NewRelationClassifier(&fakeProvider{resp: tc.reply}), "p", false, discardLogger())
+			if err != nil {
+				t.Fatalf("Reassess (dry): %v", err)
+			}
+			if dryRes.CausesWithdrawn != 1 {
+				t.Errorf("dry run predicted %d causes edge(s), want 1: the sweep is a second graph row the operator is about to delete",
+					dryRes.CausesWithdrawn)
+			}
+			if len(dryWithdrawn) != 1 || dryWithdrawn[0].CausesSwept != 1 || dryWithdrawn[0].Written {
+				t.Errorf("dry run row = %+v, want one un-written row predicting the sweep", dryWithdrawn)
+			}
+			if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 1 {
+				t.Fatalf("the dry run withdrew the edge: %d pair(s) remain", len(pairs))
+			}
+
 			cls := NewRelationClassifier(&fakeProvider{resp: tc.reply})
 			res, withdrawn, err := Reassess(ctx, store, cls, "p", true, discardLogger())
 			if err != nil {
