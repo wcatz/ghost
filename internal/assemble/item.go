@@ -126,19 +126,24 @@ func ConfidenceLabel(confidence *float64) string {
 }
 
 // stampText renders one validity boundary in the whole-day form when the instant
-// is a day boundary, and in full otherwise — into memory.DateStampLayout, the same
-// form a reader accepts.
+// is the boundary that form stands for, and in full otherwise — into
+// memory.DateStampLayout, the same form a reader accepts.
 //
-// Both ends of a day are day boundaries, and a validity window is almost always
-// stated in days: the writers store a bare start as midnight and a bare end as
-// 23:59:59 (see internal/mcpserver's wholeDayEnd), so "valid until 2026-10-01" is
-// stored as the last second of the 1st and has to read back as the 1st. Rendering
-// that as 2026-10-01 23:59:59 would be both noisier and a different claim from the
-// one the caller wrote; rendering midnight as a date is the same instant, so
-// nothing is lost either way. A time of day the caller actually chose keeps it.
-func stampText(t *time.Time) string {
+// Midnight is the start of a day, and every writer stores a bare start there, so
+// midnight always prints as the date: it is the same instant, so nothing is lost.
+//
+// isEnd says which boundary this is, and it matters for the other end of a day. A
+// writer stores a bare window end as 23:59:59 (see internal/mcpserver's
+// parseStampArg endOfDay parameter), so "valid until 2026-10-01" has to print as
+// the 1st — printing 2026-10-01 23:59:59 would be noisier and a different claim
+// from the one the caller wrote. But 23:59:59 as a window's START or as a
+// verification is an instant the caller chose, and printing it as a date would
+// understate the stored instant by a whole day: the line would read as though the
+// claim began at midnight, and re-saving the boundary it showed would move the row
+// a day earlier. So the end-of-day collapse belongs to `valid_until` alone.
+func stampText(t *time.Time, isEnd bool) string {
 	midnight := t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0
-	endOfDay := t.Hour() == 23 && t.Minute() == 59 && t.Second() == 59
+	endOfDay := isEnd && t.Hour() == 23 && t.Minute() == 59 && t.Second() == 59
 	if midnight || endOfDay {
 		return t.Format(memory.DateStampLayout)
 	}

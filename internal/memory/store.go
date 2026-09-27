@@ -4019,17 +4019,21 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 
 	var curContent, curCategory, curTags string
 	var curImportance float32
-	// The stored validity triple comes out of the same statement as the fields
-	// this edit replaces, because the window it is judged against has to be the
-	// row's at the moment the write lands. Reading it before the transaction —
-	// as a tool-level pre-check does — would leave two concurrent edits to two
-	// different boundaries able to each pass against a snapshot the other has
-	// already invalidated, and store a window that ends before it starts.
-	var curFrom, curUntil, curVerified sql.NullString
+	// The stored window comes out of the same statement as the fields this edit
+	// replaces, because it is judged against and has to be the row's at the moment
+	// the write lands. Reading it before the transaction — as a tool-level
+	// pre-check does — would leave two concurrent edits to two different
+	// boundaries able to each pass against a snapshot the other has already
+	// invalidated, and store a window that ends before it starts.
+	//
+	// The two boundaries only, because the rule is the window's: verified_at has
+	// no order to be out of, and the UPDATE below writes all three by COALESCE
+	// rather than read-modify-write, so nothing here would use it.
+	var curFrom, curUntil sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT content, category, importance, tags, valid_from, valid_until, verified_at
+		`SELECT content, category, importance, tags, valid_from, valid_until
 		 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
-	).Scan(&curContent, &curCategory, &curImportance, &curTags, &curFrom, &curUntil, &curVerified)
+	).Scan(&curContent, &curCategory, &curImportance, &curTags, &curFrom, &curUntil)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("memory %s not found in project %s", id, projectID)
 	}

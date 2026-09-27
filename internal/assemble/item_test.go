@@ -68,6 +68,29 @@ func TestItemLineRendersValidityDatesAndTimes(t *testing.T) {
 			wants: []string{"until 2026-10-01 23:59:58"},
 		},
 		{
+			// The end-of-day collapse belongs to the window's end alone. As a
+			// start or a verification, 23:59:59 is an instant the caller chose:
+			// printing it as a date would understate the stored instant by a whole
+			// day, make a not-yet-valid row read as though stage 2 accepted it from
+			// midnight, and move the row a day earlier for anyone who re-saved the
+			// value the line showed.
+			name:  "the end of a day as a start",
+			item:  Item{ValidityState: validityFuture, ValidFrom: stamp("2026-10-01 23:59:59")},
+			wants: []string{"valid from 2026-10-01 23:59:59", "not yet valid"},
+		},
+		{
+			name:  "the end of a day as a verification",
+			item:  Item{ValidityState: validityValid, VerifiedAt: stamp("2026-09-20 23:59:59")},
+			wants: []string{"verified 2026-09-20 23:59:59"},
+		},
+		{
+			// Midnight is the start of a day whichever field it is, so it prints as
+			// the date on all three — the same instant, said more briefly.
+			name:  "midnight as a verification",
+			item:  Item{ValidityState: validityValid, VerifiedAt: stamp("2026-09-20 00:00:00")},
+			wants: []string{"verified 2026-09-20"},
+		},
+		{
 			name:  "verification with no window",
 			item:  Item{ValidityState: validityValid, VerifiedAt: stamp("2026-09-20 00:00:00")},
 			wants: []string{"verified 2026-09-20"},

@@ -108,7 +108,8 @@ func TestSaveRecordsEveryValidityAndProvenanceField(t *testing.T) {
 	}{
 		{"valid_from", m.ValidFrom, time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)},
 		// A bare date as a window's end is the END of that day, not its start —
-		// see wholeDayEnd. Without that, "valid until 2026-12-01" would be dead
+		// see parseStampArg's endOfDay parameter. Without that, "valid until
+		// 2026-12-01" would be dead
 		// from midnight on the 1st.
 		{"valid_until", m.ValidUntil, time.Date(2026, 12, 1, 23, 59, 59, 0, time.UTC)},
 		{"verified_at", m.VerifiedAt, time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)},

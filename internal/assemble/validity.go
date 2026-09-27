@@ -180,11 +180,11 @@ func validityLabel(state string, from, until, verified *time.Time) string {
 	var b strings.Builder
 	if from != nil {
 		b.WriteString(" valid from ")
-		b.WriteString(stampText(from))
+		b.WriteString(stampText(from, false))
 	}
 	if until != nil {
 		b.WriteString(" until ")
-		b.WriteString(stampText(until))
+		b.WriteString(stampText(until, true))
 	}
 	// Rendered whenever it is recorded, window or not: with a window it is the
 	// moment somebody last checked the claim, and without one it is the whole
@@ -192,7 +192,7 @@ func validityLabel(state string, from, until, verified *time.Time) string {
 	// checked on the 20th" and "true until then, checked last week" identical.
 	if verified != nil {
 		b.WriteString(" verified ")
-		b.WriteString(stampText(verified))
+		b.WriteString(stampText(verified, false))
 	}
 	switch state {
 	case validityExpired:
