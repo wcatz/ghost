@@ -353,6 +353,176 @@ func TestImportAppendsAnImportedEvidenceRecord(t *testing.T) {
 	}
 }
 
+// TestImportDoesNotTurnAnEmptyVerifiedAtIntoAVerification: the artifact form
+// carries `verified_at` as a POINTER, so a hand-edited record can hold a pointer
+// to the empty string — and `omitempty` does not drop a pointer, only a nil one.
+//
+// That is not a hypothetical: the artifact is documented as "what a user reads
+// and hand-edits", and an empty string is the value a hand edit or a templating
+// accident leaves behind. The memory row stores it as-is (readers treat "" as no
+// claim, which is the pre-existing behaviour and is right), so the evidence record
+// has to agree: a record stamped as verified by a check nobody recorded is the
+// fabrication this table exists to prevent, and it would also make the support
+// summary disagree with the row the same call wrote.
+func TestImportDoesNotTurnAnEmptyVerifiedAtIntoAVerification(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const empty = "EEEEEEEEEEEEEEEEEEEEEEEEEEE1"
+	if _, _, _, err := s.ImportMemory(ctx, PortableMemory{
+		ID:        empty,
+		ProjectID: testProject,
+		Category:  "fact",
+		Content:   "a fact whose artifact left verified_at empty",
+		Source:    "onboarding",
+		Agent:     "claude-code",
+		// The hand-edited shape: a non-nil pointer to "".
+		VerifiedAt: strPtr(""),
+	}, ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+
+	ev, err := s.MemoryProvenance(ctx, empty)
+	if err != nil {
+		t.Fatalf("MemoryProvenance: %v", err)
+	}
+	if len(ev) != 1 {
+		t.Fatalf("evidence = %v, want one imported record", evidenceRowsFor(t, ev))
+	}
+	if ev[0].VerifiedAt != nil {
+		t.Errorf("verified_at = %q on the imported record, want NULL — an empty string is not a check anybody performed", *ev[0].VerifiedAt)
+	}
+
+	// And a REAL stamp still counts, or the guard is a filter rather than a rule.
+	const stamped = "EEEEEEEEEEEEEEEEEEEEEEEEEEE2"
+	if _, _, _, err := s.ImportMemory(ctx, PortableMemory{
+		ID:         stamped,
+		ProjectID:  testProject,
+		Category:   "fact",
+		Content:    "a fact whose artifact states when it was verified",
+		Source:     "onboarding",
+		VerifiedAt: strPtr("2026-01-02 03:04:05"),
+	}, ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	ev, err = s.MemoryProvenance(ctx, stamped)
+	if err != nil {
+		t.Fatalf("MemoryProvenance: %v", err)
+	}
+	if len(ev) != 1 || ev[0].VerifiedAt == nil || *ev[0].VerifiedAt == "" {
+		t.Errorf("evidence = %+v, want the arrival record carrying the artifact's verification", ev)
+	}
+	counts, err := s.MemoryEvidenceCounts(ctx, stamped)
+	if err != nil {
+		t.Fatalf("MemoryEvidenceCounts: %v", err)
+	}
+	if counts.Verified != 1 {
+		t.Errorf("Verified = %d, want 1", counts.Verified)
+	}
+	// The empty one is not counted as verified either.
+	if counts, err := s.MemoryEvidenceCounts(ctx, empty); err != nil || counts.Verified != 0 {
+		t.Errorf("an empty verified_at counted as %d verified (%v), want 0", counts.Verified, err)
+	}
+}
+
+// evidenceRowsFor renders records with their verification, for an assertion about
+// which records exist rather than about their fields.
+func evidenceRowsFor(t *testing.T, ev []Evidence) []string {
+	t.Helper()
+	out := make([]string, 0, len(ev))
+	for _, e := range ev {
+		verified := "-"
+		if e.VerifiedAt != nil {
+			verified = *e.VerifiedAt
+		}
+		out = append(out, e.Kind+":"+e.Agent+":"+verified)
+	}
+	return out
+}
+
+// TestPurgeReachesTheEvidenceASnapshotCarries: a redaction that reports success
+// while the erased memory's agent, session and reference sit in a snapshot is not
+// a redaction. `memory_snapshot_evidence` holds those columns a second time, and
+// the snapshot it belongs to stays alive for as long as any other memory in the
+// project is in it — the cleanup that prunes old snapshots is keyed on the
+// snapshot_id, not on the memory, so the rows would otherwise outlive the purge by
+// ten reflect passes, or forever if no reflect ever runs.
+func TestPurgeReachesTheEvidenceASnapshotCarries(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const redacted = "the deploy runbook lives at ops/deploy.md, not in the wiki"
+	id, _, _, err := s.UpsertWithProvenance(ctx, testProject, "convention", redacted, "reflection", 0.6, nil,
+		Provenance{Agent: "claude-code", SessionID: "ses_a", SourceRef: "ops/deploy.md"})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// A second memory in the same project, so the snapshot is a rollback point for
+	// more than the row being purged — a delete keyed on the wrong thing would take
+	// the whole project's history with it.
+	const bystander = "the staging cluster answers on port 8443"
+	other, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact", bystander, "reflection", 0.5, nil,
+		Provenance{Agent: "codex", SessionID: "ses_b"})
+	if err != nil {
+		t.Fatalf("Upsert(bystander): %v", err)
+	}
+
+	// A reflect takes the snapshot a restore reads. Both rows are re-emitted
+	// verbatim, so both are reused in place and only the snapshot grows.
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "convention", Content: redacted, Importance: 0.6},
+		{Category: "fact", Content: bystander, Importance: 0.5},
+	}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	var carried int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_snapshot_evidence WHERE memory_id = ?`, id,
+	).Scan(&carried); err != nil {
+		t.Fatalf("count the snapshot's evidence: %v", err)
+	}
+	if carried != 1 {
+		t.Fatalf("the snapshot carries %d evidence row(s) for the memory, want 1 — the fixture does not test a purge", carried)
+	}
+
+	if _, err := s.PurgeMemoryHistory(ctx, id); err != nil {
+		t.Fatalf("PurgeMemoryHistory: %v", err)
+	}
+
+	// This memory's own snapshot row goes, by id and by content — the rule that
+	// stops a restore from bringing a purged secret back — and its evidence goes with
+	// it. The OTHER memory's rollback point is the bystander's, and it stays.
+	for _, tc := range []struct {
+		id   string
+		want int
+		note string
+	}{
+		{id, 0, "the purged memory's snapshot row"},
+		{other, 1, "the other memory's snapshot row"},
+	} {
+		var n int
+		if err := s.db.QueryRow(`SELECT count(*) FROM memory_snapshots WHERE memory_id = ?`, tc.id).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", tc.note, err)
+		}
+		if n != tc.want {
+			t.Errorf("%s: %d, want %d", tc.note, n, tc.want)
+		}
+		if err := s.db.QueryRow(`SELECT count(*) FROM memory_snapshot_evidence WHERE memory_id = ?`, tc.id).Scan(&n); err != nil {
+			t.Fatalf("count %s evidence: %v", tc.note, err)
+		}
+		if n != tc.want {
+			t.Errorf("%s: %d evidence row(s), want %d", tc.note, n, tc.want)
+		}
+	}
+	leaked, err := countOccurrences(t, s.db, "ops/deploy.md")
+	if err != nil {
+		t.Fatalf("scan for the reference: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("the purged memory's reference survives in %d row(s) of this database", leaked)
+	}
+}
+
 // TestEvidenceCountsReportWhatSupportsAMemory: the compact rendering the
 // assembler's trace reports. It counts RECORDS, so a second agent corroborating a
 // fact raises it, and a record nothing has verified does not claim to be verified.

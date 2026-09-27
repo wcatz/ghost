@@ -1140,6 +1140,11 @@ func migrateV18(tx *sql.Tx) error {
 	// line this build has always documented, and it is stated rather than logged:
 	// a store that cannot be opened is the operator's to fix, and a warning they
 	// may not see would leave every writer failing on the same missing column.
+	//
+	// What it checks is IDENTITY, not version -- see evidenceTableIdentity -- so an
+	// older shape of the real table is left alone with its evidence intact, and the
+	// column it lacks is reported at the statement that reads it: a repairable
+	// message about one column, rather than a DROP of a table full of records.
 	if err := refuseForeignProvenanceTable(tx); err != nil {
 		return err
 	}
@@ -1217,6 +1222,10 @@ WHERE (agent IS NOT NULL OR session_id IS NOT NULL OR source_ref IS NOT NULL OR 
 // change log under the wrong name, there is no shape to convert them into, no
 // release ever wrote one, and the pre-migration copy is the net a conversion would
 // be guessing past.
+//
+// It checks IDENTITY rather than version, so an older shape of the real table is
+// left alone with its evidence intact — see evidenceTableIdentity for why the
+// column list is deliberately not the whole set.
 func refuseForeignProvenanceTable(run tableInspector) error {
 	present, err := tableExists(run, "memory_provenance")
 	if err != nil {
@@ -1225,7 +1234,7 @@ func refuseForeignProvenanceTable(run tableInspector) error {
 	if !present {
 		return nil
 	}
-	for _, c := range evidenceTableColumns {
+	for _, c := range evidenceTableIdentity {
 		has, err := columnExists(run, "memory_provenance", c)
 		if err != nil {
 			return err
@@ -1241,13 +1250,20 @@ func refuseForeignProvenanceTable(run tableInspector) error {
 	return nil
 }
 
-// evidenceTableColumns is the column set the evidence table's own writers and
-// seed name. migrateV18 checks a pre-existing table against it before touching
-// it, and the check is a refusal rather than an adaptation — see the step.
-var evidenceTableColumns = []string{
-	"id", "memory_id", "kind", "agent", "session_id", "source_ref",
-	"confidence", "observed_at", "verified_at", "carried_from",
-}
+// evidenceTableIdentity is the smallest column set that says "this is Ghost's
+// evidence table", and it is all refuseForeignProvenanceTable checks.
+//
+// `kind` alone settles it: no shape of the change log has a kind column, and that
+// is the only other thing this name has ever been used for. The list is
+// deliberately NOT the full column set, because a probe that compared the full set
+// would be a VERSION check wearing an identity check's clothes — the next schema
+// change that adds a column to this table would then refuse every store already
+// at that version, and the remedy that refusal names is `DROP TABLE
+// memory_provenance`, a command that destroys real evidence records. A build must
+// never answer "that is the wrong table" about a table it merely knows an older
+// shape of; a column it lacks is its own error, reported by the statement that
+// reads it, which is a repairable message about one column.
+var evidenceTableIdentity = []string{"id", "memory_id", "kind"}
 
 // tableExists reports whether a table of that name is in the schema.
 func tableExists(run tableInspector, table string) (bool, error) {

@@ -436,10 +436,13 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 //     can sit on a history row that names a different memory. Those cells are
 //     redacted rather than their rows deleted: the event (which memory, when,
 //     which agent) is worth keeping, and the text is what the purge is for.
-//   - memory_provenance. The evidence records are deleted outright rather than
-//     kept as a record: they carry no text of the memory, but they name the
-//     agents, sessions and references that reported it, and the reason a purge
-//     was asked for is this memory, not the row that quotes it.
+//   - memory_provenance and memory_snapshot_evidence. The evidence records are
+//     deleted outright rather than kept as a record: they carry no text of the
+//     memory, but they name the agents, sessions and references that reported it,
+//     and the reason a purge was asked for is this memory, not the row that quotes
+//     it. The second table is the same columns a second time, held beside the
+//     snapshot a restore would read, and a snapshot outlives the purge by being the
+//     rollback point for every OTHER memory in the project.
 //
 // The texts are collected before anything is deleted, because afterwards there
 // is nothing left to search for. The caller runs this in the same transaction as
@@ -506,6 +509,17 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_provenance WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge memory evidence: %w", err)
+	}
+	// And the copy a snapshot holds. The snapshot row itself goes above, by id and
+	// by content, but a snapshot is the rollback point for a whole PROJECT's
+	// corpus, so the evidence rows are keyed on the memory alone and would outlive
+	// the purge by however many reflects it takes to prune that snapshot — or
+	// forever if none runs. A redaction that leaves the agent, the session and the
+	// reference behind has not erased the thing it was asked to erase, whatever it
+	// reports.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM memory_snapshot_evidence WHERE memory_id = ?`, memoryID); err != nil {
+		return 0, fmt.Errorf("purge snapshot evidence: %w", err)
 	}
 
 	res, err := tx.ExecContext(ctx,

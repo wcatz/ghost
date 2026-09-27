@@ -374,16 +374,29 @@ released, so this table is named for what it is.
 A development store built from a pre-rename commit of #664 can hold a
 `memory_provenance` table from that build, holding the CHANGE LOG's shape under
 the reserved name. `initSQL` cannot stop that — the change log has a `memory_id`
-too, so its `CREATE INDEX` succeeds against the wrong table — so `migrateV18`
-checks the table's columns before it writes, and **refuses** a mismatch, naming
-the command rather than warning: a store that will not open is the operator's to
-fix, and a warning nobody may see leaves every writer failing on the same missing
-column. Nothing is converted, and nothing is dropped automatically — the rows in
-that table are a dev build's change log under the wrong name, there is no shape to
-convert them into, no release ever wrote one, and the pre-migration copy
-`OpenDB` has already taken is the net a conversion would be guessing past. A
-table of the current shape is left exactly as it is: the seed adds a `legacy` row
-only where a memory has none, so re-running the step cannot double them.
+too, so its `CREATE INDEX` succeeds against the wrong table — so the check runs
+twice: in `migrateV18`, which owns the precondition, and in `OpenDB` *before*
+`backupBeforeMigrate` (a refusal that costs a full `VACUUM INTO` copy on every
+open of a store that cannot be opened, and whose same-second retry reports a
+backup collision naming neither the table nor the remedy). It **refuses** a
+mismatch, naming the command rather than warning: a store that will not open is
+the operator's to fix, and a warning nobody may see leaves every writer failing
+on the same missing column. Nothing is converted, and nothing is dropped
+automatically — the rows in that table are a dev build's change log under the
+wrong name, there is no shape to convert them into, no release ever wrote one,
+and the pre-migration copy `OpenDB` has already taken is the net a conversion
+would be guessing past.
+
+The check is about **identity, not version**: it tests for `id`, `memory_id` and
+`kind` and nothing else. `kind` alone settles it, since no shape of the change log
+has one, and a probe that compared the *full* column set would be a version check
+wearing an identity check's clothes — the next schema change to add a column here
+would then refuse every store already at that version, with a remedy that drops a
+table full of evidence records. An older shape of the real table is therefore left
+alone with its rows intact, and the column it lacks is reported by the statement
+that reads it: a repairable message about one column. A table of the current shape
+is likewise left exactly as it is — the seed adds a `legacy` row only where a
+memory has none, so re-running the step cannot double them.
 
 | Phase | Appended by | What the row records |
 |---|---|---|
@@ -492,7 +505,15 @@ prints it. Three things follow:
   was, because "erase the history of this memory" and "delete this memory" are
   different requests. The entry points do not have that choice — they are a
   delete, and the live row goes with its history.
-- **A purge reaches every copy this database holds**, not just the history table.
+- **A purge reaches every copy this database holds**, not just the history table,
+  and that includes the *evidence* copies added later — `memory_provenance` and
+  `memory_snapshot_evidence` both name the agents, sessions and references that
+  reported a memory, so a redaction that left either behind would have erased the
+  text and kept the story of who said it. The snapshot table is the one an earlier
+  version of this list would have missed: a snapshot is the rollback point for a
+  whole *project*, so its evidence rows are keyed on the memory alone and would
+  otherwise outlive the purge by however many reflects it takes to prune that
+  snapshot — or forever if none runs.
   `memory_snapshots` is the one that matters: every applied reflection copies each
   non-manual memory's full content into a snapshot, the column has no foreign key,
   and `ghost reflect --restore` re-inserts the row from it under the memory's

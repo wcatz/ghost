@@ -119,6 +119,22 @@ type PortableEvidence struct {
 	VerifiedAt *string  `json:"verified_at,omitempty"`
 }
 
+// recordedVerification reports whether an imported memory's validity column is a
+// real claim that somebody checked it, which is what earns the arrival record its
+// verified_at.
+//
+// A non-nil pointer is not enough. The artifact form is documented as something a
+// user reads and hand-edits, the column is a POINTER, and `omitempty` drops a nil
+// rather than a pointer to "" — so a record can carry `"verified_at": ""`, which
+// is what an edit or a templating accident leaves behind. The memory row stores it
+// as-is and every reader of that column treats "" as no claim, so the evidence
+// record has to agree: a record stamped as verified by a check nobody performed is
+// a fabrication, and it would put the support summary at odds with the row the
+// same call wrote.
+func recordedVerification(at *string) bool {
+	return at != nil && *at != ""
+}
+
 // ImportOptions is what one import run is doing with the records it is given.
 type ImportOptions struct {
 	// Apply writes. False is a dry run: every check that does not depend on what
@@ -836,7 +852,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		SessionID:  m.SessionID,
 		SourceRef:  m.SourceRef,
 		Confidence: m.Confidence,
-	}, m.VerifiedAt != nil); err != nil {
+	}, recordedVerification(m.VerifiedAt)); err != nil {
 		return false, false, downgraded, err
 	}
 	if err := tx.Commit(); err != nil {

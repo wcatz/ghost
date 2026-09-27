@@ -1893,6 +1893,117 @@ func TestMigrateV18RefusesADevTableUnderTheEvidenceName(t *testing.T) {
 	}
 }
 
+// TestTheEvidenceShapeProbeAsksWhetherItIsTheEvidenceTable: the refusal above
+// must fire on a table that is NOT the evidence table and must NOT fire on one that
+// is an older version of it.
+//
+// That distinction is the whole design of the probe, and getting it wrong fails in
+// the worst direction available. Its job is to catch a pre-rename #664 dev build
+// that used the reserved name for the CHANGE LOG — and `kind` alone settles that,
+// because no shape of the change log has one. Listing every column instead would
+// make the probe a VERSION check wearing an identity check's clothes: the next
+// schema change that adds a column to this table would then refuse every store
+// already at that version, and the remedy it names is `DROP TABLE
+// memory_provenance` — a command that destroys real evidence records. A future
+// build must not answer "your table is the wrong table" about a table it merely
+// knows an older shape of.
+func TestTheEvidenceShapeProbeAsksWhetherItIsTheEvidenceTable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	for _, drop := range []string{`DROP INDEX idx_provenance_memory`, `DROP TABLE memory_provenance`} {
+		if _, err := db.Exec(drop); err != nil {
+			t.Fatalf("%s: %v", drop, err)
+		}
+	}
+	// The evidence table as an EARLIER build of it wrote it: identity columns and
+	// the four provenance fields, no carried_from. Its rows are real evidence, and
+	// a probe that reads the column list as a version check would tell an operator
+	// to drop them.
+	if _, err := db.Exec(`
+		CREATE TABLE memory_provenance (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('observed','imported','verified','legacy')),
+    agent       TEXT,
+    session_id  TEXT,
+    source_ref  TEXT,
+    confidence  REAL,
+    observed_at TEXT,
+    verified_at TEXT
+	)`); err != nil {
+		t.Fatalf("create the older evidence table: %v", err)
+	}
+	for _, s := range []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v18-old', 'p1')`,
+		`INSERT INTO memories (id, project_id, category, content, source, agent)
+		 VALUES ('m1', 'p1', 'fact', 'an older fact', 'mcp', 'claude-code')`,
+		`INSERT INTO memory_provenance (memory_id, kind, agent, observed_at)
+		 VALUES ('m1', 'observed', 'claude-code', datetime('now'))`,
+		`PRAGMA user_version = 17`,
+	} {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed (%s): %v", s, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	opened, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB refused a store whose evidence table is an older shape of ours: %v", err)
+	}
+	defer opened.Close() //nolint:errcheck
+	// It is the evidence table, so its rows are evidence and the probe must not
+	// have cost the operator any.
+	var kept int
+	if err := opened.QueryRow(`SELECT count(*) FROM memory_provenance WHERE agent = 'claude-code'`).Scan(&kept); err != nil {
+		t.Fatalf("count the evidence: %v", err)
+	}
+	if kept != 1 {
+		t.Errorf("%d evidence row(s) survived, want 1", kept)
+	}
+	// And the column the current build reads is the one that is actually missing, so
+	// the store says so itself rather than being told to drop a table it owns.
+	if _, err := opened.Exec(`SELECT carried_from FROM memory_provenance LIMIT 0`); err == nil {
+		t.Error("the older table somehow has carried_from; the fixture no longer tests what it claims")
+	}
+
+	// The other half, restated: a table with no `kind` is NOT the evidence table,
+	// and is still refused. Same probe, opposite answer, one column apart.
+	if err := refuseForeignProvenanceTable(opened); err != nil {
+		t.Errorf("the probe refused the evidence table itself: %v", err)
+	}
+	notEvidence, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer notEvidence.Close() //nolint:errcheck
+	if _, err := notEvidence.Exec(`ALTER TABLE memory_provenance RENAME TO memory_provenance_saved`); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := notEvidence.Exec(`
+		CREATE TABLE memory_provenance (
+    id        TEXT PRIMARY KEY,
+    memory_id TEXT NOT NULL,
+    phase     TEXT NOT NULL,
+    content   TEXT
+	)`); err != nil {
+		t.Fatalf("create the change-log-shaped table: %v", err)
+	}
+	if err := refuseForeignProvenanceTable(notEvidence); err == nil {
+		t.Error("the probe accepted a change log under the evidence name; it has no kind column")
+	} else if !strings.Contains(err.Error(), "kind") {
+		t.Errorf("error = %q, want it to name the column that is missing", err)
+	}
+}
+
 // TestMigrateFreshDBHasMemoryHistory: a brand-new database (initSQL path, no
 // migration involved) must have memory_history and its indexes from the start
 // — guards against the table silently dropping out of initSQL while migrateV17

@@ -1701,6 +1701,13 @@ func countOccurrences(t *testing.T, db *sql.DB, text string) (int, error) {
 		{"memory_history.content", `SELECT count(*) FROM memory_history WHERE content = ?`},
 		{"memory_history.merged_content", `SELECT count(*) FROM memory_history WHERE merged_content = ?`},
 		{"memory_snapshots", `SELECT count(*) FROM memory_snapshots WHERE content = ?`},
+		// The evidence tables, because a purge that empties the history while a
+		// snapshot still holds the text has erased nothing an operator can observe —
+		// and the same is true of an agent or a reference a redaction was asked to
+		// remove. Scanned by their identifying fields, not by content, since they
+		// hold no content.
+		{"memory_provenance.source_ref", `SELECT count(*) FROM memory_provenance WHERE source_ref = ?`},
+		{"memory_snapshot_evidence.source_ref", `SELECT count(*) FROM memory_snapshot_evidence WHERE source_ref = ?`},
 	} {
 		var n int
 		if err := db.QueryRow(q.query, text).Scan(&n); err != nil {
