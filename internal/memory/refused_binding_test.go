@@ -279,13 +279,19 @@ func TestAmbiguousNameRefusalNamesAtMostFiveCandidates(t *testing.T) {
 // that no project records the name, and the caller opens a project of its own
 // and binds the repository to it: the same-named project is left behind,
 // unbound, with no refusal to report — the one outcome this path exists to
-// prevent. A negative limit means no limit, so it returns every row; the clamp
-// is what makes both inputs behave like a positive bound.
+// prevent. A negative limit is no limit at all to SQLite, which is why the
+// clamp turns both inputs into the same bound of one.
+//
+// Two projects share the name so that each input is observable rather than
+// merely equal to the fixture: an unclamped limit returns both rows, and a
+// clamped one returns the first of them beside the true count of two.
 func TestProjectsNamedTxClampsTheLimit(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "infra", "", "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
+	for _, id := range []string{"second", "first"} {
+		if err := s.EnsureProject(ctx, id, "", "infra"); err != nil {
+			t.Fatalf("EnsureProject %s: %v", id, err)
+		}
 	}
 
 	s.mu.Lock()
@@ -303,8 +309,8 @@ func TestProjectsNamedTxClampsTheLimit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("projectsNamedTx(limit %d): %v", limit, err)
 		}
-		if matching != 1 || len(candidates) != 1 || candidates[0].id != "infra" {
-			t.Errorf("projectsNamedTx(limit %d) = (%d rows, count %d), want the one project that matches", limit, len(candidates), matching)
+		if matching != 2 || len(candidates) != 1 || candidates[0].id != "first" {
+			t.Errorf("projectsNamedTx(limit %d) = (%d rows, count %d), want one row and the count of both", limit, len(candidates), matching)
 		}
 	}
 }
