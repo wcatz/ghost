@@ -355,7 +355,7 @@ the **same transaction** as the write, so history cannot diverge from state:
 | `save` | `Create`, `Upsert` (new row or linked copy), the decision companion memory, the shipped seeds | the row as inserted |
 | `merge` | `Upsert`'s near-duplicate fold | the target after its importance and access count were raised |
 | `update` | `UpdateMemory` | the edited row (a content change may also clear `resolved_at`) |
-| `reflect` | `ReplaceNonManual` — reuse, rewrite and fresh insert alike | the row as the consolidation left it |
+| `reflect` | `ReplaceNonManual` — reuse, rewrite and fresh insert alike, including a verbatim re-emission that leaves every recorded column identical (see below) | the row as the consolidation left it |
 | `resolve` / `unresolve` | `SetResolved` / `ClearResolved` | the row with the new `resolved_at`, or without it |
 | `supersede` | `CreateLink` with a `supersedes` edge, when the edge becomes active | the **target**'s state — the row the edge declares stale |
 | `restore` | `RestoreSnapshot` | the row as the snapshot put it back |
@@ -391,25 +391,30 @@ repeating the previous state would record that nothing happened, at the cost of 
 row per recall. `Touch` (`access_count`, `last_accessed`), `TogglePin` and the
 resolve KEEP cache are in that class.
 
-`MergeProject` and `PromoteToGlobal` are in that class too — both change only
-`project_id` — and they are the writers that show the other half: appending
+Two writers deliberately break that rule, for the same reason: the row is not a
+state change but a record that a *pass* ran over this memory, or that a *claim*
+now stands against it, and neither is visible in the row's own columns. A
+consolidation that re-emits a memory verbatim — retention rather than
+consolidation, see `reusePreservesAge` — appends a `reflect` row byte-identical
+to the previous version, because "which reflection run touched this" is the
+question the table exists to answer, and a memory no reflection has confirmed is
+indistinguishable from one that has. A `supersedes` edge moves none of the
+target's columns but does change its standing — "this is no longer current" —
+and an audit blind to that is blind to the corpus's main staleness signal. Both
+cost a slot under the cap below, which is what bounds them; neither is a licence
+to repeat. The `supersede` row in particular is written when the edge *becomes*
+active and not on every re-link, because `ghost supersede` re-writes a pair on
+every pass whose endpoint moved, and a re-write of a live edge records no run and
+asserts no new claim.
+
+`MergeProject` and `PromoteToGlobal` are in the no-append class — both change
+only `project_id` — and they are the writers that show the other half: appending
 nothing is not the same as ignoring them. A write that moves a memory between
 projects has to carry its history rows' `project_id` with it, because that column
 is what the project-delete cascade follows, and both do. Without it, deleting the
 project a memory was promoted out of takes the recorded past of a memory that is
 still live in `_global`, and `ghost history <id>` reports that it was never
 written.
-
-The `supersede` row is the one deliberate exception to the no-append rule, and it
-is a different kind of entry rather than an oversight. A `supersedes` edge moves
-none of the target's columns, but it does change its standing — "this is no
-longer current" — and an audit that could not see that would be blind to the
-corpus's main staleness signal. So the row records a claim, not a state change,
-which is also why it is written when the edge *becomes* active and not on every
-re-write: `ghost supersede` re-writes a pair whenever an endpoint moved since the
-edge was written, and a row repeating the previous state would spend one of the
-per-memory version slots until it pruned the real save/update/reflect versions
-this table exists to keep.
 
 **Growth policy.** The table is append-only, not unbounded, and both bounds are
 applied in the appending transaction — so neither needs a background job or a
