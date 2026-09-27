@@ -3570,6 +3570,21 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 		}
 	}
 
+	// A purge runs BEFORE the DELETE, not after. The text it has to erase is the
+	// text the row holds, and once the row is gone the collection that finds it
+	// comes back empty — a redaction that silently ran with nothing to redact is
+	// the one failure a redaction must not have. The DELETE below still reports
+	// "memory not found" for a bad id, and the rollback that follows undoes the
+	// purge with it, so a failed delete leaves the tombstone-free history intact.
+	//
+	// And it writes no tombstone of its own, which is the point: a purge must
+	// leave nothing behind that could carry the text being redacted.
+	if opts.PurgeHistory {
+		if _, err := purgeHistoryTx(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+
 	result, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete memory: %w", err)
@@ -3577,13 +3592,6 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("memory not found: %s", id)
-	}
-	// A purge writes no tombstone of its own, which is the point: it must leave
-	// nothing behind that could carry the text being redacted.
-	if opts.PurgeHistory {
-		if _, err := purgeHistoryTx(ctx, tx, id); err != nil {
-			return err
-		}
 	}
 	return tx.Commit()
 }

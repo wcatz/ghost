@@ -1760,3 +1760,249 @@ func TestRestoreAppendsOnlyForRowsItChanged(t *testing.T) {
 		t.Errorf("phases = %v, want [save delete restore] — a repeat restore appended a row for a row it changed nothing in", got)
 	}
 }
+
+// TestPurgeReachesAPreV13Snapshot: the snapshot that has no id. A pre-v13
+// snapshot recorded no memory_id, and `ghost reflect --restore` matches those by
+// content — so an id-keyed delete left the one row that can resurrect the memory,
+// and the purge reported success on a secret one restore away.
+func TestPurgeReachesAPreV13Snapshot(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const secret = "the bastion accepts only key-based logins since the cutover"
+	id, _, _, err := s.Upsert(ctx, testProject, "gotcha", secret, "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// A pre-v13 snapshot of that memory: every column the old table had, and no
+	// memory_id.
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, memory_id)
+		VALUES (?, ?, 'gotcha', ?, 0.5, 'mcp', NULL)`, "snap-pre13", testProject, secret); err != nil {
+		t.Fatalf("seed a pre-v13 snapshot: %v", err)
+	}
+	// Assert the fixture landed. This test's whole claim is that a row SURVIVED a
+	// purge, and a fixture that never existed would satisfy it — which is exactly
+	// what happened the first time: PurgeMemoryHistory had already removed the
+	// seeded row, so the assertion below was true of a database that never had it.
+	if seeded := snapshotCount(t, s, "snap-pre13"); seeded != 1 {
+		t.Fatalf("the pre-v13 snapshot was not seeded (%d rows); the fixture does not test the case", seeded)
+	}
+	if err := s.DeleteWithOptions(ctx, id, DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("DeleteWithOptions: %v", err)
+	}
+
+	var left int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_snapshots WHERE snapshot_id = 'snap-pre13'`,
+	).Scan(&left); err != nil {
+		t.Fatalf("count the pre-v13 snapshot: %v", err)
+	}
+	if left != 0 {
+		t.Errorf("the id-less snapshot survived, and ghost reflect --restore matches it by content")
+	}
+	leaked, err := countOccurrences(t, s.db, secret)
+	if err != nil {
+		t.Fatalf("scan for the text: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("the purged text survives in %d row(s)", leaked)
+	}
+}
+
+// TestPurgeInTheDeletePathStillCollectsTheLiveText: the text a redaction has to
+// erase is the text the row holds, and `DeleteWithOptions` deletes the row before
+// it purges — so the collection that finds that text came back empty and the
+// redaction silently ran with nothing to redact. Ordered before the DELETE for
+// exactly that reason, and this is the test that says so.
+func TestPurgeInTheDeletePathStillCollectsTheLiveText(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A FoldOnly fold puts the wording it discarded on the target's merge row, so
+	// the same words can exist as a memory of their own.
+	const stored = "The cutover moved logins to key-based authentication."
+	const discarded = "the cutover moved logins to key-based authentication"
+	target, _, _, err := s.Upsert(ctx, testProject, "convention", stored, "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "convention", discarded, "mcp", 0.7, nil,
+		UpsertOptions{FoldOnly: true}); err != nil {
+		t.Fatalf("UpsertWithOptions (FoldOnly): %v", err)
+	}
+	if _, _, _, err := s.Upsert(ctx, testProject, "convention", discarded, "mcp", 0.7, nil); err != nil {
+		t.Fatalf("Upsert (the same words again): %v", err)
+	}
+	var carried int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_provenance WHERE memory_id = ? AND merged_content = ?`,
+		target, discarded,
+	).Scan(&carried); err != nil {
+		t.Fatalf("count merge rows carrying the wording: %v", err)
+	}
+	if carried != 1 {
+		t.Fatalf("%d merge rows carry the wording, want 1 — the fixture does not test the case", carried)
+	}
+
+	// Find that second memory and delete it, which is the path under test.
+	mems, err := s.GetByIDs(ctx, []string{firstIDWithContent(t, s, testProject, discarded)})
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("look the second memory up: %v %v", mems, err)
+	}
+	other := mems[0].ID
+	if other == target {
+		t.Fatal("the second save folded into the first; the fixture needs two memories")
+	}
+	if err := s.DeleteWithOptions(ctx, other, DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("DeleteWithOptions: %v", err)
+	}
+
+	leaked, err := countOccurrences(t, s.db, discarded)
+	if err != nil {
+		t.Fatalf("scan for the text: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("the text of the deleted memory survives in %d row(s): the delete path purged without collecting it", leaked)
+	}
+}
+
+// snapshotCount reports how many rows a snapshot id has, so a test whose claim is
+// about a row SURVIVING something can prove its fixture was there to begin with.
+func snapshotCount(t *testing.T, s *Store, snapshotID string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_snapshots WHERE snapshot_id = ?`, snapshotID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count snapshots for %s: %v", snapshotID, err)
+	}
+	return n
+}
+
+func firstIDWithContent(t *testing.T, s *Store, projectID, content string) string {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRow(
+		`SELECT id FROM memories WHERE project_id = ? AND content = ? LIMIT 1`, projectID, content,
+	).Scan(&id); err != nil {
+		t.Fatalf("find a memory holding %q: %v", content, err)
+	}
+	return id
+}
+
+// TestTheBaselineRowGoesThroughTheRedactionFilter: the filter's plumbing has two
+// statement shapes — the batched append and this NOT EXISTS insert — and one of
+// them missing the filter is exactly how an unredacted credential lands in the
+// table while the append path claims to redact it. This one caught the baseline
+// insert bypassing it while the batched append did not.
+//
+// The memory is pre-v17 by construction here: the only way to reach the baseline
+// is a row with no history, so a saved-then-edited memory would never get one.
+func TestTheBaselineRowGoesThroughTheRedactionFilter(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A pre-v17 row, straight into the table, and with no history row.
+	const secret = "the deploy key is ghp_BASELINEKEY0123456789ABCDEFG"
+	if _, err := s.db.Exec(`DROP TABLE memory_provenance`); err != nil {
+		t.Fatalf("drop the history table: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO memories (project_id, category, content, source, importance) VALUES (?, 'gotcha', ?, 'mcp', 0.5)`,
+		testProject, secret); err != nil {
+		t.Fatalf("seed the pre-v17 memory: %v", err)
+	}
+	id := firstIDWithContent(t, s, testProject, secret)
+	if _, err := s.db.Exec(initSQL); err != nil {
+		t.Fatalf("recreate the history table: %v", err)
+	}
+
+	restore := setHistoryRedactor(func(content string) string {
+		return strings.ReplaceAll(content, "ghp_BASELINEKEY", "[redacted]")
+	})
+	t.Cleanup(restore)
+
+	if err := s.UpdateMemory(ctx, testProject, id, strPtr("the deploy key has been rotated"), nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("phases = %v, want [baseline update]", phasesOf(t, entries))
+	}
+	if strings.Contains(entries[0].Content, "ghp_BASELINEKEY") {
+		t.Errorf("the baseline row stored the unredacted credential: %q", entries[0].Content)
+	}
+	if !strings.Contains(entries[0].Content, "[redacted]") {
+		t.Errorf("the baseline row = %q, want the redacted form", entries[0].Content)
+	}
+}
+
+// TestPurgeInTheDeletePathFindsATextNoHistoryRowHolds: why the ordering is the
+// contract rather than a detail. A memory's last history row normally repeats its
+// current text, so collecting texts from the history alone appears to work — and
+// that is why reversing the two statements survives every other test. It stops
+// working the moment a live memory's text is in no history row at all, which this
+// tree can do on purpose: a history-only purge (PurgeMemoryHistory) erases the
+// rows and leaves the row. Then the text lives in exactly one place, the
+// memories row the DELETE is about to remove, and a redaction that collects after
+// the DELETE collects nothing — and the id-less snapshot it could not have matched
+// by id survives.
+func TestPurgeInTheDeletePathFindsATextNoHistoryRowHolds(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const secret = "rotation is announced in #ops before the key is replaced"
+	id, _, _, err := s.Upsert(ctx, testProject, "convention", secret, "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// A pre-v13 snapshot: no memory_id, so only a content match reaches it.
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, memory_id)
+		VALUES (?, ?, 'convention', ?, 0.5, 'mcp', NULL)`, "snap-order", testProject, secret); err != nil {
+		t.Fatalf("seed the id-less snapshot: %v", err)
+	}
+	// The row lives; no history row holds its text. Stripped with SQL rather than
+	// through PurgeMemoryHistory, because that call would ALSO remove the id-less
+	// snapshot below — the fixture would be gone before the purge under test, and
+	// the test would pass against a database that never had the problem.
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM memory_provenance WHERE memory_id = ?`, id); err != nil {
+		t.Fatalf("strip the history: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("the fixture needs a live memory with no history; it has %d rows", len(entries))
+	}
+	if seeded := snapshotCount(t, s, "snap-order"); seeded != 1 {
+		t.Fatalf("the id-less snapshot was not seeded (%d rows); the fixture does not test the case", seeded)
+	}
+
+	if err := s.DeleteWithOptions(ctx, id, DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("DeleteWithOptions: %v", err)
+	}
+
+	var left int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_snapshots WHERE snapshot_id = 'snap-order'`,
+	).Scan(&left); err != nil {
+		t.Fatalf("count the snapshot: %v", err)
+	}
+	if left != 0 {
+		t.Errorf("the id-less snapshot survived a purge whose only record of the text was the row it deleted first")
+	}
+	leaked, err := countOccurrences(t, s.db, secret)
+	if err != nil {
+		t.Fatalf("scan for the text: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("the purged text survives in %d row(s)", leaked)
+	}
+}

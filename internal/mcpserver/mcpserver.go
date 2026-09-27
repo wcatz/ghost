@@ -705,7 +705,8 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
 			"Memory %s was already deleted; purged the %d recorded version(s) of its text. "+
-				"The memory itself is not restored, and a reflection snapshot taken before the purge may still hold the text.",
+				"reflection snapshot holding it. The memory itself is not restored, and a copy in a "+
+				"backup taken before this is not something this can reach.",
 			memoryID, purged)}},
 	}, nil, nil
 }
@@ -1131,7 +1132,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_delete",
 		Title:       "Delete Memory",
-		Description: "Permanently delete a memory by ID. Requires project_id to verify ownership — you cannot delete memories from other projects. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning. Pass purge_history: true when the memory must be ERASED rather than retired: every recorded version of its text goes with it in the same transaction, which is the only way to redact a secret Ghost already stored.",
+		Description: "Permanently delete a memory by ID. Requires project_id to verify ownership — you cannot delete memories from other projects. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning. Pass purge_history: true when the memory must be ERASED rather than retired: every recorded version of its text goes with it in the same transaction — along with any reflection snapshot that could restore the row — which is the only way to redact a secret Ghost already stored. It works on a memory that is already deleted too, purging the recorded text without restoring the row.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			OpenWorldHint:   boolPtr(false),
@@ -1177,7 +1178,8 @@ func (s *Server) registerTools() {
 		text := "Memory deleted."
 		if args.PurgeHistory {
 			text = "Memory deleted, and the versions of its text this database recorded are gone. " +
-				"A reflection snapshot taken before this purge may still hold the text, and `ghost reflect --restore` can bring the row back from one."
+				"its recorded history, and the reflection snapshot that could have restored the row. " +
+				"A copy in a backup taken before this, or in another machine's store, is not something this can reach."
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},

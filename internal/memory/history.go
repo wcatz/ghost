@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"sync/atomic"
 
 	sqlite "modernc.org/sqlite"
 )
@@ -108,10 +107,40 @@ var errHistoryNoMemory = errors.New("no live memory row")
 // the detector exists, which is what makes #656 a change of behaviour rather than
 // a change of shape.
 //
-// TODO(#656): call secret.Detect here and store its replacement. The
-// replacement, not a refusal: refusing would fail the user's own write over
-// something the history cannot even see.
-var redactHistoryContent = func(content string) string { return content }
+// TODO(#656): install secret.Detect through setHistoryRedactor, and store its
+// replacement. The replacement, not a refusal: refusing would fail the user's own
+// write over something only the history can see.
+//
+// It is installed through setHistoryRedactor, never assigned directly, and the
+// append statement asks THAT whether to call the SQL function — a second bool
+// would be a second source of truth, and the wiring below would then have to set
+// both or the filter would silently not apply.
+// filter is nil until a redactor is installed, and the append path's gate is
+// derived from it rather than kept beside it, so the two cannot disagree.
+var historyRedactor struct {
+	filter func(string) string
+}
+
+func historyRedactorInstalled() bool { return historyRedactor.filter != nil }
+
+// historyContentExpr is the SQL expression a history row's content column reads:
+// the filter when one is installed, the column itself when none is.
+//
+// Every statement that writes a history row reaches the content through here, and
+// there are two of them (the batched append and the baseline's NOT EXISTS
+// insert). They cannot each decide for themselves: one of them forgetting is
+// exactly how an unredacted credential gets into the table while the append path
+// claims to redact it.
+//
+// Calling the function when nothing is installed would cross into Go through the
+// driver for every appended row to do nothing — measurable on the write path's
+// critical section, and #656, the redactor it exists for, is not on main yet.
+func historyContentExpr() string {
+	if historyRedactorInstalled() {
+		return historyContentFunc + "(content)"
+	}
+	return "content"
+}
 
 // historyContentFunc is the SQL name the append statement calls to reach that Go
 // function, so redaction happens INSIDE the one statement that copies the state
@@ -120,12 +149,6 @@ var redactHistoryContent = func(content string) string { return content }
 // credential sits in the table, inside a transaction whose failure mode is "roll
 // the whole thing back".
 const historyContentFunc = "ghost_history_content"
-
-// TEMPORARY measurement switch.
-var historyBenchmarkOff bool
-
-// TEMPORARY measurement switch.
-var historyProbeOff bool
 
 func init() {
 	// Registered per process rather than per connection: modernc.org/sqlite keeps
@@ -138,7 +161,10 @@ func init() {
 			if !ok || content == "" {
 				return args[0], nil
 			}
-			return redactHistoryContent(content), nil
+			if historyRedactor.filter == nil {
+				return content, nil
+			}
+			return historyRedactor.filter(content), nil
 		}); err != nil {
 		// The only realistic failure is a duplicate name, which happens when a
 		// second registration reaches the same process — harmless, because the
@@ -149,29 +175,15 @@ func init() {
 	}
 }
 
-// historyRedactorInstalled reports whether a filter is installed, so the append
-// statement can skip the call into Go when there is nothing for it to do.
-func historyRedactorInstalled() bool {
-	return redactorInstalled.Load()
-}
-
-// redactorInstalled is set by setHistoryRedactor and read by the append path.
-var redactorInstalled atomic.Bool
-
 // setHistoryRedactor installs the filter history rows are written through and
-// returns a function that restores the previous one. It exists for the seam's own
-// tests and for the wiring #656 will add; nothing in production calls it.
+// returns a function that restores the previous one. It is the ONLY way to
+// install one, which is what keeps the append path's gate and the function it
+// calls in step. It exists for the seam's own tests and for the wiring #656 will
+// add; nothing in production calls it.
 func setHistoryRedactor(fn func(string) string) func() {
-	prev := redactHistoryContent
-	prevInstalled := redactorInstalled.Load()
-	if fn != nil {
-		redactHistoryContent = fn
-		redactorInstalled.Store(true)
-	}
-	return func() {
-		redactHistoryContent = prev
-		redactorInstalled.Store(prevInstalled)
-	}
+	prev := historyRedactor.filter
+	historyRedactor.filter = fn
+	return func() { historyRedactor.filter = prev }
 }
 
 // selectIDs runs a single-column id query in tx and returns its rows. args is
@@ -283,9 +295,6 @@ func appendHistoryForIDsTx(ctx context.Context, tx *sql.Tx, ids []string, phase 
 // replace by three, and the batch is also the granularity the per-memory trim
 // runs at.
 func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEvent, ids []string) error {
-	if historyBenchmarkOff {
-		return nil
-	}
 	for len(ids) > 0 {
 		batch := ids
 		if len(batch) > historyBatchSize {
@@ -323,15 +332,6 @@ func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEven
 // statement, at the moment it runs, rather than passed in by a caller that could
 // disagree with it.
 func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids []string) error {
-	// The content column goes through the filter only when one is installed.
-	// Calling the SQL function unconditionally would cross into Go through the
-	// driver for every appended row to do nothing, which is measurable on the
-	// write path's critical section, and #656 — the redactor it exists for — is
-	// not on main yet.
-	contentExpr := "content"
-	if historyRedactorInstalled() {
-		contentExpr = historyContentFunc + "(content)"
-	}
 	placeholders := make([]string, 0, len(ids))
 	args := make([]interface{}, 0, len(ids)+5)
 	args = append(args, e.phase, nullIfEmpty(e.prov.Agent), nullIfEmpty(e.prov.SessionID),
@@ -344,7 +344,7 @@ func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids [
 		INSERT INTO memory_provenance
 			(memory_id, project_id, phase, agent, session_id, related_id, merged_content,
 			 content, category, importance, resolved_at, source)
-		SELECT id, project_id, ?, ?, ?, ?, ?, `+contentExpr+`,
+		SELECT id, project_id, ?, ?, ?, ?, ?, `+historyContentExpr()+`,
 		       category, importance, resolved_at, source
 		FROM memories WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
@@ -395,7 +395,8 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 		INSERT INTO memory_provenance
 			(memory_id, project_id, phase, agent, session_id, content, category,
 			 importance, resolved_at, source)
-		SELECT id, project_id, ?, ?, ?, content, category, importance, resolved_at, source
+		SELECT id, project_id, ?, ?, ?, `+historyContentExpr()+`, category, importance,
+		       resolved_at, source
 		FROM memories
 		WHERE id = ?
 		  AND NOT EXISTS (SELECT 1 FROM memory_provenance p WHERE p.memory_id = memories.id)
@@ -444,8 +445,39 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("collect texts to purge: %w", err)
 	}
 
-	// The snapshot first: it is the copy that can bring the row back, so it is
-	// the one whose survival would make the purge's own report a lie.
+	// The snapshots first: they are the copies that can bring the row back, so
+	// they are the ones whose survival would make the purge's own report a lie.
+	//
+	// By CONTENT as well as by id, because a pre-v13 snapshot recorded no id and
+	// `ghost reflect --restore` matches those by content — so an id-keyed delete
+	// would leave the one snapshot that can resurrect the row, and this purge
+	// would report success on a secret one restore away. The content list is the
+	// memory's own, so this cannot reach an unrelated row that merely shares a
+	// word: it is an exact match on text this memory is being erased for.
+	const snapshotPurgeBatch = 25
+	for start := 0; start < len(texts); start += snapshotPurgeBatch {
+		batch := texts[start:min(start+snapshotPurgeBatch, len(texts))]
+		placeholders := make([]string, 0, len(batch))
+		args := make([]interface{}, 0, len(batch))
+		for _, text := range batch {
+			if text == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, text)
+		}
+		if len(placeholders) == 0 {
+			continue
+		}
+		list := strings.Join(placeholders, ",")
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM memory_snapshots
+			 WHERE memory_id = ? OR content IN (`+list+`)`,
+			append([]interface{}{memoryID}, args...)...,
+		); err != nil {
+			return 0, fmt.Errorf("purge memory snapshots: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_snapshots WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge memory snapshots: %w", err)
@@ -574,9 +606,6 @@ func linkSuccessorTx(ctx context.Context, tx *sql.Tx, oldID, successorID string)
 // memory under the cap and a table under the global cap are the normal state, and
 // then nothing is deleted.
 func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
-	if historyProbeOff {
-		return nil
-	}
 	for len(ids) > 0 {
 		batch := ids
 		if len(batch) > historyBatchSize {

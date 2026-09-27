@@ -1378,6 +1378,12 @@ func TestMigrateV17AddsMemoryProvenance(t *testing.T) {
 	}
 	for _, drop := range []string{
 		`DROP INDEX idx_provenance_memory`,
+		// The index this migration no longer creates. Dropping it is not
+		// defensive: initSQL no longer makes it either, so leaving it out of the
+		// list would have made this test run against a v16 database that never
+		// had it, and the absence assertion below would have passed for the wrong
+		// reason.
+		`DROP INDEX IF EXISTS idx_provenance_recorded`,
 		`DROP TABLE memory_provenance`,
 	} {
 		if _, err := db.Exec(drop); err != nil {
@@ -1412,6 +1418,25 @@ func TestMigrateV17AddsMemoryProvenance(t *testing.T) {
 		).Scan(&n); err != nil || n != 1 {
 			t.Errorf("%s %s after migrateV17: n=%d err=%v, want 1", obj.typ, obj.name, n, err)
 		}
+	}
+
+	// The index list is an absence as much as a presence, and it is asserted on
+	// the MIGRATION path, not only on the fresh-database one. initSQL and
+	// migrateV17 are two copies of the same DDL; when they disagree the fresh
+	// install and the upgraded store get different schemas, and the difference is
+	// invisible to a test that only opens a new database. This one caught exactly
+	// that: the index was removed from initSQL and left in migrateV17.
+	var strayIndexes int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM sqlite_master
+		WHERE type='index' AND tbl_name='memory_provenance'
+		  AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_provenance_memory'`,
+	).Scan(&strayIndexes); err != nil {
+		t.Fatalf("count provenance indexes: %v", err)
+	}
+	if strayIndexes != 0 {
+		t.Errorf("migrateV17 left %d index(es) on memory_provenance that nothing reads; "+
+			"every append pays a b-tree insert for each", strayIndexes)
 	}
 
 	// The migrated table is usable, and its phase vocabulary is the one the

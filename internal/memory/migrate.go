@@ -1048,8 +1048,14 @@ func migrateV17(tx *sql.Tx) error {
     resolved_at TEXT,
     source      TEXT
 )`,
+		// One index, and the same one initSQL creates. A standalone
+		// recorded_at index has no reader — the per-memory cap ranks by rowid and
+		// an as_of read filters on memory_id — while every append would pay a
+		// second b-tree insert to keep it current, inside the write transaction.
+		// Creating it here anyway would have left every UPGRADED store with two
+		// while every fresh one had one, which is the sort of difference only a
+		// test comparing the two paths would catch.
 		`CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id, recorded_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_provenance_recorded ON memory_provenance(recorded_at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {

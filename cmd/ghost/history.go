@@ -363,11 +363,11 @@ func runHistoryPurge(ctx context.Context, s *memory.Store, memoryID string) {
 			os.Exit(1)
 		}
 	}
-	// Accurate about what the transaction covers. A reflection snapshot taken
-	// before the purge is gone with it, but nothing here can reach a copy in
-	// another store, a backup taken earlier, or a text quoted into something
-	// that was never Ghost's memory.
-	fmt.Println("Purged. This memory's row, its recorded history and any reflection snapshot naming it are gone.")
+	// Accurate about what the transaction covers: the row, its history, and the
+	// snapshots that could restore it all go. What no purge can reach is a copy
+	// outside this database — an earlier backup, another machine's store — or a
+	// text quoted into something that was never Ghost's memory.
+	fmt.Println("Purged. This memory's row, its recorded history and any reflection snapshot holding it are gone.")
 }
 
 // readHistoryView gathers what the printer needs from an open store: the memory

@@ -452,7 +452,10 @@ prints it. Three things follow:
   and leave the text on disk. A plain delete deliberately keeps the history —
   that is what makes the table worth having — and an id whose history still exists
   is one `ghost import` refuses to write into, because the artifact's ids are
-  verbatim and the two records would splice under one id.
+  verbatim and the two records would splice under one id. A purge erases its
+  recorded text only: a live memory row is left exactly as it was, because
+  "erase the history of this memory" and "delete this memory" are different
+  requests.
 - **A purge reaches every copy this database holds**, not just the history table.
   `memory_snapshots` is the one that matters: every applied reflection copies each
   non-manual memory's full content into a snapshot, the column has no foreign key,
@@ -462,9 +465,12 @@ prints it. Three things follow:
   history to show it came back. A FoldOnly fold's discarded wording is the other
   copy: it sits in `merged_content` on the *target's* row, so those cells are
   redacted rather than their rows deleted (the event is worth keeping; the text is
-  what the purge is for). What a purge still cannot reach is a backup taken before
-  it, or another machine's copy of the store — so the command reports what its
-  transaction covered, not that the text has ceased to exist.
+  what the purge is for). Snapshots are matched by content as well as by id, because a
+  pre-v13 snapshot recorded no id and `ghost reflect --restore` matches those by
+  content — an id-keyed delete would have left the one snapshot that can resurrect
+  the row. What a purge still cannot reach is a backup taken before it, or another
+  machine's copy of the store, so the command reports what its transaction covered
+  rather than that the text has ceased to exist.
 - **A redaction seam on the way in.** `ghost_history_content` is a SQLite
   function called by the append statement itself, so content is rewritten inside
   the one statement that copies the state out of `memories` rather than in a
