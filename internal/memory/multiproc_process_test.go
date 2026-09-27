@@ -24,7 +24,9 @@ import (
 // and runs writers against readers, which proves the settings work at the SQLite
 // level but not that a *process* gets them: every handle there came from the same
 // binary, the same DSN builder and the same code path, so a contract setting that
-// only one of the real open paths carried would not be noticed.
+// only one of the DSN spellings in the tree carried would not be noticed. (This
+// fleet opens two of them — memory.OpenDB and memory.readOnlyDSN — and not
+// mcpinit's; see assertConnectionContract.)
 //
 // The processes here are the ones the contract names. A CLI child and a live MCP
 // server write through their own handles while reflection/maintenance replaces a
@@ -123,23 +125,15 @@ const (
 	// 5s busy timeout while six other processes write the same file.
 	multiprocBatchRows = 60
 
-	// multiprocLoadWarmup is how many iterations each load process runs before
-	// it reports itself ready. The batch waits for all of them, so by the time
-	// it commits four writers have already been colliding over one write lock
-	// for this many rounds — the contention the 5s busy timeout exists for. With
-	// no warmup the batch could commit against an idle file and the run would
-	// pass without two writers ever meeting.
-	multiprocLoadWarmup = 15
-
-	// multiprocLoadWrites is how many write transactions each writer may issue.
-	// It is larger than the warmup so writers are still going when the batch
-	// lands, and bounded because the contract's busy timeout is a bound rather
-	// than a guarantee: a writer that looped until the batch arrived would grow
-	// the corpus without limit, and each write transaction widens the
-	// near-duplicate scan inside it until a single one outlasts the very timeout
-	// the test is checking. Past the budget a writer keeps reading, which is what
-	// a live server does between saves anyway.
-	multiprocLoadWrites = 60
+	// multiprocLoadAfter is how many writes each writer completes — or reads, for
+	// the read-only roles — before it reports itself in step. The batch waits for
+	// every one of them, so it is triggered by writer progress rather than by a
+	// clock: at that point the writers are provably mid-stream against each other
+	// and against the file the batch is about to lock. It also keeps the corpus
+	// small, which matters because the contract's busy timeout is a bound and not
+	// a guarantee — a writer queued behind a transaction that has grown with the
+	// corpus measures a slower machine, not a broken setting.
+	multiprocLoadAfter = 20
 
 	// multiprocBarrierTimeout bounds each of the parent's waits for a child
 	// process to reach a state. It is a deadlock backstop, not a performance
@@ -207,12 +201,12 @@ func (c *child) start(ctx context.Context, t *testing.T, p multiprocPaths, role,
 		"-project", project,
 		"-label", label,
 		"-load", multiprocLoadPrefix,
+		"-load-project", multiprocLoadProject,
 		"-seed", multiprocSeedPrefix,
 		"-replaced", multiprocReplacedPrefix,
 		"-query", multiprocQuery,
 		"-batch", fmt.Sprint(multiprocBatchRows),
-		"-warmup", fmt.Sprint(multiprocLoadWarmup),
-		"-writes", fmt.Sprint(multiprocLoadWrites),
+		"-after", fmt.Sprint(multiprocLoadAfter),
 	}
 	args = append(args, extra...)
 	c.name = role + "/" + label
@@ -381,13 +375,12 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 		spawn(&child{}, "ro", multiprocLoadProject, "ro0"),
 		spawn(&child{}, "ro", multiprocLoadProject, "ro1"),
 	}
-	// Every load process has opened the database and finished its warmup, so the
-	// writers are provably live and already contending before the batch looks
-	// for them.
+	// Every load process has reported itself in step, so the writers are provably
+	// live and already contending before the batch looks for them.
 	for _, c := range load {
-		reach("ready-" + c.label)
+		reach("wrote-" + c.label)
 	}
-	reach("ready-" + probe.label)
+	reach("wrote-" + probe.label)
 
 	var poller, snapshot, maint *child
 	if barrierFailure == nil {
@@ -415,6 +408,18 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 	}
 
 	waitForChildren(t, ctx, children)
+	// Registered as a cleanup, not written at the end of the test: a Fatalf in any
+	// assertion below — including the two reachable only after a barrier failure
+	// — would otherwise skip the one thing that says how far each process got.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		for _, c := range children {
+			rep, _ := c.result()
+			t.Logf("%s measured: %v (observed %v, gave up: %q)", c.name, rep.KV, rep.Observed, rep.Aborted)
+		}
+	})
 	if barrierFailure != nil {
 		t.Errorf("%v", barrierFailure)
 	}
@@ -454,37 +459,29 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 
 		probeRep, _ := probe.result()
 		if got := probeRep.str("tx_lock_held"); got != "true" {
-			t.Errorf("a read-then-write transaction on the CLI open path did not hold SQLite's write lock "+
+			t.Errorf("a read-then-write transaction on the CLI caller shape did not hold SQLite's write lock "+
 				"(tx_lock_held=%q): _txlock=immediate is missing or not honoured, so a concurrent commit "+
 				"upgrades this transaction to a SQLITE_BUSY_SNAPSHOT failure", got)
 		}
 
+		assertLoadWasLive(t, reports)
 		assertSnapshotInvariant(t, snapshot)
 		assertBatchAtomicity(t, poller)
 	}
 	assertNoDroppedWrites(t, ctx, paths.db, reports)
-	assertDatabaseIntact(t, ctx, paths.db)
+	assertDatabaseIntact(t, ctx, paths.db, barrierFailure == nil)
 
 	// What the run actually did, so a pass is a number rather than a shrug. The
 	// load is bounded by the batch, not by an iteration count, so these counts
 	// vary; what must not vary is that they are not near zero. The dedup column
 	// is expected to be non-zero: the fixture's rows really are near-identical,
 	// which is what makes the rewrite phase able to catch a stale index entry.
-	t.Logf("multi-process run: %d writes, %d rewrites, %d reads, %d dedup hits across %d processes; "+
-		"batch of %d rows; poller sampled %d times and saw %v",
-		totalInt(reports, "writes"), totalInt(reports, "rewrites"), totalInt(reports, "reads"),
+	t.Logf("multi-process run: %d writes (%d of them open when the batch was announced), %d rewrites, "+
+		"%d reads, %d dedup hits across %d processes; batch of %d rows; poller sampled %d times and saw %v",
+		totalInt(reports, "writes"), totalInt(reports, "writes_overlapping_commit"),
+		totalInt(reports, "rewrites"), totalInt(reports, "reads"),
 		totalInt(reports, "duplicates"), len(children), multiprocBatchRows,
 		reports["poller/poller"].count("samples"), reports["poller/poller"].Observed)
-
-	// On failure, every process's own report. The assertions above say what was
-	// wrong with the contract; this says how far each process got before it did,
-	// which is the difference between a diagnosable CI failure and a rerun.
-	if t.Failed() {
-		for _, c := range children {
-			rep, _ := c.result()
-			t.Logf("%s measured: %v (observed %v, gave up: %q)", c.name, rep.KV, rep.Observed, rep.Aborted)
-		}
-	}
 }
 
 // totalInt sums one measured counter across every process.
@@ -627,20 +624,28 @@ func seedMultiprocDB(t *testing.T, ctx context.Context, dbPath string) {
 	}
 }
 
-// assertConnectionContract checks the settings docs/architecture.md promises,
-// per open path. The expectations differ by path on purpose: the contract table
-// gives busy_timeout(1000) to the read-only paths and 5000 to the writers, and a
-// read-only connection deliberately sets no journal_mode of its own because
-// writing the header is what a read-only connection cannot do — WAL is persisted
-// in the file, so it is asserted on the connection's own answer all the same.
+// assertConnectionContract checks the settings docs/architecture.md promises, on
+// one representative process per shape of caller. The expectations differ
+// because the contract table gives busy_timeout(1000) to the read-only paths and
+// 5000 to the writers, and a read-only connection deliberately sets no
+// journal_mode of its own because writing the header is what a read-only
+// connection cannot do — WAL is persisted in the file, so it is asserted on the
+// connection's own answer all the same.
+//
+// What this does NOT cover is the other DSN spellings in the tree. The fleet
+// opens two of them: memory.OpenDB for the read-write roles and
+// memory.readOnlyDSN for the read-only ones. mcpinit builds its own rwDSN and
+// roDSN and cmd/ghost has a third read-only spelling; no child opens those, so a
+// regression in one of them — the #288 shape, where a busy_timeout that was too
+// short lost a save — would still leave this test green.
 func assertConnectionContract(t *testing.T, reports map[string]procReport) {
 	t.Helper()
-	// One representative process per open path: the settings come from the DSN
-	// that path builds, so asserting on all ten processes would be ten copies of
+	// One representative process per caller shape: the settings come from the DSN
+	// the path builds, so asserting on all ten processes would be ten copies of
 	// the same assertion. foreignKeys is empty where the contract table does not
 	// claim it — a read-only connection is not asserted for a setting no
 	// read-only path in the tree sets.
-	type openPath struct {
+	type caller struct {
 		label        string
 		process      string
 		journal      string
@@ -649,7 +654,7 @@ func assertConnectionContract(t *testing.T, reports map[string]procReport) {
 		maxOpenConns string
 		readOnly     string
 	}
-	paths := []openPath{
+	paths := []caller{
 		{"the MCP server's", "mcp/mcp0", "wal", "1", "5000", "1", "false"},
 		{"the CLI child's", "cli/probe", "wal", "1", "5000", "1", "false"},
 		{"the maintenance writer's", "maint/maint", "wal", "1", "5000", "1", "false"},
@@ -658,50 +663,59 @@ func assertConnectionContract(t *testing.T, reports map[string]procReport) {
 	for _, p := range paths {
 		rep, ok := reports[p.process]
 		if !ok {
-			t.Errorf("%s open path: %s reported nothing", p.label, p.process)
+			t.Errorf("%s caller shape: %s reported nothing", p.label, p.process)
 			continue
 		}
 		if got := rep.str("journal_mode"); got != p.journal {
-			t.Errorf("%s open path (%s): journal_mode = %q, want %q — readers block on a writer "+
+			t.Errorf("%s caller shape (%s): journal_mode = %q, want %q — readers block on a writer "+
 				"without WAL, so a hook read can be stalled by a reflection write",
 				p.label, p.process, got, p.journal)
 		}
 		if p.foreignKeys != "" {
 			if got := rep.str("foreign_keys"); got != p.foreignKeys {
-				t.Errorf("%s open path (%s): foreign_keys = %q, want %q — a write may insert a row "+
+				t.Errorf("%s caller shape (%s): foreign_keys = %q, want %q — a write may insert a row "+
 					"whose project does not exist", p.label, p.process, got, p.foreignKeys)
 			}
 		}
 		if got := rep.str("busy_timeout_ms"); got != p.busyTimeout {
-			t.Errorf("%s open path (%s): busy_timeout = %q ms, want %q — without it a write arriving "+
+			t.Errorf("%s caller shape (%s): busy_timeout = %q ms, want %q — without it a write arriving "+
 				"mid-contention returns SQLITE_BUSY on the first collision and the memory is lost",
 				p.label, p.process, got, p.busyTimeout)
 		}
 		if got := rep.str("max_open_conns"); got != p.maxOpenConns {
-			t.Errorf("%s open path (%s): MaxOpenConns = %q, want %q — PRAGMA data_version is "+
+			t.Errorf("%s caller shape (%s): MaxOpenConns = %q, want %q — PRAGMA data_version is "+
 				"per-connection, so an unpinned pool compares ticks from different connections "+
 				"instead of points in the database's history", p.label, p.process, got, p.maxOpenConns)
 		}
 		if got := rep.str("read_only"); got != p.readOnly {
-			t.Errorf("%s open path (%s): read_only = %q, want %q", p.label, p.process, got, p.readOnly)
+			t.Errorf("%s caller shape (%s): read_only = %q, want %q", p.label, p.process, got, p.readOnly)
 		}
 		if p.readOnly == "true" && rep.str("write_rejected") != "true" {
-			t.Errorf("%s open path (%s): a read-only handle accepted a write (write_rejected=%q)",
+			t.Errorf("%s caller shape (%s): a read-only handle accepted a write (write_rejected=%q)",
 				p.label, p.process, rep.str("write_rejected"))
 		}
 	}
 
-	// The writers must actually have written, and every reader must actually have
-	// read, or the contract above was asserted on handles that issued no
-	// statement and the torn-row check never ran anywhere.
+	// The writers must actually have written, or the contract above was asserted
+	// on handles that issued no statement. Every reader must have read, for the
+	// same reason — and for the readers whose result the run checks, the torn-row
+	// check is what the read is for. The MCP readers are not in that second list:
+	// ghost_memory_search returns formatted text, so a row rewritten between its
+	// FTS match and its hydration is indistinguishable from index rot, and their
+	// reads prove only that the tools answer under contention.
 	for _, name := range []string{"mcp/mcp0", "mcp/mcp1", "cli/probe", "cli/cli0", "cli/cli1"} {
 		if reports[name].count("writes") == 0 {
 			t.Errorf("%s reported no writes: its connection settings were read off a handle that never wrote", name)
 		}
 	}
-	for _, name := range []string{"ro/ro0", "ro/ro1", "mcp/mcp0", "mcp/mcp1", "cli/cli0", "cli/cli1"} {
+	for _, name := range []string{"ro/ro0", "ro/ro1", "cli/cli0", "cli/cli1"} {
 		if reports[name].count("reads") == 0 {
-			t.Errorf("%s reported no reads: the torn-row assertion in that process never ran", name)
+			t.Errorf("%s reported no reads: the torn-row check in that process never ran", name)
+		}
+	}
+	for _, name := range []string{"mcp/mcp0", "mcp/mcp1"} {
+		if reports[name].count("reads") == 0 {
+			t.Errorf("%s reported no reads: the MCP tools were never called under contention", name)
 		}
 	}
 	maint := reports["maint/maint"]
@@ -710,6 +724,31 @@ func assertConnectionContract(t *testing.T, reports map[string]procReport) {
 	}
 	if maint.str("maintenance_rows") != "1" {
 		t.Errorf("the maintenance writer recorded %q maintenance runs, want 1", maint.str("maintenance_rows"))
+	}
+}
+
+// assertLoadWasLive checks the run was not vacuous: a writer's write transaction
+// has to have been open when the lifecycle process announced it was committing
+// its batch.
+//
+// The structural guarantee is the barrier protocol — the batch waits for every
+// writer to report its wrote-<label> file, and writers keep writing until the
+// batch releases them, so they are mid-stream by construction. This is the
+// observable half: the batch holds SQLite's write lock for its whole transaction,
+// so no writer can commit *during* it, and a row count taken on either side would
+// measure the two gaps around the lock rather than the contention. A writer reads
+// the announcement either side of its own write, so a write in flight at that
+// moment is counted.
+func assertLoadWasLive(t *testing.T, reports map[string]procReport) {
+	t.Helper()
+	after := 0
+	for _, name := range []string{"mcp/mcp0", "mcp/mcp1", "cli/probe", "cli/cli0", "cli/cli1"} {
+		after += reports[name].count("writes_overlapping_commit")
+	}
+	if after == 0 {
+		t.Errorf("no writer issued a write after the lifecycle process announced its batch, so the batch " +
+			"committed against a load that had already gone quiet and the overlap the contract promises was " +
+			"never exercised. Raise multiprocLoadWrites, or check that nothing is starving the writers")
 	}
 }
 
@@ -846,10 +885,13 @@ func assertNoDroppedWrites(t *testing.T, ctx context.Context, dbPath string, rep
 	}
 }
 
-// assertDatabaseIntact closes the run: the schema version is unchanged (nine
-// processes each ran the migration entry point against a live database) and the
+// assertDatabaseIntact closes the run: the schema version is unchanged and the
 // file passes SQLite's own integrity check.
-func assertDatabaseIntact(t *testing.T, ctx context.Context, dbPath string) {
+//
+// batchRan says whether the lifecycle process actually ran. When a barrier failed
+// the run declined to start it, and its maintenance_runs row is then a claim
+// about the contract that no process was in a position to satisfy.
+func assertDatabaseIntact(t *testing.T, ctx context.Context, dbPath string, batchRan bool) {
 	t.Helper()
 	db, err := OpenDBReadOnly(dbPath)
 	if err != nil {
@@ -862,15 +904,18 @@ func assertDatabaseIntact(t *testing.T, ctx context.Context, dbPath string) {
 		t.Fatalf("read user_version: %v", err)
 	}
 	if want := SchemaVersion(); version != want {
-		t.Errorf("user_version = %d after nine processes opened the database, want %d — a migration "+
-			"raced and left the schema stamped wrong", version, want)
+		t.Errorf("user_version = %d after the read-write processes opened the database, want %d — a "+
+			"migration raced and left the schema stamped wrong", version, want)
 	}
 	var check string
 	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&check); err != nil {
 		t.Fatalf("integrity_check: %v", err)
 	}
 	if check != "ok" {
-		t.Errorf("integrity_check = %q after concurrent writers from nine processes, want \"ok\"", check)
+		t.Errorf("integrity_check = %q after ten processes wrote this file concurrently, want \"ok\"", check)
+	}
+	if !batchRan {
+		return
 	}
 	var maintenance int
 	if err := db.QueryRowContext(ctx,

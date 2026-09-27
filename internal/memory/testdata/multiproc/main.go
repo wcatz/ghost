@@ -149,11 +149,13 @@ type options struct {
 	seed     string
 	replaced string
 	load     string
-	query    string
-	probe    bool
-	batch    int
-	warmup   int
-	writes   int
+	// loadProject is the project the steady-state writers own. The maintenance
+	// role needs it to tell whether a writer committed across its batch.
+	loadProject string
+	query       string
+	probe       bool
+	batch       int
+	after       int
 }
 
 func parseFlags() options {
@@ -166,11 +168,11 @@ func parseFlags() options {
 	flag.StringVar(&o.seed, "seed", "", "content prefix of the batch's pre-state rows")
 	flag.StringVar(&o.replaced, "replaced", "", "content prefix of the batch's post-state rows")
 	flag.StringVar(&o.load, "load", "", "content prefix for this role's steady-state writes")
+	flag.StringVar(&o.loadProject, "load-project", "", "project the steady-state writers own")
 	flag.StringVar(&o.query, "query", "", "FTS query the reader roles use")
 	flag.BoolVar(&o.probe, "probe", false, "run the _txlock=immediate probe before joining the load")
 	flag.IntVar(&o.batch, "batch", 0, "rows in the maint role's reflection batch")
-	flag.IntVar(&o.warmup, "warmup", 0, "iterations a load role runs before it reports itself ready")
-	flag.IntVar(&o.writes, "writes", 0, "write transactions a load role may issue; it keeps reading after that")
+	flag.IntVar(&o.after, "after", 0, "writes a load role completes before it reports itself in step")
 	flag.Parse()
 	return o
 }
@@ -266,9 +268,9 @@ const (
 	// answer is only evidence about its own transaction while no other process
 	// holds the write lock.
 	probeDone = "probe-done"
-	// loadReady is written by the parent once every steady-state process has
-	// opened the database and completed a write, so the load is provably live
-	// before the batch commits rather than assumed to be.
+	// loadReady is written by the parent once every load process has reported its
+	// own wrote-<label> barrier, so the load is provably live before the batch
+	// commits rather than assumed to be.
 	loadReady = "load-ready"
 	// polling is written by the poller once it is open and sampling on command.
 	polling = "polling"
@@ -279,6 +281,12 @@ const (
 	// before the batch, so the window brackets the commit instead of starting
 	// after it.
 	committing = "committing"
+	// sampled is written by the poller after its first successful count. The
+	// batch waits for it, so the pre-commit sample the atomicity assertion needs
+	// is established by a file: without this the poller could be descheduled
+	// through the whole batch and report only the post-state, failing the run for
+	// having been slow rather than for having found anything.
+	sampled = "sampled"
 	// committed is written after the batch's transaction commits.
 	committed = "committed"
 	// snapshotDone is written after the snapshot reader has released its read
@@ -469,6 +477,23 @@ func probeImmediateTxLock(ctx context.Context, dbPath string) (bool, error) {
 // roles
 // ---------------------------------------------------------------------------
 
+// noteWriteOverlap records that this write transaction was open across the moment
+// the lifecycle process announced its batch. It is how the run proves the load was
+// live at the batch, which nothing else observes: the batch holds SQLite's write
+// lock for its whole transaction, so no writer can commit *during* it, and a row
+// count taken either side would measure the two gaps around the lock rather than
+// the contention.
+func noteWriteOverlap(rep *report, announcingBefore bool, b barriers) {
+	if announcingBefore || b.signalled(committing) {
+		rep.put("writes_overlapping_commit", fmt.Sprint(rep.count("writes_overlapping_commit")+1))
+	}
+}
+
+// wroteLabel is the barrier a load process writes once it has completed its
+// -after writes. Naming the barrier after the writer rather than a step count is
+// what lets the batch wait for progress instead of for a clock.
+func wroteLabel(label string) string { return "wrote-" + label }
+
 func openStore(dbPath string) (*sql.DB, *memory.Store, error) {
 	db, err := memory.OpenDB(dbPath)
 	if err != nil {
@@ -514,33 +539,41 @@ func runMCP(ctx context.Context, o options, rep *report) error {
 	defer cleanup()
 
 	b := barriers{dir: o.barrier}
-	writesLeft := o.writes
-	return loadLoop(ctx, rep, b, o.warmup, "ready-"+o.label, func(i int) error {
-		if writesLeft > 0 {
-			writesLeft--
-			content := fmt.Sprintf("%s mcp-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
-			res, err := session.CallTool(ctx, &mcp.CallToolParams{
-				Name:      "ghost_memory_save",
-				Arguments: map[string]any{"project_id": o.project, "content": content, "category": "fact"},
-			})
-			if err != nil {
-				return fmt.Errorf("ghost_memory_save: %w", err)
+	writes := 0
+	return loadLoop(ctx, rep, b, func(i int) error {
+		content := fmt.Sprintf("%s mcp-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
+		// The commit signal is read on both sides of the save: the window
+		// between the batch's announcement and its completion is shorter than one
+		// save, so a save that merely started before the announcement is the
+		// common case and a save that only started after it may never happen.
+		announcing := b.signalled(committing)
+		res, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "ghost_memory_save",
+			Arguments: map[string]any{"project_id": o.project, "content": content, "category": "fact"},
+		})
+		if err != nil {
+			return fmt.Errorf("ghost_memory_save: %w", err)
+		}
+		if res.IsError {
+			return fmt.Errorf("ghost_memory_save returned an error result: %s", textOf(res.Content))
+		}
+		match := savedID.FindStringSubmatch(textOf(res.Content))
+		if match == nil {
+			return fmt.Errorf("ghost_memory_save reported no memory id: %s", textOf(res.Content))
+		}
+		noteWriteOverlap(rep, announcing, b)
+		rep.IDs = append(rep.IDs, match[1])
+		writes++
+		rep.put("writes", fmt.Sprint(writes))
+		if writes == o.after {
+			if err := b.signal(wroteLabel(o.label)); err != nil {
+				return err
 			}
-			if res.IsError {
-				return fmt.Errorf("ghost_memory_save returned an error result: %s", textOf(res.Content))
-			}
-			match := savedID.FindStringSubmatch(textOf(res.Content))
-			if match == nil {
-				return fmt.Errorf("ghost_memory_save reported no memory id: %s", textOf(res.Content))
-			}
-			rep.IDs = append(rep.IDs, match[1])
-			rep.put("writes", fmt.Sprint(rep.count("writes")+1))
 		}
 
 		// Every third iteration is followed by a real search through the same
 		// server, so this process reads its own writes as well as another
-		// process's — and keeps reading after its write budget is spent, which is
-		// what a live MCP server does between saves.
+		// process's.
 		if i%3 == 0 {
 			search, err := session.CallTool(ctx, &mcp.CallToolParams{
 				Name:      "ghost_memory_search",
@@ -552,6 +585,14 @@ func runMCP(ctx context.Context, o options, rep *report) error {
 			if search.IsError {
 				return fmt.Errorf("ghost_memory_search returned an error result: %s", textOf(search.Content))
 			}
+			// No torn-row check here, and the omission is deliberate. The result
+			// comes back as formatted text, so a row rewritten between the FTS
+			// match and the read that hydrates the result is indistinguishable
+			// from a stale index entry — and only the first is possible: a search
+			// is two queries, and the second is free to see a newer version of
+			// the row the first matched. Asserting on the text would report that
+			// race as index rot. This role's reads therefore prove the tools
+			// answer under contention, which is the only thing they can prove.
 			rep.put("reads", fmt.Sprint(rep.count("reads")+1))
 		}
 		return nil
@@ -649,34 +690,41 @@ func runCLI(ctx context.Context, o options, rep *report, b barriers) error {
 	// row another transaction has already committed to is the one whose
 	// read-then-write can collide with a commit in between.
 	var created []string
-	writesLeft := o.writes
-	return loadLoop(ctx, rep, b, o.warmup, "ready-"+o.label, func(i int) error {
-		if writesLeft > 0 {
-			writesLeft--
-			content := fmt.Sprintf("%s cli-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
-			id, duplicateOf, _, err := store.Upsert(ctx, o.project, "fact", content, "mcp", 0.5, []string{"concurrency"})
-			if err != nil {
-				return fmt.Errorf("Upsert: %w", err)
+	writes := 0
+	return loadLoop(ctx, rep, b, func(i int) error {
+		content := fmt.Sprintf("%s cli-%s-%03d about sqlite wal checkpointing", o.load, o.label, i)
+		// Read on both sides of the write: see noteWriteOverlap.
+		announcing := b.signalled(committing)
+		id, duplicateOf, _, err := store.Upsert(ctx, o.project, "fact", content, "mcp", 0.5, []string{"concurrency"})
+		if err != nil {
+			return fmt.Errorf("Upsert: %w", err)
+		}
+		noteWriteOverlap(rep, announcing, b)
+		// A dedup hit is counted, not failed: Upsert inserts the incoming text as
+		// its own row and links it to the near-duplicate it folded onto, so the
+		// write is neither lost nor a second copy of one row. Reported so a
+		// reader of the run's numbers can see how alike the fixture's rows are.
+		if duplicateOf != "" {
+			rep.put("duplicates", fmt.Sprint(rep.count("duplicates")+1))
+		}
+		rep.IDs = append(rep.IDs, id)
+		writes++
+		rep.put("writes", fmt.Sprint(writes))
+		created = append(created, id)
+		if writes == o.after {
+			if err := b.signal(wroteLabel(o.label)); err != nil {
+				return err
 			}
-			// A dedup hit is counted, not failed: Upsert inserts the incoming
-			// text as its own row and links it to the near-duplicate it folded
-			// onto, so the write is neither lost nor a second copy of one row.
-			// Reported so a reader of the run's numbers can see how alike the
-			// fixture's rows are.
-			if duplicateOf != "" {
-				rep.put("duplicates", fmt.Sprint(rep.count("duplicates")+1))
-			}
-			rep.IDs = append(rep.IDs, id)
-			rep.put("writes", fmt.Sprint(rep.count("writes")+1))
-			created = append(created, id)
+		}
 
-			if len(created) > 4 {
-				updated := fmt.Sprintf("%s cli-%s-rewrite-%03d about kubernetes namespaces", o.load, o.label, i)
-				if err := store.UpdateMemory(ctx, o.project, created[len(created)-5], &updated, nil, nil, nil); err != nil {
-					return fmt.Errorf("UpdateMemory: %w", err)
-				}
-				rep.put("rewrites", fmt.Sprint(rep.count("rewrites")+1))
+		if len(created) > 4 {
+			// The rewritten text holds none of the query's terms, so an index
+			// entry left pointing at it is a torn read the readers can see.
+			updated := fmt.Sprintf("%s cli-%s-rewrite-%03d about kubernetes namespaces", o.load, o.label, i)
+			if err := store.UpdateMemory(ctx, o.project, created[len(created)-5], &updated, nil, nil, nil); err != nil {
+				return fmt.Errorf("UpdateMemory: %w", err)
 			}
+			rep.put("rewrites", fmt.Sprint(rep.count("rewrites")+1))
 		}
 
 		rows, err := store.SearchFTS(ctx, o.project, o.query, 5)
@@ -708,7 +756,12 @@ func runReadOnly(ctx context.Context, o options, rep *report, b barriers) error 
 	}
 	rep.put("write_rejected", "true")
 
-	return loadLoop(ctx, rep, b, o.warmup, "ready-"+o.label, func(i int) error {
+	// A reader writes nothing, so it reports itself in step once it has completed
+	// the same number of reads the writers count in writes. That keeps the
+	// reader's searches inside the window the writers are colliding over, which
+	// is the point of having them: they must not be stalled by it.
+	reads := 0
+	return loadLoop(ctx, rep, b, func(i int) error {
 		rows, err := store.SearchFTS(ctx, o.project, o.query, 5)
 		if err != nil {
 			return fmt.Errorf("SearchFTS: %w", err)
@@ -716,7 +769,13 @@ func runReadOnly(ctx context.Context, o options, rep *report, b barriers) error 
 		if err := checkNotTorn(rows, o.query); err != nil {
 			return err
 		}
-		rep.put("reads", fmt.Sprint(rep.count("reads")+1))
+		reads++
+		rep.put("reads", fmt.Sprint(reads))
+		if reads == o.after {
+			if err := b.signal(wroteLabel(o.label)); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 }
@@ -751,6 +810,14 @@ func runMaintenance(ctx context.Context, o options, rep *report, b barriers) err
 	// The poller starts sampling at this signal, so its window brackets the
 	// commit rather than starting after it.
 	if err := b.signal(committing); err != nil {
+		return err
+	}
+	// …and does not start until the poller has actually taken a sample. Ten
+	// processes on a small CI box means any of them can be descheduled across a
+	// 60-row batch, and a sampler that only reads afterwards would report just
+	// the post-state — indistinguishable, to the assertion that reads it, from a
+	// batch that was never sampled at all.
+	if err := b.wait(sampled, time.Now().Add(barrierDeadline)); err != nil {
 		return err
 	}
 
@@ -886,6 +953,13 @@ func runPoller(ctx context.Context, o options, rep *report, b barriers) error {
 		if !seen[state] {
 			seen[state] = true
 			order = append(order, state)
+			// Announce the first sample. The batch waits for this file, so the
+			// pre-commit reading exists before the commit rather than by luck.
+			if round == 0 {
+				if err := b.signal(sampled); err != nil {
+					return err
+				}
+			}
 		}
 		rep.put("samples", fmt.Sprint(rep.count("samples")+1))
 		// The tail is counted from the commit signal, not from the first
@@ -954,18 +1028,16 @@ func batchCounts(ctx context.Context, q interface {
 // loadLoop runs body until the stop signal appears, so the steady-state writers
 // provably overlap the lifecycle batch instead of finishing before it starts.
 //
-// The first warmup iterations happen before this process announces itself as
-// ready, which is what puts the load in flight before the batch looks for it:
-// four writers hammering one database contend with each other there, and a batch
-// that arrives while they are already colliding is the case the contract is
-// about. Without it the batch could land on an idle file and the run would pass
-// without ever having made two writers fight.
+// Readiness is the caller's business, not the loop's: a role announces itself
+// once it has completed -after writes, because that is the fact the batch needs —
+// writers that are mid-stream against one another, not processes that have merely
+// started. The batch therefore triggers on writer progress rather than on a
+// timer, and the writers keep writing until the batch releases them, so they are
+// live when it commits without the run having to hope they still are.
 //
 // The iteration cap is a backstop: the loop stays bounded even if the barrier
-// protocol is broken, and it says so in the report rather than spinning. The
-// write budget is the role's, not the loop's — see the roles for why it is
-// bounded at all.
-func loadLoop(ctx context.Context, rep *report, b barriers, warmup int, readyName string, body func(int) error) error {
+// protocol is broken, and it says so in the report rather than spinning.
+func loadLoop(ctx context.Context, rep *report, b barriers, body func(int) error) error {
 	const maxIterations = 20000
 	for i := 0; i < maxIterations; i++ {
 		if b.signalled(stopSignal) {
@@ -974,12 +1046,6 @@ func loadLoop(ctx context.Context, rep *report, b barriers, warmup int, readyNam
 		}
 		if err := body(i); err != nil {
 			return err
-		}
-		if readyName != "" && i+1 == warmup {
-			if err := b.signal(readyName); err != nil {
-				return err
-			}
-			readyName = ""
 		}
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("load loop: %w", err)
