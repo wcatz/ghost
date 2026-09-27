@@ -1009,10 +1009,17 @@ FROM memory_snapshots`,
 	return nil
 }
 
-// migrateV17 adds memory_provenance, the append-only per-memory history
-// (schema v17, issue #578). The DDL is CREATE ... IF NOT EXISTS throughout, so
-// a database an operator has already created the table in is stamped without
-// harm — the step has no data to correct, and no backfill is attempted.
+// migrateV17 adds memory_history, the append-only per-memory change log
+// (schema v17, issue #578). The step creates the table under this name, and the
+// name is part of what it ships: `memory_provenance` is reserved for a different,
+// later concept (evidence records — several per memory, answering "who or what
+// supports this memory"), which this change log is not. v17 has never been
+// released, so the step itself carries the right name rather than renaming the
+// table after the fact.
+//
+// The DDL is CREATE ... IF NOT EXISTS throughout, so a database an operator has
+// already created the table in is stamped without harm — the step has no data to
+// correct, and no backfill is attempted.
 //
 // No backfill is a deliberate omission with a cost, not an oversight. Every
 // pre-v17 memory reaches this version with NO history row, so the first write
@@ -1027,7 +1034,7 @@ FROM memory_snapshots`,
 // pre-migration backup.
 func migrateV17(tx *sql.Tx) error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS memory_provenance (
+		`CREATE TABLE IF NOT EXISTS memory_history (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     memory_id   TEXT NOT NULL,
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -1055,7 +1062,7 @@ func migrateV17(tx *sql.Tx) error {
 		// Creating it here anyway would have left every UPGRADED store with two
 		// while every fresh one had one, which is the sort of difference only a
 		// test comparing the two paths would catch.
-		`CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id, recorded_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, recorded_at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {

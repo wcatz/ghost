@@ -1521,7 +1521,7 @@ func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 
 // projectMergeStatements reassigns every child table from the outgoing project
 // to the survivor. Both project_id columns that CASCADE — memory_snapshots and
-// memory_provenance — must be in this list: a merge KEEPS the corpus and deletes
+// memory_history — must be in this list: a merge KEEPS the corpus and deletes
 // only the projects row, so a table missing here loses every row it holds to
 // that DELETE, and the memories it describes survive with their past erased.
 //
@@ -1537,7 +1537,7 @@ var projectMergeStatements = []string{
 	`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
 	`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
 	`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
-	`UPDATE memory_provenance SET project_id = ? WHERE project_id = ?`,
+	`UPDATE memory_history SET project_id = ? WHERE project_id = ?`,
 	`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
 }
 
@@ -1669,7 +1669,7 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		// rows whose recorded past is gone — `ghost history <id>` reporting a
 		// memory that was never written. The history travels with the corpus it
 		// describes, and the rows' own project_id is only how a reader filters.
-		`UPDATE memory_provenance SET project_id = ? WHERE project_id = ?`,
+		`UPDATE memory_history SET project_id = ? WHERE project_id = ?`,
 		`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {
@@ -3521,7 +3521,7 @@ func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, chec
 
 // DeleteOptions is what one delete is asked to do beyond removing the row.
 type DeleteOptions struct {
-	// PurgeHistory removes every memory_provenance row for this memory in the
+	// PurgeHistory removes every memory_history row for this memory in the
 	// same transaction, leaving nothing behind.
 	//
 	// It is the redaction path, and the default is deliberately not it. The
@@ -3537,7 +3537,7 @@ type DeleteOptions struct {
 }
 
 // Delete removes a specific memory and KEEPS its history. The row's last state is
-// recorded first, in the same transaction: memory_provenance.memory_id
+// recorded first, in the same transaction: memory_history.memory_id
 // deliberately has no foreign key, so a delete leaves behind a tombstone carrying
 // the text the memory held — the only remaining record of it, and the reason a
 // cascading history table would be empty exactly when the audit is asked.
@@ -3711,7 +3711,7 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 // not-found-in-project error, not a silently accepted no-op.
 //
 // The memory's history moves with it, in the same transaction. It has to:
-// memory_provenance.project_id is ON DELETE CASCADE, so history rows left
+// memory_history.project_id is ON DELETE CASCADE, so history rows left
 // naming the project the memory just left are taken by the next
 // `ghost project delete` of that project — while the promoted memory, now in
 // _global, survives with no recorded past at all.
@@ -3748,7 +3748,7 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 		return fmt.Errorf("memory %s not found in project %s", id, projectID)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE memory_provenance SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
+		`UPDATE memory_history SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
 	); err != nil {
 		return fmt.Errorf("promote memory history: %w", err)
 	}
@@ -4235,7 +4235,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	// Pinned and resolved rows stay excluded throughout (issue #318).
 	//
 	// The rows going are selected before they are deleted, by the identical
-	// predicate, so the delete tombstones in memory_provenance name exactly the
+	// predicate, so the delete tombstones in memory_history name exactly the
 	// rows this statement removes. One transaction has held the write lock
 	// since its first statement, so the two selects cannot disagree.
 	removedIDs, err := selectIDs(ctx, tx, `

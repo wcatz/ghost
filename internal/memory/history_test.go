@@ -378,7 +378,7 @@ func TestMemoryHistoryCapsRowsPerMemory(t *testing.T) {
 	// the test still passed.
 	var stored int
 	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_provenance WHERE memory_id = ?`, id,
+		`SELECT count(*) FROM memory_history WHERE memory_id = ?`, id,
 	).Scan(&stored); err != nil {
 		t.Fatalf("count history rows: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestMemoryHistoryCapsTheTable(t *testing.T) {
 	}
 
 	var total int
-	if err := s.db.QueryRow(`SELECT count(*) FROM memory_provenance`).Scan(&total); err != nil {
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_history`).Scan(&total); err != nil {
 		t.Fatalf("count history rows: %v", err)
 	}
 	if total > historyRowsCap {
@@ -504,19 +504,19 @@ func TestMemoryHistoryRejectsAnUnknownPhase(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	_, err = db.Exec(`INSERT INTO memory_provenance (memory_id, project_id, phase, content, category, importance, source)
+	_, err = db.Exec(`INSERT INTO memory_history (memory_id, project_id, phase, content, category, importance, source)
 		VALUES ('m1', 'p1', 'teleported', 'text', 'fact', 0.5, 'mcp')`)
 	if err == nil {
 		t.Fatal("an unknown phase was accepted")
 	}
 	var check string
 	if err := db.QueryRow(
-		`SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_provenance'`,
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_history'`,
 	).Scan(&check); err != nil && err != sql.ErrNoRows {
 		t.Fatalf("read table DDL: %v", err)
 	}
 	if !strings.Contains(check, "CHECK (phase IN") {
-		t.Errorf("memory_provenance has no phase CHECK constraint: %s", check)
+		t.Errorf("memory_history has no phase CHECK constraint: %s", check)
 	}
 }
 
@@ -959,7 +959,7 @@ func TestDeleteWithPurgeHistoryLeavesNothing(t *testing.T) {
 	// rows, and not a row some other memory's writer copied.
 	var leaked int
 	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_provenance WHERE content LIKE '%ghp_ABCDEF%'`,
+		`SELECT count(*) FROM memory_history WHERE content LIKE '%ghp_ABCDEF%'`,
 	).Scan(&leaked); err != nil {
 		t.Fatalf("scan for the credential: %v", err)
 	}
@@ -1057,8 +1057,8 @@ func TestUpdateMemoryBaselinesAPreV17Memory(t *testing.T) {
 
 	// A v16 store: the memories table without the history table, stamped v16.
 	const original = "the link worker re-embeds a memory whose content changed"
-	if _, err := db.Exec(`DROP TABLE memory_provenance`); err != nil {
-		t.Fatalf("drop memory_provenance: %v", err)
+	if _, err := db.Exec(`DROP TABLE memory_history`); err != nil {
+		t.Fatalf("drop memory_history: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO memories (project_id, category, content, source, importance)
 		VALUES (?, 'gotcha', ?, 'mcp', 0.5)`, testProject, original); err != nil {
@@ -1398,7 +1398,7 @@ func TestAFailedWriteLeavesNoHistoryRow(t *testing.T) {
 	// The history append fails, so the edit that was about to be recorded must
 	// not be half-applied either.
 	if _, err := s.db.Exec(`
-		CREATE TRIGGER fail_history BEFORE INSERT ON memory_provenance
+		CREATE TRIGGER fail_history BEFORE INSERT ON memory_history
 		BEGIN SELECT RAISE(ABORT, 'injected history failure'); END`); err != nil {
 		t.Fatalf("install trigger: %v", err)
 	}
@@ -1640,7 +1640,7 @@ func TestPurgeRedactsAnotherMemoriesFoldedCopy(t *testing.T) {
 	// discarded wording is not the last one. It is looked up by what it holds.
 	var carried int
 	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_provenance WHERE memory_id = ? AND phase = ? AND merged_content = ?`,
+		`SELECT count(*) FROM memory_history WHERE memory_id = ? AND phase = ? AND merged_content = ?`,
 		target, phaseMerge, discarded,
 	).Scan(&carried); err != nil {
 		t.Fatalf("count merge rows carrying the wording: %v", err)
@@ -1657,7 +1657,7 @@ func TestPurgeRedactsAnotherMemoriesFoldedCopy(t *testing.T) {
 
 	var phase, merged string
 	if err := s.db.QueryRow(
-		`SELECT phase, merged_content FROM memory_provenance
+		`SELECT phase, merged_content FROM memory_history
 		 WHERE memory_id = ? AND phase = ?`, target, phaseMerge,
 	).Scan(&phase, &merged); err != nil {
 		t.Fatalf("read a merge row after the purge: %v", err)
@@ -1690,8 +1690,8 @@ func countOccurrences(t *testing.T, db *sql.DB, text string) (int, error) {
 		query string
 	}{
 		{"memories", `SELECT count(*) FROM memories WHERE content = ?`},
-		{"memory_provenance.content", `SELECT count(*) FROM memory_provenance WHERE content = ?`},
-		{"memory_provenance.merged_content", `SELECT count(*) FROM memory_provenance WHERE merged_content = ?`},
+		{"memory_history.content", `SELECT count(*) FROM memory_history WHERE content = ?`},
+		{"memory_history.merged_content", `SELECT count(*) FROM memory_history WHERE merged_content = ?`},
 		{"memory_snapshots", `SELECT count(*) FROM memory_snapshots WHERE content = ?`},
 	} {
 		var n int
@@ -1836,7 +1836,7 @@ func TestPurgeInTheDeletePathStillCollectsTheLiveText(t *testing.T) {
 	}
 	var carried int
 	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_provenance WHERE memory_id = ? AND merged_content = ?`,
+		`SELECT count(*) FROM memory_history WHERE memory_id = ? AND merged_content = ?`,
 		target, discarded,
 	).Scan(&carried); err != nil {
 		t.Fatalf("count merge rows carrying the wording: %v", err)
@@ -1905,7 +1905,7 @@ func TestTheBaselineRowGoesThroughTheRedactionFilter(t *testing.T) {
 
 	// A pre-v17 row, straight into the table, and with no history row.
 	const secret = "the deploy key is ghp_BASELINEKEY0123456789ABCDEFG"
-	if _, err := s.db.Exec(`DROP TABLE memory_provenance`); err != nil {
+	if _, err := s.db.Exec(`DROP TABLE memory_history`); err != nil {
 		t.Fatalf("drop the history table: %v", err)
 	}
 	if _, err := s.db.Exec(
@@ -1971,7 +1971,7 @@ func TestPurgeInTheDeletePathFindsATextNoHistoryRowHolds(t *testing.T) {
 	// snapshot below — the fixture would be gone before the purge under test, and
 	// the test would pass against a database that never had the problem.
 	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM memory_provenance WHERE memory_id = ?`, id); err != nil {
+		`DELETE FROM memory_history WHERE memory_id = ?`, id); err != nil {
 		t.Fatalf("strip the history: %v", err)
 	}
 	entries, err := s.MemoryHistory(ctx, id, 0)

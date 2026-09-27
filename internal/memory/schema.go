@@ -316,7 +316,16 @@ CREATE TABLE IF NOT EXISTS link_scans (
 -- projectMergeStatements, and in the s.mergeProjectTx method the bind-recovery
 -- paths call) and PromoteToGlobal both do this; a new writer that moves a memory
 -- between projects has to as well.
-CREATE TABLE IF NOT EXISTS memory_provenance (
+--
+-- The NAME is a reservation, not a description. This table is a change log: one
+-- row per write, holding the state the memory had once that write landed. The
+-- name memory_provenance is held for a different and later concept -- EVIDENCE
+-- records, several per memory (kind, agent, session_id, source_ref, confidence,
+-- observed_at, verified_at) answering "who or what supports this memory" -- and
+-- this table answers a different question, so it must not take that name. A
+-- schema name is permanent once released, and the two concepts are easy to
+-- confuse in prose while being unrelated in fact.
+CREATE TABLE IF NOT EXISTS memory_history (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     memory_id   TEXT NOT NULL,
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -372,7 +381,7 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
 -- index would have no reader, and every append would pay for a second b-tree
 -- insert to keep it current: measured at a fifth of the cost of writing the
 -- history row at all, on the write path's critical section.
-CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, recorded_at);
 
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),

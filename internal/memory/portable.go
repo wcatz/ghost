@@ -553,7 +553,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// exactly the operation that makes the id safe to reuse.
 	var historic int
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT 1 FROM memory_provenance WHERE memory_id = ? LIMIT 1`, m.ID,
+		`SELECT 1 FROM memory_history WHERE memory_id = ? LIMIT 1`, m.ID,
 	).Scan(&historic); err == nil {
 		return false, false, false, fmt.Errorf(
 			"import memory %s: that id has recorded history from a memory that was deleted here, "+

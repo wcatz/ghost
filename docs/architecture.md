@@ -326,7 +326,7 @@ The main schema tables are:
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
 | `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
-| `memory_provenance` | Append-only per-memory history (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)): one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`) |
+| `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — the name `memory_provenance` is reserved for evidence records, which are a different concept: one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`) |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
@@ -344,12 +344,21 @@ Without Ollama, the same API remains available with FTS5-only results. Search me
 
 ### Memory history
 
-`memory_provenance` is the append-only record of how a memory reached its current
-state ([#578](https://github.com/wcatz/ghost/issues/578)). `memories` holds only
-the last value of everything, so "which reflection run changed this", "what did
-it say before" and "why is this here with this confidence" were all unanswerable
-from the database. Every write that changes a memory's state appends one row, in
+`memory_history` is the append-only CHANGE LOG of how a memory reached its
+current state ([#578](https://github.com/wcatz/ghost/issues/578)). `memories`
+holds only the last value of everything, so "which reflection run changed this",
+"what did it say before" and "why is this here with this confidence" were all
+unanswerable from the database. Every write that changes a memory's state appends one row, in
 the **same transaction** as the write, so history cannot diverge from state:
+
+**The name is a reservation, not a description.** This is a change log — one
+row per write, holding the state the memory had once that write landed. Evidence
+provenance is a separate concept and is not this table: that is a future
+`memory_provenance` holding SEVERAL evidence records per memory (kind, agent,
+`session_id`, `source_ref`, confidence, `observed_at`, `verified_at`), answering
+"who or what supports this memory" rather than "how did this row change". The two
+are easy to confuse in prose and unrelated in fact, and a schema name is
+permanent once released, so this table is named for what it is.
 
 | Phase | Appended by | What the row records |
 |---|---|---|
@@ -392,7 +401,7 @@ Three properties are deliberate:
   `project_id` *does* cascade: deleting a project is meant to take its corpus
   with it. That makes `project_id` reassignment on a project *merge* load-bearing
   rather than cosmetic — a merge keeps the memories and deletes only the
-  `projects` row, so a `memory_provenance` row left behind would be taken by that
+  `projects` row, so a `memory_history` row left behind would be taken by that
   cascade while the memory it describes survived with no recorded past. Both of
   main's merge reassignment lists (there are two, one per implementation) carry
   the table.
@@ -521,7 +530,7 @@ global cap are the normal state, and then the only statement is the probe.
 Two more decisions on that same critical section, both measured rather than
 assumed:
 
-- **One index, not two.** `idx_provenance_memory(memory_id, recorded_at)` is the
+- **One index, not two.** `idx_history_memory(memory_id, recorded_at)` is the
   only one, and it serves every reader this build has: the per-memory cap ranks
   by rowid (the implicit index, free), `MemoryHistory` filters on `memory_id`, and
   an `as_of` read (#647) — "the newest row for this memory at or before T" — is
@@ -593,10 +602,10 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
-| **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_provenance`, `audit_log` | Partial — `memory_provenance` now records every state change and who made it, but nothing reads it during retrieval; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
+| **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — `memory_history` now records every state change and who made it, but nothing reads it during retrieval; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
 | **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — the columns are read into `memory.Memory` and stage 2 of the assembler evaluates them against the request clock, so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)). No MCP writer exists yet (PR 3), so a store nobody has restored or imported reads every row as unset and the evaluation is corpus-neutral; `Store.Restore` and `Store.ImportMemory` both carry the triple, which is where a non-NULL window first comes from ([#575](https://github.com/wcatz/ghost/issues/575)) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate) |
-| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_provenance` records who performed each write | Inert — `confidence` is written on some paths and never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)), and the history has no reader yet: `ghost history <memory-id>` and `Store.MemoryHistory` are the only two, and no retrieval path consults them |
+| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write | Inert — `confidence` is written on some paths and never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)), and the history has no reader yet: `ghost history <memory-id>` and `Store.MemoryHistory` are the only two, and no retrieval path consults them |
 
 Axis interaction rules:
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
@@ -604,7 +613,7 @@ Axis interaction rules:
 - **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Not yet enforced: stage 5 of the assembler *records* a co-occurring `contradicts` pair and leaves both rows in place, because the existing contract requires a contradicted row to survive while a duplicate restatement sinks. Separating the pair needs its own contract change ([#581](https://github.com/wcatz/ghost/issues/581)).
 - **A scope conflict blocks the relation, and is not repaired by deleting it.** Two memories naming `environment=production` and `environment=development` are two claims about two places, so no relation may be proposed or created between them — not `duplicate` (at save time), not `related` (at link time), not `supersedes` (at supersede time), because each of those writers is the only one that can see both scopes at the moment it decides. An edge that already exists stays in the graph and is exempt at read time instead: every reader ignores it, and none deletes a row to reach that verdict. The exemption is stated where the decision is made, and every writer that chooses between candidates states it *inside* the query, because the same `LIMIT` chooses them: a conflict decided after the cut spends the budget on rows the caller may not use and misses a compatible candidate ranked just below ([#665](https://github.com/wcatz/ghost/issues/665)). The two cosine writers narrow inside the query (`SearchVectorScoped`), so a neighbour budget counts only rows a memory may relate to. `Upsert`'s two dedup probes and `foldTargetStillLive` each carry a second, SQL statement of the rule (`scopesConflictSQL`, held to the Go one by a test that runs both over the same table), for two different reasons: the probes because their own `LIMIT 15` chooses the candidates — so a save whose fifteen best FTS matches all name another environment still finds the compatible duplicate at rank 16 — and `foldTargetStillLive` because it has no window to protect, names one row by id, and carries the rule to keep a scope-conflicting `supersedes` edge from being read as a verdict on it.
 - **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes.
-- **Provenance is history, not a weight.** `agent`/`session_id`/`source_ref` describe who wrote a row, and `memory_provenance` ([#578](https://github.com/wcatz/ghost/issues/578)) records who performed each write since — but neither is a ranking input, and a confidence value is not a verdict anything computes.
+- **Who wrote it is not how much to trust it.** `agent`/`session_id`/`source_ref` describe who wrote a row, and `memory_history` ([#578](https://github.com/wcatz/ghost/issues/578)) records who performed each write since — but neither is a ranking input, and a confidence value is not a verdict anything computes. (Write-time authorship and evidence provenance are different things; see [Memory history](#memory-history).)
 
 ## Context assembly (target design)
 

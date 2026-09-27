@@ -14,7 +14,7 @@ import (
 )
 
 // The write paths that append history, as the phase vocabulary of
-// memory_provenance.phase. The CHECK in initSQL (mirrored by migrateV17) is the
+// memory_history.phase. The CHECK in initSQL (mirrored by migrateV17) is the
 // authority; these constants exist so a writer cannot spell one wrong.
 //
 // They are deliberately about WHICH WRITE PATH touched a row, not about what
@@ -56,7 +56,7 @@ const (
 	phaseBaseline = "baseline"
 )
 
-// The growth policy for memory_provenance, applied inside the same transaction
+// The growth policy for memory_history, applied inside the same transaction
 // as the append (see pruneHistoryForIDsTx and pruneHistoryTableTx). They are vars
 // rather than consts only so the policy tests can lower them; nothing in
 // production assigns to them.
@@ -341,7 +341,7 @@ func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids [
 		args = append(args, id)
 	}
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO memory_provenance
+		INSERT INTO memory_history
 			(memory_id, project_id, phase, agent, session_id, related_id, merged_content,
 			 content, category, importance, resolved_at, source)
 		SELECT id, project_id, ?, ?, ?, ?, ?, `+historyContentExpr()+`,
@@ -392,14 +392,14 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 	// A statement that inserts nothing reports zero rows affected, which is the
 	// answer, not a failure: a memory this build wrote has history and keeps it.
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO memory_provenance
+		INSERT INTO memory_history
 			(memory_id, project_id, phase, agent, session_id, content, category,
 			 importance, resolved_at, source)
 		SELECT id, project_id, ?, ?, ?, `+historyContentExpr()+`, category, importance,
 		       resolved_at, source
 		FROM memories
 		WHERE id = ?
-		  AND NOT EXISTS (SELECT 1 FROM memory_provenance p WHERE p.memory_id = memories.id)
+		  AND NOT EXISTS (SELECT 1 FROM memory_history p WHERE p.memory_id = memories.id)
 	`, phase, nullIfEmpty(prov.Agent), nullIfEmpty(prov.SessionID), memoryID)
 	if err != nil {
 		return fmt.Errorf("record baseline history: %w", err)
@@ -435,7 +435,7 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 // together.
 func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, error) {
 	texts, err := selectIDs(ctx, tx, `
-		SELECT content FROM memory_provenance WHERE memory_id = ? AND content IS NOT NULL
+		SELECT content FROM memory_history WHERE memory_id = ? AND content IS NOT NULL
 		UNION
 		SELECT content FROM memories WHERE id = ?
 		UNION
@@ -484,7 +484,7 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`DELETE FROM memory_provenance WHERE memory_id = ?`, memoryID)
+		`DELETE FROM memory_history WHERE memory_id = ?`, memoryID)
 	if err != nil {
 		return 0, fmt.Errorf("purge memory history: %w", err)
 	}
@@ -512,7 +512,7 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE memory_provenance SET merged_content = ?
+			`UPDATE memory_history SET merged_content = ?
 			 WHERE memory_id <> ? AND merged_content IN (`+strings.Join(placeholders, ",")+`)`,
 			append([]interface{}{purgedTextMarker, memoryID}, args...)...,
 		); err != nil {
@@ -582,7 +582,7 @@ func linkSuccessorTx(ctx context.Context, tx *sql.Tx, oldID, successorID string)
 		return nil
 	}
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE memory_provenance
+		UPDATE memory_history
 		SET related_id = ?
 		WHERE memory_id = ? AND phase = ? AND related_id IS NULL
 	`, successorID, oldID, phaseDelete); err != nil {
@@ -627,12 +627,12 @@ func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 		// carries the newest rowid as text, since the two answers have different
 		// types and one result set carries both.
 		rows, err := tx.QueryContext(ctx, `
-			SELECT 'over', memory_id FROM memory_provenance
+			SELECT 'over', memory_id FROM memory_history
 			WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
 			GROUP BY memory_id
 			HAVING count(*) > ?
 			UNION ALL
-			SELECT 'max', COALESCE(CAST(max(rowid) AS TEXT), '0') FROM memory_provenance
+			SELECT 'max', COALESCE(CAST(max(rowid) AS TEXT), '0') FROM memory_history
 		`, args...)
 		if err != nil {
 			return fmt.Errorf("probe history growth: %w", err)
@@ -681,12 +681,12 @@ func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 			}
 			overArgs = append(overArgs, historyVersionsPerMemory)
 			if _, err := tx.ExecContext(ctx, `
-				DELETE FROM memory_provenance
+				DELETE FROM memory_history
 				WHERE rowid IN (
 				    SELECT rowid FROM (
 				        SELECT rowid, ROW_NUMBER() OVER (
 				                   PARTITION BY memory_id ORDER BY rowid DESC) AS rank
-				        FROM memory_provenance
+				        FROM memory_history
 				        WHERE memory_id IN (`+strings.Join(overPlaceholders, ",")+`)
 				    )
 				    WHERE rank > ?
@@ -704,7 +704,7 @@ func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 		// reflection can churn the whole non-manual corpus.
 		if sawMax && newest > int64(historyRowsCap) {
 			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM memory_provenance WHERE rowid <= ?`, newest-int64(historyRowsCap),
+				`DELETE FROM memory_history WHERE rowid <= ?`, newest-int64(historyRowsCap),
 			); err != nil {
 				return fmt.Errorf("cap history table size: %w", err)
 			}
@@ -740,7 +740,7 @@ func (s *Store) MemoryHistory(ctx context.Context, memoryID string, limit int) (
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, memory_id, project_id, recorded_at, phase, agent, session_id, related_id,
 		       merged_content, content, category, importance, resolved_at, source
-		FROM memory_provenance
+		FROM memory_history
 		WHERE memory_id = ?
 		ORDER BY rowid DESC
 		LIMIT ?`, memoryID, limit)

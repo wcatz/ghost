@@ -9,7 +9,7 @@ import (
 // redaction, and the one a delete cannot perform. The handler resolves the
 // project, then looks the id up in `memories` and refuses a miss — so an agent
 // told to redact a credential whose memory it deleted an hour ago was told "not
-// found", nothing was purged, and the text stayed in memory_provenance. The
+// found", nothing was purged, and the text stayed in memory_history. The
 // response text had promised that this tool was the equivalent of
 // `ghost history purge`, which does reach it.
 //
