@@ -2543,18 +2543,39 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// statement, and scopeJSONExpr names its expression twice — inside
 	// json_valid and as the value — so the predicate's two placeholders take
 	// the same argument.
+	//
+	// A save with no scope conflicts with nothing (ScopesConflict needs a key
+	// both sides name), so the predicate — a correlated subquery over two
+	// json_each scans, run once per FTS match — is only added when the save
+	// carries one. Most saves carry none.
 	incomingScope := scopeJSON(opts.Scope)
+	scopeClause := ""
+	scopeArgs := []any{}
+	if incomingScope != nil {
+		scopeClause = "AND NOT " + scopesConflictSQL("m.scope", "?")
+		scopeArgs = []any{incomingScope, incomingScope}
+	}
+	probeArgs := func(lead ...any) []any {
+		args := append([]any{}, lead...)
+		args = append(args, scopeArgs...)
+		return append(args, ftsQuery)
+	}
 	rows, err := db.QueryContext(ctx, `
 		SELECT m.id, m.content
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE m.project_id = ?
 		  AND m.category = ?
-		  AND NOT `+scopesConflictSQL("m.scope", "?")+`
+		  `+scopeClause+`
 		  AND memories_fts MATCH ?
 		ORDER BY rank, m.importance DESC
 		LIMIT 15
-	`, projectID, category, incomingScope, incomingScope, ftsQuery)
+	`, probeArgs(projectID, category)...)
+	if err != nil {
+		// Upsert treats a failed probe as "no candidate" and inserts, so a
+		// broken statement would switch dedup off silently. Say so.
+		s.logger.Warn("upsert dedup probe failed; saving without dedup", "probe", "same-category", "err", err)
+	}
 	if err == nil {
 		// Token-free content (punctuation/single-char words only) can still
 		// FTS-match — sanitizeFTS keeps single-char words that tokenizeContent
@@ -2642,11 +2663,14 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			        AND l.invalidated_at IS NULL
 			        AND NOT `+scopesConflictSQL("s.scope", "m.scope")+`
 			  )
-			  AND NOT `+scopesConflictSQL("m.scope", "?")+`
+			  `+scopeClause+`
 			  AND memories_fts MATCH ?
 			ORDER BY rank, m.importance DESC
 			LIMIT 15
-		`, projectID, category, incomingScope, incomingScope, ftsQuery)
+		`, probeArgs(projectID, category)...)
+		if crossErr != nil {
+			s.logger.Warn("upsert dedup probe failed; saving without dedup", "probe", "cross-category", "err", crossErr)
+		}
 		if crossErr == nil {
 			// Same empty-token guard as the same-category probe: token-free
 			// content can still FTS-match, and jaccard(∅,∅) scores 1.0.
