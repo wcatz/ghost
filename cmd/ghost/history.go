@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -304,38 +305,59 @@ func runHistory() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	// The refusal is already on stdout in --json form (it is the machine's copy
+	// of the message), so the exit code carries it and stderr stays quiet.
 	if err := printHistory(os.Stdout, view, opts.JSON); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		if !errors.Is(err, errNothingToReport) {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		}
 		os.Exit(1)
 	}
 }
 
-// runHistoryPurge erases one memory and every recorded version of it.
+// runHistoryPurge erases a memory's recorded text, and the memory itself when it
+// is still there.
 //
-// The count it prints is read BEFORE the purge, so the operator can see how much
-// text the purge removed rather than being told "done" and left guessing whether
-// the argument was even a live memory. A purge is irreversible by construction —
-// that is what makes it a redaction path — so the count is the only warning there
-// is, and it is printed before the write rather than after.
+// Two cases, because a purge asked for at DELETE time cannot cover a memory that
+// is already gone: a live memory is deleted with its history in one transaction,
+// and a memory that exists only as a tombstone has its history erased on its own.
+// Without the second case, "erase that secret" asked after the memory was deleted
+// would report the memory as not found and leave the text exactly where it was —
+// the failure the command exists to prevent.
+//
+// The count is read BEFORE the purge, so the operator sees how much text is about
+// to go rather than being told "done" and left guessing whether the argument was
+// even a live memory. A purge is irreversible by construction — that is what
+// makes it a redaction path — so the count is the only warning there is.
 func runHistoryPurge(ctx context.Context, s *memory.Store, memoryID string) {
 	entries, err := s.MemoryHistory(ctx, memoryID, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	if len(entries) == 0 {
-		if _, liveErr := s.GetByIDs(ctx, []string{memoryID}); liveErr != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", liveErr)
-			os.Exit(1)
-		} else {
-			fmt.Fprintf(os.Stderr, "no memory and no history for %s — nothing to purge\n", memoryID)
-			os.Exit(1)
-		}
-	}
-	fmt.Printf("Purging memory %s and %d recorded version(s) of its text.\n", memoryID, len(entries))
-	if err := s.DeleteWithOptions(ctx, memoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+	live, err := s.GetByIDs(ctx, []string{memoryID})
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+	if len(entries) == 0 && len(live) == 0 {
+		fmt.Fprintf(os.Stderr, "no memory and no history for %s — nothing to purge\n", memoryID)
+		os.Exit(1)
+	}
+	switch {
+	case len(live) > 0:
+		fmt.Printf("Purging memory %s and %d recorded version(s) of its text.\n", memoryID, len(entries))
+		if err := s.DeleteWithOptions(ctx, memoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	default:
+		// Already deleted. The row is not coming back and nothing asked for it to.
+		fmt.Printf("Memory %s is already deleted; purging its %d recorded version(s) of text.\n", memoryID, len(entries))
+		if _, err := s.PurgeMemoryHistory(ctx, memoryID); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	fmt.Println("Purged. No version of this memory's text remains in the database.")
 }
@@ -390,9 +412,30 @@ func printHistoryJSONError(w io.Writer, message string) {
 
 // printHistory chooses the rendering. --json prints only the entries, so the
 // output is pipeable into jq with no header line to strip.
+//
+// A JSON run that knows nothing about the id is a refusal, not an empty stream.
+// Zero lines with exit 0 is the one answer a script cannot act on: it cannot tell
+// "this memory was never written" from "the growth policy pruned it" from "the
+// query found nothing because the tool is broken", and all three would be the
+// same. So the miss takes the same shape as the no-database case — an error
+// object and a non-zero exit — and the caller turns that into os.Exit(1).
+//
+// Liveness is the one distinction the JSON form does not repeat per line, and it
+// does not need to: the last entry's phase says it. A memory that is gone ends
+// in a `delete` row.
 func printHistory(w io.Writer, v historyView, asJSON bool) error {
 	if asJSON {
+		if v.Live == nil && len(v.Entries) == 0 {
+			printHistoryJSONError(w, fmt.Sprintf(
+				"no memory and no history recorded for %s — it was never written, or its history has been pruned",
+				v.MemoryID))
+			return errNothingToReport
+		}
 		return printHistoryJSON(w, v.Entries)
 	}
 	return printMemoryHistory(w, v)
 }
+
+// errNothingToReport says a report found nothing to print, which is a non-zero
+// exit for a machine reader and a sentence for a person.
+var errNothingToReport = errors.New("nothing to report")

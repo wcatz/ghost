@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -412,5 +413,46 @@ func TestPrintHistoryEntryNamesTheOtherEnd(t *testing.T) {
 	}
 	if strings.Contains(plain.String(), "related memory") || strings.Contains(plain.String(), "folded-in text") {
 		t.Errorf("a row with no other end printed an empty label:\n%s", plain.String())
+	}
+}
+
+// TestPrintHistoryJSONRefusesAnUnknownID: zero lines with exit 0 is the one
+// answer a script cannot act on — "never written", "history pruned by the growth
+// policy" and "the query found nothing" would all look the same. So the JSON form
+// takes the same shape as the no-database refusal: an error object, and an error
+// the caller turns into a non-zero exit.
+func TestPrintHistoryJSONRefusesAnUnknownID(t *testing.T) {
+	var buf bytes.Buffer
+	err := printHistory(&buf, historyView{MemoryID: "nope"}, true)
+	if !errors.Is(err, errNothingToReport) {
+		t.Fatalf("printHistory error = %v, want errNothingToReport", err)
+	}
+	var got struct {
+		Error string `json:"error"`
+	}
+	if jsonErr := json.Unmarshal(buf.Bytes(), &got); jsonErr != nil {
+		t.Fatalf("the refusal is not JSON: %v\n%s", jsonErr, buf.String())
+	}
+	if got.Error == "" || !strings.Contains(got.Error, "nope") {
+		t.Errorf("the refusal does not name the id: %q", got.Error)
+	}
+}
+
+// TestPrintHistoryJSONStaysQuietWhenThereIsHistory: the refusal is for the miss
+// only. A memory that has rows — live or tombstoned — prints them and returns no
+// error, because the entries themselves carry the answer (a deleted memory ends
+// in a delete row).
+func TestPrintHistoryJSONStaysQuietWhenThereIsHistory(t *testing.T) {
+	for _, v := range []historyView{
+		{MemoryID: "live", Live: &memory.Memory{ID: "live"}, Entries: []memory.HistoryEntry{historyEntry("save", "", "text", "t")}},
+		{MemoryID: "gone", Entries: []memory.HistoryEntry{historyEntry("delete", "", "text", "t")}},
+	} {
+		var buf bytes.Buffer
+		if err := printHistory(&buf, v, true); err != nil {
+			t.Errorf("printHistory(%s) = %v, want no error", v.MemoryID, err)
+		}
+		if !strings.Contains(buf.String(), "\"phase\"") {
+			t.Errorf("printHistory(%s) printed no entries:\n%s", v.MemoryID, buf.String())
+		}
 	}
 }

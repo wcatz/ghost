@@ -543,6 +543,26 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	} else {
 		return false, false, false, nil
 	}
+	// A free id is not necessarily a NEW id. A memory deleted locally leaves its
+	// recorded history behind (that is what the history is for), and the artifact
+	// carries ids verbatim, so importing into an id that still has history would
+	// splice two unrelated memories' records under one id: the old text under its
+	// save/delete pair, then an import row for text that memory never held, with
+	// the two sharing one per-memory version budget and one as_of answer (#647).
+	// Refused, with the way out named — purging is the redaction path and is
+	// exactly the operation that makes the id safe to reuse.
+	var historic int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM memory_provenance WHERE memory_id = ? LIMIT 1`, m.ID,
+	).Scan(&historic); err == nil {
+		return false, false, false, fmt.Errorf(
+			"import memory %s: that id has recorded history from a memory that was deleted here, "+
+				"and importing would splice two memories' histories under one id — "+
+				"purge it first with `ghost history purge %s`, or give the record a new id in the artifact",
+			m.ID, m.ID)
+	} else if err != sql.ErrNoRows {
+		return false, false, false, fmt.Errorf("import memory %s: %w", m.ID, err)
+	}
 	if !apply {
 		return true, cut, downgraded, nil
 	}

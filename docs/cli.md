@@ -459,13 +459,28 @@ and the text a duplicate fold brought in and did not keep (`folded-in text:`).
 
 The history outlives the memory: a deleted memory's last state is still readable
 here, and a report that finds neither a row nor a history says so instead of
-printing nothing.
+printing nothing. In `--json` form that refusal is a one-line `{"error": ...}`
+object and a non-zero exit, never an empty stream a script would read as "no
+history"; the live / no-longer-live distinction is not repeated per line, and does
+not need to be — the last entry's phase says it, and a deleted memory ends in a
+`delete` row.
 
 `purge` is the exception, and it is the redaction path. Because the history keeps
 the text a memory **used** to hold, deleting a memory that contained a credential
 leaves that credential in the database and still readable with `ghost history`.
-`purge` deletes the row and every history row for it in one transaction, so
-neither can survive the other and nothing is left to print. The MCP equivalent is
+`purge` erases the text in both directions (the store primitive for the second
+case is `Store.PurgeMemoryHistory`):
+
+- a memory that is still there is deleted along with its history, in one
+  transaction, so neither can survive the other;
+- a memory that is **already deleted** has its history erased on its own. That
+  second case is the one a delete-time purge cannot cover: the tombstone is the
+  feature, so "erase that secret" asked an hour after the memory was deleted would
+  otherwise report the memory as not found and leave the text where it is. The
+  memory is not brought back — only the text goes.
+
+The MCP equivalent is `ghost_memory_delete` with `purge_history: true`; use it
+whenever the intent is to erase something rather than to retire a memory. The MCP equivalent is
 `ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
 erase something rather than to retire a memory.
 

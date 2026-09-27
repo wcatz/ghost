@@ -1443,3 +1443,82 @@ func TestAFailedDeleteLeavesNoTombstone(t *testing.T) {
 		t.Errorf("history has %d rows after the failed delete, want %d — a tombstone was committed for a memory that still exists", len(after), len(before))
 	}
 }
+
+// TestImportRefusesAnIDThatStillHasHistory: ids are not reused by Ghost, but a
+// portable artifact carries them verbatim. A memory deleted here leaves its
+// history behind — that is the feature — so importing into the same id would
+// splice two unrelated memories' records under one id, with the old text under
+// its save/delete pair and then an import row for text that memory never held.
+// The import refuses instead, and names the operation that makes the id reusable.
+func TestImportRefusesAnIDThatStillHasHistory(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id := "AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD"
+	if _, _, _, err := s.Upsert(ctx, testProject, "fact", "a fact that was deleted here", "mcp", 0.5, nil); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// Rename the live row to the id the artifact will carry, then delete it, so
+	// the id is free but its history is not.
+	if _, err := s.db.Exec(`UPDATE memories SET id = ? WHERE content = ?`, id, "a fact that was deleted here"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("the deleted memory left no history; the test needs an id that is free but remembered")
+	}
+
+	_, _, _, err = s.ImportMemory(ctx, PortableMemory{
+		ID:        id,
+		ProjectID: testProject,
+		Category:  "convention",
+		Content:   "an unrelated fact from an artifact",
+		Source:    "manual",
+	}, ImportOptions{Apply: true, TrustProvenance: true})
+	if err == nil {
+		t.Fatal("the import spliced two memories' histories under one id")
+	}
+	if !strings.Contains(err.Error(), "ghost history purge") {
+		t.Errorf("error = %q, want it to name the operation that frees the id", err)
+	}
+	live, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(live) != 0 {
+		t.Errorf("the refused import still wrote the row: %v %v", live, err)
+	}
+
+	// And the way out works. The row is already gone, so this is the SECOND
+	// stage of a redaction — the one a delete-time purge cannot cover — and it
+	// still has to work, or the id stays unimportable and the text stays on disk.
+	purged, err := s.PurgeMemoryHistory(ctx, id)
+	if err != nil {
+		t.Fatalf("PurgeMemoryHistory: %v", err)
+	}
+	if purged != int64(len(entries)) {
+		t.Errorf("purged %d rows, want the %d it had", purged, len(entries))
+	}
+	after, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("history rows survived: %v", phasesOf(t, after))
+	}
+	// A live memory is untouched by a history-only purge: "erase the history" and
+	// "delete the memory" are different requests.
+	other, _, _, err := s.Upsert(ctx, testProject, "fact", "an unrelated live memory", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if _, err := s.PurgeMemoryHistory(ctx, other); err != nil {
+		t.Fatalf("PurgeMemoryHistory(live): %v", err)
+	}
+	if live, err := s.GetByIDs(ctx, []string{other}); err != nil || len(live) != 1 {
+		t.Errorf("a history purge deleted a live memory: %v %v", live, err)
+	}
+}

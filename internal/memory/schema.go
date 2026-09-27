@@ -302,8 +302,10 @@ CREATE TABLE IF NOT EXISTS link_scans (
 -- destroyed by the mutation it records is the delete — a hard DELETE takes the
 -- row with it, so a cascading history table would be empty exactly when the
 -- audit is asked for. Nothing reuses a memory id (ids come from
--- hex(randomblob(16)) and a snapshot restore reinstates the id it recorded), so
--- an orphaned history row cannot be read as some other memory's.
+-- hex(randomblob(16)) and a snapshot restore reinstates the id it recorded) —
+-- with ONE exception this table's own writers guard: a portable import carries
+-- the artifact's id verbatim, so ImportMemory refuses an id that still has
+-- history rather than splicing a deleted memory's record onto new text.
 --
 -- project_id DOES cascade: deleting a project is meant to take the whole corpus
 -- with it. That makes this column load-bearing for every write that moves a

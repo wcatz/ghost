@@ -3579,7 +3579,7 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	// A purge writes no tombstone of its own, which is the point: it must leave
 	// nothing behind that could carry the text being redacted.
 	if opts.PurgeHistory {
-		if err := purgeHistoryTx(ctx, tx, id); err != nil {
+		if _, err := purgeHistoryTx(ctx, tx, id); err != nil {
 			return err
 		}
 	}

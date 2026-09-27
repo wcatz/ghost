@@ -363,21 +363,54 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 	return appendHistoryTx(ctx, tx, memoryID, phase, prov)
 }
 
-// purgeHistoryTx removes every history row for a memory. It is the redaction
-// path: this table keeps the text a memory USED to hold, so deleting a memory
-// that contained a credential leaves the credential here unless the delete asks
-// for this. The caller runs it in the same transaction as the DELETE, so a
-// memory and its history cannot come apart.
+// purgeHistoryTx removes every history row for a memory and reports how many went.
+// It is the redaction path: this table keeps the text a memory USED to hold, so
+// deleting a memory that contained a credential leaves the credential here unless
+// the delete asks for this. The delete path runs it in the same transaction as
+// the DELETE, so a memory and its history cannot come apart.
 //
 // No tombstone is written first and nothing is left behind: a purge exists
-// precisely to leave nothing, which is also why it is the one delete that
-// appends no history of its own.
-func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) error {
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM memory_provenance WHERE memory_id = ?`, memoryID); err != nil {
-		return fmt.Errorf("purge memory history: %w", err)
+// precisely to leave nothing, which is also why it is the one delete that appends
+// no history of its own.
+func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, error) {
+	res, err := tx.ExecContext(ctx, `DELETE FROM memory_provenance WHERE memory_id = ?`, memoryID)
+	if err != nil {
+		return 0, fmt.Errorf("purge memory history: %w", err)
 	}
-	return nil
+	return res.RowsAffected()
+}
+
+// PurgeMemoryHistory erases a memory's recorded history without touching the
+// memory row, and reports how many rows it removed.
+//
+// It is the second stage of the redaction path, and it exists because a purge
+// asked for at DELETE time cannot cover a memory that is already gone. The
+// tombstone is the point: a memory deleted an hour ago still has its text here,
+// so "erase that secret" asked an hour later needs this rather than a delete
+// that reports the memory as not found and leaves the text where it is. It is
+// also what makes a memory id reusable — `ghost import` refuses an id that still
+// has history, and this is how an operator frees one.
+//
+// It erases history only. A live memory is left exactly as it was, because
+// "erase the history of this memory" and "delete this memory" are different
+// requests and conflating them would destroy knowledge nobody asked to lose.
+func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin purge history: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	n, err := purgeHistoryTx(ctx, tx, memoryID)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit purge history: %w", err)
+	}
+	return n, nil
 }
 
 // linkSuccessorTx records, on the delete row of a memory a consolidation

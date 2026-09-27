@@ -418,6 +418,14 @@ active and not on every re-link, because `ghost supersede` re-writes a pair on
 every pass whose endpoint moved, and a re-write of a live edge records no run and
 asserts no new claim.
 
+Two more writers can produce a row byte-identical to the previous version
+without meaning to, and neither earns a special case: `UpdateMemory` called with
+the values a row already holds (the MCP tool passes the caller's arguments
+straight through, and its "changed" list is which arguments were supplied, not
+what differed), and a fold whose `importance` increment has saturated at 1.0.
+Both cost a slot under the cap, which is what bounds them, and both record a write
+somebody asked for.
+
 `MergeProject` and `PromoteToGlobal` are in the no-append class — both change
 only `project_id` — and they are the writers that show the other half: appending
 nothing is not the same as ignoring them. A write that moves a memory between
@@ -434,11 +442,17 @@ versions sit here. So a secret that was "removed" by deleting its memory is not
 removed — it is in a table with a longer life than the row, and `ghost history`
 prints it. Three things follow:
 
-- **A purge path.** `ghost history purge <id>` and `ghost_memory_delete`'s
-  `purge_history` argument delete the row and every history row for it in one
-  transaction, so a memory and its history cannot come apart and a purge leaves
-  nothing. A plain delete deliberately keeps the history: that is what makes the
-  table worth having.
+- **A purge path, in both directions.** `ghost history purge <id>` and
+  `ghost_memory_delete`'s `purge_history` argument delete a live row and every
+  history row for it in one transaction, so a memory and its history cannot come
+  apart and a purge leaves nothing. A memory that is ALREADY deleted has its
+  history erased on its own (`Store.PurgeMemoryHistory`), which is the case a
+  delete-time purge cannot cover: the tombstone is the feature, so a redaction
+  asked after the delete would otherwise report the memory as not found and leave
+  the text on disk. A plain delete deliberately keeps the history — that is what
+  makes the table worth having — and an id whose history still exists is one
+  `ghost import` refuses to write into, because the artifact's ids are verbatim
+  and the two records would splice under one id.
 - **A redaction seam on the way in.** `ghost_history_content` is a SQLite
   function called by the append statement itself, so content is rewritten inside
   the one statement that copies the state out of `memories` rather than in a
