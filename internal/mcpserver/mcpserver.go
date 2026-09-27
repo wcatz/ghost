@@ -836,15 +836,16 @@ func (s *Server) registerTools() {
 		Category  string `json:"category,omitempty" jsonschema:"architecture|decision|pattern|convention|gotcha|dependency|preference|fact (default: fact)"`
 		// Importance/Tags: see coerce.go — untyped so stringified client
 		// values survive schema validation and are normalized in-handler.
-		Importance any `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
-		Tags       any `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
-		Scope      any `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
+		Importance any  `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
+		Tags       any  `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
+		Scope      any  `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
+		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to pin it to the top of project context. Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_save",
 		Title:       "Save Memory",
-		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
+		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Set pin=true for a non-negotiable rule, a security constraint or a core invariant: a later 'ghost reflect' consolidation may merge or rewrite any ordinary memory away, and nothing else protects one. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -893,7 +894,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
-		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{Provenance: provenanceFor(req), Scope: scope})
+		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{Provenance: provenanceFor(req), Scope: scope, Pin: args.Pin})
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -913,6 +914,16 @@ func (s *Server) registerTools() {
 		}
 		if notice := refused.Notice(); notice != "" {
 			msg += " — " + notice
+		}
+		// The pin has to be reported, not just applied: on a fold the row
+		// consolidation would absorb is the existing one, not the id this
+		// message just returned, so the caller cannot infer the pin took effect
+		// from the id alone.
+		if args.Pin {
+			msg += " — pinned, so consolidation will not rewrite it"
+			if duplicateOf != "" {
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is pinned too)", duplicateOf)
+			}
 		}
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)

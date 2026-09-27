@@ -248,6 +248,8 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"kept verbatim",
 		"undone by that re-add",
 		"a memory you do not name is carried through unchanged",
+		"puts that row back verbatim",
+		"State an obsolete drop only when a surviving memory really does replace it",
 	} {
 		if !strings.Contains(retained, want) {
 			t.Errorf("retention prompt missing %q", want)
@@ -257,6 +259,7 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"DELETES every input",
 		"a drop nothing explains is a real deletion",
 		"There is no protected category",
+		"the input is DELETED, and yours is the last version of it",
 	} {
 		if strings.Contains(retained, unwanted) {
 			t.Errorf("retention prompt leaks the --allow-drops wording %q", unwanted)
@@ -269,6 +272,12 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"a drop nothing explains is a real deletion",
 		"a real deletion",
 		"the input is deleted even though you mentioned it",
+		// The two operations that REPLACE a row carry the same warning as a
+		// merge, and under --allow-drops the re-add never happens — the row is
+		// simply deleted. This is the path eval/cycle measures on, so a prompt
+		// promising a re-add there is telling the grader a consolidation is
+		// cheaper than it is (#549).
+		"the input is DELETED, and yours is the last version of it",
 	} {
 		if !strings.Contains(dropping, want) {
 			t.Errorf("--allow-drops prompt missing %q", want)
@@ -278,6 +287,16 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"Dropping is not deletion",
 		"EVERY category is protected",
 		"undone by that re-add",
+		"puts that row back verbatim",
+		// The mode-dependent tail spliced into the obsolete bullet and into the
+		// "drop stale situational memories" rule is staleTail, so this is the
+		// wording a leaked DEFAULT tail would carry. obsoleteTail's own text
+		// cannot do this job in either direction: it is byte-identical in both
+		// modes, so it is present whether or not a tail leaked — its presence
+		// detects nothing, and its absence would say nothing about the mode
+		// either. (It IS in the prompt, asserted in the retention branch above,
+		// which is the other half of why a literal drawn from it is a no-op here.)
+		"since a drop nothing explains is undone by the verbatim re-add",
 	} {
 		if strings.Contains(dropping, unwanted) {
 			t.Errorf("--allow-drops prompt still promises retention: %q", unwanted)

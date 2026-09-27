@@ -6,7 +6,7 @@ Ghost exposes 20 tools, 4 resources, and 2 prompts over standard MCP. The server
 
 | Group | Tool | Purpose |
 |---|---|---|
-| Memory | `ghost_memory_save` | Save a project memory; likely duplicates are linked and the existing row is strengthened |
+| Memory | `ghost_memory_save` | Save a project memory; likely duplicates are linked and the existing row is strengthened. `pin: true` exempts it from consolidation in the same call |
 | Memory | `ghost_memory_search` | Search project memories with FTS5 and optional vectors |
 | Memory | `ghost_search_all` | Search across all projects |
 | Memory | `ghost_memories_list` | Browse memories, optionally by category |
@@ -28,6 +28,8 @@ Ghost exposes 20 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Decisions | `ghost_decisions_list` | List active, superseded, or revisit decisions |
 
 `ghost_resolve` is dry-run by default. `ghost_project_delete` is also dry-run by default and is irreversible when applied. Core memory CRUD and search do not call an LLM; maintenance-oriented tools may use the calling session's CLI harness.
+
+Nothing an agent writes is excluded from `ghost reflect` by its `source`: seeds are `builtin`, agent saves are `mcp`, and reflection writes are `reflection`. `ghost_memory_save` therefore takes an optional `pin` so a memory can opt out of consolidation in the call that stores it, rather than in a second `ghost_memory_pin` call that a session might never make. On a near-duplicate save both rows are pinned — the copy just stored and the existing row the text folded into, which is the one a later consolidation is most likely to absorb — and the result message says so.
 
 ## Resources
 

@@ -38,24 +38,32 @@ const dropContainmentThreshold = 0.45
 // agent writes is ever excluded by it. Deleting an unreferenced input
 // therefore takes an explicit --allow-drops.
 //
-// One exemption, and it is witnessed rather than inferred. result.Replacements
-// names the input ids a response disposed of together with the text that took
-// their place — a rewrite's own new text, or the emitted text of the successor a
-// supersession named. A rewrite and a supersession are the same claim about the
-// same thing, so they share one list and one check: re-adding such a row would
-// put it back beside the text that replaced it, which is a duplicate rather than a
-// save, and re-adding it is how a memory reading "three issues are still open"
-// survived beside "the three open issues have all been fixed".
+// THERE IS NO EXEMPTION. Not for a rewrite and not for a supersession: an
+// unattended reflect never deletes a memory on the model's say-so alone.
 //
-// The witness has to be there, though. A filter that runs over the result after
-// the operations are resolved can remove the replacing text —
-// dropForeignProjectMemories deletes a memory naming a project the input corpus
-// never mentioned, and a rewrite or a merge is exactly such a memory — and an
-// exemption trusted on the id alone then disposes of a row with nothing in its
-// place, silently, with nothing left for --allow-drops to act on. A claim whose
-// text is gone lapses, and the input goes back under the ordinary audit. An
-// obsolete drop names no successor and never gets here at all, so the token audit
-// governs it.
+// This used to carve out one, and the carve-out was the hole. `drop X reason:
+// superseded by Y` disposed of X whenever Y's text was in the result, with
+// nothing checking that Y had anything to do with X — the parser's only rule is
+// that the target survives the response, so naming a neighbour is a valid
+// operation, and two ordinary deployment notes in the same project paired
+// because they sat adjacent in the prompt is all it took. Requiring the witness
+// to be RELATED closed that, and then turned out to be redundant: the witness
+// text is itself an output, so a row at 45% containment against it also passes
+// the per-output scan below. The whole branch was dead code, and removing it
+// leaves the suite green.
+//
+// The rule is KEEP-biased, deliberately. A stale row that is kept is
+// REPAIRABLE: the lifecycle runs resolve and supersede right after reflect, and
+// demoting a row that is genuinely stale is exactly their job. A deleted row is
+// not repairable, and on the unattended path there is nobody watching to notice.
+// So the failure direction here is a duplicate — the old text back beside its
+// replacement — never a silent deletion.
+//
+// The cost, named: the "three issues are still open" class can come back as a
+// kept stale row when the successor is reworded below the containment bar, and
+// stays visible until resolve or supersede demote it. A corpus of those grows
+// the input the next pass has to read. That is the trade, and it is the right way
+// round for a command that rewrites a memory store with no human in the loop.
 //
 // What the guard no longer has to do is the biggest part. An input the response
 // never named is emitted verbatim by executeOps (#639), so there is nothing to
@@ -64,66 +72,69 @@ const dropContainmentThreshold = 0.45
 // the "absorbed" direction a silent deletion with no warning and no
 // --allow-drops. An id the model never mentioned needs no inference at all.
 //
-// Which output set an input is compared against is the remaining choice, and it is
-// witnessed the same way. A MERGED source (result.Merges) is measured against the
-// union of every output, because a merge may carry its substance across a survivor
-// plus its siblings — but only while the merge that folded it in is still in the
-// result, since with the pass-through above the union of a result whose merge was
-// removed is the rest of the project. Everything else is measured against a single
-// output. The SQLite fallback names no ids, so every one of its inputs is measured
-// the strict way.
+// Which output set an input is compared against is the remaining choice. A MERGED
+// source (result.Merges) is measured against the text of ITS OWN merge, since
+// that is the only witness that can say whether the merge carried it: a merge
+// source is consumed by its merge, so its own text is never in the result, and
+// the parser rejects an id claimed twice, so a sibling cannot be there either.
+// It is measured against nothing at all when the merge is not in the result, and
+// falls back to the strict per-output test. Everything else — an explicit
+// `obsolete` drop, a rewrite, a supersession, and every input of the offline
+// SQLite tier, which names no ids — is measured against a single output.
 //
 // Uses the package's tokenize (numeric-retaining, stopword-filtered) so merged
 // rewrites that preserve substance — including ports and versions — are
 // recognized as survivors and are not re-added alongside the merge.
 func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []DroppedGuarded {
 	outTokens := make([]map[string]bool, 0, len(result.Memories))
-	union := make(map[string]bool)
 	present := make(map[string]bool, len(result.Memories))
 	for _, m := range result.Memories {
 		tokens := tokenize(m.Content)
 		outTokens = append(outTokens, tokens)
-		for tok := range tokens {
-			union[tok] = true
-		}
 		present[m.Content] = true
 	}
 
-	replaced := make(map[string]bool, len(result.Replacements))
-	for _, r := range result.Replacements {
-		if r.Text != "" && present[r.Text] {
-			replaced[memIDKey(r.ID)] = true
-		}
-	}
-	// A merged source is scored against the union only while the merge that folded
-	// it in is still in the result. A merge a post-filter removed leaves the union
-	// as the rest of the project — the pass-through emits every unclaimed input —
-	// so a source whose words recur elsewhere would pass containment against a
-	// vocabulary that has nothing to do with it, and be neither re-added nor
-	// reported. A lapsed claim falls back to the strict per-output test, which is
-	// the right question once there is no merge to be spread across.
-	merged := make(map[string]bool, len(result.Merges))
+	// A merged source is scored against the text of ITS OWN merge, not against
+	// the union of every output (#549). The union was sound before the
+	// pass-through existed, when the union was a handful of survivors; now every
+	// id the response never named is emitted verbatim, so the union of a real
+	// result is the whole project's vocabulary, and a source whose substance its
+	// merge discarded passes containment on the strength of whatever unrelated
+	// memory happens to share its words. That is the same class of loss the
+	// pass-through was written to remove — an unrelated survivor sharing 45% of
+	// the absorbed memory's tokens — reintroduced through the merge branch.
+	//
+	// The merge's own text is the whole witness available: a merge source is
+	// consumed by its merge, so its own text is never in the result, and the
+	// parser rejects an id claimed by two operations, so a sibling cannot be in
+	// the result either. Scoring against the merge's siblings could only LOWER
+	// the bar — they add their own words to a set the merge's text already
+	// dominates — and it never rescues a merge whose own text is too thin, which
+	// is the case the guard exists for.
+	//
+	// A merge a post-filter removed has no witness and is absent from this map,
+	// so its sources fall back to the strict per-output test, which is the right
+	// question once there is no merge to be spread across.
+	mergedText := make(map[string]map[string]bool, len(result.Merges))
 	for _, m := range result.Merges {
 		if m.Text == "" || !present[m.Text] {
 			continue
 		}
+		tokens := tokenize(m.Text)
 		for _, id := range m.IDs {
-			merged[memIDKey(id)] = true
+			mergedText[memIDKey(id)] = tokens
 		}
 	}
 
 	var drops []DroppedGuarded
 	for _, in := range input.ExistingMemories {
 		key := memIDKey(in.ID)
-		if replaced[key] {
-			continue
-		}
 		inTokens := tokenize(in.Content)
 		if len(inTokens) == 0 {
 			continue
 		}
-		if merged[key] {
-			if hasCloseSurvivor(inTokens, union) {
+		if mergeTokens, ok := mergedText[key]; ok {
+			if hasCloseSurvivor(inTokens, mergeTokens) {
 				continue
 			}
 		} else if hasCloseSurvivorInAny(inTokens, outTokens) {

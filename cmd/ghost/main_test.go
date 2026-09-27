@@ -921,6 +921,231 @@ func TestReflectMaySkipDoesNotSkipExplicitAllowDrops(t *testing.T) {
 	}
 }
 
+// TestReportReductionWarningCountsWhatTheProjectEndsUpHolding: the >50%
+// reduction warning is the only signal an unattended apply compressed hard, and
+// it used to read len(projectMems) alone. applyReflection folds the cross-project
+// candidates back into the project when promotion is off, so a round that
+// emitted 5 project-scoped and 7 cross-project memories for a 20-memory corpus
+// kept 12 of 20 (60%) while the warning reported "5 vs 20" and cried >50%
+// reduction. A warning that fires on rounds that lost nothing trains the reader
+// to ignore it — the opposite of what an unattended path needs.
+func TestReportReductionWarningCountsWhatTheProjectEndsUpHolding(t *testing.T) {
+	live := make([]memory.Memory, 20)
+	project := make([]reflection.ReflectMemory, 5)
+	candidates := make([]reflection.ReflectMemory, 7)
+
+	var buf bytes.Buffer
+	reportReductionWarning(&buf, live, project, candidates, false, promotionOutcome{})
+	if buf.Len() != 0 {
+		t.Errorf("promotion off keeps all 12 of 20, so nothing was lost; got:\n%s", buf.String())
+	}
+
+	// Promotion on is the same result with a different destination, and it does
+	// lose the candidates from this project — so the warning is right to fire.
+	buf.Reset()
+	reportReductionWarning(&buf, live, project, candidates, true, promotionOutcome{})
+	if !strings.Contains(buf.String(), "left 5 memories in the project vs 20") {
+		t.Errorf("promotion on leaves 5 of 20 in the project; got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "promoted to _global") {
+		t.Errorf("warning misreports where the 7 candidates went; got:\n%s", buf.String())
+	}
+
+	// A real compression with no candidates at all: the message has to name the
+	// count that survived, not the count of one scope.
+	buf.Reset()
+	reportReductionWarning(&buf, live, []reflection.ReflectMemory{{}, {}}, nil, false, promotionOutcome{})
+	if !strings.Contains(buf.String(), "left 2 memories in the project vs 20") {
+		t.Errorf("got:\n%s", buf.String())
+	}
+}
+
+// TestReportReductionWarningStaysQuietOnSmallCorpora: below six consolidatable
+// rows a ratio warning fires on almost every run and means nothing.
+func TestReportReductionWarningStaysQuietOnSmallCorpora(t *testing.T) {
+	var buf bytes.Buffer
+	reportReductionWarning(&buf, make([]memory.Memory, reductionWarnMinInput-1), []reflection.ReflectMemory{{}}, nil, false, promotionOutcome{})
+	if buf.Len() != 0 {
+		t.Errorf("a %d-memory corpus must not raise a reduction warning; got:\n%s", reductionWarnMinInput-1, buf.String())
+	}
+}
+
+// TestReportReductionWarningBoundaryIsNotRounded: the half is compared doubled,
+// not as len(live)/2. Integer division rounds down, so on an odd corpus "3 of 7"
+// — a 57% reduction, more than the half the message names — read as "kept at
+// least half" and printed nothing.
+func TestReportReductionWarningBoundaryIsNotRounded(t *testing.T) {
+	live := make([]memory.Memory, 7)
+	kept := make([]reflection.ReflectMemory, 3)
+
+	var buf bytes.Buffer
+	reportReductionWarning(&buf, live, kept, nil, false, promotionOutcome{})
+	if !strings.Contains(buf.String(), "left 3 memories in the project vs 7") {
+		t.Errorf("3 of 7 is a 57%% reduction and must be reported; got:\n%s", buf.String())
+	}
+
+	// And the other side of the same boundary, on the same odd corpus: 4 of 7 is
+	// 43% retained, under the half, so it stays quiet.
+	buf.Reset()
+	reportReductionWarning(&buf, live, make([]reflection.ReflectMemory, 4), nil, false, promotionOutcome{})
+	if buf.Len() != 0 {
+		t.Errorf("4 of 7 keeps more than half and must not be reported; got:\n%s", buf.String())
+	}
+}
+
+// TestReportDisposedClaims pins the three shapes a disposal claim can take, and
+// the middle one is the defect this report exists to prevent: executeOps records
+// Replacement.Text before the post-filters run, and
+// dropForeignProjectMemories deletes a memory naming a project the input corpus
+// never mentioned — so a claim can name a replacement the SAME run threw away.
+// Printing it as "replaced by" would tell a person deciding on --apply that the
+// knowledge went somewhere, when the row is about to be deleted and the
+// replacement is in neither place.
+func TestReportDisposedClaims(t *testing.T) {
+	const kept = "the bastion answers ping on 443"
+	result := reflection.ReflectionResult{
+		Memories: []reflection.ReflectMemory{{Category: "fact", Content: kept}},
+		Replacements: []reflection.Replacement{
+			{ID: "A", Text: kept},               // the replacement survived
+			{ID: "B", Text: "gone from result"}, // a post-filter removed it
+			{ID: "C"},                           // no text recorded at all
+		},
+	}
+
+	var buf bytes.Buffer
+	reportDisposedClaims(&buf, result)
+	got := buf.String()
+
+	for _, want := range []string{
+		"replaced by " + kept,
+		"its replacement is NOT in this result — gone from result",
+		"(no replacement text recorded)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("claim report missing %q; got:\n%s", want, got)
+		}
+	}
+	// The discarded replacement must not also be described as having replaced
+	// anything, which is the specific misreading.
+	if strings.Contains(got, "replaced by gone from result") {
+		t.Errorf("a replacement the run discarded is reported as replacing the row:\n%s", got)
+	}
+}
+
+// TestReportDisposedClaimsSaysNothingWithoutClaims: a round where the model
+// disposed of nothing must not print a header, so the dry run's output is not
+// carrying an empty section.
+func TestReportDisposedClaimsSaysNothingWithoutClaims(t *testing.T) {
+	var buf bytes.Buffer
+	reportDisposedClaims(&buf, reflection.ReflectionResult{
+		Memories: []reflection.ReflectMemory{{Category: "fact", Content: "anything"}},
+	})
+	if buf.Len() != 0 {
+		t.Errorf("no disposals, so nothing should be printed; got:\n%s", buf.String())
+	}
+}
+
+// TestReportReductionWarningCountsCandidatesPromotionFailed is the case the
+// pre-apply count got wrong. With --promote-globals a candidate that cannot
+// become a _global row is written back into the PROJECT, so it is a row the
+// project still holds — a survivor. Counting only projectMems understated
+// retention by the whole candidate set, so a run where every promotion failed
+// reported a far larger reduction than happened, on the one line the unattended
+// lifecycle path has to report it with.
+func TestReportReductionWarningCountsCandidatesPromotionFailed(t *testing.T) {
+	live := make([]memory.Memory, 20)
+	project := make([]reflection.ReflectMemory, 3)
+	candidates := make([]reflection.ReflectMemory, 9)
+
+	// Every promotion failed, so all nine candidates are back in the project and
+	// it ends up holding twelve of twenty: above the half, so nothing is reported.
+	var buf bytes.Buffer
+	reportReductionWarning(&buf, live, project, candidates, true,
+		promotionOutcome{applied: true, kept: len(candidates)})
+	if buf.Len() != 0 {
+		t.Errorf("12 of 20 kept is under two thirds and must not be reported as a >50%% reduction; got:\n%s", buf.String())
+	}
+
+	// And the pre-apply view of the same round, which is what the count looks
+	// like before anyone knows how many promotions will fail. 3 of 20 is 85%, so
+	// this one does report — which is exactly why the apply path must wait for
+	// the real number rather than print this one.
+	buf.Reset()
+	reportReductionWarning(&buf, live, project, candidates, true, promotionOutcome{})
+	if !strings.Contains(buf.String(), "left 3 memories in the project vs 20") {
+		t.Errorf("the pre-apply count is the optimistic one and must say so; got:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "would be promoted") {
+		t.Errorf("before the apply, a candidate is classified global and nothing more; got:\n%s", buf.String())
+	}
+}
+
+// TestReportReductionWarningNeverClaimsAnUnwrittenPromotion: the note said
+// "promoted to _global" on a run where promotion had not happened yet, so it
+// asserted a write that had not occurred. Each state has to be stated in its own
+// words, and none of them may be the one belonging to a different moment.
+//
+// The third case is the one a bare count could not express, and it is the
+// commonest outcome of `--apply --promote-globals`: the apply ran and EVERY
+// candidate promoted, so kept is 0 — the same count as "nothing has been written
+// yet". Inferring the state from the count printed "would be promoted" AFTER the
+// write that had already promoted all nine, which is the same untruth pointing
+// the other way.
+func TestReportReductionWarningNeverClaimsAnUnwrittenPromotion(t *testing.T) {
+	live := make([]memory.Memory, 20)
+	project := make([]reflection.ReflectMemory, 3)
+
+	cases := []struct {
+		name       string
+		candidates int
+		promote    bool
+		promotion  promotionOutcome
+		want       string
+		refuse     string
+	}{
+		{
+			// With promotion on, the retained side is projectMems plus whatever
+			// came back, so nine candidates do not make this round look retained.
+			name: "before the apply", candidates: 9, promote: true, promotion: promotionOutcome{},
+			want: "would be promoted to _global on apply", refuse: "promoted to _global,",
+		},
+		{
+			name: "promotion partly failed", candidates: 9, promote: true,
+			promotion: promotionOutcome{applied: true, kept: 4},
+			want:      "5 promoted to _global, 4 could not be and are back in the project",
+			refuse:    "would be promoted",
+		},
+		{
+			name: "promotion applied, all candidates promoted", candidates: 9, promote: true,
+			promotion: promotionOutcome{applied: true, kept: 0},
+			want:      "all 9 promoted to _global",
+			// The bug this case exists for: the same kept=0 as the pre-apply row
+			// above, and the opposite truth.
+			refuse: "would be promoted",
+		},
+		{
+			// With promotion off every candidate is folded back in, so it takes
+			// fewer of them to cross the line — hence its own count.
+			name: "promotion off", candidates: 6, promote: false,
+			promotion: promotionOutcome{},
+			want:      "kept project-scoped", refuse: "_global",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			reportReductionWarning(&buf, live, project, make([]reflection.ReflectMemory, tc.candidates), tc.promote, tc.promotion)
+			got := buf.String()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("note missing %q; got:\n%s", tc.want, got)
+			}
+			if tc.refuse != "" && strings.Contains(got, tc.refuse) {
+				t.Errorf("note claims %q, which is not true at this point; got:\n%s", tc.refuse, got)
+			}
+		})
+	}
+}
+
 func TestConsolidatableFilters(t *testing.T) {
 	now := "2026-09-21 00:00:00"
 	mems := []memory.Memory{

@@ -34,43 +34,46 @@ type ReflectionResult struct {
 	LearnedContext string          `json:"learned_context"`
 	Memories       []ReflectMemory `json:"memories"`
 	// Merges are the merges the response performed, each with the ids it folded in
-	// and the text that came out. The drop guard scores a merged source against the
-	// union of the output memories rather than against any single output, because
-	// a merge may carry one source's substance across a survivor plus its
-	// siblings; an id outside a merge is measured against a single output, because
-	// there the guard is asking whether the response accounted for the memory at
-	// all (#639). The text is what makes the claim checkable after the fact — see
-	// Replacement for why an id alone is not enough.
+	// and the text that came out. The drop guard scores a merged source against
+	// the text of its own merge, because that is the only witness that can say
+	// whether the merge carried it — a merge source is consumed by its merge, so
+	// its own text is never in the result — and it scores an id outside a merge
+	// against a single output, because there the guard is asking whether the
+	// response accounted for the memory at all (#639). The text is what makes the
+	// claim checkable after the fact — see Replacement for why an id alone is not
+	// enough.
 	Merges []Merge `json:"merges,omitempty"`
-	// Replacements are the input ids a response disposed of, each with the text
-	// that stands in its place: a rewrite's own new text, or the emitted text of
-	// the successor a supersession named. They share one list because they are one
-	// claim — "this row no longer needs carrying, that text says it instead" — and
-	// the drop guard treats them identically.
+	// Replacements record the input ids a response disposed of, each with the
+	// text it says took their place. They are a record of the response's claims,
+	// NOT an exemption: the drop guard audits a disposed row like any other, and
+	// keeps it unless the corpus can show it is gone (see Replacement).
 	Replacements []Replacement `json:"replacements,omitempty"`
 }
 
-// Merge is one merge operation and what it produced. Text and not just the ids for
-// the same reason Replacement carries its text: a filter that runs over the result
-// after the operations are resolved can remove the merge, and a source still
-// claiming a merge that is not there is scored against a union that has nothing to
-// do with it — which, with the pass-through emitting every unclaimed input, is the
-// rest of the project.
+// Merge is one merge operation and what it produced. Text and not just the ids so
+// the drop guard can check each source against the text its merge actually
+// produced: a source whose substance that text lost is not covered by the merge
+// and has to be put back, and scoring it against everything else in the result
+// would let an unrelated memory vouch for it instead (#549).
 type Merge struct {
 	IDs  []string
 	Text string
 }
 
-// Replacement is an input id the response disposed of together with the text that
-// took its place, which is what makes the claim checkable after the fact.
+// Replacement records that a response disposed of an input id, and the text it
+// says took its place — a rewrite's own new text, or the emitted text of the
+// successor a `superseded by` drop named.
 //
-// Text and not just id, because the guards that run over the result can still
-// remove a survivor: dropForeignProjectMemories deletes a memory naming a project
-// the input corpus never mentioned, and a rewrite or a merge is exactly such a
-// memory. An exemption trusted on the id alone therefore disposes of a row whose
-// replacement is not in the corpus — no survivor, nothing for --allow-drops to
-// act on, and a silent deletion. The text is the witness, and the drop guard
-// honours the claim only while that text is still there.
+// It is a RECORD of what the response claimed, not a permission. The drop guard
+// does not read it and no longer exempts anything on it: an unattended reflect
+// never deletes a memory on the model's say-so alone, because a stale row that
+// is kept is repairable by resolve and supersede while a deleted row is not (see
+// AuditGuardedDrops). Its reader is `ghost reflect`'s own report, which prints each
+// claim under "Disposed of (model's claim)" so a person deciding whether to pass
+// --apply can see that the model tried to drop something — the guarded-drop report
+// beside it says what was actually retained or deleted. Without that reader the
+// field would be write-only, and the honest move would be to delete it rather
+// than keep a claim nothing looks at.
 type Replacement struct {
 	ID   string
 	Text string
@@ -131,15 +134,43 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	// told omission is safe while their corpus loses the memory. Declared out here
 	// because the output rules below are emitted whether or not there are any
 	// existing memories to list.
-	foldToKeep := "Dropping is not deletion: a memory you do not name is carried through unchanged, and a memory you do not want is folded into a survivor rather than dropped. What the apply can still add back is what no surviving memory explains — an \"obsolete\" drop nothing replaced, or a merge that lost one of its sources. EVERY category is protected that way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
+	foldToKeep := "Dropping is not deletion: a memory you do not name is carried through unchanged, and a memory you do not want is folded into a survivor rather than dropped. What the apply can still add back is what no surviving memory explains — an \"obsolete\" drop nothing replaced, a merge that lost one of its sources, and a rewrite or a supersession whose replacement does not carry the old memory's substance. EVERY category is protected that way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
 	mergeTail := "a loose summary is not recognized as a merge, and the input is kept verbatim beside it"
-	staleTail := "since a drop nothing explains is undone by the verbatim re-add"
+	// staleTail and obsoleteTail are the two tails that MEET inside one bullet,
+	// and only those need their own terminal punctuation: a template cannot
+	// supply a full stop between two spliced clauses, so without one the harness
+	// is handed two sentences welded into a single clause. Every other tail is
+	// closed by whatever the template puts after it — the end of the bullet, or
+	// the sentence the template continues with — so its own terminal punctuation
+	// is optional. mergeTail relies on that (the template's own sentence follows
+	// it), which is why it deliberately carries none; foldToKeep, countTail and
+	// replaceTail end their lines and carry a full stop because it reads better
+	// to the model, not because anything needs it.
+	staleTail := "since a drop nothing explains is undone by the verbatim re-add."
+	// replaceTail is the same warning for the two operations that REPLACE a row
+	// rather than fold it. The guard exempts nothing, so a rewrite or a
+	// supersession that no output accounts for leaves the row in the corpus
+	// verbatim — a paraphrase duplicate that every later pass has to read. Saying
+	// so is what lets the model write a replacement that carries the substance
+	// instead of one that merely rewords it.
+	//
+	// Mode-dependent, and not as a formality: --allow-drops skips the verbatim
+	// re-add entirely, so under that flag the same sentence would promise a save
+	// the run never makes. That is the path eval/cycle measures on (it passes
+	// --apply --allow-drops), so a prompt that says "re-added" there is telling
+	// the grader a consolidation is cheaper than it is.
+	replaceTail := "Your replacement has to CARRY the old memory's substance — the same specifics, restated. If nothing in the result accounts for the old row, the apply puts that row back verbatim beside your replacement, and the two sit there until a later pass demotes the stale one."
+	// obsoleteTail adds only what staleTail does not already say: the guidance to
+	// prefer a fold. Restating the re-add here would repeat staleTail in the same
+	// clause.
+	obsoleteTail := "State an obsolete drop only when a surviving memory really does replace it."
 	countTail := "A count you reach by dropping is undone by that re-add."
 	omissionCost := "carried through unchanged, so forgetting one costs you the consolidation you had in mind for it and nothing else"
 	if input.AllowDrops {
 		foldToKeep = "This run DELETES every input no surviving memory explains, in EVERY category: gotcha, dependency, preference, convention, architecture, decision, pattern and fact. There is no protected category this run — fold anything you want to keep, and expect an unexplained drop to be the last version of it."
 		mergeTail = "a loose summary is not recognized as a merge, and the input is deleted even though you mentioned it"
-		staleTail = "since a drop nothing explains is a real deletion"
+		staleTail = "since a drop nothing explains is a real deletion."
+		replaceTail = "Your replacement has to CARRY the old memory's substance — the same specifics, restated. If nothing in the result accounts for the old row, the input is DELETED, and yours is the last version of it."
 		countTail = "A count you reach by dropping is a real deletion, not a cleanup."
 		omissionCost = "carried through unchanged, so forgetting one costs you the consolidation you had in mind for it and nothing else"
 	}
@@ -184,9 +215,9 @@ Produce a JSON object with two fields:
 2. "ops": an array of operation strings, one per id listed above. Every id gets exactly one operation, and an id appears in at most one operation:
    - "keep <id>" — this memory is already right and complete. Use it for the memory as it stands and do NOT retype it: a kept memory keeps its id, its age, its links and its embedding, which no rewrite can. Restating a memory you had nothing to change is what made consolidation churn identities.
    - "merge <id>,<id>,<id> -> <text>" — two or more of these memories state one fact. A merge must carry the inputs' substance into the survivor — restate the specifics, do not summarize them away: ` + mergeTail + `. Category, importance and tags are taken from the ids you name, so a merge never silently recategorizes a memory or strips its labels.
-   - "rewrite <id> -> <text>" — replace ONE memory whose CLAIM is wrong: it names the wrong service, the wrong owner, or the wrong state of the world. Never for a paraphrase, and never to put a memory into new words. The replacement must not change a specific: see the identifier rule below, so a rewrite cannot correct a wrong number, host, path or version — "keep" a memory whose specifics you cannot verify, or "drop" it if nothing else in the corpus says it.
-   - "drop <id> reason: obsolete" — the memory is wrong or no longer true and nothing else in the corpus replaces it. Prefer folding it into a survivor, ` + staleTail + ` An obsolete drop with no surviving memory that accounts for it is put back verbatim, so state one only when a survivor really does replace it.
-   - "drop <id> reason: superseded by <id>" — another id in this same list already says it better, and you carry that one forward. The target must be an id you keep, merge or rewrite in this response: a supersession pointing at a target you also drop leaves the corpus with nothing.
+   - "rewrite <id> -> <text>" — replace ONE memory whose CLAIM is wrong: it names the wrong service, the wrong owner, or the wrong state of the world. Never for a paraphrase, and never to put a memory into new words. The replacement must not change a specific: see the identifier rule below, so a rewrite cannot correct a wrong number, host, path or version — "keep" a memory whose specifics you cannot verify, or "drop" it if nothing else in the corpus says it. ` + replaceTail + `
+   - "drop <id> reason: obsolete" — the memory is wrong or no longer true and nothing else in the corpus replaces it. Prefer folding it into a survivor, ` + staleTail + ` ` + obsoleteTail + `
+   - "drop <id> reason: superseded by <id>" — another id in this same list already says it better, and you carry that one forward. The target must be an id you keep, merge or rewrite in this response: a supersession pointing at a target you also drop leaves the corpus with nothing. ` + replaceTail + `
    Rules:
    - Every id listed above needs an operation. An id you never mention is ` + omissionCost + `
    - An identifier in merge or rewrite text — a path, hash, version, hostname, port or any number — must appear in one of the ids you are merging or rewriting, copied exactly. A merge or rewrite that introduces an identifier absent from its sources is rejected and the original memories are kept, so a typo is never stored as fact. This is why a rewrite cannot fix a wrong number: the corrected value would be an identifier the source does not contain. When you cannot reproduce the specifics exactly, "keep" instead.
