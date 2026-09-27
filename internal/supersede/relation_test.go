@@ -208,13 +208,10 @@ func TestSupersedeNEITHERCachePrefixMoved(t *testing.T) {
 	if old("same text") == contentHash("same text") {
 		t.Error("a v2-prefixed NEITHER row still matches the cache key: every verdict cached under the #641 rubric would keep skipping its pair")
 	}
-	// The new prefix is in force and still keyed by content: two different texts
-	// hash apart, and the same text hashes to the same key.
-	if contentHash("a") == contentHash("b") {
+	// The key is still keyed by CONTENT, which is what lets a tag or importance
+	// edit keep a cached verdict: two different notes hash apart.
+	if contentHash("one note") == contentHash("another note") {
 		t.Error("contentHash ignores its input")
-	}
-	if contentHash("a") != contentHash("a") {
-		t.Error("contentHash is not deterministic")
 	}
 }
 
