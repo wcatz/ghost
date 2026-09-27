@@ -128,7 +128,9 @@ func parseAsOf(raw string) (*time.Time, error) {
 //
 // A block rather than inline sentences, because these are the statements a
 // reader must not scroll past: a historical answer that reads as a present one
-// is the failure mode, and the reader is the one who has to be told.
+// is the failure mode, and the reader is the one who has to be told. It carries
+// its own trailing blank line so a caller can place it before either a listing or
+// a sentence without deciding the spacing again.
 func qualifierBlock(result assemble.Result) string {
 	if len(result.Qualifiers) == 0 {
 		return ""
@@ -927,7 +929,7 @@ func (s *Server) registerTools() {
 				text = why
 			}
 			if leading != "" {
-				text = leading + "\n" + text
+				text = leading + text
 			}
 			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
 				text += "\n\n" + caveat
