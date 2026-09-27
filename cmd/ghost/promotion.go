@@ -51,14 +51,31 @@ type reflectionApplier interface {
 // count left it counting the pre-drop lists, so a partial drop — one good
 // proposal and one credential — reported 2 written when 1 was.
 func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, applied bool, err error) {
-	if !promoteGlobals && len(globalMems) > 0 {
-		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
-		globalMems = nil
+	// Filter FIRST, on the caller's two sets, and fold afterwards.
+	//
+	// The order is load-bearing and it was the other way round here first.
+	// Folding the cross-project candidates into projectMems and nilling
+	// globalMems BEFORE the drop means keptGlobal comes back as the empty slice
+	// the drop builds for a nil input — never the caller's cross-project set —
+	// and the two things the caller needs it for then silently die: the
+	// "(re-run with --promote-globals)" hint becomes unreachable, and the
+	// ", N cross-project candidates kept project-scoped" component disappears
+	// from the Applied line. Filtering first also drops a credential among the
+	// cross-project candidates before they can be promoted, which is the point.
+	keptProject, keptCrossProject, dropped := dropCredentialProposals(projectMems, globalMems)
+	projectMems = keptProject
+	// Two different sets from here on, and conflating them is the failure the
+	// ordering above is guarding: the fold is what the STORE gets, and
+	// keptCrossProject is what the caller REPORTS. Nilling the returned set to
+	// fold it would make the --promote-globals hint and the cross-project count
+	// unreachable, and a flag nobody is told about is a flag nobody uses.
+	writeGlobals := keptCrossProject
+	if !promoteGlobals && len(keptCrossProject) > 0 {
+		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), keptCrossProject...)
+		writeGlobals = nil
 	}
-	keptProject, keptGlobal, dropped := dropCredentialProposals(projectMems, globalMems)
-	projectMems, globalMems = keptProject, keptGlobal
 	projectRows := reflectMemoriesToMemory(projectID, projectMems, replaced)
-	globalRows := reflectMemoriesToMemory("_global", globalMems, replaced)
+	globalRows := reflectMemoriesToMemory("_global", writeGlobals, replaced)
 	if len(projectRows) == 0 && len(globalRows) == 0 {
 		// Nothing to write, so nothing is replaced: no deleteIds are computed and
 		// no stored row is touched. The dropped proposals are still reported
@@ -89,7 +106,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		fmt.Fprintln(os.Stderr,
 			"note: the project replace has just removed any stored memory the dropped proposal(s) were carrying forward, because it held a credential value. A manual, builtin, pinned or resolved row is not replaceable and would still be there: check the project")
 	}
-	return keptProject, keptGlobal, preserved, promoted, kept, true, nil
+	return keptProject, keptCrossProject, preserved, promoted, kept, true, nil
 }
 
 // displayProposal renders a proposal or a guarded drop for the operator's own

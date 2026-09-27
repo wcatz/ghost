@@ -56,8 +56,8 @@ func globals(contents ...string) []reflection.ReflectMemory {
 func TestApplyReflectionAlwaysReachesPromotionWithoutProjectMemories(t *testing.T) {
 	f := &fakeReflectionApplier{resultPromoted: 1}
 	_, _, preserved, promoted, kept, _, err := applyReflection(
-		context.Background(), f, "p1", nil, globals("global"), "since", true,
-		nil)
+		context.Background(), f, "p1", nil, globals("global"), "since", true, nil,
+	)
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
@@ -88,8 +88,8 @@ func TestApplyReflectionFoldsGlobalsIntoProjectUnlessAsked(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeReflectionApplier{}
 			_, _, _, _, _, _, err := applyReflection(
-				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", tc.promote,
-				nil)
+				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", tc.promote, nil,
+			)
 			if err != nil {
 				t.Fatalf("applyReflection: %v", err)
 			}

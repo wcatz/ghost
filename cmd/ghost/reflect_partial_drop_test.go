@@ -24,8 +24,8 @@ func TestPartialDropIsNotCountedAsConsolidated(t *testing.T) {
 	keptProject, keptGlobal, _, _, _, applied, err := applyReflection(
 		context.Background(), f, "p1",
 		projectMemories("the relay listens on 2222", "the deploy token is "+credential),
-		nil, "since", false,
-	 nil)
+		nil, "since", false, nil,
+	)
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
