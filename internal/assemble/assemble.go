@@ -232,8 +232,13 @@ func resolvedParams(req Request) memory.SearchParams {
 // RetrievalWindow is the window Run will ask the retriever for on this request.
 // Exported so a caller whose own path has to describe the same window asks here
 // instead of repeating the rule: explain mode reports the ranking of a window,
-// and a diagnosis of a window the tool does not use describes nothing. It
-// returns 0 for a request with no budget, which Run rejects as invalid anyway.
+// and a diagnosis of a window the tool does not use describes nothing.
+//
+// It is never 0 for a request Run accepts. A budget with no item bound — a byte
+// cap alone, or a slice clamp alone — is a coherent request ("as many rows as
+// fit"), and the all-zero check admits it, so the window falls back to
+// maxRetrievalWindow rather than handing the store a fetch limit it refuses with
+// a message about a limit instead of about the budget.
 func RetrievalWindow(req Request) int { return retrievalWindow(req) }
 
 // retrievalWindow is how wide the retrieval window is. It is the caller's total
@@ -248,7 +253,11 @@ func retrievalWindow(req Request) int {
 		}
 	}
 	if total <= 0 {
-		return 0
+		// No item bound anywhere, so nothing sizes a window from the budget.
+		// The ceiling is the honest default: stage 8 still trims by bytes or by
+		// the slice clamp, so the caller gets what it asked for, and a fetch
+		// limit of 0 would be refused by the store before any of that.
+		total = maxRetrievalWindow
 	}
 	if req.Category != "" {
 		widened := total * categoryFetchWiden

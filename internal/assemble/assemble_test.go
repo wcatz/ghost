@@ -1459,3 +1459,58 @@ func TestTheStageRecordKeepsTheStageScopedSentence(t *testing.T) {
 		t.Errorf("the stage record carries the answer's sentence, which is about a window that had not closed: %v", stageNotes)
 	}
 }
+
+// TestABudgetWithoutAnItemBoundStillGetsAWindow: MaxItems is 0 = unbounded and
+// MaxBytes is a byte cap, so "as many rows as fit in N bytes" is a coherent
+// request that the all-zero check accepts. The window cannot come from the item
+// budget in that shape, and returning 0 handed the store a request it refuses
+// with a message about a fetch limit, naming neither the budget nor the fix. The
+// window falls back to the documented ceiling instead, and stage 8 still trims by
+// bytes — which is what the caller asked for.
+func TestABudgetWithoutAnItemBoundStillGetsAWindow(t *testing.T) {
+	rows := make([]memory.Candidate, 0, 20)
+	for i := range 20 {
+		rows = append(rows, candidate(string(rune('a'+i)), "proj", "fact", "row", 0.5))
+	}
+	tests := []struct {
+		name   string
+		budget Budget
+	}{
+		{"a byte cap alone", Budget{MaxBytes: 40_000}},
+		{"a slice byte clamp alone", Budget{Slices: []Slice{{Bucket: "proj", ClampBytes: 200}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := baseRequest()
+			req.Budget = tc.budget
+
+			if got := RetrievalWindow(req); got != maxRetrievalWindow {
+				t.Errorf("RetrievalWindow = %d, want %d: a request with no item bound still needs a "+
+					"window, and %d is the documented ceiling", got, maxRetrievalWindow, maxRetrievalWindow)
+			}
+			// And the limit the store is handed: a fetch limit of 0 is what
+			// memory.validateCandidateRequest refuses, with a message about a
+			// limit rather than about the budget that produced it.
+			r := &fakeRetriever{set: setOf(rows...)}
+			if _, err := Run(context.Background(), r, req); err != nil {
+				t.Errorf("Run rejected a budget the request validation accepts: %v", err)
+			}
+			if r.req.Fetch.Limit <= 0 {
+				t.Errorf("the retriever was asked for %d rows, which the store refuses: a byte-only "+
+					"budget has no item bound to size a window from", r.req.Fetch.Limit)
+			}
+		})
+	}
+}
+
+// TestTheAllZeroBudgetIsStillRejected: the fallback above must not turn an
+// omission into a request. An all-zero budget means the caller did not say how
+// large a block it wants, and guessing the ceiling for it would be inventing the
+// answer the check exists to ask for.
+func TestTheAllZeroBudgetIsStillRejected(t *testing.T) {
+	req := baseRequest()
+	req.Budget = Budget{}
+	if _, err := Run(context.Background(), &fakeRetriever{set: setOf()}, req); err == nil {
+		t.Error("an all-zero budget was accepted, so a caller that forgot to state a size got one silently")
+	}
+}
