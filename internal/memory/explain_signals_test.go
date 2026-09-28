@@ -750,14 +750,32 @@ func TestExplainDecayFactorIsTheRankingPathOwn(t *testing.T) {
 	}
 	// The two searches above ran some gap apart, so each measured the row's age
 	// against its own `now`. The bound is therefore a CLOCK-GAP bound, not a
-	// precision claim: 1e-3 days is 86 seconds, which two back-to-back searches
-	// cannot plausibly be even on a loaded runner (the first CI attempt at this
-	// test failed at 12ms), while a deliberately different clock is 0.027 days on
-	// a 100-day row — 27x the bound. The mutation this guards needs no tolerance
-	// at all: it leaves the recorded factor and clock at zero, which is checked
-	// first and exactly.
-	const dayGap = 1e-3
-	if d := math.Abs(tc.Decay - row.DecayFactor); d > dayGap*(1.0/30.0) {
+	// precision claim.
+	//
+	// The bound is 1e-3 days — 86 seconds. Two back-to-back searches cannot
+	// plausibly be 86 seconds apart even on a loaded runner (CI's first attempt at
+	// this test failed at a 12ms gap, which is what set the scale), while any
+	// offset the code could actually produce is far above it: an hour is 1/24 =
+	// 0.0417 days, 42x the bound.
+	//
+	// The FACTOR is bounded by 1/30 of that gap, and the 1/30 is derived rather
+	// than chosen: this row is a `gotcha`, so DecayFactor takes its default
+	// branch, 1/(1+ageDays/30), whose derivative is 1/30 at the origin and
+	// decays from there — so a gap of g days moves the factor by at most g/30.
+	// The 45-day pattern/architecture branch is gentler still. A future tau
+	// shorter than 30 would need the constant re-derived, and the note below says
+	// why that is a comment-level obligation and not a live risk.
+	//
+	// None of these comparisons is the guard. The mutation this exists for deletes
+	// the trace block, which leaves the recorded factor and the clock at exactly
+	// zero, and both of those are checked exactly, immediately below and above.
+	// These two are supporting evidence that the values agree to within the gap.
+	const (
+		dayGap = 1e-3
+		// tauDays is DecayFactor's default branch, in days.
+		tauDays = 30.0
+	)
+	if d := math.Abs(tc.Decay - row.DecayFactor); d > dayGap/tauDays {
 		t.Errorf("the factor the ranking recorded (%v) is not the one explain reported (%v): the payload must "+
 			"carry the ranking's number, not one that happens to match it", tc.Decay, row.DecayFactor)
 	}
@@ -853,13 +871,17 @@ func TestExplainNamesBothSidesOfTheKeywordReservation(t *testing.T) {
 		t.Errorf("a reserved row reports rank 0: it is in the answer, so it must carry a 1-based rank: %+v", res)
 	}
 
-	// Exactly ONE exchange happened, and all three sides of that are checked
-	// rather than assumed: the window is still the 10 rows the caller asked for,
-	// exactly one of them is the reserved keyword-only row, the other nine are
-	// dual-leg rows, and the dual row the reservation named is in neither set. Too
-	// few dual rows and the pool is never wider than the window, the reservation
-	// cannot fire, and the KeywordReserved guard above is then the only thing that
-	// would have said so.
+	// What the window holds, checked rather than assumed: still the 10 rows the
+	// caller asked for, and exactly one of them is not a dual-leg row — the
+	// keyword-only row the reservation promoted into it. Too few dual rows and the
+	// pool is never wider than the window, the reservation cannot fire, and the
+	// KeywordReserved guard above is then the only thing that would have said so.
+	//
+	// This does NOT count the exchanges. Every included row lands in exactly one
+	// of dualIn/nonDualIn, so a third count would be arithmetic on the other two
+	// rather than a new observation, and a second exchange would leave all three
+	// unchanged. What pins the count of exchanges is the loop further down: no row
+	// other than these two may report keyword_reserved or displaced_by.
 	included, dualIn, nonDualIn := 0, 0, 0
 	dualSet := make(map[string]bool, len(dual))
 	for _, id := range dual {
@@ -881,12 +903,9 @@ func TestExplainNamesBothSidesOfTheKeywordReservation(t *testing.T) {
 			"so a window that is not full means the pool was never wider than the window", included)
 	}
 	if nonDualIn != 1 {
-		t.Errorf("%d of the 10 rows in the window are not dual-leg rows, want 1 (the reserved keyword-only row): "+
-			"the reservation promotes one candidate, so more than one means a different number of exchanges", nonDualIn)
-	}
-	if dualIn != 9 {
-		t.Errorf("%d dual-leg rows are in the window, want 9: %d of them were in it before the reservation and "+
-			"exactly one lost its slot, so %d is a different number of exchanges", dualIn, 10, 10)
+		t.Errorf("the window holds %d dual-leg rows and %d that are not, want 9 and 1: the one that is not is "+
+			"the reserved keyword-only row, so any other number means the window is not composed as the "+
+			"reservation left it", dualIn, nonDualIn)
 	}
 	// The displaced row is one of the dual-leg rows and is genuinely out of the
 	// window, which is what "it lost its slot" means. It is the row the eviction
