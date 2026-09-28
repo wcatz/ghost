@@ -195,6 +195,17 @@ func (w *Worker) noteSweep(got Reachability) {
 	w.writeDownMarker(filepath.Join(w.dataDir, OllamaDownMarkerFilename))
 }
 
+// withoutEvidence turns a probe's verdict into one a caller may ACT on when
+// nothing was attempted behind it. A refusal stands — it is an answer about the
+// endpoint, whatever the work — and an inconclusive does not, because it is
+// evidence of nothing and would cost a sweep every remaining project.
+func withoutEvidence(got Reachability) Reachability {
+	if got == Inconclusive {
+		return Reachable
+	}
+	return got
+}
+
 // Run starts the worker loop. Blocks until ctx is cancelled.
 // Project IDs sent on the channel are processed immediately (new saves);
 // the periodic sweep covers ALL projects so pre-existing memories backfill
@@ -359,11 +370,22 @@ const projectBatch = 50
 // comment gives. This leniency is for the callers with no second chance, and a
 // caller that has one should keep it.
 //
-// The second return is the endpoint's LAST answer in this call, and it exists so
-// that a caller walking several projects can reuse the verdict the batch's own
-// re-probe already paid for rather than probing again: a healthy endpoint makes
-// it Reachable, an unanswered one keeps whatever the re-probe found. It is not a
-// summary of the batch's work — the count is that.
+// The second return is the verdict `SweepOnce` may ACT ON, and it is not quite
+// "the endpoint's last answer", because a probe with nothing behind it is not
+// evidence. The in-batch re-probe's verdict is reported as itself: a batch
+// actually attempted an embed, so an endpoint that then stopped answering HAS said
+// something. On the two no-work paths — the unembedded list failed, or there was
+// nothing to embed — a CONCLUSIVE verdict is still reported (a refusal stops a
+// sweep whatever the work behind it) and an INCONCLUSIVE one collapses to
+// Reachable, because `client.go` says a busy machine reaches that deadline
+// routinely and a sweep breaking on it would skip every remaining project for a
+// tick, over a probe it was going to make anyway.
+//
+// So Reachable there means "nothing to act on", not "the endpoint answered", and
+// the one caller that reads this value says exactly that. Reporting the raw
+// Inconclusive instead is the cheaper-looking mistake: it costs one tick of the
+// remaining projects on every busy machine, which is the failure this whole
+// change exists to stop.
 func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) (int, Reachability) {
 	// Check whether Ollama is really not there, which is a different question
 	// from whether it answered quickly (see the doc comment above).
@@ -381,11 +403,11 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 	ids, err := w.store.UnembeddedMemoryIDs(ctx, projectID, w.client.Identity(), limit)
 	if err != nil {
 		w.logger.Error("embed: list unembedded", "error", err, "project_id", projectID)
-		return 0, got
+		return 0, withoutEvidence(got)
 	}
 
 	if len(ids) == 0 {
-		return 0, got
+		return 0, withoutEvidence(got)
 	}
 
 	w.logger.Info("embedding memories", "project_id", projectID, "count", len(ids))

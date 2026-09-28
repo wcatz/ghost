@@ -156,26 +156,25 @@ func TestSweepOnce_StopsWhenTheEndpointDiesMidSweep(t *testing.T) {
 	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
 
 	release := make(chan struct{})
-	var mu sync.Mutex
-	probes, embeds := 0, 0
+	// Atomic, not a mutex-guarded int read at the end: the handler goroutine
+	// writes these and the test reads them, and a response arriving over a socket
+	// is not a happens-before edge the race detector tracks. This file already
+	// counts with atomic for panicOnceStore.fired, and `hungEndpoint` returns a
+	// locked accessor for the same reason — an unguarded read here would be a race
+	// `go test -race ./...` can report, and CI runs that.
+	var probes, embeds atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
 			// Healthy for the sweep's own gate, gone for everything after it.
-			mu.Lock()
-			probes++
-			n := probes
-			mu.Unlock()
-			if n > 1 {
+			if probes.Add(1) > 1 {
 				<-release
 			}
 			w.WriteHeader(http.StatusOK)
 		case "/api/embed":
 			// Refused rather than wedged, so the batch fails fast and the cost
 			// of a missed stop is attempts rather than 30s a piece.
-			mu.Lock()
-			embeds++
-			mu.Unlock()
+			embeds.Add(1)
 			http.Error(w, "embedding backend unavailable", http.StatusServiceUnavailable)
 		default:
 			http.NotFound(w, r)
@@ -196,9 +195,74 @@ func TestSweepOnce_StopsWhenTheEndpointDiesMidSweep(t *testing.T) {
 
 	worker.SweepOnce(context.Background())
 
-	if embeds > 1 {
+	if n := embeds.Load(); n > 1 {
 		t.Errorf("the endpoint stopped answering after the first project, and the sweep still made %d "+
-			"embed attempt(s) across 3 projects; want at most the first project's", embeds)
+			"embed attempt(s) across 3 projects; want at most the first project's", n)
+	}
+}
+
+// TestSweepOnce_AProjectWithNoWorkDoesNotEndTheTick is the other direction of
+// the mid-sweep break, and the finding that shaped EmbedPending's second return.
+// A busy machine misses the probe deadline routinely, so a project with NOTHING
+// pending whose gate probe comes back Inconclusive must not end the tick: no
+// embed was attempted, so the probe is not evidence the endpoint died, and the
+// projects after it still have work.
+//
+// Without the collapse, the cheapest project in a store — one with nothing to
+// embed — could end a whole tick on a loaded machine, which is the failure this
+// PR exists to remove, reintroduced one layer up. So project A here is empty, the
+// probe after the sweep's own gate does not answer, and project B's work must
+// still be done: the lenient gate proceeds, the embed succeeds, and the sweep
+// ends having embedded it.
+func TestSweepOnce_AProjectWithNoWorkDoesNotEndTheTick(t *testing.T) {
+	// The sweep's own first probe must SUCCEED, so the budget has to be loose
+	// enough for that; the wedge then applies to the per-project probes, which is
+	// what a busy machine looks like from inside a sweep.
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+
+	release := make(chan struct{})
+	var probes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			// Answers the sweep's own gate, then stops: a busy machine, not a
+			// dead endpoint, and no refusal anywhere.
+			if probes.Add(1) > 1 {
+				<-release
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/api/embed":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	store := newMockStore()
+	// proj-a has a memory ALREADY embedded, so it has no pending work; proj-b has
+	// one that has none. The order is the point: the empty project comes first,
+	// and projectsOf is what makes the mock's per-project answer real.
+	store.projects = []string{"proj-a", "proj-b"}
+	store.projectsOf = map[string]string{"proj-a-mem": "proj-a", "proj-b-mem": "proj-b"}
+	store.memories["proj-a-mem"] = "a memory the index already has a vector for"
+	store.memories["proj-b-mem"] = "a memory the index does not have yet"
+	identity := NewClient(srv.URL, "nomic-embed-text", 3).Identity()
+	store.embeddings["proj-a-mem"] = []float32{0.1, 0.2, 0.3}
+	store.embModel["proj-a-mem"] = identity
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), store, logger, time.Minute, t.TempDir())
+
+	worker.SweepOnce(context.Background())
+
+	if len(store.embeddings["proj-b-mem"]) == 0 {
+		t.Errorf("a project with nothing pending ended the tick: proj-b was never embedded, "+
+			"because a probe that missed its deadline on an empty project was read as a dead endpoint")
 	}
 }
 
@@ -533,6 +597,9 @@ type mockStore struct {
 	memories   map[string]string    // id -> content
 	embeddings map[string][]float32 // id -> vector
 	embModel   map[string]string    // id -> model
+	// projectsOf, when non-nil, is id -> project and scopes
+	// UnembeddedMemoryIDs the way the real store does. See that method.
+	projectsOf map[string]string
 
 	// embedded, if non-nil, receives a memory ID each time StoreEmbedding
 	// successfully stores it. Tests use this to detect — without sleeping —
@@ -561,12 +628,20 @@ func newMockStore() *mockStore {
 // UnembeddedMemoryIDs mirrors the store's identity-aware selection: a row
 // whose vector was stamped with another identity counts as unembedded, which is
 // what makes a model change re-embed itself.
-func (m *mockStore) UnembeddedMemoryIDs(_ context.Context, _ string, identity string, limit int) ([]string, error) {
+//
+// projectsOf, when set, scopes the answer to one project the way the real store
+// does. It is optional because most of these tests use a single project, and a
+// mock that silently ignored the argument would let a per-project test pass for
+// the wrong reason — a sweep walking two projects is exactly where that shows up.
+func (m *mockStore) UnembeddedMemoryIDs(_ context.Context, projectID string, identity string, limit int) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var ids []string
 	for id := range m.memories {
+		if m.projectsOf != nil && m.projectsOf[id] != projectID {
+			continue
+		}
 		if model, hasEmb := m.embModel[id]; !hasEmb || (identity != "" && model != identity) {
 			ids = append(ids, id)
 			if len(ids) >= limit {
