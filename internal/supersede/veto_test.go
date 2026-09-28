@@ -363,8 +363,14 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 // forms a note actually contains. A hand-written word list is what rotted in the
 // first place — the previous one was checked against the past tense, which is
 // the one form every marker already had.
+//
+// The noun forms are here for the same reason and were NOT before: the marker
+// entries carry them (`retir...al|ement`, `remov...al`, `deprecat...ion`,
+// `replac...ement`) and the comment above the list points here for rot
+// prevention, so an unpinned noun is a hole the comment claims is closed. They
+// are the one place a marker can stop matching without any verb form noticing.
 func TestNamesRetirementCoversEveryInflection(t *testing.T) {
-	// The real four-way inflections, base first.
+	// The real four-way verb inflections, base first.
 	verbs := []struct {
 		word  string
 		forms []string
@@ -387,6 +393,17 @@ func TestNamesRetirementCoversEveryInflection(t *testing.T) {
 			if !namesRetirement(form) {
 				t.Errorf("namesRetirement(%q) = false, want true: it is a way to retire %q, and a veto that misses it stands on a genuine supersession (costs recall)", form, v.word)
 			}
+		}
+	}
+
+	// The noun forms the markers carry. "retirement of the no-merge rule starts
+	// next sprint" retires the rule exactly as "we retire it" does, and no verb
+	// form above would notice if the noun stopped matching.
+	for _, noun := range []string{
+		"retiral", "retirement", "removal", "deprecation", "replacement",
+	} {
+		if !namesRetirement(noun) {
+			t.Errorf("namesRetirement(%q) = false, want true: it is the noun form of a retirement marker, and no verb form in this test would notice it rotting (costs recall)", noun)
 		}
 	}
 

@@ -48,9 +48,11 @@ var retireMarkers = []*regexp.Regexp{
 	// relax is the one marker that deliberately does NOT carry its noun:
 	// "relaxation" reads as often as a Grace period or a policy term as a
 	// retirement, and a marker that fires on it lets a note that retires
-	// nothing through the veto. The cost is one false NEGATIVE, which is the
-	// direction the list above is built to keep — see the near-miss half of
-	// TestNamesRetirementCoversEveryInflection.
+	// nothing through the veto. It is the only narrowing in this list, and it
+	// costs a false NEGATIVE — the one error the list above is deliberately
+	// broad to suppress — which is why it is called out here rather than left
+	// to be discovered. The near-miss half of
+	// TestNamesRetirementCoversEveryInflection pins it.
 	regexp.MustCompile(`(?i)\brelax(?:es|ed|ing)?\b`),
 	regexp.MustCompile(`(?i)\bloosen(?:s|ed|ing)?\b`),
 	regexp.MustCompile(`(?i)\blift(?:s|ed|ing)?\b`),
