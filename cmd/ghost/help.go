@@ -36,7 +36,7 @@ import (
 // directions, per command.
 var helpValueFlagsByCommand = map[string]map[string]bool{
 	"backup":                    {"--out": true},
-	"context":                   {"--cwd": true},
+	"context":                   {"--cwd": true, "--as-of": true},
 	"export":                    {"--out": true, "--project": true},
 	"history":                   {"--limit": true},
 	"hook":                      {"--source": true},

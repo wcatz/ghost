@@ -45,6 +45,10 @@ type pipeline struct {
 	// list of pairs must not be able to squeeze out the one sentence that says
 	// the answer is not an absence.
 	retrievalFailures []string
+	// qualifiers are the statements that change what the block means, so they
+	// are held apart from the notes: a surface renders them on every answer,
+	// including an empty one, and a note list is bounded from the end.
+	qualifiers []string
 	// items mirrors rows, materialised once so rendering and the trace read
 	// the same values.
 	items []Item

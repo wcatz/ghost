@@ -107,11 +107,16 @@ var ftsStopwords = map[string]bool{
 	"you": true, "your": true, "yours": true,
 }
 
-// ftsTerm is one sanitized term with its selection metadata.
+// ftsTerm is one sanitized term with its selection metadata. clean is the term
+// BEFORE escaping and prefix=true records that the word carried a trailing `*`,
+// so a caller that matches terms itself (the historical keyword matcher) reads
+// the same extraction rather than parsing an FTS5 query string back apart.
 type ftsTerm struct {
-	text  string // emitted, escaped form (unchanged by selection)
-	value int    // ftsTermValue*
-	pos   int    // original position among cleaned terms
+	text   string // emitted, escaped form (unchanged by selection)
+	clean  string // the term as the tokenizer will see it
+	value  int    // ftsTermValue*
+	pos    int    // original position among cleaned terms
+	prefix bool   // the word carried a trailing `*`
 }
 
 // ftsTermValue scores a cleaned (pre-escape) term for selection. See the

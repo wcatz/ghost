@@ -5071,6 +5071,29 @@ func sanitizeFTS(text string) string {
 // follows; widening the cap globally would instead perturb ranked search
 // results.
 func sanitizeFTSN(text string, maxWords int) string {
+	terms := ftsQueryTerms(text, maxWords)
+	if len(terms) == 0 {
+		return `""`
+	}
+	words := make([]string, len(terms))
+	for i, t := range terms {
+		words[i] = t.text
+	}
+	return strings.Join(words, " OR ")
+}
+
+// ftsQueryTerms is the term extraction sanitizeFTSN emits, one step earlier: the
+// cleaned terms, their selection values and the prefix flag, capped at maxWords
+// SELECTED by value. It is a function because two callers need the terms
+// themselves rather than an FTS5 query string, and a second extraction would be
+// free to disagree with the first about which terms a query has.
+//
+// The only other caller is the historical keyword matcher (asof.go), which
+// cannot hand a query to FTS5: the index holds CURRENT content, and a read at T
+// has to match the text as it stood at T. It reuses the term selection and the
+// phrase/prefix semantics here, so an as_of query selects the same terms a
+// current one would.
+func ftsQueryTerms(text string, maxWords int) []ftsTerm {
 	// Remove FTS5 operators and punctuation, keep only words.
 	var terms []ftsTerm
 	for _, word := range strings.Fields(text) {
@@ -5096,14 +5119,16 @@ func sanitizeFTSN(text string, maxWords int) string {
 				term += "*"
 			}
 			terms = append(terms, ftsTerm{
-				text:  term,
-				value: ftsTermValue(clean),
-				pos:   len(terms),
+				text:   term,
+				clean:  clean,
+				value:  ftsTermValue(clean),
+				pos:    len(terms),
+				prefix: prefix,
 			})
 		}
 	}
 	if len(terms) == 0 {
-		return `""`
+		return nil
 	}
 	// Select the maxWords highest-value terms (stopwords only fill the cap
 	// when content words can't) instead of truncating the tail positionally.
@@ -5113,9 +5138,5 @@ func sanitizeFTSN(text string, maxWords int) string {
 			"limit", maxWords)
 		terms = selectFTSTERMs(terms, maxWords)
 	}
-	words := make([]string, len(terms))
-	for i, t := range terms {
-		words[i] = t.text
-	}
-	return strings.Join(words, " OR ")
+	return terms
 }

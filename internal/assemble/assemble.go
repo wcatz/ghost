@@ -97,6 +97,19 @@ type Request struct {
 	Condition Condition
 	Params    *memory.SearchParams // unresolved caller params; nil uses defaults
 	Now       time.Time            // required and used end to end
+	// AsOf asks for the block as it stood at that instant, and it is a binding
+	// rather than a filter: Run moves Now to it, so every time-dependent decision
+	// downstream — a row's age, its validity window, the trace that describes it —
+	// is made against T rather than against the wall clock. Binding it here is
+	// what keeps a historical block self-consistent; passing T down beside Now and
+	// hoping each stage picks the right one is the failure this prevents.
+	//
+	// nil is a current read, which is the default and the only shape a caller
+	// before #647 could produce. A request that names an instant cannot also ask
+	// for vector-only retrieval, because an embedding records the text a memory
+	// holds now; the store refuses that combination rather than answering it with
+	// the keyword leg.
+	AsOf *time.Time
 	// AbstainCosine is the caller-resolved cfg.Context.AbstainCosine. 0
 	// disables the vector floor arm; the arms themselves arrive with the
 	// abstention work, so v1 reports no `weak`.
@@ -112,8 +125,16 @@ type Result struct {
 	Outcome Outcome
 	Reason  string
 	Notes   []string
-	Trace   *Trace
-	Bytes   int // complete rendered response, including framing and outcome
+	// Qualifiers are the statements that change what the ANSWER MEANS rather than
+	// what it contains: that it is a historical read, that a leg did not run, that
+	// some memories have no recorded version to place. A surface must render them
+	// on every answer, including an empty one, because a block that is silently a
+	// past reading is read as a current one — and Notes cannot carry them, since
+	// Notes is a diagnostic list a surface shows for the empty case and bounds
+	// from the end, where a qualifier is the first thing to go.
+	Qualifiers []string
+	Trace      *Trace
+	Bytes      int // complete rendered response, including framing and outcome
 }
 
 // ErrResponseBudgetExceeded is returned when even the empty envelope exceeds
@@ -166,19 +187,26 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	if err := validateRequest(req); err != nil {
 		return Result{}, err
 	}
+	// The historical binding, in one place and before anything reads a clock. A
+	// stage that decided on Now and a trace that reported on the wall clock would
+	// describe two different days, and nothing downstream could tell.
+	if req.AsOf != nil {
+		req.Now = *req.AsOf
+	}
 	set, err := r.Candidates(ctx, candidateRequest(req))
 	if err != nil {
 		return Result{}, err
 	}
 
 	p := &pipeline{
-		req:       req,
-		mode:      projectMode(req),
-		set:       set,
-		trace:     newTrace(req, set),
-		rows:      set.Rows,
-		droppedBy: map[string]int{},
-		dropped:   map[string]string{},
+		req:        req,
+		mode:       projectMode(req),
+		set:        set,
+		trace:      newTrace(req, set),
+		rows:       set.Rows,
+		droppedBy:  map[string]int{},
+		dropped:    map[string]string{},
+		qualifiers: qualifiersFor(req, set),
 	}
 	// A window that had to fall back to the ceiling is disclosed, because the
 	// block's size is then decided by a number the caller did not state. The note
@@ -218,10 +246,11 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	}
 
 	res := Result{
-		Items:  p.items,
-		Trace:  p.trace,
-		Notes:  p.notes(),
-		Reason: p.reason(),
+		Items:      p.items,
+		Trace:      p.trace,
+		Notes:      p.notes(),
+		Qualifiers: p.qualifiers,
+		Reason:     p.reason(),
 	}
 	res.Outcome = p.outcome(res.Reason)
 	return res, nil
@@ -244,6 +273,10 @@ func candidateRequest(req Request) memory.CandidateRequest {
 		Condition: req.Condition,
 		Params:    resolvedParams(req),
 		Now:       req.Now,
+		// The store treats AsOf as authoritative, so it is carried rather than
+		// re-derived: Run has already bound Now to the same instant, and passing
+		// only one of the two would leave the store guessing which is the clock.
+		AsOf: req.AsOf,
 		Fetch: memory.Fetch{
 			FTSTopK:    depth,
 			VectorTopK: depth,
@@ -363,6 +396,9 @@ func validateRequest(req Request) error {
 	}
 	if req.Now.IsZero() {
 		return errors.New("assemble: Now is required: the candidate path does not read the wall clock")
+	}
+	if req.AsOf != nil && req.AsOf.IsZero() {
+		return errors.New("assemble: AsOf must name an instant; the zero time is not one")
 	}
 	if req.Condition == CondVectorOnly && len(req.QueryVec) == 0 {
 		return errors.New("assemble: vector-only retrieval requires a query vector")

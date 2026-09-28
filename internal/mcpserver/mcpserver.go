@@ -103,6 +103,41 @@ func failedLegs(result assemble.Result) string {
 	return strings.Join(failed, "; ")
 }
 
+// parseAsOf reads an RFC 3339 instant, and reports "" for the empty argument as
+// a nil so a caller can pass the result straight through as the request's AsOf.
+//
+// RFC 3339 and nothing else: the value names an instant in time, and a layout
+// that leaves the zone or the seconds out would have to guess at both. The error
+// quotes the value, because a timestamp the caller cannot read is the one thing
+// about it that is worth telling them.
+func parseAsOf(raw string) (*time.Time, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, fmt.Errorf("as_of %q is not an RFC 3339 instant (e.g. 2026-09-20T09:00:00Z): %w", raw, err)
+	}
+	utc := parsed.UTC()
+	return &utc, nil
+}
+
+// qualifierBlock renders the assembler's qualifiers as a block that leads an
+// answer, and "" when there are none — which is every current read, so a surface
+// that renders it unconditionally is unchanged for them.
+//
+// A block rather than inline sentences, because these are the statements a
+// reader must not scroll past: a historical answer that reads as a present one
+// is the failure mode, and the reader is the one who has to be told. It carries
+// its own trailing blank line so a caller can place it before either a listing or
+// a sentence without deciding the spacing again.
+func qualifierBlock(result assemble.Result) string {
+	if len(result.Qualifiers) == 0 {
+		return ""
+	}
+	return strings.Join(result.Qualifiers, "\n") + "\n\n"
+}
+
 func boolPtr(b bool) *bool { return &b }
 
 // detectCallingSource is the process/env harness detection used when the MCP
@@ -274,6 +309,16 @@ type resolveCapableStore interface {
 type historyCapableStore interface {
 	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
 	PurgeMemoryHistory(ctx context.Context, memoryID string) (int64, error)
+}
+
+// asOfCapableStore narrows provider.MemoryStore to the historical read
+// ghost_project_context needs for an as_of request. It is a capability assertion
+// rather than a new interface method for the reason assembleCapableStore is one:
+// the history-backed read is a storage detail, and a provider that cannot serve
+// it must say so instead of answering a request for a past instant with the
+// present. *memory.Store satisfies it.
+type asOfCapableStore interface {
+	MemoriesAsOf(ctx context.Context, projectID string, t time.Time) (*memory.AsOfSet, error)
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
@@ -719,13 +764,14 @@ func (s *Server) registerTools() {
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
-		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, status factor (the multiplicative resolved / project-scoped _global demotion), decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. When scope is supplied, included membership and scope exclusions reflect the scoped search. Use when a result looks wrong and you need to know which signal is responsible."`
+		AsOf      string `json:"as_of,omitempty" jsonschema:"Answer as the store stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'). Returns the wording each memory held then, including memories deleted since, and drops memories that did not exist yet. Keyword matching only: an embedding records current content, so there is no vector search over a past state. Use it to reproduce what a past session was given; omit it for the present. Cannot be combined with explain — explain diagnoses the current ranking, over the live index and the live vectors, so it has nothing to say about a past one."`
+		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, status factor (the multiplicative resolved / project-scoped _global demotion), decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. When scope is supplied, included membership and scope exclusions reflect the scoped search. Use when a result looks wrong and you need to know which signal is responsible. Describes the CURRENT ranking, so it cannot be combined with as_of."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Title:       "Search Memories",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when a category is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when a category is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Pass as_of (RFC 3339) to search the store as it stood at that instant instead: the wording each memory held then, including memories deleted since, matched by keyword only because an embedding records current content. as_of cannot be combined with explain, which diagnoses the current ranking. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -733,6 +779,14 @@ func (s *Server) registerTools() {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Query == "" {
 			return nil, nil, fmt.Errorf("project_id and query are required")
+		}
+		// Parsed before anything is retrieved, and refused rather than ignored: an
+		// as_of the caller could not spell is not a current search, and silently
+		// answering with the present is the one outcome that would be read as a
+		// historical answer.
+		asOf, err := parseAsOf(args.AsOf)
+		if err != nil {
+			return nil, nil, err
 		}
 		if args.Limit <= 0 {
 			args.Limit = 10
@@ -746,9 +800,12 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = resolved
 
-		// Use hybrid search (FTS5 + vector) when embedder is available.
+		// Use hybrid search (FTS5 + vector) when embedder is available — and never
+		// for a historical read. An embedding is a vector of the text a memory
+		// holds NOW, so embedding the query for a past content set buys a leg that
+		// cannot be run and an embedding call spent on it.
 		var queryVec []float32
-		if s.embedder != nil {
+		if s.embedder != nil && asOf == nil {
 			if vec, err := s.embedder.EmbedQuery(ctx, args.Query); err == nil {
 				queryVec = vec
 			}
@@ -774,11 +831,24 @@ func (s *Server) registerTools() {
 			Budget:    assemble.Budget{MaxItems: args.Limit},
 			Condition: assemble.CondHybrid,
 			Now:       time.Now().UTC(),
+			AsOf:      asOf,
 		}
 		// explain returns the store's ranking diagnosis instead of the
 		// formatted list. The explain projection of the assembler's trace
 		// replaces this branch once the stages carry it.
 		if args.Explain {
+			// Refused with as_of, not downgraded. This branch is the store's own
+			// ExplainSearchScoped: a diagnosis of the CURRENT ranking, over the
+			// FTS5 index and the live vectors. Handing it back for a historical
+			// request would answer "how did the rows rank at T" with the ranking
+			// they have now, under a request that named T — the one outcome a
+			// caller cannot detect from the payload, since it carries no
+			// qualifier and no trace.
+			if asOf != nil {
+				return nil, nil, fmt.Errorf("explain cannot describe a historical (as_of) read: it reports the current ranking, "+
+					"over the search index and the embeddings as they stand now. Drop as_of to diagnose the present ranking, "+
+					"or drop explain to read the store as it stood at %s", asOf.Format(time.RFC3339))
+			}
 			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec,
 				assemble.RetrievalWindow(searchRequest), scopeFilter)
 			if xErr != nil {
@@ -828,7 +898,15 @@ func (s *Server) registerTools() {
 		// The shared item renderer, one line per admitted memory. Search keeps
 		// its own framing: this surface's answer is the listing plus, when a
 		// filter left it short, the caveat below.
+		//
+		// The qualifiers lead the listing, not the notes, and not only for an
+		// empty answer: a block assembled at an instant reads as a block about the
+		// present unless the reader is told otherwise, and the rows themselves
+		// carry nothing that says which it is. This is the only place a current
+		// answer changes at all — the list is empty, so nothing is added.
+		leading := qualifierBlock(result)
 		var listing strings.Builder
+		listing.WriteString(leading)
 		for _, item := range result.Items {
 			listing.WriteString(item.Line())
 			listing.WriteString("\n")
@@ -861,6 +939,9 @@ func (s *Server) registerTools() {
 			text := "No matching memories found."
 			if why := emptyWhy(result); why != "" {
 				text = why
+			}
+			if leading != "" {
+				text = leading + text
 			}
 			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
 				text += "\n\n" + caveat
@@ -990,12 +1071,13 @@ func (s *Server) registerTools() {
 	type contextArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops')"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max memories to return (default 20)"`
+		AsOf      string `json:"as_of,omitempty" jsonschema:"Show the project as it stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'): the wording each memory held then, including memories deleted since, and without memories that did not exist yet. Omit it for the present. Learned context, tasks and decisions are not historical — they are omitted rather than shown as they are now."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_project_context",
 		Title:       "Get Project Context",
-		Description: "Get Ghost's accumulated knowledge about a project: top memories, global memories, and learned context. NOT needed at session start — the hook already injects a condensed, category-priority selection (behavioral categories such as gotcha/convention/preference/decision bias the slot budget). Use when switching projects mid-session or after saving 3+ memories to see updated context.",
+		Description: "Get Ghost's accumulated knowledge about a project: top memories, global memories, and learned context. NOT needed at session start — the hook already injects a condensed, category-priority selection (behavioral categories such as gotcha/convention/preference/decision bias the slot budget). Use when switching projects mid-session or after saving 3+ memories to see updated context. Pass as_of (RFC 3339) to read the project as it stood at that instant instead, for replaying what a past session was given.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -1003,6 +1085,10 @@ func (s *Server) registerTools() {
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args contextArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" {
 			return nil, nil, fmt.Errorf("project_id is required")
+		}
+		asOf, err := parseAsOf(args.AsOf)
+		if err != nil {
+			return nil, nil, err
 		}
 		if args.Limit <= 0 {
 			args.Limit = 20
@@ -1017,19 +1103,60 @@ func (s *Server) registerTools() {
 		args.ProjectID = resolved
 
 		// First-contact import: if project has zero memories, try importing
-		// from Claude Code's auto-memory files (read-only, one-time).
-		if cnt, cntErr := s.store.CountMemories(ctx, args.ProjectID); cntErr == nil && cnt == 0 {
-			if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
-				for _, p := range projects {
-					if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-						_, _ = claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
-						break
+		// from Claude Code's auto-memory files (read-only, one-time). A historical
+		// read is skipped: importing rows now would add memories to a store the
+		// caller asked to see as it was, and would make the answer depend on
+		// whether the import had happened yet.
+		if asOf == nil {
+			if cnt, cntErr := s.store.CountMemories(ctx, args.ProjectID); cntErr == nil && cnt == 0 {
+				if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
+					for _, p := range projects {
+						if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
+							_, _ = claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+							break
+						}
 					}
 				}
 			}
 		}
 
 		var sb strings.Builder
+
+		if asOf != nil {
+			// The historical set, the same one a search at that instant reads.
+			// Only the memories are historical: the learned context below is derived
+			// from the memories as they stand now, so it is omitted rather than
+			// printed under a heading that says the block is a past reading.
+			reader, ok := s.store.(asOfCapableStore)
+			if !ok {
+				return nil, nil, fmt.Errorf("ghost_project_context: this store cannot read its own history, so it cannot answer an as_of request")
+			}
+			set, err := reader.MemoriesAsOf(ctx, args.ProjectID, *asOf)
+			if err != nil {
+				return nil, nil, fmt.Errorf("read memories as of %s: %w", asOf.Format(time.RFC3339), err)
+			}
+			live := set.Live()
+			if len(live) > args.Limit {
+				live = live[:args.Limit]
+			}
+			sb.WriteString(memory.AsOfSourceNote(*asOf))
+			sb.WriteString("\n\n")
+			if len(live) > 0 {
+				rows := make([]memory.Memory, len(live))
+				for i, r := range live {
+					rows[i] = r.Memory
+				}
+				sb.WriteString("## Memories\n\n")
+				sb.WriteString(formatMemories(rows))
+			}
+			if note := set.UnknownNote(); note != "" {
+				sb.WriteString("\n" + note + "\n")
+			}
+			sb.WriteString("\n(" + memory.AsOfUnversionedNote() + ")\n")
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+			}, nil, nil
+		}
 
 		memories, err := s.store.GetTopMemories(ctx, args.ProjectID, args.Limit)
 		if err != nil {

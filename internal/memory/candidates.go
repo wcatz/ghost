@@ -56,6 +56,19 @@ type CandidateRequest struct {
 	// caller cannot bypass search.min_similarity.
 	Params SearchParams
 	Now    time.Time
+	// AsOf asks for the set as it stood at that instant, and it makes the whole
+	// retrieval historical: the rows are the versions memory_history recorded at
+	// or before it, the keyword leg matches THAT text, and no vector leg runs at
+	// all (see candidatesAsOf). nil is a current read, which is the default and
+	// the only shape every caller before #647 could produce.
+	//
+	// AsOf is authoritative over Now, not a second opinion about it: the assembler
+	// binds both to the same instant, and a caller that reached the store directly
+	// and set them differently would have two clocks in one retrieval. The store
+	// reads the instant from here for everything — the history bound, the decay
+	// age and the order it returns — so the ranking and the rows it ranks cannot
+	// disagree about which day it is.
+	AsOf *time.Time
 	// Fetch is the retrieval depth. Limit is the window: the rows that rank
 	// into the answer before any predicate is applied. The returned set is
 	// wider than that, so a predicate can be evaluated over rows the window
@@ -104,6 +117,13 @@ type CandidateSet struct {
 	// Legs is keyed by leg name: "fts" and "vector".
 	Legs    map[string]LegStatus
 	Widened bool
+	// Unrecorded counts the in-scope memories a historical read could not place
+	// at the requested instant because no version of them is recorded at or
+	// before it — every memory predating the history table (schema v17). They
+	// are absent from Rows because the store cannot say what they held then, and
+	// they are counted here because a shorter set that says nothing about the gap
+	// reads as the whole truth. Zero on every current read.
+	Unrecorded int
 }
 
 // Candidate is one hydrated row with the scoring facts fusion produced for it.
@@ -188,6 +208,15 @@ const (
 	edgesOK          = "ok"
 	edgesUnavailable = "unavailable"
 	edgesErr         = "err"
+	// edgesNotApplicable is a retrieval that does not read the link graph at all,
+	// as opposed to one that read it and found nothing. A historical read is the
+	// case: memory_links records when an edge was invalidated, never what the
+	// graph looked like at an instant, so the present graph would be an import of
+	// the present into a past answer. It is a status rather than a reused one
+	// because "no edge joins these candidates" is a claim, and a retrieval that
+	// made no such claim must not render it — the conflict stage reads every
+	// status but "err" as grounds to say something.
+	edgesNotApplicable = "not_applicable"
 )
 
 // ErrPassiveUnsupported is returned for an empty-query request. Passive
@@ -289,6 +318,14 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 
 	set := &CandidateSet{Legs: map[string]LegStatus{}}
+	if req.AsOf != nil {
+		// The whole retrieval is historical, so it does not share a single step
+		// with the current path: the rows are versions, the keyword leg matches
+		// their text, the vector leg cannot run and the link graph is not read.
+		// It is a branch rather than a parameter because every one of those is a
+		// different query, not a different value in the same one.
+		return cand.candidatesAsOf(ctx, req, p, ftsTopK, set)
+	}
 	fts, vec := cand.runCandidateLegs(ctx, req, p, ftsTopK, vecTopK, set)
 	// A leg the condition made applicable but the request could not run (a
 	// hybrid search with no query vector) is a skip, not a failure, so it does
@@ -414,6 +451,21 @@ func validateCandidateRequest(req CandidateRequest) error {
 	}
 	if req.Query == "" {
 		return ErrPassiveUnsupported
+	}
+	if req.AsOf != nil {
+		if req.AsOf.IsZero() {
+			return errors.New("candidates: AsOf is required to name an instant; the zero time is not one")
+		}
+		if req.Condition == CondVectorOnly {
+			// Refused rather than downgraded. An embedding records the text a
+			// memory holds now, so a vector leg over a historical content set has
+			// nothing to compare: the vectors for the versions the read chooses
+			// between were never computed. Answering with the keyword leg instead
+			// would hand a caller rows it cannot tell came from a leg it did not
+			// ask for.
+			return errors.New("candidates: vector-only retrieval is not available for a historical (as_of) read: " +
+				"embeddings record current content only, so a past content set has no vectors — ask for hybrid or fts_only")
+		}
 	}
 	return nil
 }
