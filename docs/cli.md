@@ -648,7 +648,16 @@ not need to be — the last entry's phase says it, and a deleted memory ends in 
 
 `purge` is the exception, and it is the redaction path. Because the history keeps
 the text a memory **used** to hold, deleting a memory that contained a credential
-leaves that credential in the database and still readable with `ghost history`.
+leaves that credential in the database file. Printing is not redaction, so the two
+printers withhold it: an entry whose text holds a credential-shaped value prints as
+`<withheld: format, category, bytes>` — in the human form and in `--json` alike,
+where only the value changes and the schema is the store's own. The category is in
+the marker only when the entry records one, so the folded-in text prints
+`<withheld: format, bytes>` — a history row records no category for a fold's
+discarded wording — and so does an edge's target text in `supersede --withdraw`,
+which is the other caller with none. A row the write-time filter already redacted keeps
+its own notice instead, which is the statement that the text was removed on the way
+in rather than merely hidden here.
 `purge` erases the text in both directions (the store primitive for the second
 case is `Store.PurgeMemoryHistory`), and it also removes the reflection
 snapshots naming the memory — otherwise `ghost reflect --restore` would bring the

@@ -309,7 +309,7 @@ func TestNearDuplicateDemoteReordersSearchWindow(t *testing.T) {
 	}
 
 	in := []Memory{{ID: b}, {ID: a}, {ID: other}}
-	out := s.demoteNearDuplicates(ctx, in)
+	out := s.demoteNearDuplicates(ctx, in, DefaultSearchParams())
 	if len(out) != 3 {
 		t.Fatalf("demotion changed membership: %v", out)
 	}
