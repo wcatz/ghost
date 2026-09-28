@@ -28,10 +28,16 @@ type fakeClassifier struct {
 	// fewer verdicts than contents can be exercised.
 	truncate bool
 	calls    int
+	// askedFor records every content passed to IsResolvedBatch, so a test can
+	// assert WHICH notes reached the harness and not just how many calls it
+	// took: a scoped pass that asked about a row it was told to leave alone is
+	// billed work and a wrong answer either way.
+	askedFor []string
 }
 
 func (f *fakeClassifier) IsResolvedBatch(_ context.Context, contents []string) ([]Verdict, error) {
 	f.calls++
+	f.askedFor = append(f.askedFor, contents...)
 	if f.err != nil {
 		for _, c := range contents {
 			if f.errOn == "" || f.errOn == c {

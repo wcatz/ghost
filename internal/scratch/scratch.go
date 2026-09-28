@@ -89,6 +89,36 @@ type Dir struct {
 	path string
 }
 
+// UniqueSuffix returns a token no other run of this binary produces for the same
+// moment: the pid, and 16 hex characters of fresh randomness — the exact shape
+// Open names a per-invocation directory with, so this package has one naming
+// scheme rather than two.
+//
+// It is for a caller that needs a NAME NOTHING ELSE WILL TAKE, not a directory:
+// `ghost supersede --reassess --apply` writes its follow-up id list under the root
+// with a name built from the project and a whole-second timestamp, which two runs
+// of the same project in the same second would agree on. A name derived from a
+// clock is not ownership, and a shared root ($GHOST_SCRATCH_DIR) is writable by
+// whoever else shares it.
+func UniqueSuffix() (string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", err
+	}
+	return strconv.Itoa(os.Getpid()) + "-" + token, nil
+}
+
+// randomToken is the 16-hex-character per-invocation token on its own. The owner
+// marker records it as its own field, so it is the random half rather than the
+// composite UniqueSuffix returns.
+func randomToken() (string, error) {
+	token, err := randomHex(8)
+	if err != nil {
+		return "", fmt.Errorf("scratch token: %w", err)
+	}
+	return token, nil
+}
+
 // Open creates a fresh per-invocation directory directly under the root,
 // named <pid>-<random-hex>, and writes the ownerFile marker inside it with the
 // creating pid, a random per-invocation token, and the process's
@@ -113,9 +143,9 @@ func Open() (*Dir, error) {
 	if err != nil {
 		return nil, err
 	}
-	token, err := randomHex(8)
+	token, err := randomToken()
 	if err != nil {
-		return nil, fmt.Errorf("scratch token: %w", err)
+		return nil, err
 	}
 	pid := os.Getpid()
 	path := filepath.Join(root, strconv.Itoa(pid)+"-"+token)

@@ -321,7 +321,7 @@ func TestReassessResolvesAChainIntoResolveReassess(t *testing.T) {
 	// still asserted and refuses to clear it — so nothing else in this chain can
 	// be what puts the memory back.
 	keep := &keepVerdictClassifier{}
-	before, reKept, err := resolve.Reassess(ctx, store, keep, "p", true, discardLogger())
+	before, reKept, err := resolve.Reassess(ctx, store, keep, "p", true, resolve.Scope{}, discardLogger())
 	if err != nil {
 		t.Fatalf("resolve.Reassess (before): %v", err)
 	}
@@ -347,7 +347,7 @@ func TestReassessResolvesAChainIntoResolveReassess(t *testing.T) {
 	// no longer has a floor to hold the row back, so the same KEEP verdict now
 	// clears it and the memory returns to ranked injection.
 	keep2 := &keepVerdictClassifier{}
-	after, reKept, err := resolve.Reassess(ctx, store, keep2, "p", true, discardLogger())
+	after, reKept, err := resolve.Reassess(ctx, store, keep2, "p", true, resolve.Scope{}, discardLogger())
 	if err != nil {
 		t.Fatalf("resolve.Reassess (after): %v", err)
 	}
@@ -445,7 +445,7 @@ func TestReassessHoldsTheNoteWhileAnySupersedesEdgeSurvives(t *testing.T) {
 	// The floor still holds: one surviving edge asserts the row, so it is left
 	// stamped, nothing is cleared, and the classifier is never asked.
 	keep := &keepVerdictClassifier{}
-	held, reKept, err := resolve.Reassess(ctx, store, keep, "p", true, discardLogger())
+	held, reKept, err := resolve.Reassess(ctx, store, keep, "p", true, resolve.Scope{}, discardLogger())
 	if err != nil {
 		t.Fatalf("resolve.Reassess (one edge left): %v", err)
 	}
@@ -472,7 +472,7 @@ func TestReassessHoldsTheNoteWhileAnySupersedesEdgeSurvives(t *testing.T) {
 	}
 
 	keep2 := &keepVerdictClassifier{}
-	released, reKept2, err := resolve.Reassess(ctx, store, keep2, "p", true, discardLogger())
+	released, reKept2, err := resolve.Reassess(ctx, store, keep2, "p", true, resolve.Scope{}, discardLogger())
 	if err != nil {
 		t.Fatalf("resolve.Reassess (no edges left): %v", err)
 	}

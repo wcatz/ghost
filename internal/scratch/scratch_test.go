@@ -329,6 +329,28 @@ func TestReap_LeavesForeignEntriesAlone(t *testing.T) {
 	}
 }
 
+// TestUniqueSuffix: the token Open names its directories with is the one shape
+// in this package, so a caller that needs a name nothing else will take uses the
+// same one. Two calls must differ, and the result must be a shape Reap's
+// markerless-entry rule recognises — not because the caller wants reaping, but
+// because a second naming scheme is a second thing to get wrong.
+func TestUniqueSuffix(t *testing.T) {
+	first, err := UniqueSuffix()
+	if err != nil {
+		t.Fatalf("UniqueSuffix: %v", err)
+	}
+	second, err := UniqueSuffix()
+	if err != nil {
+		t.Fatalf("UniqueSuffix: %v", err)
+	}
+	if first == second {
+		t.Errorf("two calls returned the same suffix %q", first)
+	}
+	if !isScratchDirName(first) {
+		t.Errorf("suffix %q is not the package's own token shape", first)
+	}
+}
+
 func TestIsScratchDirName(t *testing.T) {
 	tests := []struct {
 		name string

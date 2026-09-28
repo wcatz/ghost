@@ -64,6 +64,8 @@ type ReassessResult struct {
 	StillResolved int // came back RESOLVED with a closed-by reason; stays resolved
 	Unknown       int // unparseable verdict; left resolved and re-offered next pass
 	Cleared       int // rows actually cleared (0 in dry-run)
+	Pool          int // the project's already-resolved pool before any scope narrowed it
+	Misses        []ScopeMiss
 }
 
 // Reassess re-runs the vetoes and the classifier over the memories resolve has
@@ -78,12 +80,18 @@ type ReassessResult struct {
 // is fatal for the same reason — a repair that did not happen must not be
 // reported as one. A failed cache write only warns, because the repair itself
 // has already landed and losing derived state costs one re-ask next pass.
-func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectID string, apply bool, logger *slog.Logger) (ReassessResult, []memory.Memory, error) {
+func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectID string, apply bool, scope Scope, logger *slog.Logger) (ReassessResult, []memory.Memory, error) {
 	var res ReassessResult
-	loaded, err := store.ResolvedCandidates(ctx, projectID)
+	pool, err := store.ResolvedCandidates(ctx, projectID)
 	if err != nil {
 		return res, nil, fmt.Errorf("load resolved candidates: %w", err)
 	}
+	res.Pool = len(pool)
+	loaded, misses, err := scope.Select(pool)
+	if err != nil {
+		return res, nil, err
+	}
+	res.Misses = misses
 	res.Loaded = len(loaded)
 
 	keptHashes, err := store.ResolveKeptHashes(ctx, projectID)
@@ -105,6 +113,11 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		return res, nil, err
 	}
 
+	// The subject of every unresolved note, for the one case where the veto is
+	// not allowed to settle a note on its own (#698). Built once over the whole
+	// pool; only a vetoed note is looked up in it.
+	newerSubjects := indexSubjects(unresolved)
+
 	// Settle the free decisions first: the veto and the KEEP cache both answer
 	// KEEP without a harness call. reKeptIDs collects every KEEP outcome, and
 	// the returned list is built from it in the store's own order below, so a
@@ -118,12 +131,26 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			continue
 		}
 		if reason, vetoed := VetoKeep(m.Content); vetoed {
-			res.Vetoed++
-			reKeptIDs[m.ID] = true
-			if logger != nil {
-				logger.Debug("reassess veto kept memory", "id", m.ID, "pattern", reason)
+			// A veto is a KEEP here, and on THIS pass a KEEP un-hides the note.
+			// It does not get to do that on a phrase alone when a newer memory
+			// in the same project is demonstrably about the same thing: the veto
+			// protects the wording of a changelog entry, not the claim in it
+			// (#698). The note goes to the classifier instead. The ordinary
+			// pass's veto is untouched — there the same false veto costs one
+			// noisy memory, not a permanent un-hiding.
+			if newer, shared, shadowed := newerSubjects.shadowing(m); shadowed {
+				if logger != nil {
+					logger.Debug("reassess veto deferred to the classifier: a newer note names the same identifiers",
+						"id", m.ID, "pattern", reason, "newer", newer, "shared_identifiers", shared)
+				}
+			} else {
+				res.Vetoed++
+				reKeptIDs[m.ID] = true
+				if logger != nil {
+					logger.Debug("reassess veto kept memory", "id", m.ID, "pattern", reason)
+				}
+				continue
 			}
-			continue
 		}
 		if keptHashes[m.ID] == ContentHash(m.Content) {
 			res.Cached++
