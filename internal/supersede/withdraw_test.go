@@ -136,10 +136,9 @@ func TestWithdrawRefusesAnAmbiguousPrefix(t *testing.T) {
 	}
 }
 
-// TestWithdrawRefusesARefItCannotResolve: below eight characters a prefix is
-// not an identity (a 100k-memory corpus makes every 8-character prefix
-// ambiguous), and text that is not hex is not an id at all. Both are refusals
-// rather than a best guess, and neither writes.
+// TestWithdrawRefusesARefItCannotResolve: a ref that names nothing is a refusal,
+// and it says WHICH form failed — a reader who pasted a full id needs to be told
+// the store does not hold it, not that what they pasted is malformed.
 func TestWithdrawRefusesARefItCannotResolve(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -150,16 +149,16 @@ func TestWithdrawRefusesARefItCannotResolve(t *testing.T) {
 		source, tgt string
 		want        string
 	}{
-		{name: "seven hex characters", source: a[:7], tgt: target, want: "8"},
-		{name: "not hex", source: "not-an-id-at-all", tgt: target, want: "hex"},
+		{name: "seven hex characters", source: a[:7], tgt: target, want: "too short to be a prefix"},
+		{name: "not hex", source: "not-an-id-at-all", tgt: target, want: "no memory in project"},
 		{name: "empty", source: "", tgt: target, want: "empty"},
-		{name: "a memory that does not exist", source: "ffffffffffffffffffffffffffffffff", tgt: target, want: "no memory"},
-		{name: "target that does not exist", source: a, tgt: "ffffffffffffffffffffffffffffffff", want: "no memory"},
+		{name: "a memory that does not exist", source: "ffffffffffffffffffffffffffffffff", tgt: target, want: "no memory in project"},
+		{name: "target that does not exist", source: a, tgt: "ffffffffffffffffffffffffffffffff", want: "no memory in project"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: tc.source, Target: tc.tgt}}, true, discardLogger())
 			if err == nil {
-				t.Fatal("Withdraw accepted a ref it cannot resolve")
+				t.Fatal("Withdraw accepted a ref that names nothing")
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q does not mention %q", err, tc.want)
@@ -168,6 +167,39 @@ func TestWithdrawRefusesARefItCannotResolve(t *testing.T) {
 				t.Errorf("live edges = %d, want 2: a refused ref must write nothing", got)
 			}
 		})
+	}
+}
+
+// TestWithdrawNamesAnImportedID: `ghost import` writes an artifact's ids
+// verbatim, and nothing about the column says they are hex — the hex default is
+// only a default. A withdrawal that could not name such a row would be a repair
+// nobody could perform on an imported corpus, and the refusal would compound it
+// by telling the operator their full id was not a full id.
+func TestWithdrawNamesAnImportedID(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	// The two endpoints carry imported, non-hex ids; the link between them is a
+	// real graph row.
+	newer := pinID(t, db, "imported-note-a", "An imported note that restates the claim.")
+	older := pinID(t, db, "imported-note-b", "An imported note that was recorded first.")
+	if err := store.CreateLink(ctx, newer, older, string(RelationSupersedes), 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: newer, Target: older}}, true, discardLogger())
+	if err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	if res.Withdrawn != 1 || res.Links[0].TargetID != older {
+		t.Fatalf("withdrawn=%d links=%+v, want the imported edge withdrawn", res.Withdrawn, res.Links)
+	}
+	// A short imported id is a full id too, so it is nameable — a length floor
+	// applies to a PREFIX, not to an id the store actually holds.
+	pinID(t, db, "abc", "A third imported note with a three character id.")
+	if _, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "abc", Target: older}}, false, discardLogger()); err == nil {
+		t.Fatal("a full id shorter than the prefix floor was refused")
+	} else if !strings.Contains(err.Error(), "no live supersedes link") {
+		t.Errorf("the short full id was not resolved, so the refusal is about resolution: %v", err)
 	}
 }
 

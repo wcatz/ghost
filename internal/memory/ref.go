@@ -12,7 +12,12 @@ import (
 // (`ghost supersede --withdraw`): an operator naming a memory types the id it
 // was shown, and every Ghost report shortens it to eight characters, so a
 // withdrawal that insisted on a full 32-character id could not be driven from
-// the report that says which edge is wrong.
+// the report that says which edge is wrong. Because the match is a PREFIX, a
+// full id resolves through the same call — which matters because ids are not
+// necessarily hex: `ghost import` writes an artifact's ids verbatim, and the
+// column only defaults to hex(randomblob(16)). A caller that rejected a
+// non-hex-shaped ref would make such a row unnameable, and an edge endpoint that
+// cannot be named is a repair nobody can perform.
 //
 // The scope is projectID plus `_global`, and deliberately not wider. A promotion
 // moves a memory into `_global` while keeping its links, so a live
@@ -28,8 +33,8 @@ import (
 // not served by the primary-key index; a withdrawal is a one-off operator action
 // over a project's memories, not a retrieval path, so the scan is the right
 // trade. A prefix that matches nothing returns an empty slice and no error —
-// what a miss means is the caller's decision, and one of the callers here
-// reports it as an ambiguity-free "not found".
+// what a miss means is the caller's decision, and the callers here report it as
+// a miss or as a ref too short to be one.
 func (s *Store) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix string) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

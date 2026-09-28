@@ -25,11 +25,14 @@
 // is the caller's and the graph is the thing that has to survive being wrong
 // about it.
 //
-// The ids are refs, not ids: a full 32-character id, or 8 or more hex characters
-// of one. Every Ghost report shortens an id to eight characters, so requiring
-// the full id would make this undrivable from the report that names the wrong
-// edge. An ambiguous prefix is a refusal that lists the matches, never a
-// choice -- a guess here deletes a link nobody named.
+// The ids are refs, not ids: a full id, or 8 or more characters of one. Every
+// Ghost report shortens an id to eight characters, so requiring the full id
+// would make this undrivable from the report that names the wrong edge. A full
+// id is accepted whatever its shape, because `ghost import` writes an artifact's
+// ids verbatim and the column only DEFAULTS to hex — a ref check that insisted
+// on hex would leave an imported endpoint unnameable, which is a repair nobody
+// can perform. An ambiguous ref is a refusal that lists the matches, never a
+// choice: a guess here deletes a link nobody named.
 //
 // Withdrawing the edge is still only half the repair. A target that was stamped
 // resolved_at on this edge's account keeps it until `ghost resolve --reassess`
@@ -46,12 +49,13 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// minRefLen is the shortest ref a caller may pass. Ids are hex(randomblob(16)),
-// so eight characters is the first length at which a prefix is a usable identity
-// rather than a class: below it a ref names a large slice of any corpus, and a
-// large slice is not a decision. A corpus big enough for 8-character prefixes to
-// collide often (roughly 2^16 memories) is answered with the ambiguity listing,
-// which says so and asks for more characters.
+// minRefLen is the shortest PREFIX a caller may pass. A full id is always
+// accepted whatever its length or shape, because it names one row and the store
+// holds it; a prefix has to be an identity rather than a class, and below this
+// length it names a large slice of any corpus. Ids are hex(randomblob(16)), so
+// eight characters is the first length at which a prefix of a real corpus is
+// usually one row — and a corpus where it is not is answered with the ambiguity
+// listing, which says so and asks for more characters.
 const minRefLen = 8
 
 // WithdrawStore is the subset of *memory.Store a targeted withdrawal needs;
@@ -74,7 +78,8 @@ type WithdrawStore interface {
 
 // WithdrawPair is one edge to withdraw, as the caller named it: Source is the
 // superseding memory (the edge is written newer→older) and Target the superseded
-// one. Either may be a full id or an unambiguous 8-or-more-hex-character prefix.
+// one. Either may be a full id or an unambiguous 8-or-more-character prefix of
+// one.
 type WithdrawPair struct {
 	Source string
 	Target string
@@ -263,47 +268,56 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		short(sourceID), short(targetID), projectID, intoSuffix(into))
 }
 
-// resolveRef turns one ref into a memory id in the project. A ref is a full id
-// or 8 or more hex characters of one; anything shorter, or text that is not hex,
-// cannot be an identity and is refused rather than guessed at. An ambiguous
-// prefix is refused with the matches listed — the alternative is choosing which
-// memory to delete a link from, which is not a decision this function may make.
+// resolveRef turns one ref into a memory id in the project.
+//
+// A ref is matched as a LITERAL PREFIX of a memory id, which is what lets one
+// query answer both forms: a full id of any shape matches itself, so an id an
+// imported artifact wrote verbatim — `ghost import` preserves the ids it reads,
+// and nothing about an id column says they are hex — is nameable, while 8 or
+// more characters of one is the shortest prefix that can serve as an identity
+// (below it, a prefix names a large slice of any corpus, and a large slice is
+// not a decision).
+//
+// The length floor applies to a PREFIX only. A ref the store holds verbatim is a
+// full id whatever its length or shape, and refusing one would be a dead end on
+// an imported corpus — so the two forms are told apart by comparing the match
+// with the ref rather than by inspecting the ref's characters, which is what
+// would reject an imported id for not being hex.
+//
+// An ambiguous ref is refused with the matches listed. The alternative is
+// choosing which memory to delete a link from, which is not a decision this
+// function may make.
+//
+// The refusals say which of the two forms failed, because they fail for
+// different reasons and a reader who pasted a full id needs to be told that the
+// store does not hold it, not that the string they pasted is malformed.
 func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref string) (string, error) {
-	if !isHexRef(ref) {
-		return "", fmt.Errorf("the %s ref %q is neither a full memory id nor %d or more hex characters of one", which, ref, minRefLen)
-	}
 	ids, err := store.MemoryIDsByIDPrefix(ctx, projectID, ref)
 	if err != nil {
 		return "", err
 	}
 	switch len(ids) {
-	case 0:
-		return "", fmt.Errorf("no memory in project %s has an id matching %q (%s)", projectID, ref, which)
 	case 1:
+		if len(ref) < minRefLen && !strings.EqualFold(ids[0], ref) {
+			// A short ref that is not itself an id names a slice rather than a
+			// row, and this project happens to hold exactly one id in that slice.
+			// In a larger corpus the same ref would be ambiguous, so accepting it
+			// would make the answer depend on the size of the project.
+			return "", fmt.Errorf("the %s ref %q matches memory %s, but %d character(s) is too short to be a prefix of one — a prefix needs %d or more",
+				which, ref, short(ids[0]), len(ref), minRefLen)
+		}
 		return ids[0], nil
+	case 0:
+		if len(ref) < minRefLen {
+			return "", fmt.Errorf("no memory in project %s has the id %q, and %d character(s) is too short to be a prefix of one — a prefix needs %d or more",
+				projectID, ref, len(ref), minRefLen)
+		}
+		return "", fmt.Errorf("no memory in project %s has an id starting with %q (%s)", projectID, ref, which)
 	}
 	// Every match is named, because the answer to an ambiguity is more
 	// characters and the reader has to know what to type.
 	return "", fmt.Errorf("the %s ref %q is ambiguous in project %s: %s — pass more characters of the id to choose one",
 		which, ref, projectID, strings.Join(ids, ", "))
-}
-
-// isHexRef reports whether ref is at least minRefLen hexadecimal characters.
-// Ids are hex(randomblob(16)), so this is the shape a ref has to have; the
-// store matches case-insensitively, so both cases pass.
-func isHexRef(ref string) bool {
-	if len(ref) < minRefLen {
-		return false
-	}
-	for i := 0; i < len(ref); i++ {
-		c := ref[i]
-		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 // intoSuffix names the live edges that DO point at a target, for the refusal

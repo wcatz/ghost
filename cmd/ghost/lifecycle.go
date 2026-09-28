@@ -1403,9 +1403,9 @@ Flags:
                       wrong supersession is repaired. --threshold is not used: there
                       are no candidates to select.
   --withdraw <source-id> <target-id>
-                      Withdraw the ONE supersedes link from source-id to target-id,
-                      which may be a full memory id or an unambiguous prefix of one
-                      (8 or more hex characters). Repeatable. --apply writes the
+                      Withdraw the ONE supersedes link from source-id to target-id.
+                      Each id may be a full memory id or an unambiguous prefix of
+                      one (8 or more characters). Repeatable. --apply writes the
                       unsupersede history row; without it nothing is written.
                       --source and --threshold are not used: nothing is classified.
                       Cannot be combined with --reassess (run them as two commands).
@@ -1643,8 +1643,9 @@ func retryNote(retries int) string {
 // before anything else because --withdraw makes NO harness call: it is the
 // operator's own judgement, so a machine with no detectable calling harness can
 // still repair an edge, and nothing about it is billed. Both are dry-run by
-// default and both print the `ghost resolve --reassess --apply` step that clears
-// a resolution a withdrawn edge caused.
+// default; the --withdraw report also names the `ghost resolve --reassess --apply`
+// step that clears a resolution a withdrawn edge caused, which is the half of
+// this repair the graph cannot do on its own.
 func runSupersede() {
 	projectName, source, apply, reassess, threshold, withdrawPairs, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {

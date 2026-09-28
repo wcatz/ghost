@@ -1115,7 +1115,11 @@ func TestCLIResolveSupersede(t *testing.T) {
 		// A pair the operator can see is wrong but Ghost cannot resolve is the
 		// same refusal, not a guess.
 		unknown := s.mustFail("supersede", e2eProject, "--withdraw", "not-an-id-at-all", older)
-		mustMatch(t, "unresolvable ref", unknown.stderr, `(?i)hex characters`)
+		mustMatch(t, "unresolvable ref", unknown.stderr, `no memory in project .* has an id starting with`)
+		// And a ref too short to be a prefix says THAT, rather than pretending the
+		// string the operator pasted was not an id.
+		short := s.mustFail("supersede", e2eProject, "--withdraw", newer[:6], older)
+		mustMatch(t, "short ref", short.stderr, `too short to be a prefix`)
 	})
 }
 
