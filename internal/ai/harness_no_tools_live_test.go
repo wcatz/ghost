@@ -65,9 +65,13 @@ const noToolsLiveProbeTimeout = 30 * time.Second
 // content, and a successful turn therefore means the mode is COMPATIBLE with a
 // headless run — not that the answer is correct, which is not this test's claim.
 // It spends a model call, which is why it is behind the same GHOST_LIVE_TESTS=1
-// gate as the rest of this file rather than running in CI. It is skipped without
-// a configured provider, because a goose with no credentials fails on
-// authentication and that would read as a mode failure.
+// gate as the rest of this file rather than running in CI.
+//
+// It is SKIPPED, not failed, when no goose configuration exists to carry into the
+// child. Without one the turn cannot authenticate, and an authentication failure
+// is indistinguishable from the mode breaking the backend — so that guard is in
+// the body, not only in this comment. A test that can only fail is worse than no
+// test, because it reports a problem that is not there.
 func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	if !LiveTestsEnabled() {
 		t.Skip("live CLI test makes a real goose model call; set GHOST_LIVE_TESTS=1 to run")
@@ -79,23 +83,51 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
-	// A decoy config in the permissive mode, so a turn that completes proves the
-	// child's GOOSE_MODE=chat is what governed it and not an inherited "auto".
-	configRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(configRoot, "goose"), 0o700); err != nil {
-		t.Fatal(err)
+
+	// The REAL goose configuration, carried into the isolated config root the
+	// same way configureGooseIsolation carries it — so that the ONLY difference
+	// from a production call is GOOSE_MODE.
+	//
+	// This is the point of the test and it took a second attempt to get right. A
+	// fresh XDG_CONFIG_HOME seeded with nothing but `GOOSE_MODE: auto` cannot
+	// work: harnessEnv drops GOOSE_PROVIDER__API_KEY, OPENAI_API_KEY and
+	// ANTHROPIC_API_KEY, and setting XDG_CONFIG_HOME makes linkGooseConfigDirs
+	// return early, so the child gets no config at all. `goose run` then fails on
+	// authentication, and that failure is indistinguishable from "chat mode
+	// breaks the goose backend" — the one question this test exists to answer.
+	// A test that can only fail is worse than no test.
+	sourceDir := liveGooseConfigDir(t)
+	if sourceDir == "" {
+		t.Skip("no real goose config root to carry credentials from; run this where `goose configure` has been done")
 	}
-	if err := os.WriteFile(
-		filepath.Join(configRoot, "goose", "config.yaml"),
-		[]byte("GOOSE_MODE: auto\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
+	carried := 0
+	for _, name := range []string{"config.yaml", "secrets.yaml"} {
+		data, err := os.ReadFile(filepath.Join(sourceDir, name))
+		if err != nil {
+			continue
+		}
+		configRoot := filepath.Join(root, "config")
+		if err := os.MkdirAll(filepath.Join(configRoot, "goose"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(configRoot, "goose", name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		carried++
 	}
+	if carried == 0 {
+		t.Skipf("no config.yaml or secrets.yaml under %s; nothing would authenticate", sourceDir)
+	}
+	// A decoy in the PARENT's environment, so a passing turn is attributable to
+	// the child's GOOSE_MODE rather than to an inherited "auto". This is the
+	// precedence half: the child's value must beat both the file and whatever the
+	// parent had.
+	t.Setenv("GOOSE_MODE", "auto")
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 
 	// gooseInvocationArgs is the production argv, read here rather than
 	// reconstructed, so a change to the policy is exercised rather than
@@ -123,6 +155,43 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	if strings.TrimSpace(stdout.String()) == "" {
 		t.Fatalf("goose run in chat mode exited 0 with no output:\n%s", harnessFailureOutput(stdout.String(), stderr.String()))
 	}
+}
+
+// liveGooseHomeDir finds the home a real `goose configure` wrote to, or "" when
+// there is not one. Read from the PARENT's environment deliberately: the test
+// replaces HOME for the child, so it has to know the real one before it does.
+//
+// The layout goose documents on Linux and macOS is ~/.config/goose; the other
+// platforms' roots are checked too so the test is not quietly Linux-only, and a
+// home that is merely unreadable is reported as not-found rather than asserted.
+func liveGooseConfigDir(t *testing.T) string {
+	t.Helper()
+	// gooseHomeConfigRelPaths, not a list spelled out here: it is the same list
+	// configureGooseIsolation uses to decide which roots to carry, so a test
+	// spelling its own would test a platform this build does not support — and
+	// would pass on one machine and skip on another.
+	for _, root := range []string{os.Getenv("HOME"), os.Getenv("USERPROFILE")} {
+		if root == "" {
+			continue
+		}
+		for _, rel := range gooseHomeConfigRelPaths {
+			path := filepath.Join(append([]string{root}, rel...)...)
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				return path
+			}
+		}
+	}
+	// An inherited XDG_CONFIG_HOME is an absolute path the child reads directly,
+	// so the child finds the REAL config without any copy — which is what the
+	// `info -v` probe wants (it is about precedence, not credentials) and what
+	// the turn test does not, since there the decoy in the copied file has to be
+	// the only thing the env var is beating.
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		if info, err := os.Stat(filepath.Join(xdg, "goose")); err == nil && info.IsDir() {
+			return filepath.Join(xdg, "goose")
+		}
+	}
+	return ""
 }
 
 // gooseLiveTurnTimeout bounds the live turn. Longer than a probe because this one
