@@ -311,6 +311,113 @@ func successorRow(t *testing.T, s *Store, content string) Memory {
 	return rows[0]
 }
 
+// A complete pair anywhere in the source set wins, in EITHER id order.
+//
+// The single-pass version took the first source holding EITHER boundary as the
+// whole unit, so a source holding only valid_from locked the window and every
+// later source's valid_until was discarded — and which half survived depended on
+// the order the consolidator happened to name ReplacesIDs in. A row that inherited
+// a start and lost its end never retires, which is the outcome valid_until exists
+// to prevent, on a path that runs unattended over the whole corpus.
+//
+// Both orders are asserted because the bug WAS order-dependence: a fix that only
+// happened to be right for [A, B] would pass one of these.
+func TestReplaceNonManualPrefersACompleteWindowWhicheverSourceIsNamedFirst(t *testing.T) {
+	for _, order := range []struct {
+		name string
+		// halfFirst names which of the two ids leads.
+		halfFirst string
+	}{
+		{"half named first", "half"},
+		{"complete pair named first", "whole"},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+
+			// A complete, consistent window.
+			whole, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: "the support window is open through next year", Source: "mcp", Importance: 0.6,
+				ValidFrom: stampPtr("2026-01-01 00:00:00"), ValidUntil: stampPtr("2027-03-01 00:00:00"),
+			})
+			if err != nil {
+				t.Fatalf("Create (whole): %v", err)
+			}
+			// And a row holding one boundary only, which is what used to win the
+			// unit and close it.
+			half, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: "the rollback window has a start but no end", Source: "mcp", Importance: 0.6,
+				ValidFrom: stampPtr("2028-05-01 00:00:00"),
+			})
+			if err != nil {
+				t.Fatalf("Create (half): %v", err)
+			}
+
+			ids := []string{whole, half}
+			if order.halfFirst == "half" {
+				ids = []string{half, whole}
+			}
+			content := "the support window is open through next year and the rollback is bounded"
+			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+				Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: ids,
+			}}, ""); err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+
+			row := successorRow(t, s, content)
+			if row.ValidFrom == nil || *row.ValidFrom != "2026-01-01 00:00:00" {
+				t.Errorf("valid_from = %v, want the complete pair's 2026-01-01 00:00:00 — a single-boundary source won the unit", row.ValidFrom)
+			}
+			if row.ValidUntil == nil || *row.ValidUntil != "2027-03-01 00:00:00" {
+				t.Errorf("valid_until = %v, want the complete pair's 2027-03-01 00:00:00 — the complementary end was discarded", row.ValidUntil)
+			}
+		})
+	}
+}
+
+// And when NO source supplies a complete pair, the result must never be a composed
+// one. Half from one row and half from another is the pair no row asserted, so at
+// most one boundary may survive — which boundary is the first id's, and that
+// order dependence is a stated cost rather than a silent one.
+func TestReplaceNonManualNeverComposesHalvesWhenNoSourceHasBoth(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	from, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the migration has a scheduled start", Source: "mcp", Importance: 0.6,
+		ValidFrom: stampPtr("2026-01-01 00:00:00"),
+	})
+	if err != nil {
+		t.Fatalf("Create (from): %v", err)
+	}
+	until, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the migration has a scheduled end", Source: "mcp", Importance: 0.6,
+		ValidUntil: stampPtr("2027-03-01 00:00:00"),
+	})
+	if err != nil {
+		t.Fatalf("Create (until): %v", err)
+	}
+
+	const content = "the migration is scheduled for a window"
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: content, Importance: 0.6,
+		ReplacesIDs: []string{from, until},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	row := successorRow(t, s, content)
+	if row.ValidFrom != nil && row.ValidUntil != nil {
+		t.Errorf("the merged row holds a window composed across two rows (from=%v until=%v); "+
+			"neither row asserted that pair", *row.ValidFrom, *row.ValidUntil)
+	}
+	// One boundary is a real half of a claim and is worth keeping — the fallback
+	// exists so the fix is not satisfied by dropping every window.
+	if row.ValidFrom == nil && row.ValidUntil == nil {
+		t.Error("no source supplied a complete pair, yet the merge inherited no boundary at all — the fallback dropped a real half")
+	}
+}
+
 // The precedence, and the half of the rule the inheritance tests cannot see: when
 // the EMISSION states a value it WINS, and the source is consulted only where the
 // emission is silent. Both halves are the same rule — a value the caller supplied

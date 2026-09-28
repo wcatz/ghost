@@ -4626,6 +4626,11 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		sessionID:  m.SessionID,
 		sourceRef:  m.SourceRef,
 	}
+	// The window is decided AFTER every source has been read, because the choice
+	// between a complete pair and a single boundary is only knowable once the whole
+	// set has been seen — deciding per source is the bug this shape exists to fix.
+	var completeWindow, firstHalfWindow Validity
+	var haveComplete, haveHalf bool
 	for _, id := range m.ReplacesIDs {
 		if id == "" {
 			continue
@@ -4646,28 +4651,23 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		if err != nil {
 			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", id, err)
 		}
-		// The window is inherited AS A UNIT, from one source or from none — never
-		// half from one row and half from another.
-		//
-		// Filling the two boundaries independently is what a merge must not do. A
-		// source stating only valid_from and another stating only valid_until
-		// compose a pair neither row ever asserted, and the halves can land
-		// backwards: a row born expired, with both sources' evidence carried onto
-		// it as though the pair were one claim, so stage 2 withholds it from ranked
-		// retrieval with no error anywhere. That is the contradiction
-		// UpdateMemoryWithOptions and UpsertWithOptions' fold both refuse by
-		// running CheckWindowOrder over the pair they compose.
-		//
-		// The check is here as well as the unit, and it is not redundant: a source
-		// row can hold a window that is ITSELF out of order, because Store.Create,
-		// ImportMemory and RestoreSnapshot write the triple with no order check. So
-		// the first source whose OWN pair passes is taken, and a source whose pair
-		// fails is passed over rather than copied.
-		if claims.validFrom == nil && claims.validUntil == nil {
-			candidate := Validity{ValidFrom: nullStringPtr(validFrom), ValidUntil: nullStringPtr(validUntil)}
-			if err := CheckWindowOrder(candidate, Validity{}); err == nil {
-				claims.validFrom, claims.validUntil = candidate.ValidFrom, candidate.ValidUntil
+		// This source is a WINDOW CANDIDATE, remembered rather than decided on.
+		// See the resolution after the loop for why, and for what a candidate is
+		// allowed to become.
+		candidate := Validity{ValidFrom: nullStringPtr(validFrom), ValidUntil: nullStringPtr(validUntil)}
+		switch {
+		case candidate.ValidFrom != nil && candidate.ValidUntil != nil:
+			// A source states a COMPLETE window. It is preferred, but only if the
+			// pair it states is one that passes CheckWindowOrder; a source whose
+			// own window is out of order contributes NOTHING, not a half. Keeping
+			// one of its boundaries would pick a side the row itself never took,
+			// and the pair is the only thing it ever asserted.
+			if err := CheckWindowOrder(candidate, Validity{}); err == nil && !haveComplete {
+				completeWindow, haveComplete = candidate, true
 			}
+		case !haveHalf && (candidate.ValidFrom != nil || candidate.ValidUntil != nil):
+			// Exactly one boundary: a genuine half, and the fallback's source.
+			firstHalfWindow, haveHalf = candidate, true
 		}
 		if claims.verifiedAt == nil && verifiedAt.Valid {
 			claims.verifiedAt = &verifiedAt.String
@@ -4684,6 +4684,46 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		}
 		if claims.sourceRef == "" {
 			claims.sourceRef = sourceRef.String
+		}
+	}
+	// The window is inherited AS A UNIT, from one source or from none — never half
+	// from one row and half from another.
+	//
+	// Filling the two boundaries independently is what a merge must not do. A source
+	// stating only valid_from and another stating only valid_until compose a pair
+	// neither row ever asserted, and the halves can land backwards: a row born
+	// expired, with both sources' evidence carried onto it as though the pair were
+	// one claim, so stage 2 withholds it from ranked retrieval with no error
+	// anywhere. That is the contradiction UpdateMemoryWithOptions and
+	// UpsertWithOptions' fold both refuse by running CheckWindowOrder over the pair
+	// they compose.
+	//
+	// Order of preference, and the second rule is the one a single-pass version
+	// gets wrong:
+	//
+	//  1. A source holding a COMPLETE consistent pair wins, whichever id the
+	//     consolidator named first. Deciding per source instead would let a
+	//     single-boundary row claim the unit and lock the window, discarding a
+	//     later source's complete pair — and a row that inherits a start and
+	//     loses its end never retires, which is the outcome valid_until exists to
+	//     prevent, on a path that runs unattended over the whole corpus.
+	//  2. Failing that, ONE boundary from the first source that states any. Half a
+	//     real claim beats none, and the other half is not invented. Which half
+	//     survives is the first id's, and that order dependence is a stated cost
+	//     rather than a silent one: it is bounded by rule 1 removing it whenever
+	//     any source in the set states a complete pair.
+	//
+	// The CheckWindowOrder on rule 1 is not redundant with the unit. A source row
+	// can hold a window that is ITSELF out of order, because Store.Create,
+	// ImportMemory and RestoreSnapshot write the triple with no order check, so
+	// inheriting a pair whole still needs judging. A source failing it falls to
+	// rule 2 and contributes no half.
+	if claims.validFrom == nil && claims.validUntil == nil {
+		switch {
+		case haveComplete:
+			claims.validFrom, claims.validUntil = completeWindow.ValidFrom, completeWindow.ValidUntil
+		case haveHalf:
+			claims.validFrom, claims.validUntil = firstHalfWindow.ValidFrom, firstHalfWindow.ValidUntil
 		}
 	}
 	return claims, nil
