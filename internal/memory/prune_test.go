@@ -314,6 +314,73 @@ func TestPruneIsOneTransaction(t *testing.T) {
 	}
 }
 
+// TestPruneReadsAnAccessStampInEitherTimestampShape: the grace term coalesces
+// three columns and they do not all hold the same shape — Store.Touch writes
+// last_accessed as RFC 3339 while datetime('now') writes the other two in
+// SQLite's own form. Nothing in production calls Touch today, so a text
+// comparison looks correct and quietly becomes wrong the day a surface records a
+// read, and a guarantee that holds only while a column has no writer is not a
+// guarantee.
+//
+// The instants are fixed and deliberately all fall on ONE date, because that is
+// the only place the two shapes disagree: compared as text, 'T' (0x54) sorts
+// above the space (0x20) that separates date from time, so a value stored as
+// 11:30 sorts after a cutoff of 11:00 and the row is kept when it should have
+// gone. Across dates the two orders agree, which is exactly what makes this a
+// silent one-day-late bug rather than an obvious one.
+func TestPruneReadsAnAccessStampInEitherTimestampShape(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A fixed clock, so every instant below falls on the same calendar day as the
+	// cutoff and the test does not depend on when it runs. The grace window runs
+	// BACK from the cutoff, so 10:30 is outside it (prunable) and 11:30 is inside
+	// it (kept) — and both are on the cutoff's own day, which is the only place
+	// the two shapes disagree.
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	const grace = time.Hour
+	cutoff := now.Add(-grace)
+	outside := cutoff.Add(-30 * time.Minute)
+	inside := cutoff.Add(30 * time.Minute)
+
+	rfcGone := pruneFixture(t, s, "a session note read half an hour before the cutoff, in RFC 3339", RetentionSession,
+		"2026-08-01 00:00:00", outside.Format(time.RFC3339))
+	sqlGone := pruneFixture(t, s, "a session note read half an hour before the cutoff, in SQLite's shape", RetentionSession,
+		"2026-08-01 00:00:00", outside.Format("2006-01-02 15:04:05"))
+	rfcKept := pruneFixture(t, s, "a session note read half an hour after the cutoff, in RFC 3339", RetentionSession,
+		"2026-08-01 00:00:00", inside.Format(time.RFC3339))
+	sqlKept := pruneFixture(t, s, "a session note read half an hour after the cutoff, in SQLite's shape", RetentionSession,
+		"2026-08-01 00:00:00", inside.Format("2006-01-02 15:04:05"))
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: grace, Now: now})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	removed := map[string]bool{}
+	for _, id := range report.RemovedIDs {
+		removed[id] = true
+	}
+	// The row that discriminates: read at 10:30 in the shape Store.Touch writes,
+	// against a cutoff of 11:00. Compared as text the stored 'T' sorts after the
+	// cutoff's space, so the row is KEPT — a prune that runs a day late on every
+	// row whose last read fell on the cutoff's own day.
+	if !removed[rfcGone] {
+		t.Errorf("a row read at %s — before the %s cutoff, in the shape Store.Touch writes — survived: "+
+			"the two timestamp shapes are not both read", outside.Format(time.RFC3339), cutoff)
+	}
+	if !removed[sqlGone] {
+		t.Error("the control row, in SQLite's own shape, survived — the fixture is not exercising the predicate")
+	}
+	for _, tc := range []struct{ id, why string }{
+		{rfcKept, "a row read after the cutoff, in the RFC 3339 shape"},
+		{sqlKept, "a row read after the cutoff, in SQLite's shape"},
+	} {
+		if removed[tc.id] {
+			t.Errorf("%s was removed: %s", tc.id, tc.why)
+		}
+	}
+}
+
 // TestPruneScopesToOneProjectWhenAsked: `ghost prune --project` is how an
 // operator looks at one repository's session notes, and a filter that was ignored
 // would report a store-wide number next to a project name.

@@ -455,6 +455,18 @@ func validateRequest(req Request) error {
 	if req.Source == SourceProjectCtx && req.ProjectID == "" {
 		return errors.New("assemble: project context requires a project")
 	}
+	// A tier filter over a historical read, refused rather than answered -- the
+	// same reasoning as vector-only over an as_of request, one field over. The
+	// change log records the state a memory HELD: its wording, its category, its
+	// importance, its pin. It does not record the tier, so the only value a
+	// historical row can carry is the one the row holds NOW, and applying that
+	// would answer "what did Ghost know at T, in the tier it is in today" without
+	// saying the second half. A filter the caller believes was applied and that
+	// was not is the wrong answer; this is the same combination
+	// ghost_memory_search already refuses for explain.
+	if req.AsOf != nil && req.Retention != "" {
+		return fmt.Errorf("assemble: a retention filter cannot describe a historical read: memory_history records what a memory held, not its retention tier, so the only tier available for a version is the one it carries now. Drop the retention filter, or drop as_of")
+	}
 	if req.Budget.MaxItems < 0 || req.Budget.MaxBytes < 0 {
 		return errors.New("assemble: a budget cannot be negative")
 	}

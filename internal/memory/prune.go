@@ -117,7 +117,7 @@ type PruneReport struct {
 	Removed    int
 }
 
-// pruneSelectSQL is the candidate predicate, and the DELETE runs the identical
+// prunePredicate is the candidate predicate, and the DELETE runs the identical
 // text. That is not tidiness: the tombstones are appended for the ids the SELECT
 // returned, so the two statements have to name exactly the same rows. One
 // transaction has held the write lock since before the SELECT (the DSN asks for
@@ -127,17 +127,27 @@ type PruneReport struct {
 // The activity term is COALESCE(last_accessed, updated_at, created_at): a
 // recorded access is the stronger signal, and nothing in production writes
 // last_accessed (Store.Touch has no caller), so in practice this is the row's
-// last WRITE. Both timestamps are stored in the 'YYYY-MM-DD HH:MM:SS' form
-// datetime('now') produces, which is what makes the text comparison the same
-// comparison the rest of this package makes (see supersede.orient). expires_at is
-// bound the same way for the same reason, and a hand-set value in another format
-// simply does not match — leaving the row in the store, which is the safe
-// direction.
+// last WRITE. It is compared through SQLite's datetime() rather than as text,
+// because the three columns do not all hold the same shape: created_at and
+// updated_at are whatever datetime('now') wrote, and Store.Touch writes
+// last_accessed as RFC 3339. A text comparison between the two errs only WITHIN
+// one calendar day ('T' sorts above ' '), and it errs towards keeping the row — a
+// prune that runs a day late, never one that removes a memory it should not — but
+// a guarantee that holds only while a column has no writer is not a guarantee.
+// datetime() reads both shapes, and a value it cannot read yields NULL, which
+// compares false and so leaves the row in the store: the same safe direction.
+//
+// expires_at is compared as TEXT rather than through datetime() because it is the
+// one term an index can serve (idx_memories_session_expiry is a partial index on
+// expires_at WHERE retention = 'session'), and Ghost is its only writer — the
+// derivation in sessionExpiry, in the one shape every other timestamp column uses.
+// A value set by hand in another shape does not match, which leaves the row in the
+// store rather than taking it out.
 const prunePredicate = `
 		retention = '` + RetentionSession + `'
 		AND expires_at IS NOT NULL
 		AND expires_at <= ?
-		AND COALESCE(last_accessed, updated_at, created_at) <= ?
+		AND datetime(COALESCE(last_accessed, updated_at, created_at)) <= datetime(?)
 `
 
 // PruneSessionMemories removes expired session-tier memories that nothing has

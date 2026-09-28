@@ -4008,9 +4008,17 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 // silently ignored a value it did not recognise would answer a mistyped filter
 // with the whole corpus.
 //
-// The `_global` rows come along, exactly as GetByCategory brings them, because a
-// browse that hid the project's shared knowledge would be answering a different
-// question than the one asked.
+// The SCOPE is the project's own rows alone, which is what the unfiltered browse
+// has always answered: a caller asking "what does this project know" is asking
+// about the project. A filtered browse also brings the `_global` rows, which is
+// what the category filter has always done and what makes a tier filter useful on
+// a keep-forever rule the user wrote once for every repository. That asymmetry is
+// inherited from the two readers this replaces (GetAll and GetByCategory
+// disagreed about it) and is kept rather than tidied, because the wider reading
+// applied to the DEFAULT answer is a behaviour change nobody asked for: a project
+// with no memories of its own would come back holding the per-install builtin
+// seeds, and the "no memories yet" answer a caller reads as a measurement would
+// become unreachable.
 func (s *Store) ListMemories(ctx context.Context, projectID, category, retention string, limit int) ([]Memory, error) {
 	if category != "" && !IsValidCategory(category) {
 		return nil, fmt.Errorf("invalid category %q — must be one of %s", category, categoryList())
@@ -4021,10 +4029,17 @@ func (s *Store) ListMemories(ctx context.Context, projectID, category, retention
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	scope := "project_id = ?"
+	if category != "" || retention != "" {
+		// A filtered browse keeps the wider scope the category filter has always
+		// had. See the method comment: this is inherited, not chosen, and it is
+		// deliberately NOT applied to the unfiltered default.
+		scope = "(project_id = ? OR project_id = '_global')"
+	}
 	query := `
 		SELECT ` + memoryColumns + `
 		FROM memories
-		WHERE (project_id = ? OR project_id = '_global')`
+		WHERE ` + scope
 	var args []any
 	args = append(args, projectID)
 	if category != "" {

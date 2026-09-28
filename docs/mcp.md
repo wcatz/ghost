@@ -51,7 +51,7 @@ An unknown value is refused in the caller's own words, naming all three, and not
 
 `ghost_save_global` takes the same argument. There is no update path: a tier is set by a save, and on a near-duplicate save it RAISES the existing row rather than lowering it, so restating a memory as keep-forever protects the row that is already there.
 
-`ghost_memory_search` and `ghost_memories_list` take the same three values as a `retention` filter, and both refuse an unknown one rather than ignoring it. The search filter is applied before the result window closes, so a matching row ranked below the window still takes a slot; an answer that found rows and withheld them all reports `reason=all_out_of_retention`.
+`ghost_memory_search` and `ghost_memories_list` take the same three values as a `retention` filter, and both refuse an unknown one rather than ignoring it. The search filter is applied before the result window closes, so a matching row ranked below the window still takes a slot; an answer that found rows and withheld them all reports `reason=all_out_of_retention`. It cannot be combined with `as_of`: the change log records what a memory held, not the tier it was in, so a historical read has no tier to filter on and the request is refused rather than answered from the tier the row carries now. `ghost_memories_list` returns the project's own rows; a filtered browse also brings the `_global` rows, as its category filter always has.
 
 ## Resources
 
