@@ -3,6 +3,7 @@ package bench
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -74,6 +75,61 @@ func TestStalenessReport(t *testing.T) {
 		}
 	}
 	t.Logf("staleness suite (report-only, default params):\n%s", FormatStaleness(outcomes))
+}
+
+// TestStalenessReportNamesFreshAt1 is the headline the docs publish, and it used
+// to be one number (#561). "Fresh-wins 1.000" says the newest version outranks
+// every older one — somewhere in the window. It does not say the caller is shown
+// it first, and on this fixture the two are 1.000 and 0.583/0.458: an agent that
+// reads the top result of a "what is X now" query gets the stale answer on
+// roughly half the probes while every one of them is scored a win. Publishing
+// only the first is the part of the report that overstates what it proves.
+//
+// So the report carries an all-probes row with all three columns, and the test
+// pins that the aggregate is the arithmetic of the per-type rows rather than a
+// number someone typed: a headline that cannot be derived from the rows above it
+// is a headline nobody can check.
+func TestStalenessReportNamesFreshAt1(t *testing.T) {
+	scenarios := loadStalenessTestdata(t)
+	outcomes, err := RunStaleness(context.Background(), scenarios, memory.DefaultSearchParams(), false)
+	if err != nil {
+		t.Fatalf("RunStaleness: %v", err)
+	}
+	report := FormatStaleness(outcomes)
+	t.Logf("%s", report)
+
+	if !strings.Contains(report, "fresh@1") {
+		t.Fatalf("the staleness report has no fresh@1 column:\n%s", report)
+	}
+	perType := SummarizeStaleness(outcomes)
+	if len(perType) < 2 {
+		t.Fatalf("want a state and a premise row, got %+v", perType)
+	}
+	all := stalenessAll(outcomes)
+	if all.Probes != len(outcomes) {
+		t.Errorf("all-probes row counts %d probes, the run produced %d", all.Probes, len(outcomes))
+	}
+	// The aggregate is the sum of the rows, not a separate judgement.
+	var probes, found, wins, top1 int
+	for _, s := range perType {
+		probes += s.Probes
+		found += s.FreshFound
+		wins += s.FreshWins
+		top1 += s.FreshTop1
+	}
+	if all.Probes != probes || all.FreshFound != found || all.FreshWins != wins || all.FreshTop1 != top1 {
+		t.Errorf("all-probes row %+v does not add up to the per-type rows (probes %d found %d wins %d top1 %d)",
+			all, probes, found, wins, top1)
+	}
+	// fresh@1 is a real gap here, which is the whole reason the column exists:
+	// asserting the gap would freeze a number, so the assertion is that the
+	// column is PRESENT and that the two ratios are reported independently.
+	if all.FreshWins <= 0 {
+		t.Errorf("fresh-wins is %d of %d, so the fixture is not measuring what the report claims", all.FreshWins, all.Probes)
+	}
+	if !strings.Contains(report, "all") {
+		t.Errorf("report has no all-probes row:\n%s", report)
+	}
 }
 
 // freshWins reports the fraction of probes where the fresh version outranked
