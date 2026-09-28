@@ -359,17 +359,28 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 // is in the set and not among the callers. Both times eleven or more tests passed
 // while the paragraph was untrue, because no test read it.
 //
-// So this walks internal/memory with go/parser, finds every function mentioning the
-// `verified_at` column or the VerifiedAt field, and requires each to be in exactly
-// one of three classifications. A new writer, reader, migration or snapshot-side
-// statement has to be placed, and an unplaced one fails here instead of quietly
-// making the paragraph stale.
+// So this walks internal/memory with go/parser, finds every function that mentions
+// the `verified_at` column or the VerifiedAt field IN ITS OWN BODY, and requires
+// each to be in exactly one of three classifications. A new writer, reader,
+// migration or snapshot-side statement has to be placed, and an unplaced one fails
+// here instead of quietly making the paragraph stale.
 //
-// It deliberately does NOT infer whether a mention is a read, a write to memories,
-// or a write to memory_snapshots: that inference is the fragile part, and a wrong
-// guess would let a real writer through. Over-approximating to "mentions the
-// column" costs one line per new reader and cannot miss a writer, which is the
-// direction to be wrong in.
+// What it does NOT do, stated plainly because an earlier version of this comment
+// over-claimed it: it does not resolve the column name out of a package-level
+// literal, so a function that reaches `verified_at` only through one is INVISIBLE
+// to it. The tree already contains that case — migrateV10 ALTERs memories to add
+// the column, naming it only through phase1aProvenanceColumns — and there is a
+// second shape: AppendVerifiedEvidenceTx's body mentions no column at all, because
+// it is the seam the writers reach the column THROUGH. Both are placed explicitly,
+// and TestColumnListWritersAreClassified closes the literal indirection rather than
+// pretending to solve the general one. "Cannot miss a writer" was never true. What
+// is true is that a writer which NAMES the column in its own body cannot go
+// unplaced, and the residual gap is one comment away from this file.
+//
+// Nor does it infer read-versus-write, or memories-versus-snapshot: that inference
+// is the fragile part, and a wrong guess would let a real writer through as a
+// "reader". Over-approximating to "mentions the column" costs one line per new
+// reader and cannot misclassify one.
 func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 	// Each set answers a different question, so a name in two of them is a
 	// documentation failure as much as a name in none.
@@ -391,34 +402,42 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		"evidence.go:restoreSnapshotEvidenceTx": true,
 		"portable.go:portableEvidence":          true,
 	}
-	// migrations and readers: they mention the column and change no claim about who
-	// observed a check. A new one belongs in one of the three, not nowhere.
+	// migrations, readers, and the two functions the body scan cannot see.
 	//
-	// The four scanners and helpers at the bottom of this set are the ones a
-	// hand-written list reliably misses, because they carry the field through a
-	// struct or a SELECT list rather than naming the column in a write. The scan
-	// found all four on its first run against a list I had written by reading
-	// greps, which is the argument for having it.
+	// The scanners are the ones a hand-written list reliably misses, because they
+	// carry the field through a struct or a SELECT list rather than naming the
+	// column in a write — the scan found four on its first run against a list I had
+	// written by reading greps, which is the argument for having it. migrateV10 and
+	// AppendVerifiedEvidenceTx are here for the opposite reason: the scan cannot see
+	// either, and each reaches the column in a way worth naming.
 	migrationsAndReaders := map[string]bool{
-		"migrate.go:migrateV13":          true,
-		"migrate.go:migrateV18":          true,
-		"migrate.go:rebuildMemoriesV15":  true,
-		"evidence.go:MemoryProvenance":   true,
-		"evidence.go:evidenceCountsFor":  true,
-		"evidence.go:evidenceCountsOne":  true,
-		"evidence.go:scanEvidence":       true, // the evidence table's row scanner
-		"portable.go:PortableMemories":   true,
-		"portable.go:scanPortableMemory": true, // the artifact's row scanner
-		"store.go:IsZero":                true, // Validity.IsZero — reads the field, no SQL
-		"store.go:scanMemories":          true, // the memories row scanner
-		"store.go:GetAll":                true,
-		"store.go:GetByCategory":         true,
-		"store.go:GetTopMemories":        true,
-		"store.go:ResolveCandidates":     true,
-		"store.go:ResolvedCandidates":    true,
-		"store.go:SearchFTS":             true,
-		"store.go:SearchFTSAll":          true,
-		"vector.go:GetByIDs":             true,
+		// ALTERs memories to ADD the column, naming it only through
+		// phase1aProvenanceColumns — invisible to the body scan, and the reason
+		// TestColumnListWritersAreClassified exists.
+		"migrate.go:migrateV10": true,
+		// The exported seam the live writers reach verified_at THROUGH, so its own
+		// body names no column and the scan cannot see it either. Listed so a future
+		// writer that only calls the seam is a known shape, not a silent one.
+		"evidence.go:AppendVerifiedEvidenceTx": true,
+		"migrate.go:migrateV13":                true,
+		"migrate.go:migrateV18":                true,
+		"migrate.go:rebuildMemoriesV15":        true,
+		"evidence.go:MemoryProvenance":         true,
+		"evidence.go:evidenceCountsFor":        true,
+		"evidence.go:evidenceCountsOne":        true,
+		"evidence.go:scanEvidence":             true, // the evidence table's row scanner
+		"portable.go:PortableMemories":         true,
+		"portable.go:scanPortableMemory":       true, // the artifact's row scanner
+		"store.go:IsZero":                      true, // Validity.IsZero — reads the field, no SQL
+		"store.go:scanMemories":                true, // the memories row scanner
+		"store.go:GetAll":                      true,
+		"store.go:GetByCategory":               true,
+		"store.go:GetTopMemories":              true,
+		"store.go:ResolveCandidates":           true,
+		"store.go:ResolvedCandidates":          true,
+		"store.go:SearchFTS":                   true,
+		"store.go:SearchFTSAll":                true,
+		"vector.go:GetByIDs":                   true,
 	}
 
 	found := scanVerifiedAtMentions(t)
@@ -499,6 +518,197 @@ func mentionsVerifiedAt(body *ast.BlockStmt) bool {
 			if v.Name == "VerifiedAt" {
 				found = true
 			}
+		}
+		return !found
+	})
+	return found
+}
+
+// The one indirection the body scan cannot see, closed directly rather than by
+// generalising the scan to resolve constants — which would be a heuristic with
+// holes of its own, and the review that found migrateV10 was right that naming the
+// hole is cheaper than pretending to have solved it.
+//
+// The shape is a function that ALTERs memories to add a column whose name lives in
+// a package-level slice. The body scan sees neither the name nor the field, so
+// migrateV10 — the migration that brings verified_at into existence — was
+// unclassified and the test stayed green. This finds every function that ITERATES
+// phase1aProvenanceColumns and requires each to be in the classification sets, so
+// the next migration written that way has to be placed.
+//
+// It is deliberately narrow. A function that reaches a column through a const, a
+// format string or a helper is still invisible, and that residual gap is stated in
+// the scan's own comment rather than papered over.
+func TestColumnListWritersAreClassified(t *testing.T) {
+	const listName = "phase1aProvenanceColumns"
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	referencing := map[string]bool{}
+	listed := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			key := name + ":" + fn.Name.Name
+			if mentionsIdent(fn.Body, listName) {
+				referencing[key] = true
+			}
+			// Every function the scan DOES see is classified by the other test; the
+			// only thing this one owns is the set the scan cannot reach.
+			if mentionsVerifiedAt(fn.Body) {
+				listed[key] = true
+			}
+		}
+	}
+
+	// The list must contain the column, or this test is guarding nothing.
+	if !listContainsColumn(t, listName, "verified_at") {
+		t.Fatalf("%s no longer contains verified_at, so this test guards an indirection that does not exist", listName)
+	}
+
+	if len(referencing) == 0 {
+		t.Fatal("no function references " + listName + ", so the scan is broken rather than the package being clean")
+	}
+	for key := range referencing {
+		if listed[key] {
+			continue // the body scan already covers and classifies it
+		}
+		if !classifiedNames[key] {
+			t.Errorf("%s iterates %s, which contains verified_at, but is classified nowhere — the body scan cannot see it", key, listName)
+		}
+	}
+}
+
+// classifiedNames is every key the three classification sets in
+// TestEveryVerifiedAtMentionIsClassified accept, hoisted so this test can check a
+// name that test cannot reach. Kept as a literal rather than a computed union
+// because the two tests failing for different reasons is the point: a name missing
+// from here and from there should be visible in both.
+var classifiedNames = map[string]bool{
+	"migrate.go:migrateV10":                 true,
+	"migrate.go:migrateV13":                 true,
+	"migrate.go:migrateV18":                 true,
+	"migrate.go:rebuildMemoriesV15":         true,
+	"evidence.go:AppendVerifiedEvidenceTx":  true,
+	"evidence.go:MemoryProvenance":          true,
+	"evidence.go:evidenceCountsFor":         true,
+	"evidence.go:evidenceCountsOne":         true,
+	"evidence.go:scanEvidence":              true,
+	"portable.go:PortableMemories":          true,
+	"portable.go:scanPortableMemory":        true,
+	"portable.go:portableEvidence":          true,
+	"store.go:IsZero":                       true,
+	"store.go:scanMemories":                 true,
+	"store.go:GetAll":                       true,
+	"store.go:GetByCategory":                true,
+	"store.go:GetTopMemories":               true,
+	"store.go:ResolveCandidates":            true,
+	"store.go:ResolvedCandidates":           true,
+	"store.go:SearchFTS":                    true,
+	"store.go:SearchFTSAll":                 true,
+	"store.go:insertMemory":                 true,
+	"store.go:UpsertWithOptions":            true,
+	"store.go:UpdateMemoryWithOptions":      true,
+	"store.go:RestoreSnapshot":              true,
+	"store.go:ReplaceNonManual":             true,
+	"vector.go:GetByIDs":                    true,
+	"evidence.go:appendEvidenceTx":          true,
+	"evidence.go:carryEvidenceTx":           true,
+	"evidence.go:importEvidenceTx":          true,
+	"evidence.go:restoreSnapshotEvidenceTx": true,
+	"portable.go:ImportMemory":              true,
+}
+
+// listContainsColumn reports whether a package-level slice literal of
+// {name, typ} pairs contains the column. A literal walk, because the alternative
+// is evaluating Go, and a heuristic that silently stops matching is worse than
+// one that says it only handles the shape it can see.
+func listContainsColumn(t *testing.T, listName, column string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			continue
+		}
+		for _, decl := range file.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, ident := range vs.Names {
+					if ident.Name != listName {
+						continue
+					}
+					for _, elt := range vs.Values {
+						cl, ok := elt.(*ast.CompositeLit)
+						if !ok {
+							continue
+						}
+						for _, item := range cl.Elts {
+							switch v := item.(type) {
+							case *ast.KeyValueExpr:
+								// {"name": "x", "typ": "TEXT"}
+								if lit, ok := v.Key.(*ast.BasicLit); ok &&
+									strings.Trim(lit.Value, `"`) == column {
+									return true
+								}
+							case *ast.CompositeLit:
+								// {"x", "TEXT"} — the shape phase1aProvenanceColumns
+								// actually uses, so the first element is the name.
+								if len(v.Elts) == 0 {
+									continue
+								}
+								if lit, ok := v.Elts[0].(*ast.BasicLit); ok &&
+									strings.Trim(lit.Value, `"`) == column {
+									return true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// mentionsIdent reports whether a function body references a package-level name.
+func mentionsIdent(body *ast.BlockStmt, name string) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+			found = true
 		}
 		return !found
 	})

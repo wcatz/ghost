@@ -272,11 +272,28 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 // row would double-count every check the snapshot already holds. That is the same
 // byte-exact exclusion MaxContentLen and the credential guard draw.
 //
-// This enumeration has now been wrong twice, both times because a comment is not
-// checkable, so the set is a TEST: TestEveryVerifiedAtWriterIsEnumerated walks
-// these four writers and asserts the outcome each leaves. A new writer that stores
-// a verified_at belongs in that table before it belongs in this paragraph, and
-// the table fails if the paragraph and the code disagree about it.
+// This enumeration has now been wrong three times, every time because a comment is
+// not checkable, so the set is TESTS rather than prose. Two of them, because they
+// answer different questions. TestEveryVerifiedAtWriterIsEnumerated asserts the
+// OUTCOME each writer leaves — whether a record carries a stamp, and of what kind —
+// for the writers whose mechanism differs from the shared one.
+// TestEveryVerifiedAtMentionIsClassified walks internal/memory and requires every
+// function naming verified_at in its own body to be placed in one of three
+// classifications, so a new writer cannot be added without a decision being made
+// about it.
+//
+// What the second one does NOT cover is as much a part of the claim as what it
+// does. It does not resolve the column name out of a package-level literal, so a
+// function reaching verified_at only through one is invisible to it — and
+// migrateV10, the migration that ADDS the column, is exactly that, naming it only
+// through phase1aProvenanceColumns. A third test,
+// TestColumnListWritersAreClassified, closes that one indirection by requiring
+// every function iterating that list to be classified, and migrateV10 and
+// AppendVerifiedEvidenceTx (the exported seam, whose body names no column because
+// the writers reach it THROUGH it) are placed explicitly. A function reaching the
+// column through some other indirection — a const, a format string, a helper — is
+// still invisible, and that residual gap is the honest limit of the claim rather
+// than something the next reader should have to rediscover.
 func appendVerificationIfStatedTx(ctx context.Context, tx *sql.Tx, memoryID string, prov Provenance, stated *string) error {
 	if stated == nil {
 		return nil
