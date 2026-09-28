@@ -250,6 +250,11 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 		// wantVerifiedKinds are the record kinds that may carry the stamp. Empty
 		// means the writer must leave NO record carrying one.
 		wantVerifiedKinds []string
+		// wantVerified is the EXACT number of stamped records the writer must leave.
+		// Exact rather than a floor because every row here writes one row and one
+		// write produces one record: a floor cannot tell a correct single stamp from
+		// a doubled one, and a doubled stamp is the bug this table exists over.
+		wantVerified int
 		// why is the reason this writer is or is not in the set, kept next to the
 		// assertion so the table cannot drift from the comment.
 		why string
@@ -267,6 +272,7 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 				return id
 			},
 			wantVerifiedKinds: []string{evidenceVerified},
+			wantVerified:      1,
 			why:               "a live save; Ghost recorded the check, so the store's clock is the honest stamp",
 		},
 		{
@@ -282,6 +288,7 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 				return id
 			},
 			wantVerifiedKinds: nil,
+			wantVerified:      0,
 			why:               "a bare value in a third-party dataset with no observation behind it — no event, and the only stamp available would manufacture one",
 		},
 		{
@@ -299,6 +306,7 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 				return id
 			},
 			wantVerifiedKinds: []string{evidenceImported},
+			wantVerified:      1,
 			why:               "the artifact carries an OBSERVATION, so a check happened and is attested; it rides the import's own record rather than adding a `verified` one",
 		},
 	} {
@@ -324,15 +332,15 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 				t.Fatalf("MemoryEvidenceCounts: %v", err)
 			}
 			if len(tc.wantVerifiedKinds) == 0 {
-				if counts.Verified != 0 {
-					t.Errorf("Verified = %d, want 0 — %s", counts.Verified, tc.why)
+				if counts.Verified != tc.wantVerified {
+					t.Errorf("Verified = %d, want exactly %d — %s", counts.Verified, tc.wantVerified, tc.why)
 				}
 				if len(stamped) != 0 {
 					t.Errorf("records carrying a verification stamp = %v, want none — %s", stamped, tc.why)
 				}
 			} else {
-				if counts.Verified < 1 {
-					t.Errorf("Verified = %d, want at least 1 — %s", counts.Verified, tc.why)
+				if counts.Verified != tc.wantVerified {
+					t.Errorf("Verified = %d, want exactly %d — %s", counts.Verified, tc.wantVerified, tc.why)
 				}
 				var found bool
 				for _, want := range tc.wantVerifiedKinds {
@@ -361,7 +369,7 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 //
 // So this walks internal/memory with go/parser, finds every function that mentions
 // the `verified_at` column or the VerifiedAt field IN ITS OWN BODY, and requires
-// each to be in exactly one of three classifications. A new writer, reader,
+// each to be in one of four classifications. A new writer, reader,
 // migration or snapshot-side statement has to be placed, and an unplaced one fails
 // here instead of quietly making the paragraph stale.
 //
@@ -395,7 +403,6 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 	// tables a restore reads back, and the evidence table's own copies. Here so a
 	// new one is a decision rather than an omission.
 	snapshotSide := map[string]bool{
-		"store.go:ReplaceNonManual":             true, // memory_snapshots + memory_snapshot_evidence
 		"evidence.go:appendEvidenceTx":          true,
 		"evidence.go:carryEvidenceTx":           true,
 		"evidence.go:importEvidenceTx":          true,
@@ -410,6 +417,21 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 	// written by reading greps, which is the argument for having it. migrateV10 and
 	// AppendVerifiedEvidenceTx are here for the opposite reason: the scan cannot see
 	// either, and each reaches the column in a way worth naming.
+	// spansBoth is for a function that genuinely writes a memory row AND a snapshot
+	// or evidence row, which the other two sets each describe half of.
+	//
+	// ReplaceNonManual is the one, and it moved into it in this PR: its fresh-insert
+	// path now writes the validity triple and the provenance strings onto the row a
+	// rewrite becomes, so it is a memories writer as well as the snapshot writer #673
+	// recorded. The alternative was to leave it in snapshotSide and call it classified,
+	// which is the kind of half-true claim this test exists to catch — and it is also
+	// why a function in two sets is an error everywhere else.
+	spansBoth := map[string]bool{
+		"store.go:ReplaceNonManual":          true, // memory row (fresh insert) + memory_snapshots + memory_snapshot_evidence
+		"store.go:inheritedClaims":           true, // READS the replaced rows' columns; the write is its caller's
+		"portable.go:anyCarriedVerification": true, // reads PortableEvidence.VerifiedAt; the write is the import's
+	}
+
 	migrationsAndReaders := map[string]bool{
 		// ALTERs memories to ADD the column, naming it only through
 		// phase1aProvenanceColumns — invisible to the body scan, and the reason
@@ -449,26 +471,51 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 
 	found := scanVerifiedAtMentions(t)
 
-	for name := range writesMemory {
-		if snapshotSide[name] || migrationsAndReaders[name] {
-			t.Errorf("%s is classified more than once — the three sets answer different questions", name)
+	exclusive := map[string]int{}
+	for _, set := range []map[string]bool{writesMemory, snapshotSide, migrationsAndReaders} {
+		for name := range set {
+			exclusive[name]++
 		}
 	}
-	for name := range snapshotSide {
-		if migrationsAndReaders[name] {
-			t.Errorf("%s is classified more than once", name)
+	for name, n := range exclusive {
+		if n > 1 {
+			t.Errorf("%s is in %d of the three exclusive sets — they answer different questions, and one of the placements is half-true. Use spansBoth if it genuinely does both", name, n)
 		}
 	}
 	for name := range found {
-		if !writesMemory[name] && !snapshotSide[name] && !migrationsAndReaders[name] {
+		if !writesMemory[name] && !snapshotSide[name] && !migrationsAndReaders[name] && !spansBoth[name] {
 			t.Errorf("%s mentions verified_at but is in no classification: place it, or the enumeration in evidence.go is wrong", name)
+		}
+	}
+	// spansBoth is the only escape from the sets above, so a name in it AND in one
+	// of them is the same half-true claim with a different spelling.
+	for name := range spansBoth {
+		if writesMemory[name] || snapshotSide[name] || migrationsAndReaders[name] {
+			t.Errorf("%s is in spansBoth and in another set; it is either one or the other", name)
 		}
 	}
 	// A name in a set but no longer in the code is the same drift in reverse: the
 	// classification would be describing a function that no longer exists.
-	for name := range writesMemory {
-		if !found[name] {
-			t.Errorf("%s is classified as writing memories.verified_at but no longer mentions the column", name)
+	//
+	// The two names the scan CANNOT see are exempt from the reverse check, and that
+	// is the whole reason they are named explicitly: they are placed because the scan
+	// does not find them, so "the scan did not find it" is evidence about them
+	// rather than about the classification. migrateV10 reaches the column through
+	// phase1aProvenanceColumns and AppendVerifiedEvidenceTx is the seam the writers
+	// reach it THROUGH, so neither names it in its own body. Exempting them by name
+	// keeps the reverse check meaningful for everything the scan does cover.
+	invisibleToScan := map[string]bool{
+		"migrate.go:migrateV10":                true,
+		"evidence.go:AppendVerifiedEvidenceTx": true,
+	}
+	for _, set := range []map[string]bool{writesMemory, snapshotSide, migrationsAndReaders, spansBoth} {
+		for name := range set {
+			if invisibleToScan[name] {
+				continue
+			}
+			if !found[name] {
+				t.Errorf("%s is classified but no longer mentions the column — the classification describes a function that no longer exists", name)
+			}
 		}
 	}
 }
@@ -606,6 +653,9 @@ func TestColumnListWritersAreClassified(t *testing.T) {
 // because the two tests failing for different reasons is the point: a name missing
 // from here and from there should be visible in both.
 var classifiedNames = map[string]bool{
+	"store.go:ReplaceNonManual":             true,
+	"store.go:inheritedClaims":              true,
+	"portable.go:anyCarriedVerification":    true,
 	"asof.go:ReadMemoriesAsOf":              true,
 	"migrate.go:migrateV10":                 true,
 	"migrate.go:migrateV13":                 true,
@@ -632,7 +682,6 @@ var classifiedNames = map[string]bool{
 	"store.go:UpsertWithOptions":            true,
 	"store.go:UpdateMemoryWithOptions":      true,
 	"store.go:RestoreSnapshot":              true,
-	"store.go:ReplaceNonManual":             true,
 	"vector.go:GetByIDs":                    true,
 	"evidence.go:appendEvidenceTx":          true,
 	"evidence.go:carryEvidenceTx":           true,

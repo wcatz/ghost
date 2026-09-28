@@ -4587,6 +4587,87 @@ func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandida
 // consolidation round trip (the consolidatedSince race) — callers must not
 // treat the post-apply corpus as fully consolidated when this is non-empty.
 //
+// rowClaims is the set of columns a rewrite inherits from the rows it replaces: the
+// validity triple, the trust rating, and the three provenance strings.
+type rowClaims struct {
+	validFrom, validUntil, verifiedAt *string
+	confidence                        *float64
+	agent, sessionID, sourceRef       string
+}
+
+// inheritedClaims resolves the columns a rewritten or merged row takes from the
+// rows it stands in for.
+//
+// One rule, the same one the reuse branch inside ReplaceNonManual already follows:
+// a value the EMISSION states wins, and silence inherits. Nothing is defaulted and
+// nothing invented, because a consolidation has no authority to re-attribute a
+// claim it was never told about. The sources are read in the order ReplacesIDs
+// names them — for a merge that is the consolidator's own order — and the FIRST
+// source stating a value supplies it, so the result is a function of the proposal
+// rather than of rowid order.
+//
+// It is the SOURCES rather than the emission alone because an emission carries none
+// of this: reflectMemoriesToMemory builds it from the consolidator's output and has
+// nothing to copy a window from, so binding only the emission's columns would store
+// NULL every time and fix nothing. Read here because the delete below is what
+// disposes of the sources, and this loop runs before it — the same reordering
+// carryEvidenceTx already depends on.
+func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (rowClaims, error) {
+	claims := rowClaims{
+		validFrom:  m.ValidFrom,
+		validUntil: m.ValidUntil,
+		verifiedAt: m.VerifiedAt,
+		confidence: m.Confidence,
+		agent:      m.Agent,
+		sessionID:  m.SessionID,
+		sourceRef:  m.SourceRef,
+	}
+	for _, id := range m.ReplacesIDs {
+		if id == "" {
+			continue
+		}
+		var validFrom, validUntil, verifiedAt sql.NullString
+		var confidence sql.NullFloat64
+		var agent, sessionID, sourceRef sql.NullString
+		err := tx.QueryRowContext(ctx,
+			`SELECT valid_from, valid_until, verified_at, confidence, agent, session_id, source_ref
+			 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+		).Scan(&validFrom, &validUntil, &verifiedAt, &confidence, &agent, &sessionID, &sourceRef)
+		if err == sql.ErrNoRows {
+			// A source the proposal named but this store does not hold, or one
+			// another writer took. Its evidence is not carried either, so there is
+			// nothing to inherit and the row is written on what the emission said.
+			continue
+		}
+		if err != nil {
+			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", id, err)
+		}
+		if claims.validFrom == nil && validFrom.Valid {
+			claims.validFrom = &validFrom.String
+		}
+		if claims.validUntil == nil && validUntil.Valid {
+			claims.validUntil = &validUntil.String
+		}
+		if claims.verifiedAt == nil && verifiedAt.Valid {
+			claims.verifiedAt = &verifiedAt.String
+		}
+		if claims.confidence == nil && confidence.Valid {
+			f := confidence.Float64
+			claims.confidence = &f
+		}
+		if claims.agent == "" {
+			claims.agent = agent.String
+		}
+		if claims.sessionID == "" {
+			claims.sessionID = sessionID.String
+		}
+		if claims.sourceRef == "" {
+			claims.sourceRef = sourceRef.String
+		}
+	}
+	return claims, nil
+}
+
 // consolidatedSince should be a timestamp (see CurrentTimestamp) captured
 // before the caller fetched the memories it fed to the consolidator. ghost
 // reflect runs as a separate process from the long-lived MCP server, so a
@@ -4841,12 +4922,39 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			}
 			continue
 		}
+		// The claims the row stands in for, resolved from the rows it replaces. The
+		// insert below used to list none of these columns, so a rewrite or a merge
+		// dropped a source row's window, its verification, its confidence and its
+		// reference while carryEvidenceTx carried that row's EVIDENCE forward — which
+		// is how a row comes to read verified_at NULL beside evidence that says
+		// somebody checked it, and a reader comparing the two finds the table
+		// contradicting the memory it describes.
+		//
+		// From the SOURCES, not from the emission, because an emission carries none:
+		// reflectMemoriesToMemory builds it from the consolidator's output and has
+		// nothing to copy a window from, so binding m's columns here would store
+		// NULL every time and fix nothing. It is also the rule the reuse branch
+		// above already follows — an emission inherits rather than invents — and the
+		// one carryEvidenceTx follows for the records.
+		//
+		// Read here because the delete below is what takes the sources, and this loop
+		// runs before it: the same reordering the carry already depends on.
+		claims, err := inheritedClaims(ctx, tx, projectID, m)
+		if err != nil {
+			return nil, err
+		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags, scope)
-			VALUES (?, ?, ?, 'reflection', ?, ?, ?)
+			INSERT INTO memories (project_id, category, content, source, importance, tags, scope,
+			                      valid_from, valid_until, verified_at,
+			                      confidence, agent, session_id, source_ref)
+			VALUES (?, ?, ?, 'reflection', ?, ?, ?,
+			        ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
-		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope)).Scan(&newID); err != nil {
+		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope),
+			claims.validFrom, claims.validUntil, claims.verifiedAt,
+			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
+			nullIfEmpty(claims.sourceRef)).Scan(&newID); err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
 		// The support this emission was consolidated FROM, carried onto the row that

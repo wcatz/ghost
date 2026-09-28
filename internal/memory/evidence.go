@@ -278,9 +278,11 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 // OUTCOME each writer leaves — whether a record carries a stamp, and of what kind —
 // for the writers whose mechanism differs from the shared one.
 // TestEveryVerifiedAtMentionIsClassified walks internal/memory and requires every
-// function naming verified_at in its own body to be placed in one of three
+// function naming verified_at in its own body to be placed in one of four
 // classifications, so a new writer cannot be added without a decision being made
-// about it.
+// about it. The fourth is for a function that genuinely spans two surfaces:
+// ReplaceNonManual writes a memory row's validity and provenance on its fresh-insert
+// path AND the snapshot tables, which no single one of the other three describes.
 //
 // What the second one does NOT cover is as much a part of the claim as what it
 // does. It does not resolve the column name out of a package-level literal, so a
