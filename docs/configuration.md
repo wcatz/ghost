@@ -188,7 +188,7 @@ log carries one warning per retired identity (not one per search, but a second
 model change warns again) naming how many vectors
 were skipped and which identity wrote them, `ghost mcp status` counts only
 vectors in the configured space and splits the remainder
-(`embeddings: 120/547 memories (427 awaiting re-embed: 45 stale, 382 unembedded)`),
+(`embeddings: 120/551 memories (431 awaiting re-embed: 45 stale, 386 unembedded)`),
 and `ghost_health` warns about the same gap, likewise separating stale rows
 (those are vectors written under a retired identity) from unembedded ones (no
 vector at all). Linking and `ghost supersede` skip a memory whose

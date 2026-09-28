@@ -8,11 +8,14 @@ import (
 
 // The fusion gate asks one question: is hybrid fusion actually earning its keep
 // over either single leg? The old gate was `hybrid.NDCG10 >= vector.NDCG10` on a
-// dataset where the two differ by 0.017, and it was two claims dressed as one —
+// dataset where the two differ by a hair, and it was two claims dressed as one —
 // that fusion does not hurt, and that it helps. The first is worth asserting; the
-// second needs an interval, because a 0.017 gap over 220 queries is inside the
-// noise a resample of the query set produces, and a hard inequality on a noisy
-// gap is a gate that fires on the fixture and nowhere else.
+// second needs an interval, because a gap that thin over 220 queries is inside
+// the noise a resample of the query set produces, and a hard inequality on a
+// noisy gap is a gate that fires on the fixture and nowhere else. (The exact
+// margin is quoted below and in `TestBenchRegressionFloors`; it has been 0.017 and
+// 0.018 on this branch as the corpus grew, which is itself the point — the figure
+// moves, the fragility does not.)
 //
 // So the comparison is made the way the statistics are: paired per query, with a
 // percentile bootstrap over the differences. Two conditions scoring the SAME
@@ -115,7 +118,7 @@ func CompareFusion(hybrid, leg Result) (PairDiff, error) {
 // So fusion is genuinely ahead of both legs here, and ahead of the vector leg by
 // 0.0028 at the interval's lower edge — under half of one query's worth of
 // margin (1/220 = 0.0045). The old gate was `hybrid.NDCG10 >= vector.NDCG10` on
-// that 0.017 point estimate, which is the same claim with none of the
+// that thin point estimate, which is the same claim with none of the
 // uncertainty: a dataset edit worth 0.001 tripped it while the evidence said
 // nothing had changed.
 //

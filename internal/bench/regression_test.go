@@ -64,7 +64,7 @@ func TestBenchRegressionFloors(t *testing.T) {
 	// fusionTolerance for the number and the measurement behind it), not that it
 	// wins everywhere — on the chat benchmark in Phase 1 it ties.
 	//
-	// The old gate was `hybrid.NDCG10 >= vector.NDCG10` on a 0.017 point
+	// The old gate was `hybrid.NDCG10 >= vector.NDCG10` on a thin point
 	// estimate, which fails on a 0.001 dataset edit while the interval still
 	// excludes zero. The intervals are logged because they are the result: on the
 	// committed v2 dataset hybrid beats vector by +0.0179 [+0.0028, +0.0335] and
