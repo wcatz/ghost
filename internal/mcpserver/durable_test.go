@@ -6,14 +6,23 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // #674: nothing in the save path said what a memory is FOR, so agents saved
 // facts the repository already holds authoritatively. These tests are the
-// golden contract for the guidance that answers it, on every surface an agent
-// reads before it saves — the server instructions and the description of each
-// memory-writing save tool — and for the advisory the save response carries
-// back.
+// golden contract for the guidance that answers it — the server instructions
+// and the description of each memory-writing SAVE tool — and for the advisory
+// the response carries back.
+//
+// The surface map is the two SAVE tools plus the instructions, which is the set
+// an agent reads BEFORE it chooses to store something, and the set the advisory
+// fires on at the point of storing. It is NOT every tool that writes memory
+// text: ghost_memory_update carries the advisory but no description guidance
+// (an update names an existing memory rather than choosing a new one), and
+// ghost_decision_record carries neither, because its companion memory's text is
+// composed inside memory.RecordDecision and duplicating that format here would
+// let the two drift. Both reach the rule through the server instructions.
 //
 // The guidance is prose in constants, so nothing but a test stops it from
 // being reworded away; the strings below are the golden ones, copied from the
@@ -60,11 +69,11 @@ func saveToolDescription(t *testing.T, session *mcp.ClientSession, tool string) 
 func TestDurableGuidanceStatesTheRuleOnEverySaveSurface(t *testing.T) {
 	_, session := newCapSession(t)
 
-	// Both memory-writing save tools are here, not just the project one: the
+	// Both memory-writing SAVE tools are here, not just the project one: the
 	// instructions send an agent to ghost_save_global for the cross-project
 	// case, the advisory fires on that path too, and a description that carried
-	// neither the rule nor an example would be the one surface where a save
-	// is offered with no guidance attached.
+	// neither the rule nor an example would be the one surface where a save is
+	// offered with no guidance attached.
 	surfaces := map[string]string{
 		"mcpInstructions":   mcpInstructions,
 		"ghost_memory_save": saveToolDescription(t, session, "ghost_memory_save"),
@@ -240,6 +249,59 @@ func TestGlobalSaveAdvisesToo(t *testing.T) {
 		if !strings.Contains(resultText(found), "«"+tc.content+"»") {
 			t.Errorf("global save of %q was not stored: %q", tc.content, resultText(found))
 		}
+	}
+}
+
+// TestUpdateAdvisesOnAContentRewrite: ghost_memory_update is the third path
+// that writes caller-supplied memory text and reports a real stored id, and an
+// agent correcting a memory INTO a repository fact is the same mistake as
+// saving one. The advisory is gated on content being present, so this also pins
+// that a tag-only edit — which stores no text and cannot be judged — stays quiet
+// rather than advising about a note the caller never rewrote.
+func TestUpdateAdvisesOnAContentRewrite(t *testing.T) {
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "an older note about the same subject", Source: "mcp", Importance: 0.7, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cases := []struct {
+		name         string
+		args         map[string]any
+		wantAdvisory bool
+	}{
+		{
+			name:         "rewriting the content into a repository fact advises",
+			args:         map[string]any{"content": "foo.go contains HandleFoo()"},
+			wantAdvisory: true,
+		},
+		{
+			name:         "rewriting the content into a durable rule does not",
+			args:         map[string]any{"content": "Production schema changes require explicit approval."},
+			wantAdvisory: false,
+		},
+		{
+			name:         "a tag-only edit has no text to judge",
+			args:         map[string]any{"tags": []any{"a", "b"}},
+			wantAdvisory: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.args["project_id"] = "test-project"
+			tc.args["memory_id"] = id
+			resp := resultText(callTool(t, session, "ghost_memory_update", tc.args))
+			if !strings.Contains(resp, "Memory updated (id: "+id+")") {
+				t.Fatalf("update response reports no stored id: %q", resp)
+			}
+			if got := strings.Contains(resp, "ADVISORY"); got != tc.wantAdvisory {
+				t.Errorf("advisory present = %v, want %v; got %q", got, tc.wantAdvisory, resp)
+			}
+		})
 	}
 }
 

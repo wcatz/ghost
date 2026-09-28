@@ -47,6 +47,24 @@ func TestClassifyRubricStatesTheRepositoryFactRule(t *testing.T) {
 func TestClassifyRubricKeepsDurableKnowledgeWithPaths(t *testing.T) {
 	prompt := classifySystemPrompt
 
+	// Per-SENTENCE, not per-prompt, and that is the whole point. This side has
+	// no backstop: a wrongly-RESOLVED note leaves ranked injection permanently,
+	// and unlike the reflect half there is no verbatim re-add to undo it. So the
+	// boundary that makes the rule safe has to be read to APPLY the rule, which
+	// means the same sentence as the ground it limits — a boundary parked in a
+	// later paragraph is a second thing to reconcile, and reword the two halves
+	// together or the model reconciles them apart. The reflect half already reads
+	// "is an obsolete-drop candidate WHEN the note is a location or a definition…".
+	ground := sentenceContaining(t, prompt, "is RESOLVED on this ground")
+	if !strings.Contains(ground, "only when it is a location or a definition") {
+		t.Errorf("the RESOLVED ground does not carry its boundary in the same sentence:\n%s", ground)
+	}
+	if !strings.Contains(ground, "nothing in it says something the file does not") {
+		t.Errorf("the RESOLVED ground does not exclude a note that says more than the file:\n%s", ground)
+	}
+	// The durable case still needs naming, and with a path in it: a rule stated
+	// only as an abstract "a reason the code does not state" is what let a
+	// reviewer re-read this rule and find it unguarded.
 	if !strings.Contains(prompt, "whatever files or paths it mentions") {
 		t.Errorf("the rubric does not protect a durable note that names a path:\n%s", prompt)
 	}
@@ -55,6 +73,23 @@ func TestClassifyRubricKeepsDurableKnowledgeWithPaths(t *testing.T) {
 	if !strings.Contains(prompt, "When uncertain, answer KEEP.") {
 		t.Errorf("the rubric lost its uncertainty rule:\n%s", prompt)
 	}
+}
+
+// sentenceContaining returns the one sentence of text holding marker. It fails
+// rather than returning "" because a missing sentence and an empty one are the
+// same bug here: the rule is gone, or the rule is there and the assertion is
+// pointed at nothing.
+func sentenceContaining(t *testing.T, text, marker string) string {
+	t.Helper()
+	// Split on a full stop followed by whitespace, the same boundary the
+	// heuristic uses, so a path like internal/memory/store.go never splits.
+	for _, s := range strings.Split(text, ". ") {
+		if strings.Contains(s, marker) {
+			return s
+		}
+	}
+	t.Fatalf("no sentence holds %q", marker)
+	return ""
 }
 
 // TestNoDeterministicVetoForRepositoryFacts: the issue says the resolve rubric

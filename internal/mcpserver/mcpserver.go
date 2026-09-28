@@ -776,6 +776,22 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	}
 
 	msg := fmt.Sprintf("Memory updated (id: %s): %s", args.MemoryID, strings.Join(changed, ", "))
+	// The same advisory the two save tools carry (#674), and on the same
+	// reasoning: an update that rewrites a memory into a repository fact is the
+	// same durable-knowledge mistake, and this response reports a real stored id
+	// just as theirs do. Only when the update actually carried content — a tag or
+	// importance edit has no text to judge, and the pointer is nil exactly then.
+	//
+	// ghost_decision_record is deliberately NOT wired, and the reason is a
+	// coupling rather than a scope choice: its companion memory's text is
+	// composed inside memory.RecordDecision ("%s: %s. Rationale: %s"), so the
+	// MCP layer would have to duplicate that format string to judge it, and a
+	// change there would leave the advisory checking text that is no longer what
+	// got stored. The rule still reaches that tool through the server
+	// instructions, which route design decisions to it by name.
+	if content != nil {
+		msg += repoFactHint(*content)
+	}
 	if truncated {
 		msg += truncationWarning("content", memoryTruncationAdvice)
 	}
