@@ -6,6 +6,31 @@ Every subcommand accepts `-h` or `--help`: it prints that command's usage on std
 
 Two spellings decide whether a flag is a request. The token after a flag that *this* command takes a value for is a value, never a help request — `ghost reflect --project -h` runs reflect for a project named `-h` — and a flag belonging to a different command is not a value at all, so `ghost upgrade --cwd -h` prints the upgrade usage instead of upgrading with the help flag swallowed as `--cwd`'s value. And a bare `--` ends the options for that scan: a token after it is an operand, never a help request, so `ghost reflect -- --help` runs reflect rather than printing usage. What the command then does with that operand is its own parser's business — none of them implements `--` (several report it as an unknown flag), so a project whose name looks like a flag is still addressed with the verbatim `--project <name>` form.
 
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | The command ran, or the reader asked a question (`-h`/`--help`, `ghost help`). |
+| `2` | **Usage error.** The CLI cannot act on the command line: a command that does not exist, a subcommand that is not one of its command's, a command group invoked with no subcommand, or no command at all. |
+| `1` | The command was found and ran, and failed: a database that would not open, a refused operation, a harness that could not be reached, an argument its own parser rejects. |
+
+A usage error prints one diagnostic line naming the word that matched nothing, then the usage of the level it was typed at — both on stderr — and nothing on stdout, so a caller reading a command's output sees an empty stream rather than a command list where results should have been:
+
+```console
+$ ghost project frobnicate
+ghost project: unknown command: "frobnicate"
+
+Usage: ghost project delete <name-or-id> [--apply]
+       ghost project merge <old-name-or-id> <new-name-or-id>
+       ghost project bind <project-id> <checkout-directory>
+$ echo $?
+2
+```
+
+The same shape applies at every level: `ghost mcp nope` and `ghost project` (no subcommand) exit `2` the same way, `ghost frobnicate` names the top level and shows the command list, and bare `ghost` reports that no command was given. A command group with a default action is the one exception — bare `ghost mcp` starts the server, because that is what every MCP client spawns.
+
+A word after a command that takes an *operand* is not a subcommand and is never reported as an unknown one: `ghost history <memory-id>`, `ghost reflect <project>` and `ghost import <file>` all take the word as the thing they were asked about, and their own parsers report an operand they cannot use (a missing memory id, a second project, a file that is not there). An unknown **flag** is not a routing error either, and never exits `2` — the command was found, so what answers the flag is that command's own parser: `ghost bench --wat` and `ghost upgrade --wat` reject the flag — an unknown flag and an unknown argument respectively — and exit `1`, while `ghost reflect --wat` ignores an unknown flag, as it always has.
+
 ## MCP server
 
 ### `ghost mcp`

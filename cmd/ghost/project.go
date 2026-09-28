@@ -120,8 +120,8 @@ func runProjectDeleteCore(ctx context.Context, store *memory.Store, out io.Write
 }
 
 // projectUsage is the help for `ghost project` with no recognised
-// subcommand. It goes to stderr for that usage error and to stdout for
-// -h/--help (see handleHelp) — one text for both.
+// subcommand. It goes to stderr for that usage error (the dispatch's, exit 2)
+// and to stdout for -h/--help (see handleHelp) — one text for both.
 const projectUsage = `Usage: ghost project delete <name-or-id> [--apply]
        ghost project merge <old-name-or-id> <new-name-or-id>
        ghost project bind <project-id> <checkout-directory>
