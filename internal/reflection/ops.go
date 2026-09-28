@@ -2,6 +2,7 @@ package reflection
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -71,6 +72,89 @@ type memOp struct {
 	line     int    // 1-based position in the ops array, for diagnostics
 }
 
+// opRefusal is a reader complaint, kept in two renderings because it has two
+// audiences with different rights to the same text.
+//
+// Error() is the one a person reads, and the one the repair prompt quotes back to
+// the model that wrote the offending line: it carries that line, clipped, because
+// the line is how anyone can see WHICH of the operations was wrong and a model
+// re-asked has nothing else to go on. Safe() is the one a log may carry: the line
+// is withheld, because an operation's replacement text is model-written prose over
+// stored memory — a rewrite can quote a memory nearly verbatim — and a log
+// outlives the run that produced it, which is the same reason the three log lines
+// that report a proposal go through previewContent instead of printing it. The
+// reason and the ids stay in both: they are the diagnostic, and an id is not
+// content.
+type opRefusal struct {
+	full  string
+	safe  string
+	cause error
+}
+
+func (e *opRefusal) Error() string { return e.full }
+
+// Safe is the value-free rendering, for a sink that outlives the run.
+func (e *opRefusal) Safe() string { return e.safe }
+
+// Unwrap keeps the cause of an envelope refusal unwrappable, as the %w it
+// replaced was.
+func (e *opRefusal) Unwrap() error { return e.cause }
+
+// refuseOp refuses one operation line. raw is the line as it arrived; the
+// rendered quote is clipped, and the log gets its size instead of its text.
+func refuseOp(lineNo int, raw, reason string) error {
+	return &opRefusal{
+		full: fmt.Sprintf("ops[%d] %q: %s", lineNo, clipOpLine(raw), reason),
+		safe: fmt.Sprintf("ops[%d] <withheld: operation line, %d chars>: %s", lineNo, len([]rune(raw)), reason),
+	}
+}
+
+// refuseAt refuses a response at a known operation without quoting its line — a
+// contradiction found only once the whole list is known. Nothing model-written
+// is in the reason beyond ids, so the two renderings agree.
+func refuseAt(lineNo int, reason string) error {
+	msg := fmt.Sprintf("ops[%d]: %s", lineNo, reason)
+	return &opRefusal{full: msg, safe: msg}
+}
+
+// refuseEnvelope refuses the JSON envelope itself. snippet is the head of the raw
+// response, which is model-written prose over stored memory (a learned_context
+// paragraph, typically), so it is in the full text only.
+func refuseEnvelope(reason, snippet string, cause error) error {
+	full := reason
+	if snippet != "" {
+		full = fmt.Sprintf("%s (starts: %q)", reason, snippet)
+	}
+	return &opRefusal{full: full, safe: reason, cause: cause}
+}
+
+// readerComplaintForLog renders a reader refusal for a sink that outlives the
+// run, withholding the operation line it quotes. It falls CLOSED: an error this
+// package did not build as an opRefusal is withheld whole and named by type,
+// because an unrecognised renderer is exactly the case in which a log line must
+// not guess what is safe to print.
+func readerComplaintForLog(err error) string {
+	var refusal *opRefusal
+	if errors.As(err, &refusal) {
+		return refusal.Safe()
+	}
+	return fmt.Sprintf("<withheld: unclassified reader complaint, %T>", err)
+}
+
+// clipOpText bounds ONE model-supplied fragment interpolated into a complaint —
+// a hallucinated id, a free-form drop reason, a verb. Clipping the line is not
+// enough on its own: `drop <id> reason: <a paragraph of prose>` puts that whole
+// paragraph in the message, and the message is quoted back into a prompt and
+// written to a log. A real id is 26 characters, so this bound never truncates a
+// legitimate one.
+func clipOpText(s string) string {
+	const max = 60
+	if r := []rune(s); len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
+
 // parseOpResponse reads the JSON envelope, tolerating a markdown code fence
 // (harnesses emit one whether or not they are asked to) and nothing else. The
 // operation grammar is deliberately not parsed here — see parseOpLine — so the
@@ -97,17 +181,17 @@ func parseOpResponse(text string) (opResponse, error) {
 		if len(snippet) > 120 {
 			snippet = memory.TruncateUTF8(snippet, 120) + "..."
 		}
-		return opResponse{}, fmt.Errorf("reflection output is not valid JSON: %w (starts: %q)", err, snippet)
+		return opResponse{}, refuseEnvelope(fmt.Sprintf("reflection output is not valid JSON: %v", err), snippet, err)
 	}
 	if resp.Ops == nil {
-		return opResponse{}, fmt.Errorf("reflection output has no \"ops\" array — consolidation is now expressed as operations on the input ids (keep/merge/rewrite/drop), not as a rewritten memory list")
+		return opResponse{}, refuseEnvelope("reflection output has no \"ops\" array — consolidation is now expressed as operations on the input ids (keep/merge/rewrite/drop), not as a rewritten memory list", "", nil)
 	}
 	if len(*resp.Ops) == 0 {
 		// An empty operation list is not a consolidation, it is a deletion, and
 		// the only thing between it and the store is the quality gate — which
 		// reads no output count at all below six inputs. Failing here names the
 		// cause and keeps the deterministic tier reachable in every case.
-		return opResponse{}, fmt.Errorf("reflection output carries no operations: the harness returned an empty \"ops\" array")
+		return opResponse{}, refuseEnvelope("reflection output carries no operations: the harness returned an empty \"ops\" array", "", nil)
 	}
 	return resp, nil
 }
@@ -119,7 +203,7 @@ func parseOpResponse(text string) (opResponse, error) {
 // partial apply.
 func parseOpLine(lineNo int, raw string) (memOp, error) {
 	fail := func(format string, args ...any) error {
-		return fmt.Errorf("ops[%d] %q: %s", lineNo, clipOpLine(raw), fmt.Sprintf(format, args...))
+		return refuseOp(lineNo, raw, fmt.Sprintf(format, args...))
 	}
 
 	s := strings.TrimSpace(raw)
@@ -194,7 +278,7 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 		}
 		target, named := strings.CutPrefix(lower, "superseded by ")
 		if !named {
-			return memOp{}, fail("unreadable drop reason %q — use \"obsolete\" or \"superseded by <id>\"", reason)
+			return memOp{}, fail("unreadable drop reason %q — use \"obsolete\" or \"superseded by <id>\"", clipOpText(reason))
 		}
 		target, ok = trimIDLabel(target)
 		if !ok || strings.ContainsAny(target, " \t") {
@@ -203,7 +287,7 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 		return memOp{kind: opDrop, ids: []string{id}, target: strings.ToUpper(target), line: lineNo}, nil
 
 	default:
-		return memOp{}, fail("unknown operation %q — use keep, merge, rewrite or drop", verb)
+		return memOp{}, fail("unknown operation %q — use keep, merge, rewrite or drop", clipOpText(verb))
 	}
 }
 
@@ -273,18 +357,18 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 		}
 		for _, id := range op.ids {
 			if _, ok := resolve(id); !ok {
-				return ReflectionResult{}, fmt.Errorf("ops[%d] %q: id %q is not one of the memories this run was given", i+1, clipOpLine(line), id)
+				return ReflectionResult{}, refuseOp(i+1, line, fmt.Sprintf("id %q is not one of the memories this run was given", clipOpText(id)))
 			}
 		}
 		if op.target != "" {
 			if _, ok := resolve(op.target); !ok {
-				return ReflectionResult{}, fmt.Errorf("ops[%d] %q: superseded-by target %q is not one of the memories this run was given", i+1, clipOpLine(line), op.target)
+				return ReflectionResult{}, refuseOp(i+1, line, fmt.Sprintf("superseded-by target %q is not one of the memories this run was given", clipOpText(op.target)))
 			}
 		}
 		for _, id := range op.ids {
 			key := memIDKey(id)
 			if first, dup := claimed[key]; dup {
-				return ReflectionResult{}, fmt.Errorf("ops[%d] %q: id %q already appears in ops[%d] — each id takes exactly one operation", i+1, clipOpLine(line), id, first)
+				return ReflectionResult{}, refuseOp(i+1, line, fmt.Sprintf("id %q already appears in ops[%d] — each id takes exactly one operation", clipOpText(id), first))
 			}
 			claimed[key] = i + 1
 		}
@@ -303,8 +387,8 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 	}
 	for _, op := range ops {
 		if op.kind == opDrop && op.target != "" && !carried[op.target] {
-			return ReflectionResult{}, fmt.Errorf("ops[%d]: %q is dropped as superseded by %q, but %q is not carried forward in this response — the memory would leave the corpus with nothing replacing it",
-				op.line, op.ids[0], op.target, op.target)
+			return ReflectionResult{}, refuseAt(op.line, fmt.Sprintf("%q is dropped as superseded by %q, but %q is not carried forward in this response — the memory would leave the corpus with nothing replacing it",
+				clipOpText(op.ids[0]), clipOpText(op.target), clipOpText(op.target)))
 		}
 	}
 

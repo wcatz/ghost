@@ -187,6 +187,22 @@ func (t *TieredConsolidator) Available(ctx context.Context) bool {
 
 func (t *TieredConsolidator) Consolidate(ctx context.Context, input ReflectionInput) (ReflectionResult, error) {
 	var lastErr error
+	// Repairs are counted per RUN, not per tier: a tier whose result is
+	// discarded here may have spent a repair turn to produce it, and the count
+	// has to reach whichever result does survive. Without that, a run that
+	// repaired and then fell through to SQLite would report the Jaccard-only
+	// outcome as one that never had a repair — the degradation #689 exists to
+	// make visible, arriving silently after two billed calls.
+	spent := 0
+	withRepairs := func(result ReflectionResult) ReflectionResult {
+		if result.RepairTurns > spent {
+			spent = result.RepairTurns
+		}
+		if spent > result.RepairTurns {
+			result.RepairTurns = spent
+		}
+		return result
+	}
 	for i, tier := range t.tiers {
 		if !tier.Available(ctx) {
 			t.logger.Debug("consolidator unavailable, skipping", "tier", tier.Name())
@@ -196,6 +212,7 @@ func (t *TieredConsolidator) Consolidate(ctx context.Context, input ReflectionIn
 		result, err := tier.Consolidate(ctx, input)
 		if err != nil {
 			t.logger.Warn("consolidator failed, trying next tier", "tier", tier.Name(), "error", err)
+			withRepairs(result)
 			lastErr = err
 			continue
 		}
@@ -217,12 +234,13 @@ func (t *TieredConsolidator) Consolidate(ctx context.Context, input ReflectionIn
 				"output", len(result.Memories),
 				"min_output", gateMinOutput(inputCount),
 			)
+			withRepairs(result)
 			lastErr = fmt.Errorf("%s: quality gate failed (%d/%d memories)", tier.Name(), len(result.Memories), inputCount)
 			continue
 		}
 
 		t.active.Store(int32(i))
-		return result, nil
+		return withRepairs(result), nil
 	}
 
 	if lastErr != nil {

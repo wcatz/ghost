@@ -968,10 +968,7 @@ func runReflect() {
 	}
 	result.Memories = validMemories
 
-	// The repair turn is on the same line rather than a note of its own, because
-	// this stdout is the append-only lifecycle.log on the unattended path and one
-	// token there has to mean one re-read (see reflectRepairNote).
-	fmt.Printf("Result:       %d memories (%s)%s\n", len(result.Memories), reflectCategoryParts(result.Memories), reflectRepairNote(result.RepairTurns))
+	fmt.Print(reflectResultLine(result))
 	fmt.Println()
 
 	var projectMems, globalMems []reflection.ReflectMemory

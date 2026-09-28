@@ -458,6 +458,88 @@ func TestSupersededDropTargetMustSurvive(t *testing.T) {
 	}
 }
 
+// TestReaderComplaintsAreBounded: a complaint is quoted back into a prompt,
+// written to an append-only log, and printed as the run's failure, so every
+// model-supplied fragment in it is bounded where it is interpolated — clipping
+// the operation LINE is not enough on its own. `drop <id> reason: <a paragraph>`
+// is the case that makes this load-bearing: the reason tail is model prose, and
+// unbounded it would put a whole paragraph of it (and of whatever stored memory
+// the model was echoing) into all three of those sinks.
+func TestReaderComplaintsAreBounded(t *testing.T) {
+	// Long enough that no clip of it survives, and shaped like prose over a stored
+	// memory rather than like an id, which is what a hallucinated id looks like
+	// too.
+	// The sentinel sits past BOTH clips — the 80-rune line quote and the 60-rune
+	// fragment clip — so it can only appear in the message if one of them stopped
+	// working, and it stands in for whatever prose the model was echoing out of
+	// stored memory.
+	const sentinel = "SENTINEL-PAST-BOTH-CLIPS"
+	noise := strings.Repeat("x", 150) + sentinel + strings.Repeat("y", 2000)
+
+	t.Run("unreadable drop reason", func(t *testing.T) {
+		err := opErr(t, opInput(), `{"ops":["drop `+opID1+` reason: `+noise+`"]}`)
+		if err == nil {
+			t.Fatal("a free-form drop reason was accepted")
+		}
+		// The line quote (80 runes) plus the bounded fragment clip, plus the fixed
+		// prose around them. Generous: the claim is that the message cannot grow
+		// with the response, not that it is short.
+		if n := len(err.Error()); n > 400 {
+			t.Errorf("complaint is %d bytes, want a bound that does not grow with the response:\n%s", n, err.Error())
+		}
+		if strings.Contains(err.Error(), sentinel) {
+			t.Errorf("the complaint carries model text from past the fragment clip:\n%s", err.Error())
+		}
+	})
+
+	t.Run("hallucinated id", func(t *testing.T) {
+		err := opErr(t, opInput(), `{"ops":["keep `+noise+opID2+`"]}`)
+		if err == nil {
+			t.Fatal("a hallucinated id was accepted")
+		}
+		if n := len(err.Error()); n > 400 {
+			t.Errorf("complaint is %d bytes, want a bound that does not grow with the response:\n%s", n, err.Error())
+		}
+		if strings.Contains(err.Error(), sentinel) {
+			t.Errorf("the complaint carries model text from past the fragment clip:\n%s", err.Error())
+		}
+	})
+}
+
+// TestReaderComplaintForLogWithholdsTheLine: the log rendering is the one a sink
+// that outlives the run may carry, so the quoted operation line is withheld
+// while the reason and the id — the diagnostic, and neither of them content —
+// survive. It also has to fail CLOSED on an error this package did not build as a
+// complaint, because an unrecognised renderer is exactly the case where a log
+// line must not guess.
+func TestReaderComplaintForLogWithholdsTheLine(t *testing.T) {
+	err := opErr(t, opInput(), `{"ops":["keep 00000000000000000000000000000000"]}`)
+	if err == nil {
+		t.Fatal("an unknown id was accepted")
+	}
+	safe := readerComplaintForLog(err)
+	if !strings.Contains(safe, "00000000000000000000000000000000") {
+		t.Errorf("safe rendering dropped the id that was refused:\n%s", safe)
+	}
+	if !strings.Contains(safe, "is not one of the memories this run was given") {
+		t.Errorf("safe rendering dropped the reason:\n%s", safe)
+	}
+	if !strings.Contains(safe, "withheld") {
+		t.Errorf("safe rendering does not say the operation line was withheld:\n%s", safe)
+	}
+	if strings.Contains(safe, `"keep 00000000000000000000000000000000"`) {
+		t.Errorf("safe rendering quotes the operation line back:\n%s", safe)
+	}
+
+	fellback := readerComplaintForLog(fmt.Errorf("something else went wrong"))
+	if !strings.Contains(fellback, "unclassified") {
+		t.Errorf("an unrecognised error = %q, want it withheld whole and named by type", fellback)
+	}
+	if strings.Contains(fellback, "went wrong") {
+		t.Errorf("an unrecognised error was printed verbatim: %q", fellback)
+	}
+}
+
 // TestParseOpResponseRejectsTheOldMemoriesShape: the pre-#639 contract had the
 // model return a "memories" array. Accepting it would silently keep the free-text
 // path alive for any harness that still answers that way, which is the exact

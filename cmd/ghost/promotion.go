@@ -297,28 +297,45 @@ func reflectCategoryParts(mems []reflection.ReflectMemory) string {
 	return strings.Join(parts, ", ")
 }
 
-// reflectRepairNote reports the LLM tier's repair turn on the `Result:` line: a
-// run whose first answer the strict ops reader rejected and which succeeded on
-// the re-read says so, and a run that needed no repair says nothing at all.
+// reflectResultLine renders the `Result:` line: what came back, broken down by
+// category, and the repair turn the LLM tier had to spend to get an answer at
+// all (see reflectRepairNote).
 //
-// It is on that one line, and only that line, for a counting reason. On the
-// unattended path this stdout IS the append-only lifecycle.log (the stop hook
-// redirects it, see internal/mcpinit/stophook), so printing the token twice —
-// once in the summary and once in a note on the other stream — would double
-// every count the token exists to produce. The `repair: %d` token is the stable
-// grep for "the first answer was malformed and the run survived it"; the
-// denominator is the `Result:` lines in the same log, so a run that repaired and
-// then failed outright is not in it — that run's rejection is on the WARN line
-// the tier writes whether the run goes on to succeed or not.
+// It is a function taking the result rather than a Printf in runReflect because
+// runReflect exits the process, so the line is otherwise unreachable from a test
+// and a test that re-spelled the format string would pass with the command
+// changed — the same seam reasoning as gatedLLMTier.
+func reflectResultLine(result reflection.ReflectionResult) string {
+	return fmt.Sprintf("Result:       %d memories (%s)%s\n", len(result.Memories), reflectCategoryParts(result.Memories), reflectRepairNote(result.RepairTurns))
+}
+
+// reflectRepairNote reports the run's repair turn on the `Result:` line: a run
+// whose first answer the strict ops reader rejected and which succeeded on the
+// re-read says so, and a run that needed no repair says nothing at all.
 //
-// The count is 0 or 1 because the tier allows one extra turn (opRepairTurns); if
-// that bound ever moves, the wording below has to move with it rather than
-// report "once" for a number that is not once.
+// One line of this process's own output carries it, and nothing else does, for a
+// counting reason. On the unattended path that stdout IS the append-only
+// lifecycle.log (the stop hook redirects it, see internal/mcpinit/stophook), so
+// printing the token a second time on the other stream would double every count
+// the token exists to produce. The `repair: %d` token is the stable grep for "the
+// first answer was malformed and the run survived it", and the denominator is the
+// `Result:` lines in the same log. A run that repaired and then failed outright is
+// not in that denominator — it never printed a summary — and its rejection is on
+// the WARN line the tier writes whether the run goes on to succeed or not. (A
+// grep over the phase-failure MARKER as well as the log sees the same line twice,
+// because the marker copies the last of the phase's output; grep the log.)
+//
+// The count is 0 or 1 because the tier allows one extra turn (opRepairTurns). It
+// is per run rather than per tier, so it can be 1 on a result the mechanical tier
+// produced — see ReflectionResult.RepairTurns — which is why the wording names
+// the re-read rather than the result. If the bound ever moves, the wording here
+// has to move with it rather than report one re-read for a number that is not
+// one.
 func reflectRepairNote(turns int) string {
 	if turns <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("  repair: %d (the first response was rejected and re-read)", turns)
+	return fmt.Sprintf("  repair: %d (a rejected response was re-read)", turns)
 }
 
 // appliedSummary describes the rows actually written to the project. The
