@@ -143,6 +143,20 @@ func TestRepoFactHintRecognisesOnlyContainmentClaims(t *testing.T) {
 		"The linker imports nothing from the harness package.",
 		// Ordinary knowledge, no repository anchor at all.
 		"SSH to the bastion goes through port 2222, not 22.",
+		// The five probes an independent review measured firing on durable
+		// notes. Every one is a CAPITALISED dotted token that is not a code
+		// reference: a person's name, a product name, an initialism, and a
+		// Go-looking identifier dropped into prose. Each carries a genuine
+		// containment predicate ("is defined by", "is where", "are defined
+		// in"), so only the REFERENCE half is wrong — which is why they are
+		// the fixtures that pin it. Without them the qualified-identifier
+		// branch is unpinned and a future edit can widen it back to any
+		// Capital.Ident.
+		"This rule is defined by U.S. regulators for production compliance.",
+		"Bob.Smith is where escalations are routed after hours.",
+		"Node.js is where the build tooling lives for the frontend, per team convention.",
+		"The release manager is named per quarter, and Terraform.State is where locks are held.",
+		"Escalation contacts are defined in the on-call rotation, not in Jane.Doe's calendar.",
 		"",
 	}
 	for _, content := range quiet {
