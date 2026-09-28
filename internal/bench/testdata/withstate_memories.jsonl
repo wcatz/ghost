@@ -1,0 +1,68 @@
+# Ranking-state suite (`withstate_*` = the headline corpus WITH the state decay
+# and the supersede demote consume): the graded counterpart to the headline
+# dataset's blind spot. Named `withstate_*` rather than `ranked_*` because
+# .gitignore carries `ranked*.jsonl` for the Phase 4 harness's local retrieval
+# output, and a fixture under that pattern is silently never committed.
+#
+# The headline `ghost bench` corpus seeds through store.Create, which stamps one
+# created_at for every row, so the decay factor is identical across every
+# candidate and cannot reorder them; it holds no supersedes edge either, so the
+# demote is a hard no-op. Both ranking paths production runs are therefore inert
+# on the headline table, which is a property of that corpus and not of the
+# ranker (#561). This corpus carries the state those two paths consume:
+#
+#   * distinct created_at, spread 4 to 700 days, in BOTH decaying and
+#     never-decay categories, so decay is observable on ordinary rows and not
+#     only on superseded ones;
+#   * eight supersession chains (two of them three deep) written as
+#     newer -> older `supersedes` links through store.CreateLink, the same
+#     direction and source the LLM pass writes.
+#
+# Grading: the answer to a chain question is the LIVE row. The superseded rows
+# are the same claim in older words, which is exactly what makes them hard: a
+# lexical search finds them first, and a vector search finds them too. Their
+# gain is 0 because they are no longer the answer — that is the store's real
+# state, not a convenience.
+#
+# Two of the chains (metrics_backend, alert_channel, tls_source) sit in
+# never-decay categories and are close in age, so decay cannot separate them at
+# all and only the demote can. The rest are in decaying categories, where decay
+# and demote both point the same way and the pair cannot be told apart — which
+# is why the report prints the four configurations rather than one number.
+#
+# Deterministic and judge-free like every other suite here: the corpus and the
+# questions are committed, and so are their nomic-embed-text:v1.5 vectors, so
+# both legs run in CI with no Ollama and no network. Regenerate the vectors
+# through internal/embedding's EmbedDocument/EmbedQuery (the task prefixes are
+# part of the space) when the corpus changes.
+{"key":"pg_pool_v1","category":"dependency","content":"The cardano-db-sync service reads blocks from the cnode replica at db-replica-1.internal.","importance":0.7,"age_days":420}
+{"key":"pg_pool_v2","category":"dependency","content":"The cardano-db-sync service reads blocks from the cnode replica at cnode-replica-3.internal; db-replica-1 was decommissioned.","importance":0.7,"age_days":12,"supersedes":["pg_pool_v1"]}
+{"key":"k8s_ver_v1","category":"dependency","content":"The relay cluster runs Kubernetes 1.28.","importance":0.7,"age_days":380}
+{"key":"k8s_ver_v2","category":"dependency","content":"The relay cluster was upgraded from Kubernetes 1.28 to 1.30.","importance":0.7,"age_days":90,"supersedes":["k8s_ver_v1"]}
+{"key":"k8s_ver_v3","category":"dependency","content":"The relay cluster now runs Kubernetes 1.33 after the upgrade from 1.30.","importance":0.7,"age_days":6,"supersedes":["k8s_ver_v2","k8s_ver_v1"]}
+{"key":"signer_v1","category":"architecture","content":"The block producer signs in a single process on the BP host.","importance":0.7,"age_days":300}
+{"key":"signer_v2","category":"architecture","content":"Signing runs in a sidecar beside the node, so the node process itself never holds a signing key.","importance":0.7,"age_days":4,"supersedes":["signer_v1"]}
+{"key":"metrics_backend_v1","category":"fact","content":"Metrics are stored in an InfluxDB instance on the monitoring host.","importance":0.7,"age_days":500}
+{"key":"metrics_backend_v2","category":"fact","content":"Metrics are stored in the Prometheus TSDB on kube-prometheus-stack; the InfluxDB instance is gone.","importance":0.7,"age_days":7,"supersedes":["metrics_backend_v1"]}
+{"key":"alert_channel_v1","category":"convention","content":"Paging alerts go to the ops Telegram group.","importance":0.7,"age_days":260}
+{"key":"alert_channel_v2","category":"convention","content":"Paging alerts go to the on-call rotation's own alertmanager receiver, not the ops Telegram group.","importance":0.7,"age_days":20,"supersedes":["alert_channel_v1"]}
+{"key":"backup_window_v1","category":"pattern","content":"Database snapshots are taken once a night at 02:00.","importance":0.7,"age_days":340}
+{"key":"backup_window_v2","category":"pattern","content":"Database snapshots are taken every six hours, so the 02:00 window no longer exists.","importance":0.7,"age_days":15,"supersedes":["backup_window_v1"]}
+{"key":"tls_source_v1","category":"preference","content":"TLS certificates are bought from a commercial CA.","importance":0.7,"age_days":610}
+{"key":"tls_source_v2","category":"preference","content":"TLS certificates come from Let's Encrypt through cert-manager; the commercial CA is not renewed.","importance":0.7,"age_days":30,"supersedes":["tls_source_v1"]}
+{"key":"cardano_dir_v1","category":"gotcha","content":"The cardano-node socket lives under the node's default state directory.","importance":0.7,"age_days":220}
+{"key":"cardano_dir_v2","category":"gotcha","content":"The cardano-node socket lives under the CARDANO_NODE_SOCKET_PATH override, which the systemd unit sets; the default state directory holds nothing.","importance":0.7,"age_days":9,"supersedes":["cardano_dir_v1"]}
+{"key":"ogmios_port","category":"dependency","content":"Ogmios listens on port 1337 and is bound to the loopback interface only.","importance":0.7,"age_days":500}
+{"key":"kv_store","category":"architecture","content":"The key-value store is plain JSON files under a cache directory, with one index file listing them.","importance":0.7,"age_days":640}
+{"key":"retry_budget","category":"pattern","content":"Client retries use exponential backoff capped at 30 seconds, with full jitter.","importance":0.7,"age_days":280}
+{"key":"log_scrape","category":"gotcha","content":"Scrape configs must not carry the instance label; the relabel rule drops it, so adding it back silently multiplies every series.","importance":0.7,"age_days":150}
+{"key":"wire_protocol","category":"decision","content":"We decided the memory server speaks JSON-RPC over stdio and exposes nothing else.","importance":0.7,"age_days":700}
+{"key":"index_type","category":"dependency","content":"The block-slot index column is declared UNIQUE, so a duplicate slot aborts the insert instead of double-counting.","importance":0.7,"age_days":95}
+{"key":"staking_rewards","category":"convention","content":"Stake rewards are withdrawn every epoch to the registered reward address.","importance":0.6,"age_days":400}
+{"key":"snapshot_interval","category":"convention","content":"Chain snapshots are exported after every epoch rollover so a peer can bootstrap from one.","importance":0.6,"age_days":200}
+{"key":"peer_count","category":"fact","content":"The block producer peers with seven relays.","importance":0.6,"age_days":350}
+{"key":"wallet_cli","category":"pattern","content":"Wallet operations go through the CLI with an explicit signing key path; nothing reads a keystore implicitly.","importance":0.6,"age_days":45}
+{"key":"cors_origin","category":"gotcha","content":"The origin allowlist is exact-match; a wildcard there is a credential leak, not a convenience.","importance":0.7,"age_days":520}
+{"key":"release_tag","category":"convention","content":"Releases are cut from main with a signed annotated tag.","importance":0.6,"age_days":100}
+{"key":"session_limit","category":"preference","content":"Never keep more than six concurrent sessions open on the laptop.","importance":0.6,"age_days":700}
+{"key":"artifact_retention","category":"pattern","content":"Build artifacts are kept for 14 days and then pruned by the workflow's own cleanup step.","importance":0.6,"age_days":260}

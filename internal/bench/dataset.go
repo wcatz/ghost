@@ -35,7 +35,7 @@ type MemorySpec struct {
 	// AgeDays backdates created_at. It is 0 on the headline dataset, which is
 	// what makes the decay factor identical across every candidate there and
 	// the headline table blind to decay; the ranking-state suite sets it
-	// (testdata/ranked_memories.jsonl).
+	// (testdata/withstate_memories.jsonl).
 	AgeDays int `json:"age_days,omitempty"`
 	// Supersedes names the keys this memory REPLACES — the direction the demote
 	// consumes (newer -> older), written through store.CreateLink with the same

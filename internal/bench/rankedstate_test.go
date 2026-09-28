@@ -2,10 +2,50 @@ package bench
 
 import (
 	"context"
+	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
+
+// TestRankedStateFixturesAreCommitted guards a failure mode that is invisible
+// from the working tree: .gitignore carries `ranked*.jsonl` for the Phase 4
+// harness's local retrieval output, and the first version of this suite's corpus
+// was named `ranked_memories.jsonl` — so `git add` skipped it, every local run
+// passed, and CI failed where the file was absent rather than where it was
+// written. The fixtures are now `withstate_*`, out of that pattern's way.
+//
+// The check is `git ls-files`, so it fails in CI (where the files are missing
+// from the checkout, and from the index) rather than only locally. It is skipped
+// outside a git worktree, where there is no index to ask.
+func TestRankedStateFixturesAreCommitted(t *testing.T) {
+	files := []string{
+		"testdata/" + withStateMemories,
+		"testdata/" + withStateQueries,
+		"testdata/" + withStateVectors,
+	}
+	// The test runs with the package directory as its working directory, so the
+	// pathspecs above are relative to it and git resolves them from there. The
+	// "is this a checkout at all" question is asked of git rather than of a
+	// `.git` path, because in a linked worktree `.git` is a file.
+	if _, err := exec.Command("git", "rev-parse", "--git-dir").CombinedOutput(); err != nil {
+		t.Skip("not inside a git checkout, so there is no index to check the fixtures against")
+	}
+	out, err := exec.Command("git", append([]string{"ls-files", "--error-unmatch"}, files...)...).CombinedOutput()
+	if err != nil {
+		t.Errorf("these fixtures are not tracked by git, so CI will not have them:\n%s\n%s",
+			strings.Join(files, "\n"), out)
+	}
+	// And they must not be sitting under an ignore rule either: a tracked file
+	// that is also ignored is legal, but it means the name is one edit away from
+	// being dropped from the index.
+	for _, f := range files {
+		if exec.Command("git", "check-ignore", "-q", f).Run() == nil {
+			t.Errorf("testdata fixture %s is covered by an ignore rule, so adding it needs -f; rename it", f)
+		}
+	}
+}
 
 // seedRankedStateFixture seeds the committed suite and returns the queries plus
 // the corpus, so a test can assert what the corpus carries as well as what it

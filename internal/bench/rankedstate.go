@@ -35,13 +35,19 @@ import (
 const (
 	// RankedStateProject is the project the suite seeds and searches.
 	RankedStateProject = "rankedstate"
-	// rankedStateMemories, rankedStateQueries and rankedStateVectors name the
+	// withStateMemories, withStateQueries and withStateVectors name the
 	// committed corpus, questions and embedding fixture. Only the directory is
 	// a constant: the loader is handed a directory so a test can read the same
 	// suite from a fixture it built itself.
-	rankedStateMemories = "ranked_memories.jsonl"
-	rankedStateQueries  = "ranked_queries.jsonl"
-	rankedStateVectors  = "ranked_embeddings.json"
+	//
+	// The files are `withstate_*` and not `ranked_*` on purpose: .gitignore
+	// carries `ranked*.jsonl` for the Phase 4 harness's LOCAL retrieval output,
+	// and a fixture named `ranked_memories.jsonl` sits under that pattern and is
+	// silently never committed — a failure that only shows up where the fixture
+	// is absent, not where it was written.
+	withStateMemories = "withstate_memories.jsonl"
+	withStateQueries  = "withstate_queries.jsonl"
+	withStateVectors  = "withstate_embeddings.json"
 )
 
 // LoadRankedStateDataset reads the suite's corpus and questions. It has its own
@@ -50,11 +56,11 @@ const (
 // maintenance state, and the abstention baseline belongs to the corpus the
 // headline table uses.
 func LoadRankedStateDataset(dir string) (Dataset, error) {
-	mems, err := loadFile(dir+"/"+rankedStateMemories, LoadMemories)
+	mems, err := loadFile(dir+"/"+withStateMemories, LoadMemories)
 	if err != nil {
 		return Dataset{}, err
 	}
-	qs, err := loadFile(dir+"/"+rankedStateQueries, LoadQueries)
+	qs, err := loadFile(dir+"/"+withStateQueries, LoadQueries)
 	if err != nil {
 		return Dataset{}, err
 	}
@@ -69,7 +75,7 @@ func SeedRankedState(ctx context.Context, store *memory.Store, db *sql.DB, dir s
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(dir + "/" + rankedStateVectors)
+	f, err := os.Open(dir + "/" + withStateVectors)
 	if err != nil {
 		return nil, err
 	}
