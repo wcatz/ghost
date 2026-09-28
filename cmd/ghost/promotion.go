@@ -113,16 +113,27 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 // eyes, substituting a description for the content whenever the content holds a
 // credential.
 //
-// Every print site in cmd/ghost that renders STORED memory text goes through this
-// substitution — displayProposal itself, displayClaim, displayStored and
-// `ghost history`'s two printers — and that is the point. A guarantee made at the
-// write boundary — the drop reports format, category, scope and length, never the
+// Every print site in cmd/ghost that renders stored memory text IN A REPORT — the
+// lifecycle listings and `ghost history` — goes through this substitution:
+// displayProposal itself, displayClaim, displayStored, and the two history
+// printers. A guarantee made at the write boundary — the drop reports format, category, scope and length, never the
 // content — is not a guarantee about the command's report if the same command
 // prints the value somewhere else: the proposal listing and the drop-guard warning
 // both printed 120 truncated characters, and 120 is far more than a GitHub PAT or a
 // Docker Hub token needs. In the autonomous path that stdout is the append-only
 // lifecycle.log, so the value outlives the run. The exposure the store's refusal
 // exists to prevent, reached from the other direction.
+//
+// The class is REPORT, and saying so is load-bearing rather than pedantic:
+// `ghost context` and the SessionStart hook's digest (internal/mcpinit) print the
+// same stored rows — `quoteData` wraps them in «» and nothing else — and they are
+// outside this substitution on purpose. They are a data FEED rather than a report
+// a person reads: a memory withheld from the injected context is silently out of
+// every later session, which is a worse failure than printing one, and the same
+// text is already reachable through `ghost_memory_search`, whose contract is to
+// return what is stored. The control on that path is the write boundary plus a
+// store scan, the same answer the search tool has. docs/architecture.md records
+// this under the credential guard.
 //
 // The lifecycle listings were the sites left out, and the argument for them was
 // that the write-boundary guard already refuses their input. That argument is

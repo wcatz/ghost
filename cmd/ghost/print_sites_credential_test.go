@@ -224,12 +224,15 @@ func TestHistoryPrintersWithholdCredentialsInPreGuardRows(t *testing.T) {
 	s, db, row := preGuardStore(t)
 	ctx := context.Background()
 
-	// Two rows, because printHistoryEntry prints two text fields and one of them
-	// is not the write-time filter's: `content` goes through
-	// `ghost_history_content`, `merged_content` is a plain column.
-	insertPreGuardHistory(t, db, row.ID, preGuardContent, "")
+	// Two rows, because printHistoryEntry prints two text fields and one of them is
+	// not the write-time filter's: `content` goes through
+	// `ghost_history_content`, and `merged_content` is a plain column beside it —
+	// so this second row is the field the filter never saw. It is also the only
+	// field here that reaches the marker with no category, which is what makes the
+	// marker's two shapes observable rather than theoretical.
+	insertPreGuardHistory(t, db, row.ID, preGuardContent, "", "gotcha")
 	insertPreGuardHistory(t, db, row.ID, "the relay now reads its token from the runner env",
-		"the older wording held "+preGuardCredential)
+		"the older wording held "+preGuardCredential, "gotcha")
 
 	entries, err := s.MemoryHistory(ctx, row.ID, 0)
 	if err != nil {
@@ -263,6 +266,16 @@ func TestHistoryPrintersWithholdCredentialsInPreGuardRows(t *testing.T) {
 			// text. The second row's own content is clean and is printed in full.
 			t.Errorf("`ghost history` withheld %d field(s), want 2:\n%s",
 				strings.Count(out.String(), "<withheld:"), out.String())
+		}
+		// The two shapes, because the marker reports what the caller knows: the
+		// entry's own content names its category, and the folded-in text does not
+		// carry one — a history row records no category for a fold's discarded
+		// wording — so it prints the short form rather than an empty `category=`.
+		if !strings.Contains(out.String(), "category=gotcha") {
+			t.Errorf("`ghost history` did not name the category it holds:\n%s", out.String())
+		}
+		if strings.Contains(out.String(), "category=,") || strings.Contains(out.String(), "category=>") {
+			t.Errorf("`ghost history` printed an empty category in a marker:\n%s", out.String())
 		}
 		// The rest of the entry is still there. The history answers "what did this
 		// memory say, when, and who wrote it", and a withheld value must not cost
@@ -324,6 +337,11 @@ func TestHistoryPrintersWithholdCredentialsInPreGuardRows(t *testing.T) {
 			if strings.HasPrefix(e.MergedContent, "<withheld:") {
 				withheldMerged++
 			}
+			// The same two shapes in the machine form, so a consumer branching on
+			// the marker sees what a person reading it sees.
+			if strings.HasPrefix(e.MergedContent, "<withheld:") && strings.Contains(e.MergedContent, "category=") {
+				t.Errorf("the folded-in text's marker names a category it does not have: %q", e.MergedContent)
+			}
 		}
 		if withheldContent != 1 || withheldMerged != 1 {
 			t.Errorf("the --json stream withheld %d content and %d folded-in field(s), want 1 and 1: %s",
@@ -337,14 +355,14 @@ func TestHistoryPrintersWithholdCredentialsInPreGuardRows(t *testing.T) {
 // because there was none. Nothing through the store's own writers can produce this
 // state, which is the point — a test that reached it through a writer would be
 // testing the guard rather than the reader.
-func insertPreGuardHistory(t *testing.T, db *sql.DB, memoryID, content, merged string) {
+func insertPreGuardHistory(t *testing.T, db *sql.DB, memoryID, content, merged, category string) {
 	t.Helper()
 	if _, err := db.Exec(`INSERT INTO memory_history
 		(memory_id, project_id, phase, agent, session_id, related_id, merged_content,
 		 content, category, importance, resolved_at, source, recorded_at)
-		VALUES (?, ?, 'save', 'opencode', '', '', ?, ?, 'gotcha', 0.7, NULL, 'mcp',
+		VALUES (?, ?, 'save', 'opencode', '', '', ?, ?, ?, 0.7, NULL, 'mcp',
 			'2020-01-01T00:00:00Z')`,
-		memoryID, preGuardProject, merged, content); err != nil {
+		memoryID, preGuardProject, merged, content, category); err != nil {
 		t.Fatalf("insert the pre-guard history row: %v", err)
 	}
 }

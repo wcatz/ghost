@@ -115,8 +115,9 @@ source the memory held once that write landed.
               leaves that credential in the database FILE unless it is purged.
               Printing is not redaction and this command does not pretend to be
               one: an entry whose text holds a credential-shaped value prints as
-              '<withheld: format, category, bytes>' instead of the value, in the
-              human and the --json form alike. The row, its history and its
+              '<withheld: format, category, bytes>' — or, for the folded-in text
+              a history row records no category for, '<withheld: format, bytes>'
+              — in the human and the --json form alike. The row, its history and its
               snapshots go in one transaction, so none can survive the others. A
               memory that is ALREADY deleted is handled here too: its recorded
               text is erased on its own, because the tombstone is the feature
