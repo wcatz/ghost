@@ -1075,3 +1075,38 @@ func TestUpgradeFlagsAgreeAcrossBothHelpSurfaces(t *testing.T) {
 		t.Errorf("the top-level command list does not carry %q, so the two help surfaces disagree about what `ghost upgrade` accepts:\n%s", usageLine, summary)
 	}
 }
+
+// TestPerformUpgradeWarnsBeforeInstallingADowngrade is the sibling of the
+// prerelease warning assertion, and it exists because the two warnings are the
+// same shape: one pinned and the other free to drift is how a pair ends up
+// disagreeing. The "newer" in the wording is only true because the warning is
+// reached through isOlderRelease, so the release is provably older than the
+// running one — an unorderable running version never gets here at all.
+func TestPerformUpgradeWarnsBeforeInstallingADowngrade(t *testing.T) {
+	rs := newReleaseServer(t, "v0.33.0", []byte("the older binary"))
+	target := installedGhost(t, "the newer binary")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var errOut bytes.Buffer
+	installed, err := performUpgrade(ctx, upgradeStreams{out: io.Discard, err: &errOut}, "0.34.0",
+		upgradeOptions{allowDowngrade: true}, upgradeDeps{
+			fetch:   rs.fetch,
+			install: installOver(target),
+		})
+	if err != nil {
+		t.Fatalf("performUpgrade with --allow-downgrade: %v", err)
+	}
+	if installed != "0.33.0" {
+		t.Errorf("installed version = %q, want 0.33.0", installed)
+	}
+	// Intent, not a completed act: this line is written before the download and
+	// both digest checks, so it cannot claim an install that has not happened.
+	if !strings.Contains(errOut.String(), "about to install 0.33.0 over the newer 0.34.0") {
+		t.Errorf("stderr %q should announce the downgrade as what is about to be installed", errOut.String())
+	}
+	if got, _ := os.ReadFile(target); string(got) != "the older binary" {
+		t.Errorf("installed binary holds %q, want the older release's binary", got)
+	}
+}
