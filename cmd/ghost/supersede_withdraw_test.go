@@ -148,9 +148,13 @@ func TestSupersedeWithdrawReportDryRun(t *testing.T) {
 	if !strings.Contains(out, "llm") || !strings.Contains(out, "manual") {
 		t.Errorf("the report does not name each edge's own source:\n%s", out)
 	}
-	// And the follow-up: the withdrawal alone does not un-bury anything.
-	if !strings.Contains(out, "ghost resolve ghost --reassess") {
-		t.Errorf("the report omits the resolve step that un-hides the target:\n%s", out)
+	// The report itself does NOT name the resolve pass, and that is deliberate:
+	// the caller prints the follow-up through the same formatter --reassess uses,
+	// so both repairs emit one scoped command for it and there is no second
+	// command string here to fall behind. #702 made the unscoped one wrong to
+	// suggest, so a hint re-introduced here is a hint that is already stale.
+	if strings.Contains(out, "resolve") {
+		t.Errorf("the report names the resolve pass; the shared follow-up owns that:\n%s", out)
 	}
 }
 
@@ -181,7 +185,43 @@ func TestSupersedeWithdrawReportApplied(t *testing.T) {
 	if strings.Contains(out, "Re-run with --apply") {
 		t.Errorf("an apply report asks the reader to apply again:\n%s", out)
 	}
-	if !strings.Contains(out, "ghost resolve ghost --reassess") {
-		t.Errorf("the report omits the resolve step that un-hides the target:\n%s", out)
+	if strings.Contains(out, "resolve") {
+		t.Errorf("the report names the resolve pass; the shared follow-up owns that:\n%s", out)
+	}
+}
+
+// TestWithdrawnLinkTargetsNamesWhatTheFollowUpMustClear: the follow-up is a
+// SCOPED resolve repair, so the ids it carries decide which memories it may
+// clear. Three things have to hold. A target appears once however many edges
+// named it — the same orphan is not a second claim. A row this run never reached
+// is NOT in the list: its edge is still live, so nothing was orphaned and the
+// repair would report it as still asserted. And a dry run contributes nothing,
+// because there is no stamp to clear.
+func TestWithdrawnLinkTargetsNamesWhatTheFollowUpMustClear(t *testing.T) {
+	links := []supersede.WithdrawnLink{
+		{SourceID: "A", TargetID: "T1", Withdrawn: true},
+		{SourceID: "B", TargetID: "T1", Withdrawn: true}, // a second edge, one target
+		{SourceID: "C", TargetID: "T2", Withdrawn: true},
+		{SourceID: "D", TargetID: "T3", NotAttempted: true},     // never reached: still live
+		{SourceID: "E", TargetID: "T4", WithdrawalFailed: true}, // the write errored
+		{SourceID: "F", TargetID: "T5"},                         // a dry run's row
+	}
+	got := withdrawnLinkTargets(links)
+	if len(got) != 2 || got[0] != "T1" || got[1] != "T2" {
+		t.Fatalf("withdrawnLinkTargets = %v, want [T1 T2]", got)
+	}
+	// And the list is what the shared formatter turns into a command naming
+	// exactly these memories.
+	followup := supersedeReassessFollowup("myproj", got, "")
+	if !strings.Contains(followup, "T1") || !strings.Contains(followup, "T2") {
+		t.Errorf("the follow-up does not name the withdrawn targets:\n%s", followup)
+	}
+	for _, unwanted := range []string{"T3", "T4", "T5"} {
+		if strings.Contains(followup, unwanted) {
+			t.Errorf("the follow-up names %s, which no withdrawn edge orphaned:\n%s", unwanted, followup)
+		}
+	}
+	if !strings.Contains(followup, "--only") {
+		t.Errorf("the follow-up is not a SCOPED repair, which is the whole reason it is printed:\n%s", followup)
 	}
 }

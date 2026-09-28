@@ -143,7 +143,14 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 // a collision is retried under a fresh name. The two failure modes this buys
 // are a symlink not followed and another run's list not replaced, and the
 // operator's command can only ever point at the list this run wrote.
-func writeReassessTargets(projectName string, ids []string) (string, error) {
+//
+// writtenBy names the command that produced the list, and it is a parameter
+// because two commands write this file: `ghost supersede --reassess --apply` and
+// `ghost supersede --withdraw … --apply` orphan the same kind of resolution. A
+// file claiming the other command wrote it would be read days later by whoever
+// runs the repair, and that header is the only line in it saying where the ids
+// came from.
+func writeReassessTargets(projectName string, ids []string, writtenBy string) (string, error) {
 	if len(ids) == 0 {
 		return "", fmt.Errorf("no withdrawn targets to write")
 	}
@@ -153,8 +160,8 @@ func writeReassessTargets(projectName string, ids []string) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n", resolveFollowupCommand(projectName, ids))
-	b.WriteString("# Written by `ghost supersede --reassess --apply`: the targets of the edges it\n" +
-		"# withdrew, one id per line. Use with `ghost resolve <project> --reassess --only-file`.\n")
+	fmt.Fprintf(&b, "# Written by `%s`: the targets of the edges it\n", writtenBy)
+	b.WriteString("# withdrew, one id per line. Use with `ghost resolve <project> --reassess --only-file`.\n")
 	for _, id := range ids {
 		b.WriteString(id + "\n")
 	}

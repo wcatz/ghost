@@ -163,7 +163,8 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		// un-hides it. Without the second, an agent reads a finished repair where
 		// half of one happened: the resolved_at the edge caused is still there.
 		mustContain(t, "withdraw (target)", out, "about forty minutes")
-		mustContain(t, "withdraw (follow-up)", out, "--reassess")
+		mustContain(t, "withdraw (follow-up)", out, "--reassess --only")
+		mustContain(t, "withdraw (follow-up) target", out, older)
 		// Scoped to this pair: the stub answer above confirmed every candidate the
 		// scan proposed, so the project holds other live edges this call was not
 		// asked about and must not have touched.

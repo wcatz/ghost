@@ -1078,7 +1078,12 @@ func TestCLIResolveSupersede(t *testing.T) {
 		mustMatch(t, "withdraw (dry run) target", dry.stdout, `the staging relay port is 2222`)
 		// And the step that un-hides the target, which the withdrawal does not do
 		// by itself.
-		mustMatch(t, "withdraw (dry run) follow-up", dry.stdout, `(?i)resolve .*--reassess`)
+		// A dry run prints no follow-up at all: it withdrew nothing, and resolve
+		// would refuse the command anyway while the edge is live. The --apply run
+		// below is where the scoped repair is checked.
+		if strings.Contains(dry.stdout, "--reassess") {
+			t.Fatalf("a dry-run withdrawal printed a repair command for an edge it did not withdraw:\n%s", dry.stdout)
+		}
 		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND invalidated_at IS NULL`); n != 1 {
 			t.Fatalf("a dry-run withdrawal left %d live edge(s), want 1", n)
 		}
@@ -1088,6 +1093,13 @@ func TestCLIResolveSupersede(t *testing.T) {
 
 		applied := s.mustRun("supersede", e2eProject, "--withdraw", newer, older, "--apply")
 		mustMatch(t, "withdraw (apply)", applied.stdout, `(?i)withdrew`)
+		// The other half of the repair, and it must be the SCOPED one: the ids the
+		// withdrawal orphaned, not a project-wide re-judge (#702 measured the
+		// unscoped repair proposing to un-hide 143 rows, ~35% of them stale).
+		mustMatch(t, "withdraw (apply) follow-up", applied.stdout, `(?i)resolve .*--reassess --only`)
+		if !strings.Contains(applied.stdout, older) {
+			t.Errorf("the follow-up does not name the target it orphaned (%s):\n%s", older, applied.stdout)
+		}
 		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links
 			WHERE relation = 'supersedes' AND invalidated_at IS NULL AND source_id = ? AND target_id = ?`, newer, older); n != 0 {
 			t.Fatalf("the apply left the named edge live (%d)", n)

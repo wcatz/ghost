@@ -782,10 +782,34 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	// this string is the tool's whole answer, and a clause addressed to the
 	// implementer inside it reads as an instruction to the agent reading it.
 	// That guidance lives in this function's doc comment instead.
+	// Scoped, and named as such, for the reason the CLI prints the same command:
+	// an unscoped repair re-judges every resolved memory in the project, and
+	// #702 measured that proposing to un-hide 143 rows on a real store, about 35%
+	// of them stale. An agent handed the unscoped form has to be told which one to
+	// run, or it will run the one that rewrites the most.
 	sb.WriteString("\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of " +
-		"ranked injection until `ghost resolve " + projectID + " --reassess --apply` clears it (that pass honours a " +
-		"live edge as a floor, which is why the edge has to go first).")
+		"ranked injection until `ghost resolve " + projectID + " --reassess --only " +
+		strings.Join(shortIDs(res.Links), ",") + " --apply` clears it (scoped, because an unscoped repair " +
+		"re-judges every resolved memory in the project; that pass honours a live edge as a floor, which is why " +
+		"the edge has to go first).")
 	return sb.String(), nil
+}
+
+// shortIDs is the follow-up's selector list: the targets this call withdrew, in
+// full. Full ids and not the eight-character abbreviations the reports use —
+// `--only` is a command about to be run, and a prefix that is unambiguous now may
+// not be after the operator's next save.
+func shortIDs(links []supersede.WithdrawnLink) []string {
+	var out []string
+	seen := make(map[string]bool, len(links))
+	for _, l := range links {
+		if l.TargetID == "" || seen[l.TargetID] || !l.Withdrawn {
+			continue
+		}
+		seen[l.TargetID] = true
+		out = append(out, l.TargetID)
+	}
+	return out
 }
 
 // purgeDeletedMemoryHistory answers ghost_memory_delete for an id whose row is
@@ -1684,7 +1708,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_link_withdraw",
 		Title:       "Withdraw a supersedes link",
-		Description: "Withdraw ONE wrong 'supersedes' link, naming the newer memory it points from and the older memory it points at. Use it when a supersession is wrong for a reason no classifier can see — the newer note is not a replacement of the older one at all, or the 'newer' note is the stale one. The link is not informational: ranking demotes its target and resolve's supersedes piggyback stamps resolved_at on it, so a wrong edge takes a live memory out of every later session, and a repair path is the only way to undo it — the `ghost supersede --reassess` CLI pass withdraws only what the current rules reject, so an edge they still accept needs this. a ref may be a full memory id or an unambiguous 8-or-more-character prefix of one, as every Ghost report abbreviates them. A pair with no live link is an error and nothing is written; an ambiguous prefix is refused with the matches listed rather than guessed at. The withdrawal writes the 'unsupersede' history row, so the audit shows the claim and the withdrawal, and it is soft — a later pass that still judges the pair a supersession re-creates the edge. It does NOT un-bury the target by itself: the resolved_at the edge caused stays until `ghost resolve <project> --reassess --apply` clears it, and the result says so. Do not use this to retire a memory — the target stays searchable and editable, which is the point.",
+		Description: "Withdraw ONE wrong 'supersedes' link, naming the newer memory it points from and the older memory it points at. Use it when a supersession is wrong for a reason no classifier can see — the newer note is not a replacement of the older one at all, or the 'newer' note is the stale one. The link is not informational: ranking demotes its target and resolve's supersedes piggyback stamps resolved_at on it, so a wrong edge takes a live memory out of every later session, and a repair path is the only way to undo it — the `ghost supersede --reassess` CLI pass withdraws only what the current rules reject, so an edge they still accept needs this. a ref may be a full memory id or an unambiguous 8-or-more-character prefix of one, as every Ghost report abbreviates them. A pair with no live link is an error and nothing is written; an ambiguous prefix is refused with the matches listed rather than guessed at. The withdrawal writes the 'unsupersede' history row, so the audit shows the claim and the withdrawal, and it is soft — a later pass that still judges the pair a supersession re-creates the edge. It does NOT un-bury the target by itself: the resolved_at the edge caused stays until a SCOPED `ghost resolve <project> --reassess --only <those ids> --apply` clears it, and the result says so — scoped, because an unscoped repair re-judges every resolved memory in the project. Do not use this to retire a memory — the target stays searchable and editable, which is the point.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			IdempotentHint:  false,

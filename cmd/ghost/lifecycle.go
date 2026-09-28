@@ -1511,11 +1511,11 @@ func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, a
 	if !apply {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.\n")
 	}
-	// The half of the repair that is easy to miss, printed by the one call below
-	// so the report and the pass cannot drift. The wording is mode-neutral on
-	// purpose — a dry run has withdrawn nothing yet, and a sentence in the wrong
-	// tense there would be claiming a deletion the run did not make.
-	fmt.Fprintf(&b, "\nThe edge is only half the repair. A target it buried is still stamped\nresolved and stays out of ranked injection until:\n  ghost resolve %s --reassess --apply\nThat pass honours a live edge as a floor, which is why the edge has to go first.\n", projectName)
+	// The report ends here. The other half of the repair — the resolve pass that
+	// clears the resolution this edge justified — is printed by the caller through
+	// the SAME formatter --reassess uses, so both repairs emit one scoped command
+	// for it. A second, hand-written hint here would be a second command string to
+	// keep current, and #702 made the unscoped one wrong to suggest.
 	return b.String()
 }
 
@@ -1714,7 +1714,7 @@ func runSupersede() {
 		// can clear, and an operator who does not learn that from this run
 		// learns it from a memory that stayed out of every session.
 		if targets := withdrawnTargets(withdrawn); apply && len(targets) > 0 {
-			path, werr := writeReassessTargets(projectName, targets)
+			path, werr := writeReassessTargets(projectName, targets, "ghost supersede --reassess --apply")
 			if werr != nil {
 				// The repair already landed and the command is printed either
 				// way, so a scratch file that could not be written is a warning
@@ -1801,10 +1801,50 @@ type resolveArgs struct {
 func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog.Logger, projectName, projectID string, pairs []supersedePair, apply bool) {
 	res, err := supersede.Withdraw(ctx, store, projectID, toWithdrawPairs(pairs), apply, logger)
 	fmt.Print(supersedeWithdrawReport(projectName, res, apply))
+	// The follow-up through the SAME helpers --reassess uses, and for the same
+	// reason: the resolution this edge justified is cleared by a SCOPED resolve
+	// repair, and an unscoped one re-judges every resolved memory in the project
+	// (#698 measured that proposing to un-hide 143 rows, about 35% of them stale).
+	// One formatter and one file writer means the two repairs cannot drift into
+	// printing different commands for the same situation. It is printed before
+	// the error below, for the reason that error exists at all: a partial
+	// withdrawal still orphaned the targets it did reach.
+	if targets := withdrawnLinkTargets(res.Links); apply && len(targets) > 0 {
+		path, werr := writeReassessTargets(projectName, targets, "ghost supersede --withdraw --apply")
+		if werr != nil {
+			// The withdrawal already landed and the command is printed either way,
+			// so a scratch file that could not be written is a warning and not a
+			// failed run — the same trade --reassess makes.
+			fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", werr)
+		}
+		fmt.Print(supersedeReassessFollowup(projectName, targets, path))
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// withdrawnLinkTargets is the follow-up's id list for a --withdraw run: the
+// targets of the edges it withdrew, deduplicated, in the order the rows were
+// reported. #702's withdrawnTargets does this for the --reassess report's own row
+// type; the two cannot share one function without a type parameter over two
+// structs that differ in one field name, and a wrong answer here clears the
+// wrong memories.
+//
+// A row the run never reached is not in it: its edge is still live, so nothing
+// was orphaned by it and the scoped repair would report it as still asserted.
+func withdrawnLinkTargets(links []supersede.WithdrawnLink) []string {
+	var out []string
+	seen := make(map[string]bool, len(links))
+	for _, l := range links {
+		if l.TargetID == "" || seen[l.TargetID] || !l.Withdrawn {
+			continue
+		}
+		seen[l.TargetID] = true
+		out = append(out, l.TargetID)
+	}
+	return out
 }
 
 // toWithdrawPairs maps the parsed command line onto the core's request, so the

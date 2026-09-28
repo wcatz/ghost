@@ -196,7 +196,7 @@ func TestWriteReassessTargetsIsReadableAsOnlyFile(t *testing.T) {
 	t.Setenv("GHOST_SCRATCH_DIR", root)
 
 	ids := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
-	path, err := writeReassessTargets("myproj", ids)
+	path, err := writeReassessTargets("myproj", ids, "ghost supersede --reassess --apply")
 	if err != nil {
 		t.Fatalf("writeReassessTargets: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestWriteReassessTargetsSanitizesTheProjectName(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
 
-	path, err := writeReassessTargets("../../escape/odd name", []string{"aaaaaaaa1111111111111111111111"})
+	path, err := writeReassessTargets("../../escape/odd name", []string{"aaaaaaaa1111111111111111111111"}, "ghost supersede --reassess --apply")
 	if err != nil {
 		t.Fatalf("writeReassessTargets: %v", err)
 	}
@@ -267,11 +267,11 @@ func TestWriteReassessTargetsGivesEachRunItsOwnFile(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
 
-	first, err := writeReassessTargets("myproj", []string{"aaaaaaaa1111111111111111111111"})
+	first, err := writeReassessTargets("myproj", []string{"aaaaaaaa1111111111111111111111"}, "ghost supersede --reassess --apply")
 	if err != nil {
 		t.Fatalf("first write: %v", err)
 	}
-	second, err := writeReassessTargets("myproj", []string{"bbbbbbbb2222222222222222222222"})
+	second, err := writeReassessTargets("myproj", []string{"bbbbbbbb2222222222222222222222"}, "ghost supersede --reassess --apply")
 	if err != nil {
 		t.Fatalf("second write: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestWriteReassessTargetsNeverWritesOverSomethingElse(t *testing.T) {
 			t.Cleanup(func() { reassessTargetsName = defaultReassessTargetsName })
 			tc.setup(t, filepath.Join(root, taken))
 
-			path, err := writeReassessTargets("myproj", []string{"aaaaaaaa1111111111111111111111"})
+			path, err := writeReassessTargets("myproj", []string{"aaaaaaaa1111111111111111111111"}, "ghost supersede --reassess --apply")
 			if err == nil {
 				t.Fatalf("writeReassessTargets returned %q for a name that was already taken", path)
 			}
@@ -349,7 +349,7 @@ func TestWriteReassessTargetsNeverWritesOverSomethingElse(t *testing.T) {
 // behind is a report that claims a repair nobody can run.
 func TestWriteReassessTargetsFailsWithoutAnId(t *testing.T) {
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
-	if _, err := writeReassessTargets("myproj", nil); err == nil {
+	if _, err := writeReassessTargets("myproj", nil, "ghost supersede --reassess --apply"); err == nil {
 		t.Fatal("writeReassessTargets with no ids must not write a file")
 	}
 }

@@ -78,8 +78,16 @@ func TestLinkWithdrawRemovesTheNamedEdge(t *testing.T) {
 	// The half of the repair the caller cannot infer for itself: the target stays
 	// stamped resolved until the resolve repair pass runs, and the result says so
 	// rather than leaving the agent to believe the memory is back in context.
-	if !strings.Contains(msg, "--reassess") {
-		t.Errorf("the result omits the resolve step that un-hides the target: %q", msg)
+	//
+	// SCOPED, and naming the id it withdrew. An unscoped repair re-judges every
+	// resolved memory in the project (#702 measured 143 rows proposed, ~35% of
+	// them stale), so a result handing the agent the unscoped form is handing it
+	// the command that rewrites the most.
+	if !strings.Contains(msg, "--reassess --only") {
+		t.Errorf("the result does not name a SCOPED repair: %q", msg)
+	}
+	if !strings.Contains(msg, older) {
+		t.Errorf("the result does not name the target it orphaned (%s): %q", older, msg)
 	}
 	if got := liveInto(t, store, "abc123", older); got != 0 {
 		t.Errorf("live edges into the target = %d, want 0", got)
