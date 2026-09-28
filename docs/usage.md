@@ -75,6 +75,61 @@ Ranking is category-aware. Preferences, conventions, and facts do not decay. Arc
 
 Ranking is also status-aware. A resolved memory, and a `_global` row when you search a specific project, are multiplied by 0.5 before the result window is chosen. With Reciprocal Rank Fusion at k=60 that effectively ranks them below every live candidate the search fetched, not merely below one equally good match. Like decay it is a score multiplier rather than a lookup filter — no query excludes a memory from the candidate pool — but unlike decay it is applied before the window is cut: a demoted memory drops out when the window fills with rows that outscore its halved score — or when the keyword reservation hands its slot to a top-`limit/5` keyword hit, even one that scores below it — and it is never let in by that reservation, so a demoted keyword hit has to make that cut on its demoted score. It is still the answer when nothing live outranks it. Cross-project search does not demote `_global` rows. `explain: true` reports the factor per row as `status_factor`.
 
+### `explain: true` — the signals, and the ones that are off
+
+`explain: true` returns a JSON scoring breakdown instead of the formatted list,
+for when a result looks wrong and you need to know which signal decided it. Every
+number in it is the number the ranking used, read from a record the ranking path
+writes as it runs — it is a description of the search that happened, not a second
+attempt at ranking.
+
+Alongside the fusion mechanics (`fts_rank`, `vector_rank`, `vector_score`,
+`rrf_score`, `status_factor`, `decay_factor`, `age_days`) each row carries the
+axes that decide eligibility:
+
+- `project_match` and `row_project` — whether the row belongs to the project you
+  searched, and which project it actually belongs to. A `_global` row is admitted
+  by the shared-row predicate and is **not** a match; `status_factor` is what
+  demotes it.
+- `scope_matched` and `scope_keys_compared` — the scope verdict, and which keys
+  were compared to reach it. A row that does not mention a requested key is
+  reported as matched: silence is not disagreement. This is the same verdict
+  window selection applied, so it cannot report rows the tool would exclude.
+- `keyword_reserved`, `took_slot_from` and `displaced_by` — a keyword-only hit can
+  enter the result window even though its score is below the cut, and no score
+  explains that; these say so, and name the row that lost its slot.
+- `floor_dropped` and `floor_score` — the vector similarity floor cut this row's
+  **vector** contribution, and `floor_score` is the cosine that did it. This is a
+  statement about the vector leg, not about the row's fate: a row the keyword leg
+  also matched keeps its keyword term, stays in the answer, and reports a
+  non-zero `rrf_score`. Check `fts_rank` to tell the two apart — a negative
+  `fts_rank` means the floor removed the row outright, and that is the only case
+  where `rrf_score` is `0` and `status_factor` is `1.0`, because no demotion was
+  applied to a row nothing scored. `row_project` still says whose row it is, so a
+  shared row is visible as one without the field that ranks anything carrying a
+  hypothetical.
+- `superseded_by` and `near_duplicate_of` — the id of the specific memory behind
+  each window-scoped demotion. The penalty counts beside them say how many, these
+  say which.
+- `validity_state` — `valid`, `future`, `expired`, `unverified` or `unset`. The
+  search does not read validity, so an out-of-window row is returned like any
+  other; this is how you notice. Dropping such a row is the context assembler's
+  job, so ask without `explain` for that answer.
+- `confidence` — the stored provenance confidence, reported so you can see it was
+  not used.
+
+Four fields report signals the ranking does **not** act on, and they say so
+rather than carrying a number nobody computed: `confidence_contribution`,
+`provenance_contribution` and `validity_penalty` are `0`, and
+`provenance_weight` is `"off"`. A multiplier that does not exist is reported as
+off, not as `1.0` — `1.0` would read as "weighed and found neutral". The notes in
+the payload repeat this in words.
+
+The payload is bounded at 150 **candidate** rows. A response that reached the budget
+carries a `truncation` object naming how many candidates were dropped; only excluded
+candidates are ever dropped, so every row in the answer is present, and `max_rows`
+reports what the payload actually carries rather than the budget it aimed for.
+
 Demotion only reorders what the legs already fetched: each leg pulls `limit*2` rows from the project plus `_global`, and `_global` rows count against that budget, so a project with fewer matches than the limit still gets `_global` rows filling the rest — demoted, but present. Session-start injection is unaffected by all of this: it ranks in SQL on two separate paths — `loadSessionContext` (`internal/mcpinit/hook.go`) builds the session-start digest and `Store.GetTopMemories` backs the MCP tool surface — neither reaches fusion, and both already filter resolved rows.
 
 ## Tasks

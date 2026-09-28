@@ -305,6 +305,92 @@ could be padding), and explain mode reports the factor per row
 as `status_factor`, computed by the same `statusDemotionFactor` the ranking
 used.
 
+## Explain is a record of the ranking, not a second one
+
+`ghost_memory_search` with `explain:true` answers "why did I get this memory"
+by reporting what the ranking path did to each candidate. Every number in the
+payload is read from a trace the ranking stages write as they run
+(`internal/memory/ranktrace.go`), carried on `SearchParams.trace` — an
+unexported pointer that is nil in every production call, so a normal search pays
+a nil check per stage and allocates nothing.
+
+This is the whole design. Before it, explain rebuilt the fused score by summing
+the leg weights itself, rebuilt the status factor from the hydrated row, rebuilt
+the scope verdict with a second `ScopeMatches` call, and rebuilt both
+window-scoped penalties with a second copy of both queries. Each of those is a
+parallel re-derivation: it agrees with the ranking only until somebody edits the
+ranking, and then an agent debugging a bad result is handed a diagnosis of a
+search that did not happen. The trace is a byproduct, not a decision path —
+nothing reads it to decide anything.
+
+Which stage records what:
+
+| Stage | Records |
+|---|---|
+| `fuseCandidatePool` | each leg's 0-based rank, and the vector cosine |
+| `demoteStatus` | the fused base and the status factor — the two sides of the one multiplication, so a reader can perform it |
+| `scopeEligiblePool` | the scope verdict, for the dropped candidates as well as the survivors |
+| `selectWindow` | the keyword reservation, naming both the promoted row and the row whose slot it took |
+| `decayRank` | the decay factor, the age, and the clock it was measured against |
+| `searchHybridLegs` | the vector floor's verdict: per-candidate, which vector contribution it cut, plus the leg-level fact that the floor let no match through at all |
+| `supersedeVerdicts` / `nearDuplicateVerdicts` | the penalty count and the id of the memory that decided it |
+
+Recording the scope verdict inside `scopeEligiblePool` — for the rows it drops as
+well as the rows it keeps — is the structural fix for [#571](https://github.com/wcatz/ghost/issues/571),
+where explain reported rows the tool would exclude because the filter ran after
+the ranking had already described them. There is no longer a second place that
+decides whether a row is in scope.
+
+The two penalty functions each return the count and the counterpart ids from ONE
+edge read, so the id explain attributes a demotion to is the id the demotion
+actually chose; deciding the loser twice is how an explanation ends up
+contradicting the order it is explaining.
+
+### Signals the ranking does not apply
+
+Four fields report a contribution the search ranking does not act on:
+`confidence_contribution`, `provenance_contribution` and `validity_penalty` are
+`0`, and `provenance_weight` is `"off"` — a multiplier that does not exist
+reported as `1.0` would read as "weighed and found neutral". Beside them,
+`confidence`, `provenance` and `validity_state` report the row's own stored
+values, which is a different thing: those are readable, not applied. One note per
+payload says which is which.
+
+That is a deliberate choice, not a gap. A multiplier that does not exist reported
+as `1.0` reads as "provenance was weighed and found neutral", and a contribution
+invented to fill a field is a ranking factor nobody measured. Validity is the
+clearest case: the search ranking does not read validity at all, so an expired
+row is returned like any other and the state is the useful thing to report; the
+context assembler is what drops such a row, and it DROPS it rather than ranking
+it lower, which is why `validity_penalty` is 0 rather than a fraction. A
+multiplier here needs a measured threshold first, the same bar the evidence
+weight cleared before it shipped.
+
+The validity state itself is read through `memory.ValidityState`, the one rule in
+the tree. `internal/assemble` delegates to it rather than keeping its own copy:
+a row that is `valid` in an explanation and `expired` in an assembled block is
+the #571 class of bug one layer up.
+
+### Size budget
+
+An explanation is bounded at 150 CANDIDATE rows (`explainMaxRows`) — the answer is
+not part of the budget, because a caller that asked for a window needs it back. The
+candidate set is the
+union of both legs' results, so it grows with the caller's limit rather than with
+the corpus — each leg fetches `limit*2` — while the window itself is capped at 100
+by the tool, which is what makes a fixed row budget possible at all.
+
+The cut spends itself on **candidates and never on the answer**: every row the
+search returned is kept wherever it falls in the list, and only excluded
+candidates are dropped, from the far end. Positional order is not a safe proxy
+for that, because the list runs leg by leg and a vector-leg rank-0 row sits after
+every keyword-leg row however it ranked.
+
+A payload that hit the budget carries a `truncation` object — `rows_omitted`,
+`max_rows` and a sentence — rather than only a note, because a note list is
+bounded from the end and a short candidate list that LOOKS complete is the exact
+failure the marker prevents.
+
 Window selection reserves real estate for the keyword leg. A plain cut on the
 fused score could not admit a keyword-only hit at all: the keyword leg's rank-1
 row scores 0.3/61 ≈ 0.0049, while the vector leg's 20th row — still well
