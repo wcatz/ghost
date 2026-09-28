@@ -152,14 +152,3 @@ func TestAnyMemoryIDsByIDPrefixMeasuresTheBoundInCharacters(t *testing.T) {
 		}
 	}
 }
-
-// historyRowCount counts the history rows behind one id, so a fixture can prove
-// the case that distinguishes a distinct id set from a row-per-write one.
-func historyRowCount(t *testing.T, s *Store, memoryID string) int {
-	t.Helper()
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, memoryID).Scan(&n); err != nil {
-		t.Fatalf("count history rows for %s: %v", memoryID, err)
-	}
-	return n
-}
