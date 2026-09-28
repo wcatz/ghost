@@ -2,6 +2,8 @@ package bench
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"regexp"
@@ -153,10 +155,13 @@ func TestSweepGrid(t *testing.T) {
 //
 // One test because one seed is the expensive part; and the four-memory fixture,
 // NOT the committed corpus, which is a budget decision rather than a shortcut.
-// This package's race-instrumented test binary runs 471s against Go's 600s
-// ceiling, so ~130s is all the headroom there is, and a second full seed of 547
-// memories plus a six-point sweep measured 15s without -race — roughly 220s with
-// it, which is the timeout. Nothing here is corpus-dependent: which point is the
+// Measured on this machine with `go test -race ./internal/bench -count=1`: the
+// committed 547-memory corpus puts this package's test binary at 471s on this
+// branch (478s on origin/main, before the commits that brought the ceiling
+// problem in), against Go's 600s per-binary default — so ~130s is all the headroom
+// there is. A second full seed of 547 memories plus a six-point sweep measured
+// 15s without -race; at this tree's race factor that is ~230s, which added to
+// 471s is the timeout. Nothing here is corpus-dependent: which point is the
 // reference, that the interval is the one recomputed from the same two Results,
 // that it reaches the report. A four-memory corpus pins all of it. The
 // corpus-scale half of the claim is held elsewhere and for free — TestSweepGrid
@@ -284,6 +289,181 @@ func TestSweepPairsEveryOtherPointAgainstTheDefaultAndPrintsIt(t *testing.T) {
 	}
 }
 
+// TestSweepMeasuresAgainstTheDefaultNotTheFirstRow: the reference for every
+// point's interval is the point holding the shipped default, never whichever
+// point the sort placed first. Those are different points whenever the default
+// is not the top scorer, and the regression this guards is one this branch has
+// already had: comparing against points[0] passes every numeric assertion on a
+// fixture whose points all tie, because every per-query difference is then
+// exactly zero.
+//
+// Hand-built points, not the committed corpus and not the four-memory fixture,
+// for two reasons: the values have to be KNOWN (a real search cannot be told
+// which point should win by how many), and this is pure arithmetic over
+// Result.PerQuery, so it costs no store and no seed.
+func TestSweepMeasuresAgainstTheDefaultNotTheFirstRow(t *testing.T) {
+	wide := memory.DefaultSearchParams()
+	wide.VecWeight, wide.FTSWeight = 0.8, 0.2
+	narrow := memory.DefaultSearchParams()
+	narrow.VecWeight, narrow.FTSWeight = 0.3, 0.7
+
+	// The default scores 0.5 on every query, so whichever way the sort runs,
+	// points[0] is NOT what the others must be compared against.
+	per := func(vals ...float64) []QueryScore {
+		out := make([]QueryScore, len(vals))
+		for i, v := range vals {
+			out[i] = QueryScore{Name: fmt.Sprintf("q%d", i), NDCG: v}
+		}
+		return out
+	}
+	// `wide` beats the default on q0 and loses on q1: a mean of zero with a
+	// non-degenerate interval, so a wrong reference shows up as a different
+	// pair of edges rather than as an all-zero one.
+	widePt := SweepPoint{
+		Params: wide,
+		Result: Result{Condition: "vec=0.80", NDCG10: 0.75, PerQuery: per(1.0, 0.0)},
+	}
+	defPt := SweepPoint{
+		Params: memory.DefaultSearchParams(),
+		Result: Result{Condition: "vec=0.70", NDCG10: 0.50, PerQuery: per(0.5, 0.5)},
+	}
+	narrowPt := SweepPoint{
+		Params: narrow,
+		Result: Result{Condition: "vec=0.30", NDCG10: 0.25, PerQuery: per(0.0, 0.0)},
+	}
+	// Sorted order deliberately puts the default in the MIDDLE: a reference
+	// taken from points[0] would compare the other two against the wrong point,
+	// and against each other's worst case at that.
+	points := []SweepPoint{widePt, defPt, narrowPt}
+	if err := pairAgainstDefault(points); err != nil {
+		t.Fatalf("pairAgainstDefault: %v", err)
+	}
+
+	if points[1].VsDefault != nil {
+		t.Errorf("the default point carries an interval against itself: %+v", *points[1].VsDefault)
+	}
+	for _, i := range []int{0, 2} {
+		got := points[i].VsDefault
+		if got == nil {
+			t.Fatalf("%s has no interval", points[i].Result.Condition)
+		}
+		if got.Leg != "vec=0.70" {
+			t.Errorf("%s is measured against %q, want the default's condition vec=0.70", points[i].Result.Condition, got.Leg)
+		}
+	}
+	// wide - default = (0.5, -0.5): mean 0, and a real interval around it.
+	if w := points[0].VsDefault; math.Abs(w.Mean) > 1e-12 {
+		t.Errorf("vec=0.80 mean = %+.6f, want 0 (it wins one query and loses one)", w.Mean)
+	}
+	if w := points[0].VsDefault; w.Lo >= 0 || w.Hi <= 0 {
+		t.Errorf("vec=0.80 interval [%+.4f, %+.4f] does not straddle zero; a two-query sample must", w.Lo, w.Hi)
+	}
+	// narrow - default = (-0.5, -0.5): entirely negative, which is a different
+	// interval from wide's, and is what a points[0]-based comparison would lose.
+	if n := points[2].VsDefault; n.Hi >= 0 {
+		t.Errorf("vec=0.30 interval [%+.4f, %+.4f] reaches zero, but it loses both queries", n.Lo, n.Hi)
+	}
+	if w, n := points[0].VsDefault, points[2].VsDefault; w.Lo == n.Lo && w.Hi == n.Hi {
+		t.Errorf("vec=0.80 and vec=0.30 share the interval [%+.4f, %+.4f]; the reference is the same point for both", w.Lo, w.Hi)
+	}
+}
+
+// TestSweepRefusesAGridThatHoldsTheDefaultTwice: the two copies are
+// indistinguishable, so "the first one" would be an artefact of the sort. The
+// comparison is refused rather than made against a guess.
+func TestSweepRefusesAGridThatHoldsTheDefaultTwice(t *testing.T) {
+	wide := memory.DefaultSearchParams()
+	wide.VecWeight, wide.FTSWeight = 0.8, 0.2
+	mk := func(cond string, ndcg float64) Result {
+		return Result{Condition: cond, NDCG10: ndcg, PerQuery: []QueryScore{{Name: "q0", NDCG: ndcg}}}
+	}
+	points := []SweepPoint{
+		{Params: memory.DefaultSearchParams(), Result: mk("vec=0.70", 0.9)},
+		{Params: wide, Result: mk("vec=0.80", 0.5)},
+		{Params: memory.DefaultSearchParams(), Result: mk("vec=0.70", 0.4)},
+	}
+	err := pairAgainstDefault(points)
+	if err == nil {
+		t.Fatal("a grid holding the default twice was accepted")
+	}
+	if !strings.Contains(err.Error(), "twice") {
+		t.Errorf("the error does not say what is wrong with the grid: %v", err)
+	}
+	// And it must not have half-filled the column on the way to failing.
+	for i, p := range points {
+		if i != 0 && p.VsDefault != nil {
+			t.Errorf("point %d was paired before the grid was refused: %+v", i, *p.VsDefault)
+		}
+	}
+}
+
+// TestFormatSweepAsksTheGridWhetherItHasADerivedDefault: SweepPoint is exported,
+// so FormatSweep can be handed a hand-built slice it never paired. Deciding
+// "no default in grid" from one row's nil VsDefault let a slice that DOES hold
+// the default print that claim beside it.
+func TestFormatSweepAsksTheGridWhetherItHasADerivedDefault(t *testing.T) {
+	wide := memory.DefaultSearchParams()
+	wide.VecWeight, wide.FTSWeight = 0.8, 0.2
+	points := []SweepPoint{
+		// The default, unpaired — as a hand-built slice would carry it.
+		{Params: memory.DefaultSearchParams(), Result: Result{Condition: "vec=0.70", NDCG10: 0.7}},
+		// A non-default point with no interval.
+		{Params: wide, Result: Result{Condition: "vec=0.80", NDCG10: 0.8}},
+	}
+	out := FormatSweep(points)
+	if strings.Contains(out, "no default in grid") {
+		t.Errorf("the grid DOES hold the default and the report says it does not:\n%s", out)
+	}
+	if !strings.Contains(out, "this is the default") {
+		t.Errorf("the default row is not marked:\n%s", out)
+	}
+	// The unpaired non-default row says nothing rather than an interval.
+	row := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "vec=0.80") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("no row for vec=0.80:\n%s", out)
+	}
+	if intervalCellRE.MatchString(row) {
+		t.Errorf("a row with no interval printed one: %q", row)
+	}
+	if strings.Contains(row, "no default in grid") {
+		t.Errorf("a row with no interval claimed the grid has no default, which is false: %q", row)
+	}
+}
+
+// TestFormatSweepCaveatNamesNoWeightItWasNotGiven: the footer used to say
+// "vec=0.50 here (#708), the other five reproduce exactly" for every grid it was
+// handed, so a two-point grid with no 0.50 in it printed a claim about a row that
+// was not on the page and a count that was not true. The caveat has to describe
+// the mechanism and cite the issue, and must not name a weight or a count.
+func TestFormatSweepCaveatNamesNoWeightItWasNotGiven(t *testing.T) {
+	wide := memory.DefaultSearchParams()
+	wide.VecWeight, wide.FTSWeight = 0.8, 0.2
+	points := []SweepPoint{
+		{Params: memory.DefaultSearchParams(), Result: Result{Condition: "vec=0.70", NDCG10: 0.7, Queries: 2}},
+		{Params: wide, Result: Result{Condition: "vec=0.80", NDCG10: 0.8, Queries: 2}},
+	}
+	out := FormatSweep(points)
+	caveat := out[strings.Index(out, "Caveat"):]
+	if caveat == "" {
+		t.Fatalf("the report prints no caveat at all:\n%s", out)
+	}
+	if !strings.Contains(caveat, "#708") {
+		t.Errorf("the caveat does not point at the issue that tracks it:\n%s", caveat)
+	}
+	// No weight, and no count of the other rows.
+	if strings.Contains(caveat, "vec=") {
+		t.Errorf("the caveat names a specific weight, which is a claim about a grid it was not given:\n%s", caveat)
+	}
+	if strings.Contains(caveat, "other five") || strings.Contains(caveat, "other ") {
+		t.Errorf("the caveat counts rows, which is a claim about a grid it was not given:\n%s", caveat)
+	}
+}
+
 // findPoint returns the sweep point printed as cond, or nil.
 func findPoint(points []SweepPoint, cond string) *SweepPoint {
 	for i := range points {
@@ -382,9 +562,15 @@ func TestBenchmarksDocSweepTableMatchesTheReport(t *testing.T) {
 		}
 		rows++
 		cond := strings.Fields(line)[0]
-		if cond == "vec=0.70" {
+		// Derived from the shipped default, not written down: the sibling test
+		// states that rule for the report, and a hardcoded "vec=0.70" here would
+		// keep checking a stale doc row if the default's leg weight ever moved.
+		if cond == defaultCondition() {
 			if !strings.Contains(line, "this is the default") {
 				t.Errorf("the published default row does not mark itself the reference: %q", line)
+			}
+			if !strings.Contains(line, "<- current default") {
+				t.Errorf("the published default row is not marked as the current default: %q", line)
 			}
 			continue
 		}
@@ -395,4 +581,13 @@ func TestBenchmarksDocSweepTableMatchesTheReport(t *testing.T) {
 	if want := len(SweepGrid()); rows != want {
 		t.Errorf("the published table has %d grid rows, want %d", rows, want)
 	}
+}
+
+// defaultCondition is the condition name the sweep prints for the shipped
+// default, derived from it rather than written down. A hardcoded "vec=0.70"
+// makes every check that names it silently stop applying — or keep applying to a
+// stale row — if the default's leg weight ever moves.
+func defaultCondition() string {
+	p := memory.DefaultSearchParams()
+	return fmt.Sprintf("vec=%.2f", p.VecWeight)
 }

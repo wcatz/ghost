@@ -70,7 +70,71 @@ func FormatResults(results []Result) string {
 	}
 	fmt.Fprintf(&b, "\n%d graded queries, %d memories. Retrieval-only, no LLM judge.\n", n, len(builtinMemoryKeys()))
 	b.WriteString(FormatNoAnswer(summariesOf(results)))
+	b.WriteString(FormatFusionGaps(results))
 	return b.String()
+}
+
+// FormatFusionGaps renders the paired per-query NDCG@10 difference between the
+// fused condition and each single leg, with a percentile bootstrap interval.
+//
+// It is here, and not only in the regression test's log, because the fusion
+// margin is the headline number in docs/benchmarks.md and README.md: a published
+// interval that no command prints is a claim a reader has to take on trust, which
+// is the defect #561 exists to remove. `ghost bench` now prints the same figures
+// TestBenchRegressionFloors gates on, from the same function, so the doc and the
+// build cannot disagree about them.
+//
+// The gate is one-sided and deliberately weaker than what this prints — it
+// requires the lower edge to clear -fusionTolerance — so a row here that excludes
+// zero is the claim "fusion earns its keep", and a row that does not is the claim
+// "fusion is not materially worse". Both are reported; neither is enforced here.
+func FormatFusionGaps(results []Result) string {
+	hybrid, ok := resultFor(results, CondHybrid)
+	if !ok {
+		return ""
+	}
+	var b bytes.Buffer
+	b.WriteString("\nFused vs one leg at a time, paired per query (95% percentile bootstrap, ")
+	fmt.Fprintf(&b, "%d resamples):\n", bootstrapResamples)
+	fmt.Fprintf(&b, "%-28s %9s %9s %9s  %s\n", "comparison", "mean", "lo", "hi", "queries")
+	rows := 0
+	for _, leg := range []string{CondVector, CondFTS} {
+		lr, ok := resultFor(results, leg)
+		if !ok {
+			continue
+		}
+		gap, err := CompareFusion(hybrid, lr)
+		if err != nil {
+			// The two conditions did not score the same query set, so there is no
+			// pairing and no interval. Refusing to print a row is the honest
+			// answer; a zero row would read as "identical".
+			fmt.Fprintf(&b, "%-28s  not comparable: %v\n", "fused - "+lr.Condition, err)
+			rows++
+			continue
+		}
+		verdict := "not separable from the leg"
+		if gap.Lo > 0 {
+			verdict = "ahead of the leg"
+		}
+		fmt.Fprintf(&b, "%-28s %+9.4f %+9.4f %+9.4f  %4d  %s\n",
+			"fused - "+lr.Condition, gap.Mean, gap.Lo, gap.Hi, gap.Queries, verdict)
+		rows++
+	}
+	if rows == 0 {
+		return ""
+	}
+	b.WriteString("A row whose interval contains 0.0 does not separate the two conditions; the sort above cannot either.\n")
+	return b.String()
+}
+
+// resultFor finds a condition's Result by name.
+func resultFor(results []Result, cond string) (Result, bool) {
+	for _, r := range results {
+		if r.Condition == cond {
+			return r, true
+		}
+	}
+	return Result{}, false
 }
 
 // summariesOf reduces each condition's no-answer measurements to its summary, in

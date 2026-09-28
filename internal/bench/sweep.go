@@ -19,7 +19,14 @@ type SweepPoint struct {
 
 	// VsDefault is the paired per-query NDCG@10 difference of this grid point
 	// against the shipped default, with a percentile bootstrap interval over it.
-	// It is nil for the default point, which has nothing to be compared against.
+	//
+	// It is nil in exactly two cases, and they are different cases: on the default
+	// point itself, which has nothing to be measured against, and on EVERY point
+	// of a grid that holds no default at all, where there is no reference to
+	// measure against. So nil does not mean "this is the default" and
+	// VsDefault == nil does not mean "this point is the default" — which is why
+	// FormatSweep asks the grid whether it holds a default rather than reading it
+	// back out of this field.
 	//
 	// The sweep sorts by NDCG@10, and a sorted table of point estimates is
 	// precisely the claim #561 is about: a 0.004 gap over 220 queries is not a
@@ -63,8 +70,14 @@ func SweepGrid() []memory.SearchParams {
 // A grid with no point equal to the shipped default yields no intervals at all
 // rather than intervals against an arbitrary member: there is nothing here that
 // says which of these points is the one in production, and a comparison made
-// against a guess would be the kind of claim this column exists to remove. The
-// rows are then marked as un-compared, so the absence is visible.
+// against a guess would be the kind of claim this column exists to remove.
+// FormatSweep then says so in the affected cell, so the absence is visible.
+//
+// A grid holding the default TWICE is refused rather than resolved. The two
+// copies are indistinguishable, so "the first one" is an artefact of iteration
+// order and a comparison drawn against it would be a claim about which duplicate
+// the sort happened to put first. SweepGrid is checked for uniqueness by
+// TestSweepGrid, and this is the same rule enforced on a caller's grid.
 //
 // The sweep is a relevance search, so it scores the graded set only: a
 // no-answer query in the set would be measured for false positives
@@ -107,18 +120,19 @@ func isDefaultParams(p memory.SearchParams) bool {
 }
 
 // pairAgainstDefault fills in VsDefault on every point that is not the shipped
-// default, pairing it against the default point's per-query NDCG. A grid carrying
-// the default twice would compare the second against the first, so the FIRST such
-// point is the reference and a later one is measured against it. That is the right
-// reading of a grid that lists a point twice by mistake, and
-// TestSweepPairsEveryOtherPointAgainstTheDefaultAndPrintsIt fails such a grid
-// rather than letting the mistake reach a report.
+// default, pairing it against the default point's per-query NDCG. A grid holding
+// the default twice is an error rather than a coin flip over which copy is the
+// reference: see the comment on Sweep.
 func pairAgainstDefault(points []SweepPoint) error {
 	def := -1
 	for i := range points {
 		if isDefaultParams(points[i].Params) {
+			if def >= 0 {
+				return fmt.Errorf("the grid holds the shipped default twice (%q and %q), so neither is the reference: "+
+					"the comparison would be against whichever copy the sort placed first",
+					points[def].Result.Condition, points[i].Result.Condition)
+			}
 			def = i
-			break
 		}
 	}
 	if def < 0 {
@@ -149,17 +163,37 @@ func sweepHeader() string {
 // default. The default row's own column says so rather than printing a zero
 // interval, which would read as "indistinguishable from the default" rather than
 // as the absence of a comparison.
+//
+// Whether the grid holds a default is decided ONCE, by looking at the points,
+// not inferred from any single row's VsDefault being nil. SweepPoint is
+// exported, so a caller can hand FormatSweep a hand-built slice; deriving the
+// answer from one row's nil pointer lets a slice carrying the default print "no
+// default in grid" beside it.
 func FormatSweep(points []SweepPoint) string {
 	var b bytes.Buffer
 	fmt.Fprintln(&b, sweepHeader())
+	hasDefault := false
 	for _, pt := range points {
-		mark, ci := "", "no default in grid"
+		if isDefaultParams(pt.Params) {
+			hasDefault = true
+			break
+		}
+	}
+	for _, pt := range points {
+		mark, ci := "", ""
 		switch {
 		case isDefaultParams(pt.Params):
 			mark = "  <- current default"
 			ci = "this is the default"
+		case !hasDefault:
+			ci = "no default in grid"
 		case pt.VsDefault != nil:
 			ci = fmt.Sprintf("%+.4f [%+.4f, %+.4f]", pt.VsDefault.Mean, pt.VsDefault.Lo, pt.VsDefault.Hi)
+		default:
+			// The grid HAS a default, so "no default in grid" would be false, and
+			// this point simply carries no interval — a hand-built slice that was
+			// never paired. Blank rather than a reason: there is no measurement
+			// here to explain, and any reason would be a claim about a nil pointer.
 		}
 		fmt.Fprintf(&b, "%-22s %7.3f %7.3f %8.3f %8.3f  %s%s\n",
 			pt.Result.Condition, pt.Result.Recall1, pt.Result.Recall10, pt.Result.MRR10, pt.Result.NDCG10, ci, mark)
@@ -168,9 +202,9 @@ func FormatSweep(points []SweepPoint) string {
 		fmt.Fprintf(&b, "\n%d parameter combinations, sorted by NDCG@10; %d graded queries each.\n", n, points[0].Result.Queries)
 		fmt.Fprintf(&b, "The sort is by point estimate. The interval column is the paired per-query NDCG@10 difference against the shipped default;\n")
 		fmt.Fprintf(&b, "an interval containing 0.0 means the point is not separable from the default, whatever its position in the sort.\n")
-		fmt.Fprintf(&b, "The store breaks tied fused scores by memory id and the benchmark seeds every id from randomblob, so a point whose two\n")
-		fmt.Fprintf(&b, "legs are weighted equally re-draws that tie-break on every run: vec=0.50 here (#708), the other five reproduce exactly.\n")
-		fmt.Fprintf(&b, "Read that row's interval as a shape rather than as four decimals.\n")
+		fmt.Fprintf(&b, "Caveat on that last rule, which this table cannot resolve for you (#708): the store breaks tied fused scores by memory id and\n")
+		fmt.Fprintf(&b, "the benchmark seeds every id from randomblob, so a point whose two legs are weighted EQUALLY re-draws that tie-break on\n")
+		fmt.Fprintf(&b, "every run and its interval moves. Read such a row as a shape, not as four decimals.\n")
 	}
 	return b.String()
 }
