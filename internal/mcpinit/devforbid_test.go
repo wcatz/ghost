@@ -36,9 +36,7 @@ func withBuildVersion(t *testing.T, version string) {
 // measure it before anything opens it.
 func storeAt(t *testing.T, dir string) string {
 	t.Helper()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir %s: %v", dir, err)
-	}
+	mkdirAll(t, dir)
 	db, err := memory.OpenDB(filepath.Join(dir, "ghost.db"))
 	if err != nil {
 		t.Fatalf("create the store: %v", err)
@@ -83,6 +81,16 @@ func realPath(t *testing.T, path string) string {
 		t.Fatalf("resolve %s: %v", path, err)
 	}
 	return resolved
+}
+
+// mkdirAll creates a directory and fails the test if it cannot, so a test body
+// stays about the rule rather than about the fixture.
+func mkdirAll(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	return path
 }
 
 // preMigrateBackupsIn lists the pre-migration copies beside dbPath, which is the
@@ -230,12 +238,15 @@ func TestTheSessionContextHookFailsOpenOnAForbiddenDataDir(t *testing.T) {
 	withBuildVersion(t, devBuild)
 	root := t.TempDir()
 	dataHome := filepath.Join(root, "data")
-	work := filepath.Join(root, "work")
-	for _, d := range []string{dataHome, work} {
+	for _, d := range []string{dataHome, filepath.Join(root, "work")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatalf("mkdir %s: %v", d, err)
 		}
 	}
+	// The directory the project is recorded under, canonicalized: the hook
+	// canonicalizes the directory it renders for, and this test's claim is about
+	// the refusal rather than about a project that failed to resolve.
+	work := realPath(t, filepath.Join(root, "work"))
 	// HOME and the config roots, so the hook's other lookups (the Obsidian
 	// mirror's opt-in, the scratch root) stay inside this test's tree.
 	for _, kv := range [][2]string{
@@ -315,12 +326,11 @@ func TestTheSessionContextHookRendersTheStoreOnAReleaseBuild(t *testing.T) {
 	withBuildVersion(t, releaseBuild)
 	root := t.TempDir()
 	dataHome := filepath.Join(root, "data")
-	work := filepath.Join(root, "work")
-	for _, d := range []string{dataHome, work} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
-			t.Fatalf("mkdir %s: %v", d, err)
-		}
-	}
+	// realPath, because RenderSessionContextAt canonicalizes the directory it is
+	// given and resolves the project by path prefix: storing the raw temp path
+	// would not resolve on a platform whose temp dir is spelled short
+	// (Windows), and the control would then pass for the wrong reason.
+	work := realPath(t, mkdirAll(t, filepath.Join(root, "work")))
 	for _, kv := range [][2]string{
 		{"HOME", root},
 		{"XDG_CONFIG_HOME", filepath.Join(root, "config")},
