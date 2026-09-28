@@ -266,6 +266,12 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 	if !strings.Contains(buf.String(), "supersede reassess") {
 		t.Errorf("this exit must still log the summary; a run with the most to explain logged nothing:\n%s", buf.String())
 	}
+	// And the summary must agree with the exit: the log is what an operator
+	// reads when the exit code has scrolled past, so a failed=true line on a
+	// successful run (or the reverse) is the same defect in either direction.
+	if !strings.Contains(buf.String(), "failed=true") {
+		t.Errorf("the summary claims a run that did not fail, on an exit that returns an error:\n%s", buf.String())
+	}
 }
 
 // TestReassessDryRunWritesNothingWhenABatchFails: a dry run that hits the same

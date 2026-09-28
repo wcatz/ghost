@@ -388,12 +388,14 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	}
 	causesPairs, err := liveCausesPairs(ctx, store, rows)
 	if err != nil {
-		// Joined, not replaced, and logged before returning: a classify failure
-		// recorded above is still true, and this is the one exit that would
-		// otherwise drop both its text and the summary line explaining a run
-		// that had already recorded a partial state.
+		// Joined, not replaced, and recorded BEFORE the summary is logged: a
+		// classify failure from above is still true, and a log line saying
+		// failed=false on a run that returns an error is the one claim this
+		// pass cannot make — the log is the thing an operator reads when the
+		// exit code has scrolled past.
+		fail = errors.Join(fail, err)
 		logSummary()
-		return res, nil, errors.Join(fail, err)
+		return res, nil, fail
 	}
 
 	withdrawn := make([]WithdrawnEdge, 0, len(settled))
