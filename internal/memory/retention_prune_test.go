@@ -33,6 +33,32 @@ func pruneFixture(t *testing.T, s *Store, content, tier, expires, lastAccessed s
 
 // backdateWrite ages a row's last write, which is what the grace falls back to
 // when no read has ever been recorded for it.
+// seedPruneRow writes one prune-shaped row straight into the store, skipping
+// the upsert dedup probe. Batch tests seed thousands of rows, and each probe is
+// an FTS ranking pass over every same-category row already present, so seeding
+// through UpsertWithOptions is quadratic in the backlog — and the race
+// detector's per-step instrumentation turns that quadratic into tens of
+// minutes, which is how this package misses its own ten-minute test deadline.
+// The probe is a dedup concern; the assertions that follow are prune-batching
+// concerns, so the direct INSERT keeps the same row shape (the memories→fts
+// triggers still index the content) without paying the probe.
+func seedPruneRow(t *testing.T, s *Store, content, tier, expires, lastAccessed string) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	if err := s.db.QueryRowContext(ctx, `
+		INSERT INTO memories (project_id, category, content, source, importance, tags,
+		                      retention, expires_at, last_accessed)
+		VALUES (?, 'fact', ?, 'mcp', 0.6, '', ?, ?, ?)
+		RETURNING id`,
+		testProject, content, tier, nullIfEmpty(expires), nullIfEmpty(lastAccessed)).Scan(&id); err != nil {
+		t.Fatalf("seed prune row %q: %v", content, err)
+	}
+	return id
+}
+
+// backdateWrite ages a row's last write, which is what the grace falls back to
+// when no read has ever been recorded for it.
 func backdateWrite(t *testing.T, s *Store, id, when string) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(),
@@ -372,7 +398,7 @@ func TestPruneBatchesCommitPerBatch(t *testing.T) {
 
 	const total = 3*pruneBatchSize + 50 // four batches
 	for i := 0; i < total; i++ {
-		pruneFixture(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession,
+		seedPruneRow(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession,
 			stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 	}
 	if liveCount(t, s, testProject) != total {
@@ -400,7 +426,7 @@ func TestPruneBatchesCommitPerBatch(t *testing.T) {
 		t.Fatalf("clear history between directions: %v", err)
 	}
 	for i := 0; i < total; i++ {
-		pruneFixture(t, s, fmt.Sprintf("an expired session note %d again", i), RetentionSession,
+		seedPruneRow(t, s, fmt.Sprintf("an expired session note %d again", i), RetentionSession,
 			stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 	}
 
