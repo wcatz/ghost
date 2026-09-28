@@ -142,6 +142,23 @@ func TestAsOfRefusesVectorOnly(t *testing.T) {
 	}
 }
 
+// TestAsOfQualifierNamesTheEvidenceCountsAsUnread: schema v18 put the evidence
+// counts on Candidate, and a zero renders as "no recorded evidence" — a claim.
+// The store deliberately does not fill them for a historical read (an observation
+// is not versioned, so a count would describe the present), which means the trace
+// says "no recorded evidence" for a memory that may well have observations. The
+// disclosure is what keeps that a stated absence rather than a false one.
+func TestAsOfQualifierNamesTheEvidenceCountsAsUnread(t *testing.T) {
+	res := run(t, &fakeRetriever{set: setOf(candidate("m1", "proj", "fact", "database configuration m1", 1))}, historicalRequest(at(0)))
+	joined := strings.Join(res.Qualifiers, " ")
+	if !strings.Contains(joined, "evidence") {
+		t.Errorf("the qualifier %q does not mention the evidence counts, so the trace's \"no recorded evidence\" for a historical row stands as a claim", joined)
+	}
+	if !strings.Contains(joined, "not read") {
+		t.Errorf("the qualifier %q says nothing about the evidence counts being unread, want it to say the read did not happen", joined)
+	}
+}
+
 // TestAsOfRefusesAZeroInstant: the zero time is not an instant, and a request
 // that named it would be a historical read of the year one — silently, because
 // every stored timestamp is after it and the read would simply find nothing.

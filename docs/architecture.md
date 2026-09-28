@@ -710,7 +710,10 @@ than against the wall clock. The store treats `AsOf` as authoritative over
 `Now` for the same reason.
 
 A historical retrieval is **keyword-only**, and says so in the answer, the trace
-and the store's leg status:
+and the store's leg status. Every statement in the read names `memory_history` or
+`memories` and nothing else, so a store that predates v18 — or one whose evidence
+table a later migration has not created yet — answers an `as_of` read in full
+(`TestCandidatesAsOfDoesNotDependOnMemoryProvenance` drops the table and reads on):
 
 | | current | `as_of` |
 |---|---|---|
@@ -718,6 +721,7 @@ and the store's leg status:
 | vector leg | cosine, when an embedding is available | **not applicable** — an embedding is a vector of the text as it is *now*, and the vectors for the versions being chosen between were never computed. `Condition: vector_only` with `as_of` is refused rather than downgraded, and so is `explain` with `as_of` (`explain` is the store's `ExplainSearchScoped`, a diagnosis of the current ranking, and it runs before the assembler — so a historical request would otherwise have come back as a present-day payload with nothing to say so). The two refusals live at different layers, and the difference matters to anyone auditing the contract: the `explain` one is on an input the tool accepts and is **advertised in the tool's own `as_of` and `explain` argument descriptions**, while the `vector_only` one is a store-level guard on `CandidateRequest.Condition` — a condition `ghost_memory_search` never sets, because its handler hardcodes `Condition: assemble.CondHybrid`. The tool's published schema therefore has no argument that can trigger it |
 | ranking | RRF fusion, then decay | matched query terms, then the same decay composite at T — not bm25, so it is not comparable with a current order |
 | link graph | supersede and near-duplicate demotion, `contradicts` edges | **not read** — `memory_links` records when an edge was invalidated, never what the graph looked like at T. The supersede demotion uses the recorded sequence instead, and the edge status is `not_applicable` so the conflict stage makes no claim in either direction |
+| evidence counts (`memory_provenance`, v18) | read on the same snapshot as the rows, recorded in the trace | **not read** — an evidence record is one *observation* of a memory, not a version of it, so nothing in that table can be placed at an instant and a count taken now would be a present-day claim about a past memory. The counts therefore stay zero, and a zero renders as "no recorded evidence", which is why the `as_of` disclosure says the counts were not read rather than leaving that phrase to stand as a claim |
 | edges status | `ok` / `unavailable` / `err` | adds `not_applicable`: "no edge joins these candidates" is a claim, and a retrieval that made none must not render it |
 
 The term extraction is the **same** one the FTS leg uses (`ftsQueryTerms`, so the

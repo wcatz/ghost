@@ -15,14 +15,15 @@ import (
 // historicalQualifier is the sentence a surface shows above a block that was
 // assembled at an instant rather than now.
 //
-// It names the three things a reader cannot see from the rows: where they came
+// It names the four things a reader cannot see from the rows: where they came
 // from (the recorded versions, deleted memories included), what did not run (the
-// vector leg, and conflict and near-duplicate handling, because neither an
-// embedding nor the link graph has a history), and what the order is (matched
-// query terms then decay, not bm25 — so it is not comparable with a current
-// search's ranking). A reader who has only one of those three will draw a
-// conclusion the read does not support: that it is current, that the ranking is
-// the same ranking, or that an absence means what an absence usually means.
+// vector leg, conflict and near-duplicate handling, and the evidence counts),
+// what the order is (matched query terms then decay, not bm25 — so it is not
+// comparable with a current search's ranking), and what an absent field in the
+// trace means. A reader who has only some of those will draw a conclusion the read
+// does not support: that it is current, that the ranking is the same ranking,
+// that an absence means what an absence usually means, or — on the counts — that
+// a memory nobody can date rests on nothing.
 func historicalQualifier(asOf time.Time) string {
 	// The store owns the first sentence, because the store owns the fact and
 	// another surface renders it too; this function adds only what is true of a
@@ -30,7 +31,9 @@ func historicalQualifier(asOf time.Time) string {
 	return memory.AsOfSourceNote(asOf) +
 		" Retrieval was keyword-only over that historical text: an embedding records current content, so no vector " +
 		"leg ran, and the link graph records no history, so conflict and near-duplicate handling did not run either. " +
-		"The order is by matched query terms then decay, not bm25."
+		"The order is by matched query terms then decay, not bm25. The evidence counts were not read — an observation " +
+		"is not versioned, so a count here would describe the present — which means this block's trace reports \"no " +
+		"recorded evidence\" for every row because nothing was read, not because none exists."
 }
 
 // qualifiersFor builds the block's qualifiers from the request and what the

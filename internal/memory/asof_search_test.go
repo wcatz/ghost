@@ -82,6 +82,63 @@ func TestCandidatesAsOfMatchesTheTextTheVersionHeld(t *testing.T) {
 	}
 }
 
+// TestCandidatesAsOfDoesNotDependOnMemoryProvenance: schema v18 added
+// memory_provenance — the append-only EVIDENCE table, several rows per memory,
+// answering "who or what supports this memory". A historical read must neither
+// read it nor fail without it, and the only way to be sure of both is to remove
+// it: every statement in the as_of path has to work against a database that has
+// no such table, which is exactly what a store that predates v18 looks like to
+// this read.
+//
+// It is also the reason the candidate carries no evidence counts. A count taken
+// now describes the present — evidence records are not versioned, and none of
+// them can be dated back to an instant — so a historical read that filled it in
+// would be reporting present-day support for a past memory. The counts stay zero
+// and the surface says so, because a zero renders as "no recorded evidence",
+// which is a claim.
+func TestCandidatesAsOfDoesNotDependOnMemoryProvenance(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact", "the evidence table records observations, not versions", "mcp", 0.5, nil, Provenance{})
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// The evidence row has to exist before the table goes, or the test would be
+	// proving that a read works against a store that never had one — which is a
+	// weaker claim.
+	var observed int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_provenance WHERE memory_id = ?`, id).Scan(&observed); err != nil {
+		t.Fatalf("count evidence rows: %v", err)
+	}
+	if observed == 0 {
+		t.Fatal("the save recorded no evidence row, so this fixture would not prove non-dependence")
+	}
+	if _, err := s.db.Exec(`DROP TABLE memory_provenance`); err != nil {
+		t.Fatalf("drop memory_provenance: %v", err)
+	}
+
+	// The set read, and the retrieval, both still work.
+	set, err := s.MemoriesAsOf(ctx, testProject, asOfAt(t, asOfStampFarFuture))
+	if err != nil {
+		t.Fatalf("MemoriesAsOf against a store with no evidence table: %v", err)
+	}
+	if _, ok := asOfContentByID(t, set)[id]; !ok {
+		t.Errorf("the set read lost the memory against a store with no evidence table: %v", asOfContentByID(t, set))
+	}
+	candidates := asOfSearch(t, s, testProject, "evidence observations", asOfStampFarFuture)
+	if !containsID(candidates, id) {
+		t.Errorf("the historical search lost the memory against a store with no evidence table: %v", candidateIDs(t, candidates))
+	}
+	// And the counts are absent rather than zero-because-they-were-read, which is
+	// what the surface's disclosure is about.
+	for _, c := range candidates.Rows {
+		if c.Evidence != (EvidenceCounts{}) {
+			t.Errorf("row %s carries evidence counts %+v, want none: a historical read cannot date an observation", c.ID, c.Evidence)
+		}
+	}
+}
+
 // TestCandidatesAsOfDropsADeletedMemoryAndItsTombstone: a delete removes the row
 // and leaves a tombstone carrying the text. A historical read that ran against
 // the live tables would return nothing for that memory at every instant; a

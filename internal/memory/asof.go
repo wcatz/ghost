@@ -7,6 +7,14 @@ package memory
 // memory held once the write named by its phase landed. The newest row at or
 // before T is therefore the state at T, with no reconstruction and no
 // inference involved anywhere in this file.
+//
+// Nothing here reads `memory_provenance` (schema v18, the append-only EVIDENCE
+// table), and that is a property of the feature rather than an omission: an
+// evidence record is one OBSERVATION of a memory, not a version of it, so nothing
+// in that table can be placed at an instant and a count taken now would be a
+// present-day claim about a past memory. A store that predates v18 therefore
+// answers an as_of read in full; TestCandidatesAsOfDoesNotDependOnMemoryProvenance
+// drops the table and says so.
 
 import (
 	"context"
