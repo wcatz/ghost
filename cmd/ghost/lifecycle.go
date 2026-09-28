@@ -1392,9 +1392,16 @@ ancestry — an undetectable caller is an error, never a fallback to a different
 harness). The harness owns its authentication and billing.
 
 Withdrawing an edge (--reassess --apply) writes the unsupersede history row and
-leaves the resolution it may have caused in place: follow it with
-"ghost resolve <project> --reassess" to clear a resolved_at that only a
-withdrawn edge justified.
+leaves the resolution it may have caused in place: resolve treats a live edge as
+a floor, so that resolution becomes clearable only now. The run therefore prints
+its own follow-up — the exact
+
+  ghost resolve <project> --reassess --only <those ids> --apply
+
+— and writes the same id list under the data dir's scratch, ready for
+--only-file. Prefer that scoped command over a bare "ghost resolve <project>
+--reassess": an unscoped repair re-judges every resolved memory in the project,
+not only the ones this withdrawal orphaned.
 `
 
 // supersedeReassessReport renders the --reassess result: the per-outcome counts,
@@ -1580,6 +1587,20 @@ func runSupersede() {
 		// the Nth edge leaves N-1 already withdrawn and unreachable by a later
 		// pass. A repair that partly happened has to be visible as such.
 		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls(), cls.Retries()))
+		// The follow-up too, for the same reason and before the exit: the edges
+		// that did land orphaned resolutions that only a scoped resolve repair
+		// can clear, and an operator who does not learn that from this run
+		// learns it from a memory that stayed out of every session.
+		if targets := withdrawnTargets(withdrawn); apply && len(targets) > 0 {
+			path, werr := writeReassessTargets(projectName, targets)
+			if werr != nil {
+				// The repair already landed and the command is printed either
+				// way, so a scratch file that could not be written is a warning
+				// and not a failed run.
+				fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", werr)
+			}
+			fmt.Print(supersedeReassessFollowup(projectName, targets, path))
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
