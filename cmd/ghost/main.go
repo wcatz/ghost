@@ -27,9 +27,56 @@ func runCLI(argv []string, dispatch func([]string) int) int {
 	return dispatch(argv)
 }
 
+// commandGroup is a command that dispatches on a subcommand word. A command
+// that takes an OPERAND instead — `ghost history <memory-id>`, `ghost reflect
+// <project>`, `ghost import <file>` — is not a group: the word after it is the
+// data the command was asked about, and its own parser already reports one it
+// cannot use ("a memory id is required", "unknown flag %q"). Only a group has a
+// position where a word can be a command, and therefore a position where a
+// mistyped one can be told apart from an operand.
+type commandGroup struct {
+	// path is the usage-table path this group is dispatched on ("mcp").
+	path string
+	// subs are the subcommand words it dispatches on. Every one of them is
+	// either a path usageByCommand registers under path ("mcp init") or named
+	// in path's own usage text (obsidian registers one usage for both of its
+	// modes), which TestCommandGroupsMatchTheUsageTable holds it to.
+	subs []string
+	// defaultAction marks the group whose bare invocation runs its own action
+	// instead of reporting a missing subcommand: `ghost mcp` starts the MCP
+	// server, which is what every client spawns. It is the only one, and the
+	// field is why "no subcommand given" is not a blanket rule.
+	defaultAction bool
+}
+
+// commandGroups is every command that dispatches on a subcommand word, in the
+// order the usage table documents them. It is the table the unknown-subcommand
+// test drives, so a new group registered in the usage table has to be added
+// here — and adding it here without routing an unknown word in the dispatch
+// fails that test rather than reproducing #691 for the new group.
+var commandGroups = []commandGroup{
+	{path: "mcp", subs: []string{"init", "status"}, defaultAction: true},
+	{path: "maintenance", subs: []string{"status", "clean-scratch"}},
+	{path: "obsidian", subs: []string{"export", "sync"}},
+	{path: "opencode", subs: []string{"cleanup-sessions"}},
+	{path: "project", subs: []string{"bind", "delete", "merge"}},
+}
+
+// exitUsage is the exit code for a command line the CLI cannot act on: an
+// unrecognised command word, or a command group invoked with no subcommand (or
+// with one that is not one of its subcommands). 2 is the conventional code for
+// a usage error, and it is distinct from the 1 every command here uses for a
+// run that started and then failed — a mistyped subcommand and a database that
+// will not open are different answers to a script, and #691 was a mistyped one
+// that answered like neither. A help request is not a usage error and stays 0.
+const exitUsage = 2
+
 // dispatchCommand routes one invocation to its subcommand and returns the
 // exit code. Subcommands that exit on their own (every failure path) never
-// return here; the fall-through codes below match that behaviour.
+// return here. A command line this cannot route is not one of them: it ends in
+// usageError and exitUsage, at whichever level the word that matched nothing was
+// typed (#691) — an unrecognised command, an unrecognised or missing
+// subcommand, or no command at all.
 func dispatchCommand(argv []string) int {
 	// Repository identity needs git, which internal/memory deliberately never
 	// invokes — the capability is injected so the store stays a pure storage
@@ -47,8 +94,12 @@ func dispatchCommand(argv []string) int {
 		case "help", "--help", "-h":
 			return runHelpCommand(argv[1:])
 		case "mcp":
-			if len(argv) > 1 {
-				switch argv[1] {
+			// Presence, not a non-empty word: `ghost mcp "$SUB"` with an unset
+			// $SUB passes an EMPTY word, and taking the bare invocation for it
+			// starts the server — a typo that produces a long-lived process,
+			// which is the exit-0 shape #691 is about. subArg reports both.
+			if sub, given := subArg(argv, 1); given {
+				switch sub {
 				case "init":
 					runMCPInit()
 					return 0
@@ -56,7 +107,11 @@ func dispatchCommand(argv []string) int {
 					runMCPStatus()
 					return 0
 				}
+				return usageError("mcp", sub, true, mcpUsage)
 			}
+			// Bare `ghost mcp` is the server, which is what every client spawns:
+			// the one command group whose bare invocation runs its own action
+			// (commandGroups.defaultAction).
 			runMCP()
 			return 0
 		case "hook":
@@ -75,20 +130,19 @@ func dispatchCommand(argv []string) int {
 			runLifecycle()
 			return 0
 		case "project":
-			if len(argv) > 1 && argv[1] == "delete" {
+			sub, given := subArg(argv, 1)
+			switch sub {
+			case "delete":
 				runProjectDelete()
 				return 0
-			}
-			if len(argv) > 1 && argv[1] == "merge" {
+			case "merge":
 				runProjectMerge()
 				return 0
-			}
-			if len(argv) > 1 && argv[1] == "bind" {
+			case "bind":
 				runProjectBind()
 				return 0
 			}
-			fmt.Fprint(os.Stderr, projectUsage)
-			return 1
+			return usageError("project", sub, given, projectUsage)
 		case "upgrade":
 			runUpgrade(argv[1:])
 			return 0
@@ -105,15 +159,21 @@ func dispatchCommand(argv []string) int {
 			runImport()
 			return 0
 		case "obsidian":
-			runObsidian()
-			return 0
-		case "opencode":
-			if len(os.Args) > 2 && os.Args[2] == "cleanup-sessions" {
-				runOpenCodeCleanupSessions(os.Args[3:])
+			sub, given := subArg(argv, 1)
+			switch sub {
+			case "export", "sync":
+				runObsidian(sub, argv[2:])
 				return 0
 			}
-			fmt.Fprintln(os.Stderr, "Usage: "+usageCleanupSessions)
-			return 1
+			return usageError("obsidian", sub, given, obsidianUsage)
+		case "opencode":
+			sub, given := subArg(argv, 1)
+			switch sub {
+			case "cleanup-sessions":
+				runOpenCodeCleanupSessions(argv[2:])
+				return 0
+			}
+			return usageError("opencode", sub, given, opencodeUsage)
 		case "bench":
 			runBench()
 			return 0
@@ -121,22 +181,74 @@ func dispatchCommand(argv []string) int {
 			runContext()
 			return 0
 		case "maintenance":
-			if len(argv) > 1 {
-				switch argv[1] {
-				case "status":
-					runMaintenanceStatus()
-					return 0
-				case "clean-scratch":
-					runMaintenanceCleanScratch(argv[2:])
-					return 0
-				}
+			sub, given := subArg(argv, 1)
+			switch sub {
+			case "status":
+				runMaintenanceStatus()
+				return 0
+			case "clean-scratch":
+				runMaintenanceCleanScratch(argv[2:])
+				return 0
 			}
-			fmt.Fprint(os.Stderr, maintenanceUsage)
-			return 1
+			return usageError("maintenance", sub, given, maintenanceUsage)
 		}
 	}
-	printUsage()
-	return 0
+	// Nothing above matched the command word. `ghost` with no arguments at all
+	// and `ghost <not-a-command>` are both command lines that cannot be acted
+	// on, and both are answered with the command list a reader (or a script) has
+	// always been sent to — plus exit 2, so a caller branching on the exit code
+	// can tell a mistyped command from a successful run. That is the whole of
+	// #691: the text was right, the code said it had succeeded. A help request
+	// never arrives here, because runCLI answered it first (#630).
+	if len(argv) == 0 {
+		return usageError("", "", false, topLevelUsage())
+	}
+	return usageError("", argv[0], true, topLevelUsage())
+}
+
+// subArg returns argv[i] and whether a word was given there at all: the word
+// after a command, which is a subcommand for a command group and an operand for
+// everything else. One accessor so every group reads its subcommand — and the
+// difference between "none was given" and "that one does not exist" — from the
+// same place.
+//
+// The two are reported separately because an EMPTY word is given, not absent:
+// a wrapper running `ghost mcp "$SUB"` with an unset $SUB passes one, and
+// treating it as no word at all starts the MCP server. The word is returned
+// unquoted here; usageError quotes it.
+func subArg(argv []string, i int) (word string, given bool) {
+	if i < len(argv) {
+		return argv[i], true
+	}
+	return "", false
+}
+
+// usageError reports a command line the CLI cannot act on and returns
+// exitUsage: the diagnostic naming the mistake, then the usage of the level the
+// word was typed at, both on stderr. level is the command group the word
+// followed, or "" for the CLI itself; name is the word that matched no
+// subcommand, and given says whether one was given at all. The two cases are
+// different mistakes — a word that is not a subcommand and no word — and saying
+// which is the reason the diagnostic leads.
+//
+// Nothing goes to stdout: that is where a subcommand's own help lands (#630),
+// so a caller reading a command's output sees an empty stream rather than the
+// command list where its results should have been.
+func usageError(level, name string, given bool, usage string) int {
+	where := "ghost"
+	if level != "" {
+		where += " " + level
+	}
+	switch {
+	case given:
+		fmt.Fprintf(os.Stderr, "%s: unknown command: %q\n\n", where, name)
+	case level != "":
+		fmt.Fprintf(os.Stderr, "%s: no subcommand given\n\n", where)
+	default:
+		fmt.Fprintf(os.Stderr, "%s: no command given\n\n", where)
+	}
+	fmt.Fprint(os.Stderr, usage)
+	return exitUsage
 }
 
 // versionUsage is `ghost version`'s help. It goes to stdout for -h/--help
@@ -146,9 +258,13 @@ const versionUsage = `Usage: ghost version
 Prints the binary version.
 `
 
-// printUsage displays the top-level help.
-func printUsage() {
-	fmt.Fprintf(os.Stderr, `ghost %s — MCP memory server for Claude Code
+// topLevelUsage is the CLI's own usage: the command list. `ghost help` and the
+// top-level -h/--help print it on stderr, where it has always gone, and a
+// command line that cannot be acted on is answered with the same text through
+// usageError — so a reader who mistyped a command is sent to the same list
+// whether they asked for it or not.
+func topLevelUsage() string {
+	return fmt.Sprintf(`ghost %s — MCP memory server for Claude Code
 
 Usage:
   ghost <command>
@@ -209,4 +325,11 @@ Environment:
   GHOST_OPENCODE_MODEL        Pin the model for opencode-backed tiers (e.g. "big-pickle")
   GHOST_DEBUG                 Enable debug logging
 `, version)
+}
+
+// printUsage displays the top-level help. It is the help path's writer; the
+// unusable-command-line path prints the same text through usageError, which
+// also reports the mistake and returns the exit code.
+func printUsage() {
+	fmt.Fprint(os.Stderr, topLevelUsage())
 }
