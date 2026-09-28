@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"path/filepath"
 	"sort"
@@ -657,6 +658,233 @@ func TestExplainTruncatesWithAnExplicitMarker(t *testing.T) {
 }
 
 // hasExplainNote reports whether any note mentions substr.
+// TestExplainDecayFactorIsTheRankingPathOwn pins the decay record, which is
+// easy to leave untested and expensive when it goes: every other explain fixture
+// seeds `fact` rows, and DecayFactor returns 1.0 for `fact` unconditionally, so
+// deleting the whole decayRank trace block leaves the suite green. It also takes
+// `searchTrace.now` with it — the clock the ranking ordered by — and explain then
+// falls back to its own wall clock, which reports a different factor on every row
+// old enough for the difference to show.
+//
+// The fixture therefore uses a decaying category and an old created_at, and
+// checks both halves separately. The white-box half is the mutation guard: the
+// ranking path must WRITE the factor and the clock onto the trace, because
+// explain's recomputed fallback agrees with it at the same instant and the two
+// can only be told apart by looking at what was recorded.
+func TestExplainDecayFactorIsTheRankingPathOwn(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	// `gotcha` falls to the default branch: tau 30, floor 0.15. At 100 days the
+	// factor is 1/(1+100/30) = 0.2308, which no rounding-free comparison against
+	// 1.0 can pass by accident. Create stamps created_at itself, so the age is
+	// written directly — the same way the existing decay tests do it.
+	aged, err := store.Create(ctx, "test-proj", Memory{
+		Category: "gotcha", Content: "the archive bucket cache warmer needs the replica restarted first",
+		Source: "manual", Importance: 0.8, Tags: []string{"test"},
+	})
+	if err != nil {
+		t.Fatalf("Create(gotcha): %v", err)
+	}
+	created := time.Now().UTC().Add(-100 * 24 * time.Hour)
+	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET created_at = ? WHERE id = ?`,
+		created.Format("2006-01-02 15:04:05"), aged); err != nil {
+		t.Fatalf("set created_at: %v", err)
+	}
+	ex, err := store.ExplainSearch(ctx, "test-proj", "archive bucket cache warmer replica", []float32{0.8, 0.6}, 5)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	row, ok := explainRowByID(ex)[aged]
+	if !ok {
+		t.Fatalf("the gotcha row is missing from the explanation: %+v", ex.Rows)
+	}
+	if !row.Included {
+		t.Fatalf("the gotcha row was excluded, so this fixture is not exercising the window: %+v", row)
+	}
+
+	// The public half: the number is this row's own decaying factor, and the two
+	// halves of the report agree with each other — age_days feeds decay_factor, so
+	// a reader can check one against the other rather than take either on trust.
+	want := DecayFactor("gotcha", false, row.AgeDays)
+	if row.DecayFactor != want {
+		t.Errorf("decay_factor = %v, want DecayFactor(\"gotcha\", false, age_days=%v) = %v: the two must be "+
+			"one number and its input, or neither is checkable", row.DecayFactor, row.AgeDays, want)
+	}
+	if row.DecayFactor >= 1.0 {
+		t.Errorf("decay_factor = %v, want a factor below 1.0: this fixture is a `gotcha` row 100 days old, and "+
+			"the whole point is that decay bites, so a 1.0 here means the fixture stopped reaching the branch "+
+			"(a `fact` or `preference` category would return 1.0 unconditionally and make the rest vacuous)",
+			row.DecayFactor)
+	}
+	if row.AgeDays < 99 || row.AgeDays > 101 {
+		t.Errorf("age_days = %v, want ~100: a factor computed from a different age is a different number, and "+
+			"this is what pins the clock the ranking measured against", row.AgeDays)
+	}
+
+	// The white-box half, and the one the mutation deletes. Read through the same
+	// entry point explain uses, with the trace held by the test rather than
+	// internal to ExplainSearch, so the assertion is on what the ranking path
+	// WROTE rather than on what explain did with it.
+	tr := newSearchTrace(nil)
+	p := DefaultSearchParams()
+	p.MinSimilarity = store.vectorMinSimilarityFloor()
+	p.ProjectID = "test-proj"
+	p.trace = tr
+	fts, err := store.SearchFTS(ctx, "test-proj", "archive bucket cache warmer replica", 5*2)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	vec, err := store.SearchVector(ctx, "test-proj", []float32{0.8, 0.6}, 5*2)
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if _, err := store.fuseAndRank(ctx, fts, vec, 5, p); err != nil {
+		t.Fatalf("fuseAndRank: %v", err)
+	}
+	tc := tr.row(aged)
+	if tc == nil {
+		t.Fatalf("the ranking path recorded no trace row for the gotcha candidate at all")
+	}
+	if tc.Decay == 0 {
+		t.Error("the ranking path left tracedCandidate.Decay at zero: explain falls back to computing the factor " +
+			"itself, which agrees today and silently stops agreeing the moment anything moves either clock")
+	}
+	// The two searches above ran a fraction of a millisecond apart, so each
+	// measured the row's age against its own `now`. The comparison is therefore
+	// RELATIVE to the magnitude: 1e-9 of 100 days is 100 microseconds, ten
+	// thousand times the observed clock skew, while a clock an hour off would move
+	// a 100-day age by 0.027 — eleven orders of magnitude. The two are not
+	// confusable, which is the property that lets this be a real assertion rather
+	// than a tolerance wide enough to hide anything.
+	const relTol = 1e-9
+	if d := math.Abs(tc.Decay-row.DecayFactor) / math.Max(math.Abs(row.DecayFactor), 1); d > relTol {
+		t.Errorf("the factor the ranking recorded (%v) is not the one explain reported (%v): the payload must "+
+			"carry the ranking's number, not one that happens to match it", tc.Decay, row.DecayFactor)
+	}
+	if tr.now.IsZero() {
+		t.Error("searchTrace.now was never set: without it explain measures every row's age against its own " +
+			"wall clock, and the factor it reports for an old row is then not the one that ranked anything")
+	}
+	if d := math.Abs(tc.AgeDays-row.AgeDays) / math.Max(math.Abs(row.AgeDays), 1); d > relTol {
+		t.Errorf("the age the ranking recorded (%v) is not the one explain reported (%v): the clock is the "+
+			"whole point, so the two must be the same measurement", tc.AgeDays, row.AgeDays)
+	}
+}
+
+// TestExplainNamesBothSidesOfTheKeywordReservation covers the one admission
+// decision no score can explain: a keyword-only hit promoted into the window
+// below the cut, taking a slot from a row that outscored it. Both sides are
+// reported — keyword_reserved / took_slot_from on the promoted row,
+// displaced_by on the loser — and without them "why is this row in the answer"
+// has no answer, because its score is below the cut by construction.
+//
+// The fixture has to hit every guard at once, which is why this case had no test
+// at all until now: the reservation needs limit ≥ 5 (for a non-zero slot count),
+// len(pool) > width, a candidate with no vector leg at all, that candidate
+// ranking inside the top limit/5 of the keyword leg, and a non-reserved row
+// inside the window for it to evict. The keyword-only row carries NO embedding, so
+// the vector leg cannot return it however close its text is.
+func TestExplainNamesBothSidesOfTheKeywordReservation(t *testing.T) {
+	store, ctx := setupTestStore(t)
+
+	// The reserved row: it matches both query terms and they are rare, so BM25
+	// puts it at the top of the keyword leg, but it has no embedding so the vector
+	// leg never sees it. Its score is therefore a lone keyword term and it lands
+	// below every dual-leg row.
+	reserved, err := store.Create(ctx, "test-proj", Memory{
+		Category: "fact", Content: "quasar calibration is a manual step",
+		Source: "manual", Importance: 0.8, Tags: []string{"test"},
+	})
+	if err != nil {
+		t.Fatalf("Create(reserved): %v", err)
+	}
+	// Twelve dual-leg rows, so the window (limit 10) is full before the
+	// reservation runs and there is a non-reserved row in it to evict.
+	dual := make([]string, 0, 12)
+	for i := range 12 {
+		id, err := store.Create(ctx, "test-proj", Memory{
+			Category: "fact",
+			Content:  fmt.Sprintf("the quasar calibration notes file %d covers stage %d", i, i),
+			Source:   "manual", Importance: 0.8, Tags: []string{"test"},
+		})
+		if err != nil {
+			t.Fatalf("Create(dual %d): %v", i, err)
+		}
+		// Every one of them close to the query, so they beat the keyword-only row
+		// on the vector leg and fill the window.
+		if err := store.StoreEmbedding(ctx, id, []float32{0.99, 0.14}, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding(dual %d): %v", i, err)
+		}
+		dual = append(dual, id)
+	}
+
+	// limit 10 gives slots = 2, so a keyword-only hit in the top two of the
+	// keyword leg is reserved. Verified below rather than assumed.
+	ex, err := store.ExplainSearch(ctx, "test-proj", "quasar calibration", []float32{1, 0}, 10)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	rows := explainRowByID(ex)
+	res, ok := rows[reserved]
+	if !ok {
+		t.Fatalf("the keyword-only row is missing from the explanation, so this fixture is not reaching the "+
+			"candidate set: %+v", ex.Rows)
+	}
+	if !res.KeywordReserved {
+		t.Fatalf("the keyword-only row reports keyword_reserved=false with %d candidates, so the reservation "+
+			"did not fire and the rest of this test would pass vacuously: %+v", len(ex.Rows), res)
+	}
+	if !res.Included {
+		t.Errorf("a reserved row is not in the answer, which is the one thing the reservation is for: %+v", res)
+	}
+	if res.TookSlotFrom == "" {
+		t.Errorf("keyword_reserved is set but took_slot_from is empty: the promoted row without the row it "+
+			"displaced does not answer why it is in the window: %+v", res)
+	}
+	if res.VectorRank != -1 {
+		t.Errorf("the reserved row reports vector_rank=%d, so the vector leg DID retrieve it and this fixture "+
+			"is not exercising a keyword-only hit: %+v", res.VectorRank, res)
+	}
+	// Its score really is below the cut, which is the whole reason the field
+	// exists: nothing in the number explains its presence.
+	if res.Rank == 0 {
+		t.Errorf("a reserved row reports rank 0: it is in the answer, so it must carry a 1-based rank: %+v", res)
+	}
+
+	// The other side. A displaced row is not in the answer and says who took its
+	// slot; that is the only place the loser's fate is recorded at all.
+	loser, ok := rows[res.TookSlotFrom]
+	if !ok {
+		t.Fatalf("took_slot_from names row %s, which is not in the payload at all, so the id points at "+
+			"nothing the reader can look up: %+v", res.TookSlotFrom, ex.Rows)
+	}
+	if loser.Included {
+		t.Errorf("the row whose slot was taken is still included, so nothing was actually displaced: %+v", loser)
+	}
+	if loser.DisplacedBy != reserved {
+		t.Errorf("the displaced row's displaced_by = %q, want %q: the two sides of one exchange must name each "+
+			"other, or one of them is describing a different event", loser.DisplacedBy, reserved)
+	}
+	if loser.FloorDropped || loser.KeywordReserved {
+		t.Errorf("the displaced row reports floor_dropped=%v keyword_reserved=%v; the eviction target is by "+
+			"construction neither floor-dropped nor itself reserved, so one of those is wrong: %+v",
+			loser.FloorDropped, loser.KeywordReserved, loser)
+	}
+	// And nothing else claims to be part of the exchange.
+	for _, r := range ex.Rows {
+		if r.ID == reserved || r.ID == loser.ID {
+			continue
+		}
+		if r.DisplacedBy != "" {
+			t.Errorf("row %s reports displaced_by=%q but the reservation names only one displaced row (%s): "+
+				"the count of displaced rows is part of the claim", r.ID, r.DisplacedBy, loser.ID)
+		}
+		if r.KeywordReserved {
+			t.Errorf("row %s reports keyword_reserved but only %s was reserved by the top-%d keyword rule",
+				r.ID, reserved, 10/5)
+		}
+	}
+}
+
 func hasExplainNote(notes []string, substr string) bool {
 	for _, n := range notes {
 		if strings.Contains(n, substr) {
