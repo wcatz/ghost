@@ -659,7 +659,7 @@ ghost context --cwd /path/to/project
 
 This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response.
 
-### `ghost history <memory-ref>` / `ghost history purge <memory-id>`
+### `ghost history <memory-ref>` / `ghost history purge <memory-id>` / `ghost history compact`
 
 Prints one memory's append-only history: every insert, edit, reflection rewrite,
 duplicate fold, resolve, supersession, restore, import and deletion, oldest
@@ -749,6 +749,84 @@ erase something rather than to retire a memory.
 The command writes no memory, history or project row. It does open the store read-write — the same open `ghost maintenance status` and `ghost backup` use — so a database predating the history table is migrated by the open, and that migration first writes the full pre-migration backup copy it always takes. The strictly read-only opener is not used here because it refuses a store behind the current schema, which is exactly the store someone is most likely to run this against after upgrading.
 
 Entries are kept per the growth policy in [architecture.md](architecture.md#memory-history): the newest 50 versions of one memory, and the newest 20 000 rows in the store.
+
+#### `ghost history compact`
+
+Repairs what the pre-#727 reflect behaviour left in a store. Until #727 landed,
+every applied reflection appended a **byte-identical** `reflect` version for each
+memory it kept and set that memory's `updated_at` to the run's own time. On a store
+that ran the unattended lifecycle, that measured at 80% of `memory_history`, and it
+pushed real events toward the retention caps above while leaving `updated_at`
+holding the time of a reflection instead of the time of the last real change — which
+is what `ghost supersede` orients a candidate pair by and what `--skip-unchanged`'s
+fingerprint carries as a change proxy. #727 stopped the new damage; this removes the
+old.
+
+```bash
+ghost history compact                                  # dry run, every project
+ghost history compact --project my-project             # dry run, one project
+ghost history compact --apply                          # remove the redundant versions
+ghost history compact --apply --fix-updated-at         # and restore updated_at too
+```
+
+A version row is removed **only** when it records the same state as the row before
+it of the same memory, in rowid order, compared over every column a version stores:
+`content`, `category`, `importance`, `resolved_at` and `source`. Nothing else
+decides it. Four things always stay:
+
+- a memory's **first** version — the only statement of what it said, with nothing
+  to duplicate;
+- a memory's **newest** version — the statement of what it says *now*, and the same
+  row the per-memory retention cap already declines to trim;
+- a `delete` tombstone, a `supersede` or its `unsupersede`, a `resolve` or its
+  `unresolve`, a `merge`, an `import`, a `restore` — each records a claim the state
+  does not, and a phase added to the schema later is not removable until it has
+  been classified;
+- any row carrying a `related_id` or `merged_content` — it is the thread a reader
+  follows from one memory's past into its successor's, not a statement about this
+  one.
+
+`--fix-updated-at` is a second, separate repair, behind its own flag. Each live
+memory's `updated_at` becomes the `recorded_at` of the last version that *changed*
+its state, and only where a version that changed nothing sits **above** that change
+— that version is the evidence a reflection run moved the stamp, and without it a
+stamp the history cannot account for belongs to some other writer. It moves **only
+backward** — the damage moved a stamp forward, so the repair undoes that — and a
+memory whose stamp is already at or before the target, or which no version explains,
+is left exactly as it is. Both stamps are read through the store's own layouts and
+the restored one is written in the layout the store writes, so a whole-day value on
+either side is readable and never written back. A memory whose stamp no layout reads
+is left alone and counted separately (`stamps unreadable`), because a row this run
+could not repair is a row whose supersede orientation is still wrong.
+
+Because the stamp repair needs that evidence, pass both flags in the **same** run:
+`ghost history compact --apply --fix-updated-at`. An earlier run that already
+removed the versions took the evidence with it, and the second run has nothing to
+act on. That is not a quirk — a dry run reports the same numbers either way, and
+the same is true of the apply.
+
+Both repairs leave a memory that keeps only the versions a reader could want: its
+first, its newest, and every event. Nothing here removes a `delete` tombstone, a
+supersede or its withdrawal, a resolve or its clearing, a merge, an import, a
+restore, or a row that names another memory.
+
+A dry run is the default and writes nothing; `--apply` writes. Either way the
+counts are per project, and the dry run's numbers are the apply's numbers rather
+than an estimate: deleting a version that changed nothing cannot change whether the
+row after it changed anything, so the set of removable rows is a fixed point of the
+deletion. The work runs in bounded `BEGIN IMMEDIATE` batches, so it never holds the
+write lock over a whole store's history, and running it twice is a no-op the second
+time. It refuses to run while a lifecycle run holds any of the projects' locks, and
+it checks **every** project before it touches any of them — a refusal that arrived
+after the first project had been compacted would be a check that protects nothing.
+The refusal names the projects, so an operator can either wait or re-run scoped with
+`--project`.
+
+This is the only `ghost history` mode that writes. It opens the store read-write
+like the rest of the command and, under `--apply`, deletes `memory_history` rows and
+updates `memories.updated_at`. Both are repairs rather than edits: a version row is
+removed only when the row before it of the same memory says the same thing, so no
+event and no state a reader could want is lost.
 
 ### `ghost bench`
 

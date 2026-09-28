@@ -43,6 +43,12 @@ type historyOptions struct {
 // anything else is an error rather than being ignored, because a silently
 // misparsed flag here would print a confident and wrong history. The ref is NOT
 // resolved here: that needs the store, and this stays a pure function of argv.
+//
+// `compact` is NOT a mode here. It is routed away before this runs
+// (historyCompactRequested), because it is a different request with its own
+// flags and its own parser, and mixing the two would mean this function
+// accepting --apply for a mode that has no meaning in it — or refusing it, which
+// would be a parser reporting a flag that works.
 func parseHistoryArgs(args []string) (historyOptions, error) {
 	var opts historyOptions
 	for i := 0; i < len(args); i++ {
@@ -89,6 +95,19 @@ func parseHistoryArgs(args []string) (historyOptions, error) {
 	return opts, nil
 }
 
+// historyCompactRequested reports whether `ghost history` was asked for the
+// store-wide compaction (#730) rather than for one memory's history.
+//
+// It is a named function because runHistory ends in os.Exit, so an inline word
+// comparison would be untestable — and the routing is the one thing that decides
+// whether a word the reader typed is a REQUEST or a memory id. A memory id is 32
+// hex characters, so nothing a reader can type is ambiguous with `compact`; the
+// decision is made on the first word alone, exactly as `purge` is, and every
+// other word is still read as the id it looks like.
+func historyCompactRequested(args []string) bool {
+	return len(args) > 0 && args[0] == "compact"
+}
+
 // parseHistoryLimit accepts a positive whole number. Zero is refused rather
 // than read as "unlimited": a reader who types --limit 0 asking for no entries
 // would be handed the store's full default, which is the opposite of what they
@@ -106,6 +125,7 @@ func parseHistoryLimit(value string) (int, error) {
 // both, so the two cannot drift.
 const historyUsage = `Usage: ghost history <memory-ref> [--limit N] [--json]
        ghost history purge <memory-id>
+       ghost history compact [--project <p>] [--fix-updated-at] [--apply]
 
 Prints one memory's append-only history: every insert, edit, reflection
 rewrite, duplicate fold, resolve, supersession, restore, import and deletion,
@@ -140,13 +160,50 @@ source the memory held once that write landed.
               argument is not a message but an unprintable memory. Run
               'ghost history <prefix>' to see the full id a prefix names.
 
+  compact     Repair what the pre-#727 reflect behaviour left in this store
+              (#730). Until that fix landed, every applied reflection appended a
+              byte-identical 'reflect' version for each memory it kept and set
+              that memory's updated_at to the run's own time. New ones stopped
+              being written; this removes the ones already here.
+
+              A version row is removed ONLY when it records the same state as the
+              row before it of the same memory, compared over every column a
+              version stores: content, category, importance, resolved_at and
+              source. Four things always stay: a memory's FIRST version (the only
+              statement of what it said), its NEWEST version (the statement of
+              what it says now, and the same row the retention cap declines to
+              trim), every event that records a claim the state does not (a
+              tombstone, a supersede or its withdrawal, a resolve or its clearing, a
+              merge, an import, a restore), and any row naming another memory.
+
+                --project <p>   Compact one project only (id, name or path)
+                --fix-updated-at  Also move each live memory's updated_at back to
+                                 the recorded_at of the last version that changed
+                                 its state — but only where a version that changed
+                                 nothing sits ABOVE that change, since that version
+                                 is the evidence a reflection run moved the stamp.
+                                 Only ever BACKWARD, and a stamp no version
+                                 explains is left alone. Without the flag the
+                                 redundant versions go and no stamp moves.
+
+              Pass --apply and --fix-updated-at in the SAME run: the stamp repair
+              needs the versions the deletion removes as its evidence, so a second
+              run after an --apply has nothing left to act on.
+
+              A dry run is the default and writes nothing; --apply writes. Either
+              way the counts are per project, and a dry run reports exactly what
+              the apply would do. It refuses to run while a lifecycle run holds
+              any of the projects' locks, and it works in bounded transactions so
+              it does not hold the write lock over a whole store's history.
+
 The history outlives the memory: a deleted memory's last state is still
 readable here unless it was purged.
 
-This command writes no memory, history or project row. It does open the store
-read-write, the same open 'ghost maintenance status' and 'ghost backup' use, so
-a database predating the history table is migrated by the open — and that
-migration first writes the pre-migration backup copy it always takes.
+Reading a history writes no memory, history or project row. It does open the
+store read-write, the same open 'ghost maintenance status' and 'ghost backup'
+use, so a database predating the history table is migrated by the open — and that
+migration first writes the pre-migration backup copy it always takes. 'compact'
+under --apply writes memory_history and memories, deliberately and only then.
 `
 
 // historyView is everything `ghost history` prints. A value the printer takes,
@@ -314,7 +371,15 @@ func displayedHistoryEntry(e memory.HistoryEntry) memory.HistoryEntry {
 // instead of failing, and says so in its help rather than promising to write
 // nothing.
 func runHistory() {
-	opts, err := parseHistoryArgs(os.Args[2:])
+	args := os.Args[2:]
+	// `compact` is routed away before parseHistoryArgs sees it: it is a different
+	// request with its own flags and its own parser, and this command's first
+	// operand stays a memory id.
+	if historyCompactRequested(args) {
+		runHistoryCompact(args[1:])
+		return
+	}
+	opts, err := parseHistoryArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, historyUsage)
 		os.Exit(1)

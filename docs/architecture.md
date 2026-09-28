@@ -47,7 +47,8 @@ ghost context                     Render passive session context
 ghost context --as-of <RFC3339>   Render it as the store stood at an instant
 ghost history <memory-id>         Print one memory's append-only history
 ghost history purge <memory-id>   Erase a memory and every recorded version of it
-ghost bench [--sweep|--context]   Run the built-in benchmark
+ghost history compact [--apply]   Remove history versions that changed nothing
+ghost bench [--sweep]             Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
 ghost version                     Print the version
 ```
@@ -470,7 +471,7 @@ The main schema tables are:
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
 | `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
-| `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`). Its `memory_id` deliberately has no foreign key |
+| `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`). Its `memory_id` deliberately has no foreign key. A version row that changed nothing is removable by `ghost history compact` ([#730](https://github.com/wcatz/ghost/issues/730)); see [Memory history](#memory-history) |
 | `memory_provenance` | Append-only per-memory EVIDENCE records (schema v18, [#673](https://github.com/wcatz/ghost/issues/673)) — SEVERAL rows per memory, one per observation, each naming the agent, session, reference and confidence that supported it, with `observed_at`/`verified_at`, and `carried_from` when a consolidation carried the record off the memory it was consolidated from. A different question from the change log, and the name `memory_history` deliberately did not take. Its `memory_id` cascades, and the table is in the migration's derived-row whitelist so an orphan cannot brick a newer build |
 | `memory_snapshot_evidence` | The evidence a reflection snapshot carries, so a restore brings the support back with the row (schema v18). Pruned with the snapshots themselves |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
@@ -506,6 +507,17 @@ the **same transaction** as the write, so history cannot diverge from state:
 The redaction is whole-content, not a span, and the reason is worth stating because it looks like laziness and is not. `secret.Finding` carries a rule name and a human-readable label and no offsets, deliberately — its other consumer is a refusal message that must not quote the value — so a span-precise redactor would need a capture group per rule across the whole rules table plus offsets from all three post-table passes. The honest options today are "replace the content" and "keep the credential", and only one of those is a redaction. The trade is that a **false positive now costs one history entry's text**, where before the guard landed it cost nothing: the live row still holds the current text, and the entry still records that a change happened, when and by whom. And it is defence in depth rather than a live control — every writer refuses a credential on the way in, so a credential can only be in a history row if it was stored before that guard existed, which means the filter fires on nothing at all in a store that has never held one.
 
 The filter runs on **every** appended row whether or not anything is redacted, because the only sound way to know is to look, and that cost is on the write path's critical section: measured at **~1.1 ms per 2 KB row and ~3.6 ms at the 8 KB content cap**, inside the transaction, so a batched append pays it once per id. Skipping the detector on rows that look clean is not available — a prefilter with a false negative is a silent leak, which is the same lesson `internal/secret` already teaches once in its own comments.
+
+**A version row is removable only when it changed nothing, and "nothing" is every column a version records.**
+`ghost history compact` (#730) is the repair for the rows a pre-#727 build left behind: #727 stopped every applied
+reflection from appending a byte-identical `reflect` version per kept memory and from moving that memory's
+`updated_at` to the run's own time, which measured at 80% of this table on one real store. A version row goes only
+when it records the same state as the row before it of the same memory, in rowid order, compared over **every**
+column a version stores — and four things never go: a memory's first version, its newest version, the phases that
+record a claim the state does not, and any row naming another memory. The rules, the reasons, the writer whose
+deliberate restatement forced the newest-version guard, and the gate `--fix-updated-at` needs are stated in
+[invariants.md](invariants.md#ghost-invariants) under "Memory history"; this section is the design narrative, that
+file the checklist a change is held to.
 
 **The name is a distinction, not a description.** This is a change log — one
 row per write, holding the state the memory had once that write landed. Evidence
