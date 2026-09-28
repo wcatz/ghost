@@ -155,8 +155,20 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # -timeout 20m is DECLARED, not a raised limit: Go's implicit default is
+      # 10m per test binary, and internal/memory's race binary sits at or past
+      # it. Measured 2026-09-28 on feat/retention-tiers: 314s on a developer
+      # laptop, 479.267s on one CI runner, and two runs on the same head that
+      # hit the default and failed at 600.05s — the same tree, so the spread is
+      # the runner, not the code. Nothing is weakened by declaring it: no
+      # assertion changes, nothing is skipped, and the hang-prone tests keep
+      # their own far tighter backstops (TestMultiProcessSharedDatabase's 90s
+      # context, its 30s barrier waits, SQLite's busy timeouts), so this alarm
+      # remains a deadlock net rather than the thing that finds one. Raise it
+      # with a measurement beside it, never instead of one. The E2E step below
+      # is left at the default on purpose: it measures ~67s.
       - name: Test
-        run: go test -race -count=1 ./...
+        run: go test -race -count=1 -timeout 20m ./...
 
       # The built-binary suite (e2e/, build tag e2e): every MCP tool, CLI
       # subcommand and hook against a sandboxed HOME with fake harnesses.
