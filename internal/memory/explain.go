@@ -386,12 +386,16 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			// Unreachable while the trace covers every leg row, which it does: the
 			// floor site stamps the rows fusion never saw. Kept because a nil
 			// dereference in a diagnostic path is a worse failure than a
-			// conservative row. StatusFactor stays at its 1.0 default — no demotion
-			// ran on a row nothing scored — so the field means one thing across the
-			// whole payload; the project axis is still stamped from the hydrated
-			// row, because project_match is a statement about the row and not about
-			// whether it was scored.
+			// conservative row.
+			//
+			// Every sentinel is ASSIGNED rather than left to the Go zero value,
+			// because the zero is outside the documented domain of each field:
+			// StatusFactor 0 is not a value statusDemotionFactor can return, and
+			// the statusDemoted flag below would read it as a demotion and
+			// disclose one. No demotion ran on a row nothing scored, so the applied
+			// factor is 1.0.
 			row.FTSRank, row.VectorRank, row.VectorScore = -1, -1, -1
+			row.StatusFactor = 1.0
 			row.AgeDays = ageDays(m.CreatedAt, now)
 			row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
 			row.RowProject = m.ProjectID
