@@ -283,7 +283,21 @@ func (w writeFields) foldNotice(prov memory.Provenance) string {
 		parts = append(parts, "agent "+prov.Agent)
 	}
 	if w.SourceRef != "" {
-		parts = append(parts, "source_ref "+w.SourceRef)
+		// The one field here that is caller-supplied free text, so the one that has
+		// to be delimited. source_ref is a path, a commit, a URL or a ticket the
+		// caller chose, and it lands in the tool's own result — the same rule
+		// assemble.SourceRefLabel applies on every listing and the search line
+		// applies to the same column. Without it, a value carrying « or » escapes
+		// the data block and continues as instruction, in the one place this column
+		// was echoed raw.
+		//
+		// The fields above are not delimited and should not be: agent comes from
+		// ai.SourceForClientName, so it is one of a closed set of harness tokens;
+		// the three stamps are normalized to StoredStampLayout before they reach
+		// here; confidence is a formatted float. Delimiting those would be
+		// noise, and a delimiter that appears on every field stops meaning
+		// "this one is data" on any of them.
+		parts = append(parts, "source_ref "+quoteData(w.SourceRef))
 	}
 	return strings.Join(parts, ", ")
 }
