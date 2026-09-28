@@ -115,21 +115,95 @@ func (c *Client) embed(ctx context.Context, input string) ([]float32, error) {
 	return vec, nil
 }
 
-// Alive checks if Ollama is reachable by hitting the root endpoint.
-func (c *Client) Alive(ctx context.Context) bool {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+// Reachability is what a liveness probe found, with the one distinction that
+// matters kept rather than flattened.
+//
+// Alive's original bool could not tell "nothing is listening" from "nothing
+// answered in time", so a caller gating work on it read a slow machine as a dead
+// endpoint. The two cost very different things: a wrong "down" makes a caller
+// skip work it could do, and a wrong "up" costs one bounded request. So the
+// answer is three-valued and every call site says which of the two it means.
+type Reachability int
+
+const (
+	// Reachable: the endpoint answered 200.
+	Reachable Reachability = iota
+	// Unreachable: the endpoint is not there. Either it answered with a
+	// non-200, or the connection was refused — both are an answer, and both mean
+	// there is no Ollama behind the URL.
+	Unreachable
+	// Inconclusive: the probe's OWN deadline expired. Something may be listening
+	// and simply too slow to answer this time: a machine under load, a proxy, a
+	// disk stall. It is evidence of nothing, and the difference from Unreachable
+	// is the whole point of this type.
+	Inconclusive
+)
+
+// String names the state for a log line, so a report says which of the three it
+// is rather than leaving a reader to infer it from a bool.
+func (r Reachability) String() string {
+	switch r {
+	case Reachable:
+		return "reachable"
+	case Unreachable:
+		return "unreachable"
+	default:
+		return "inconclusive"
+	}
+}
+
+// aliveProbeTimeout bounds ONE liveness probe. It is short because the probe
+// runs before every sweep, every save-driven embed and every one-shot pass that
+// reads the index, and a probe that takes its full time is a caller waiting. It
+// is also why a timeout is reported as Inconclusive rather than Unreachable: at
+// this length a busy machine reaches it routinely, and a reachability answer
+// that flips on load is not a reachability answer.
+//
+// A var so a test can hand it milliseconds rather than sitting out the shipped
+// two, the same reason embedSupersedeCorpus's budget is a parameter and
+// maxOpencodeOutputLine is a var: a test that has to wait out the real one is a
+// test that does not run often enough to be trusted. The tests that need a probe
+// to MISS it lower this, and the tests that need it to arrive lower it too — so
+// the production value is the only one exercised by production, and every test
+// that lowers it says so.
+var aliveProbeTimeout = 2 * time.Second
+
+// Probe reports what one liveness check found: whether Ollama is reachable, and
+// if it is not, whether that is something it established or something that
+// merely failed to arrive in time.
+func (c *Client) Probe(ctx context.Context) Reachability {
+	ctx, cancel := context.WithTimeout(ctx, aliveProbeTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/", nil)
 	if err != nil {
-		return false
+		return Unreachable
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return false
+		if ctx.Err() != nil {
+			// The probe's own deadline (or a cancelled parent) — not a refusal.
+			// A client walking away from a refused connection does not wait out
+			// the timeout, so this cannot be a connection error.
+			return Inconclusive
+		}
+		return Unreachable
 	}
 	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode == http.StatusOK {
+		return Reachable
+	}
+	return Unreachable
+}
+
+// Alive reports if Ollama is reachable by hitting the root endpoint. It is the
+// two-valued form, for the callers that only need to know whether to warn a
+// human: a health report that says "not reachable" during a stall is
+// conservative in the direction that costs nothing, so they do not need the
+// third state. A caller that decides whether to DO work must use Probe, because
+// that is where a false "down" is expensive.
+func (c *Client) Alive(ctx context.Context) bool {
+	return c.Probe(ctx) == Reachable
 }
 
 // tagsResponse is the Ollama /api/tags response.

@@ -989,6 +989,36 @@ type ollamaStub struct {
 	mu      sync.Mutex
 	inputs  []string
 	failing bool
+	// probeDelay and embedDelay hold one endpoint each, per request. They model
+	// a machine that is BUSY rather than one whose embedding backend is broken:
+	// a liveness probe and an embed both come back eventually, just not inside
+	// the client's deadline. A sleep is the honest way to say that, because the
+	// failure it reproduces is a request that took too long, not one that was
+	// refused.
+	probeDelay time.Duration
+	embedDelay time.Duration
+}
+
+// slowEndpoint holds the liveness probe for probe and /api/embed for embed, per
+// request, from now on. A delay the client has already walked away from returns
+// as soon as it disconnects, so a slow stub never wedges the test's teardown.
+func (s *ollamaStub) slowEndpoint(probe, embed time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.probeDelay, s.embedDelay = probe, embed
+}
+
+// hold waits d, or returns early if the client gave up first.
+func hold(r *http.Request, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-r.Context().Done():
+	case <-t.C:
+	}
 }
 
 // newOllamaStub starts the stub and registers its shutdown with t.
@@ -1008,7 +1038,9 @@ func newOllamaStub(t *testing.T, model string, dims int) *ollamaStub {
 		stub.mu.Lock()
 		stub.inputs = append(stub.inputs, req.Input)
 		failing := stub.failing
+		delay := stub.embedDelay
 		stub.mu.Unlock()
+		hold(r, delay)
 		if failing {
 			http.Error(w, "embedding backend unavailable", http.StatusServiceUnavailable)
 			return
@@ -1025,6 +1057,10 @@ func newOllamaStub(t *testing.T, model string, dims int) *ollamaStub {
 			http.NotFound(w, r)
 			return
 		}
+		stub.mu.Lock()
+		delay := stub.probeDelay
+		stub.mu.Unlock()
+		hold(r, delay)
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "Ollama is running")
 	})

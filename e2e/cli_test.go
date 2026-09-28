@@ -955,8 +955,13 @@ func TestCLIResolveSupersede(t *testing.T) {
 		// stale one (issue #641).
 		edges := s.queryStrings(t,
 			`SELECT source_id || '->' || target_id FROM memory_links WHERE relation = 'supersedes'`)
+		// The pass report travels with the count, for the reason the flaky-harness
+		// case gives: a corpus the scan could not score reports the same empty
+		// totals as a classifier that disagreed, and only the report says which
+		// (#736).
 		if len(edges) != 1 {
-			t.Fatalf("the apply wrote %d supersedes link(s), want exactly 1: %v", len(edges), edges)
+			t.Fatalf("the apply wrote %d supersedes link(s), want exactly 1: %v\n--- pass report ---\n%s",
+				len(edges), edges, applied.stdout)
 		}
 		if want := newer + "->" + older; edges[0] != want {
 			t.Fatalf("the supersedes link is %s, want %s (the restating note must point at the one it replaces)",
@@ -969,6 +974,56 @@ func TestCLIResolveSupersede(t *testing.T) {
 			`SELECT DISTINCT source FROM memory_links WHERE relation = 'supersedes'`)
 		if len(sources) != 1 || sources[0] != "llm" {
 			t.Fatalf("supersedes link source = %v, want [llm]", sources)
+		}
+	})
+
+	// The same fixture under the condition #736 was filed against: a machine
+	// busy enough that a liveness probe misses its own deadline.
+	//
+	// The pass reads the vector index, and a corpus saved through `ghost mcp` is
+	// indexed by that server's embedding worker — another process, on its own
+	// schedule. The pass fills the gap itself before it scans (issue #716), but
+	// that fill was GATED on a reachability probe with a two-second deadline, and
+	// a probe that did not answer in two seconds was read as one with no Ollama
+	// at all. So on a loaded machine both writers stood down at once: the
+	// daemon's sweep and the pass's own fill. The candidate scan then had no
+	// vectors to score, `SelectCandidates` counted the whole corpus as unscored,
+	// and the pass reported "0 candidate pairs" and EXITED 0 — a clean-looking
+	// no-op for a pair the operator could see, which is how these three cases
+	// failed a few runs in ten under load while every isolated retry passed.
+	//
+	// Reproduced here by holding the endpoints rather than by hoping a
+	// scheduling race lands: the liveness probe answers, just 2.5s in, and the
+	// embed answers 1.4s in, so the worker's own vector for the second memory
+	// has not landed by the time the pass starts and the pass's own fill is
+	// what has to do it. A request that took too long and an endpoint that is
+	// not there must not read the same to the gate, or this corpus is only
+	// readable on a fast machine.
+	t.Run("a busy endpoint does not make the pass skip its own corpus", func(t *testing.T) {
+		s := newSandbox(t)
+		// Set BEFORE the saves, so the daemon's worker is slow at them too: the
+		// point of the case is that the pass's OWN fill is what has to read this
+		// corpus, and a worker that wins the race hides that by accident.
+		s.ollama.slowEndpoint(2500*time.Millisecond, 1500*time.Millisecond)
+		cs := s.mcpSession(t)
+		older := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay port is 2222",
+		}))
+		time.Sleep(1100 * time.Millisecond) // the orientation is by updated_at
+		newer := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay port is 3333 now",
+		}))
+		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port is 2222")
+
+		applied := s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
+		edges := s.queryStrings(t,
+			`SELECT source_id || '->' || target_id FROM memory_links WHERE relation = 'supersedes'`)
+		if want := newer + "->" + older; len(edges) != 1 || edges[0] != want {
+			t.Fatalf("the pass wrote %v, want [%s]: it read no corpus it was able to read, "+
+				"and its report is what an operator would take for a project holding no near-duplicate pair:\n%s",
+				edges, want, applied.stdout)
 		}
 	})
 
@@ -1009,12 +1064,17 @@ func TestCLIResolveSupersede(t *testing.T) {
 			"content":    "the staging relay port is 3333 now",
 		}))
 		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port is 2222")
-		s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
+		created := s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
 		live := func() int {
 			return s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND source_id = ? AND target_id = ?`, newer, older)
 		}
+		// The creating pass's own report, because "the fixture wrote 0
+		// supersedes links" does not say WHICH half of the pass declined: a
+		// corpus it could not score reads exactly like a classifier that
+		// disagreed, and #736 spent its diagnosis on that ambiguity. Naming
+		// the report here is what makes the next occurrence legible.
 		if n := live(); n != 1 {
-			t.Fatalf("the fixture wrote %d supersedes link(s), want 1", n)
+			t.Fatalf("the fixture wrote %d supersedes link(s), want 1\n--- pass report ---\n%s", n, created.stdout)
 		}
 
 		// One failed call, answered by the retry: the repair completes, the
@@ -1179,10 +1239,10 @@ func TestCLISupersedeReassessFeedsResolveReassess(t *testing.T) {
 	}))
 
 	s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port was 2222")
-	s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
+	created := s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
 	if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND source_id = ? AND target_id = ? AND invalidated_at IS NULL`,
 		newer, older); n != 1 {
-		t.Fatalf("the setup did not write the supersedes edge %s->%s", newer, older)
+		t.Fatalf("the setup did not write the supersedes edge %s->%s\n--- pass report ---\n%s", newer, older, created.stdout)
 	}
 
 	// A second memory the same resolve run resolves, and which the scoped
