@@ -1076,10 +1076,10 @@ func TestRunCodex_TOMLRepairKeepsCRLF(t *testing.T) {
 // described as doing, and it is not what it does.
 //
 // The fixture is ONE CRLF line against FIVE bare-LF ones, so it also pins WHICH
-// rule: a majority rule would pick LF here and leave the file mixed, and the
-// test would fail. The rule is presence, on the reasoning in installCodexMCP —
-// a config carrying any CRLF was written by something on Windows, and CRLF is
-// the ending that file wants back.
+// rule: a majority rule picks LF for this fixture, and the test then fails
+// because `want` is all-CRLF. The rule is presence, on the reasoning in
+// installCodexMCP — a config carrying any CRLF was written by something on
+// Windows, and CRLF is the ending that file wants back.
 func TestRunCodex_TOMLRepairNormalisesAMixedEndingFile(t *testing.T) {
 	home, _ := setupCodexTestEnv(t)
 	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
