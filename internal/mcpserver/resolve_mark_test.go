@@ -103,7 +103,13 @@ func TestResolveMarkIsRegisteredAsATool(t *testing.T) {
 // its fix landed can bury it by name, through the same store path the CLI uses.
 func TestResolveMarkStampsTheNamedMemory(t *testing.T) {
 	srv, store := linkWithdrawServer(t)
-	session := connectedClient(t, srv)
+	// A NAMED client, not connectedClient's "test-client". The performer on the
+	// history row comes from the calling client's reported name, so a client that
+	// identifies itself is what a real one does and the only way to assert WHICH
+	// performer was recorded rather than merely that some came from the ambient
+	// environment — which is empty in CI and a harness name on a laptop, so an
+	// assertion of "not empty" passes for different reasons in different places.
+	session := connectedClientNamed(t, srv, "claude-code")
 	ctx := context.Background()
 	id := seedMarkable(t, store, "test-project", "the relay firmware on the edge nodes runs build 4471")
 	untouched := seedMarkable(t, store, "test-project", "the staging relay speaks QUIC on port 4471")
@@ -141,8 +147,11 @@ func TestResolveMarkStampsTheNamedMemory(t *testing.T) {
 			continue
 		}
 		resolves++
-		if e.Agent == "" {
-			t.Error("the resolve history row has no performer: it is indistinguishable from a pass's verdict")
+		if e.Agent != "claude-code" {
+			t.Errorf("the resolve history row's agent = %q, want %q — it is the only resolve row that can say a reader decided rather than a classifier judged", e.Agent, "claude-code")
+		}
+		if e.ResolvedAt == nil || *e.ResolvedAt == "" {
+			t.Errorf("the resolve history row records no resolved_at, so it is not a version of the stamped state: %+v", e)
 		}
 	}
 	if resolves != 1 {
