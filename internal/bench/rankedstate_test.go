@@ -262,13 +262,15 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 		t.Error("the shipped configuration lost no probe relative to the demote alone, so decay and the demote do not interact on this corpus")
 	}
 
-	// The headline corpus is deliberately NOT checked here. It is 547 memories
-	// with 768-dim vectors, and seeding it a seventh time (six other tests
-	// already do) to re-prove a property another test owns put this package over
-	// CI's 10-minute timeout. The claim lives where the corpus is already
-	// loaded: TestDecayDoesNotPerturbGradedBench now runs all four
-	// configurations over it and asserts the four are equal, so the comparison
-	// cannot rot either.
+	// The headline corpus is deliberately NOT re-seeded and re-measured here.
+	// It is 547 memories with 768-dim vectors, six other tests already load it,
+	// and a seventh load put this package over CI's 10-minute timeout. The
+	// comparison's validity is asserted where the corpus already is, and more
+	// directly: TestDecayDoesNotPerturbGradedBench measures that decay does not
+	// move it and asserts that no memory in it declares an age or a supersedes
+	// edge, which is the structural reason both paths are inert there. If that
+	// ever stops holding, the ranking-state suite's comparison stops being
+	// like-for-like and that test says so.
 }
 
 // rankMoved reports whether a configuration changed either of the two columns the

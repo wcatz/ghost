@@ -235,60 +235,47 @@ func TestStalenessDecayProof(t *testing.T) {
 // TestDecayDoesNotPerturbGradedBench: the ghost bench dataset is seeded via
 // store.Create, which never sets created_at, so every memory shares
 // (effectively) the same timestamp — decay applies an identical factor to
-// every candidate and cannot reorder them. It also holds no supersedes edge, so
-// the demote has nothing to act on. Hybrid NDCG@10 and recall must therefore be
-// identical across ALL FOUR configurations the shipped default can be in (both
-// off, decay, demote, both), not just across the decay toggle.
+// every candidate and cannot reorder them. Hybrid NDCG@10 and recall must be
+// identical with decay on and off. This is why flipping DecayEnabled on in
+// production is safe for the graded benchmarks.
 //
-// This is the test that owns that claim, because it is the one that has the
-// 547-memory corpus already loaded: the [ranking-state suite] needs the same
-// statement as its comparison's validity, and re-seeding that corpus in a seventh
-// place put this package over CI's 10-minute timeout. A suite that only
-// re-proved it in its own copy would also be one that could disagree with this
-// one without anything noticing.
+// The supersede demote is inert on this corpus for the complementary reason,
+// and that half is asserted structurally rather than by a fourth search pass:
+// the corpus declares no `supersedes` edge at all, and the demote is a hard no-op
+// unless an edge joins two rows inside one window. A measurement here would have
+// cost a whole pass over 547 memories to re-derive a fact about the fixture, and
+// this package runs within ~120s of CI's 10-minute ceiling; the ranking-state
+// suite is where the demote is measured against edges that exist.
 func TestDecayDoesNotPerturbGradedBench(t *testing.T) {
 	ds, vecs := loadTestdataDataset(t)
 	ctx := context.Background()
+
+	for _, m := range ds.Memories {
+		if len(m.Supersedes) > 0 {
+			t.Errorf("headline memory %q declares a supersedes edge on %v, so the headline corpus is no longer inert "+
+				"to the demote and the ranking-state suite's comparison against it is no longer like-for-like", m.Key, m.Supersedes)
+		}
+		if m.AgeDays > 0 {
+			t.Errorf("headline memory %q declares age_days=%d, so the headline corpus is no longer inert to decay", m.Key, m.AgeDays)
+		}
+	}
 
 	store, db := newBenchStoreWithDB(t)
 	queries, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	configs := RankedStateConfigs()
-	points, err := Sweep(ctx, store, queries, paramsOf(configs))
+	off := memory.DefaultSearchParams()
+	off.DecayEnabled = false
+	on := memory.DefaultSearchParams()
+	pts, err := Sweep(ctx, store, queries, []memory.SearchParams{off, on})
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	off := points[0].Result
-	for i, cfg := range configs {
-		got := points[i].Result
-		if got.NDCG10 != off.NDCG10 || got.Recall10 != off.Recall10 {
-			t.Errorf("%s: the headline corpus is not inert (both off NDCG=%.4f recall@10=%.4f; %s NDCG=%.4f recall@10=%.4f) — "+
-				"it now carries the ages or edges decay and the demote read, so it has stopped being the reference the "+
-				"ranking-state suite is compared against", cfg.Label, off.NDCG10, off.Recall10, cfg.Label, got.NDCG10, got.Recall10)
-		}
+	if pts[0].Result.NDCG10 != pts[1].Result.NDCG10 || pts[0].Result.Recall10 != pts[1].Result.Recall10 {
+		t.Errorf("decay perturbed graded ranking (uniform timestamps should make it inert): off NDCG=%.4f on NDCG=%.4f",
+			pts[0].Result.NDCG10, pts[1].Result.NDCG10)
 	}
-	t.Logf("headline hybrid NDCG@10 across %s: %.4f (inert, as intended)",
-		labelsOf(configs), off.NDCG10)
-}
-
-// paramsOf and labelsOf take the four configurations apart, so the two helpers
-// are not repeated at every use site.
-func paramsOf(configs []RankedStateConfig) []memory.SearchParams {
-	out := make([]memory.SearchParams, 0, len(configs))
-	for _, c := range configs {
-		out = append(out, c.Params)
-	}
-	return out
-}
-
-func labelsOf(configs []RankedStateConfig) string {
-	names := make([]string, 0, len(configs))
-	for _, c := range configs {
-		names = append(names, c.Label)
-	}
-	return strings.Join(names, "/")
 }
 
 // TestSupersedeDemoteClearsFrontier is the headline result the recency-trap

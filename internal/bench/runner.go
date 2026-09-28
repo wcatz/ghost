@@ -143,16 +143,17 @@ func runCondition(ctx context.Context, store *memory.Store, name string, queries
 			return Result{}, fmt.Errorf("%s: query %q: %w", name, q.Name, err)
 		}
 		res.Queries++
+		// Computed once and used twice: the aggregate sums and the per-query
+		// record are the same two numbers, and calling NDCGAtK twice per query
+		// doubled the metric cost of every run in this package for nothing.
+		ndcg := NDCGAtK(ranked, q.Rel, 10)
+		mrr := ReciprocalRankAtK(ranked, q.Rel, 10)
 		sumR1 += RecallAtK(ranked, q.Rel, 1)
 		sumR5 += RecallAtK(ranked, q.Rel, 5)
 		sumR10 += RecallAtK(ranked, q.Rel, 10)
-		sumMRR += ReciprocalRankAtK(ranked, q.Rel, 10)
-		sumNDCG += NDCGAtK(ranked, q.Rel, 10)
-		res.PerQuery = append(res.PerQuery, QueryScore{
-			Name: q.Name,
-			NDCG: NDCGAtK(ranked, q.Rel, 10),
-			MRR:  ReciprocalRankAtK(ranked, q.Rel, 10),
-		})
+		sumMRR += mrr
+		sumNDCG += ndcg
+		res.PerQuery = append(res.PerQuery, QueryScore{Name: q.Name, NDCG: ndcg, MRR: mrr})
 	}
 	if res.Queries > 0 {
 		n := float64(res.Queries)
