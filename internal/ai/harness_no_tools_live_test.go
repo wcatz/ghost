@@ -138,6 +138,12 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	for _, source := range roots {
 		// The rel path is the SOURCE's own, relative to the real home, so the
 		// target sits where the child would look for it under the isolated home.
+		//
+		// An XDG root outside the home-relative list (XDG_CONFIG_HOME=~/.xdg) has
+		// no such path, and this loop skips it. That is not a loss: the branch
+		// below carries exactly that root, because when XDG is set the child
+		// resolves nothing home-relative at all — which is what
+		// linkGooseConfigDirsWith's early return says.
 		rel, ok := liveGooseRelPathFor(source, realHome)
 		if !ok {
 			continue
@@ -171,18 +177,28 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	// parent had.
 	t.Setenv("GOOSE_MODE", "auto")
 
-	// XDG_CONFIG_HOME is set only when the PARENT had one, and then to the copy
-	// of the single root it pointed at. Fabricating it when the parent had none
-	// would make the child resolve through a path no real goose/user pair uses —
+	// XDG_CONFIG_HOME is set only when the PARENT had one, and then to a copy of
+	// the single root it pointed at. Fabricating it when the parent had none would
+	// make the child resolve through a path no real goose/user pair uses —
 	// configureGooseIsolation's own comment is explicit that this code cannot know
 	// which root a given pair uses, so a test must not invent one. When the parent
 	// had none, the carried home-relative roots are what the child resolves, which
 	// is the production path this test is exercising.
+	//
+	// The exported value is the copy's PARENT, because the copy IS the config root
+	// and goose resolves that root as $XDG_CONFIG_HOME/goose. Exporting the root
+	// itself points the child at <xdgCopy>/goose/goose, which is never created, so
+	// it authenticates against nothing and the failure reads as "chat mode breaks
+	// the goose backend". The loop above also carries this root when
+	// XDG_CONFIG_HOME=$HOME/.config — the common explicit setting — so the branch
+	// is reachable, not latent.
 	if realXDG != "" {
-		xdgCopy := filepath.Join(home, "xdg", "goose")
-		t.Setenv("XDG_CONFIG_HOME", xdgCopy)
 		// liveGooseConfigRoots resolved the parent's XDG root first, so roots[0] is
-		// its copy's source and the target mirrors where the child will look.
+		// its copy's source — and that root need not be one of the home-relative
+		// paths at all, which is why the loop above may have skipped it.
+		xdgBase := filepath.Join(home, "xdg")
+		xdgCopy := filepath.Join(xdgBase, "goose")
+		t.Setenv("XDG_CONFIG_HOME", xdgBase)
 		if err := os.MkdirAll(xdgCopy, 0o700); err != nil {
 			t.Fatal(err)
 		}
