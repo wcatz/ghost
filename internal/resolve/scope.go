@@ -93,7 +93,7 @@ func (s Scope) Select(pool []memory.Memory) (scoped []memory.Memory, misses []Sc
 	for _, spec := range s.Only {
 		key := strings.TrimSpace(spec)
 		if key == "" {
-			return nil, nil, emptySelectorError
+			return nil, nil, errEmptySelector
 		}
 		if wanted[key] {
 			// A repeated selector names one row, so it is judged once. Silently,
@@ -153,10 +153,10 @@ func (s Scope) Select(pool []memory.Memory) (scoped []memory.Memory, misses []Sc
 // this pass can see, and guessing between them would be a lie in a report line.
 const noSuchRow = "no already-resolved memory in this project has that id or prefix (it may be unresolved, cleared by an earlier repair, or in another project)"
 
-// emptySelectorError is one message for both empty spellings ("" and whitespace),
+// errEmptySelector is one message for both empty spellings ("" and whitespace),
 // because there is nothing to distinguish them for the reader: either way no
 // memory was named.
-var emptySelectorError = fmt.Errorf("--only selector is empty: give a memory id or an 8+ character hex prefix")
+var errEmptySelector = fmt.Errorf("--only selector is empty: give a memory id or an 8+ character hex prefix")
 
 // exactInPool finds the row a selector names in full, comparing the stored id
 // rather than the selector's spelling: a byte-exact id first, then a single

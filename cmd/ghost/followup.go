@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -85,12 +84,6 @@ func withdrawnTargets(withdrawn []supersede.WithdrawnEdge) []string {
 func resolveFollowupCommand(projectName string, ids []string) (string, []string, []string) {
 	return followup.ResolveCommand(projectName, ids)
 }
-
-// bareShellWord matches a token that can be pasted into a shell unquoted and
-// still be one argument: it starts with a word character, so it cannot be read
-// as a flag, and carries nothing a shell would interpret. Everything else is
-// quoted.
-var bareShellWord = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._+-]*$`)
 
 // shellQuote renders one POSIX shell argument, single-quoted. An embedded single
 // quote is closed, backslash-escaped and reopened, which is the only spelling a
