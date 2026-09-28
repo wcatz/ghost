@@ -14,9 +14,12 @@
 #   * distinct created_at, spread 4 to 700 days, in BOTH decaying and
 #     never-decay categories, so decay is observable on ordinary rows and not
 #     only on superseded ones;
-#   * eight supersession chains (two of them three deep) written as
-#     newer -> older `supersedes` links through store.CreateLink, the same
-#     direction and source the LLM pass writes.
+#   * eight supersession chains, 10 edges, one of them three deep
+#     (k8s_ver_v3 supersedes v2 and v1 in a star, and v2 supersedes v1) written
+#     as newer -> older `supersedes` links through store.CreateLink, the same
+#     direction and source the LLM pass writes. The chain depth is PINNED to
+#     exactly one by TestRankedStateFixtureCarriesState and published as such in
+#     docs/benchmarks.md, so adding a second star chain here fails that test.
 #
 # Grading: the answer to a chain question is the LIVE row. The superseded rows
 # are the same claim in older words, which is exactly what makes them hard: a
