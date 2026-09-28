@@ -247,17 +247,20 @@ printf '%s' 'KEEP'
 `)
 }
 
-// resetCodexFeatureProbe puts the process-wide probe cache and warning latch
-// back to their cold state. Both are deliberately process-wide (one probe per
-// binary identity, one warning per process), which is exactly what makes them
-// untestable without this.
+// resetCodexFeatureProbe puts the process-wide probe cache and the two warning
+// latches back to their cold state. All three are deliberately process-wide (one
+// probe per binary identity, one warning per verdict per process), which is
+// exactly what makes them untestable without this. There are TWO latches because
+// the two verdicts must not suppress each other; see the var in codex_client.go.
 func resetCodexFeatureProbe(t *testing.T) {
 	t.Helper()
 	codexFeatureCache.Clear()
-	codexWeakPolicyWarned = sync.Once{}
+	codexUnverifiedWarned = sync.Once{}
+	codexWeakerWarned = sync.Once{}
 	t.Cleanup(func() {
 		codexFeatureCache.Clear()
-		codexWeakPolicyWarned = sync.Once{}
+		codexUnverifiedWarned = sync.Once{}
+		codexWeakerWarned = sync.Once{}
 	})
 }
 
@@ -365,6 +368,151 @@ func TestCodexProbeRunsOncePerBinaryIdentity(t *testing.T) {
 	}
 	if n := probeCallLog(t); n != 1 {
 		t.Errorf("probe ran %d times over 5 calls on one binary identity, want 1", n)
+	}
+}
+
+// TestCodexOneRealRowIsEnoughToTrustTheTable is the other edge of the shape
+// test, and it is deliberately its own test. A single well-formed row establishes
+// the table, so one real feature plus a stray token is a genuine answer — and the
+// "unreadable" table above deliberately does NOT include that case, because
+// calling it unreadable would strip a real codex's policy over one noisy line.
+// Which warning is right there is a judgement, and it belongs in a test that
+// states it rather than in a list of examples that only asserts the other side.
+func TestCodexOneRealRowIsEnoughToTrustTheTable(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	logs := captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	bin := codexFeaturesFake(t, "shell_tool stable true\nLEN:0\n")
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if !strings.Contains(logs.String(), "WEAKER than on a current codex") {
+		t.Errorf("a table with one well-formed row was treated as unreadable, which passes every key and claims nothing:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "view_image") {
+		t.Errorf("the warning does not name the keys this codex is missing, so shell_tool would not be disabled either:\n%s", logs.String())
+	}
+}
+
+// TestCodexUnreadableProbeOutputIsNotAnAnswer: a positive verdict is cached for
+// the life of the process, so reading output that is not a feature table as one
+// strips the whole policy permanently and silently — a single token is enough,
+// because `parseCodexFeaturesList` takes any line's first field as a key.
+//
+// This is not hypothetical. An unrelated fake codex in prompt_stdin_test.go
+// answers every argument with one line, so its probe run yields something that
+// parses to exactly one key. The test drives that shape directly rather than
+// pointing at the other test, so the invariant does not depend on a fixture
+// elsewhere staying the way it is.
+func TestCodexUnreadableProbeOutputIsNotAnAnswer(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	logs := captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+
+	for _, tc := range []struct {
+		name string
+		rows string
+	}{
+		{name: "a single token", rows: "LEN:0\n"},
+		{name: "a header and a footer", rows: "NAME  STAGE  ENABLED\n2 features\n"},
+		{name: "rows with an unknown stage", rows: "shell_tool SORTED true\nLEN:0\n"},
+		{name: "a row with a non-boolean third column", rows: "shell_tool stable maybe\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetCodexFeatureProbe(t)
+			logs.Reset()
+			bin := codexFeaturesFake(t, tc.rows)
+			if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+				t.Fatalf("Reflect: %v", err)
+			}
+			// The safe direction: pass everything, and say we learned nothing.
+			if !strings.Contains(logs.String(), "probe did not answer") {
+				t.Errorf("output %q was not treated as an unreadable probe; log was %q", tc.rows, logs.String())
+			}
+			if strings.Contains(logs.String(), "WEAKER than on a current codex") {
+				t.Errorf("output %q was read as a codex missing features, which strips the policy: %s", tc.rows, logs.String())
+			}
+		})
+	}
+}
+
+// TestCodexGenuinelyMissingKeysStayAnAnswer is the other side of the floor, and
+// it is the case the reviewer's suggested fix would have broken. A real codex
+// older than this policy answers with a full table naming features Ghost has
+// never heard of and none of the ten it disables. That is an ANSWER — a genuine,
+// reportable weaker policy — not "we could not read the output", which would pass
+// every key and claim nothing. So the validity floor tests the table's SHAPE
+// rather than its overlap with the policy's own key list.
+//
+// Mutation-checked: replacing the shape test with an overlap test fails this AND
+// the unreadable-output test, which is why the choice is a test rather than a
+// line of reasoning in a comment.
+func TestCodexGenuinelyMissingKeysStayAnAnswer(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	logs := captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	// A well-formed table full of real features, none of which the policy names:
+	// a codex older than this policy. This must be an ANSWER, not an unreadable
+	// one, because an unreadable answer passes every key and claims nothing —
+	// while the truth is that this codex cannot have those surfaces switched off.
+	bin := codexFeaturesFake(t, "daemon_auto_start stable true\nsqlite stable true\nfast_mode stable true\n")
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if !strings.Contains(logs.String(), "WEAKER than on a current codex") {
+		t.Errorf("a real table naming none of the policy keys was not reported as a weaker policy:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "shell_tool") {
+		t.Errorf("the warning does not name the missing keys:\n%s", logs.String())
+	}
+}
+
+// TestCodexBothVerdictsCanBeReported: two latches, not one. The reachable order
+// is a long-lived MCP server whose first probe fails while the binary is
+// mid-upgrade, followed by a codexFeatureRetry re-ask that returns a real answer
+// naming the missing keys. A single shared sync.Once would consume itself on the
+// first message and silently drop the second — which is the one that says which
+// surfaces are on.
+func TestCodexBothVerdictsCanBeReported(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	logs := captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	unanswering := codexFeaturesFake(t, "")
+
+	if _, _, err := (&CodexClient{binary: unanswering}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if !strings.Contains(logs.String(), "probe did not answer") {
+		t.Fatalf("the unverified warning did not fire:\n%s", logs.String())
+	}
+
+	// The re-ask after the retry interval returns a real, weaker answer. The fake
+	// changes behaviour in place, which is what an in-place upgrade looks like
+	// from here.
+	t.Setenv("FAKE_FEATURE_ROWS", "shell_tool stable true\ndaemon_auto_start stable true\n")
+	ageCodexFeatureCache(t, -codexFeatureRetry-time.Minute)
+	if _, _, err := (&CodexClient{binary: unanswering}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect after upgrade: %v", err)
+	}
+	if !strings.Contains(logs.String(), "WEAKER than on a current codex") {
+		t.Errorf("the weaker-policy warning was suppressed by the earlier unverified one; both verdicts must be reportable:\n%s", logs.String())
+	}
+	// And the reverse order, because the shared latch would fail this one too.
+	resetCodexFeatureProbe(t)
+	logs.Reset()
+	weaker := codexFeaturesFake(t, "shell_tool stable true\ndaemon_auto_start stable true\n")
+	if _, _, err := (&CodexClient{binary: weaker}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	t.Setenv("FAKE_FEATURE_ROWS", "")
+	// A different binary identity, so it gets its own cache entry rather than
+	// the one just stored above.
+	other := codexFeaturesFake(t, "")
+	if _, _, err := (&CodexClient{binary: other}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if !strings.Contains(logs.String(), "probe did not answer") {
+		t.Errorf("the unverified warning was suppressed by an earlier weaker-policy one:\n%s", logs.String())
 	}
 }
 

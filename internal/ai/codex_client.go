@@ -299,18 +299,21 @@ func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
 	//     policy is stripped to nothing, and the warning says so plainly.
 	support := codexFeatureSupport{at: time.Now()}
 	if out, err := probe.Output(); err == nil {
-		declared := parseCodexFeaturesList(string(out))
-		if len(declared) == 0 {
-			// Output that parses to no key at all is not a feature table, so it is
-			// treated as no answer: an empty set would strip the whole policy on a
-			// codex that merely printed something unexpected.
+		// Output that is not a feature table must NOT be read as an
+		// authoritative answer, because a positive verdict is cached for the life
+		// of the process: a header row, a footer count, a progress line, or a
+		// single stray token would strip all ten overrides and the only signal
+		// would be a WARN. isCodexFeatureTable is the floor, and it is deliberately
+		// a test of SHAPE rather than an overlap with the policy's own key list —
+		// a real codex older than this policy answers with a full table naming
+		// features Ghost has never heard of and none of the ten it disables, and
+		// that is a genuine weaker policy rather than an unreadable answer.
+		text := string(out)
+		if !isCodexFeatureTable(text) {
 			support.probed = false
 		} else {
-			// A key set is an answer, even when it holds none of ours — that is
-			// the case where the policy really is unavailable and the warning
-			// says so.
 			support.probed = true
-			support.declared = declared
+			support.declared = parseCodexFeaturesList(text)
 		}
 	}
 	// Cached whether it answered or not: an unanswering codex is the old-codex
@@ -321,13 +324,23 @@ func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
 	return support
 }
 
-// codexWeakPolicyWarned makes the weaker-policy warning fire ONCE per process.
-// It has to be once: a lifecycle run makes hundreds of harness calls on the same
-// binary, and a warning per call would bury the phase output it is meant to
-// interrupt. The once is per process rather than per key so that a codex
-// missing two keys and a codex missing one are reported the same number of
-// times.
-var codexWeakPolicyWarned sync.Once
+// codexWeakPolicyWarned makes the weaker-policy warning fire ONCE PER PROCESS
+// PER VERDICT. It has to be once: a lifecycle run makes hundreds of harness calls
+// on the same binary, and a warning per call would bury the phase output it is
+// meant to interrupt.
+//
+// There are TWO latches, not one, and sharing a single sync.Once would be a bug
+// rather than a shortcut. The two verdicts are not interchangeable, and the
+// suppressed one is the more informative. The reachable order is a long-lived
+// MCP server whose first codex call probes while the binary is mid-upgrade and
+// gets no answer (the unverified warning consumes a shared latch), after which
+// the codexFeatureRetry re-ask returns a real answer naming the missing keys —
+// and the operator is never told which surfaces are on. So each verdict is latched
+// separately and both can be reported, in either order.
+var (
+	codexUnverifiedWarned sync.Once
+	codexWeakerWarned     sync.Once
+)
 
 // warnOnWeakerCodexPolicy reports, once per process, that this codex does not
 // support every key the no-tools policy asks for — and that Ghost will run
@@ -341,7 +354,7 @@ var codexWeakPolicyWarned sync.Once
 // may not exist, which is a worse failure than the one this policy prevents.
 func warnOnWeakerCodexPolicy(support codexFeatureSupport) {
 	if !support.probed {
-		codexWeakPolicyWarned.Do(func() {
+		codexUnverifiedWarned.Do(func() {
 			slog.Warn("codex feature probe did not answer; passing the whole no-tools key list, which is the behaviour before the probe existed. This is not evidence that any tool is on: the codex may be older than this policy, or `codex features list` may be unavailable.",
 				"policy", "unverified")
 		})
@@ -351,15 +364,20 @@ func warnOnWeakerCodexPolicy(support codexFeatureSupport) {
 	if len(missing) == 0 {
 		return
 	}
-	codexWeakPolicyWarned.Do(func() {
+	codexWeakerWarned.Do(func() {
 		slog.Warn("installed codex does not declare every no-tools feature key, so the no-tools policy is WEAKER than on a current codex. Running anyway: a missing key means this codex does not have the surface it governs, and refusing would fail every reflect, resolve and supersede call over a surface that may not exist.",
 			"missing", strings.Join(missing, ","))
 	})
 }
 
 // parseCodexFeaturesList reads `codex features list` output. codex prints one
-// row per feature as "<key>  <stage>  <enabled>" in a fixed-width layout, so
-// the first field of each line is the key and the rest is prose about it.
+// row per feature as "<key>  <stage>  <enabled>" in a fixed-width layout, so the
+// first field of each line is the key and the rest is prose about it.
+//
+// It is deliberately permissive — a line with a single token still yields a key —
+// because the VALIDITY question is answered separately, by isCodexFeatureTable.
+// Splitting it that way keeps "what did codex say" apart from "did codex say
+// anything usable", and only the second one is allowed to change the policy.
 func parseCodexFeaturesList(out string) map[string]bool {
 	keys := make(map[string]bool)
 	for _, line := range strings.Split(out, "\n") {
@@ -370,6 +388,62 @@ func parseCodexFeaturesList(out string) map[string]bool {
 		keys[fields[0]] = true
 	}
 	return keys
+}
+
+// codexFeatureStages is codex's own `Stage` vocabulary — the second column of
+// `codex features list`, printed by `stage_str` as a fixed set of these words.
+// It is the discriminator, and it is a real one rather than a proxy: a row of the
+// table is "<key>  <stage>  <enabled>", so a line whose second field is not one
+// of these words is not a row. A header, a footer, a progress line and a stray
+// message all fail it, and so does the single-token output an unrelated fake
+// emits.
+var codexFeatureStages = map[string]bool{
+	"stable":              true,
+	"experimental":        true,
+	"under development":   true,
+	"deprecated":          true,
+	"removed":             true,
+	"disabled by default": true,
+}
+
+// isCodexFeatureTable reports whether `codex features list` output can be
+// trusted as codex's own answer about which features it has.
+//
+// The shape test is the ROW test, not an overlap test with the policy's own key
+// list, and the difference matters. A real codex older than this policy answers
+// with a full table naming features Ghost has never heard of and none of the ten
+// it wants to disable — that is a genuine, reportable "this codex does not have
+// those surfaces", and it must NOT be filed under "we could not read the output",
+// because those two need different warnings and only one of them is a weaker
+// policy. An overlap test would collapse them and lose the more informative
+// message on exactly the install class this design exists to support.
+//
+// So: one line must parse as "<key> <known stage> <bool>", and that is the whole
+// requirement. A single well-formed row is enough to establish the table is real
+// — requiring a majority would reject a short table from a codex that declares
+// few features, and requiring overlap would reject a genuinely older one.
+func isCodexFeatureTable(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if codexFeatureRow(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexFeatureRow reports whether one line is a well-formed feature row. The
+// stage is checked by VALUE because codex prints it from a closed set, and the
+// enabled column by SHAPE because it is whatever Rust's Debug prints for a bool,
+// which is one of two words either way.
+func codexFeatureRow(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) != 3 {
+		return false
+	}
+	if !codexFeatureStages[fields[1]] {
+		return false
+	}
+	return fields[2] == "true" || fields[2] == "false"
 }
 
 // missingCodexFeatureKeys names the policy keys this codex does not declare, in
