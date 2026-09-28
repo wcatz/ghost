@@ -16,6 +16,96 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// TestProbe_DistinguishesAnOutageFromASlowMachine is the unit-level statement
+// of the same distinction TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer
+// makes at the worker: the three answers come from three different situations,
+// and only one of them is "there is no Ollama".
+//
+// The three stubs are the three situations, and none of them is a fake of the
+// others: a refused connection (nothing listening), a non-200 (something
+// listening, not Ollama), and a wedge the probe's own deadline expires on. The
+// last is what a busy machine looks like, so `Inconclusive` has to be the answer
+// for it — a false Unreachable is a caller told to skip work it could do.
+func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
+	// Refused: nothing is listening. localhost:0 is the same shape the
+	// unreachable-client tests use above, and it fails at connect rather than
+	// waiting, so the probe's own 2s is not what ends it.
+	if got := NewClient("http://localhost:0", "m", 3).Probe(context.Background()); got != Unreachable {
+		t.Errorf("Probe at a refused port = %v, want Unreachable", got)
+	}
+
+	nonOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not ollama", http.StatusInternalServerError)
+	}))
+	defer nonOK.Close()
+	if got := NewClient(nonOK.URL, "m", 3).Probe(context.Background()); got != Unreachable {
+		t.Errorf("Probe at a non-200 = %v, want Unreachable", got)
+	}
+
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ok.Close()
+	if got := NewClient(ok.URL, "m", 3).Probe(context.Background()); got != Reachable {
+		t.Errorf("Probe at a 200 = %v, want Reachable", got)
+	}
+
+	// The wedge. Released when the probe's own deadline has passed, so the test
+	// costs one probe and not the client's 30s embed timeout.
+	release := make(chan struct{})
+	wedged := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer wedged.Close()
+	defer close(release)
+	if got := NewClient(wedged.URL, "m", 3).Probe(context.Background()); got != Inconclusive {
+		t.Errorf("Probe at an endpoint that misses the deadline = %v, want Inconclusive", got)
+	}
+
+	// And Alive, the two-valued form the diagnostic callers keep, reads a stall
+	// as not-reachable — the conservative direction, since a health line that
+	// says "unreachable" during a stall costs a human nothing and a work-gating
+	// caller everything.
+	if NewClient(wedged.URL, "m", 3).Alive(context.Background()) {
+		t.Error("Alive = true at an endpoint that misses the deadline, want false")
+	}
+}
+
+// TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive is the other
+// half of the same fix, on the file `ghost mcp status` reads. A probe that did
+// not answer must neither START an outage clock (a marker written here is
+// reported, with this timestamp, for as long as the machine stays busy) nor END
+// a real one (the marker's own case is that it is written once and left).
+func TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	// A real outage already on record. A stall must not clear it: the endpoint
+	// has not been shown to be back.
+	dataDir := t.TempDir()
+	const real = "2020-01-01T00:00:00Z"
+	if err := os.WriteFile(markerPath(dataDir), []byte(real), 0o600); err != nil {
+		t.Fatalf("seed marker: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), newMockStore(), logger, time.Minute, dataDir)
+
+	if got := worker.checkAlive(context.Background()); got != Inconclusive {
+		t.Fatalf("checkAlive = %v, want Inconclusive", got)
+	}
+	data, err := os.ReadFile(markerPath(dataDir))
+	if err != nil {
+		t.Fatalf("marker file missing after an inconclusive probe: %v", err)
+	}
+	if string(data) != real {
+		t.Errorf("marker = %q, want unchanged %q: a probe that did not answer is not evidence the outage is over", data, real)
+	}
+}
+
 // --- Mock Store ---
 
 type mockStore struct {
@@ -466,8 +556,8 @@ func TestCheckAlive_WritesMarkerWhenDown(t *testing.T) {
 	client := NewClient("http://localhost:0", "nomic-embed-text", 3) // unreachable
 	worker := NewWorker(client, newMockStore(), logger, time.Minute, dataDir)
 
-	if alive := worker.checkAlive(context.Background()); alive {
-		t.Fatal("checkAlive = true, want false for an unreachable client")
+	if got := worker.checkAlive(context.Background()); got != Unreachable {
+		t.Fatalf("checkAlive = %v, want Unreachable for an unreachable client", got)
 	}
 
 	data, err := os.ReadFile(markerPath(dataDir))
@@ -501,8 +591,8 @@ func TestCheckAlive_RemovesMarkerWhenReachableAgain(t *testing.T) {
 	client := NewClient(srv.URL, "nomic-embed-text", 3)
 	worker := NewWorker(client, newMockStore(), logger, time.Minute, dataDir)
 
-	if alive := worker.checkAlive(context.Background()); !alive {
-		t.Fatal("checkAlive = false, want true for a reachable client")
+	if got := worker.checkAlive(context.Background()); got != Reachable {
+		t.Fatalf("checkAlive = %v, want Reachable for a reachable client", got)
 	}
 
 	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
@@ -541,6 +631,62 @@ func TestCheckAlive_DoesNotClobberExistingMarker(t *testing.T) {
 	}
 }
 
+// TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer is the regression
+// test for the load-shaped hole #736 found in the e2e supersede/resolve cases.
+//
+// The probe here answers /api/embed promptly and does not answer "/" inside the
+// probe's own 2s deadline. That is not a broken endpoint: it is what a machine
+// too busy to schedule a two-second-old HTTP round trip looks like, which is
+// what "the full suite under load" is. The probe's own deadline is the only
+// reason the answer is missing.
+//
+// It matters because a liveness probe is a GATE, and a gate that misreads a
+// slow machine as a dead endpoint makes the caller skip work it can do:
+// `ghost supersede` embeds the project's unvectorised memories itself before
+// its candidate scan, precisely because those vectors are otherwise written by
+// the embedding worker in another process (issue #716). That fill is the only
+// thing standing between a pass started seconds after a save and a clean
+// "0 candidate pairs" report for a pair the operator can see — and the daemon's
+// own sweep stands in the same place, so a stall takes out both writers.
+func TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer(t *testing.T) {
+	// The release channel rather than r.Context(), for the reason
+	// TestEmbedSupersedeCorpusStopsAtItsBudget gives: a handler that never reads
+	// the body has no way to notice the client walking away, so waiting on the
+	// request context here wedges the FAKE. Defers run last-in-first-out, so the
+	// wedge is released before the server is closed.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			<-release
+		case "/api/embed":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	dataDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := newMockStore()
+	store.memories["mem-1"] = "a memory the index does not have yet"
+	client := NewClient(srv.URL, "test-model", 3)
+	worker := NewWorker(client, store, logger, time.Minute, dataDir)
+
+	if n := worker.EmbedPending(context.Background(), "proj-a", 10); n != 1 {
+		t.Errorf("EmbedPending wrote %d vector(s), want 1: a probe that missed its own deadline is not evidence that nothing is listening, and the caller is left with a corpus it could have read", n)
+	}
+	// And the outage marker is the other half of the same misreading: a stall
+	// stamped "ollama-down-since" is an outage `ghost mcp status` then reports
+	// for as long as the machine stays busy.
+	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
+		t.Errorf("a probe that did not answer wrote the ollama-down marker: err=%v", err)
+	}
+}
+
 // TestCheckAlive_BlankDataDirDisablesMarker verifies that a Worker built with
 // dataDir == "" (the fallback when config.DataDir() itself fails at startup —
 // see cmd/ghost/main.go) behaves exactly like calling client.Alive directly,
@@ -550,8 +696,8 @@ func TestCheckAlive_BlankDataDirDisablesMarker(t *testing.T) {
 	client := NewClient("http://localhost:0", "nomic-embed-text", 3) // unreachable
 	worker := NewWorker(client, newMockStore(), logger, time.Minute, "")
 
-	if alive := worker.checkAlive(context.Background()); alive {
-		t.Error("checkAlive = true, want false for an unreachable client")
+	if got := worker.checkAlive(context.Background()); got != Unreachable {
+		t.Errorf("checkAlive = %v, want Unreachable for an unreachable client", got)
 	}
 	// No dataDir means no marker path to check — the assertion above not
 	// panicking (no filepath.Join(\"\", ...) misuse causing a write to an

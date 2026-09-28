@@ -60,35 +60,44 @@ func NewWorker(client *Client, store memoryStore, logger *slog.Logger, interval 
 
 // checkAlive reports whether Ollama is currently reachable and, as a side
 // effect, maintains the on-disk down-since marker (OllamaDownMarkerFilename)
-// that `ghost mcp status` reads to report outage duration: the marker is
-// written — only if one doesn't already exist, so a still-down Ollama
-// doesn't keep resetting its own "down since" clock on every poll — the
-// first time Alive() is observed false, and removed once Alive() is observed
-// true again. A blank dataDir (set by callers that don't care about the
-// marker) disables this bookkeeping and behaves exactly like calling
-// client.Alive(ctx) directly. Best-effort: a failure to write or remove the
-// marker is logged at debug level and never changes the reported liveness.
-func (w *Worker) checkAlive(ctx context.Context) bool {
-	alive := w.client.Alive(ctx)
+// that `ghost mcp status` reads to report outage duration, returning the
+// tri-state the probe found.
+//
+// The marker is the reason this is not a bool. It is written when the endpoint
+// is established to be Unreachable — a non-200, or a refused connection — and
+// removed once Ollama answers Reachable again (only if one doesn't already
+// exist, so a still-down Ollama doesn't keep resetting its own "down since"
+// clock on every poll). An Inconclusive probe leaves it exactly as it found it,
+// in BOTH directions: starting an outage clock on a timeout reports an outage
+// that was never established, and `ghost mcp status` goes on reporting it, with
+// a start time, for as long as the machine stays busy; ending one the same way
+// hides a real outage for a poll.
+//
+// A blank dataDir (set by callers that don't care about the marker) disables
+// this bookkeeping and behaves exactly like calling client.Probe(ctx)
+// directly. Best-effort: a failure to write or remove the marker is logged at
+// debug level and never changes the reported reachability.
+func (w *Worker) checkAlive(ctx context.Context) Reachability {
+	got := w.client.Probe(ctx)
 	if w.dataDir == "" {
-		return alive
+		return got
 	}
 
 	markerPath := filepath.Join(w.dataDir, OllamaDownMarkerFilename)
-	if alive {
+	switch got {
+	case Reachable:
 		if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
 			w.logger.Debug("embed: remove ollama-down marker", "error", err)
 		}
-		return true
-	}
-
-	if _, err := os.Stat(markerPath); os.IsNotExist(err) {
-		ts := time.Now().UTC().Format(time.RFC3339)
-		if err := os.WriteFile(markerPath, []byte(ts), 0o600); err != nil {
-			w.logger.Debug("embed: write ollama-down marker", "error", err)
+	case Unreachable:
+		if _, err := os.Stat(markerPath); os.IsNotExist(err) {
+			ts := time.Now().UTC().Format(time.RFC3339)
+			if err := os.WriteFile(markerPath, []byte(ts), 0o600); err != nil {
+				w.logger.Debug("embed: write ollama-down marker", "error", err)
+			}
 		}
 	}
-	return false
+	return got
 }
 
 // Run starts the worker loop. Blocks until ctx is cancelled.
@@ -144,7 +153,7 @@ func (w *Worker) safeSweepOnce(ctx context.Context) {
 
 // SweepOnce embeds unembedded memories across all projects.
 func (w *Worker) SweepOnce(ctx context.Context) {
-	if !w.checkAlive(ctx) {
+	if w.checkAlive(ctx) == Unreachable {
 		return
 	}
 	projects, err := w.store.ListProjects(ctx)
@@ -204,9 +213,21 @@ const projectBatch = 50
 // own skip rule handles it — so nothing here is an error. The bound keeps a
 // first pass after a model change from embedding a whole corpus in one go; the
 // rest is the sweep's work, and the caller reports what it did not embed.
+//
+// The gate below is reached only on an ESTABLISHED outage. An Inconclusive probe
+// — this machine being too busy to answer a two-second-old liveness check — is
+// not an outage, and skipping the batch on it is what made the index depend on
+// the machine's mood: `ghost supersede` calls this to fill the corpus it is
+// about to scan (issue #716), so a stall here left it reporting a clean
+// "0 candidate pairs" for a pair the operator could see, and the daemon's own
+// sweep stopped filling the index for the same reason at the same moment. The
+// cost of trying is bounded and small — one request, capped by the client's own
+// timeout, and the loop below stops at the first failure — so the two errors are
+// not symmetric and this is the one worth making.
 func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) int {
-	// Check if Ollama is alive first.
-	if !w.checkAlive(ctx) {
+	// Check whether Ollama is really not there, which is a different question
+	// from whether it answered quickly (see the doc comment above).
+	if w.checkAlive(ctx) == Unreachable {
 		return 0
 	}
 	if limit <= 0 {
@@ -246,9 +267,18 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 			failed++
 			lastErr = err
 			w.logger.Debug("embed: ollama", "error", err, "memory_id", id)
-			// If Ollama went down mid-batch, stop.
-			if !w.checkAlive(ctx) {
-				w.logger.Info("ollama unavailable, pausing embedding", "embedded", embedded)
+			// If Ollama went down mid-batch, stop. This one takes anything but
+			// Reachable, which is the opposite of the gate above and deliberately
+			// so: the batch is already part-done, so a second request at a
+			// machine that is not answering is 30s each for nothing, and a stall
+			// is as good a reason to stop as an outage.
+			if got := w.checkAlive(ctx); got != Reachable {
+				// The verdict is named because the two are not the same event and
+				// this line is where a reader works out which one happened: an
+				// outage is the endpoint's, an inconclusive is this machine's, and
+				// the second is a reason to look at load rather than at Ollama.
+				w.logger.Info("ollama unavailable, pausing embedding",
+					"embedded", embedded, "reachability", got.String())
 				return embedded
 			}
 			continue
