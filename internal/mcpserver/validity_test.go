@@ -187,6 +187,94 @@ func TestSaveAcceptsRFC3339ValidityStamps(t *testing.T) {
 	}
 }
 
+// RFC 3339 permits a fractional second, and it is accepted — which is worth a
+// test of its own, because the obvious reading of acceptedStampForms (RFC3339 and
+// not RFC3339Nano) says the opposite, and a reviewer did read it that way.
+//
+// The layout list is not the reason. time.Parse is documented to accept a
+// fractional second "immediately after the seconds field, even if the layout does
+// not signify its presence", so time.RFC3339 already parses ".123" and
+// ".123456789". RFC3339Nano differs in FORMATTING — it renders the fraction — and
+// adding it to the parse list would buy nothing and cost a second attempt at every
+// stamp. The endOfDay shift is unaffected, because it is keyed on the DATE layout
+// and a fractional stamp is not one.
+//
+// The fraction is dropped on the way in, which is the stored layout's own
+// resolution rather than a loss this path chooses: StoredStampLayout is
+// second-precision text, and a claim stated to the millisecond is stored to the
+// second. A caller needing sub-second precision has no column to put it in.
+func TestSaveAcceptsFractionalSecondValidityStamps(t *testing.T) {
+	srv, session := newCapSession(t)
+	pinAgent(t, "opencode")
+
+	m := savedMemory(t, srv, session, "ghost_memory_save", map[string]any{
+		"project_id":  "test-project",
+		"content":     "the cutover completes at a quarter past the hour",
+		"category":    "fact",
+		"valid_until": "2027-03-31T09:00:00.123Z",
+	})
+
+	raw := stamp(t, m, "valid_until", m.ValidUntil)
+	at, err := time.Parse(memory.StoredStampLayout, raw)
+	if err != nil {
+		t.Fatalf("valid_until = %q, not the documented stored layout: %v", raw, err)
+	}
+	if want := time.Date(2027, 3, 31, 9, 0, 0, 0, time.UTC); !at.Equal(want) {
+		t.Errorf("valid_until = %v, want %v — the fraction is dropped, the instant is not moved", at, want)
+	}
+}
+
+// The same through the parser directly, for the forms a table of one would not
+// cover: a nanosecond fraction, and an offset carrying one. The offset is the case
+// that matters, because a stamp like 09:00:00.5+02:00 is 07:00:00.5 UTC and a
+// path that kept the local time would store the wrong instant.
+func TestParseStampArgAcceptsEveryRFC3339FractionForm(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want string
+	}{
+		{"2026-10-01T09:00:00Z", "2026-10-01 09:00:00"},
+		{"2026-10-01T09:00:00.5Z", "2026-10-01 09:00:00"},
+		{"2026-10-01T09:00:00.123Z", "2026-10-01 09:00:00"},
+		{"2026-10-01T09:00:00.123456789Z", "2026-10-01 09:00:00"},
+		{"2026-10-01T09:00:00.5+02:00", "2026-10-01 07:00:00"},
+		{"2026-10-01T09:00:00-05:00", "2026-10-01 14:00:00"},
+		// The date form, for contrast: no time of day, and the endOfDay shift is
+		// keyed on this layout alone.
+		{"2026-10-01", "2026-10-01 00:00:00"},
+	} {
+		got, err := parseStampArg("valid_from", tc.in, false)
+		if err != nil {
+			t.Errorf("parseStampArg(%q) = error %v, want it accepted", tc.in, err)
+			continue
+		}
+		if got == nil || *got != tc.want {
+			t.Errorf("parseStampArg(%q) = %v, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// The endOfDay shift must NOT fire on a fractional stamp, only on the date form.
+// A caller who said 23:59:59.5 chose that instant, and collapsing it to a
+// whole-day end would move the claim a day later than they asked for.
+func TestParseStampArgDoesNotExtendAFractionalStampToTheDay(t *testing.T) {
+	got, err := parseStampArg("valid_until", "2026-10-01T23:59:59.500Z", true)
+	if err != nil {
+		t.Fatalf("parseStampArg: %v", err)
+	}
+	if want := "2026-10-01 23:59:59"; got == nil || *got != want {
+		t.Errorf("parseStampArg(endOfDay) = %v, want %q — the whole-day shift belongs to the date form alone", got, want)
+	}
+	// And the date form still gets the shift, so the two are not confused.
+	dateGot, err := parseStampArg("valid_until", "2026-10-01", true)
+	if err != nil {
+		t.Fatalf("parseStampArg(date): %v", err)
+	}
+	if want := "2026-10-01 23:59:59"; dateGot == nil || *dateGot != want {
+		t.Errorf("parseStampArg(date, endOfDay) = %v, want %q", dateGot, want)
+	}
+}
+
 // The shortcut has to mean now, and now has to mean a stamp nobody has to
 // compute: the caller's one problem when re-checking a fact is not knowing the
 // current time in the store's format.
