@@ -13,13 +13,23 @@ import (
 // flag off (default) vs on. Report-only — the ship decision is manual until
 // a default flips. Run with GHOST_BENCH_PROBE=1. (FTS/vector ablations do
 // not pass through decayRank, so only hybrid is graded here.)
+//
+// The trap column is the fixture's never-decay half, and it has to be. Since
+// #561 that fixture also carries decaying-category scenarios, whose decay factor
+// is below 1.0 and which therefore MOVE under reselect — so pooling the two
+// halves would report the feature working as designed where this probe's whole
+// point is whether widening the window regresses anything. The never-decay half
+// cannot move at all (its factor is exactly 1.0, so base x decay == base), so it
+// is also the half that can show a regression, which is what this probe is for.
+// The decaying half's own numbers are reported by
+// TestRecencyTrapDecayingCategories, per category and with the pinned column.
 func TestDecayReselectProbe(t *testing.T) {
 	if os.Getenv("GHOST_BENCH_PROBE") == "" {
 		t.Skip("set GHOST_BENCH_PROBE=1 to run the decay-reselect probe")
 	}
 	ctx := context.Background()
 	stale := loadStalenessTestdata(t)
-	traps := loadTrapTestdata(t)
+	traps := neverDecayScenarios(loadTrapTestdata(t))
 
 	ds, vecs := loadTestdataDataset(t)
 	store, db := newBenchStoreWithDB(t)
@@ -53,7 +63,7 @@ func TestDecayReselectProbe(t *testing.T) {
 		if err != nil {
 			t.Fatalf("trap: %v", err)
 		}
-		t.Logf("trap correct-wins=%.3f", TrapCorrectWins(to))
+		t.Logf("trap correct-wins (never-decay scenarios only)=%.3f", TrapCorrectWins(to))
 	}
 
 	run(false)

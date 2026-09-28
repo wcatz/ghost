@@ -317,11 +317,30 @@ func TestSupersedeDemoteClearsFrontier(t *testing.T) {
 	}
 	baseTW := TrapCorrectWins(baseTrap)
 
-	t.Logf("supersede demote: staleness fresh-wins=%.3f, trap correct-wins=%.3f (default trap=%.3f)", sw, tw, baseTW)
+	// The other direction, which is what makes "the demote is a no-op on a corpus
+	// with no edges" a measurement rather than a claim about demoteSuperseded's
+	// early return: the SAME suite with the demote switched OFF. Without this,
+	// "untouched" is only established against another demote-on configuration, so
+	// a demote that reordered everything identically under both would pass.
+	demoteOff := memory.DefaultSearchParams()
+	demoteOff.SupersedeDemote = false
+	offTrap, err := RunRecencyTrap(ctx, traps, demoteOff)
+	if err != nil {
+		t.Fatalf("trap demote-off: %v", err)
+	}
+	offTW := TrapCorrectWins(offTrap)
+
+	t.Logf("supersede demote: staleness fresh-wins=%.3f, trap correct-wins=%.3f (default trap=%.3f, demote-off trap=%.3f)",
+		sw, tw, baseTW, offTW)
 	if sw < 0.9 {
 		t.Errorf("supersede demote should flip staleness to near-1.0, got %.3f", sw)
 	}
 	if tw != baseTW {
 		t.Errorf("supersede demote must not touch the trap (no supersession pairs there): %.3f vs default %.3f", tw, baseTW)
+	}
+	if tw != offTW {
+		t.Errorf("with no supersedes edge anywhere in the suite, the demote changed the trap score: on %.3f, off %.3f — "+
+			"so the frontier's 'the demote does not touch the trap' claim is not about the demote being inert",
+			tw, offTW)
 	}
 }

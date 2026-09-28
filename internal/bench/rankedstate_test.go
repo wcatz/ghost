@@ -79,7 +79,7 @@ func seedRankedStateFixture(t *testing.T) ([]Query, Dataset, *memory.Store) {
 //     two-row edge cannot show the star-link ordering a chain depends on;
 //   - the edges are real: every key a memory supersedes exists in the corpus.
 func TestRankedStateFixtureCarriesState(t *testing.T) {
-	_, ds, _ := seedRankedStateFixture(t)
+	queries, ds, _ := seedRankedStateFixture(t)
 	if len(ds.Memories) < 20 {
 		t.Errorf("ranking-state corpus has %d memories, want >= 20 for the state to be contested", len(ds.Memories))
 	}
@@ -132,6 +132,18 @@ func TestRankedStateFixtureCarriesState(t *testing.T) {
 	// quietly take the claim away.
 	if depth != 1 {
 		t.Errorf("%d memories supersede more than one row, want exactly 1 (the three-deep chain the report describes)", depth)
+	}
+
+	// Every probe grades exactly one memory. The per-probe rank grid resolves a
+	// probe's "the answer" out of Relevance, which is a map, so a probe grading
+	// two rows would pick one of them by iteration order and report a
+	// run-to-run-varying rank for the finding the grid exists to support. Checked
+	// on the SEEDED queries, because that is where the keys have become the store
+	// IDs AnswerRanks actually resolves.
+	for _, q := range queries {
+		if _, err := singleRelevant(q); err != nil {
+			t.Errorf("%v", err)
+		}
 	}
 
 	// Both classes of chain have to be present, or the report cannot separate

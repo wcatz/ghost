@@ -161,17 +161,19 @@ func RunRankedState(ctx context.Context, store *memory.Store, queries []Query, p
 // the fused leg's own per-query scores is not possible (a score is not a rank), so
 // the search is repeated per probe. It is 14 searches and the point is the
 // per-probe breakdown the aggregate table cannot show.
+//
+// A probe must grade EXACTLY ONE memory as relevant, and that is enforced rather
+// than assumed: Relevance is a map, so picking "an" answer by ranging over it
+// would pick a different one from run to run, and a probe with two graded rows
+// would then report a rank for whichever the map iteration happened to end on.
+// The error names the probe, because a fixture that grades two rows is a question
+// about which of them the answer is — and a question this harness cannot answer.
 func AnswerRanks(ctx context.Context, store *memory.Store, queries []Query, p memory.SearchParams) ([]RankedStateAnswer, error) {
 	out := make([]RankedStateAnswer, 0, len(queries))
 	for _, q := range queries {
-		var answerID string
-		for id, gain := range q.Rel {
-			if gain > 0 {
-				answerID = id
-			}
-		}
-		if answerID == "" {
-			return nil, fmt.Errorf("probe %q has no relevant memory, so it has no answer to rank", q.Name)
+		answerID, err := singleRelevant(q)
+		if err != nil {
+			return nil, err
 		}
 		results, err := store.SearchHybridParams(ctx, q.ProjectID, q.Text, q.Vector, scoreK, p)
 		if err != nil {
@@ -187,6 +189,27 @@ func AnswerRanks(ctx context.Context, store *memory.Store, queries []Query, p me
 		out = append(out, RankedStateAnswer{Probe: q.Name, Rank: rank})
 	}
 	return out, nil
+}
+
+// singleRelevant returns the one memory a query grades as relevant, or an error
+// naming how many it graded. Sorted output is not needed — the id is the value —
+// but the COUNT is, and it is counted rather than read off a map's last key.
+func singleRelevant(q Query) (string, error) {
+	var found []string
+	for id, gain := range q.Rel {
+		if gain > 0 {
+			found = append(found, id)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", fmt.Errorf("probe %q grades no memory as relevant, so it has no answer to rank", q.Name)
+	default:
+		return "", fmt.Errorf("probe %q grades %d memories as relevant, so which one is the answer is a question "+
+			"this suite cannot answer; the per-probe rank grid needs one", q.Name, len(found))
+	}
 }
 
 // FormatRankedState renders the suite as one row per configuration, with the
