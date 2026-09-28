@@ -425,6 +425,84 @@ func TestImportDoesNotTurnAnEmptyVerifiedAtIntoAVerification(t *testing.T) {
 	}
 }
 
+// TestImportDoesNotStoreAnEmptyStampOnACarriedRecord: the same rule as the
+// memory-level case, one field over — the artifact's OWN evidence records carry
+// their own `observed_at` and `verified_at`, and a hand edit can leave either as a
+// pointer to "".
+//
+// Two readers turn that into a claim. `scanEvidence` reports a non-nil pointer for
+// a non-NULL column, so a reader sees a moment that does not exist; and the counts
+// sum `verified_at IS NOT NULL`, so an empty string is counted as a verification
+// and the assembler's trace prints "1 verified" for a check nobody performed. It
+// also round-trips: an export re-emits the non-NULL column as "", so every later
+// import re-creates it.
+func TestImportDoesNotStoreAnEmptyStampOnACarriedRecord(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const id = "EEEEEEEEEEEEEEEEEEEEEEEEEEE3"
+	empty := ""
+	if _, _, _, err := s.ImportMemory(ctx, PortableMemory{
+		ID:        id,
+		ProjectID: testProject,
+		Category:  "fact",
+		Content:   "a fact whose carried record left both stamps empty",
+		Source:    "onboarding",
+		Evidence: []PortableEvidence{{
+			Kind:       "observed",
+			Agent:      "claude-code",
+			ObservedAt: &empty,
+			VerifiedAt: &empty,
+		}},
+	}, ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+
+	ev, err := s.MemoryProvenance(ctx, id)
+	if err != nil {
+		t.Fatalf("MemoryProvenance: %v", err)
+	}
+	if len(ev) != 2 {
+		t.Fatalf("evidence = %v, want the carried record and the arrival", evidenceRowsFor(t, ev))
+	}
+	carried := ev[0]
+	if carried.ObservedAt != nil {
+		t.Errorf("the carried record's observed_at = %q, want NULL — an empty string is not a moment", *carried.ObservedAt)
+	}
+	if carried.VerifiedAt != nil {
+		t.Errorf("the carried record's verified_at = %q, want NULL — an empty string is not a check", *carried.VerifiedAt)
+	}
+	// The count is where an empty string becomes a fact a reader acts on.
+	counts, err := s.MemoryEvidenceCounts(ctx, id)
+	if err != nil {
+		t.Fatalf("MemoryEvidenceCounts: %v", err)
+	}
+	if counts.Verified != 0 {
+		t.Errorf("Verified = %d, want 0 — an empty string is not a check anybody performed", counts.Verified)
+	}
+	if want := "supported by 2 observations"; counts.Label() != want {
+		t.Errorf("label = %q, want %q", counts.Label(), want)
+	}
+	// And the export must not hand the empty string to the next importer.
+	rows, err := s.PortableMemories(ctx, []string{testProject})
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+	for _, r := range rows {
+		if r.ID != id {
+			continue
+		}
+		for i, e := range r.Evidence {
+			if e.VerifiedAt != nil && *e.VerifiedAt == "" {
+				t.Errorf("evidence %d exports verified_at as \"\" for a column that is NULL", i)
+			}
+			if e.ObservedAt != nil && *e.ObservedAt == "" {
+				t.Errorf("evidence %d exports observed_at as \"\" for a column that is NULL", i)
+			}
+		}
+	}
+}
+
 // evidenceRowsFor renders records with their verification, for an assertion about
 // which records exist rather than about their fields.
 func evidenceRowsFor(t *testing.T, ev []Evidence) []string {

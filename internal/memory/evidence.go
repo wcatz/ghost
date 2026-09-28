@@ -334,11 +334,35 @@ func importEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, e Portab
 		VALUES (COALESCE(NULLIF(?, ''), hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, memoryID, e.Kind,
 		nullIfEmpty(e.Agent), nullIfEmpty(e.SessionID), nullIfEmpty(e.SourceRef),
-		e.Confidence, e.ObservedAt, e.VerifiedAt,
+		e.Confidence, boundStamp(e.ObservedAt), boundStamp(e.VerifiedAt),
 	); err != nil {
 		return fmt.Errorf("import evidence for %s: %w", memoryID, err)
 	}
 	return nil
+}
+
+// boundStamp maps an artifact's optional stamp to a bind parameter, where NULL is
+// the only honest answer for "this record does not say when".
+//
+// A non-nil pointer is not enough, and the artifact is where that bites: the form
+// is documented as something a user reads and hand-edits, the column is a POINTER,
+// and `omitempty` drops a nil rather than a pointer to "". An empty string bound
+// straight through would be stored as a value that is not NULL — and these two
+// columns are the two a reader ACTS on. `scanEvidence` reports a non-nil pointer
+// for a non-NULL column, so a moment that does not exist reads as one; and
+// `verified_at IS NOT NULL` is what the support counts sum, so an empty string is
+// counted as a verification and the assembler's trace prints "1 verified" for a
+// check nobody performed. It round-trips too: the export re-emits a non-NULL
+// column as "", so every later import re-creates it.
+//
+// Both stamps go through here, not only the verified one: an empty `observed_at`
+// is the same lie about the same kind of thing, and one rule for the pair is the
+// only way a hand edit cannot slip past the field nobody remembered.
+func boundStamp(at *string) any {
+	if at == nil || *at == "" {
+		return nil
+	}
+	return *at
 }
 
 // MemoryProvenance returns one memory's evidence records, oldest first.
