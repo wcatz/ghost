@@ -79,6 +79,11 @@ func runMaintenanceStatus() {
 	}
 	view := maintenanceStatusView{Budget: cfg.Scratch.MaxBytes}
 
+	// DataDirPath, not DataDir: the report below opens the store read-write when
+	// it exists, and it must not create the data directory on a machine that has
+	// none — the "no database" branch is what says so. A GHOST_DEV_FORBID_DATA_DIR
+	// refusal arrives from this same call (#721), reported like any other
+	// unresolvable data dir.
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

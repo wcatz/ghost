@@ -4,10 +4,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/wcatz/ghost/internal/config"
 	"os"
 	"path/filepath"
 
-	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -16,6 +16,11 @@ import (
 // and neither should leave a data directory behind on a machine that has none —
 // a backup of a store that does not exist is an error, not a reason to make an
 // empty one.
+//
+// It is also where a GHOST_DEV_FORBID_DATA_DIR refusal comes from (#721), which
+// needs nothing here: every caller opens a store with the directory this
+// returns, and a store open in a forbidden directory is refused by
+// config.DataDirPath itself.
 func dataDirPath() (string, error) {
 	dir, err := config.DataDirPath()
 	if err != nil {

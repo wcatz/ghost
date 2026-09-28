@@ -114,6 +114,9 @@ func runObsidian(mode string, args []string) {
 		interval = cfg.Obsidian.Interval
 	}
 
+	// A GHOST_DEV_FORBID_DATA_DIR refusal arrives from here, before the
+	// directory is created and before the store below is opened: the mirror reads
+	// every row of it, and so does a dev build's refusal have to (#721).
 	dataDir, err := config.DataDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

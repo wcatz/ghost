@@ -1,5 +1,12 @@
 export GOTOOLCHAIN = auto
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# --long on purpose: `git describe --tags` at an exact tag prints the bare tag,
+# which selfupdate.IsRelease reads as a PUBLISHED release -- and `make build` /
+# `make install` produce a binary nobody published. With --long the stamp is
+# always "<tag>-<n>-g<sha>" (n=0 exactly at the tag), whose tail parses as a
+# prerelease, so a local build is a development build and honours
+# GHOST_DEV_FORBID_DATA_DIR. The release path does not use this: goreleaser
+# stamps its own version.
+VERSION ?= $(shell git describe --tags --always --dirty --long 2>/dev/null || echo dev)
 LDFLAGS  = -ldflags "-X main.version=$(VERSION)"
 BINARY   = ghost
 
