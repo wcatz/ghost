@@ -28,20 +28,31 @@ func BackupFileName(dbPath string, at time.Time) string {
 // the printed report is stable. It counts what the snapshot holds, not what the
 // live database held a moment later: a restore is checked against the file, so
 // these are the numbers that have to match it.
+//
+// The JSON tags are the manifest's field names. They are here, on the one type
+// both the printed report and the manifest use, because a second definition of
+// the same five numbers would be a second place for them to drift — and a
+// manifest reporting a different set of tables than the report prints beside it
+// would be a manifest describing a file no reader can check.
 type BackupCounts struct {
-	Projects    int
-	Memories    int
-	MemoryLinks int
-	Tasks       int
-	Decisions   int
+	Projects    int `json:"projects"`
+	Memories    int `json:"memories"`
+	MemoryLinks int `json:"memory_links"`
+	Tasks       int `json:"tasks"`
+	Decisions   int `json:"decisions"`
 }
 
 // BackupResult is what one backup wrote: where it went, how big the file is,
-// and what it contains.
+// what it contains, and where the manifest describing all three landed.
 type BackupResult struct {
 	Path   string
 	Bytes  int64
 	Counts BackupCounts
+	// ManifestPath is the sidecar written beside Path. It is reported rather
+	// than left to convention because the printed report is the only place a
+	// user learns the file exists, and a backup whose description is in a file
+	// nobody was told about is a backup nobody will check.
+	ManifestPath string
 }
 
 // Store.Backup writes a consistent snapshot of the live database to dest and
@@ -54,16 +65,52 @@ type BackupResult struct {
 // copying ghost.db without a matching -wal loses whatever the log held, and
 // copying the pair while a write lands can capture a torn page.
 //
-// The write lock is held for the duration of the VACUUM and nothing longer:
-// this is not wrapped in a transaction, and no other lock is taken on the way,
-// so a running MCP server keeps serving for the length of one vacuum and not
-// for a copy-then-check sequence.
+// The write lock is held for the length of the vacuum and the count that follows
+// it, and no longer. It is not wrapped in a transaction, and no other lock is
+// taken on the way, so a running MCP server keeps serving for the length of one
+// vacuum and not for a copy-then-check sequence — the manifest write below is
+// deliberately OUTSIDE it, for the same reason.
 //
 // dest must not exist. Both this and the pre-migration copy refuse rather than
 // replace, because the file already there is the previous backup someone may
 // still be relying on. An Lstat is used so a dangling symlink at that path is
 // refused too, rather than being written through to whatever it points at.
+//
+// A manifest lands beside the snapshot (see writeBackupManifest), and a failure
+// to write it fails the backup rather than being reported as a success with a
+// quiet omission: the whole point of a copy is that it can be checked later, and
+// a snapshot nothing can check is a claim, not a backup. The snapshot itself is
+// left in place when that happens — it is a real, restorable copy, and deleting
+// a user's only backup because a sidecar could not be written would trade a
+// smaller problem for a larger one.
+//
+// The manifest is written AFTER s.mu is released, and that is load-bearing rather
+// than incidental. Hashing it re-reads every byte of the snapshot, and a second
+// full pass over the database's bytes inside this store's EXCLUSIVE lock would
+// stall every reader — every ghost_memory_search through a live server — for a
+// read of a file that belongs to nobody but this call. By the time the lock is
+// dropped the snapshot is complete and closed and O_EXCL has claimed its path,
+// so nothing else can be writing it and the manifest can be built from the path
+// alone, which is all it takes.
 func (s *Store) Backup(ctx context.Context, dest string) (BackupResult, error) {
+	res, err := s.vacuumAndCount(ctx, dest)
+	if err != nil {
+		return BackupResult{}, err
+	}
+	manifestPath, err := writeBackupManifest(dest, res.Counts, time.Now())
+	if err != nil {
+		return BackupResult{}, fmt.Errorf("backup manifest: %w", err)
+	}
+	res.ManifestPath = manifestPath
+	return res, nil
+}
+
+// vacuumAndCount takes the copy and counts it, and returns everything but the
+// manifest path. Split out of Backup so the extent of the lock is one function
+// rather than a span a reader has to infer from where a defer happens to sit:
+// the manifest write reads the whole file again, and must not be inside it (see
+// Backup).
+func (s *Store) vacuumAndCount(ctx context.Context, dest string) (BackupResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

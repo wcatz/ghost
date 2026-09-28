@@ -20,6 +20,7 @@ import (
 // syntax that would have worked.
 const (
 	backupUsage = `Usage: ghost backup [--out <path>]
+       ghost backup verify <file>
 
 Writes a consistent snapshot of the memory database while Ghost is running.
 
@@ -34,9 +35,55 @@ whatever the write-ahead log held. The write lock is held for the length of the
 vacuum and no longer.
 
 The command prints the path, the file size, and the row count of each table, so
-a restore can be checked against what the file actually contains. To restore,
-stop Ghost, move the file into the data directory as ghost.db (removing the
-old ghost.db, ghost.db-wal and ghost.db-shm first), and start Ghost again.
+a restore can be checked against what the file actually contains. It also writes
+a sidecar manifest beside the snapshot — <snapshot>.manifest.json — recording the
+schema version, the row count of each table, the size and a SHA-256 of the
+snapshot. That is what "ghost backup verify" checks against; see below and
+"ghost backup verify --help".
+
+To restore, stop Ghost, move the file into the data directory as ghost.db
+(removing the old ghost.db, ghost.db-wal and ghost.db-shm first), and start Ghost
+again. Run "ghost backup verify <file>" on the copy first.
+`
+
+	backupVerifyUsage = `Usage: ghost backup verify <file>
+
+Checks a backup before you trust it, and exits non-zero if the file cannot be
+vouched for. It reads the file and the manifest beside it, and it does not open
+the database in your data directory, so running it can neither migrate nor seed
+your live store — which matters, because the moment a user reaches for this
+command is the moment they are least sure what state their own store is in.
+
+Four checks, all reported, in the order they run:
+
+  sha256           The file is the size its manifest records and hashes to what
+                   the manifest records. This is the only check that needs
+                   nothing but the path, which is why it runs first: a truncated
+                   or appended-to copy is diagnosed here, and a file that is not
+                   a database at all still gets an answer.
+  integrity check  SQLite's own PRAGMA integrity_check. When it fails, its
+                   answer is printed as it stands: it names the pages and the
+                   reasons, which is the most anyone will be told about the
+                   damage.
+  schema version   The version the file carries, against the one this build
+                   reads and the one its manifest recorded. A file from a newer
+                   Ghost is a downgrade to restore and is refused; an older one
+                   is what the documented restore path produces, and is reported
+                   as restorable with the migration named.
+  row counts       The rows the file holds, against the manifest's.
+
+Every check that can run does. One that cannot reports as skipped, which says it
+did not run rather than that it passed.
+
+A file with no manifest beside it is not refused, and does not get the word
+"verified" either: a pre-migration copy — taken before a migration — is written
+without one, and it is exactly the copy a user wants to check after a bad
+upgrade. Such a file is reported as checked, with the two manifest-derived checks
+marked skipped and the other two still standing.
+
+A manifest that is present but unreadable IS a refusal. That is damage, not an
+absent optional file, and treating it as absent would quietly downgrade a damaged
+sidecar into an unverified backup that still looked fine.
 `
 
 	exportUsage = `Usage: ghost export [--project <name>] [--out <file.jsonl>]
@@ -127,6 +174,24 @@ func parseBackupArgs(args []string) (backupOptions, error) {
 		}
 	}
 	return opts, nil
+}
+
+// parseBackupVerifyArgs parses `ghost backup verify <file>`. Exactly one file:
+// two paths in one run would produce one verdict for a question that has two
+// answers, and a flag is a flag this command has no meaning for — it reads one
+// file, and the only way to change which file is to name a different one.
+func parseBackupVerifyArgs(args []string) (string, error) {
+	var positional []string
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			return "", fmt.Errorf("unknown flag %q", arg)
+		}
+		positional = append(positional, arg)
+	}
+	if len(positional) != 1 {
+		return "", fmt.Errorf("expected exactly one backup file, got %d", len(positional))
+	}
+	return positional[0], nil
 }
 
 // parseExportArgs parses `ghost export`. Both --flag value and --flag=value are
@@ -289,9 +354,18 @@ func runBackupCore(ctx context.Context, store *memory.Store, out io.Writer, dest
 // printBackupReport names the file and every count a restore would be checked
 // against. The counts are per table rather than a single total, because "the
 // file is there" is not the question — "does it hold what my store held" is.
+//
+// The manifest is named too. It is a second file the user did not ask for, and
+// this report is the only place they learn it exists: a backup whose description
+// is in a file nobody was told about is a backup nobody will check.
 func printBackupReport(out io.Writer, res memory.BackupResult) error {
 	if _, err := fmt.Fprintf(out, "backed up %s (%d bytes)\n", res.Path, res.Bytes); err != nil {
 		return err
+	}
+	if res.ManifestPath != "" {
+		if _, err := fmt.Fprintf(out, "  %-13s %s\n", "manifest:", res.ManifestPath); err != nil {
+			return err
+		}
 	}
 	rows := []struct {
 		name  string
@@ -305,6 +379,119 @@ func printBackupReport(out io.Writer, res memory.BackupResult) error {
 	}
 	for _, r := range rows {
 		if _, err := fmt.Fprintf(out, "  %-13s %d\n", r.name+":", r.count); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runBackupVerify implements `ghost backup verify <file>`.
+//
+// Unlike every other command here it opens no store: bootstrap() migrates the
+// database in the data directory and seeds its builtin rows, and the moment a
+// user reaches for this command is the moment they are least sure what state
+// their own store is in. Nothing here reads anything but the file it was given
+// and the manifest beside it, so the check is equally safe against a copy on
+// another machine and against a copy of a store this binary has never seen.
+func runBackupVerify(args []string) {
+	path, err := parseBackupVerifyArgs(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, backupVerifyUsage)
+		os.Exit(1)
+	}
+	if err := runBackupVerifyCore(context.Background(), os.Stdout, path); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runBackupVerifyCore checks one file and prints every check. Split out of
+// runBackupVerify for the same reason runBackupCore is split out of runBackup:
+// the whole command, minus the argument parsing and the process exit.
+//
+// The report is printed even when the run fails, hard errors included — the
+// checks that did run are the diagnosis, and a file that is not a database at
+// all still produces a report worth reading. A failed check is an error return
+// as well as a line of output, because the exit code is what a script branches
+// on: a verify that printed "failed" and exited 0 would be read as a pass by
+// every caller that is not parsing the text.
+func runBackupVerifyCore(ctx context.Context, out io.Writer, path string) error {
+	rep, err := memory.VerifyBackup(ctx, path)
+	if perr := printVerifyReport(out, rep, err); perr != nil && err == nil {
+		err = perr
+	}
+	if err != nil {
+		return err
+	}
+	if failed := rep.Failed(); len(failed) > 0 {
+		return fmt.Errorf("%s cannot be trusted as a backup: %s failed", path, strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// printVerifyReport states the file, what it holds, and every check with its
+// verdict. The error is a parameter rather than something printVerifyReport
+// infers, because a run that failed has established nothing: printing it as
+// though it had would put a verdict word on a report with no checks in it.
+//
+// The verdict is a column of its own rather than folded into the detail,
+// because the difference between ok, failed and skipped is the whole report. A
+// check that did not run says nothing about the file, and a reader who cannot
+// see that difference has been handed a reassurance they did not earn — which is
+// the exact failure this command exists to prevent, one level up.
+//
+// Three verdicts, and the middle one is the point of having three:
+//
+//	verified  every check ran and passed
+//	checked   nothing failed, but something did not run — which is what a
+//	          pre-migration copy, taken with no manifest, is
+//	refusing  a check failed, or the file could not be checked at all
+//
+// "verified" is reserved for the first. It is the strongest word the command
+// can print, and a file whose hash was never checked has not earned it: the side
+// car is the part a user forgets to copy, so a manifest-less file is the single
+// most likely thing to arrive here, and it must not be answered as though the
+// same thing had been established as for a file with a manifest.
+func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) error {
+	skipped := 0
+	for _, c := range rep.Checks {
+		if c.State == memory.VerifySkipped {
+			skipped++
+		}
+	}
+	var verdict string
+	switch {
+	case runErr != nil || len(rep.Failed()) > 0:
+		verdict = "refusing"
+	case skipped > 0:
+		verdict = "checked"
+	default:
+		verdict = "verified"
+	}
+
+	headline := fmt.Sprintf("%s: %d bytes", rep.Path, rep.Bytes)
+	// One arm, not three: the counts are printed only where they were read, and
+	// the condition is written once so there is no second path through this
+	// switch that could print a count the report does not have.
+	switch {
+	case runErr != nil || !rep.CountsRead:
+		headline += ", not checked"
+	default:
+		headline += ", " + rep.Counts.String()
+	}
+	if _, err := fmt.Fprintf(out, "%s %s\n", verdict, headline); err != nil {
+		return err
+	}
+	for _, c := range rep.Checks {
+		if _, err := fmt.Fprintf(out, "  %-16s %-8s %s\n", c.Name, c.State, c.Detail); err != nil {
+			return err
+		}
+	}
+	if !rep.HasManifest {
+		// Once, at the bottom: the table above already says it in two rows, and
+		// saying it a third time in prose would bury the line being looked for.
+		if _, err := fmt.Fprintf(out, "  (no manifest at %s, so the hash and the recorded counts were not checked)\n",
+			rep.ManifestPath); err != nil {
 			return err
 		}
 	}
