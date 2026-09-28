@@ -1,0 +1,495 @@
+package memory
+
+import (
+	"context"
+	"math"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// The six tests below are issue #583's contract. They are written against the
+// store's own search, not against explain's internals, so what they pin is the
+// promise explain makes: every number in the payload is one the ranking path
+// actually used, and a field the ranking path does not apply says so instead of
+// carrying an invented contribution.
+
+// explainStoreFor opens a file-backed store and registers the project the
+// shared createTestMemory helper writes to, so a test that only reads scores
+// does not pay for a shared fixture.
+func explainStoreFor(t *testing.T, name string) (*Store, context.Context) {
+	t.Helper()
+	db, err := OpenDB(filepath.Join(t.TempDir(), name+".sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := NewStore(db, nil)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "test-proj", "/tmp/"+name, "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	return s, ctx
+}
+
+// explainRowByID indexes an explanation for lookup.
+func explainRowByID(ex SearchExplain) map[string]ExplainRow {
+	rows := make(map[string]ExplainRow, len(ex.Rows))
+	for _, r := range ex.Rows {
+		rows[r.ID] = r
+	}
+	return rows
+}
+
+// TestExplainScoreIsTheScoreTheRankingUsed is the load-bearing assertion of
+// #583: explain must report the score the search ordered by, not a number it
+// re-derived from the legs.
+//
+// The comparison is against Store.Candidates, which reaches the SAME ranking
+// seam (fuseCandidatePool -> selectWindow -> decayRank -> demoteResults) through
+// the other entry point, and whose Candidate.Base is documented as the fused
+// score the window was cut on. Two independent callers of one seam must see one
+// number: if explain re-derived it, a change to the fusion weights, the RRF
+// constant, the vector floor or the status factor would move one and not the
+// other, and the explanation would describe a ranking the search did not
+// produce.
+func TestExplainScoreIsTheScoreTheRankingUsed(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	query := []float32{0.9, 0.2}
+
+	// A resolved row, a _global row and a live project row, all matching, so
+	// the status factor actually moves a score rather than being 1.0 by
+	// accident. Without a demoted row this test would pass on a re-derivation
+	// that forgot the factor entirely.
+	if err := store.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+	const needle = "the ledger replay job reconciles settled invoices nightly"
+	live := createTestMemory(t, store, ctx, needle)
+	resolved := createTestMemory(t, store, ctx, needle)
+	global, err := store.Create(ctx, "_global", Memory{
+		Category: "fact", Content: needle, Source: "manual", Importance: 0.8, Tags: []string{"test"},
+	})
+	if err != nil {
+		t.Fatalf("Create(_global): %v", err)
+	}
+	if n, err := store.SetResolved(ctx, []string{resolved}); err != nil || n != 1 {
+		t.Fatalf("SetResolved = (%d, %v), want (1, nil)", n, err)
+	}
+	for _, id := range []string{live, resolved, global} {
+		if err := store.StoreEmbedding(ctx, id, query, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding(%s): %v", id, err)
+		}
+	}
+
+	const limit = 5
+	set, err := store.Candidates(ctx, CandidateRequest{
+		ProjectID: "test-proj",
+		Mode:      ProjectScoped,
+		Query:     needle,
+		QueryVec:  query,
+		Condition: CondHybrid,
+		Params:    DefaultSearchParams(),
+		Now:       time.Now().UTC(),
+		Fetch:     Fetch{Limit: limit},
+	})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	ex, err := store.ExplainSearch(ctx, "test-proj", needle, query, limit)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	rows := explainRowByID(ex)
+
+	cand := make(map[string]Candidate, len(set.Rows))
+	for _, c := range set.Rows {
+		cand[c.ID] = c
+	}
+	// The window the two entry points share, in the order they ranked it.
+	window := set.Rows
+	if len(window) > limit {
+		window = window[:limit]
+	}
+
+	seen := 0
+	for i, c := range window {
+		row, ok := rows[c.ID]
+		if !ok {
+			t.Fatalf("row %s is in the ranked window but missing from the explanation", c.ID)
+		}
+		if !row.Included {
+			t.Errorf("row %s ranked %d in the window but explain marks it excluded: %+v", c.ID, i+1, row)
+			continue
+		}
+		seen++
+		if row.Rank != i+1 {
+			t.Errorf("row %s explain rank = %d, want %d — explain must report the order the search produced", c.ID, row.Rank, i+1)
+		}
+		// The fused base, before status demotion and decay, is what the
+		// explanation publishes. Multiplying it by the factor the search
+		// applied has to land on the score the window was actually cut on.
+		got := row.RRFScore * row.StatusFactor
+		if math.Abs(got-c.Base) > 1e-12 {
+			t.Errorf("row %s: explain rrf_score*status_factor = %v, the score the window was cut on = %v "+
+				"(rrf %v, status %v) — explain re-derived a number the ranking path did not produce",
+				c.ID, got, c.Base, row.RRFScore, row.StatusFactor)
+		}
+		// And with decay the same product is the value decayRank ordered by.
+		// The two paths read the wall clock a moment apart, so this one is a
+		// tolerance rather than an equality.
+		want := c.Score
+		if math.Abs(got*row.DecayFactor-want) > 1e-9 {
+			t.Errorf("row %s: explain rrf*status*decay = %v, the score the order was ranked on = %v (decay %v)",
+				c.ID, got*row.DecayFactor, want, row.DecayFactor)
+		}
+	}
+	if seen != len(window) {
+		t.Fatalf("only %d of %d window rows were marked included", seen, len(window))
+	}
+	// At least one row has to be demoted, or the comparison above never left
+	// the all-1.0 case where a re-derivation that ignored the factor would
+	// still agree.
+	if rows[resolved].StatusFactor == 1.0 || rows[global].StatusFactor == 1.0 {
+		t.Fatalf("fixture did not produce a demoted row (resolved %v, _global %v): the score comparison is vacuous without one",
+			rows[resolved].StatusFactor, rows[global].StatusFactor)
+	}
+}
+
+// TestExplainScopeStateAgreesWithTheRowsSearchReturns closes the class of bug in
+// #571 structurally: the scope verdict explain publishes is the one window
+// selection applied, so the two cannot disagree. A row the search returns is
+// scope-matched; a row that is not returns names scope as the reason.
+func TestExplainScopeStateAgreesWithTheRowsSearchReturns(t *testing.T) {
+	store, ctx := explainStoreFor(t, "explain-scope-signals")
+	mk := func(content, environment string) string {
+		t.Helper()
+		id, err := store.Create(ctx, "test-proj", Memory{
+			Category: "fact", Content: content, Source: "manual", Importance: 0.8,
+			Tags: []string{"test"}, Scope: map[string]string{"environment": environment},
+		})
+		if err != nil {
+			t.Fatalf("Create(%q): %v", content, err)
+		}
+		return id
+	}
+	dev := mk("the ingest worker batches rows before writing", "development")
+	prod := mk("the ingest worker batches rows before writing", "production")
+	unscoped := createTestMemory(t, store, ctx, "the ingest worker batches rows before writing")
+
+	want := map[string]string{"environment": "production"}
+	final, err := store.SearchHybridScoped(ctx, "test-proj", "ingest worker batches rows", nil, 3, want)
+	if err != nil {
+		t.Fatalf("SearchHybridScoped: %v", err)
+	}
+	ex, err := store.ExplainSearchScoped(ctx, "test-proj", "ingest worker batches rows", nil, 3, want)
+	if err != nil {
+		t.Fatalf("ExplainSearchScoped: %v", err)
+	}
+	rows := explainRowByID(ex)
+	if len(rows) != 3 {
+		t.Fatalf("explanation carries %d rows, want 3 (one per scoped candidate)", len(rows))
+	}
+
+	// The keys compared are named, so a reader can see which axis decided.
+	for id, row := range rows {
+		if got := strings.Join(row.ScopeKeysCompared, ","); got != "environment" {
+			t.Errorf("row %s scope_keys_compared = %q, want the requested key", id, got)
+		}
+	}
+
+	returned := map[string]bool{}
+	for _, m := range final {
+		returned[m.ID] = true
+	}
+	for _, id := range []string{prod, unscoped} {
+		row, ok := rows[id]
+		if !ok {
+			t.Fatalf("row %s missing from the explanation", id)
+		}
+		if !returned[id] {
+			t.Errorf("row %s was not returned by the scoped search, so explain cannot mark it included", id)
+		}
+		if !row.Included || !row.ScopeMatched {
+			t.Errorf("row %s is in the scoped result but explain reports included=%v scope_matched=%v: %+v",
+				id, row.Included, row.ScopeMatched, row)
+		}
+	}
+	devRow, ok := rows[dev]
+	if !ok {
+		t.Fatal("the out-of-scope candidate is missing from the explanation")
+	}
+	if devRow.ScopeMatched {
+		t.Errorf("the development row reports scope_matched=true under a production request: %+v", devRow)
+	}
+	if devRow.Included || returned[dev] {
+		t.Errorf("the development row is included (%v, search returned it: %v) under a production scope: %+v",
+			devRow.Included, returned[dev], devRow)
+	}
+	if !strings.Contains(devRow.Reason, "scope") {
+		t.Errorf("the development row's reason is %q, want the scope exclusion named", devRow.Reason)
+	}
+}
+
+// TestExplainReportsValidityAndSaysNoPenaltyIsApplied: a row past its own
+// validity window is still returned by the search — the ranking path does not
+// read validity — so an explanation that stayed silent would let a caller read
+// a stale row as a current one. The state is reported; the penalty is 0 because
+// nothing in this path multiplies by it, and the note says who does drop the
+// row instead.
+func TestExplainReportsValidityAndSaysNoPenaltyIsApplied(t *testing.T) {
+	store, ctx := explainStoreFor(t, "explain-validity")
+	const needle = "the release train ships thursday at noon"
+	expired := createTestMemory(t, store, ctx, needle)
+	future := createTestMemory(t, store, ctx, needle)
+	live := createTestMemory(t, store, ctx, needle)
+
+	past := time.Now().UTC().Add(-48 * time.Hour).Format("2006-01-02 15:04:05")
+	soon := time.Now().UTC().Add(48 * time.Hour).Format("2006-01-02 15:04:05")
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE memories SET valid_until = ? WHERE id = ?`, past, expired); err != nil {
+		t.Fatalf("set valid_until: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE memories SET valid_from = ? WHERE id = ?`, soon, future); err != nil {
+		t.Fatalf("set valid_from: %v", err)
+	}
+
+	ex, err := store.ExplainSearch(ctx, "test-proj", needle, nil, 5)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	rows := explainRowByID(ex)
+	for _, tc := range []struct{ id, want string }{
+		{expired, ValidityExpired},
+		{future, ValidityFuture},
+		{live, ValidityUnset},
+	} {
+		row, ok := rows[tc.id]
+		if !ok {
+			t.Fatalf("row %s missing from the explanation", tc.id)
+		}
+		if row.ValidityState != tc.want {
+			t.Errorf("row %s validity_state = %q, want %q", tc.id, row.ValidityState, tc.want)
+		}
+		if row.ValidityPenalty != 0 {
+			t.Errorf("row %s validity_penalty = %v, want 0: nothing in the ranking path multiplies by validity, "+
+				"so a non-zero value would be a contribution the search never made", tc.id, row.ValidityPenalty)
+		}
+	}
+	if !hasExplainNote(ex.Notes, "validity") {
+		t.Errorf("notes = %v, want one saying how validity is (not) applied", ex.Notes)
+	}
+}
+
+// TestExplainReportsConfidenceAndProvenanceAsNotApplied: both are readable
+// columns and neither is multiplied by anything. Reporting the column alone
+// would read as "this contributed 0.9 of score"; reporting a contribution would
+// invent one. The contract is the column, an explicit zero delta and a note.
+func TestExplainReportsConfidenceAndProvenanceAsNotApplied(t *testing.T) {
+	store, ctx := explainStoreFor(t, "explain-confidence")
+	id := createTestMemory(t, store, ctx, "the retry budget is three attempts per upstream call")
+	conf := 0.42
+	if _, err := store.db.ExecContext(ctx,
+		`UPDATE memories SET confidence = ? WHERE id = ?`, conf, id); err != nil {
+		t.Fatalf("set confidence: %v", err)
+	}
+
+	ex, err := store.ExplainSearch(ctx, "test-proj", "retry budget attempts upstream", nil, 5)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	row, ok := explainRowByID(ex)[id]
+	if !ok {
+		t.Fatalf("row %s missing from the explanation", id)
+	}
+	if row.Confidence == nil || math.Abs(*row.Confidence-conf) > 1e-12 {
+		t.Errorf("confidence = %v, want the stored %v", row.Confidence, conf)
+	}
+	if row.ConfidenceContribution != 0 {
+		t.Errorf("confidence_contribution = %v, want 0: no confidence multiplier exists in the ranking path",
+			row.ConfidenceContribution)
+	}
+	if row.ProvenanceWeight != explainProvenanceOff {
+		t.Errorf("provenance_weight = %q, want %q — the signal is off, not a number nobody multiplies by",
+			row.ProvenanceWeight, explainProvenanceOff)
+	}
+	if row.ProvenanceContribution != 0 {
+		t.Errorf("provenance_contribution = %v, want 0", row.ProvenanceContribution)
+	}
+	if !hasExplainNote(ex.Notes, "confidence") || !hasExplainNote(ex.Notes, "provenance") {
+		t.Errorf("notes = %v, want one naming confidence and one naming provenance as not applied", ex.Notes)
+	}
+}
+
+// TestExplainAttributesEachDemotionToASpecificMemory: a penalty count alone
+// says the row moved and not what moved it. Each window-scoped demotion has to
+// name the other memory that decided it, because that is the row the caller
+// has to look at next.
+func TestExplainAttributesEachDemotionToASpecificMemory(t *testing.T) {
+	store, ctx := explainStoreFor(t, "explain-attribution")
+
+	// A supersede pair: stale is replaced by fresh, and both must be in the
+	// window for the penalty to exist at all.
+	fresh := createTestMemory(t, store, ctx, "the archive bucket rotates to cold storage monthly")
+	stale := createTestMemory(t, store, ctx, "the archive bucket rotates to cold storage monthly")
+	if err := store.CreateLink(ctx, fresh, stale, "supersedes", 1, "llm"); err != nil {
+		t.Fatalf("CreateLink(supersedes): %v", err)
+	}
+	// A near-duplicate pair, kept lexically distinct so neither folds into the
+	// other on save.
+	dupA := createTestMemory(t, store, ctx, "the cache warmer runs on the read replica every hour")
+	dupB := createTestMemory(t, store, ctx, "the cache warmer runs on the read replica hourly")
+	if err := store.CreateLink(ctx, dupA, dupB, "related", 0.95, "auto"); err != nil {
+		t.Fatalf("CreateLink(related): %v", err)
+	}
+	other := createTestMemory(t, store, ctx, "the cache warmer is drained before a deploy")
+
+	ex, err := store.ExplainSearch(ctx, "test-proj", "archive bucket cache warmer replica", nil, 10)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	rows := explainRowByID(ex)
+
+	if row := rows[stale]; !explainsAny(row.SupersededBy, fresh) {
+		t.Errorf("the superseded row names %v, want the superseder %s — a penalty count without the "+
+			"counterpart leaves the caller with nothing to read next", row.SupersededBy, fresh)
+	}
+	if row := rows[stale]; row.SupersedePenalty != 1 {
+		t.Errorf("supersede_penalty = %d, want 1", row.SupersedePenalty)
+	}
+
+	// Exactly one member of the near-duplicate pair loses, and it must be the
+	// one the search demoted, not an arbitrary one.
+	loser := ""
+	for _, id := range []string{dupA, dupB} {
+		if rows[id].NearDuplicatePenalty == 0 {
+			continue
+		}
+		if loser != "" {
+			t.Fatalf("both members of the near-duplicate pair carry a penalty (%s and %s): the attribution "+
+				"disagrees with the demotion, which sinks exactly one", loser, id)
+		}
+		loser = id
+	}
+	if loser == "" {
+		t.Fatalf("no member of the near-duplicate pair carries a penalty: %+v", ex.Rows)
+	}
+	winner := map[string]string{dupA: dupB, dupB: dupA}[loser]
+	if !explainsAny(rows[loser].NearDuplicateOf, winner) {
+		t.Errorf("the demoted duplicate %s names %v, want the winner it lost to (%s)", loser,
+			rows[loser].NearDuplicateOf, winner)
+	}
+
+	// A row neither edge touches carries no attribution at all, so a reader
+	// can tell "nothing demoted this" from "something did and we cannot say
+	// what".
+	if row := rows[other]; len(row.SupersededBy) > 0 || len(row.NearDuplicateOf) > 0 {
+		t.Errorf("an untouched row carries attribution %v / %v, want none", row.SupersededBy, row.NearDuplicateOf)
+	}
+	// And the two signals the ranking path does NOT apply are reported as
+	// absent, with the reason in the notes.
+	if !hasExplainNote(ex.Notes, "contradicts") {
+		t.Errorf("notes = %v, want one saying a contradicts edge causes no penalty here", ex.Notes)
+	}
+	if !hasExplainNote(ex.Notes, "diversity") {
+		t.Errorf("notes = %v, want one saying no per-bucket diversity cap is applied here", ex.Notes)
+	}
+}
+
+// TestExplainTruncatesWithAnExplicitMarker: a pathological candidate set must
+// not inflate the payload, and a reader must be able to see that it was cut
+// rather than reading a short list as the whole truth. The included rows are
+// the search's answer, so they are never the rows dropped.
+func TestExplainTruncatesWithAnExplicitMarker(t *testing.T) {
+	store, ctx := explainStoreFor(t, "explain-budget")
+	// A corpus whose candidate union is larger than the row budget keeps. The
+	// union is what both legs return, so it grows with the LIMIT rather than
+	// with the corpus: the tool's own ceiling is a 100-row window, and each leg
+	// then fetches 200, so a well-matched corpus really does produce a
+	// four-hundred-row candidate set at the largest limit a caller can ask for.
+	const limit = 100
+	for i := range 2 * limit {
+		if _, _, _, err := store.Upsert(ctx, "test-proj", "fact",
+			"vaultwarden sync retries the unix socket path "+strconv.Itoa(i),
+			"manual", 0.5, nil); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	// A row the KEYWORD leg cannot reach, embedded so the vector leg finds it at
+	// cosine 1.0. It therefore wins the window on the fused score and sits LAST
+	// in the candidate list (the list runs leg by leg), which is what makes "the
+	// budget never drops a returned row" a guarantee rather than a lucky
+	// ordering: a naive cut at the budget would drop it.
+	lateWinner := createTestMemory(t, store, ctx, "an unrelated note about the postgres autovacuum schedule")
+	if err := store.StoreEmbedding(ctx, lateWinner, []float32{1, 0}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+
+	ex, err := store.ExplainSearch(ctx, "test-proj", "vaultwarden sync unix socket", []float32{1, 0}, limit)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	if len(ex.Rows) == 0 {
+		t.Fatal("no rows explained")
+	}
+	if ex.Truncation == nil {
+		t.Fatalf("a %d-row payload from a corpus this size was returned whole: the budget is not applied", len(ex.Rows))
+	}
+	if ex.Truncation.MaxRows != explainMaxRows {
+		t.Errorf("truncation max_rows = %d, want the documented budget %d", ex.Truncation.MaxRows, explainMaxRows)
+	}
+	if ex.Truncation.RowsOmitted <= 0 {
+		t.Errorf("truncation rows_omitted = %d, want a positive count", ex.Truncation.RowsOmitted)
+	}
+	if len(ex.Rows) > explainMaxRows {
+		t.Errorf("payload carries %d rows, over the documented budget of %d", len(ex.Rows), explainMaxRows)
+	}
+	// The marker is only honest if the rows it kept include the answer.
+	if !hasExplainNote(ex.Notes, "truncated") {
+		t.Errorf("notes = %v, want one naming the truncation", ex.Notes)
+	}
+	searched, err := store.SearchHybrid(ctx, "test-proj", "vaultwarden sync unix socket", []float32{1, 0}, limit)
+	if err != nil {
+		t.Fatalf("SearchHybrid: %v", err)
+	}
+	if len(searched) == 0 || searched[0].ID != lateWinner {
+		t.Fatalf("fixture did not produce a vector-leg winner at rank 1 (got %d results, first %v): "+
+			"the case this test exists for needs a returned row late in the candidate list",
+			len(searched), searched)
+	}
+	kept := explainRowByID(ex)
+	for _, m := range searched {
+		row, ok := kept[m.ID]
+		if !ok {
+			t.Errorf("row %s was returned by the search but the truncated payload dropped it: "+
+				"truncation may only spend the budget on candidates, never on the answer", m.ID)
+			continue
+		}
+		if !row.Included {
+			t.Errorf("row %s was returned by the search but kept as excluded", m.ID)
+		}
+	}
+}
+
+// hasExplainNote reports whether any note mentions substr.
+func hasExplainNote(notes []string, substr string) bool {
+	for _, n := range notes {
+		if strings.Contains(n, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// explainsAny reports whether ids names want.
+func explainsAny(ids []string, want string) bool {
+	s := append([]string(nil), ids...)
+	sort.Strings(s)
+	i := sort.SearchStrings(s, want)
+	return i < len(s) && s[i] == want
+}

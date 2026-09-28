@@ -422,6 +422,17 @@ type SearchParams struct {
 	// scoping. Empty means a cross-project search, where nothing is demoted
 	// for being global.
 	ProjectID string
+	// trace, when non-nil, receives a per-candidate record of what this ranking
+	// decided. Only ExplainSearchScoped sets it, and only explain reads it, so
+	// the production path pays a nil check per stage and allocates nothing.
+	//
+	// It is here, and not an extra argument on every stage, because SearchParams
+	// is already the one value that reaches fusion, scope narrowing, window
+	// selection, decay and both demotions — a trace that had to be threaded
+	// separately would be one a future stage could forget to accept, and a stage
+	// that forgets is a stage whose decisions explain cannot report. See
+	// ranktrace.go for why explain must not rebuild these numbers.
+	trace *searchTrace
 }
 
 // DefaultSearchParams returns the production fusion parameters.
@@ -497,7 +508,7 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 		ids[i] = m.ID
 	}
 	s.mu.RLock()
-	penalty, err := SupersedePenalties(ctx, s.queryDB(), ids)
+	penalty, err := supersedeVerdicts(ctx, s.queryDB(), ids, p.trace)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("supersede demote: lookup failed", "error", err)
@@ -577,6 +588,19 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 			m    Memory
 			base float64
 		}{m, base}
+		// The factor is computed HERE, where the order is taken, rather than by
+		// explain afterwards: this is the multiplier that decided the sequence,
+		// so recording it is the only way a reader can verify the sequence. The
+		// clock travels with it for the same reason — an explanation measured
+		// against its own wall clock reports a different factor than the ranking
+		// used, and the difference shows up only on old rows.
+		if t := p.trace.row(m.ID); t != nil {
+			t.AgeDays = ageDays(m.CreatedAt, now)
+			t.Decay = DecayFactor(m.Category, m.Pinned, t.AgeDays)
+			if p.trace.now.IsZero() {
+				p.trace.now = now
+			}
+		}
 	}
 
 	// Sort by base first: relevance is the primary key in both modes.
@@ -746,10 +770,19 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 		candidate.projectID = memory.ProjectID
 		candidate.resolved = memory.ResolvedAt != nil
 		candidate.score += p.FTSWeight / float64(p.RRFK+rank+1)
+		if t := p.trace.row(memory.ID); t != nil {
+			// The 0-based rank, recorded where fusion read the leg's order —
+			// the same order RRF awarded from, so the two cannot disagree.
+			t.FTSRank = rank
+		}
 	}
 	for rank, scored := range vecResults {
 		candidate := get(scored.MemoryID)
 		candidate.vec = rank + 1
+		if t := p.trace.row(scored.MemoryID); t != nil {
+			t.VectorRank = rank
+			t.VectorScore = float64(scored.Score)
+		}
 		// Only fill in scope from the vector leg when the keyword leg did not
 		// supply it: both describe the same row, so they agree, and a nil map
 		// from either leg is a row that genuinely has no scope.
@@ -802,8 +835,17 @@ func scopeEligiblePool(pool []*hybridCandidate, p SearchParams) []*hybridCandida
 	}
 	eligible := pool[:0]
 	for _, c := range pool {
-		if ScopeMatches(c.scope, p.Scope) {
+		matched := ScopeMatches(c.scope, p.Scope)
+		if matched {
 			eligible = append(eligible, c)
+		}
+		// Recorded for the DROPPED candidates too, not just the survivors. A
+		// verdict only for the rows that passed would leave explain with no way
+		// to say why one was excluded — the #571 failure — and it would have to
+		// call ScopeMatches itself to recover it, which is the parallel
+		// re-derivation this trace exists to remove.
+		if t := p.trace.row(c.id); t != nil {
+			t.ScopeMatched = matched
 		}
 	}
 	return eligible
@@ -919,6 +961,19 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 			// Evict the weakest admitted row that is not itself reserved.
 			for i := width - 1; i >= 0; i-- {
 				if !isReserved(pool[i]) {
+					// The reservation is the one admission decision a reader
+					// cannot reconstruct from a score, so both sides of it are
+					// recorded: the row that was promoted, and the row whose
+					// slot it took. Without the displaced id, "why is this
+					// keyword hit in the answer" has no answer, because its score
+					// is by construction below the cut.
+					if t := p.trace.row(c.id); t != nil {
+						t.KeywordReserved = true
+						t.TookSlotFrom = pool[i].id
+					}
+					if t := p.trace.row(pool[i].id); t != nil {
+						t.DisplacedBy = c.id
+					}
 					pool[i] = c
 					break
 				}
@@ -1040,6 +1095,34 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 	}
 	legs.vec = vecResults
 	filtered := filterVectorFloor(vecResults, p.MinSimilarity)
+	// A candidate the floor removed never reaches fusion, so nothing downstream
+	// can record why it is absent. It is a distinct, diagnosable outcome — "your
+	// query matched nothing strongly enough" — and it is invisible if only the
+	// surviving leg is kept, so the floor's own verdict is stamped here, at the
+	// only place that applies it. Explained, not asserted: explain reports
+	// whether the row was floor-dropped rather than inferring it from a missing
+	// vector rank, which is indistinguishable from a leg that never matched.
+	if p.trace != nil && len(filtered) < len(vecResults) {
+		kept := make(map[string]bool, len(filtered))
+		for _, v := range filtered {
+			kept[v.MemoryID] = true
+		}
+		for _, v := range vecResults {
+			if kept[v.MemoryID] {
+				continue
+			}
+			if t := p.trace.row(v.MemoryID); t != nil {
+				t.FloorDropped = true
+				t.FloorScore = float64(v.Score)
+				// The project travels with it: the row belongs to one whether or
+				// not it was eligible, and a floor-dropped row reporting no
+				// project at all would be indistinguishable from a row the legs
+				// never attributed to one.
+				t.RowProject = v.ProjectID
+				t.ProjectMatch = p.ProjectID == "" || v.ProjectID == p.ProjectID
+			}
+		}
+	}
 
 	// If only FTS worked, return that through the same selection seam.
 	if len(filtered) == 0 {

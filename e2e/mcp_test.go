@@ -1047,14 +1047,21 @@ func TestMCPLifecycles(t *testing.T) {
 			ProjectID       string `json:"project_id"`
 			Query           string `json:"query"`
 			VectorAvailable bool   `json:"vector_available"`
+			Notes           []string
 			Rows            []struct {
-				ID          string  `json:"memory_id"`
-				Included    bool    `json:"included"`
-				Rank        int     `json:"rank"`
-				FTSRank     int     `json:"fts_rank"`
-				VectorRank  int     `json:"vector_rank"`
-				VectorScore float64 `json:"vector_score"`
-				RRFScore    float64 `json:"rrf_score"`
+				ID           string   `json:"memory_id"`
+				Included     bool     `json:"included"`
+				Rank         int      `json:"rank"`
+				FTSRank      int      `json:"fts_rank"`
+				VectorRank   int      `json:"vector_rank"`
+				VectorScore  float64  `json:"vector_score"`
+				RRFScore     float64  `json:"rrf_score"`
+				ProjectMatch bool     `json:"project_match"`
+				RowProject   string   `json:"row_project"`
+				ScopeMatched bool     `json:"scope_matched"`
+				ScopeKeys    []string `json:"scope_keys_compared"`
+				Validity     string   `json:"validity_state"`
+				ConfWeight   string   `json:"provenance_weight"`
 			} `json:"rows"`
 		}
 		if err := json.Unmarshal([]byte(out), &ex); err != nil {
@@ -1075,6 +1082,27 @@ func TestMCPLifecycles(t *testing.T) {
 		for _, r := range ex.Rows {
 			if r.Included && r.Rank > 0 && r.RRFScore > 0 && r.FTSRank >= 0 {
 				found = true
+			}
+			// The axes an agent reads to decide WHICH signal to trust have to be
+			// populated on every row, including the sentinels: an included row
+			// is by definition in the searched project and unopposed by scope,
+			// and a row that states no validity reads as unset rather than
+			// absent.
+			if r.Included && (!r.ProjectMatch || !r.ScopeMatched) {
+				t.Fatalf("row %s is in the answer but reports project_match=%v scope_matched=%v",
+					r.ID, r.ProjectMatch, r.ScopeMatched)
+			}
+			if r.RowProject == "" {
+				t.Fatalf("row %s carries no row_project, so project_match=%v cannot be checked",
+					r.ID, r.ProjectMatch)
+			}
+			if r.Validity == "" {
+				t.Fatalf("row %s carries no validity_state", r.ID)
+			}
+			if r.ConfWeight != "off" {
+				t.Fatalf("row %s reports provenance_weight %q, want \"off\": nothing in the search "+
+					"ranking multiplies by provenance, and any number would be an invented weight",
+					r.ID, r.ConfWeight)
 			}
 		}
 		if !found {

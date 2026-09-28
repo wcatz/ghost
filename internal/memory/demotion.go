@@ -34,6 +34,40 @@ const DefaultDemotionThreshold = 0.90
 // (i.e. GetTopMemories) take it themselves around the call, same as every
 // other Store method taking a raw SQL read handle.
 func DemotionPenalties(ctx context.Context, db Queryer, ids []string, pinned map[string]bool, threshold float64) (map[string]int, error) {
+	penalty, err := nearDuplicateVerdicts(ctx, db, ids, pinned, threshold, nil)
+	if err != nil {
+		return nil, err
+	}
+	return penalty, nil
+}
+
+// nearDuplicateVerdicts is DemotionPenalties' edge read with the counterpart
+// kept, for the same reason as supersedeVerdicts: one read, both facts, so the
+// id explain names is the id the demotion chose rather than a second read's idea
+// of it.
+func nearDuplicateVerdicts(ctx context.Context, db Queryer, ids []string, pinned map[string]bool, threshold float64, tr *searchTrace) (map[string]int, error) {
+	pairs, err := nearDuplicatePenaltyRows(ctx, db, ids, pinned, threshold)
+	if err != nil {
+		return nil, err
+	}
+	penalty, against := demotionVerdicts(pairs)
+	for _, id := range ids {
+		if t := tr.row(id); t != nil {
+			t.NearDuplicatePenalty = penalty[id]
+			t.NearDuplicateOf = against[id]
+		}
+	}
+	return penalty, nil
+}
+
+// nearDuplicatePenaltyRows is the near-duplicate edge set as one loser/winner
+// verdict per edge, with the scope exemption and the rank and pinning rules
+// applied. It is the one place that decides which member of a pair loses, so the
+// penalty a caller demotes by and the ids explain attributes that demotion to
+// cannot come from two different reads: a re-derived attribution could name a
+// different loser than the demotion chose, and the explanation would then
+// contradict the order it is explaining.
+func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, pinned map[string]bool, threshold float64) ([]demotionPairs, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -67,7 +101,7 @@ func DemotionPenalties(ctx context.Context, db Queryer, ids []string, pinned map
 	}
 	defer rows.Close() //nolint:errcheck
 
-	penalty := make(map[string]int, len(ids))
+	var pairs []demotionPairs
 	for rows.Next() {
 		var a, b string
 		var sourceScope, targetScope sql.NullString
@@ -84,12 +118,34 @@ func DemotionPenalties(ctx context.Context, db Queryer, ids []string, pinned map
 		if pinned[loser] && !pinned[winner] {
 			loser = winner
 		}
-		penalty[loser]++
+		pairs = append(pairs, demotionPairs{loser: loser, winner: winner})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("demotion penalties: %w", err)
 	}
-	return penalty, nil
+	return pairs, nil
+}
+
+// demotionPairs is the per-edge outcome both near-duplicate statements agree on:
+// the id that loses and the id it lost to.
+type demotionPairs struct {
+	loser, winner string
+}
+
+// demotionVerdicts folds the per-edge outcomes into a penalty count per loser and
+// the counterpart ids behind it. It is the shared tail of DemotionPenalties and
+// its attribution form, so "which member of a pair loses" is decided once.
+func demotionVerdicts(pairs []demotionPairs) (map[string]int, map[string][]string) {
+	penalty := make(map[string]int)
+	against := make(map[string][]string)
+	for _, pr := range pairs {
+		penalty[pr.loser]++
+		against[pr.loser] = append(against[pr.loser], pr.winner)
+	}
+	for id := range against {
+		sort.Strings(against[id])
+	}
+	return penalty, against
 }
 
 // Status demotion: multiplicative factors on a candidate's fused score, as
@@ -151,6 +207,21 @@ func statusDemotionFactor(resolved bool, rowProjectID, searchProjectID string) f
 func demoteStatus(pool []*hybridCandidate, p SearchParams) {
 	for _, c := range pool {
 		factor := statusDemotionFactor(c.resolved, c.projectID, p.ProjectID)
+		if t := p.trace.row(c.id); t != nil {
+			// Recorded on both sides of the multiplication: Base is what the
+			// legs contributed, Score is what the window was cut on. Reporting
+			// only the demoted number would make an explanation unable to show
+			// what the demotion cost, and reporting only the base would hide
+			// the number that decided membership.
+			t.Base = c.score
+			t.StatusFactor = factor
+			t.Score = c.score * factor
+			t.RowProject = c.projectID
+			// A cross-project search has no bucket of its own, so every row
+			// matches it by definition — the same rule BucketUnexpected states
+			// for the assembler, applied where the project is actually known.
+			t.ProjectMatch = p.ProjectID == "" || c.projectID == p.ProjectID
+		}
 		if factor != 1.0 {
 			c.score *= factor
 		}
@@ -189,6 +260,47 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // edge is left in the graph; scope exempts it from ranking rather than deleting
 // it.
 func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[string]int, error) {
+	penalty, err := supersedeVerdicts(ctx, db, ids, nil)
+	if err != nil {
+		return nil, err
+	}
+	return penalty, nil
+}
+
+// supersedeVerdicts is SupersedePenalties' edge read with the counterpart kept,
+// so a caller that wants to REPORT the demotion gets the count and the ids from
+// one statement. The trace is written here rather than by a second read because
+// the ranking path's own lookup already happened: a separate attribution query
+// would be a second chance to disagree with it, on the store's single
+// connection, inside a snapshot a concurrent writer is already locked out of.
+func supersedeVerdicts(ctx context.Context, db Queryer, ids []string, tr *searchTrace) (map[string]int, error) {
+	rows, err := supersedePenaltyRows(ctx, db, ids)
+	if err != nil {
+		return nil, err
+	}
+	penalty := make(map[string]int, len(rows))
+	for target, sources := range rows {
+		penalty[target] = len(sources)
+		// Sorted so the rendered list is stable: the edges arrive in whatever
+		// order the index walk produced, and a list that reshuffles between two
+		// identical explanations is not a diagnosis anyone can follow. The count
+		// is unaffected — a chain of superseders sinks the same row once each
+		// either way.
+		sort.Strings(sources)
+		if t := tr.row(target); t != nil {
+			t.SupersedePenalty = penalty[target]
+			t.SupersededBy = sources
+		}
+	}
+	return penalty, nil
+}
+
+// supersedePenaltyRows is the 'supersedes' edge set within ids as target ->
+// present superseders, with the scope exemption applied. It is the one place
+// that decides which endpoint a 'supersedes' edge sinks, so the count a caller
+// demotes by and the ids explain attributes that demotion to cannot come from
+// two different reads.
+func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string) (map[string][]string, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -217,7 +329,7 @@ func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[stri
 	}
 	defer rows.Close() //nolint:errcheck
 
-	penalty := make(map[string]int, len(ids))
+	against := make(map[string][]string, len(ids))
 	for rows.Next() {
 		var src, tgt string
 		var sourceScope, targetScope sql.NullString
@@ -230,12 +342,12 @@ func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[stri
 		// src supersedes tgt: sink the superseded side once per edge.
 		// The query already restricted both endpoints to ids, so src is
 		// present by construction (same rule demoteSuperseded applies).
-		penalty[tgt]++
+		against[tgt] = append(against[tgt], src)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("supersede penalties: %w", err)
 	}
-	return penalty, nil
+	return against, nil
 }
 
 // demoteResults applies both targeted, window-scoped demotions to a search
@@ -245,14 +357,14 @@ func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[stri
 // injection ranking so the MCP search path and session injection agree.
 func (s *Store) demoteResults(ctx context.Context, results []Memory, p SearchParams) []Memory {
 	results = s.demoteSuperseded(ctx, results, p)
-	return s.demoteNearDuplicates(ctx, results)
+	return s.demoteNearDuplicates(ctx, results, p)
 }
 
 // demoteNearDuplicates ranks down the lower-ranked member of each
 // near-duplicate pair present in the window. Without it, ghost_memory_search
 // returns both members of a pair at full rank even though injection demotes
 // one.
-func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory) []Memory {
+func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p SearchParams) []Memory {
 	if len(results) < 2 {
 		return results
 	}
@@ -263,7 +375,7 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory) []Me
 		pinned[m.ID] = m.Pinned
 	}
 	s.mu.RLock()
-	penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, pinned, s.demotionThreshold)
+	penalty, err := nearDuplicateVerdicts(ctx, s.queryDB(), ids, pinned, s.demotionThreshold, p.trace)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("near-duplicate demote: lookup failed", "error", err)
@@ -272,5 +384,9 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory) []Me
 	if len(penalty) == 0 {
 		return results
 	}
+	// As with supersedes, the counterpart ids come from the same edge read the
+	// penalty was decided on: which member of a cluster loses is decided by
+	// position in the window, so a separate attribution read would be a second
+	// chance to name a different loser than the demotion chose.
 	return StableDemote(results, func(m Memory) string { return m.ID }, penalty)
 }

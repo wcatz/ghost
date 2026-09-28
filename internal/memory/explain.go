@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// explainProvenanceOff is the value provenance_weight carries when no
+// provenance multiplier is applied. It is the string "off" rather than a number
+// on purpose: a multiplier of 1.0 is a claim that the ranking considered
+// provenance and decided it did not matter, which is not what happens — nothing
+// reads provenance at all. A reader seeing "off" cannot mistake a missing
+// implementation for a neutral one.
+const explainProvenanceOff = "off"
+
 // ExplainRow is one candidate's contribution to a search, with every signal
 // that moved it stated separately.
 //
@@ -14,6 +22,14 @@ import (
 // arithmetic shown matches the arithmetic performed. A leg that did not match
 // reports -1 rather than 0, because rank 0 is a real first place — an absent
 // leg and a top-ranked one must not look alike.
+//
+// Every number here is read from the ranking path's own record of the candidate
+// (searchTrace), not recomputed from the legs after the fact. A score that
+// explain rebuilds is a score that can disagree with the one that ordered the
+// results, and an explanation built from one is a diagnosis of a search that did
+// not happen. The fields that name a signal the ranking path does NOT apply say
+// so with a zero or "off" rather than carrying an invented contribution; the
+// payload's notes say which is which.
 type ExplainRow struct {
 	ID                   string  `json:"memory_id"`
 	Category             string  `json:"category"`
@@ -30,6 +46,84 @@ type ExplainRow struct {
 	SupersedePenalty     int     `json:"supersede_penalty"`      // window-scoped as demoteResults applies it; 0 for rows outside the window
 	NearDuplicatePenalty int     `json:"near_duplicate_penalty"` // window-scoped and order-sensitive, exactly as DemotionPenalties assigns it
 	Reason               string  `json:"reason,omitempty"`       // why it is absent from the results
+
+	// --- the eligibility axes, as the ranking path decided them ---
+
+	// ProjectMatch is whether the row belongs to the searched project. A
+	// _global row is admitted by the legs' project predicate and is NOT a match:
+	// it is a shared row, and StatusFactor is what demotes it in a
+	// project-scoped search. A cross-project search matches everything, since it
+	// expresses no project of its own.
+	ProjectMatch bool `json:"project_match"`
+	// RowProject is the project the row belongs to, as the leg supplied it.
+	// It is what makes ProjectMatch checkable: a reader that sees
+	// project_match=false and row_project="_global" knows the row was admitted
+	// by the shared-row predicate rather than by a project mismatch.
+	RowProject string `json:"row_project,omitempty"`
+	// ScopeMatched is the verdict scope narrowing reached, and it agrees with
+	// membership by construction because it IS the verdict that decided it — the
+	// structural fix for #571, where explain reported rows the tool would exclude
+	// because the filter ran after the ranking. Silence is not disagreement: a
+	// row that does not mention a requested key is reported matched.
+	ScopeMatched bool `json:"scope_matched"`
+	// ScopeKeysCompared names the scope keys narrowing compared, so a reader can
+	// see WHICH axis decided rather than only that something did. It is the
+	// request's key set, identical on every row.
+	ScopeKeysCompared []string `json:"scope_keys_compared,omitempty"`
+	// KeywordReserved says the row entered the window through the keyword
+	// reservation rather than the score cut. Its score is below the cut BY
+	// CONSTRUCTION, so this is the only thing that explains its presence, and it
+	// is invisible from the numbers otherwise.
+	KeywordReserved bool `json:"keyword_reserved,omitempty"`
+	// TookSlotFrom names the row whose window slot KeywordReserved took, and
+	// DisplacedBy names the reserved row that took this row's slot. Both sides
+	// are recorded because the exchange is the interesting fact: neither row's
+	// score explains it.
+	TookSlotFrom string `json:"took_slot_from,omitempty"`
+	DisplacedBy  string `json:"displaced_by,omitempty"`
+	// FloorDropped says the vector similarity floor removed the row before
+	// fusion scored it, and FloorScore is the cosine that did it. Distinct from
+	// VectorRank == -1, which is also what a row the vector leg never matched
+	// reports.
+	FloorDropped bool    `json:"floor_dropped,omitempty"`
+	FloorScore   float64 `json:"floor_score,omitempty"`
+	// SupersededBy names the present superseders that sank this row, and
+	// NearDuplicateOf the rows it sank below as a near-duplicate loser. A count
+	// alone says the row moved; the counterpart is the row a reader has to look
+	// at next. Attribution is READ FROM the same edge set the penalty was
+	// decided on, so the named row is the one that actually decided it.
+	SupersededBy    []string `json:"superseded_by,omitempty"`
+	NearDuplicateOf []string `json:"near_duplicate_of,omitempty"`
+
+	// --- signals the ranking path does not apply ---
+
+	// ValidityState is the row's own currency against the search clock, by the
+	// one shared rule (memory.ValidityState) the context assembler's validity
+	// stage also uses: valid, future, expired, unverified or unset. It is
+	// reported because the search ranking does NOT read validity — an expired row
+	// is returned like any other — so a caller reading a stale row needs the
+	// state from the explanation, and the note says who does drop such rows.
+	ValidityState string `json:"validity_state,omitempty"`
+	// ValidityPenalty is 0 on every row, and that is the honest value: no stage
+	// in the search ranking multiplies by validity. Stage 2 of the assembler
+	// DROPS an out-of-window row rather than ranking it lower, so there is no
+	// factor for a score to carry. A non-zero value here would describe a
+	// ranking that does not exist.
+	ValidityPenalty float64 `json:"validity_penalty"`
+	// Confidence is the stored provenance confidence, and
+	// ConfidenceContribution is the score delta a bounded multiplier applied —
+	// which is 0, because no such multiplier exists. Both are reported: the
+	// column is readable and a reader comparing rows needs to see that two rows
+	// with different confidence ranked identically, rather than inferring it
+	// from a field that is absent.
+	Confidence             *float64 `json:"confidence,omitempty"`
+	ConfidenceContribution float64  `json:"confidence_contribution"`
+	// ProvenanceWeight is "off": no score anywhere in the search path is
+	// multiplied by provenance. See explainProvenanceOff.
+	ProvenanceWeight string `json:"provenance_weight"`
+	// ProvenanceContribution is 0 for the same reason as
+	// ConfidenceContribution.
+	ProvenanceContribution float64 `json:"provenance_contribution"`
 }
 
 // SearchExplain is the diagnosis for one search: which legs ran, what each
@@ -48,7 +142,41 @@ type SearchExplain struct {
 	Scope           map[string]string `json:"scope,omitempty"` // requested scope applied to membership
 	Notes           []string          `json:"notes,omitempty"`
 	Rows            []ExplainRow      `json:"rows"`
+	// Truncation is set when the payload hit its size budget. It is a field
+	// rather than a note because a note is prose a reader may skip, and a short
+	// candidate list that LOOKS complete is the failure this prevents: an agent
+	// checking a row that "was not even a candidate" has to be able to tell that
+	// the explanation never looked.
+	Truncation *ExplainTruncation `json:"truncation,omitempty"`
 }
+
+// ExplainTruncation records that the payload was cut to fit the documented
+// budget, and says what was cut and why. RowsOmitted counts candidate rows the
+// budget would not carry; MaxRows is the budget itself, published so a reader can
+// judge whether the cut could plausibly have hidden the row it cares about.
+type ExplainTruncation struct {
+	RowsOmitted int    `json:"rows_omitted"`
+	MaxRows     int    `json:"max_rows"`
+	Reason      string `json:"reason"`
+}
+
+// explainMaxRows is the documented size budget for one explanation, in rows.
+//
+// The candidate pool is the union of what both legs returned, so it grows with
+// the caller's limit rather than with the corpus: each leg fetches limit*2, so a
+// hybrid search over a well-matched corpus produces a candidate set four times
+// the window. The window itself is capped (the tool's retrieval-window ceiling
+// is 100 rows), which is what makes a fixed row budget possible at all: 150
+// holds every row a search can return, plus the candidates nearest the cut, and
+// cuts only the far tail of the union beyond that. At the default limit of ten
+// the union is at most 40 rows and the budget never engages.
+//
+// It spends itself on the CANDIDATES and never on the answer: rows the search
+// returned are always kept, in their own order, and the rows dropped are the ones
+// that were already excluded. A caller diagnosing a missing result is looking
+// for a row the search did not return, and a budget that could drop those would
+// spend itself exactly where it is needed least.
+const explainMaxRows = 150
 
 // ExplainSearch runs the production unscoped search and reports how each
 // candidate got its score. It is kept as the compatibility entry point for
@@ -67,6 +195,10 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	// The same stamp searchHybridLegs applies for membership, so the factor
 	// reported below is the one the search used rather than a re-derivation.
 	p.ProjectID = projectID
+	// The trace the ranking path writes as it ranks. Every score, factor and
+	// verdict below is READ from it rather than recomputed here, which is what
+	// makes this a record of the search instead of a second attempt at it.
+	p.trace = newSearchTrace(scope)
 
 	ex := SearchExplain{
 		ProjectID:       projectID,
@@ -130,29 +262,14 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		return ex, fmt.Errorf("search: %w", err)
 	}
 
-	// Both the raw and floor-filtered vector legs are needed: a candidate
-	// dropped by the floor is a distinct, diagnosable outcome ("your query
-	// matched nothing strongly enough"), and it is invisible if only the
-	// filtered leg is kept.
+	// The raw leg is needed for one reason only: a candidate the vector floor
+	// removed never reached fusion, so it is in neither the window nor the
+	// trace's scored rows, and without the raw leg it would be invisible — a
+	// distinct outcome ("your query matched nothing strongly enough") reported
+	// as silence. Everything else below is read from the trace.
 	fts, rawVec := legs.fts, legs.vec
-	vec := filterVectorFloor(rawVec, p.MinSimilarity)
-
-	ftsRank := make(map[string]int, len(fts))
-	for i, m := range fts {
-		if _, seen := ftsRank[m.ID]; !seen {
-			ftsRank[m.ID] = i
-		}
-	}
-	vecRank := make(map[string]int, len(vec))
-	vecScore := make(map[string]float64, len(vec))
-	for i, v := range vec {
-		vecRank[v.MemoryID] = i
-		vecScore[v.MemoryID] = float64(v.Score)
-	}
-	rawRank := make(map[string]int, len(rawVec))
 	rawScore := make(map[string]float64, len(rawVec))
-	for i, v := range rawVec {
-		rawRank[v.MemoryID] = i
+	for _, v := range rawVec {
 		rawScore[v.MemoryID] = float64(v.Score)
 	}
 	finalRank := make(map[string]int, len(final))
@@ -161,8 +278,12 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	}
 
 	// Candidate union: everything any leg surfaced, plus everything returned.
+	// The trace's own row set is deliberately NOT the union's basis — it holds
+	// only the candidates the ranking path examined, and a floor-dropped row is
+	// stamped rather than scored, so the legs are still the honest source for
+	// "which rows existed at all".
 	seen := map[string]bool{}
-	ids := make([]string, 0, len(ftsRank)+len(rawRank)+len(finalRank))
+	ids := make([]string, 0, len(fts)+len(rawVec)+len(finalRank))
 	add := func(id string) {
 		if !seen[id] {
 			seen[id] = true
@@ -187,81 +308,93 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		return ex, fmt.Errorf("hydrate candidates: %w", err)
 	}
 	byID := make(map[string]Memory, len(candidates))
-	pinned := make(map[string]bool, len(candidates))
 	for _, m := range candidates {
 		byID[m.ID] = m
-		pinned[m.ID] = m.Pinned
 	}
 
-	// Penalties are window-scoped and order-sensitive, exactly as the search
-	// applies them. demoteResults runs over the returned window in returned
-	// order, and DemotionPenalties decides which member of a near-duplicate
-	// pair loses from its position in that slice (rank[b] > rank[a]) — so
-	// passing anything else both widens the set and changes the verdict.
-	finalIDs := make([]string, len(final))
-	for i, m := range final {
-		finalIDs[i] = m.ID
-	}
-	supersede, supErr := SupersedePenalties(ctx, traceStore.queryDB(), finalIDs)
-	nearDup, nearErr := DemotionPenalties(ctx, traceStore.queryDB(), finalIDs, pinned, demotionThreshold)
-	if supErr != nil {
-		supersede = nil
-	}
-	if nearErr != nil {
-		nearDup = nil
+	// The clock the ranking ordered by, so a row's age and decay are measured
+	// against the search rather than against this loop. They differ by however
+	// long hydration took, which is invisible on a young row and visible on a
+	// year-old one.
+	now := p.trace.now
+	if now.IsZero() {
+		// No window was selected, so nothing ordered by a clock. The candidates
+		// still need an age and a factor, and any instant is as good as another
+		// when the number is not the one that ranked anything.
+		now = time.Now().UTC()
 	}
 
 	// When the vector leg contributes nothing, ranking used the unweighted
 	// keyword base: keywordOnlyParams sets FTSWeight=1, VecWeight=0, so the fused
 	// score is 1/(K+rank+1). Reporting the weighted form there would show a
 	// number 0.3x the one that actually ranked the results.
-	ftsOnly := len(vec) == 0
+	ftsOnly := len(filterVectorFloor(rawVec, p.MinSimilarity)) == 0
 	if ftsOnly {
 		ex.Notes = append(ex.Notes, "no vector matches survived — ranking used the unweighted FTS base score, so rrf_score reports that base rather than a weighted sum")
 	}
 
-	now := time.Now().UTC()
 	statusDemoted := false
 	for _, id := range ids {
 		m, ok := byID[id]
 		if !ok {
 			continue // raced with a delete; not diagnosable, skip
 		}
+		t, traced := p.trace.lookup(id)
 		row := ExplainRow{
-			ID:       id,
-			Category: m.Category,
-			Content:  explainSnippet(m.Content, 120),
-			FTSRank:  -1, VectorRank: -1, VectorScore: -1,
-			SupersedePenalty:     supersede[id],
-			NearDuplicatePenalty: nearDup[id],
-			AgeDays:              ageDays(m.CreatedAt, now),
+			ID:                id,
+			Category:          m.Category,
+			Content:           explainSnippet(m.Content, 120),
+			ScopeKeysCompared: clampScopeKeys(p.trace.scopeKeys),
+			ProvenanceWeight:  explainProvenanceOff,
 		}
-		row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
-		// The factor the search itself applied — same function, same inputs,
-		// so an explanation cannot report a demotion that did not rank the
-		// results. rrf_score stays the pre-status base (like decay_factor, it
-		// is reported as its own multiplier rather than folded into the score).
-		row.StatusFactor = statusDemotionFactor(m.ResolvedAt != nil, m.ProjectID, p.ProjectID)
+		if traced {
+			// Every scoring fact is the ranking path's own, and the sentinels on a
+			// row the path never scored are the ones below — a floor-dropped
+			// candidate was stamped, not scored, and it keeps them.
+			row.FTSRank, row.VectorRank, row.VectorScore = t.FTSRank, t.VectorRank, t.VectorScore
+			row.RRFScore = t.Base
+			row.StatusFactor = t.StatusFactor
+			row.DecayFactor, row.AgeDays = t.Decay, t.AgeDays
+			if t.Decay == 0 {
+				// The row never reached decayRank, so no ordering was taken on it
+				// and there is no factor the ranking used. What is reported instead
+				// is the factor it WOULD carry, measured at the ranking's own clock
+				// rather than this loop's. DecayFactor has a 0.15 floor, so a
+				// recorded 0.0 is unambiguously "never ordered" rather than a real
+				// value — the two are told apart by that floor, not by a sentinel
+				// the field never had.
+				row.AgeDays = ageDays(m.CreatedAt, now)
+				row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
+			}
+			row.ProjectMatch, row.RowProject = t.ProjectMatch, t.RowProject
+			row.ScopeMatched = t.ScopeMatched
+			row.KeywordReserved, row.TookSlotFrom, row.DisplacedBy = t.KeywordReserved, t.TookSlotFrom, t.DisplacedBy
+			row.FloorDropped, row.FloorScore = t.FloorDropped, t.FloorScore
+			row.SupersedePenalty = t.SupersedePenalty
+			row.NearDuplicatePenalty = t.NearDuplicatePenalty
+			row.SupersededBy = clampAttribution(t.SupersededBy)
+			row.NearDuplicateOf = clampAttribution(t.NearDuplicateOf)
+		} else {
+			// Unreachable while the trace covers every leg row, which it does: the
+			// floor site stamps the rows fusion never saw. Kept because a nil
+			// dereference in a diagnostic path is a worse failure than a
+			// conservative row, and the sentinels say exactly that.
+			row.FTSRank, row.VectorRank, row.VectorScore = -1, -1, -1
+			row.AgeDays = ageDays(m.CreatedAt, now)
+			row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
+			row.ProjectMatch, row.ScopeMatched = true, true
+		}
 		statusDemoted = statusDemoted || row.StatusFactor != 1.0
 
-		if r, hit := ftsRank[id]; hit {
-			row.FTSRank = r
-			if ftsOnly {
-				// Matches the score the search actually ranked on:
-				// keywordOnlyParams applies no leg weight, so the base is
-				// 1/(K+rank+1).
-				row.RRFScore += 1.0 / float64(p.RRFK+r+1)
-			} else {
-				row.RRFScore += p.FTSWeight / float64(p.RRFK+r+1)
-			}
-		}
-		if r, hit := vecRank[id]; hit {
-			row.VectorRank = r
-			row.VectorScore = vecScore[id]
-			row.RRFScore += p.VecWeight / float64(p.RRFK+r+1)
-		}
+		// Validity is reported, never applied: the search ranking does not read
+		// it, so the state is the row's own currency and the penalty is zero
+		// because no score anywhere here carries one. Read through the SAME rule
+		// the assembler's validity stage uses, so a row cannot be "valid" here
+		// and "expired" there.
+		row.ValidityState, _ = ValidityState(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now)
+		row.Confidence = m.Confidence
 
-		if rank, isFinal := finalRank[id]; isFinal && (len(scope) == 0 || ScopeMatches(m.Scope, scope)) {
+		if rank, isFinal := finalRank[id]; isFinal {
 			row.Included = true
 			row.Rank = rank
 			ex.Rows = append(ex.Rows, row)
@@ -269,19 +402,18 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		}
 
 		// Excluded. Demotions in this system are membership-preserving, so
-		// absence is the vector floor (for a vector-only candidate), the scope
-		// constraint, or the result window, in the same order production
-		// applies them. A vector floor removes only the vector contribution of
-		// a dual-leg FTS candidate, so that row must not be labeled as if the
-		// whole memory had been dropped.
-		_, onFloor := rawRank[id]
-		_, survived := vecRank[id]
-		_, ftsHit := ftsRank[id]
+		// absence is the vector floor, the scope constraint, or the result
+		// window, in the same order production applies them — and every one of
+		// those verdicts is now the ranking path's own, so the reason and the
+		// membership cannot come from different decisions.
 		switch {
-		case onFloor && !survived && !ftsHit:
+		case row.FloorDropped && row.FTSRank < 0:
+			// A floor-dropped candidate that the keyword leg also missed. A dual-leg
+			// row is never labelled this way: the floor removes only its vector
+			// contribution and the row stays a candidate on its keyword score.
 			row.Reason = fmt.Sprintf("dropped by the vector similarity floor: cosine %.4f is below the minimum %.4f",
-				rawScore[id], float64(p.MinSimilarity))
-		case len(scope) > 0 && !ScopeMatches(m.Scope, scope):
+				row.FloorScore, float64(p.MinSimilarity))
+		case !row.ScopeMatched:
 			row.Reason = "excluded by scope: memory scope conflicts with the requested scope"
 		default:
 			row.Reason = fmt.Sprintf("outside the result window: only the top %d are returned", limit)
@@ -291,7 +423,96 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	if statusDemoted {
 		ex.Notes = append(ex.Notes, "status_factor is applied to the fused score inside window selection, before the cut: multiply rrf_score by status_factor for the score the window actually ranked on (decay_factor then multiplies that)")
 	}
+	// The budget is applied last, so it sees every row the diagnosis produced,
+	// and the marker is attached before the notes so it reads first: a note list
+	// is bounded from the end, and the field beside it is the part that cannot
+	// be dropped.
+	ex.Rows, ex.Truncation = boundExplainRows(ex.Rows)
+	if ex.Truncation != nil {
+		ex.Notes = append(ex.Notes, ex.Truncation.Reason)
+	}
+	ex.Notes = append(ex.Notes, explainAxisNotes()...)
 	return ex, nil
+}
+
+// explainAxisNotes disclose, once per payload, the axes the ranking path does
+// NOT act on and the fields that therefore carry a zero. They are notes and not
+// per-row flags because the answer is the same for every row: a reader who finds
+// confidence_contribution = 0 needs to know that zero means "no multiplier
+// exists", not "the multiplier measured zero", and the cheapest place to say that
+// once is the payload.
+//
+// They are appended LAST so a caller that bounds the note list keeps the ones
+// that qualify the result. Nothing renders notes from a length-capped position,
+// so the order here is documentation of intent rather than a mechanism.
+func explainAxisNotes() []string {
+	return []string{
+		"validity_state is the row's own currency against the search clock and validity_penalty is 0: the search ranking does not read validity, so an expired or future row is returned like any other. The context assembler drops such a row at its validity stage instead of ranking it lower — use ghost_memory_search without explain to get that answer",
+		"confidence and provenance are recorded, not scored: confidence_contribution and provenance_contribution are 0 and provenance_weight is \"off\" because no stage in the search ranking multiplies by either. Two rows with different confidence therefore ranked identically, and the columns are reported so that is visible rather than inferred",
+		"a contradicts edge causes no penalty in this ranking (supersedes does, and is reported as supersede_penalty with superseded_by naming the superseder), and there is no per-bucket diversity cap here: near_duplicate_penalty with near_duplicate_of names the row each near-duplicate lost to",
+	}
+}
+
+// boundExplainRows applies the documented size budget, and records the cut when
+// it applies one.
+//
+// The budget spends itself on candidates, never on the answer. Every included row
+// is kept — regardless of where it falls in the list, which is not a reliable
+// proxy for it, because the list runs leg by leg and a vector-leg rank-0 row sits
+// after every keyword-leg row however it ranked — and the rows dropped are
+// excluded candidates, taken from the far end because the rows a caller is most
+// likely to ask about are the ones the window came closest to keeping. The
+// surviving rows keep their original order, so the payload looks the same with a
+// budget as without one, only shorter.
+func boundExplainRows(rows []ExplainRow) ([]ExplainRow, *ExplainTruncation) {
+	if len(rows) <= explainMaxRows {
+		return rows, nil
+	}
+	included := make([]bool, len(rows))
+	includedCount := 0
+	for i, r := range rows {
+		if r.Included {
+			included[i] = true
+			includedCount++
+		}
+	}
+	// The tool's window ceiling is 100 rows, so the answer always fits inside a
+	// 150-row budget and the first pass never has to drop one. The clamp is
+	// stated rather than assumed, so a future larger window cannot quietly start
+	// losing returned rows.
+	room := explainMaxRows - min(includedCount, explainMaxRows)
+	keep := make([]bool, len(rows))
+	for i := range rows {
+		if included[i] {
+			keep[i] = true
+		}
+	}
+	omitted := 0
+	for i := range rows {
+		if keep[i] || room == 0 {
+			continue
+		}
+		keep[i] = true
+		room--
+	}
+	kept := make([]ExplainRow, 0, explainMaxRows)
+	for i, r := range rows {
+		if keep[i] {
+			kept = append(kept, r)
+			continue
+		}
+		omitted++
+	}
+	trunc := &ExplainTruncation{
+		RowsOmitted: omitted,
+		MaxRows:     explainMaxRows,
+		Reason: fmt.Sprintf(
+			"the explanation was truncated to its documented %d-row budget: %d excluded candidates were omitted "+
+				"and all %d rows the search returned were kept, so a row absent from this payload was either never a "+
+				"candidate or was cut by the budget",
+			explainMaxRows, omitted, includedCount),
+	}
+	return kept, trunc
 }
 
 // explainSnippet shortens content for a diagnostic listing. Explanations are

@@ -83,15 +83,17 @@ func BucketUnexpected(bucket, projectID string) bool {
 	return bucket != projectID && bucket != "_global"
 }
 
-// validityState names a row's validity against the request clock. The order
-// matters: a row whose window has closed is expired even if it also carries an
-// open start, because a closed window is the stronger statement.
+// The state names are memory.ValidityState's, aliased here so this file's
+// pipeline reads the same vocabulary the store's explain mode reports. The rule
+// itself lives in internal/memory (validity.go): the assembler's stage and
+// explain mode both read it, and two copies would be two answers to "may this
+// row be used".
 const (
-	validityValid      = "valid"
-	validityFuture     = "future"
-	validityExpired    = "expired"
-	validityUnverified = "unverified"
-	validityUnset      = "unset"
+	validityValid      = memory.ValidityValid
+	validityFuture     = memory.ValidityFuture
+	validityExpired    = memory.ValidityExpired
+	validityUnverified = memory.ValidityUnverified
+	validityUnset      = memory.ValidityUnset
 )
 
 // validityVerdict is stage 2's decision for one row.
@@ -107,41 +109,13 @@ type validityVerdict struct {
 // readValidity interprets a row's validity columns against the request clock.
 // A missing or unreadable boundary is unset, so the row keeps its place unless a
 // readable boundary excludes it.
+//
+// The decision is memory.ValidityState's — the same call explain mode makes for a
+// row the search returned — and only the collection of unreadable values is
+// done here, because a note is this package's to emit and not the store's.
 func readValidity(c memory.Candidate, now time.Time) validityVerdict {
-	v := validityVerdict{state: validityUnset}
-	read := func(s *string) (*time.Time, bool) {
-		if s == nil {
-			return nil, false
-		}
-		t := parseStamp(*s)
-		if t.IsZero() {
-			v.unparseable = append(v.unparseable, *s)
-			return nil, false
-		}
-		return &t, true
-	}
-	from, _ := read(c.ValidFrom)
-	until, _ := read(c.ValidUntil)
-	_, verifiedReadable := read(c.VerifiedAt)
-
-	switch {
-	case ExpiredAt(until, now):
-		v.state = validityExpired
-	case NotYetValidAt(from, now):
-		v.state = validityFuture
-	case from == nil && until == nil && !verifiedReadable:
-		// No claim at all: the row says nothing about its own currency, which
-		// is the state of every memory written before the columns existed.
-		v.state = validityUnset
-	case !verifiedReadable:
-		// A window with no readable verification is unverified: the row claims
-		// a period and nothing vouches for it. verified_at is a flag in v1, so
-		// this state is recorded and the row is kept.
-		v.state = validityUnverified
-	default:
-		v.state = validityValid
-	}
-	return v
+	state, unreadable := memory.ValidityState(c.ValidFrom, c.ValidUntil, c.VerifiedAt, now)
+	return validityVerdict{state: state, unparseable: unreadable}
 }
 
 // formatNote builds a bounded diagnostic note.
