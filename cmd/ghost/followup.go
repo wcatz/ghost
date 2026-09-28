@@ -6,10 +6,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/scratch"
 	"github.com/wcatz/ghost/internal/supersede"
 )
@@ -71,19 +71,19 @@ func withdrawnTargets(withdrawn []supersede.WithdrawnEdge) []string {
 // flag"). Rendering a bare `ghost resolve my proj …` would be two positionals
 // and a failed repair; rendering a name holding a shell metacharacter bare would
 // execute it.
-func resolveFollowupCommand(projectName string, ids []string) string {
-	project := projectName
-	if !bareShellWord.MatchString(projectName) {
-		project = "--project " + shellQuote(projectName)
-	}
-	return fmt.Sprintf("ghost resolve %s --reassess --only %s --apply", project, strings.Join(ids, ","))
+// The renderer is internal/followup's, because the MCP tool answers the same
+// question and the quoting here is what decides whether the command RUNS: one
+// implementation, two surfaces, no way for them to drift on the part that matters.
+//
+// The two returns after the command are the ids it could not carry, split by which
+// surface can still reach them: those holding a comma, and those holding a newline
+// that no surface can. supersedeReassessFollowup turns them into lines, because a
+// command that silently named fewer memories than the block above lists would be the
+// one lie this block must not tell — and an EMPTY command, which is what every id
+// holding a comma produces, must never be filled in with the unscoped form.
+func resolveFollowupCommand(projectName string, ids []string) (string, []string, []string) {
+	return followup.ResolveCommand(projectName, ids)
 }
-
-// bareShellWord matches a token that can be pasted into a shell unquoted and
-// still be one argument: it starts with a word character, so it cannot be read
-// as a flag, and carries nothing a shell would interpret. Everything else is
-// quoted.
-var bareShellWord = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._+-]*$`)
 
 // shellQuote renders one POSIX shell argument, single-quoted. An embedded single
 // quote is closed, backslash-escaped and reopened, which is the only spelling a
@@ -111,16 +111,91 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		"resolutions those edges justified. One that no live 'supersedes' edge still\n" +
 		"holds can now be cleared; one another edge still holds is reported as still\n" +
 		"asserted rather than cleared. Nothing outside this list is judged:\n")
-	fmt.Fprintf(&b, "  %s\n", resolveFollowupCommand(projectName, ids))
-	if path != "" {
+	cmd, viaFileOnly, unnameable := resolveFollowupCommand(projectName, ids)
+	// Never the unscoped command. When no id is carriable by --only the block says
+	// so and points at the file, because `ghost resolve <project> --reassess
+	// --apply` — the form with no --only — is the project-wide re-judge #698
+	// measured, and printing it here under a heading that promises nothing outside
+	// this list is judged would be the worst line in the report.
+	if cmd != "" {
+		fmt.Fprintf(&b, "  %s\n", cmd)
+	}
+	// The file line is printed only when the file can name something, which is
+	// `len(ids) > len(unnameable)`: writeReassessTargets omits the newline-bearing
+	// ids rather than writing two half-ids, so a file holding only those names no
+	// selector at all and readOnlySelectors refuses it — pointing the operator at
+	// it would be pointing at a command that cannot run.
+	fileHoldsSomething := path != "" && len(unnameable) < len(ids)
+	if fileHoldsSomething {
 		// Quoted for the same reason as the project name, and because the path
 		// is not Ghost's to control: $GHOST_SCRATCH_DIR and a data directory
 		// under a spaced path both reach it.
 		fmt.Fprintf(&b, "  (the same ids are in %s, for `ghost resolve --project %s --reassess --only-file %s --apply`)\n",
 			path, shellQuote(projectName), shellQuote(path))
 	}
+	// Every branch is driven by the buckets, not by `cmd == ""`, which has two
+	// causes: ids holding a comma (the file reaches them) and ids holding a
+	// newline (nothing does). Keying the wording off the empty command made a
+	// newline-only report claim the file was the only way and, three lines later,
+	// that no surface could name the id.
+	switch {
+	case len(viaFileOnly) == 0 && len(unnameable) == 0:
+		// Nothing to explain: every id is in the command above.
+	case len(viaFileOnly) == len(ids):
+		// Every id needs the file. The unscoped repair is DESCRIBED and not written
+		// out: rendering it here, even inside a warning, puts a copy-pasteable line
+		// that re-judges every resolved memory in the project directly under the
+		// block promising that nothing outside this list is judged.
+		if fileHoldsSomething {
+			fmt.Fprintf(&b, "  (no --only command can name them — every id holds a comma, which --only splits on —\n"+
+				"   so the file above is the only way to run this repair. Do NOT fall back on the same command\n"+
+				"   without --only: that re-judges every resolved memory in the project)\n")
+		} else {
+			fmt.Fprintf(&b, "  (no --only command can name them and the id file could not be written, so they are\n"+
+				"   named here: put each on its own line in a file and use --only-file. Do NOT fall back on the\n"+
+				"   same command without --only: that re-judges every resolved memory in the project)\n")
+			for _, id := range viaFileOnly {
+				fmt.Fprintf(&b, "    %s\n", id)
+			}
+		}
+	case len(viaFileOnly) > 0 && fileHoldsSomething:
+		// `--only` splits on commas, so an id holding one is not nameable by that
+		// flag however it is quoted, and the command above leaves it out rather
+		// than splitting it into selectors that name nothing. The file is the only
+		// surface that can carry it, so this is a warning about which line to run.
+		fmt.Fprintf(&b, "  (%d id(s) hold a comma, which --only cannot carry, so the command above leaves them out;\n"+
+			"   they are in the file, and the file is the only way to name them)\n", len(viaFileOnly))
+	case len(viaFileOnly) > 0:
+		// No file: the file write failed, so pointing at it would point at nothing
+		// and the ids would be listed nowhere — the invisibility this whole block
+		// exists to remove. They are named here instead, which is what the MCP
+		// surface does for the same reason.
+		fmt.Fprintf(&b, "  (%d id(s) hold a comma and the id file could not be written, so they are named here;\n"+
+			"   no --only command can carry them — put each on its own line in a file and use --only-file)\n", len(viaFileOnly))
+		for _, id := range viaFileOnly {
+			fmt.Fprintf(&b, "    %s\n", id)
+		}
+	}
+	if len(unnameable) > 0 {
+		// No surface can name these: the file is one id per line, so a newline in
+		// an id becomes two selectors. Saying so is the whole answer, because
+		// pretending otherwise leaves a memory stamped resolved with nothing able
+		// to clear it.
+		fmt.Fprintf(&b, "  (%d id(s) hold a newline, which no --only or --only-file form can carry. No surface can\n"+
+			"   name them, so these stay resolved until the row is rewritten — delete and re-save the memory,\n"+
+			"   or re-import it under an id without a newline)\n", len(unnameable))
+		for _, id := range unnameable {
+			fmt.Fprintf(&b, "    %q\n", id)
+		}
+	}
 	return b.String()
 }
+
+// containsLineBreak reports whether an id cannot be written as one line of an
+// --only-file. It is the one character class no surface can carry: --only splits
+// on commas, the file splits on newlines, and an id holding one is nameable by
+// neither.
+func containsLineBreak(id string) bool { return strings.ContainsAny(id, "\n\r") }
 
 // writeReassessTargets writes the follow-up's id list under the data dir's
 // scratch root and returns its path, so the printed command and the file can
@@ -143,7 +218,14 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 // a collision is retried under a fresh name. The two failure modes this buys
 // are a symlink not followed and another run's list not replaced, and the
 // operator's command can only ever point at the list this run wrote.
-func writeReassessTargets(projectName string, ids []string) (string, error) {
+//
+// writtenBy names the command that produced the list, and it is a parameter
+// because two commands write this file: `ghost supersede --reassess --apply` and
+// `ghost supersede --withdraw … --apply` orphan the same kind of resolution. A
+// file claiming the other command wrote it would be read days later by whoever
+// runs the repair, and that header is the only line in it saying where the ids
+// came from.
+func writeReassessTargets(projectName string, ids []string, writtenBy string) (string, error) {
 	if len(ids) == 0 {
 		return "", fmt.Errorf("no withdrawn targets to write")
 	}
@@ -151,12 +233,59 @@ func writeReassessTargets(projectName string, ids []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	head, viaFileOnly, unnameable := resolveFollowupCommand(projectName, ids)
+	if len(unnameable) == len(ids) {
+		// Nothing this file could name. Writing it anyway produces a list
+		// readOnlySelectors refuses with "names no memory ids or prefixes", and the
+		// report would point the operator at a command that cannot run. The ids are
+		// named in the report instead, which is the only place they can be.
+		return "", fmt.Errorf("no id in this set is nameable through --only-file: all %d hold a newline", len(ids))
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n", resolveFollowupCommand(projectName, ids))
-	b.WriteString("# Written by `ghost supersede --reassess --apply`: the targets of the edges it\n" +
-		"# withdrew, one id per line. Use with `ghost resolve <project> --reassess --only-file`.\n")
+	// The header carries the command, and an id the command cannot carry makes it
+	// name fewer ids than the list below — so the header says so rather than
+	// letting the operator compare the two and wonder which was dropped. Which
+	// claim is made is driven by the buckets and not by `head == ""`, because an
+	// empty command has two causes and only one of them is a comma: an id holding
+	// a newline is one no surface can name, and calling that a comma says the
+	// file is the answer when the file is not carrying it.
+	// The format is unchanged otherwise, because this file is a --only-file input
+	// and readOnlySelectors reads one id per line whatever the comment says.
+	switch {
+	case head != "":
+		fmt.Fprintf(&b, "# %s\n", head)
+	default:
+		// One arm, not two. An empty command with comma ids AND newline ids reaches
+		// here, and the two-word claim that "every one of them holds a comma" is
+		// false for the newline id — which the loop below deliberately omits and the
+		// trailing comment then admits is not below. So the header says what is true
+		// about both buckets: the ids it can carry are below, and the run is scoped
+		// to them.
+		fmt.Fprintf(&b, "# No --only command can name some of these ids: %d hold a comma, which --only\n"+
+			"# splits on, and %d hold a newline, which no form can carry. The ids this file CAN name\n"+
+			"# are below; run `ghost resolve <project> --reassess --only-file <this file> --apply`.\n",
+			len(viaFileOnly), len(unnameable))
+	}
+	if len(viaFileOnly) > 0 {
+		fmt.Fprintf(&b, "# (%d id(s) below hold a comma and are not in that command; --only cannot carry them,\n"+
+			"#  which is what this file is for)\n", len(viaFileOnly))
+	}
+	fmt.Fprintf(&b, "# Written by `%s`: the targets of the edges it\n", writtenBy)
+	b.WriteString("# withdrew, one id per line. Use with `ghost resolve <project> --reassess --only-file`.\n")
+	// A newline in an id is the one character the file cannot carry either: this
+	// format is one id per line, so writing it verbatim produces two selectors,
+	// both naming nothing. The id is left out and named in the report instead,
+	// because a corrupt file that looks right is worse than a listed id with an
+	// honest note that no surface can reach it.
 	for _, id := range ids {
+		if containsLineBreak(id) {
+			continue
+		}
 		b.WriteString(id + "\n")
+	}
+	if len(unnameable) > 0 {
+		fmt.Fprintf(&b, "# (%d id(s) hold a newline, which no surface can carry, and are NOT below;\n"+
+			"#  they are named in the command's own output and must be cleared by rewriting the row)\n", len(unnameable))
 	}
 	body := b.String()
 

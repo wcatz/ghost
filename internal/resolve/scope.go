@@ -91,9 +91,9 @@ func (s Scope) Select(pool []memory.Memory) (scoped []memory.Memory, misses []Sc
 	// selectors were written.
 	selected := make(map[string]bool, len(s.Only))
 	for _, spec := range s.Only {
-		key, err := selectorKey(spec)
-		if err != nil {
-			return nil, nil, err
+		key := strings.TrimSpace(spec)
+		if key == "" {
+			return nil, nil, errEmptySelector
 		}
 		if wanted[key] {
 			// A repeated selector names one row, so it is judged once. Silently,
@@ -101,13 +101,31 @@ func (s Scope) Select(pool []memory.Memory) (scoped []memory.Memory, misses []Sc
 			continue
 		}
 		wanted[key] = true
+		// A FULL id, whatever its shape, before any rule about prefixes. The
+		// alphabet check below is about what a PREFIX may be built from, and
+		// applying it first refused exactly the rows this repair exists to name:
+		// `ghost import` writes an artifact's ids verbatim and ImportMemory
+		// refuses only an empty one, so a stored id can hold a space, a `;` or a
+		// leading dash — and a supersede withdrawal that orphans such a target
+		// prints `ghost resolve --only <that id>`, which this pass then refused.
+		// internal/supersede.resolveRef already resolves a ref on this order, and
+		// two id-resolution paths that disagree about the same id are the defect,
+		// not the feature.
+		if id, ok := exactInPool(pool, key); ok {
+			selected[id] = true
+			continue
+		}
+		// Past the full-id reading it IS a prefix, and a prefix is a prefix of a
+		// hex id: the two shape rules are about the prefix, and both are checked
+		// before a single candidate is gathered, so a malformed selector can never
+		// reach the ambiguity listing.
+		prefix, err := prefixKey(spec)
+		if err != nil {
+			return nil, nil, err
+		}
 		var hits []string
 		for _, m := range pool {
-			if strings.EqualFold(m.ID, spec) {
-				hits = []string{m.ID}
-				break
-			}
-			if len(key) >= minSelectorPrefix && strings.HasPrefix(strings.ToLower(m.ID), key) {
+			if strings.HasPrefix(strings.ToLower(m.ID), prefix) {
 				hits = append(hits, m.ID)
 			}
 		}
@@ -135,18 +153,49 @@ func (s Scope) Select(pool []memory.Memory) (scoped []memory.Memory, misses []Sc
 // this pass can see, and guessing between them would be a lie in a report line.
 const noSuchRow = "no already-resolved memory in this project has that id or prefix (it may be unresolved, cleared by an earlier repair, or in another project)"
 
-// selectorKey normalises one selector to the form the pool is matched against,
-// after checking it could name a row at all.
-func selectorKey(spec string) (string, error) {
-	key := strings.ToLower(strings.TrimSpace(spec))
-	if key == "" {
-		return "", fmt.Errorf("--only selector is empty: give a memory id or an 8+ character hex prefix")
+// errEmptySelector is one message for both empty spellings ("" and whitespace),
+// because there is nothing to distinguish them for the reader: either way no
+// memory was named.
+var errEmptySelector = fmt.Errorf("--only selector is empty: give a memory id or an 8+ character hex prefix")
+
+// exactInPool finds the row a selector names in full, comparing the stored id
+// rather than the selector's spelling: a byte-exact id first, then a single
+// case-folded one, so an uppercase paste of a lowercase hex id still resolves
+// while two ids differing only in case are left to the prefix rules (where the
+// operator is told about the ambiguity rather than handed one of the two).
+//
+// The first rule, "at most one row can be byte-equal to this", is what makes a
+// full id safe to accept without the shape check: an id is a unique key, so an
+// exact match is not a guess.
+func exactInPool(pool []memory.Memory, spec string) (string, bool) {
+	for _, m := range pool {
+		if m.ID == spec {
+			return m.ID, true
+		}
 	}
+	var folded string
+	for _, m := range pool {
+		if strings.EqualFold(m.ID, spec) {
+			if folded != "" {
+				return "", false
+			}
+			folded = m.ID
+		}
+	}
+	return folded, folded != ""
+}
+
+// prefixKey normalises one selector to the form a PREFIX is matched against,
+// after checking it could name a row at all. It runs only after exactInPool has
+// declined to read the selector as a full id, so both rules below are rules about
+// a prefix and neither is a statement about what an id may contain.
+func prefixKey(spec string) (string, error) {
+	key := strings.ToLower(strings.TrimSpace(spec))
 	if strings.TrimFunc(key, func(r rune) bool { return strings.ContainsRune(hexDigits, r) }) != "" {
-		return "", fmt.Errorf("--only selector %q is not a memory id or an 8+ character hex prefix: ids are hex", spec)
+		return "", fmt.Errorf("--only prefix %q is not hex: a full memory id is accepted as given, and a prefix must be built from the hex digits ids are made of", spec)
 	}
 	if len(key) < minSelectorPrefix {
-		return "", fmt.Errorf("--only selector %q is too short to be a prefix: give the full id or at least %d hex characters", spec, minSelectorPrefix)
+		return "", fmt.Errorf("--only prefix %q is too short to be a prefix: give the full id or at least %d hex characters", spec, minSelectorPrefix)
 	}
 	return key, nil
 }

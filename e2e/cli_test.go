@@ -107,7 +107,9 @@ var cliCommands = []cliCommand{
 	{path: "mcp status", help: "Usage: ghost mcp status", coveredBy: "TestCLIMCPInit/status for every client"},
 	{path: "hook", help: "Usage: ghost hook", coveredBy: "TestHookSessionStartInjectsContext, TestHookStop, TestHookFailOpen, TestHookSessionEnd"},
 	{path: "reflect", help: "Usage: ghost reflect", coveredBy: "TestCLIReflect"},
-	{path: "supersede", help: "Usage: ghost supersede", coveredBy: "TestCLIResolveSupersede"},
+	{path: "supersede", help: "Usage: ghost supersede",
+		coveredBy: "TestCLIResolveSupersede, including --withdraw, which the " +
+			"dry-run/apply case above does not reach"},
 	{path: "resolve", help: "Usage: ghost resolve", coveredBy: "TestCLIResolveSupersede"},
 	{path: "lifecycle", help: "Usage: ghost lifecycle",
 		coveredBy: "TestHookStop/lifecycle_spawns_behind_its_lock_and_min_interval, as the " +
@@ -1039,6 +1041,98 @@ func TestCLIResolveSupersede(t *testing.T) {
 		s := newSandbox(t)
 		s.mustFail("supersede")
 	})
+
+	// The repair for an edge the classifier still accepts. #688's --reassess
+	// withdraws what the current rules reject, so a pair that is wrong for a
+	// reason no rubric can see keeps its edge — and that edge buries its target
+	// twice, in ranking and in resolved_at. --withdraw is the operator's own undo
+	// for the edge they name, and the assertion that matters most is the one
+	// about the harness: nothing is judged here, so a machine that cannot spawn
+	// one at all can still repair an edge, and nothing is billed.
+	t.Run("a named edge is withdrawn without asking the classifier", func(t *testing.T) {
+		s := newSandbox(t)
+		cs := s.mcpSession(t)
+		older := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay port is 2222",
+		}))
+		// The same one-second gap the creation case needs: the pass orients a
+		// pair by updated_at, and two saves in the same second tie.
+		time.Sleep(1100 * time.Millisecond)
+		newer := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay port is 3333 now",
+		}))
+		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port is 2222")
+		s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND invalidated_at IS NULL`); n != 1 {
+			t.Fatalf("the creation pass left %d live edge(s), want 1", n)
+		}
+		before, _ := s.harnessLog("opencode")
+
+		// Dry run: names the edge, writes nothing, and spawns no harness.
+		dry := s.mustRun("supersede", e2eProject, "--withdraw", newer[:8], older[:8])
+		mustMatch(t, "withdraw (dry run)", dry.stdout, `(?i)would withdraw`)
+		// The report carries the memory the edge was burying, so the operator can
+		// confirm from the output that this was the edge they meant.
+		mustMatch(t, "withdraw (dry run) target", dry.stdout, `the staging relay port is 2222`)
+		// And the step that un-hides the target, which the withdrawal does not do
+		// by itself.
+		// A dry run prints no follow-up at all: it withdrew nothing, and resolve
+		// would refuse the command anyway while the edge is live. The --apply run
+		// below is where the scoped repair is checked.
+		if strings.Contains(dry.stdout, "--reassess") {
+			t.Fatalf("a dry-run withdrawal printed a repair command for an edge it did not withdraw:\n%s", dry.stdout)
+		}
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND invalidated_at IS NULL`); n != 1 {
+			t.Fatalf("a dry-run withdrawal left %d live edge(s), want 1", n)
+		}
+		if after, _ := s.harnessLog("opencode"); after != before {
+			t.Fatalf("a withdrawal asked the classifier: it judges nothing, so a harness call here is a billable call for no judgment")
+		}
+
+		applied := s.mustRun("supersede", e2eProject, "--withdraw", newer, older, "--apply")
+		mustMatch(t, "withdraw (apply)", applied.stdout, `(?i)withdrew`)
+		// The other half of the repair, and it must be the SCOPED one: the ids the
+		// withdrawal orphaned, not a project-wide re-judge (#702 measured the
+		// unscoped repair proposing to un-hide 143 rows, ~35% of them stale).
+		mustMatch(t, "withdraw (apply) follow-up", applied.stdout, `(?i)resolve .*--reassess --only`)
+		if !strings.Contains(applied.stdout, older) {
+			t.Errorf("the follow-up does not name the target it orphaned (%s):\n%s", older, applied.stdout)
+		}
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links
+			WHERE relation = 'supersedes' AND invalidated_at IS NULL AND source_id = ? AND target_id = ?`, newer, older); n != 0 {
+			t.Fatalf("the apply left the named edge live (%d)", n)
+		}
+		// Soft, not deleted: the row is stamped, so a later pass that still judges
+		// the pair a supersession re-creates the edge.
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links
+			WHERE relation = 'supersedes' AND source_id = ? AND target_id = ?`, newer, older); n != 1 {
+			t.Fatalf("the withdrawal deleted the graph row rather than stamping it")
+		}
+		// And the audit row, which is what makes the withdrawal a record rather
+		// than a silent graph edit.
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ? AND phase = 'unsupersede'`, older); n != 1 {
+			t.Fatalf("the withdrawal wrote %d unsupersede history row(s), want 1", n)
+		}
+		if after, _ := s.harnessLog("opencode"); after != before {
+			t.Fatalf("the apply asked the classifier")
+		}
+
+		// Withdrawing it again is an error rather than a quiet no-op that reads as
+		// a completed withdrawal, and a ref that names nothing changes nothing.
+		again := s.mustFail("supersede", e2eProject, "--withdraw", newer, older, "--apply")
+		mustMatch(t, "re-withdraw", again.stderr, `(?i)no live supersedes link`)
+		s.mustFail("supersede", e2eProject, "--withdraw", newer, "ffffffff")
+		// A pair the operator can see is wrong but Ghost cannot resolve is the
+		// same refusal, not a guess.
+		unknown := s.mustFail("supersede", e2eProject, "--withdraw", "not-an-id-at-all", older)
+		mustMatch(t, "unresolvable ref", unknown.stderr, `no memory in project .* has an id starting with`)
+		// And a ref too short to be a prefix says THAT, rather than pretending the
+		// string the operator pasted was not an id.
+		short := s.mustFail("supersede", e2eProject, "--withdraw", newer[:6], older)
+		mustMatch(t, "short ref", short.stderr, `too short to be a prefix`)
+	})
 }
 
 // TestCLISupersedeReassessFeedsResolveReassess runs the whole repair chain
@@ -1099,7 +1193,10 @@ func TestCLISupersedeReassessFeedsResolveReassess(t *testing.T) {
 	// the operator does not have to work out the second half themselves.
 	s.setHarnessAnswer("supersede", "NEITHER")
 	repair := s.mustRun("supersede", e2eProject, "--source", "opencode", "--reassess", "--apply")
-	want := "ghost resolve " + e2eProject + " --reassess --only " + older + " --apply"
+	// The ids are quoted: `ghost import` writes an artifact's ids verbatim, so an
+	// id is caller-supplied text like a project name, and a POSIX shell
+	// concatenates adjacent quoted words — so --only still receives one argument.
+	want := "ghost resolve " + e2eProject + " --reassess --only '" + older + "' --apply"
 	mustContain(t, "supersede --reassess --apply", repair.stdout, want)
 	if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND source_id = ? AND invalidated_at IS NULL`, newer); n != 0 {
 		t.Fatalf("the reassess did not withdraw the edge")

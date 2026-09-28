@@ -189,16 +189,24 @@ Proposes and classifies directed replacement relationships:
 ```bash
 ghost supersede myproject
 ghost supersede myproject --apply
+ghost supersede myproject --reassess
+ghost supersede myproject --withdraw a1b2c3d4 e5f6a7b8 --apply
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--apply` | Write `supersedes` and `causes` links. |
+| `--apply` | Write `supersedes` and `causes` links, or withdraw the edges `--withdraw` / `--reassess` name. |
+| `--reassess` | Re-judge the `supersedes` links already in the graph under the current rules and withdraw the ones they no longer support. Not combinable with `--withdraw`. |
+| `--withdraw <source-id> <target-id>` | Withdraw one named `supersedes` link — the edge from `source-id` (the newer note) to `target-id` (the older, buried one). Repeatable. `--source` and `--threshold` are not used: nothing is classified. |
 | `--threshold <float>` | Minimum cosine similarity for a candidate pair; default `0.80`. |
 | `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
 Each candidate is classified as `supersedes`, `causes`, `reversed`, or `neither`, with each note's creation timestamp in the prompt. A `supersedes` link only ever points from the newer note to the older one, so a `reversed` verdict — the classifier says the older note holds the current value and the newer one restates an obsolete claim — is reported and refused instead of written; `--apply` also invalidates any `supersedes`/`causes` link the pair already carries. A refused verdict is never recorded in the NEITHER cache, so the pair is not skipped on later passes. The default source is the calling harness. Applying the pass enables targeted demotion during search for genuine replacement pairs.
+
+`--withdraw` is the repair for an edge the rules still accept. `--reassess` withdraws what the current rubric rejects, so a pair that is wrong for a reason no rubric can see — the newer note is not a replacement of the older one at all — keeps its edge and buries its target, because a classifier asked about it has not made a mistake by its own lights. `--withdraw` removes the edge you name, on your say-so, with no harness call and nothing billed. Both are dry-run by default and both write the `unsupersede` history row; under `--apply` both print the same follow-up — a **scoped** `ghost resolve <project> --reassess --only <the withdrawn edges' target ids> --apply`, with the same id list written as a `--only-file` beside it (an id holding a comma is not nameable by `--only`, which splits on commas, so it is carried by the file alone and the report says how many such ids there were; an id holding a newline is reachable through neither form, and the report says that memory stays resolved until the row is rewritten; a `#` on an `--only-file` line is a comment only when it follows whitespace, so an annotated `<id>   # note` still works while `<id>#note` is one id; a `#` in an `--only-file` line is a comment only when it follows whitespace, so an annotated `<id>   # note` still works and `<id>#note` is one id — it never prints the unscoped repair, which would re-judge the whole project) — because the withdrawal is only half the repair and the `resolved_at` the edge caused keeps the target out of ranked injection until that runs. Prefer the scoped form: an unscoped repair re-judges every resolved memory in the project.
+
+A ref is a full memory id, or an unambiguous **8-or-more-character prefix** of one, because every Ghost report abbreviates to eight characters. A full id is accepted whatever its shape — `ghost import` writes an artifact's ids verbatim, and the id column only *defaults* to hex — while the 8-character floor applies to a prefix, which names a class of ids rather than one. A prefix naming two memories is refused with the matches listed rather than guessed at. A pair with no live `supersedes` link is an error, and the message names the target's live edges. Several pairs may be given at once, and the whole request is settled before anything is written — one bad pair out of five withdraws none of them. The edge must belong to the named project (it is found through the memory the edge points *from*), so a project can neither withdraw nor discover another project's edge. The withdrawal is a soft invalidation: a later pass that still judges the pair a supersession re-creates it. The MCP tool `ghost_link_withdraw` does the same thing over the tool surface.
 
 ## Project operations
 
