@@ -1666,14 +1666,15 @@ const supersedeEmbedBound = 50
 // embedding is enabled: with embedding off there is no vector index to fill.
 //
 // WHY a pass does this at all: `supersede` is the one lifecycle phase whose
-// candidate mechanism IS the vector index — the pair is proposed by cosine — so a
-// memory it has no vector for is not a candidate for anything
-// (supersede.SelectCandidates skips it). Those vectors are written by the
-// embedding worker, which lives in `ghost mcp`: another process, on its own
-// schedule, running only if a server is up. A user who saves two notes and runs
-// the pass in the same breath therefore gets "0 candidate pairs" — a clean report
-// for a pair that was in front of them, with nothing anywhere saying the index
-// had not caught up. That window is short, and it is also exactly when a
+// NEW-candidate mechanism IS the vector index — the pair is proposed by cosine —
+// so a memory it has no vector for is proposed as no new candidate by that scan
+// (supersede.SelectCandidates skips it, though an edge already in the graph is
+// re-proposed from its link row, with no vector involved). Those vectors are
+// written by the embedding worker, which lives in `ghost mcp`: another process,
+// on its own schedule, running only if a server is up. A user who saves two notes
+// and runs the pass in the same breath therefore gets "0 candidate pairs" — a
+// clean report for a pair that was in front of them, with nothing anywhere saying
+// the index had not caught up. That window is short, and it is also exactly when
 // supersession is most likely to be wanted, so the pass closes it itself instead
 // of leaving the answer to a daemon's timing (#716).
 //
@@ -1709,21 +1710,27 @@ func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory
 // statement about work THIS run did, and on an ordinary pass — the index already
 // current — the answer to the operator's question is that there was nothing to
 // do, which an unconditional "embedded 0" line would bury.
+//
+// Its consequence is scoped to the vector scan too, for the same reason
+// supersedeUnscoredNote's is: a memory with no vector is proposed as a NEW
+// candidate by nothing, but it can still be an endpoint of a pair re-proposed
+// from an edge already in the graph, and this line is printed directly above the
+// one that says so.
 func supersedeEmbedNote(embedded int) string {
 	switch embedded {
 	case 0:
 		return ""
 	case 1:
-		return "  1 memory embedded for this pass — it had no vector yet, and a note with no vector is not a candidate for anything\n"
+		return "  1 memory embedded for this pass — it had no vector yet, and a note with no vector is proposed as no new candidate by the vector scan\n"
 	default:
-		return fmt.Sprintf("  %d memories embedded for this pass — they had no vector yet, and a note with no vector is not a candidate for anything\n", embedded)
+		return fmt.Sprintf("  %d memories embedded for this pass — they had no vector yet, and a note with no vector is proposed as no new candidate by the vector scan\n", embedded)
 	}
 }
 
 // supersedeUnscoredNote reports the part of the project the candidate scan could
-// not read at all — a memory with no usable vector is skipped by the scan, so it
-// is in no pair the SCAN proposes, and every other number on the report is a
-// total over the rest of the project. It is counted where it is true
+// not read at all — a memory with no usable vector is skipped by the scan, so the
+// pairs this pass proposed as NEW candidates are bounded by the part of the
+// project the scan could read. It is counted where it is true
 // (SelectCandidates, one pass over the corpus) rather than inferred from what the
 // pre-scan embed managed to write, so it cannot disagree with the totals printed
 // beside it: a bound reached, an endpoint down, a list query that failed and a
@@ -1733,12 +1740,14 @@ func supersedeEmbedNote(embedded int) string {
 // pass's answer to the operator's question is that there was nothing missing.
 //
 // The sentence is about NEW candidates, and that is load-bearing rather than
-// careful wording. A memory with no vector CAN still turn up in a pair this run
-// considered: the reclassify half of the pass re-proposes live 'supersedes' edges
-// from their link rows and never reads a vector. After a model change every
-// vector in a project is retired, so this count can be the whole corpus while a
-// reclassified edge printed above it is made of exactly those memories — and a
-// report that contradicts itself two lines apart is worse than no line.
+// careful wording: the reclassified count printed above it is NOT bounded by what
+// the scan could score, so a report claiming "every other number is a total over
+// the rest of the project" would contradict the line directly above. A memory
+// with no vector CAN still turn up in a pair this run considered, because the
+// reclassify half re-proposes live 'supersedes' edges from their link rows and
+// never reads a vector — and after a model change every vector in a project is
+// retired, so this count can be the whole corpus while a reclassified edge
+// printed above it is made of exactly those memories.
 func supersedeUnscoredNote(unscored int, embeddingEnabled bool) string {
 	switch unscored {
 	case 0:

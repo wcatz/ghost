@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -134,6 +136,102 @@ func TestSupersedeEmbedNoteSaysNothingWhenThereWasNothingToDo(t *testing.T) {
 	if !strings.Contains(strings.ToLower(note), "embedded") {
 		t.Errorf("the note does not say what it did: %q", note)
 	}
+	// The consequence is scoped to the vector scan, for the same reason
+	// supersedeUnscoredNote's is: a memory with no vector is proposed as no new
+	// candidate by nothing, but it can still be an endpoint of a pair
+	// re-proposed from an edge already in the graph, and these two lines are
+	// printed one after the other. The absolute form is false in this
+	// codebase's own vocabulary — Result.Candidates counts such a pair.
+	if !strings.Contains(note, "no new candidate by the vector scan") {
+		t.Errorf("the note does not scope its consequence to the scan: %q", note)
+	}
+	if strings.Contains(note, "not a candidate for anything") {
+		t.Errorf("the note claims an unvectorised memory is in no pair at all, which a reclassified edge contradicts: %q", note)
+	}
+}
+
+// TestRunSupersedeSaysSoWhenItCannotReadTheCorpus is the same pass with the
+// endpoint gone, and it is the case a formatter test cannot reach: an index that
+// is merely current and a pass that could not refresh it both leave the embed
+// call with nothing to report, and only the SCAN can tell them apart. So this
+// drives the real command and reads what the operator would see.
+//
+// Without the line, a run like this prints "0 candidate pairs" over a project the
+// pass could not read a single memory of — the same report a project with no
+// near-duplicate pair produces, and the reason #716 was invisible.
+func TestRunSupersedeSaysSoWhenItCannotReadTheCorpus(t *testing.T) {
+	dataHome := isolatedLifecycleEnv(t)
+
+	binDir := t.TempDir()
+	harness := filepath.Join(binDir, "opencode")
+	writeExecutable(t, harness, "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GHOST_CLI_OPENCODE_BINARY", harness)
+
+	// Port 1 has nothing listening, so Alive() fails exactly as an Ollama that is
+	// down does — no stub to keep running and nothing to shut down afterwards.
+	cfgPath, err := config.ConfigFilePath()
+	if err != nil {
+		t.Fatalf("config file path: %v", err)
+	}
+	yaml := "embedding:\n  enabled: true\n  ollama_url: http://127.0.0.1:1\n  model: test-model\n  dimensions: 2\n"
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	ids := seedUnembeddedPair(t, dbPath)
+
+	origArgs := os.Args
+	os.Args = []string{origArgs[0], "supersede", "projy", "--source", "opencode"}
+	t.Cleanup(func() { os.Args = origArgs })
+
+	out := captureStdout(t, runSupersede)
+
+	// The count is the scan's, so it names the two notes it could not read and
+	// points at the thing that reports coverage.
+	if !strings.Contains(out, fmt.Sprintf("%d memories had no vector", len(ids))) {
+		t.Errorf("a pass that could read none of the corpus did not say so:\n%s", out)
+	}
+	if !strings.Contains(out, "ghost mcp status") {
+		t.Errorf("the line does not point at the coverage report:\n%s", out)
+	}
+	// And the embed line must stay silent rather than claim the work was done.
+	if strings.Contains(out, "embedded for this pass") {
+		t.Errorf("the pass claims vectors it could not write:\n%s", out)
+	}
+	// The headline alone would be indistinguishable from an empty project.
+	if !strings.Contains(out, "0 candidate pairs") {
+		t.Errorf("the pass did not complete its report, so the line above was not the reason this failed:\n%s", out)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected and returns what it printed.
+// The report is a few hundred bytes, far inside a pipe buffer, so nothing here
+// has to read concurrently with the writer.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var sb strings.Builder
+		_, _ = io.Copy(&sb, r)
+		done <- sb.String()
+	}()
+	fn()
+	os.Stdout = orig
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
 }
 
 // TestSupersedeUnscoredNoteNamesWhatThePassCouldNotRead: the two counts on a

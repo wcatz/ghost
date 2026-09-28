@@ -109,12 +109,12 @@ func TestSelectCandidates(t *testing.T) {
 }
 
 // TestRunCountsMemoriesItCouldNotScore pins the fact that makes a pass's totals
-// checkable: a memory with no vector is in no pair the pass could find, so the
-// report is a total over the rest of the project, and the caller is told how big
-// the rest is. Without the count, "0 candidate pairs" over a corpus nobody had
-// finished indexing reads exactly like the same line over a corpus with nothing
-// similar in it — which is how #716 looked like a fixture problem for as long as
-// it did.
+// checkable: a memory with no vector is proposed as no new candidate by the scan,
+// so the pairs a pass finds fresh are bounded by the part of the project it could
+// read, and the caller is told how much of the project that was. Without the
+// count, "0 candidate pairs" over a corpus nobody had finished indexing reads
+// exactly like the same line over a corpus with nothing similar in it — which is
+// how #716 looked like a fixture problem for as long as it did.
 //
 // The memory whose vector is missing is the NEAR-DUPLICATE half of a pair the
 // store could otherwise have proposed, so the count cannot be satisfied by a
@@ -138,7 +138,7 @@ func TestRunCountsMemoriesItCouldNotScore(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if res.Unscored != 1 {
-		t.Errorf("Result.Unscored = %d, want 1: the memory with no vector is in no pair, so every total on the report is over the rest of the project", res.Unscored)
+		t.Errorf("Result.Unscored = %d, want 1: the memory with no vector is proposed as no new candidate, so the pairs this pass found fresh are bounded by the part of the project the scan could read", res.Unscored)
 	}
 	// And it is a count of what the scan could not read, not a failure: the pass
 	// still completes, and the pair it did find is still proposed.
