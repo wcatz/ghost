@@ -74,7 +74,7 @@ func TestExplainNamesTheSessionDecay(t *testing.T) {
 	}
 	// The factor has to be the one that ranked, not a second computation of it:
 	// decay_factor is the whole multiplier, so the tier half has to be inside it.
-	if want := RetentionDecayFactor(RetentionSession, sessionRow.AgeDays); sessionRow.RetentionFactor != want {
+	if want := RetentionDecayFactor(RetentionSession, false, sessionRow.AgeDays); sessionRow.RetentionFactor != want {
 		t.Errorf("retention_factor = %v, want %v for age %v", sessionRow.RetentionFactor, want, sessionRow.AgeDays)
 	}
 	if got, want := sessionRow.DecayFactor, DecayFactor("fact", RetentionSession, false, sessionRow.AgeDays); got != want {
@@ -122,6 +122,56 @@ func TestExplainSaysNothingAboutATierItIsNotApplying(t *testing.T) {
 	}
 }
 
+// TestExplainReportsNoTierDecayForAPinnedSessionRow: the pin is a full decay
+// exemption, and explain's retention_factor is the half of the multiplier that
+// actually decayed — not what the tier alone would have said. A pinned 30-day
+// session row ranks exactly as a brand-new one, so its retention_factor has to
+// report 1.0, and the per-search note that names a bounded retention decay has
+// to stay quiet when every session row is pinned: the note claims a signal
+// inside decay_factor that none of the rows carried. retentionDecayFactorSQL
+// already exempts a pinned row (its pin case sits FIRST), so the Go half has to
+// agree with the rank it reports, or the field's own contract — "the part of
+// decay_factor it contributed" — is a lie.
+func TestExplainReportsNoTierDecayForAPinnedSessionRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
+		"the canary cluster stays pinned while its queue drains", "mcp", 0.7, nil,
+		UpsertOptions{Pin: true, Retention: RetentionSession})
+	if err != nil {
+		t.Fatalf("save the pinned session row: %v", err)
+	}
+	// Old enough that the tier factor would have bitten: at 0 days it is 1.0 and
+	// reports nothing, so the exemption is measured where the decay is.
+	setCreatedAtDaysAgo(t, s, id, 30)
+
+	ex, err := s.ExplainSearch(ctx, testProject, "canary cluster queue", nil, 10)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	var row *ExplainRow
+	for i := range ex.Rows {
+		if ex.Rows[i].ID == id {
+			row = &ex.Rows[i]
+			break
+		}
+	}
+	if row == nil {
+		t.Fatalf("the pinned session row is not in the explanation at all: %+v", ex.Rows)
+	}
+	if row.RetentionFactor != 1.0 {
+		t.Errorf("pinned session row retention_factor = %v, want 1.0: the pin exempts the whole multiplier", row.RetentionFactor)
+	}
+	if row.DecayFactor != 1.0 {
+		t.Errorf("pinned session row decay_factor = %v, want 1.0", row.DecayFactor)
+	}
+	for _, note := range ex.Notes {
+		if strings.Contains(note, "session") && strings.Contains(note, "decay") {
+			t.Errorf("explain names a retention decay for a corpus whose only session row is pinned: %q", note)
+		}
+	}
+}
+
 // TestTheExplainTierFactorIsTheRankingOne: the multiply lives in DecayFactor, so
 // this is the statement that a row's reported factor cannot drift from the one
 // that ranked it. It is cheap and it is the whole reason the field exists.
@@ -130,7 +180,7 @@ func TestTheExplainTierFactorIsTheRankingOne(t *testing.T) {
 		for _, cat := range []string{"fact", "pattern", "gotcha"} {
 			durable := DecayFactor(cat, RetentionProject, false, age)
 			session := DecayFactor(cat, RetentionSession, false, age)
-			if want := categoryDecay(cat, age) * RetentionDecayFactor(RetentionSession, age); session != want {
+			if want := categoryDecay(cat, age) * RetentionDecayFactor(RetentionSession, false, age); session != want {
 				t.Errorf("category=%s age=%v: session decay %v, want the category curve times the tier factor %v", cat, age, session, want)
 			}
 			if durable != categoryDecay(cat, age) {

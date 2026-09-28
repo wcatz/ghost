@@ -161,9 +161,13 @@ const (
 //
 // It is 1.0 for every tier but session, which is what makes a durable memory's
 // score exactly what it was before tiers existed — the default has to cost
-// nothing, or adopting Ghost would silently re-rank every existing corpus.
-func RetentionDecayFactor(tier string, ageDays float64) float64 {
-	if tier != RetentionSession {
+// nothing, or adopting Ghost would silently re-rank every existing corpus. It is
+// also 1.0 for a PINNED row before the tier is consulted, for the same reason
+// the SQL ranking's pin case sits first (see retentionDecayFactorSQL): a pin is
+// a full decay exemption, and a tier formula that decayed the very row the
+// category formula next to it exempted would split one score against itself.
+func RetentionDecayFactor(tier string, pinned bool, ageDays float64) float64 {
+	if pinned || tier != RetentionSession {
 		return 1.0
 	}
 	return math.Max(sessionDecayFloor, 1.0/(1.0+ageDays/sessionDecayTau))

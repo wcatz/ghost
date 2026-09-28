@@ -299,13 +299,13 @@ func TestRetentionExemptIsTheOneExemptionPredicate(t *testing.T) {
 // signal, or a user asking "why is this ranked here" gets a number with no
 // label.
 func TestTheSessionDecayIsBoundedAndNamedInExplain(t *testing.T) {
-	if got := RetentionDecayFactor(RetentionProject, 0); got != 1.0 {
+	if got := RetentionDecayFactor(RetentionProject, false, 0); got != 1.0 {
 		t.Errorf("a project row's tier factor at age 0 = %v, want 1.0 — a durable memory's score must be exactly what it was before tiers", got)
 	}
-	if got := RetentionDecayFactor(RetentionPersistent, 0); got != 1.0 {
+	if got := RetentionDecayFactor(RetentionPersistent, false, 0); got != 1.0 {
 		t.Errorf("a persistent row's tier factor = %v, want 1.0", got)
 	}
-	if got := RetentionDecayFactor(RetentionSession, 0); got != 1.0 {
+	if got := RetentionDecayFactor(RetentionSession, false, 0); got != 1.0 {
 		t.Errorf("a brand-new session row's tier factor = %v, want 1.0 — the decay is an age term, and a new row is not old", got)
 	}
 	// The bound, at every age. It has two ends and both matter: the factor never
@@ -315,7 +315,7 @@ func TestTheSessionDecayIsBoundedAndNamedInExplain(t *testing.T) {
 	// it never falls below the floor, which is what keeps an old session memory
 	// findable rather than quietly unfindable.
 	for _, age := range []float64{0.01, 1, 7, 30, 100, 10000} {
-		got := RetentionDecayFactor(RetentionSession, age)
+		got := RetentionDecayFactor(RetentionSession, false, age)
 		if got > 1.0 {
 			t.Errorf("session tier factor at age %v = %v, above 1.0: a session row must never outrank its durable twin", age, got)
 		}
@@ -326,7 +326,7 @@ func TestTheSessionDecayIsBoundedAndNamedInExplain(t *testing.T) {
 	// And monotone downward, so age is the only thing that moves it.
 	prev := 2.0
 	for age := 0.0; age <= 60; age += 5 {
-		got := RetentionDecayFactor(RetentionSession, age)
+		got := RetentionDecayFactor(RetentionSession, false, age)
 		if got > prev {
 			t.Fatalf("session tier factor rose from %v to %v at age %v", prev, got, age)
 		}
@@ -334,7 +334,7 @@ func TestTheSessionDecayIsBoundedAndNamedInExplain(t *testing.T) {
 	}
 	// The asymptote is the floor, and a row far older than the tau is there:
 	// a bound nothing reaches is not a bound.
-	if got := RetentionDecayFactor(RetentionSession, 100000); math.Abs(got-sessionDecayFloor) > 1e-9 {
+	if got := RetentionDecayFactor(RetentionSession, false, 100000); math.Abs(got-sessionDecayFloor) > 1e-9 {
 		t.Errorf("session tier factor deep past the tau = %v, want the %v floor", got, sessionDecayFloor)
 	}
 	// And the composite consequence, which is the property an operator cares

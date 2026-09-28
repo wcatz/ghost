@@ -395,7 +395,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	// row is at.
 	tierDecay := false
 	for _, id := range ids {
-		if m, ok := byID[id]; ok && RetentionDecayFactor(m.Retention, ageDays(m.CreatedAt, time.Now().UTC())) != 1.0 {
+		if m, ok := byID[id]; ok && RetentionDecayFactor(m.Retention, m.Pinned, ageDays(m.CreatedAt, time.Now().UTC())) != 1.0 {
 			tierDecay = true
 			break
 		}
@@ -480,7 +480,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			row.ScopeMatched = true
 		}
 		row.Retention = m.Retention
-		row.RetentionFactor = RetentionDecayFactor(m.Retention, row.AgeDays)
+		row.RetentionFactor = RetentionDecayFactor(m.Retention, m.Pinned, row.AgeDays)
 		statusDemoted = statusDemoted || row.StatusFactor != 1.0
 
 		// Validity is reported, never applied: the search ranking does not read

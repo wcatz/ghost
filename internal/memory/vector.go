@@ -556,7 +556,7 @@ func DecayFactor(category, retention string, pinned bool, ageDays float64) float
 	if pinned {
 		return 1.0
 	}
-	return categoryDecay(category, ageDays) * RetentionDecayFactor(retention, ageDays)
+	return categoryDecay(category, ageDays) * RetentionDecayFactor(retention, pinned, ageDays)
 }
 
 // categoryDecay is the category-and-age half of DecayFactor, split out because
