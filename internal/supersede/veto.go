@@ -27,8 +27,9 @@ var retireMarkers = []*regexp.Regexp{
 	//
 	// Every form here has a word in TestNamesRetirementCoversEveryInflection —
 	// verbs, nouns and near-misses — or, for the five phrase markers ("no
-	// longer", "obsolete", "must now", "not required", "exception to"), in
-	// TestVetoSupersedeLetsEveryRetirementMarkerThrough. Both tests exist
+	// longer", "obsolete", "must now", "not (be) required", "exception to"), in
+	// TestVetoSupersedeLetsEveryRetirementMarkerThrough, which holds both
+	// branches of that one alternation. Both tests exist
 	// because a form that stops matching is silent: on the creation pass it
 	// costs a supersession, and on the repair pass it costs an edge. The
 	// inflection test also exists because the form that was missing was the BARE

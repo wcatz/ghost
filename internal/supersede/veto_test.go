@@ -334,6 +334,11 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 		"remove", "removes", "removed", "removing", "removal",
 		"deprecated", "obsolete", "replace", "replaced", "superseded", "dropped",
 		"relaxed", "loosened", "lifted", "waived", "must now", "not required",
+		// The marker's (?:be )? branch. It is the only marker here with an
+		// alternation inside a phrase rather than on a stem, so nothing else in
+		// the suite would notice an edit that dropped it — and dropping it costs
+		// a supersession on every note phrased "shall not be required".
+		"not be required",
 		"exception to",
 	}
 	for _, c := range cases {
@@ -367,8 +372,9 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 // The noun forms are here for the same reason: a noun can stop matching with
 // every verb form in this table still passing. Measured against main,
 // `retirement` and `removal` were pinned only by the sibling marker's word list
-// and `retiral`, `deprecation`, `replacement` and `supersession` by nothing at
-// all, so this loop is the only place any of the five is held.
+// and `retiral`, `deprecation`, `replacement` and `supersession`/
+// `supersessions` by nothing at all, so this loop is the only place any of the
+// five is held.
 func TestNamesRetirementCoversEveryInflection(t *testing.T) {
 	// The real four-way verb inflections, base first.
 	verbs := []struct {
