@@ -327,9 +327,10 @@ func TestTheSessionContextHookRendersTheStoreOnAReleaseBuild(t *testing.T) {
 	root := t.TempDir()
 	dataHome := filepath.Join(root, "data")
 	// realPath, because RenderSessionContextAt canonicalizes the directory it is
-	// given and resolves the project by path prefix: storing the raw temp path
-	// would not resolve on a platform whose temp dir is spelled short
-	// (Windows), and the control would then pass for the wrong reason.
+	// given and resolves the project by path prefix, so a project recorded under
+	// a raw t.TempDir() spelling matches nothing on a platform that spells its
+	// temp dir short (Windows) — the digest comes back empty and this control
+	// fails for a reason that has nothing to do with the guard.
 	work := realPath(t, mkdirAll(t, filepath.Join(root, "work")))
 	for _, kv := range [][2]string{
 		{"HOME", root},
