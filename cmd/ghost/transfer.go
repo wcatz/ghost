@@ -452,6 +452,11 @@ func runBackupVerifyCore(ctx context.Context, out io.Writer, path string) error 
 // car is the part a user forgets to copy, so a manifest-less file is the single
 // most likely thing to arrive here, and it must not be answered as though the
 // same thing had been established as for a file with a manifest.
+//
+// Nothing here is printed unless it was measured. The size is gated on
+// BytesRead and the row counts on CountsRead, because the zero value of a size is
+// a 0-byte file and the zero value of a row count is an empty database — neither
+// can stand for "not measured", and a run that reached neither says so.
 func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) error {
 	skipped := 0
 	for _, c := range rep.Checks {
@@ -469,7 +474,13 @@ func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) err
 		verdict = "verified"
 	}
 
-	headline := fmt.Sprintf("%s: %d bytes", rep.Path, rep.Bytes)
+	headline := rep.Path
+	// Each clause is gated on the flag for what it states, never on the value:
+	// the zero value of a size is a 0-byte file and the zero value of a row count
+	// is an empty database, so neither can stand for "not measured".
+	if rep.BytesRead {
+		headline += fmt.Sprintf(": %d bytes", rep.Bytes)
+	}
 	// One arm, not three: the counts are printed only where they were read, and
 	// the condition is written once so there is no second path through this
 	// switch that could print a count the report does not have.
@@ -487,7 +498,19 @@ func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) err
 			return err
 		}
 	}
-	if !rep.HasManifest {
+	// The footer distinguishes the two ways a sidecar can be unusable, because
+	// they are opposites and "no manifest" is wrong for one of them: a missing
+	// sidecar is expected and merely limits what was checked, while one that is
+	// there and unreadable is damage, and telling that reader to go look for a
+	// file sitting right beside the snapshot is the "treating it as absent" this
+	// command is built not to do.
+	switch {
+	case rep.ManifestPresent && !rep.HasManifest:
+		if _, err := fmt.Fprintf(out, "  the manifest at %s is present but could not be read: %v\n",
+			rep.ManifestPath, rep.ManifestErr); err != nil {
+			return err
+		}
+	case !rep.ManifestPresent:
 		// Once, at the bottom: the table above already says it in two rows, and
 		// saying it a third time in prose would bury the line being looked for.
 		if _, err := fmt.Fprintf(out, "  (no manifest at %s, so the hash and the recorded counts were not checked)\n",

@@ -315,6 +315,7 @@ The command prints the path, the file size, and the row count of each table it c
 
 ```text
 backed up ~/.local/share/ghost/ghost.db.backup-20260926T153207Z (204800 bytes)
+  manifest:     ~/.local/share/ghost/ghost.db.backup-20260926T153207Z.manifest.json
   projects:     1
   memories:     4
   memory_links: 1
@@ -357,7 +358,7 @@ Every backup also writes `<snapshot>.manifest.json` beside the snapshot, and the
 
 `bytes` and `sha256` are the point of the file. A copy that opens is not much of a promise — SQLite will open a file whose header was never finalised, and every row count will read correctly out of one. The hash is the only thing that notices a change to bytes the database does not read, which is why it is recorded at backup time rather than computed on demand.
 
-The manifest is at `0600` before a byte of it is written, like the snapshot: it is a full description of the memory database, and a description is not something to leave at the width a create-then-chmod would pass through. The mode is set with an explicit `chmod` as well as through the open, because the open mode applies only to a file being *created* — and a manifest is replaced rather than refused, so the replacing path is the one where it would otherwise keep whatever width something else gave it.
+The manifest is at `0600` before a byte of it is written, like the snapshot: it is a full description of the memory database, and a description is not something to leave at the width a create-then-chmod would pass through. The mode is set with an explicit `chmod` as well as through the open, because the open mode applies only to a file being *created* — and a manifest is replaced rather than refused, so the replacing path is the one where it would otherwise keep whatever width something else gave it. The path is classified with an `Lstat` before the create, which the snapshot beside it also does: replacing means no `O_EXCL`, and without that the open has no symlink defence, so a link at the manifest path would be written *through* and its target truncated, overwritten and narrowed.
 
 Unlike the snapshot, the manifest *is* replaced rather than refused. It is derived from the snapshot beside it, so a manifest found at that path belongs to an earlier backup of a file that has since been deleted. Nothing is lost: the snapshot it described is gone, and it is the snapshot, not its manifest, that a backup is.
 
@@ -419,7 +420,7 @@ Both outputs above are what the command prints, verbatim, including the column w
 
 Note the `schema version` line: a pre-migration copy is **always** at a lower version than the build that wrote it, because that is what "before the migration" means. So this case is not an accident of the example, and it is why an older file passes. `OpenDB` refuses a file from a newer Ghost outright, so that direction is a real failure and the message says to upgrade; an older file is what every restore of a pre-migration copy produces, and the next ordinary open migrates it.
 
-A manifest that is *present but unreadable* **is** a refusal. That is damage, not an absent optional file, and treating it as absent would quietly downgrade a damaged sidecar into an unverified backup that still looked fine.
+A manifest that is *present but unreadable* **is** a refusal, and the report says so in those words rather than calling it absent — that is damage, not a missing optional file, and treating it as absent would send the reader looking for a file that is sitting right there. The report also never states a size or a row count it did not measure: a run that stopped early says `not checked` rather than `0 bytes` or `no rows`, because the zero value of a size is a 0-byte file and the zero value of a row count is an empty database.
 
 Verify **before** restoring, not after: it is the difference between restoring a copy and finding out afterwards that it was never the copy you thought. The restore procedure itself is above, under [`ghost backup`](#ghost-backup).
 

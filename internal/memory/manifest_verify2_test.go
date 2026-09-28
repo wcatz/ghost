@@ -177,12 +177,20 @@ func TestVerifyRefusesAManifestFromAnotherFormatVersion(t *testing.T) {
 	}
 }
 
-// TestCheckIntegrityReportsEveryProblemNotJustTheFirst: PRAGMA
-// integrity_check returns ONE ROW PER PROBLEM, so reading only the first — which
-// is what a QueryRow does — would report a file with fifty damaged pages as
-// having one. This runs against a plain database built for the purpose: a Ghost
-// store has FTS shadow tables whose pages fail to load before the check can even
-// start, which tests the "could not check" path and nothing about row counting.
+// TestCheckIntegrityReportsEveryProblemNotJustTheFirst: a check that judged or
+// reported only the FIRST of SQLite's findings would describe a file with a dozen
+// problems as having one, and a cap applied to rows rather than findings would
+// bound nothing at all — a driver may hand the whole report over in one row.
+//
+// This runs against a plain database built for the purpose. NOT because a Ghost
+// store cannot pass integrity_check — snapshots of one do, and several tests here
+// require exactly that — but because damaging arbitrary pages of a Ghost store
+// lands on the FTS5 shadow tables, and the pragma then aborts with "vtable
+// constructor failed" before it has reported anything. That is a real behaviour
+// worth handling, and checkIntegrity does handle it (the findings delivered
+// before the abort are reported along with the error), but it exercises the abort
+// path and says nothing about how many findings are kept. A plain b-tree gives
+// pages whose scrambling produces findings and nothing else.
 //
 // The cap keeps a catastrophic file from producing an unreadable report, and the
 // count of what was dropped is stated rather than the cap being silent.

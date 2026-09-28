@@ -107,6 +107,13 @@ func FileSHA256(path string) (string, error) {
 // (see VerifyBackup), so a write interrupted part-way leaves a file that fails
 // loudly instead of one that is silently treated as absent — which would turn a
 // damaged sidecar into an unverified backup that still looked fine.
+//
+// The path is classified with an Lstat before the create, which the snapshot
+// beside it also does and for the same reason: this open has no O_EXCL, because
+// the manifest is replaced rather than refused, and without O_NOFOLLOW a symlink
+// at this path would be written THROUGH. That is not a hypothetical for a --out
+// destination: a backup directory is a plausible place to put a link, and the
+// target would be truncated, overwritten with a manifest and narrowed to 0600.
 func writeBackupManifest(dest string, counts BackupCounts, at time.Time) (string, error) {
 	path := ManifestPath(dest)
 	sum, err := FileSHA256(dest)
@@ -138,6 +145,18 @@ func writeBackupManifest(dest string, counts BackupCounts, at time.Time) (string
 	// Chmod before a byte is written, so the window vacuumInto closes for the
 	// snapshot is closed here too, on the replacing path as well as the
 	// creating one.
+	// Classified before the create, for the reason reserveBackupPath classifies
+	// the snapshot: this open has no O_EXCL (the manifest is replaced, not
+	// refused) and no O_NOFOLLOW, so a symlink already at this path would be
+	// followed and its TARGET truncated, rewritten and chmod'ed to 0600 — Ghost
+	// clobbering and narrowing a file the user never named, through a --out
+	// directory they chose. A dangling link is the worst case of all: a
+	// stat-based check reads it as absent.
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return "", fmt.Errorf("refusing to write the manifest to %s, which is not a regular file", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("check the manifest path %s: %w", path, err)
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("create manifest %s: %w", path, err)
@@ -222,11 +241,31 @@ type VerifyReport struct {
 	// Bytes is its size, read from the file. checkHash compares it against the
 	// manifest's, so a mismatch is the first thing reported about a copy that
 	// was truncated or appended to.
+	//
+	// Meaningful only when BytesRead is set. A run that failed before the stat —
+	// a damaged sidecar, a path that is not there — leaves it false, and a caller
+	// that printed the zero value would be reporting a 0-byte file rather than an
+	// unmeasured one. The flag is the size's counterpart to CountsRead.
 	Bytes int64
-	// HasManifest reports whether a manifest was found beside the file. It is
-	// false for a pre-migration copy, which the migration path writes without
-	// one.
+	// BytesRead reports whether Bytes was actually read. Not inferable from the
+	// value: a genuinely empty file is a 0-byte file, and "this file is empty"
+	// must never be printed for a file nobody stat'ed.
+	BytesRead bool
+	// HasManifest reports whether a manifest was found beside the file AND read.
+	// It is false for a pre-migration copy, which the migration path writes
+	// without one.
 	HasManifest bool
+	// ManifestPresent reports whether a sidecar was there at all, read or not.
+	// It is separate from HasManifest because the two failures are opposites and
+	// a reader must be told which one they have: a missing sidecar is expected
+	// and merely limits what was checked, while a sidecar that is present and
+	// unreadable is DAMAGE, and calling that "no manifest" would send the reader
+	// looking for a file that is sitting right there.
+	ManifestPresent bool
+	// ManifestErr is why a present sidecar could not be read, or nil. It rides
+	// on the report so the message can be specific — an unreadable format
+	// version, a truncated JSON document — rather than a bare refusal.
+	ManifestErr error
 	// ManifestPath is the sidecar that was read, or would have been.
 	ManifestPath string
 	// SchemaVersion is what the file itself carries, read from its own
@@ -318,6 +357,15 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	// one, or one written by a format this build does not read — is the
 	// diagnosis, rather than a check-by-check account of a file nobody can
 	// compare anything against.
+	// Lstat before the read, so a sidecar that is there and unreadable is a
+	// different report from one that is not there. ReadFile cannot tell them
+	// apart on its own: both surface as "no manifest" to a caller that only looks
+	// at the error.
+	if _, err := os.Lstat(rep.ManifestPath); err == nil {
+		rep.ManifestPresent = true
+	} else if !os.IsNotExist(err) {
+		return rep, fmt.Errorf("check the manifest at %s: %w", rep.ManifestPath, err)
+	}
 	var manifest BackupManifest
 	switch m, err := ReadBackupManifest(rep.ManifestPath); {
 	case err == nil:
@@ -326,6 +374,7 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	case os.IsNotExist(err):
 		// Expected for a pre-migration copy. Recorded as the absence it is.
 	default:
+		rep.ManifestErr = err
 		return rep, err
 	}
 
@@ -333,7 +382,7 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	if err != nil {
 		return rep, err
 	}
-	rep.Bytes = info.Size()
+	rep.Bytes, rep.BytesRead = info.Size(), true
 
 	// Before the open, deliberately; see the ordering note on VerifyBackup. The size
 	// and the digest are what a truncated or appended-to copy is diagnosed by,

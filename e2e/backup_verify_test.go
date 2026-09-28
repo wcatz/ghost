@@ -3,7 +3,12 @@
 package e2e
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,6 +56,18 @@ func TestCLIBackupVerifyRestore(t *testing.T) {
 	// about whether the copy is the one the manifest describes.
 	if got, want := countInFileWhere(t, dest, "SELECT COUNT(*) FROM memories WHERE project_id = ?", e2eProject), memories; got != want {
 		t.Fatalf("the backup holds %d project memories, want %d", got, want)
+	}
+
+	// The restore below has to put back a copy this command VERIFIED, so a
+	// verified pair is set aside before anything is done to the working one. A
+	// restore leg that reinstalled the damaged copy would prove only that a file
+	// can be moved, which is not what this test is about.
+	good := filepath.Join(s.t.TempDir(), "good.db")
+	if err := os.WriteFile(good, mustReadFile(t, dest), 0o600); err != nil {
+		t.Fatalf("copy the verified snapshot aside: %v", err)
+	}
+	if err := os.WriteFile(manifestPathFor(good), mustReadFile(t, manifestPathFor(dest)), 0o600); err != nil {
+		t.Fatalf("copy its manifest too: %v", err)
 	}
 
 	// One flipped bit in the database header's file change counter (byte 24, see
@@ -114,13 +131,35 @@ func TestCLIBackupVerifyRestore(t *testing.T) {
 			t.Fatalf("remove %s: %v", s.dbPath()+suffix, err)
 		}
 	}
-	if err := os.Rename(dest, s.dbPath()); err != nil {
-		t.Fatalf("move the snapshot into the data directory: %v", err)
+	// `good`, not `dest`: this is the copy verify passed, and it is the one whose
+	// memories the assertions below read back.
+	if err := os.Rename(good, s.dbPath()); err != nil {
+		t.Fatalf("move the verified snapshot into the data directory: %v", err)
+	}
+
+	// The file now in the data directory IS the one verify vouched for, checked
+	// against the manifest that vouched for it. Without this the restore leg
+	// proves only that a file can be moved: the damaged copy carries a flipped
+	// bit in a header field the database never reads, so it restores just as
+	// successfully and holds just as many memories, and a leg that reinstalled it
+	// would pass while restoring exactly what the command had just refused.
+	restoredSum, err := memorySum(t, s.dbPath())
+	if err != nil {
+		t.Fatalf("hash the restored database: %v", err)
+	}
+	vouched, err := manifestHash(t, manifestPathFor(good))
+	if err != nil {
+		t.Fatalf("read the manifest of the copy that verified: %v", err)
+	}
+	if restoredSum != vouched {
+		t.Errorf("the restored file hashes to %s, but the copy that verified is %s — the restore put back a copy the command refused",
+			restoredSum, vouched)
 	}
 
 	// The restored store answers through the server again, and holds what it
 	// held before the backup. This is the point of the whole path: a copy that
-	// verifies is still worthless if restoring it loses a memory.
+	// verifies is still worthless if restoring it loses a memory — and this leg
+	// restores the copy that verified, not the damaged one above.
 	restored := s.mcpSession(t)
 	rows := stringsInFile(t, s.dbPath(),
 		"SELECT content FROM memories WHERE project_id = ?", e2eProject)
@@ -141,3 +180,40 @@ func TestCLIBackupVerifyRestore(t *testing.T) {
 // notices when the two disagree. The one thing it cannot check is that they
 // agree, which is what TestManifestPathSitsBesideTheSnapshot is for.
 func manifestPathFor(snapshot string) string { return snapshot + ".manifest.json" }
+
+// memorySum is the SHA-256 of a file, computed here rather than imported: the
+// e2e suite drives the built binary, and the one thing it must not do is reach
+// into the product's own code for the answer it is checking.
+func memorySum(t *testing.T, path string) (string, error) {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// manifestHash reads the sha256 field out of a manifest. The manifest is the
+// product's own document, so this parses it rather than grepping it.
+func manifestHash(t *testing.T, path string) (string, error) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var m struct {
+		SHA256 string `json:"sha256"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil {
+		return "", err
+	}
+	if m.SHA256 == "" {
+		return "", errors.New("the manifest carries no sha256")
+	}
+	return m.SHA256, nil
+}
