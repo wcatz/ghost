@@ -10,13 +10,14 @@ import (
 
 // #674: nothing in the save path said what a memory is FOR, so agents saved
 // facts the repository already holds authoritatively. These tests are the
-// golden contract for the guidance that answers it, on both surfaces an agent
-// reads before it saves — the server instructions and the save tool's own
-// description — and for the advisory the save response carries back.
+// golden contract for the guidance that answers it, on every surface an agent
+// reads before it saves — the server instructions and the description of each
+// memory-writing save tool — and for the advisory the save response carries
+// back.
 //
 // The guidance is prose in constants, so nothing but a test stops it from
 // being reworded away; the strings below are the golden ones, copied from the
-// issue, and both surfaces must carry all of them.
+// issue, and every surface must carry all of them.
 
 // durableGuidanceGolden is the issue's rule and its three examples, verbatim.
 // Both surfaces state it in their own words, so the test asserts the CLAIM set
@@ -34,34 +35,40 @@ var durableGuidanceGolden = []string{
 	"foo.go contains HandleFoo()",
 }
 
-// saveToolDescription reads ghost_memory_save's description off the wire rather
-// than out of the source, so the test pins what a client is actually handed.
-func saveToolDescription(t *testing.T, session *mcp.ClientSession) string {
+// saveToolDescription reads a save tool's description off the wire rather than
+// out of the source, so the test pins what a client is actually handed.
+func saveToolDescription(t *testing.T, session *mcp.ClientSession, tool string) string {
 	t.Helper()
 	tools, err := session.ListTools(context.Background(), &mcp.ListToolsParams{})
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	for _, tool := range tools.Tools {
-		if tool.Name == "ghost_memory_save" {
-			return tool.Description
+	for _, tl := range tools.Tools {
+		if tl.Name == tool {
+			return tl.Description
 		}
 	}
-	t.Fatal("ghost_memory_save is missing from tools/list")
+	t.Fatalf("%s is missing from tools/list", tool)
 	return ""
 }
 
 // TestDurableGuidanceStatesTheRuleOnBothSaveSurfaces pins the guidance an
 // agent reads BEFORE it saves. The server instructions are the session-level
-// contract and the tool description is what a client puts in front of the model
+// contract and a tool description is what a client puts in front of the model
 // at the call site; an agent that reads only one of them still has to learn
 // that a memory is durable knowledge and not a restatement of the code.
 func TestDurableGuidanceStatesTheRuleOnBothSaveSurfaces(t *testing.T) {
 	_, session := newCapSession(t)
 
+	// Both memory-writing save tools are here, not just the project one: the
+	// instructions send an agent to ghost_save_global for the cross-project
+	// case, the advisory fires on that path too, and a description that carried
+	// neither the rule nor an example would be the one surface where a save
+	// is offered with no guidance attached.
 	surfaces := map[string]string{
-		"mcpInstructions":  mcpInstructions,
-		"save description": saveToolDescription(t, session),
+		"mcpInstructions":   mcpInstructions,
+		"ghost_memory_save": saveToolDescription(t, session, "ghost_memory_save"),
+		"ghost_save_global": saveToolDescription(t, session, "ghost_save_global"),
 	}
 	for name, text := range surfaces {
 		for _, want := range durableGuidanceGolden {
@@ -80,8 +87,9 @@ func TestSaveGuidanceSaysGhostOnlyGuides(t *testing.T) {
 	_, session := newCapSession(t)
 
 	for name, text := range map[string]string{
-		"mcpInstructions":  mcpInstructions,
-		"save description": saveToolDescription(t, session),
+		"mcpInstructions":   mcpInstructions,
+		"ghost_memory_save": saveToolDescription(t, session, "ghost_memory_save"),
+		"ghost_save_global": saveToolDescription(t, session, "ghost_save_global"),
 	} {
 		if !strings.Contains(strings.ToLower(text), "never refuse") &&
 			!strings.Contains(strings.ToLower(text), "never rejects") {
