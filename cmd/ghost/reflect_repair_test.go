@@ -86,10 +86,11 @@ func TestResultLineCarriesTheRepairToken(t *testing.T) {
 // lines go through previewContent is that this file is read by the next session.
 func TestTieredFailureLogWithholdsTheRejectedLine(t *testing.T) {
 	const secret = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
-	// secretInClip is the part of the value clipOpLine's 80-rune window keeps
-	// whole, and it is what the log must not contain. Checking the full value
-	// instead would pass whatever the log did, because the clip truncates the
-	// tail of any token this long — a vacuous assertion.
+	// secretInClip is the part of the value that survives clipOpLine's 80-rune
+	// window on the fixture below, and it is what the log must not contain.
+	// Checking the full value instead would be a vacuous assertion: the clip cuts
+	// the tail of any token this long, so the full value could not be there
+	// whatever the log did.
 	secretInClip := secret[:32]
 	badID := "D20E133860CC4AFE38B485AD5371BA599"
 	var buf bytes.Buffer
@@ -102,12 +103,13 @@ func TestTieredFailureLogWithholdsTheRejectedLine(t *testing.T) {
 	// the wrapper takes its failure path — the mechanical one exists only to be
 	// the next thing tried.
 	//
-	// The replacement text is the value itself, and it is a rewrite rather than a
-	// merge, for one reason: clipOpLine keeps 80 runes of the line, so a fixture
-	// has to put the WHOLE value inside that window or the assertion below passes
-	// whatever the log did. "rewrite <26-char id> -> " is 38 runes and the value
-	// is 40, so it fits with room to spare; two 26-character ids and a sentence of
-	// prose would not.
+	// A rewrite rather than a merge, with the arithmetic that makes it a real
+	// probe: clipOpLine keeps 80 runes of the line, "rewrite " + the 33-rune
+	// badID + " -> " is 45 of them, so 35 of the value's 40 runes survive — and
+	// secretInClip below is the first 32. Three runes of margin, which is why the
+	// probe is a stated prefix rather than the whole value: two 33-rune ids in a
+	// merge, or any prose in front of the value, would truncate it and the
+	// assertion would pass whatever the log did.
 	refused := `{"ops":["rewrite ` + badID + ` -> ` + secret + `"]}`
 	llm := reflection.NewNamedConsolidator(&scriptedHarness{replies: []string{refused, refused}}, "opencode")
 	input := reflection.ReflectionInput{ProjectName: "ghost", ExistingMemories: []memory.Memory{

@@ -141,14 +141,21 @@ func readerComplaintForLog(err error) string {
 	return fmt.Sprintf("<withheld: unclassified reader complaint, %T>", err)
 }
 
-// safeTierError renders an error a TIERED run logged on a failed tier. It is not
-// readerComplaintForLog, and the difference is deliberate: a refusal withholds
-// the operation line it quotes, while a transport failure — the common error on
-// that line, and the one with no model text anywhere in it — keeps its message,
-// because a harness that died reporting "signal: killed" and a harness that died
-// reporting nothing are worth telling apart. So only a refusal is redacted, and an
-// error that is not one is logged as it is rather than withheld behind a type
-// name. Both paths still reach the log; only the model prose is withheld.
+// safeTierError renders an error a TIERED run logged on a failed tier.
+//
+// A reader refusal is redacted: Safe() withholds the operation line it quotes,
+// which for a merge or a rewrite ends in the model's own replacement prose over
+// stored memory. Nothing else is. In particular a HARNESS failure is passed
+// through verbatim, and it is NOT value-free: internal/ai builds those from the
+// child's own output (harnessFailureOutput falls back to stdout, because
+// opencode reports on its JSON stream, and that stream carries `text` events
+// holding the model's answer), so up to 1200 bytes of model prose reach this line
+// and the append-only lifecycle.log with it. That is pre-existing — the old code
+// logged `err` too — and it is the deliberate trade #540 made, because those 357
+// undiagnosable "opencode run: exit status 1: " entries were the cost of hiding
+// the child's explanation. Fixing it means changing what internal/ai puts in the
+// error, which is a separate change with its own callers; what this function
+// declines to do is pretend the line is value-free.
 func safeTierError(err error) string {
 	var refusal *opRefusal
 	if errors.As(err, &refusal) {

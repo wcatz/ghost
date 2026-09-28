@@ -266,11 +266,14 @@ func TestOpTierWithholdsTheRejectedLineFromTheLog(t *testing.T) {
 	const secret = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 	stored := opMem(opID1, "fact", "the deploy token is "+secret, 0.5)
 	badID := opID1 + "X"
-	// The replacement text IS the value, with no prose in front of it: clipOpLine
-	// keeps 80 runes of the line, and "rewrite <26-char id> -> " is 38, so the
-	// whole secret is inside the clip. A fixture with a sentence in front of the
-	// value would be truncated at 80 runes and the assertion below would pass
-	// whatever the log did — the probe has to be able to see the whole value.
+	// The arithmetic, because the assertion below is only a real probe if the
+	// window the code applies is wide enough to see what it looks for:
+	// clipOpLine keeps 80 runes of the line, "rewrite " + the 33-rune badID +
+	// " -> " is 45 of them, so 35 of the value's 40 runes survive the clip — and
+	// the probe below is the first 32. Three runes of margin is all it is, which
+	// is why the probe is stated as a prefix and not as the whole value: a
+	// fixture with prose in front of the value, or a longer id, would truncate it
+	// and the assertion would pass whatever the log did.
 	reply := `{"ops":["rewrite ` + badID + ` -> ` + secret + `"]}`
 
 	var buf bytes.Buffer
