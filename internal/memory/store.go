@@ -3996,6 +3996,63 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 	return scanMemories(rows)
 }
 
+// ListMemories returns a project's memories for browsing, narrowed by the two
+// row-level filters a caller can state and left open for everything else. An
+// empty category or retention is no filter on that axis.
+//
+// It is one query rather than GetAll followed by a filter, for the same reason
+// the assembler's predicates run before the window closes: a filter applied to
+// the result spends the LIMIT on rows the caller cannot use and then reports the
+// ones it wanted as absent. The tier predicate is bound, never interpolated, and
+// the vocabulary is checked here rather than trusted — a browse surface that
+// silently ignored a value it did not recognise would answer a mistyped filter
+// with the whole corpus.
+//
+// The `_global` rows come along, exactly as GetByCategory brings them, because a
+// browse that hid the project's shared knowledge would be answering a different
+// question than the one asked.
+func (s *Store) ListMemories(ctx context.Context, projectID, category, retention string, limit int) ([]Memory, error) {
+	if category != "" && !IsValidCategory(category) {
+		return nil, fmt.Errorf("invalid category %q — must be one of %s", category, categoryList())
+	}
+	if retention != "" && !IsValidRetention(retention) {
+		return nil, InvalidRetentionError(retention)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	query := `
+		SELECT ` + memoryColumns + `
+		FROM memories
+		WHERE (project_id = ? OR project_id = '_global')`
+	var args []any
+	args = append(args, projectID)
+	if category != "" {
+		query += " AND category = ?"
+		args = append(args, category)
+	}
+	if retention != "" {
+		query += " AND retention = ?"
+		args = append(args, retention)
+	}
+	query += " ORDER BY importance DESC, created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list memories: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanMemories(rows)
+}
+
+// categoryList is the category vocabulary in schema order, for the refusal
+// ListMemories names. The map cannot be ranged in that order, which is why this
+// is a list rather than a join over the map's keys.
+func categoryList() string {
+	return "architecture, decision, pattern, convention, gotcha, dependency, preference, fact"
+}
+
 // Touch increments access_count and updates last_accessed.
 func (s *Store) Touch(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {

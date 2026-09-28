@@ -1287,6 +1287,7 @@ func (s *Server) registerTools() {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops', 'web-app')"`
 		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*'; trailing * is a prefix match, terms are OR'd)"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
+		Retention string `json:"retention,omitempty" jsonschema:"Filter results to one retention tier: session (true for this conversation only; expired session rows are what 'ghost prune' removes), project (the default \u2014 persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning). Omit it for every tier. Applied before the result window closes, so a matching row ranked below the window still takes a slot."`
 		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
 		AsOf      string `json:"as_of,omitempty" jsonschema:"Answer as the store stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'). Returns the wording each memory held then, including memories deleted since, and drops memories that did not exist yet. Keyword matching only: an embedding records current content, so there is no vector search over a past state. Use it to reproduce what a past session was given; omit it for the present. Cannot be combined with explain — explain diagnoses the current ranking, over the live index and the live vectors, so it has nothing to say about a past one."`
@@ -1312,6 +1313,15 @@ func (s *Server) registerTools() {
 		asOf, err := parseAsOf(args.AsOf)
 		if err != nil {
 			return nil, nil, err
+		}
+		// Refused rather than ignored, for the same reason as_of is: a tier filter
+		// the caller believes was applied and that was not is a wrong answer. The
+		// refusal is the store's own, so the tool and the writer it calls cannot
+		// spell the three tiers differently.
+		if args.Retention != "" {
+			if _, err := memory.NormalizeRetention(args.Retention); err != nil {
+				return nil, nil, err
+			}
 		}
 		if args.Limit <= 0 {
 			args.Limit = 10
@@ -1359,6 +1369,7 @@ func (s *Server) registerTools() {
 			QueryVec:  queryVec,
 			Scope:     scopeFilter,
 			Category:  args.Category,
+			Retention: args.Retention,
 			Source:    assemble.SourceSearch,
 			Budget: assemble.Budget{
 				MaxItems: args.Limit,
@@ -1392,6 +1403,9 @@ func (s *Server) registerTools() {
 			}
 			if args.Category != "" {
 				ex.Notes = append(ex.Notes, "a category filter is not applied to these rows: they are the retrieval window the formatted path searches, before the category filter runs, so a row marked included may not be in that answer")
+			}
+			if args.Retention != "" {
+				ex.Notes = append(ex.Notes, "a retention filter is not applied to these rows either: they are the retrieval window the formatted path searches, before the tier filter runs, so a row marked included may not be in that answer")
 			}
 			payload, mErr := json.MarshalIndent(ex, "", "  ")
 			if mErr != nil {
@@ -1470,6 +1484,7 @@ func (s *Server) registerTools() {
 		Scope      any  `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
 		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to pin it to the top of project context. Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
 		validityArgs
+		Retention string `json:"retention,omitempty" jsonschema:"How long this memory is wanted: session (true of this conversation only \u2014 Ghost derives an expiry, and 'ghost prune' is the only thing that removes one, never automatically), project (the default: persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning, and nothing automatic can rewrite it). Use session for an observation that is about now; use persistent for a decision or rule the user would be annoyed to lose. An unknown value is refused. On a near-duplicate save the tier RAISES the existing row and never lowers it."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1489,6 +1504,12 @@ func (s *Server) registerTools() {
 		}
 		if !memory.IsValidCategory(args.Category) {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
+		}
+		// The vocabulary, the default and the refusal are the store's, so the tool
+		// and the writer it calls cannot spell the three tiers differently.
+		retention, err := memory.NormalizeRetention(args.Retention)
+		if err != nil {
+			return nil, nil, err
 		}
 		importance, err := defaultImportanceArg(args.Importance, 0.7)
 		if err != nil {
@@ -1547,6 +1568,7 @@ func (s *Server) registerTools() {
 			Scope:      scope,
 			Validity:   fields.Validity,
 			Pin:        args.Pin,
+			Retention:  retention,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
@@ -1593,6 +1615,17 @@ func (s *Server) registerTools() {
 		// because both describe the stored result, and the fold notice names
 		// the row that actually answered — which is also the row this advisory
 		// is about.
+		// Reported for the same reason the pin is: on a fold the id this message
+		// names is the copy just stored, while the tier landed on the existing row
+		// the text merged into, so a caller reading only the id would conclude the
+		// wrong memory carries it. An unstated `project` is not worth a clause on
+		// every save, so only a tier the caller asked for by name is reported.
+		if args.Retention != "" {
+			msg += fmt.Sprintf(" — retention %s", retention)
+			if duplicateOf != "" {
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
+			}
+		}
 		msg += repoFactHint(args.Content)
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
@@ -1733,6 +1766,7 @@ func (s *Server) registerTools() {
 	type listArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost')"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter by category (optional)"`
+		Retention string `json:"retention,omitempty" jsonschema:"Filter by retention tier: session, project or persistent (optional; omit for every tier)"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 30)"`
 	}
 
@@ -1760,14 +1794,10 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = resolved
 
-		var memories []memory.Memory
-		var err error
-
-		if args.Category != "" {
-			memories, err = s.store.GetByCategory(ctx, args.ProjectID, args.Category, args.Limit)
-		} else {
-			memories, err = s.store.GetAll(ctx, args.ProjectID, args.Limit)
-		}
+		// One read for both filters, so neither is applied to an already-trimmed
+		// result: a category that matched four of the ten rows the limit allowed
+		// would otherwise report the other six as absent.
+		memories, err := s.store.ListMemories(ctx, args.ProjectID, args.Category, args.Retention, args.Limit)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list failed: %w", err)
 		}
@@ -1780,8 +1810,12 @@ func (s *Server) registerTools() {
 				text = "Project lookup failed — unable to determine whether it is registered."
 			case !exists:
 				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", args.ProjectID)
+			case args.Category != "" && args.Retention != "":
+				text = fmt.Sprintf("No memories found in category %q with retention %q for this project.", args.Category, args.Retention)
 			case args.Category != "":
 				text = fmt.Sprintf("No memories found in category %q for this project.", args.Category)
+			case args.Retention != "":
+				text = fmt.Sprintf("No memories found with retention %q for this project.", args.Retention)
 			default:
 				text = "Project is registered but has no memories yet."
 			}

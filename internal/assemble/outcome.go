@@ -34,6 +34,14 @@ const (
 	reasonVectorUnavailable = "vector_backend_unavailable"
 	reasonAllInvalid        = "all_invalid"
 	reasonAllOutOfCategory  = "all_out_of_category"
+	// reasonAllOutOfRetention is the third stage-3 verdict, added with the tier
+	// filter itself. The vocabulary above is closed on purpose, so adding one is a
+	// contract change rather than a patch: a caller branching on the reason now has
+	// a value it has never seen. That is the cheaper of the two failures — the
+	// alternative was folding a tier mismatch into all_out_of_category, which
+	// would tell a reader who filtered by retention to go and change their
+	// category.
+	reasonAllOutOfRetention = "all_out_of_retention"
 	reasonAllOutOfScope     = "all_out_of_scope"
 	reasonAllDedupDropped   = "all_dedup_dropped"
 	reasonAllDiversity      = "all_diversity_capped"
@@ -204,17 +212,20 @@ func (p *pipeline) dominantRemoval() (string, string) {
 	return best.stage, best.reason
 }
 
-// predicateReason names the stage-3 verdict that removed the rows, or "" when
-// neither filter is set. The two verdicts are counted apart because they answer
+// predicateReason names the stage-3 verdict that removed the rows, or "" when no
+// filter is set. The three verdicts are counted apart because they answer
 // different questions for the caller: a category that removed nothing while the
-// scope removed everything is a scope problem, and a reason naming the category
-// sends the reader to change the wrong filter. A tie names the category, which
-// is the narrower of the two and the one a caller is likelier to have set by
-// accident.
+// tier removed everything is a tier problem, and a reason naming the category
+// sends the reader to change the wrong filter. A tie names the narrowest predicate
+// that removed anything, in the order category, retention, scope — the tier is
+// narrower than the scope for the same reason the category is, and all three are
+// likelier to have been set by accident than deliberately.
 func (p *pipeline) predicateReason() string {
 	switch {
-	case p.droppedBy[dropCategory] > 0 && p.droppedBy[dropCategory] >= p.droppedBy[dropScope]:
+	case p.droppedBy[dropCategory] > 0 && p.droppedBy[dropCategory] >= p.droppedBy[dropRetention] && p.droppedBy[dropCategory] >= p.droppedBy[dropScope]:
 		return reasonAllOutOfCategory
+	case p.droppedBy[dropRetention] > 0 && p.droppedBy[dropRetention] >= p.droppedBy[dropScope]:
+		return reasonAllOutOfRetention
 	case p.droppedBy[dropScope] > 0:
 		return reasonAllOutOfScope
 	}
@@ -318,6 +329,9 @@ func (p *pipeline) absenceNote() string {
 	}
 	if p.req.Category != "" {
 		advice = append(advice, "drop the category filter")
+	}
+	if p.req.Retention != "" {
+		advice = append(advice, "drop the retention filter")
 	}
 	note := "Ghost memory: no match within the searched window"
 	if len(advice) > 0 {
@@ -443,6 +457,9 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 		case reasonAllOutOfCategory:
 			return "No sufficiently trustworthy memory found: nothing found passed the category filter." +
 				p.stageNote()
+		case reasonAllOutOfRetention:
+			return "No sufficiently trustworthy memory found: nothing found was in the requested retention tier " +
+				"(" + p.req.Retention + ")." + p.stageNote()
 		case reasonAllOutOfScope:
 			return "No sufficiently trustworthy memory found: nothing found matched the requested scope." +
 				p.stageNote()
@@ -621,13 +638,16 @@ func totalTokens(items []Item) int {
 }
 
 // filterCaveat names the filters that can make a windowed result short and
-// gives the caller a filter-appropriate next step. Both filters are applied
-// before the final cut now, but the candidate pool they select from is still
-// finite, so further matches may exist beyond it.
-func filterCaveat(category string, scope map[string]string) string {
+// gives the caller a filter-appropriate next step. All three are applied before
+// the final cut now, but the candidate pool they select from is still finite, so
+// further matches may exist beyond it.
+func filterCaveat(category, retention string, scope map[string]string) string {
 	var filters []string
 	if category != "" {
 		filters = append(filters, "category")
+	}
+	if retention != "" {
+		filters = append(filters, "retention")
 	}
 	if len(scope) > 0 {
 		filters = append(filters, "scope")
@@ -643,8 +663,12 @@ func filterCaveat(category string, scope map[string]string) string {
 		verb = "were"
 	}
 	next := "raise the limit"
-	if category != "" {
-		next += " or use ghost_memories_list for exhaustive category browsing"
+	if category != "" || retention != "" {
+		// The exhaustive-browsing advice belongs to any row-level filter, not only
+		// to the category: ghost_memories_list carries the same filters and is not
+		// windowed, so it is the next step for a caller looking for rows of one
+		// tier just as it is for one category.
+		next += " or use ghost_memories_list for exhaustive browsing"
 	}
 	return "(Note: " + which + " " + verb + " applied to a finite search window, so further matches may exist beyond the retrieved candidates — " + next + ".)"
 }
@@ -749,7 +773,7 @@ func (p *pipeline) filterCaveat() string {
 	if p.droppedBy[stageResponseFit] > 0 {
 		return ""
 	}
-	caveat := filterCaveat(p.req.Category, p.req.Scope)
+	caveat := filterCaveat(p.req.Category, p.req.Retention, p.req.Scope)
 	if caveat == "" {
 		return ""
 	}

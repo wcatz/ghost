@@ -125,6 +125,7 @@ var cliCommands = []cliCommand{
 	{path: "backup verify", help: "Usage: ghost backup verify", coveredBy: "TestCLIBackupVerifyRestore"},
 	{path: "export", help: "Usage: ghost export", coveredBy: "TestCLIExportImport"},
 	{path: "history", help: "Usage: ghost history", coveredBy: "TestCLIHistory"},
+	{path: "prune", help: "Usage: ghost prune", coveredBy: "TestCLIPruneTiers"},
 	{path: "import", help: "Usage: ghost import", coveredBy: "TestCLIExportImport"},
 	{path: "bench", help: "Usage: ghost bench", coveredBy: "TestCLIBench"},
 	{path: "upgrade", help: "Usage: ghost upgrade",

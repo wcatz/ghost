@@ -218,6 +218,9 @@ func dispatchCommand(argv []string) int {
 		case "history":
 			runHistory()
 			return 0
+		case "prune":
+			runPrune(argv[1:])
+			return 0
 		case "import":
 			runImport()
 			return 0
@@ -355,6 +358,12 @@ Commands:
                               Print one memory's append-only history: every write,
                               what it changed, and which phase or agent made it
                               (survives the memory itself)
+  prune [--project <name>] [--grace 168h] [--apply]
+                              Remove expired session-tier memories — nothing
+                              durable, and a persistent row never. Dry-run by
+                              default; never run for you, no lifecycle pass or
+                              hook calls it, and each removal is recorded in
+                              memory_history as a delete
   maintenance status          Show live scratch usage and recent hygiene runs
   maintenance clean-scratch   Report pre-scratch-root legacy debris
                               (dry-run by default, --apply to remove strict matches)
