@@ -113,42 +113,46 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 // eyes, substituting a description for the content whenever the content holds a
 // credential.
 //
-// Every print site in `ghost reflect` goes through this or through
-// displayClaim, and that is the point. A guarantee made at the write boundary —
-// the drop reports format, category, scope and length, never the content — is not
-// a guarantee about the command's report if the same command prints the value
-// somewhere else: the proposal listing and the drop-guard warning both printed
-// 120 truncated characters, and 120 is far more than a GitHub PAT or a Docker Hub
-// token needs. In the autonomous path that stdout is the append-only
+// Every print site in cmd/ghost that renders STORED memory text goes through this
+// substitution — displayProposal itself, displayClaim, displayStored and
+// `ghost history`'s two printers — and that is the point. A guarantee made at the
+// write boundary — the drop reports format, category, scope and length, never the
+// content — is not a guarantee about the command's report if the same command
+// prints the value somewhere else: the proposal listing and the drop-guard warning
+// both printed 120 truncated characters, and 120 is far more than a GitHub PAT or a
+// Docker Hub token needs. In the autonomous path that stdout is the append-only
 // lifecycle.log, so the value outlives the run. The exposure the store's refusal
 // exists to prevent, reached from the other direction.
 //
-// The scope is `ghost reflect` and the scope is stated because a reader who greps
-// for `.Content` in cmd/ghost finds three more sites, in two other commands, and
-// both are deliberate rather than oversights:
+// The lifecycle listings were the sites left out, and the argument for them was
+// that the write-boundary guard already refuses their input. That argument is
+// about the databases this build writes, and it says nothing about a database
+// written before the guard existed: `rejectSecret` is not retroactive, a pre-guard
+// row can still hold a value, and `firstLine` at 70 characters is more than a
+// GitHub PAT needs. So `ghost resolve` (both listings), `resolve --mark` and
+// `supersede --withdraw` route through displayStored, which is this same
+// substitution over the first-line cut those lines already made.
 //
-//   - runResolve's listing (lifecycle.go, two sites) uses firstLine at 70
-//     characters. `ghost resolve` is a separate invocation from `ghost reflect`,
-//     so it is outside the claim above — and its input is the STORED corpus,
-//     which the write-boundary guard already refuses, so there is no value here
-//     for a pre-guard row to have leaked into. That is the argument, and it is
-//     narrower than "resolve cannot print a credential": a database written
-//     before the guard could still hold one, and resolve would print it.
-//   - printHistoryEntry (history.go) prints the stored history content raw, and
-//     that is the one place this substitution is deliberately ABSENT. History
-//     content is redacted at write time instead — the ghost_history_content
-//     filter in internal/memory — because the history is the one surface where a
-//     credential outlives the row it was removed from, so a per-print-site
-//     substitution would be the wrong layer for it. The consequence is that
-//     `ghost history` renders whatever is stored, so the guarantee there is the
-//     filter's and not this function's.
+// `ghost history` is the site where two layers are both correct, and neither
+// replaces the other. History content is redacted at WRITE time
+// (`ghost_history_content` in internal/memory), and that is the right layer for
+// it: it is the only one that also covers the reads Ghost performs itself — an
+// `as_of` search answers from a recorded version and feeds session injection — and
+// every future reader of that table, none of which would have to remember a print
+// site. But a filter installed today cannot reach the rows already on disk, and it
+// does not cover `merged_content` at all, which is a plain column holding the text
+// a FoldOnly fold dropped. The print site therefore carries the substitution as
+// well: `ghost history` renders whatever is stored, and on the store that most
+// needs purging that is a value a pre-guard build wrote. `ghost history purge` is
+// the redaction path for what is left on disk; withholding is what keeps the
+// command from printing it in the meantime.
 //
 // The substitution keeps the category and the byte length, so an operator can
 // still find the row and tell how much was withheld — a report that says only
 // "redacted" is indistinguishable from a report that lost the proposal.
 func displayProposal(content, category string, limit int) string {
 	if finding, ok := secret.Detect(content); ok {
-		return fmt.Sprintf("<withheld: %s, category=%s, bytes=%d>", finding.Label, category, len(content))
+		return withheld(finding, category, content)
 	}
 	return displayText(content, limit)
 }
@@ -160,9 +164,22 @@ func displayProposal(content, category string, limit int) string {
 // pre-guard row held — and reports no category, because the result records none.
 func displayClaim(content string, limit int) string {
 	if finding, ok := secret.Detect(content); ok {
-		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(content))
+		return withheld(finding, "", content)
 	}
 	return displayText(content, limit)
+}
+
+// withheld is the one rendering of a credential that a cmd/ghost print site
+// produces: the format, the category when the caller has one, and how many bytes
+// were kept. Every substitution above goes through it, so a second site cannot
+// invent a second marker, and the two shapes are the two facts available — a
+// caller with a category says so, and a caller without one (an edge's target, a
+// fold's discarded wording) does not print an empty field where one should be.
+func withheld(finding secret.Finding, category, content string) string {
+	if category == "" {
+		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(content))
+	}
+	return fmt.Sprintf("<withheld: %s, category=%s, bytes=%d>", finding.Label, category, len(content))
 }
 
 // displayText is the truncation half both of those share: `limit` bytes of

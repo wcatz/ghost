@@ -112,8 +112,11 @@ source the memory held once that write landed.
               reflection snapshot that could restore the row. This is the
               redaction path: the history deliberately keeps the text a memory
               used to hold, so deleting a memory that contained a credential
-              leaves that credential in the database and readable with
-              'ghost history' unless it is purged. The row, its history and its
+              leaves that credential in the database FILE unless it is purged.
+              Printing is not redaction and this command does not pretend to be
+              one: an entry whose text holds a credential-shaped value prints as
+              '<withheld: format, category, bytes>' instead of the value, in the
+              human and the --json form alike. The row, its history and its
               snapshots go in one transaction, so none can survive the others. A
               memory that is ALREADY deleted is handled here too: its recorded
               text is erased on its own, because the tombstone is the feature
@@ -181,8 +184,18 @@ func printMemoryHistory(w io.Writer, v historyView) error {
 // printHistoryEntry renders one event: when it happened, which write path it
 // was, who performed it when the path knew, and the state the memory held
 // afterwards. The content is printed in full — a history whose text is elided
-// cannot answer the question it exists for.
+// cannot answer the question it exists for — except that it goes through the same
+// credential substitution every other cmd/ghost site rendering stored memory text
+// uses, because the write-time filter which also guards this table cannot reach a
+// row written before it existed, and `ghost history` is the command that store's
+// owner is asked to run. See displayProposal for the two layers and why this is
+// the second rather than the only one.
+//
+// The substitution is computed once, in displayedHistoryEntry, and the --json
+// printer encodes the same values: two forms of one command cannot then disagree
+// about what a row holds.
 func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
+	shown := displayedHistoryEntry(e)
 	who := "agent unknown"
 	if e.Agent != "" {
 		who = "agent " + e.Agent
@@ -209,12 +222,17 @@ func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
 			return err
 		}
 	}
-	if e.MergedContent != "" {
-		if _, err := fmt.Fprintf(w, "  folded-in text: %s\n", singleLine(e.MergedContent)); err != nil {
+	// The folded-in text is a memory's own wording, from a row a FoldOnly fold
+	// deliberately dropped, and it is the one text field here the write-time
+	// filter never saw: `ghost_history_content` wraps the content column, and
+	// merged_content is a plain column beside it. So this is the field most likely
+	// to still hold a value on a store where the content column does not.
+	if shown.MergedContent != "" {
+		if _, err := fmt.Fprintf(w, "  folded-in text: %s\n", shown.MergedContent); err != nil {
 			return err
 		}
 	}
-	_, err := fmt.Fprintf(w, "  %s\n", e.Content)
+	_, err := fmt.Fprintf(w, "  %s\n", shown.Content)
 	return err
 }
 
@@ -229,14 +247,40 @@ func singleLine(s string) string {
 // printHistoryJSON writes one JSON object per entry. The store's own
 // HistoryEntry is the schema, so the machine-readable form cannot drift from
 // what the read API returns.
+//
+// The two text fields are substituted rather than encoded verbatim, and the schema
+// is not what changes — the keys, their types and their order are the entry's own,
+// so a consumer sees a string it can branch on. What it must not see is the value:
+// --json is the form people pipe into jq and into files, which outlives the
+// terminal the way lifecycle.log outlives the run, and the human form already
+// withholds it. Two forms of one command disagreeing about the same row is the
+// wrong answer either way, and a consumer that wants the redacted notice rather
+// than the value gets the same one the human form prints.
 func printHistoryJSON(w io.Writer, entries []memory.HistoryEntry) error {
 	enc := json.NewEncoder(w)
 	for _, e := range entries {
-		if err := enc.Encode(e); err != nil {
+		if err := enc.Encode(displayedHistoryEntry(e)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// displayedHistoryEntry is the entry with its two text fields put through the
+// substitution, for both printers. A copy, because the caller's slice is the
+// store's read and nothing here may rewrite it.
+//
+// The two fields are not the same column and are not treated as one: content is
+// the write-time filter's, and merged_content is not, so a store can hold a value
+// in the second and not the first. The limit is zero — no cut — because the history
+// answers "what did this hold" and a cut is not an answer; what is withheld is
+// withheld whole, with the byte count of the text that was not printed.
+func displayedHistoryEntry(e memory.HistoryEntry) memory.HistoryEntry {
+	e.Content = displayProposal(e.Content, e.Category, 0)
+	if e.MergedContent != "" {
+		e.MergedContent = displayClaim(singleLine(e.MergedContent), 0)
+	}
+	return e
 }
 
 // runHistory implements `ghost history <memory-id>`, and `ghost history purge

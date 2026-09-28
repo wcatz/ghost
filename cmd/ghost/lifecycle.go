@@ -1506,9 +1506,12 @@ func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, a
 		}
 		// The edge's own source column, because it decides the follow-up: only a
 		// 'supersedes'/'llm' edge is one resolve's piggyback ever stamps on
-		// account of.
+		// account of. The target's text goes through the stored-content
+		// substitution with no category, because an edge records none: the marker
+		// says the format and the length, which is all a reader of this line has.
 		fmt.Fprintf(&b, "  %s  %s -> %s  [%s, strength %.2f]  %s\n",
-			marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, l.Strength, firstLine(l.TargetText, 70))
+			marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, l.Strength,
+			displayStored(l.TargetText, "", 70))
 	}
 	if !apply {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.\n")
@@ -2319,7 +2322,7 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}
-		fmt.Fprintf(&b, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, firstLine(m.Content, 70))
+		fmt.Fprintf(&b, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, displayStored(m.Content, m.Category, 70))
 	}
 	if !apply && count > 0 {
 		b.WriteString("\nRe-run with --apply to stamp these resolved.\n")
@@ -2513,9 +2516,7 @@ func runResolve() {
 		}
 		fmt.Print(reassessSummaryLine(projectName, res, apply, len(reKept), cls.Calls()))
 		fmt.Print(reassessMissLines(res))
-		for _, m := range reKept {
-			fmt.Printf("  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
-		}
+		fmt.Print(memoryLines(reKept))
 		if !apply && len(reKept) > 0 {
 			fmt.Println("\nRe-run with --apply to return these to session injection.")
 		}
@@ -2532,10 +2533,27 @@ func runResolve() {
 		fmt.Printf("  (%d via supersedes links, %d via correction pairing, %d via LLM)\n",
 			res.Superseded, res.Corrected, res.Confirmed)
 	}
-	for _, m := range confirmed {
-		fmt.Printf("  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
-	}
+	fmt.Print(memoryLines(confirmed))
 	if !apply && res.Confirmed+res.Superseded+res.Corrected > 0 {
 		fmt.Println("\nRe-run with --apply to mark these resolved.")
 	}
+}
+
+// memoryLines renders the per-memory listing the two resolve listings share: one
+// line per memory, its short id, its category, and its own first line at the
+// listing's 70 characters — withheld whole if the row holds a credential, since
+// the input is the stored corpus and the write-boundary guard is not retroactive.
+//
+// It is a function because both call sites were inline loops in runResolve, and
+// runResolve cannot be called from a test: it opens a store, builds a harness
+// provider and calls os.Exit. The property these lines are responsible for — what
+// a caller is shown about each memory it decided on — was therefore untestable, and
+// the two commands print the same line for the same reason, so one renderer is the
+// whole of both sites rather than a place for them to drift apart.
+func memoryLines(memories []memory.Memory) string {
+	var b strings.Builder
+	for _, m := range memories {
+		fmt.Fprintf(&b, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, displayStored(m.Content, m.Category, 70))
+	}
+	return b.String()
 }
