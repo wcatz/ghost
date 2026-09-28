@@ -436,7 +436,18 @@ func runHistory() {
 // next command, and refusing without it would leave the operator to find the id in
 // a report again.
 func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) error {
-	if !isWholeMemoryID(ctx, s, memoryID) {
+	if stored, ok := wholeMemoryID(ctx, s, memoryID); ok {
+		// The STORED spelling, never the caller's. Ids are matched
+		// case-insensitively here — a report can print a hex id uppercased
+		// whatever the column holds — and every read below compares case-
+		// SENSITIVELY, because neither `memories.id` nor `memory_history.memory_id`
+		// carries COLLATE NOCASE. Purging the caller's spelling of an id stored in
+		// another one would find no row and no history and report "nothing to
+		// purge" on the redaction path, while the text sat in the database. The
+		// read path does not have this hazard because memref returns the stored
+		// spelling too; this gate is the one that has to remember it.
+		memoryID = stored
+	} else {
 		return purgePrefixRefusal(ctx, s, memoryID)
 	}
 	entries, err := s.MemoryHistory(ctx, memoryID, 0)
@@ -471,28 +482,32 @@ func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) e
 	return nil
 }
 
-// isWholeMemoryID reports whether ref is a complete id this store holds, rather
-// than the start of one. It is a membership test, not a length test, and that is
-// the whole decision: a length test would have to hardcode what a full id looks
-// like, and nothing says an id is 32 hex characters — `ghost import` writes an
-// artifact's ids verbatim, and a store full of imported notes is a store whose ids
-// are whatever the artifacts held. A store holding an eight-character id answers
-// true for those eight characters, and that id is a whole one.
-func isWholeMemoryID(ctx context.Context, s *memory.Store, ref string) bool {
+// wholeMemoryID reports the id this store holds under ref, and whether it holds
+// one — the whole-id test a purge is gated on. It returns the STORED spelling,
+// which is the half that matters: the reads a purge then makes compare
+// case-sensitively, so a boolean would let a case-folded spelling through the gate
+// and then find nothing.
+//
+// It is a membership test, not a length test, and that is the whole decision: a
+// length test would have to hardcode what a full id looks like, and nothing says an
+// id is 32 hex characters — `ghost import` writes an artifact's ids verbatim, and a
+// store full of imported notes is a store whose ids are whatever the artifacts
+// held. A store holding an eight-character id answers true for those eight
+// characters, and that id is a whole one.
+func wholeMemoryID(ctx context.Context, s *memory.Store, ref string) (string, bool) {
 	ids, err := s.AnyMemoryIDsByIDPrefix(ctx, ref)
 	if err != nil {
-		// A failed read is not a verdict. Answering false would report the
-		// argument as a prefix and send the operator after a full id that is
-		// already correct, so the refusal below is the safer of the two wrong
-		// answers: nothing is erased either way.
-		return false
+		// A failed read is not a verdict. Reporting the argument as a prefix sends
+		// the operator after a full id they may already have, so this is the safer
+		// of the two wrong answers: nothing is erased either way.
+		return "", false
 	}
 	for _, id := range ids {
 		if strings.EqualFold(id, ref) {
-			return true
+			return id, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // purgePrefixRefusal explains that a prefix is not enough here, and names the full
@@ -559,10 +574,14 @@ func purgePrefixRefusal(ctx context.Context, s *memory.Store, ref string) error 
 // has always answered an unknown full id as "never written, or its history has been
 // pruned" — a report about the id, not an error about the operator's argument.
 // Routing it through the prefix rules would report it as a prefix of nothing, which
-// is a claim about a string the caller never shortened. The distinction is made by
-// resolving, not by inspecting the argument: memref's byte-exact and fold rules
-// decide a stored id, and only a ref that names no id at all is asked whether it
-// could have been one.
+// is a claim about a string the caller never shortened.
+//
+// "Not a refusal" is narrower than "not an error", and the difference is
+// `memref.ErrNoMatch`. Only the refusal that says the set holds NOTHING this ref
+// can mean passes through, and only for a ref long enough not to be a truncation;
+// an ambiguity and a third casing are refusals whatever the ref's length, and they
+// reach the operator with the matches named. That distinction is memref's, and it
+// is why the sentinel is.
 func resolveHistoryRef(ctx context.Context, s *memory.Store, ref string) (string, error) {
 	ids, err := s.AnyMemoryIDsByIDPrefix(ctx, ref)
 	if err != nil {
@@ -574,19 +593,23 @@ func resolveHistoryRef(ctx context.Context, s *memory.Store, ref string) (string
 	if err == nil {
 		return id, nil
 	}
-	// A ref at least as LONG as a whole id that no id begins with cannot be a
-	// truncation of one — there is nothing left to shorten — so the miss is about the
-	// id itself and is this command's to report as it always has. A shorter ref may be
-	// a truncation, and memref's "no id starts with this" is the answer that matters,
-	// so the refusal stands.
+	// A MISS on a ref at least as LONG as a whole id passes through to the read,
+	// which reports it as it always has. The reason for the length is that such a ref
+	// cannot be a TRUNCATION of an id — there is nothing left to shorten — so the
+	// answer is about the id rather than about the operator's spelling of it.
 	//
-	// The bound is the length of the id Ghost MINTS, not a test of whether this ref is
-	// one: nothing says an id is 32 hex characters, and `ghost import` writes an
-	// artifact's ids verbatim, so a store full of imported notes holds eight-character
-	// ids and those are whole. A longer ref matching nothing in such a store is
-	// reported as a prefix miss — the unhelpful answer, for a rare shape, rather than
-	// a wrong one. Membership above already decided every id the store really holds.
-	if utf8.RuneCountInString(ref) >= memref.FullIDLen {
+	// The reason for branching on the REFUSAL and not on the length alone is that a
+	// length cannot tell the refusals apart. `ghost import` writes an artifact's ids
+	// verbatim, so a store can hold two 40-character ids sharing 32 characters, or two
+	// 32-character ids differing only in letter case; a gate on length would let
+	// either through, and the read would then print "no memory and no history
+	// recorded" about a memory the store plainly holds. That is a false claim of
+	// exactly the kind #720 removes, and the reader cannot tell it from the truth.
+	// `ErrNoMatch` is the distinction, and memref is where it belongs: it already
+	// draws it, having separated this refusal from the ambiguity and third-casing
+	// ones, and a caller that re-derived it from the message or the length would be
+	// the second implementation this package exists to prevent.
+	if errors.Is(err, memref.ErrNoMatch) && utf8.RuneCountInString(ref) >= memref.FullIDLen {
 		return ref, nil
 	}
 	return "", err

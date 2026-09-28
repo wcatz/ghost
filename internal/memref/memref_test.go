@@ -2,6 +2,7 @@ package memref
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -392,6 +393,52 @@ func TestResolveInRefusesAnEmptySetAndAnEmptyRef(t *testing.T) {
 	if !strings.Contains(err.Error(), "too short") {
 		t.Errorf("the refusal does not say why: %v", err)
 	}
+}
+
+// TestOnlyAMissCarriesErrNoMatch: the sentinel exists so a caller can tell "the set
+// holds nothing this ref can mean" from "the set holds too much", and a caller
+// that cannot tell them is how one of them gets swallowed. It must therefore mark
+// the miss and NOTHING else: a too-short ref is a miss, an ambiguity is the
+// opposite, and a third casing is a different unaddressable case again.
+func TestOnlyAMissCarriesErrNoMatch(t *testing.T) {
+	t.Run("a miss carries it", func(t *testing.T) {
+		_, err := ResolveIn(hexIDs("aaaaaaaa", 1), "id", "bbbbbbbb")
+		if !errors.Is(err, ErrNoMatch) {
+			t.Errorf("a ref matching nothing = %v, want it to wrap ErrNoMatch", err)
+		}
+		// Through the project-scoped entry point too, or the sentinel would be a
+		// property of ResolveIn alone and Resolve's callers could not use it.
+		store := &fakeStore{ids: hexIDs("aaaaaaaa", 1)}
+		if _, err := Resolve(context.Background(), store, "p", "id", "bbbbbbbb"); !errors.Is(err, ErrNoMatch) {
+			t.Errorf("Resolve on a ref matching nothing = %v, want it to wrap ErrNoMatch", err)
+		}
+	})
+	t.Run("an empty set is a miss", func(t *testing.T) {
+		if _, err := ResolveIn(nil, "id", "a1b2c3d4"); !errors.Is(err, ErrNoMatch) {
+			t.Errorf("a ref against an empty set = %v, want it to wrap ErrNoMatch", err)
+		}
+	})
+	t.Run("an ambiguity does not", func(t *testing.T) {
+		_, err := ResolveIn(hexIDs("aaaaaaaa", 2), "id", "aaaaaaaa")
+		if errors.Is(err, ErrNoMatch) {
+			t.Error("an ambiguous ref reports itself as a miss, so a caller would pass it through")
+		}
+	})
+	t.Run("a third casing does not", func(t *testing.T) {
+		ids := []string{"abcdef01" + strings.Repeat("0", 24), "ABCDEF01" + strings.Repeat("0", 24)}
+		if _, err := ResolveIn(ids, "id", "Abcdef01"+strings.Repeat("0", 24)); errors.Is(err, ErrNoMatch) {
+			t.Error("a third casing reports itself as a miss, so a caller would pass it through")
+		}
+	})
+	t.Run("a too-short ref does not", func(t *testing.T) {
+		// It matches nothing, so it IS a miss by the set — but the caller that
+		// branches on this sentinel is choosing between two SENTENCES, and the
+		// "too short to be a prefix" one is the answer for a short ref whatever
+		// the set holds. Marking it would replace that with a whole-id sentence.
+		if _, err := ResolveIn(hexIDs("a", 3), "id", "a"); errors.Is(err, ErrNoMatch) {
+			t.Error("a sub-floor ref reports itself as a miss")
+		}
+	})
 }
 
 // TestShortMeasuresEightCharactersNotEightBytes: the report form has to be a ref

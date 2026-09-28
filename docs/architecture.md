@@ -580,22 +580,43 @@ would be a claim about a scope the set never searched, and the kind of claim a
 reader acts on. The same store read is why `resolveIn` applies the prefix match
 itself rather than trusting the caller's set: `Resolve`'s query is already a prefix
 filter so re-filtering it is a no-op, and a caller that collected ids for another
-reason is then not obliged to have filtered them.
+reason is then not obliged to have filtered them. `memref.ErrNoMatch` is the
+sentinel for the one refusal that says the set holds nothing this ref can mean, so
+a caller can tell that from the ones that say it holds too much — `TestOnlyAMissCarriesErrNoMatch`
+holds the line in both directions, because the distinction is worth nothing if a
+second refusal acquires the sentinel.
 
 Two arguments do not go through the refusal, and both are about what a full id
-means. One is a ref **at least as long** as a whole id (32 characters, what
-`hex(randomblob(16))` mints) that no id begins with: it cannot be a truncation, so
-the miss is about the id and `readHistoryView` reports it as it always has —
-"never written, or its history has been pruned" — rather than as a prefix of
-nothing. The other is `purge`, which takes the **whole id only** and refuses a
+means. One is a **miss** on a ref at least as long as a whole id (32 characters,
+what `hex(randomblob(16))` mints): it cannot be a truncation, so the answer is
+about the id and `readHistoryView` reports it as it always has — "never written, or
+its history has been pruned" — rather than as a prefix of nothing. "Miss" is the
+whole of the exception, and that is what `memref.ErrNoMatch` is for: an ambiguity
+and a third casing are refusals whatever the ref's length, and a gate on length
+alone would let either through. Both are reachable here, because `ghost import`
+writes an artifact's ids verbatim, so a store can hold two 40-character ids sharing
+32 characters, and the read would then report two memories the store plainly holds
+as never written. `ErrNoMatch` is the distinction memref already draws between the
+refusal that says the set holds nothing and the one that says it holds too much, so
+branching on it here is not a second implementation of a rule.
+
+The other argument is `purge`, which takes the **whole id only** and refuses a
 prefix. It is the one place in Ghost that erases recorded text for good, where a
 mistyped argument is not a message but an unprintable memory; echoing the resolved
 full id would not make that safe, because the announcement and the transaction are
 one breath apart and a single-character slip in a pasted prefix is still a unique
 match. So the prefix is refused and the full id it names is printed, and the way
-through is `ghost history <prefix>`, which resolves the ref and shows the id. An id
-the store never held is a **miss**, not a prefix — which is also what re-running a
-successful purge looks like, since a purge removes the id from both tables.
+through is `ghost history <prefix>`, which resolves the ref and shows the id. Two
+consequences of the asymmetry, both tested. An id the store never held is a
+**miss**, not a prefix — which is also what re-running a successful purge looks
+like, since a purge removes the id from both tables. And the whole-id test returns
+the **stored spelling** rather than a boolean: ids are matched case-insensitively
+when a ref is resolved, and a report can print a hex id uppercased whatever the
+column holds, but every read a purge then makes compares case-SENSITIVELY (neither
+`memories.id` nor `memory_history.memory_id` carries `COLLATE NOCASE`) — so a
+boolean would accept a folded spelling through the gate and then erase nothing,
+reporting "nothing to purge" on the redaction path while the text was still in the
+database.
 
 Three properties are deliberate:
 

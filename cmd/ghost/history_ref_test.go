@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/memref"
@@ -260,6 +262,101 @@ func TestResolveHistoryRefRefusesAnEmptyRef(t *testing.T) {
 	s, _, _ := refTestStore(t)
 	if _, err := resolveHistoryRef(context.Background(), s, ""); err == nil {
 		t.Fatal("an empty ref resolved to an id")
+	}
+}
+
+// TestResolveHistoryRefRefusesAnAmbiguousWholeLengthRef: the full-id pass-through
+// is a pass-through on a MISS, not on every refusal. `ghost import` writes an
+// artifact's ids verbatim, so a store can hold two 40-character ids sharing 32
+// characters — and a gate on LENGTH alone would let that through, hand the read an
+// id in neither table, and print "never written" about two memories the store
+// plainly holds. The reader cannot tell that from the truth, so the ambiguity has
+// to reach them the same way a shorter ambiguous prefix does: refused, with the
+// matches named.
+func TestResolveHistoryRefRefusesAnAmbiguousWholeLengthRef(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p", "/tmp/p", "p"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// Two ids LONGER than a minted full id, sharing a 32-character prefix. The
+	// shape is reachable: an artifact may hold ids of any length and any case.
+	const (
+		first  = "AABBCCDDEEFF0011223344556677889900AA"
+		second = "AABBCCDDEEFF0011223344556677889900BB"
+	)
+	for _, id := range []string{first, second} {
+		if _, _, _, err := s.ImportMemory(ctx, memory.PortableMemory{
+			ID: id, ProjectID: "p", Category: "fact", Content: "a memory behind a long shared prefix", Source: "mcp",
+		}, memory.ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
+			t.Fatalf("ImportMemory(%s): %v", id, err)
+		}
+	}
+	// The prefix is 32 characters, so a length gate would wave it through.
+	shared := first[:memref.FullIDLen]
+	if got := utf8.RuneCountInString(shared); got != memref.FullIDLen {
+		t.Fatalf("the fixture's shared prefix is %d characters, not the %d a length gate tests", got, memref.FullIDLen)
+	}
+
+	_, err = resolveHistoryRef(ctx, s, shared)
+	if err == nil {
+		t.Fatal("a whole-length ref naming two memories was passed through as a whole id")
+	}
+	// NOT a miss, which is the whole finding: a caller branching on ErrNoMatch
+	// passes a genuine miss through to the read's own sentence and refuses this.
+	if errors.Is(err, memref.ErrNoMatch) {
+		t.Errorf("an ambiguous whole-length ref reports itself as a miss: %v", err)
+	}
+	for _, want := range []string{first, second, "more characters"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not contain %q: %v", want, err)
+		}
+	}
+}
+
+// TestRunHistoryPurgePurgesTheStoredSpellingOfAFoldedRef: ids are matched
+// case-insensitively everywhere a ref is resolved, and a report can print a hex id
+// uppercased whatever the column holds. Every read a purge makes after the
+// whole-id gate compares case-SENSITIVELY — neither `memories.id` nor
+// `memory_history.memory_id` carries COLLATE NOCASE — so a gate that returned a
+// boolean would accept the folded spelling and then erase nothing, reporting
+// "nothing to purge" on the redaction path while the text sat in the database.
+func TestRunHistoryPurgePurgesTheStoredSpellingOfAFoldedRef(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p", "/tmp/p", "p"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// A lower-case id, so the caller has to spell it in another case to reach it.
+	const id = "abcdef0123456789abcdef0123456789"
+	if _, _, _, err := s.ImportMemory(ctx, memory.PortableMemory{
+		ID: id, ProjectID: "p", Category: "fact", Content: "a secret in a memory nobody must read", Source: "mcp",
+	}, memory.ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+
+	if err := purgeHistoryMemory(ctx, s, strings.ToUpper(id)); err != nil {
+		t.Fatalf("a case-folded whole id was refused: %v", err)
+	}
+	if rows, err := s.GetByIDs(ctx, []string{id}); err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	} else if len(rows) != 0 {
+		t.Error("the purge left the live row")
+	}
+	if entries, err := s.MemoryHistory(ctx, id, 0); err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	} else if len(entries) != 0 {
+		t.Errorf("the purge left %d recorded version(s) of a memory the store still names as %s", len(entries), id)
 	}
 }
 

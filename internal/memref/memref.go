@@ -40,6 +40,7 @@ package memref
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -205,7 +206,7 @@ func resolveIn(ids []string, scope, which, ref string) (string, error) {
 		// against "no memory in project p has an id starting with". A separate
 		// "project %s" placeholder would leave a double space in the second case
 		// and read as a hole in the sentence.
-		return "", fmt.Errorf("no memory%s has an id starting with %q (%s)", inProject(scope), ref, which)
+		return "", fmt.Errorf("%w: no memory%s has an id starting with %q (%s)", ErrNoMatch, inProject(scope), ref, which)
 	case 1:
 		return matches[0], nil
 	}
@@ -220,6 +221,21 @@ func resolveIn(ids []string, scope, which, ref string) (string, error) {
 	return "", fmt.Errorf("the %s ref %q is ambiguous%s: %s%s — pass more characters of the id to choose one",
 		which, ref, inProject(scope), strings.Join(shown, ", "), suffix)
 }
+
+// ErrNoMatch is wrapped by the ONE refusal that says the id set holds nothing this
+// ref can mean — every other refusal says the set holds too much (an ambiguity, or
+// two stored spellings the ref reaches neither of). A caller that wants to tell
+// those apart branches on this with errors.Is rather than on the message, and
+// rather than on the ref's LENGTH, which is the mistake that produced this
+// sentinel: a length cannot distinguish "nothing begins with this" from "two ids
+// begin with this", and treating those alike lets one of them through.
+//
+// `ghost history` is the caller that needs it. A ref that matches nothing has one
+// honest answer from a command whose whole job is to report a miss, but a ref that
+// matches two ids is a question with two answers, and swallowing that — on the
+// strength of the ref being long enough to look like a whole id — is how a memory
+// the operator named is reported as never written.
+var ErrNoMatch = errors.New("no memory matches the ref")
 
 // inProject is the prepositional phrase a refusal uses for WHERE it looked, so a
 // caller whose set is not confined to a project is described rather than left to
