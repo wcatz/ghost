@@ -1243,6 +1243,19 @@ A round is also reported when it compresses hard: a corpus of six consolidatable
 
 `expires_at` has exactly one source. A caller cannot state an expiry on a save, so there is no way for a save to schedule the memory it just wrote for deletion, and a NULL expiry is never a prune candidate.
 
+Two readers cannot name a column a migration added, because they open the store
+read-only and cannot migrate it: the session-start loaders, and anything else on
+`memory.OpenReadDB`. `internal/mcpinit` already had that shape for
+`memories.scope` (`scopeColumnExpr`, and the `NULL AS scope` literal that stands in
+for a store below v12), and the tier column takes the same route:
+`retentionColumnExpr` substitutes `NULL AS retention` below v19 and the ORDER BY
+is built from `memory.DecayRankingSQLWithTier(false)`, the same decay expression
+without the tier half. Both halves have to fall back together — a query that
+selected a literal while ordering by the real column would order by nothing — and
+the scanned value is nullable for the same reason, because scanning NULL into a
+string fails EVERY row and that loop's answer to a scan failure is `continue`:
+a plain string there would drop the whole digest on a pre-v19 store, silently.
+
 A tier is a claim about a memory's owner, not part of its text, and nothing that replays text carries one. The portable artifact does not (an imported memory arrives as `project` — consolidatable, never pruned, which is the direction that keeps a memory rather than the one that schedules it); a consolidation's own output is a `project` row, because a tier the model never chose is not a protection; and `ghost reflect --restore` revives a deleted memory as `project`, because neither `memory_snapshots` nor `memory_history` records a tier and there is nothing to restore one from. All three resolve to the durable default, which is the direction that cannot surprise a user by ending a memory's life.
 
 `persistent` is the one tier a default may not take back, and the exemption is asked in two places, not one. At the write: `ReplaceNonManual` (snapshot, replaceable set, concurrent-save set, output delete), `RestoreSnapshot`'s UPDATE, `ResolveCandidates`/`ResolvedCandidates`/`SetResolved`, and `supersede.SelectCandidates` — before the classify call, so a verdict that could only produce the refused edge is never paid for. And at the consequence: `SupersedePenalties` and `DemotionPenalties` both read the tier, because an edge written before the tier was declared would otherwise sink the row on the next search. A protection that survives one pass and is lost in the next is not a protection, and a user cannot be asked to re-save a memory to defend it. `DemotionPenalties`' pin map is therefore a *protection* map (pin or tier) rather than a list of pins.

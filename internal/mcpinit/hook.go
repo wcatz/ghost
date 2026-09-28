@@ -595,6 +595,41 @@ const sessionMemoriesCap = 15
 // column, and they read it through a handle that runs no migration.
 const scopeColumnFloor = 12
 
+// retentionColumnFloor is the schema version that added memories.retention
+// (internal/memory/migrate.go, migrateV19). The session-start loader reads the
+// column, and it reads it through a handle that runs no migration — for the same
+// reason, and with the same consequence, as scopeColumnFloor below.
+const retentionColumnFloor = 19
+
+// retentionColumnExpr is the memories.retention column for a store at or past
+// retentionColumnFloor, and a NULL literal for one below it.
+//
+// Same shape and same reason as scopeColumnExpr: memory.OpenReadDB cannot migrate
+// a store it opens, so naming a column a v18 database does not have fails the
+// whole query, and loadSessionContext reads a failed query as no rows — a digest
+// with no memories and nothing saying why, where the same store rendered its
+// memories a build earlier. Every row in a pre-v19 store carries the default
+// tier, so NULL is the value such a store has by definition, and the Go-side
+// re-scoring below resolves it to `project`, which is what those rows are.
+//
+// The ORDER BY needs the same treatment, which is why the second result is a
+// boolean rather than just a string: memory.DecayRankingSQLWithTier is the decay
+// expression with the tier half dropped, and a query that selected NULL for the
+// column while ordering by it would order by a literal.
+func retentionColumnExpr(db *sql.DB) (expr string, hasTier bool) {
+	v, err := memory.DBUserVersion(db)
+	if err != nil {
+		if warnScopeVersionOnce(err) {
+			fmt.Fprintln(os.Stderr, "ghost: could not read the store's schema version:", err)
+		}
+		return "NULL AS retention", false
+	}
+	if v < retentionColumnFloor {
+		return "NULL AS retention", false
+	}
+	return "retention", true
+}
+
 // scopeColumnExpr is the memories.scope column for a store at or past
 // scopeColumnFloor, and a NULL literal for one below it. The second result says
 // which of the two it is, because a caller that filters on the column cannot name
@@ -783,7 +818,8 @@ type sessionMemory struct {
 	// re-scoring so it applies the same bounded session decay the SQL ordering
 	// applied. The globals loader does not select it: that query ranks on pin,
 	// importance and recency and never consults the decay, so a tier there would
-	// be a field nothing reads.
+	// be a field nothing reads. Empty is never a tier — the loader resolves it,
+	// because the read-only handle may not have been able to select it.
 	Retention string
 	// Scope is the row's machine-readable scope, decoded with
 	// memory.ParseScopeJSON. It is what the renderer labels the line with and
@@ -885,14 +921,16 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	if hasScope && len(injection.SessionScope) > 0 {
 		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", injection.SessionScope)
 	}
-	// retention is selected because DecayRankingSQL -- the ORDER BY below --
-	// reads it: a session-tier row carries a bounded tier decay in that
-	// expression, and a Go re-scoring of the same candidates has to be given the
-	// same value or the two passes disagree about the same corpus.
+	// retention is selected because the ORDER BY below reads it: a session-tier
+	// row carries a bounded tier decay in that expression, and a Go re-scoring of
+	// the same candidates has to be given the same value or the two passes
+	// disagree about the same corpus. On a store that predates the column both
+	// halves fall back together, for the reason retentionColumnExpr gives.
+	retentionColumn, hasRetention := retentionColumnExpr(db)
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, importance, created_at, retention, `+scopeColumn+` FROM memories
+		SELECT id, category, content, pinned, importance, created_at, `+retentionColumn+`, `+scopeColumn+` FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
-		ORDER BY (`+memory.DecayRankingSQL+`) DESC, importance DESC, created_at DESC, id
+		ORDER BY (`+memory.DecayRankingSQLWithTier(hasRetention)+`) DESC, importance DESC, created_at DESC, id
 		LIMIT ?
 	`, projectID, sessionMemoriesCap*3)
 	if err != nil {
@@ -912,10 +950,16 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	}
 	var cands []candidate
 	for rows.Next() {
-		var id, cat, content, createdAt, retention string
+		var id, cat, content, createdAt string
 		var pinnedInt int
 		var importance float64
 		var rawScope []byte
+		// Nullable, because the column may not have been selected at all: on a
+		// store below retentionColumnFloor it is the NULL literal above. Scanning
+		// a NULL into a string fails EVERY row, and this loop's answer to a scan
+		// failure is `continue` — so a plain string here would drop the entire
+		// digest on a pre-v19 store, silently, with no error to find.
+		var retention sql.NullString
 		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt, &retention, &rawScope); err != nil {
 			continue
 		}
@@ -931,10 +975,18 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 			// (which would inflate age and wrongly floor its decay).
 			t = now
 		}
+		tier := retention.String
+		if tier == "" {
+			// The NULL a pre-v19 store selects, resolved to the tier every row in
+			// such a store has by definition — the same normalisation scanMemories
+			// applies, and the value the ORDER BY above was built without a tier
+			// factor, so the two agree.
+			tier = memory.RetentionProject
+		}
 		cands = append(cands, candidate{
 			mem: sessionMemory{
 				ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
-				Retention: retention, ProjectID: projectID, Scope: memory.ParseScopeJSON(rawScope),
+				Retention: tier, ProjectID: projectID, Scope: memory.ParseScopeJSON(rawScope),
 			},
 			importance: importance,
 			createdAt:  t,

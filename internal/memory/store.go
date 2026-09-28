@@ -3848,7 +3848,32 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 // A var, not a const, because the tier half is built from the Go constants that
 // define its floor — see retentionDecayFactorSQL. Every reader interpolates it
 // into its own ORDER BY, so the two spellings cannot disagree.
-var DecayRankingSQL = `
+var DecayRankingSQL = decayRankingSQL(true)
+
+// DecayRankingSQLWithTier is the same expression with or without the tier half,
+// for a reader that may not be able to name memories.retention. The
+// session-start loaders hold a read-only handle that runs no migration
+// (memory.OpenReadDB), so on a store from before schema v19 the column is not
+// there and naming it fails the whole query with SQLite's "no such column" —
+// which both loaders read as no rows, so a user whose first session after the
+// upgrade starts the hook would get a digest with no memories and nothing saying
+// why. That is the same window `scopeColumnExpr` has always covered for
+// memories.scope, and the remedy is the same shape: the expression a reader
+// cannot afford to fail on drops the half it cannot spell.
+//
+// One template, so the category half cannot drift from DecayRankingSQL — a second
+// hand-copied expression is the failure mode DecayFactor's parity test exists to
+// prevent, and this is the same formula by another route.
+func DecayRankingSQLWithTier(hasTier bool) string {
+	return decayRankingSQL(hasTier)
+}
+
+func decayRankingSQL(hasTier bool) string {
+	tier := ""
+	if hasTier {
+		tier = retentionDecayFactorSQL
+	}
+	return `
 	importance
 	* CASE
 		WHEN pinned = 1 THEN 1.0
@@ -3857,8 +3882,9 @@ var DecayRankingSQL = `
 			MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
 		ELSE
 			MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
-	END` + retentionDecayFactorSQL + `
+	END` + tier + `
 `
+}
 
 // GetTopMemories returns the top N memories ranked by composite score
 // with category-aware time decay and pinned exemption.
