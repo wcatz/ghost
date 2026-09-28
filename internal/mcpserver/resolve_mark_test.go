@@ -355,7 +355,6 @@ func TestResolveMarkNamesAnIDNoFlagCanCarry(t *testing.T) {
 // silently, so the tool's default marker has to be the negative one.
 func TestMCPResolveMarkReportNeverClaimsAMarkItDidNotMake(t *testing.T) {
 	srv, store := linkWithdrawServer(t)
-	session := connectedClientNamed(t, srv, "claude-code")
 	// Two rows, and the store is wrapped so the second is declined at write time
 	// exactly as a concurrent pin would decline it.
 	fresh := seedMarkable(t, store, "test-project", "a note the write did stamp")
@@ -365,8 +364,9 @@ func TestMCPResolveMarkReportNeverClaimsAMarkItDidNotMake(t *testing.T) {
 		store:       store,
 		decline:     late,
 	}
-	// The session is reconnected so the handler holds the wrapped store.
-	session = connectedClientNamed(t, srv, "claude-code")
+	// Connected AFTER the swap, because the handler reads s.store at call time and
+	// a session made before it would not be looking at the wrapper at all.
+	session := connectedClientNamed(t, srv, "claude-code")
 	out := resultText(callTool(t, session, "ghost_resolve_mark", map[string]any{
 		"project_id": "test-project",
 		"memory_ids": []string{fresh, late},
