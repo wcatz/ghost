@@ -1174,12 +1174,13 @@ func TestRunCodex_TOMLAppendBacksUpThePreGhostFile(t *testing.T) {
 	}
 }
 
-// TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig: a 0-byte config.toml has no keys
-// to lose, and copying it would leave a 0-byte .bak that — the backup being
-// written O_EXCL and never rolled forward — would stand forever and suppress the
-// real copy a later repair of a file the user has since filled in would
-// otherwise take. Restoring that .bak would wipe the keys, which is strictly
-// worse than never having written it.
+// TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig: a 0-byte config.toml is the one
+// case where a .bak has nothing worth keeping, and because the backup is written
+// O_EXCL and never rolled forward, a 0-byte one would stand forever and suppress
+// the real pre-ghost copy a later repair of a file the user has since filled in
+// would otherwise take. Restoring that would wipe their keys, which is worse than
+// never having written it. A file holding only comments is still backed up — see
+// the guard in installCodexMCP — because its bytes are the user's either way.
 func TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig(t *testing.T) {
 	home, _ := setupCodexTestEnv(t)
 	path := codexConfigToml(home)
@@ -1195,7 +1196,7 @@ func TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig(t *testing.T) {
 		t.Fatalf("RunCodex: %v", err)
 	}
 	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
-		t.Errorf("an empty config.toml produced a .bak (Lstat err = %v), which would block every later backup", err)
+		t.Errorf("an empty config.toml produced a .bak (Stat err = %v), which would block every later backup", err)
 	}
 	if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), "[mcp_servers.ghost]") {
 		t.Errorf("the registration did not happen (err %v):\n%q", err, b)

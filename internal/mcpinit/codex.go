@@ -1225,12 +1225,18 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	//
 	// O_EXCL and never rolled forward, for the reason writeBackupOnce gives: a
 	// later run would otherwise overwrite the only pristine copy with Ghost's own
-	// output. Which is also why an EMPTY file is skipped rather than copied: a
-	// 0-byte config.toml is a file with no keys to lose, and since the backup is
-	// never rolled forward, a 0-byte .bak would stand forever and suppress the
-	// real copy a later repair of a file the user has since filled in would
-	// otherwise take — a "way back" that would wipe those keys. A file that did
-	// not exist before this run returned above and never reaches here.
+	// output. Which is why a 0-byte file is skipped rather than copied: a
+	// 0-byte config.toml is the one case where a .bak has nothing worth keeping,
+	// and since the backup is never rolled forward, that empty one would stand
+	// forever and suppress the real copy a later repair of a file the user has
+	// since filled in would otherwise take — a "way back" that wipes their keys.
+	//
+	// 0-BYTE, deliberately, and not "defines no keys". A file holding only
+	// comments or whitespace is also a file with no keys to lose, but its bytes
+	// are still the user's, and skipping those would need a scan of every file on
+	// every init to work out. Restoring a comments-only .bak costs the user
+	// comments, not data, which is a different trade from the one above. A file
+	// that did not exist before this run returned earlier and never gets here.
 	if len(existing) > 0 {
 		if err := writeBackupOnce(path+".bak", existing); err != nil {
 			return false, err
