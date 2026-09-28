@@ -9,6 +9,12 @@ import (
 // memory can be re-inserted verbatim by RetainGuardedDrops without losing its
 // weight or labels.
 type DroppedGuarded struct {
+	// ID is the input memory's own id. The guard is asked a question about
+	// memories and answers with their text, but a reader of a dry run needs to
+	// know WHICH row the verdict was about: the operation that named the id is
+	// on its own line in the report, and the verdict has to be annotatable on
+	// that line (#684).
+	ID         string
 	Category   string
 	Content    string
 	Importance float32
@@ -141,6 +147,7 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 			continue
 		}
 		drops = append(drops, DroppedGuarded{
+			ID:         in.ID,
 			Category:   in.Category,
 			Content:    in.Content,
 			Importance: in.Importance,

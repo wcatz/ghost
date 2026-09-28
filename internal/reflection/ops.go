@@ -321,6 +321,11 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 			m, _ := resolve(op.ids[0])
 			result.Memories = append(result.Memories, verbatimMemory(m))
 			emitted[memIDKey(op.ids[0])] = m.Content
+			// The one thing that separates a keep from the pass-through below, and
+			// the report needs the difference: both emit the stored row, so a
+			// reader of the result cannot otherwise tell a row the model looked
+			// at from one it never mentioned (#684).
+			result.Kept = append(result.Kept, op.ids[0])
 
 		case opMerge, opRewrite:
 			sources := make([]memory.Memory, 0, len(op.ids))
@@ -342,6 +347,17 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 					result.Memories = append(result.Memories, verbatimMemory(m))
 					emitted[memIDKey(m.ID)] = m.Content
 				}
+				// Recorded, not only logged. The sources being in the result is
+				// what the refusal means, and on its own it reads as a pass-through:
+				// nothing in the result said the model had asked to combine these
+				// rows, so a report accounting for every input id could not
+				// distinguish this from a memory the model ignored.
+				result.Refusals = append(result.Refusals, Refusal{
+					Kind:        kind,
+					IDs:         op.ids,
+					Text:        op.text,
+					Identifiers: unknown,
+				})
 				break
 			}
 			result.Memories = append(result.Memories, mergedMemory(sources, op.text))
@@ -361,6 +377,19 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 
 		case opDrop:
 			dropped = append(dropped, op)
+			// Every drop is recorded, the obsolete ones included. An obsolete drop
+			// names no successor, so nothing else in the result mentions the id it
+			// disposed of — and an input id nothing accounts for is the hole this
+			// record closes: the report could not show a disposal the model had
+			// asked for. The reason travels with it for the same reason, since
+			// "obsolete" and "superseded by" are different claims, and the named
+			// successor is its own field so a reader can resolve it to the stored
+			// id rather than parsing it out of a sentence.
+			drop := Drop{ID: op.ids[0], Reason: "obsolete"}
+			if !op.obsolete {
+				drop.Reason, drop.Successor = "superseded by", op.target
+			}
+			result.Drops = append(result.Drops, drop)
 		}
 	}
 	for _, op := range dropped {
