@@ -212,7 +212,18 @@ func TestLiveCodexDeclaresTheNoToolFeatureKeys(t *testing.T) {
 // `features list` is read-only and makes no LLM call, so provoking one costs a
 // process and nothing else.
 //
-// Three things make the answer trustworthy rather than merely confident, and
+// The verdict is drawn from a run carrying EXACTLY the flags Ghost passes, and
+// that is the whole point of the shape. The obvious way to ask "is an unknown key
+// an error?" is to pass --strict-config, since that is codex's strict reading —
+// and it is the wrong question here, because codexInvocationArgs never passes
+// it. A codex that rejects unknown keys ONLY under --strict-config, which is
+// exactly the premise codexInvocationArgs states, would then be reported as
+// fail-CLOSED and the probe would fail the test and order three documentation
+// edits, on the strength of a configuration Ghost never uses. The strict
+// behaviour is therefore a SECOND, separately-reported probe whose failure
+// cannot condemn the first.
+//
+// Four things make the answer trustworthy rather than merely confident, and
 // each exists because the naive version got it wrong:
 //
 //   - Its OWN deadline. The listing probe above has already spent the budget
@@ -221,10 +232,12 @@ func TestLiveCodexDeclaresTheNoToolFeatureKeys(t *testing.T) {
 //     and that non-nil error is indistinguishable from codex rejecting the key.
 //     A cold codex against a fresh CODEX_HOME is exactly the slow first run this
 //     file warns about, so this would be a reproducible false failure.
-//   - A BASELINE. `features list --strict-config` with no unknown key must
-//     succeed first. Only a baseline success followed by a failure is evidence
-//     about the unknown key; a codex that rejects the flag outright, or fails a
-//     migration or an auth check, must not be reported as fail-CLOSED.
+//   - Ghost's OWN flags. No --strict-config, no --ignore-user-config, no
+//     --ephemeral: the run answers for the configuration a lifecycle call gets.
+//   - A BASELINE. Plain `features list` must succeed first. Only a baseline
+//     success followed by a failure is evidence about the unknown key; a codex
+//     that fails a migration or an auth check must not be reported as
+//     fail-CLOSED.
 //   - The child's stderr. `exit status 2` alone cannot tell a rejected key from
 //     an unrecognised argument or a migration failure, so a confident wrong
 //     conclusion is worse than none.
@@ -232,28 +245,42 @@ func probeCodexUnknownFeatureKey(t *testing.T, bin string) {
 	t.Helper()
 	const unknownKey = "ghost_definitely_not_a_codex_feature"
 
-	baselineOut, baselineErr := runCodexFeatureProbe(t, bin, "--strict-config")
-	if baselineErr != "" {
-		// Not a verdict on the unknown key. Saying so is the whole point: the
-		// alternative is reporting every cause as "codex REJECTS the key".
-		t.Skipf("baseline `codex features list --strict-config` did not succeed, so this codex cannot settle whether an unrecognised -c key is ignored: %s", baselineErr)
+	if _, err := runCodexFeatureProbe(t, bin); err != "" {
+		t.Skipf("baseline `codex features list` did not succeed, so this codex cannot settle whether an unrecognised -c key is ignored: %s", err)
 	}
-	_ = baselineOut
 
-	_, unknownErr := runCodexFeatureProbe(t, bin, "--strict-config", "-c", "features."+unknownKey+"=false")
+	_, unknownErr := runCodexFeatureProbe(t, bin, "-c", "features."+unknownKey+"=false")
 	if unknownErr == "" {
-		t.Logf("codex ACCEPTS an unrecognised -c key (%s): it is silently ignored, "+
-			"which is the fail-OPEN behaviour codexInvocationArgs describes and the "+
-			"reason TestCodexFeatureKeysAreDeclaredNames checks against a recorded "+
-			"transcript. This probe is the sole detector of an upstream rename, and "+
+		t.Logf("codex ACCEPTS an unrecognised -c key (%s) under the flags Ghost passes, "+
+			"so it is silently ignored: that is the fail-OPEN behaviour codexInvocationArgs "+
+			"describes, and the reason TestCodexFeatureKeysAreDeclaredNames checks against a "+
+			"recorded transcript. This probe is the sole detector of an upstream rename, and "+
 			"it is opt-in, so CI does not run it.", unknownKey)
+	} else {
+		t.Errorf("codex REJECTS an unrecognised -c key (%s) after a passing baseline, with "+
+			"the flags Ghost actually passes, so it fails CLOSED: %s. That makes the \"silently "+
+			"ignored / fail OPEN\" wording wrong in codexInvocationArgs, "+
+			"TestCodexFeatureKeysAreDeclaredNames and the CLAUDE.md internal/ai bullet, and "+
+			"every one of those sites must be corrected to match.", unknownKey, unknownErr)
+	}
+
+	// Reported, never used for the verdict above: a codex may reject unknown keys
+	// under --strict-config while still ignoring them in every call Ghost makes.
+	// That is the current expectation, so a pass here is unremarkable and a
+	// failure is information rather than a defect.
+	if _, strictBaselineErr := runCodexFeatureProbe(t, bin, "--strict-config"); strictBaselineErr != "" {
+		t.Logf("this codex does not accept `features list --strict-config` (%s), so the strict "+
+			"reading of an unknown key could not be compared. The verdict above does not depend "+
+			"on it: it is drawn from a run without the flag, which is what Ghost sends.", strictBaselineErr)
 		return
 	}
-	t.Errorf("codex REJECTS an unrecognised -c key (%s) after a passing baseline, "+
-		"so it fails CLOSED: %s. That makes the \"silently ignored / fail OPEN\" "+
-		"wording wrong in codexInvocationArgs, TestCodexFeatureKeysAreDeclaredNames "+
-		"and the CLAUDE.md internal/ai bullet, and every one of those sites must be "+
-		"corrected to match.", unknownKey, unknownErr)
+	if _, err := runCodexFeatureProbe(t, bin, "--strict-config", "-c", "features."+unknownKey+"=false"); err != "" {
+		t.Logf("under --strict-config this codex REJECTS an unrecognised -c key: %s. Ghost never "+
+			"passes --strict-config, so this does not change the verdict above; it only means the "+
+			"fail-OPEN behaviour is specific to the configuration a lifecycle call uses.", err)
+		return
+	}
+	t.Logf("under --strict-config this codex ALSO accepts an unrecognised -c key (%s).", unknownKey)
 }
 
 // runCodexFeatureProbe runs `codex features list` with its own timeout and
