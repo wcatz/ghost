@@ -91,12 +91,16 @@ feature keys, so `features list` says nothing about them and they are never
 filtered.
 
 **The codex list is filtered against the installed binary and NEVER refuses.**
-`codexFeaturesFor` probes once per binary identity with `codex features list` —
-the same `sync.Map`-on-path/size/mtime pattern as claude's capability probe, so an
-in-place upgrade is re-probed rather than served a stale answer, and a lifecycle
-spawning hundreds of children does not pay for hundreds of probes. A failed probe
-is NOT cached, because caching "declares nothing" after one timeout would strip
-the policy for the life of the process.
+`codexFeaturesFor` probes with `codex features list`, keyed on path/size/mtime by
+a `sync.Map` exactly as claude's capability probe is, and caches the result. The
+negative verdict is cached too, for `codexFeatureRetry` (5 minutes), and that
+asymmetry is the point rather than an oversight: an unanswering codex is the
+OLD-codex install this design exists to support, so probing it per call would add
+a process to each of a lifecycle's hundreds of calls — the doubling the cache
+exists to prevent, for the whole run. Caching the negative for the life of the
+process is the opposite failure, because a codex upgraded in place under a
+long-lived MCP server would never be noticed. A positive answer does not expire at
+all.
 
 The filter matters because codex **silently IGNORES** a `-c` key it does not know
 (the fail-OPEN direction): `-c` overrides are applied onto the config tree without
@@ -138,7 +142,14 @@ disabling flag or key (its registry entry is gated on the model catalog, and
 `apply_patch_freeform` is marked Removed), so the read-only sandbox is its boundary
 and a write attempt is refused rather than the tool withheld; the same holds for
 codex's skills-extension read/list tools, which are off unless a skill exists and
-the child's working directory is a neutral scratch dir holding none. And whether
-goose's `chat` mode suppresses extensions in a given build is a property of the
-binary that `goose info -v` does not report, so it is documented as unverified
-rather than claimed as tested.
+the child's working directory is a neutral scratch dir holding none.
+
+On the goose side two questions are open, and they are different in kind. Whether
+`chat` mode SUPPRESSES EXTENSIONS in a given build is a property of the binary
+that no configuration-printing command reports, so it is documented as unverified
+rather than claimed as tested. Whether `chat` mode is COMPATIBLE WITH A HEADLESS
+`goose run` is the question that decides whether this policy breaks the goose
+backend at all, and `TestLiveGooseRunsATurnInChatMode` runs the production argv
+under the production environment to answer it — behind `GHOST_LIVE_TESTS=1`,
+because a real turn costs a model call. So the mode is confirmed end-to-end only
+where goose is installed and a provider is configured, and not in CI.

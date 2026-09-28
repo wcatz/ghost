@@ -176,8 +176,8 @@ var codexNoToolFeatureKeys = []string{
 	"multi_agent",
 }
 
-// codexFeatureSupport is what the probe learned about one codex binary: the
-// keys it declares, and whether the probe actually answered.
+// codexFeatureSupport is what the probe learned about one codex binary: the keys
+// it declares, and whether the probe actually answered.
 //
 // `probed` is separate from an empty `declared` because the two cases are
 // different. An empty set means codex ran `features list` and declares none of
@@ -187,7 +187,27 @@ var codexNoToolFeatureKeys = []string{
 type codexFeatureSupport struct {
 	declared map[string]bool
 	probed   bool
+	// at is when the probe ran, for the ONE thing the cache is not keyed on: a
+	// negative verdict is re-tried after codexFeatureRetry so a codex that stops
+	// answering (an in-place upgrade, a PATH that briefly went missing) recovers
+	// without a restart.
+	at time.Time
 }
+
+// codexFeatureRetry is how long an unanswerable probe is trusted before the next
+// call re-asks.
+//
+// The negative verdict has to be cached at all: a codex whose `features list`
+// does not answer is precisely the OLD codex this design exists to support, so
+// not caching it would give that install an extra process on every one of the
+// hundreds of calls a lifecycle makes — the doubling the cache exists to avoid,
+// for the whole run rather than for a window. But caching it for the life of the
+// process is the other failure: a codex upgraded in place, where the parent
+// Ghost process is long-lived, would keep passing keys the new binary does not
+// know and never notice. A short re-ask interval is the compromise, and it is
+// deliberately much longer than a call (a lifecycle's calls are seconds apart)
+// and much shorter than a process (the MCP server outlives many upgrades).
+const codexFeatureRetry = 5 * time.Minute
 
 // codexBinaryID identifies a codex install by identity rather than by name, so
 // an in-place upgrade is re-probed instead of reusing a stale answer, and a
@@ -222,11 +242,15 @@ var codexFeatureCache sync.Map // codexBinaryID -> codexFeatureSupport
 // its own probe, so a long-lived Ghost process (the MCP server) re-probes a codex
 // upgraded in place rather than reusing a stale answer.
 //
-// A FAILED PROBE IS NOT CACHED. Caching "this binary declares nothing" after one
-// timeout would strip the policy for the life of the process, so a codex that is
-// mid-upgrade or slow on a cold first run is simply re-asked. The cost is one
-// extra process per call in that window, which is the right trade: the
-// alternative is a permanently weaker policy that nothing reports.
+// THE NEGATIVE VERDICT IS CACHED TOO, for codexFeatureRetry, and that is the
+// subtlety. A codex whose `features list` does not answer is precisely the OLD
+// codex this design supports, so leaving it uncached would cost that install an
+// extra process on every one of the hundreds of calls a lifecycle makes — the
+// doubling the cache exists to avoid, for the whole run. Caching it for the life
+// of the process is the opposite failure: a codex upgraded in place would keep
+// getting keys the new binary does not know, and the parent MCP server would
+// never notice. So a negative is stored like any other answer and re-asked after
+// the interval, which is far longer than a call and far shorter than a process.
 //
 // codexFeaturesFor probes the installed codex once per binary identity for the
 // feature keys it declares, using the same `codex features list` a person would
@@ -248,7 +272,12 @@ func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
 	}
 	id := codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
 	if cached, ok := codexFeatureCache.Load(id); ok {
-		return cached.(codexFeatureSupport)
+		if support := cached.(codexFeatureSupport); support.probed || time.Since(support.at) < codexFeatureRetry {
+			return support
+		}
+		// A negative verdict older than the interval. Re-probe rather than keep
+		// it: this is where a codex upgraded in place, or one whose PATH entry
+		// went missing and came back, is noticed by a long-lived parent.
 	}
 
 	// Bounded like the claude capability probe: an unanswering probe must not
@@ -257,21 +286,37 @@ func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
 	defer cancel()
 	probe, release, _ := harnessCommand(probeCtx, path, []string{"features", "list"}, os.Environ(), harnessCodex)
 	defer release()
-	out, err := probe.Output()
-	if err != nil {
-		// Not cached. A codex that is mid-upgrade, or a probe that timed out on
-		// a cold first run, should be re-asked on the next call rather than
-		// remembered as "declares nothing" for the life of the process.
-		return codexFeatureSupport{}
+	// `probed` means THE PROBE ANSWERED, not merely that it ran. That distinction
+	// is the whole reason the field exists, and the two "no" cases must not
+	// collapse into one:
+	//
+	//   - probe failed, or printed something that is not a feature table: we
+	//     know NOTHING about this codex. `declared` stays nil, nothing is
+	//     filtered, and the warning says "unverified" rather than accusing the
+	//     codex of lacking features it was never asked about.
+	//   - a table with keys we recognise but none of ours: codex told us it has
+	//     none of them, which IS an answer. `declared` is an empty set, the
+	//     policy is stripped to nothing, and the warning says so plainly.
+	support := codexFeatureSupport{at: time.Now()}
+	if out, err := probe.Output(); err == nil {
+		declared := parseCodexFeaturesList(string(out))
+		if len(declared) == 0 {
+			// Output that parses to no key at all is not a feature table, so it is
+			// treated as no answer: an empty set would strip the whole policy on a
+			// codex that merely printed something unexpected.
+			support.probed = false
+		} else {
+			// A key set is an answer, even when it holds none of ours — that is
+			// the case where the policy really is unavailable and the warning
+			// says so.
+			support.probed = true
+			support.declared = declared
+		}
 	}
-	declared := parseCodexFeaturesList(string(out))
-	if len(declared) == 0 {
-		// Output that is not a feature table. Treating it as an empty answer
-		// would strip the whole policy on a codex that merely printed something
-		// unexpected, so it is treated as no answer at all.
-		return codexFeatureSupport{}
-	}
-	support := codexFeatureSupport{declared: declared, probed: true}
+	// Cached whether it answered or not: an unanswering codex is the old-codex
+	// case this whole design supports, and re-probing it on every call would
+	// double a lifecycle's process count for the entire run. Only the
+	// unanswered case expires (see codexFeatureRetry).
 	codexFeatureCache.Store(id, support)
 	return support
 }

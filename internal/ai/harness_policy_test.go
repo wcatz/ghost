@@ -15,6 +15,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func fakeHarnessPolicyBinary(t *testing.T, name, script string) string {
@@ -364,6 +365,91 @@ func TestCodexProbeRunsOncePerBinaryIdentity(t *testing.T) {
 	}
 	if n := probeCallLog(t); n != 1 {
 		t.Errorf("probe ran %d times over 5 calls on one binary identity, want 1", n)
+	}
+}
+
+// TestCodexProbeFailureIsCachedButExpires is the cost half of the FAILING case,
+// and the two halves pull in opposite directions.
+//
+// A codex whose `features list` does not answer is the old-codex install this
+// design exists to support, so probing it on every call would add a process to
+// each of the hundreds of calls a lifecycle makes — the doubling the cache
+// exists to prevent, for the whole run rather than for a window. So the negative
+// is cached, and the test moves the cached entry's timestamp back instead of
+// sleeping through the interval, so the expiry is asserted in milliseconds.
+//
+// Caching it for the life of the process is the opposite failure: an in-place
+// upgrade under a long-lived MCP server would never be noticed. So the negative
+// expires, and a call after the interval re-probes. The test moves the cached
+// entry's timestamp rather than sleeping through the interval, so the expiry is
+// asserted without a five-minute test.
+func TestCodexProbeFailureIsCachedButExpires(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	bin := codexFeaturesFake(t, "")
+
+	for range 4 {
+		if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+			t.Fatalf("Reflect: %v", err)
+		}
+	}
+	if n := probeCallLog(t); n != 1 {
+		t.Errorf("an unanswering probe ran %d times over 4 calls, want 1 — that is the per-call probe the cache exists to avoid", n)
+	}
+
+	// Age every cached entry past the retry interval, which is what the expiry
+	// check reads. The timestamp is reached through the real Store path rather
+	// than by poking the struct, so this test still fails if the field the
+	// expiry compares against is ever dropped.
+	aged := ageCodexFeatureCache(t, -codexFeatureRetry-time.Minute)
+	if aged == 0 {
+		t.Fatal("no cache entry to age, so the expiry path was never reached")
+	}
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect after expiry: %v", err)
+	}
+	if n := probeCallLog(t); n != 2 {
+		t.Errorf("probe ran %d times after the cached negative expired, want 2 (one before, one re-ask): an in-place upgrade must still be noticed", n)
+	}
+}
+
+// ageCodexFeatureCache shifts every cached probe result's timestamp by delta and
+// returns how many entries it touched.
+func ageCodexFeatureCache(t *testing.T, delta time.Duration) int {
+	t.Helper()
+	aged := 0
+	codexFeatureCache.Range(func(key, value any) bool {
+		support := value.(codexFeatureSupport)
+		support.at = support.at.Add(delta)
+		codexFeatureCache.Store(key, support)
+		aged++
+		return true
+	})
+	return aged
+}
+
+// TestCodexProbeSuccessIsCachedIndefinitely: the positive answer has no expiry,
+// because a key set that was right an hour ago is still right, and re-probing it
+// per call is the cost the cache exists to avoid. The asymmetry with the negative
+// case above is deliberate.
+func TestCodexProbeSuccessIsCachedIndefinitely(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	bin := codexFeaturesFake(t, "shell_tool stable true\nunified_exec stable true\nview_image stable true\napps stable true\nplugins stable true\ntool_suggest stable true\nskill_mcp_dependency_install stable true\nremote_plugin stable true\nhooks stable true\nmulti_agent stable true\n")
+
+	for range 2 {
+		if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+			t.Fatalf("Reflect: %v", err)
+		}
+	}
+	ageCodexFeatureCache(t, -codexFeatureRetry-time.Minute)
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect after ageing: %v", err)
+	}
+	if n := probeCallLog(t); n != 1 {
+		t.Errorf("a successful probe ran %d times, want 1: a positive answer is not subject to the retry interval", n)
 	}
 }
 

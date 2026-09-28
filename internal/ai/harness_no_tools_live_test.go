@@ -47,6 +47,89 @@ import (
 // in the dump instead of failing here with a diagnosis.
 const noToolsLiveProbeTimeout = 30 * time.Second
 
+// TestLiveGooseRunsATurnInChatMode is the half TestLiveGooseAcceptsTheNoToolsMode
+// cannot settle, and it is the one that decides whether #552 breaks the goose
+// backend at all.
+//
+// `info -v` reads and prints configuration, so it proves the string is accepted
+// and outranks config.yaml. It does NOT prove that `goose run` still completes a
+// turn once the session mode is chat — and GOOSE_MODE changes the harness's
+// OPERATING MODE rather than adding a flag, so a goose that refuses or diverts a
+// headless run under chat mode would fail every reflect, resolve and supersede
+// call with nothing in the tree having gone red first.
+//
+// So this runs the real `goose run` with the exact argv GooseClient builds, under
+// the exact environment GooseClient.subprocessEnv builds.
+//
+// What it asserts and what it cannot: the prompt is a fixed string with no memory
+// content, and a successful turn therefore means the mode is COMPATIBLE with a
+// headless run — not that the answer is correct, which is not this test's claim.
+// It spends a model call, which is why it is behind the same GHOST_LIVE_TESTS=1
+// gate as the rest of this file rather than running in CI. It is skipped without
+// a configured provider, because a goose with no credentials fails on
+// authentication and that would read as a mode failure.
+func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
+	if !LiveTestsEnabled() {
+		t.Skip("live CLI test makes a real goose model call; set GHOST_LIVE_TESTS=1 to run")
+	}
+	bin := "goose"
+	if _, err := exec.LookPath(bin); err != nil {
+		t.Skipf("goose not resolvable at %q (cli.goose_binary or PATH): %v", bin, err)
+	}
+
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	// A decoy config in the permissive mode, so a turn that completes proves the
+	// child's GOOSE_MODE=chat is what governed it and not an inherited "auto".
+	configRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(configRoot, "goose"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(configRoot, "goose", "config.yaml"),
+		[]byte("GOOSE_MODE: auto\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+
+	// gooseInvocationArgs is the production argv, read here rather than
+	// reconstructed, so a change to the policy is exercised rather than
+	// shadowed by a copy that can drift from it.
+	args := gooseInvocationArgs()
+	ctx, cancel := context.WithTimeout(context.Background(), gooseLiveTurnTimeout)
+	defer cancel()
+	cmd, cleanup, err := (&GooseClient{binary: bin}).subprocessEnv(ctx, args)
+	if err != nil {
+		t.Fatalf("subprocessEnv: %v", err)
+	}
+	defer cleanup()
+	// The smallest prompt that is still a turn, and carries no memory content.
+	cmd.Stdin = strings.NewReader("Reply with the single word OK and nothing else.")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatalf("goose run in chat mode: timed out after %s. Chat mode may have diverted a headless run rather than answering it.", gooseLiveTurnTimeout)
+		}
+		t.Fatalf("goose run in chat mode: %v: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
+	}
+	if strings.TrimSpace(stdout.String()) == "" {
+		t.Fatalf("goose run in chat mode exited 0 with no output:\n%s", harnessFailureOutput(stdout.String(), stderr.String()))
+	}
+}
+
+// gooseLiveTurnTimeout bounds the live turn. Longer than a probe because this one
+// really does call a model, and the point is to let a slow provider answer rather
+// than to assert anything about latency.
+const gooseLiveTurnTimeout = 2 * time.Minute
+
 // TestLiveGooseAcceptsTheNoToolsMode runs the real `goose info -v` under the
 // exact environment GooseClient.subprocessEnv builds (not a hand-rolled one) and
 // reads back the mode goose resolved for itself.
