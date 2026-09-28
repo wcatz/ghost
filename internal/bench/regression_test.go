@@ -18,8 +18,9 @@ func byCondition(results []Result) map[string]Result {
 func TestBenchRegressionFloors(t *testing.T) {
 	// Parallel: this test seeds and searches the immutable headline corpus and only
 	// reads it, and at 60-130s under -race it is one of the five that decide whether
-	// this package fits Go's 600s per-binary default. The corpus grew by four rows in
-	// #677 and took it over. There is no shared state to order against — the
+	// this package fits Go's 600s per-binary default — a budget it had already
+	// spent down to ~10s when #677 added a sixth corpus-wide test, not a budget that
+	// rows cost. There is no shared state to order against — the
 	// package-level values are embedded bytes and one constant floor slice, and no
 	// bench test sets an env var or the default logger — so the only thing running
 	// these together buys is the overlap. Measured, in the commit that added this.

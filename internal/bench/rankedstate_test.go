@@ -275,8 +275,10 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 	}
 
 	// The headline corpus is deliberately NOT re-seeded and re-measured here.
-	// It is 551 memories with 768-dim vectors, six other tests already load it,
-	// and a seventh load put this package over CI's 10-minute timeout. The
+	// It is 551 memories with 768-dim vectors, and this package's CI budget for
+	// loading it is spent: a corpus-wide test costs ~10s and the package was within
+	// ~10s of Go's 600s per-binary default when #677 added a sixth one, which is what
+	// failed `build-and-test` at 600.038s (see the budget note in sweep_test.go). The
 	// comparison's validity is asserted where the corpus already is, and more
 	// directly: TestDecayDoesNotPerturbGradedBench measures that decay does not
 	// move it and asserts that no memory in it declares an age or a supersedes

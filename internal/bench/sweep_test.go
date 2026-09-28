@@ -78,8 +78,9 @@ func tinySweepFixture(t *testing.T) (*memory.Store, []Query) {
 func TestSweep(t *testing.T) {
 	// Parallel: this test seeds and searches the immutable headline corpus and only
 	// reads it, and at 60-130s under -race it is one of the five that decide whether
-	// this package fits Go's 600s per-binary default. The corpus grew by four rows in
-	// #677 and took it over. There is no shared state to order against — the
+	// this package fits Go's 600s per-binary default — a budget it had already
+	// spent down to ~10s when #677 added a sixth corpus-wide test, not a budget that
+	// rows cost. There is no shared state to order against — the
 	// package-level values are embedded bytes and one constant floor slice, and no
 	// bench test sets an env var or the default logger — so the only thing running
 	// these together buys is the overlap. Measured, in the commit that added this.
@@ -166,15 +167,19 @@ func TestSweepGrid(t *testing.T) {
 // `go test -race ./internal/bench -run '^Test[^L]' -count=1` on the laptop:
 // 188s, 187s, 187s over three runs at this commit, against Go's 600s
 // per-binary default. That is AFTER the five corpus-wide tests were made
-// concurrent, and the number that is not machine-dependent is CI's: before
-// that, #677's four extra rows took this package's test binary past the
-// ceiling and `build-and-test` failed at 600.038s; after it, the same job
-// passes in 7m43s-10m58s. So the headroom is roughly 400s of a LOCAL figure
-// and much less of CI's — quote CI, not the laptop, if you are about to decide
-// whether there is room. A seventh full seed of the 551-memory corpus is about
-// 9s without -race, and the four tests that would join the concurrent set each
-// cost 60-130s, so the honest read is that the ceiling is a shared budget and
-// this package is spending it. Nothing here is corpus-dependent: which point is the
+// concurrent, and the number that is not machine-dependent is CI's.
+//
+// What actually tipped it, since the two obvious causes are both wrong: ONE
+// corpus load costs ~10s under -race (9.8s and 13.0s here, 10.7s and 12.0s on
+// origin/main, so #677's per-row validity and provenance writes are free), and
+// four extra rows on 551 is 0.7% of a load. This package was within about ten
+// seconds of the ceiling — CI's job passed at 7m08s — and #677 added one more
+// corpus-wide test, `TestBuiltinDatasetCarriesValidityIntoRetrieval`, a full
+// load plus a Candidates read, 9.14s here. Nine seconds of test against ten
+// seconds of headroom is what failed `build-and-test` at 600.038s. So the fix
+// was to overlap the corpus-wide tests, not to remove any, and the budget to
+// watch is the CI one: a single new corpus-wide test is ~10s of it. Nothing here
+// is corpus-dependent: which point is the
 // reference, that the interval is the one recomputed from the same two Results,
 // that it reaches the report. A four-memory corpus pins all of it. The
 // corpus-scale half of the claim is held elsewhere and for free — TestSweepGrid
