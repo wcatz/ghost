@@ -382,38 +382,41 @@ func TestCodexProbeFollowerDoesNotInheritALeaderCancellation(t *testing.T) {
 	}
 }
 
-// TestProbeCodexFeaturesCachesNothingUnderADeadContext: the store rule itself,
-// checked on the function that owns it, because the whole of it is one
-// condition and the condition is what a later edit would drop.
+// TestProbeCodexFeaturesStoresNothingAndTheFlightStoresItsVerdict: the store is
+// single-sited, and this is the test that says so.
 //
-// A probe that hit its OWN 10s cap knows nothing about the codex and must be
-// remembered anyway — that is the negative this design exists to cache. A probe
-// killed by its caller's cancellation knows nothing either, but for a different
-// reason, and caching it would be a statement about the CALLER's connection
-// rather than about the binary, lasting codexFeatureRetry. The test asserts both
-// halves from the same fake, because the difference between them is the whole
-// content of the rule: the same binary, the same silence, two opposite answers.
-func TestProbeCodexFeaturesCachesNothingUnderADeadContext(t *testing.T) {
+// The store moved out of probeCodexFeatures and into the flight, because the
+// decision needs BOTH facts at once — whether an answer is worth keeping, and
+// whether the caller that produced it was still alive — and a check-then-act
+// split across two functions disagrees with itself in the window between the
+// two. A second store inside the probe would put back the exact negative the move
+// removed, and no other test would notice: every caller reaches its verdict
+// through the flight, which stores a verdict of its own.
+//
+// The first assertion is on the probe alone, so it is synchronous and cannot race
+// the flight goroutine — which is the other reason it is here rather than folded
+// into the cancelled-leader test, where the write is asynchronous by nature. The
+// cancelled leader's end-to-end shape is TestCodexProbeCancelledLeaderLeavesNoCachedNegative,
+// and the converse half of the retention rule (a real unanswering codex IS still
+// cached) is TestCodexProbeFailureIsCachedButExpires.
+func TestProbeCodexFeaturesStoresNothingAndTheFlightStoresItsVerdict(t *testing.T) {
 	resetCodexFeatureProbe(t)
-	bin, _ := sleepingCodexFake(t)
-	path := codexIdentityFor(t, bin).path
+	setHarnessPolicyParentEnv(t)
+	bin := codexFeaturesFake(t, allCodexFeatureRows)
+	id := codexIdentityFor(t, bin)
 
-	deadCtx, cancelDead := context.WithCancel(context.Background())
-	cancelDead()
-	probeCodexFeatures(deadCtx, path, codexIdentityFor(t, bin))
-	if cached, ok := codexCachedSupport(codexIdentityFor(t, bin)); ok {
-		t.Errorf("a probe under a dead context cached %+v, want nothing stored", cached)
+	if support := probeCodexFeatures(context.Background(), id.path, id); !support.probed {
+		t.Fatalf("probe got %+v, want the fake's answer", support)
+	}
+	if cached, ok := codexCachedSupport(id); ok {
+		t.Fatalf("probeCodexFeatures cached %+v itself; the store belongs to the flight, which is the only place that knows whether the caller was alive", cached)
 	}
 
-	// The other half, and the one that would be broken by a fix that simply
-	// stopped caching negatives: a probe with a live context still caches, and
-	// still caches the NEGATIVE, because an unanswering codex is the install
-	// this design supports.
-	if support := probeCodexFeatures(context.Background(), path, codexIdentityFor(t, bin)); !support.probed {
-		t.Errorf("live probe got %+v, want an answered verdict", support)
+	if support := codexFeaturesFor(context.Background(), bin); !support.probed {
+		t.Errorf("codexFeaturesFor got %+v, want the fake's answer", support)
 	}
-	if cached, ok := codexCachedSupport(codexIdentityFor(t, bin)); !ok || !cached.probed {
-		t.Errorf("cache holds %+v, want the live probe's positive verdict", cached)
+	if cached, ok := codexCachedSupport(id); !ok || !cached.probed {
+		t.Errorf("cache holds %+v, want the flight's positive verdict", cached)
 	}
 }
 

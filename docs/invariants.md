@@ -148,9 +148,9 @@ long-lived parent stops noticing a codex upgraded in place. The mutex-map argume
 is CLAUDE'S, and codex is the case that would survive without the group:
 `probeCodexFeatures` caches a verdict the probe could not REACH, so a per-key
 lock would leave each follower a fresh negative to return. (A verdict reached under a
-DEAD context is the one it refuses to cache — a cancellation, not an answer — which
-does not change this.) Both use the same
-mechanism, chosen once, rather than a claim each probe needs a guarantee it lacks.
+DEAD context is the one that is not cached — a cancellation, not an answer — which does
+not change this.) Both use the same mechanism, chosen once, rather than a claim each
+probe needs a guarantee it lacks.
 
 **A caller's own context still governs its own call.** `Do` blocks on the leader's
 flight and never consults the follower, so both probes use `DoChan` and `select` on
@@ -167,24 +167,36 @@ group is load-bearing on the retry: a direct re-probe would restore the #741 bur
 child per follower) on the rare path out of a common one, and re-reading the cache would
 not do it either, because the followers all arrive within microseconds of each other and
 would all miss it. Each round consumes one more cancellation, so rounds are bounded by
-the callers sharing the key, and a caller whose OWN context is dead leaves on the first
-arm of every round rather than looping. The converse is not treated as shared — a leader
-sees the same marker, and a dead caller must not start a fresh attempt under a dead
-context, which is why `isSharedProbeCancellation` requires a LIVE `ctx` as well as the
-marker.
+the callers sharing the key, and a caller whose OWN context is dead leaves without looping
+— `isSharedProbeCancellation` requires a live `ctx`, and both arms of the select check it.
+The converse is not treated as shared — a leader sees the same marker, and a dead caller
+must not start a fresh attempt under a dead context, which is why
+`isSharedProbeCancellation` requires a LIVE `ctx` as well as the marker.
 
 **A cancelled caller leaves NOTHING behind.** The negative a killed probe produces says
-more about the caller's connection than about the codex, so `probeCodexFeatures` stores
-nothing when its own context is dead — measured on the CALLER's context and not on
-`probeCtx`, because a probe that hit its own 10s cap also knows nothing and must still be
-cached for `codexFeatureRetry`. Nothing was cached by the round that died, so the next
-round's re-read misses and a live caller really does re-probe rather than inherit the
-negative. For the same reason a caller that stopped waiting gets no
-`warnOnWeakerCodexPolicy` at all (`CodexClient.run` checks `ctx.Err()` first): nothing
-was learned about the codex, so the placeholder it was handed is not a probe result, and
-reporting it would fire the `unverified` WARN and CONSUME its once-per-process latch —
-silencing the real diagnostic for the rest of a long-lived server, over the one turn that
-lost the most information.
+more about the caller's connection than about the codex, so the flight that runs
+`probeCodexFeatures` stores its verdict only while THAT caller's context is alive, and
+marks the flight instead when it is not. The store lives in the flight rather than in the
+probe because the decision needs both facts at once — is the answer worth keeping, and was
+the caller that produced it still alive — and a check-then-act split across two functions
+disagrees with itself in the window between them. It is measured on the CALLER's context
+and not on `probeCtx`: a probe that hit its own 10s cap also knows nothing, and that one IS
+cached, for `codexFeatureRetry`, because an unanswering codex is the install this design
+supports. Nothing was cached by the round that died, so the next round's re-read misses
+and a live caller really does re-probe rather than inherit the negative. For the same
+reason a caller that stopped waiting gets no `warnOnWeakerCodexPolicy` at all
+(`CodexClient.run` checks `ctx.Err()` first): nothing was learned about the codex, so the
+placeholder it was handed is not a probe result, and reporting it would fire the
+`unverified` WARN and CONSUME its once-per-process latch — silencing the real diagnostic
+for the rest of a long-lived server, over the one turn that lost the most information.
+
+**Both arms of the probe's `select` check the caller's own context.** When a caller's
+context is already done AND the flight channel already holds a result, both `select` cases
+are ready and Go picks between them at random, so a dead caller leaves by the flight arm
+about half the time. The flight arm therefore re-checks `ctx.Err()` before it treats a
+result as this caller's answer, rather than leaving the outcome to a coin — otherwise a
+caller whose context died while the probe was running would report the leader's success
+(or its kill) as its own, which is the one outcome the `ctx.Done()` arm exists to prevent.
 
 The filter matters because codex **silently IGNORES** a `-c` key it does not know
 (the fail-OPEN direction): `-c` overrides are applied onto the config tree without

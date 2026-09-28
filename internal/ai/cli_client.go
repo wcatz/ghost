@@ -116,9 +116,10 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 	// check they all miss.
 	//
 	// Each round consumes one more cancellation, so the rounds are bounded by the
-	// callers sharing this key, and this caller leaves on the first arm below if
-	// its OWN context dies. It is never worse than the behaviour before #741,
-	// which was one probe per caller, however many rounds that took.
+	// callers sharing this key, and a caller whose OWN context is dead leaves
+	// without looping: isSharedProbeCancellation requires a live ctx, and both
+	// arms of the select below check it. It is never worse than the behaviour
+	// before #741, which was one probe per caller, however many rounds that took.
 	for {
 		flight := claudeProbeGroup.DoChan(id.probeKey(), func() (any, error) {
 			if cached, ok := claudeCapabilityCache.Load(id); ok {
@@ -141,6 +142,18 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 		case <-ctx.Done():
 			return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", ctx.Err())
 		case res := <-flight:
+			// BOTH arms have to agree, because this one cannot be assumed: when a
+			// caller's context is already done AND the flight channel already
+			// holds a result, both cases are ready and Go picks at random, so a
+			// dead caller leaves by this arm about half the time — and an
+			// unchecked `res.Err == nil` here would report the leader's success as
+			// this caller's own answer, which is the one outcome the arm above
+			// exists to prevent. Checking the caller's own context first is what
+			// makes the choice between the two arms immaterial, instead of leaving
+			// it to a coin.
+			if ctx.Err() != nil {
+				return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", ctx.Err())
+			}
 			if res.Err == nil {
 				return res.Val.(claudeCapabilities), nil
 			}
