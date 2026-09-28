@@ -94,12 +94,7 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	// which loads the user's real config, Ghost's plugin and MCP server
 	// included, defeating the scrub above. V2 therefore gets --standalone,
 	// so the child runs a private server on the scrubbed config instead.
-	args := []string{"run", "--format", "json", "--pure", "--title", ghostSessionTitle}
-	policy := openCodeDenyConfig
-	if c.majorVersion(ctx) >= 2 {
-		args = []string{"run", "--format", "json", "--standalone", "--title", ghostSessionTitle}
-		policy = openCodeAskConfig
-	}
+	major := c.majorVersion(ctx)
 	model := c.model
 	if model == "" {
 		model = os.Getenv("GHOST_OPENCODE_MODEL")
@@ -107,8 +102,7 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	if model == "" {
 		model = DefaultOpenCodeModel
 	}
-	args = append(args, "-m", model)
-	cmd, cleanup, err := c.subprocessEnv(ctx, args, policy)
+	cmd, cleanup, err := c.subprocessEnv(ctx, openCodeInvocationArgs(major, model), openCodePolicyFor(major))
 	if err != nil {
 		return "", err
 	}
@@ -196,6 +190,35 @@ func OpencodeMajorVersion(out string) int {
 	return 0
 }
 
+// openCodeInvocationArgs is the whole argv of an `opencode run` turn for a
+// given major version, kept as a named value so the policy can be pinned as a
+// golden (TestHarnessInvocationArgsAreGoldens covers both the V1 and V2 shapes).
+// The prompt is NOT here: it goes on stdin, because the kernel caps one argv
+// element at 32 pages and a reflect prompt reaches megabytes (issue #560).
+//
+// The version split is not cosmetic. V1 takes `--pure`, which skips plugins;
+// V2 rejects that flag outright and needs `--standalone`, because without it
+// `run` attaches to the user's shared background service — and the SERVER,
+// holding the user's real config, is what loads Ghost's own plugin and MCP
+// registration, defeating the scrub in configureOpenCodeIsolation.
+func openCodeInvocationArgs(major int, model string) []string {
+	if major >= 2 {
+		return []string{"run", "--format", "json", "--standalone", "--title", ghostSessionTitle, "-m", model}
+	}
+	return []string{"run", "--format", "json", "--pure", "--title", ghostSessionTitle, "-m", model}
+}
+
+// openCodePolicyFor is the config written into the isolated tree for a given
+// major version. The two differ because V2 cannot use a deny policy at all
+// (openCodeAskConfig), and V1's non-interactive handling of an ask is
+// unverified, so it keeps the stronger deny.
+func openCodePolicyFor(major int) string {
+	if major >= 2 {
+		return openCodeAskConfig
+	}
+	return openCodeDenyConfig
+}
+
 // openCodeAskConfig is the isolated child's policy on opencode V2. Every tool
 // is "ask", and V2's non-interactive `run` auto-rejects each ask, so no tool
 // call executes; Ghost never passes an auto-approve flag (--auto, --yolo,
@@ -204,6 +227,17 @@ func OpencodeMajorVersion(out string) int {
 // answers such a request with 403 provider.auth ("free tier can only be used
 // from within OpenCode"), which failed every lifecycle phase. An empty MCP map
 // and an empty plugin list keep the user's servers and plugins out of the child.
+//
+// `opencode run` has no flag to disable tools — its only permission flag is
+// `--auto`, which moves in the WRONG direction (it approves everything not
+// explicitly denied) — so the config is the only lever, which is why this lives
+// in the isolated tree Ghost already writes and not in argv.
+//
+// The wildcard is what makes it total, and opencode's own defaults are the
+// reason it is needed: every permission defaults to "allow" when unset, so a
+// config naming a few tools leaves the rest open. A name opencode adds later
+// (a skill, an LSP query, a `question` call) is covered by `*` on the day it
+// ships rather than on the day someone remembers it.
 const openCodeAskConfig = `{
   "$schema": "https://opencode.ai/config.json",
   "permission": {
@@ -216,7 +250,9 @@ const openCodeAskConfig = `{
 // openCodeDenyConfig is the policy for opencode V1, whose handling of an ask in
 // a non-interactive run has not been verified: the wildcard permission denies
 // every tool, and the explicit tool map keeps older versions from exposing a
-// built-in tool that predates the wildcard rule.
+// built-in tool that predates the wildcard rule (and is still what opencode
+// documents as the legacy spelling of the same policy). The `mcp_*` rule closes
+// the MCP half for a version whose wildcard predates namespaced tool names.
 const openCodeDenyConfig = `{
   "$schema": "https://opencode.ai/config.json",
   "permission": {

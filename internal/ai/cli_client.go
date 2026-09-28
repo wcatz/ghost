@@ -75,6 +75,38 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 	return caps, nil
 }
 
+// claudeInvocationArgs builds the whole `claude -p` argv, or refuses to.
+//
+// Refusal rather than degradation is the contract, and the capability probe is
+// what makes it possible: each flag is read out of the INSTALLED binary's own
+// `--help`, so a claude that lacks one cannot be run with a silently weaker
+// policy than the one this function returns. A missing no-tools flag is an
+// error the caller reports, not an invocation that proceeds with tools.
+//
+// The five required capabilities are the load-bearing ones, and each maps to a
+// documented claude behaviour (verified against `claude --help` on 2.1.283):
+//
+//   - --tools ""          "disable all tools" — claude's own wording. This is
+//     what removes the built-in set; the pattern is claude's, not a
+//     list-of-names approximation that misses a tool shipped later.
+//   - --disallowedTools "mcp__*"
+//     denies MCP tools by prefix. Kept as a second layer rather than as the
+//     primary: --strict-mcp-config already leaves no MCP server configured, so
+//     there is nothing to expose, and a belt-and-braces rule keeps that true if
+//     a future claude widens what --tools covers.
+//   - --safe-mode        disables every customization (CLAUDE.md, skills,
+//     plugins, hooks, MCP servers, custom agents). The child reads memory text,
+//     so none of those should reach it in the first place.
+//   - --restricted       drops the command- and code-running tools, ignores
+//     user/project/local settings, and refuses bypassPermissions. It is the
+//     second boundary for a tool --tools somehow still names.
+//   - --strict-mcp-config  ignores every MCP configuration, so no MCP server is
+//     started and therefore none can be reached.
+//
+// --disable-slash-commands and --setting-sources are conditional because they
+// are hardening rather than the restriction itself: skills are already off under
+// --safe-mode, and the child's working directory is a neutral scratch dir with
+// no project to load settings from. Both are still passed when present.
 func claudeInvocationArgs(caps claudeCapabilities) ([]string, error) {
 	if !caps.safeMode || !caps.restricted || !caps.strictMCP || !caps.tools || !caps.disallowedTools {
 		return nil, fmt.Errorf("installed claude lacks required no-tools flags; upgrade claude")
