@@ -1199,6 +1199,18 @@ func TestCLISupersedeReassessFeedsResolveReassess(t *testing.T) {
 		}
 	}
 
+	// #712: a dry-run repair over a still-live edge has to name what holds the
+	// target, because the summary's count is the only thing it used to report
+	// and this is the one case with an action attached — the id named is the
+	// edge's SOURCE, which is what `ghost supersede --withdraw` takes. The
+	// harness is answered KEEP so a row the report holds back is never asked
+	// about at all: the edge settles it for free.
+	s.setHarnessAnswer("resolve", "KEEP")
+	held := s.mustRun("resolve", e2eProject, "--source", "opencode", "--reassess", "--only", older)
+	mustMatch(t, "resolve --reassess names the holder", held.stdout, `1 still asserted by a link or correction`)
+	mustContain(t, "resolve --reassess names the holder", held.stdout, older+"  [")
+	mustContain(t, "resolve --reassess names the holder", held.stdout, "held by supersedes "+newer)
+
 	// Withdraw the edge. The follow-up has to name the withdrawn target, and it
 	// has to be the exact command, because the whole value of the run is that
 	// the operator does not have to work out the second half themselves.

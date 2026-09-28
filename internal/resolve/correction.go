@@ -123,7 +123,42 @@ func correctionPairTargets(loaded, cands []memory.Memory) []memory.Memory {
 // correction is looked for. Keeping those three apart is what lets the repair
 // pass mirror Run exactly instead of approximately: a correction only asserts
 // anything while it is in the pool Run searches, i.e. while it is unresolved.
+//
+// It is correctionPairingsFrom with the corrections dropped, and it deduplicates
+// the targets, because a target paired by two corrections is still one demoted
+// row (Run counts Corrected per row) and the order a target first appears in is
+// the order the same loop has always produced.
 func correctionPairTargetsFrom(loaded, cands, corrections []memory.Memory) []memory.Memory {
+	seen := make(map[string]bool, len(cands))
+	var out []memory.Memory
+	for _, p := range correctionPairingsFrom(loaded, cands, corrections) {
+		if seen[p.Target.ID] {
+			continue
+		}
+		seen[p.Target.ID] = true
+		out = append(out, p.Target)
+	}
+	return out
+}
+
+// Pairing is one correction and the older, prefilter-passing candidate it
+// demotes. The pair is the unit the repair pass reports, not the target: a row
+// the pass leaves resolved has to say WHICH correction is asserting it, because
+// the two reasons a row stays resolved need different remedies — a supersedes
+// edge can be withdrawn, a correction pairing cannot be, it can only be read.
+type Pairing struct {
+	Correction memory.Memory
+	Target     memory.Memory
+}
+
+// correctionPairingsFrom is correctionPairTargetsFrom with the corrections kept.
+// One entry per (correction, target) pair rather than per target: two
+// corrections can pair the same row, and naming only the first would send an
+// operator to check a pairing that is not the only thing holding the row.
+// Deterministic and free, for correctionPairTargets' reasons — and the ONE
+// implementation of the rare-token rule, so a caller that wants the correction
+// and one that wants only the targets cannot disagree about which pairs exist.
+func correctionPairingsFrom(loaded, cands, corrections []memory.Memory) []Pairing {
 	if len(cands) == 0 {
 		return nil
 	}
@@ -181,12 +216,14 @@ func correctionPairTargetsFrom(loaded, cands, corrections []memory.Memory) []mem
 		return nil
 	}
 
-	demoted := make(map[string]bool)
-	var out []memory.Memory
+	// One entry per (correction, target) pair, in correction order then candidate
+	// order. The target is not deduplicated here: which corrections pair a row is
+	// exactly the question a repair report has to answer about it.
+	var out []Pairing
 	for _, c := range correctionMems {
 		cRare := rareFor(c.ID)
 		for _, m := range cands {
-			if m.ID == c.ID || demoted[m.ID] {
+			if m.ID == c.ID {
 				continue
 			}
 			// Only demote OLDER candidates: the correction invalidates the
@@ -201,8 +238,7 @@ func correctionPairTargetsFrom(loaded, cands, corrections []memory.Memory) []mem
 				}
 			}
 			if shared >= correctionMinSharedRare {
-				demoted[m.ID] = true
-				out = append(out, m)
+				out = append(out, Pairing{Correction: c, Target: m})
 			}
 		}
 	}
