@@ -99,6 +99,10 @@ type Request struct {
     QueryVec  []float32         // nil skips the vector leg; required for CondVectorOnly
     Scope     map[string]string
     Category  string
+    // Retention is the tier filter (memory's session|project|persistent). Empty
+    // is no filter: a filter is applied to the widened candidate set before the
+    // window closes, exactly as Category is.
+    Retention string
     Source    Source
     Budget    Budget
     Condition Condition
