@@ -188,8 +188,9 @@ func safeTierError(err error) string {
 // schema is `hex(randomblob(16))` — so 60 leaves room for an id plus a label or
 // a separator and never truncates a legitimate one.
 //
-// It also runs the value-shape gate, because bounding the fragment is not the
-// same as making it safe to print. 60 runes holds a whole short-format token
+// It also runs the value-shape gate in BOTH cases — see the probe below —
+// because bounding the fragment is not the same as making it safe to print. 60
+// runes holds a whole short-format token
 // (gh[pousr]_ + 20, AKIA… + 16, npm_/hf_ + 30) and a large part of a long one —
 // an ed25519 cborHex, a PEM body, a mnemonic, a JWT all run past the clip, so
 // without the gate a fragment of the key would sit in the log rather than
@@ -200,8 +201,24 @@ func safeTierError(err error) string {
 // call site — see previewContent for why. The detection runs BEFORE the clip, so
 // a value that straddles the boundary is judged whole.
 func clipOpText(s string) string {
+	// Probed in BOTH cases, and neither probe is redundant. secret.Detect matches
+	// value shapes in the spelling it is given, and the two directions are not
+	// symmetric: `ghp_…` is only recognised lower-cased, `AKIA…` only upper-cased.
+	// The parser also upper-cases a supersession's target so it coincides with the
+	// stored spelling (hex(randomblob) renders upper-case), so a model whose
+	// hallucinated target IS a token arrives here already folded — and a single
+	// probe in the original case missed exactly the fragment that fold created.
+	// A credential is a credential in either case, and this function's only
+	// question is whether the fragment is safe to print, so it asks in both.
+	// A stored id (32 hex characters) matches neither, so this withholds nothing
+	// the diagnostics actually need.
 	if finding, ok := secret.Detect(s); ok {
 		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(s))
+	}
+	if lower := strings.ToLower(s); lower != s {
+		if finding, ok := secret.Detect(lower); ok {
+			return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(s))
+		}
 	}
 	const max = 60
 	if r := []rune(s); len(r) > max {

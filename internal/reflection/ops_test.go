@@ -704,12 +704,12 @@ func (f *fakeReflector) Reflect(_ context.Context, _ string) (string, ai.TokenUs
 }
 
 // TestReaderComplaintWithholdsAValueFromTheReasonToo: withholding the operation
-// LINE is not enough, because three reasons quote a model-supplied fragment
-// and a refusal is often triggered BY that fragment being free-form. A
+// LINE is not enough, because six reasons quote a model-supplied fragment (the
+// source enumerates all six) and a refusal is often triggered BY that fragment
+// being free-form. A
 // `drop <id> reason: <a credential>` is refused precisely because the tail is
 // neither "obsolete" nor "superseded by <id>", so the refused text is the
-// model's own and 60 runes of it is room for the whole value — well inside
-// clipOpText's clip. Without the value-shape gate this string is what
+// model's own, and a short-format token fits inside clipOpText's clip whole. Without the value-shape gate this string is what
 // readerComplaintForLog and safeTierError write to the append-only lifecycle.log,
 // and it would be the one in-tier log sink without the gate its three siblings
 // get from previewContent.
@@ -739,6 +739,31 @@ func TestReaderComplaintWithholdsAValueFromTheReasonToo(t *testing.T) {
 		})
 	}
 
+	// A third site, and the one a reader is most likely to assume is covered by
+	// the other two: a `superseded by` TARGET. It is a different executeOps
+	// branch from the unknown id above, quoting a different fragment, and
+	// clipOpText is the only thing between it and the log — so if a future
+	// refactor routes this one differently, only a test on THIS branch notices.
+	t.Run("superseded-by target that is a value", func(t *testing.T) {
+		err := opErr(t, opInput(), `{"ops":["drop `+opID1+` reason: superseded by `+secretValue+`"]}`)
+		if err == nil {
+			t.Fatal("a supersession to an id this run was not given was accepted")
+		}
+		safe := readerComplaintForLog(err)
+		if !strings.Contains(safe, "superseded-by target") {
+			t.Errorf("safe rendering dropped the reason a reader needs:\n%s", safe)
+		}
+		// Case-insensitively, and deliberately: the parser UPPER-CASES a
+		// supersession's target (it matches the stored spelling, hex(randomblob)
+		// being upper-case), so the value reaching this complaint is not the
+		// string this test wrote. A case-sensitive Contains here passes whether
+		// or not the gate ran — which is exactly what the mutation below caught
+		// doing on the first version of this case.
+		if strings.Contains(strings.ToUpper(safe), strings.ToUpper(secretValue)) {
+			t.Errorf("safe rendering carries the hallucinated supersession target verbatim:\n%s", safe)
+		}
+	})
+
 	// The same gate on a hallucinated id, which executeOps quotes by name: the
 	// model invents an id that IS the value, and the reader refuses it for not
 	// being one of the input.
@@ -755,4 +780,20 @@ func TestReaderComplaintWithholdsAValueFromTheReasonToo(t *testing.T) {
 			t.Errorf("safe rendering carries the hallucinated id verbatim:\n%s", safe)
 		}
 	})
+}
+
+// TestClipOpTextStillGatesARealId: the case-insensitive probe exists to catch a
+// folded token, and its cost is a second Detect call on every fragment in every
+// complaint. What must not regress is the other direction — a real stored id
+// reaching a diagnostic, which happens on every unknown-id refusal that is
+// merely a typo rather than an attack. A stored id is 32 hex characters, under
+// every floor in the detector, so it must pass through untouched; if a future
+// rule widened enough to catch one, this fails and the fix belongs in the rule
+// rather than in the gate.
+func TestClipOpTextStillGatesARealId(t *testing.T) {
+	for _, id := range []string{opID1, opID2, opID3, strings.ToLower(opID1), "A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6"} {
+		if got := clipOpText(id); got != id {
+			t.Errorf("clipOpText(%q) = %q, want it unchanged: a real id is a diagnostic, not a value", id, got)
+		}
+	}
 }
