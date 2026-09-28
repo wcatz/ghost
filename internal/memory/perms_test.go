@@ -325,6 +325,39 @@ func TestFchmodNoFollowTightensTheRealFile(t *testing.T) {
 	}
 }
 
+// TestTightenPermissionsHardensTheDatabaseAndNotTheSQLiteSidecars pins the
+// split fchmodNoFollow's comment argues for. The database goes through an
+// O_NOFOLLOW descriptor; the -wal and -shm beside it keep the name-based chmod.
+//
+// The sidecars are the half that matters here, because the split is not
+// cosmetic. OpenDB runs this pass from inside the open, and opening either
+// sidecar read-only at that point changes what a later write records — the e2e
+// suite caught it as a save whose history row was never written at all, which
+// is silent data loss rather than a wrong mode. So the test states both halves:
+// the sidecars are still tightened, and the database is still tightened when
+// the name is a symlink at the moment chmod is called.
+func TestTightenPermissionsHardensTheDatabaseAndNotTheSQLiteSidecars(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ghost.db")
+	for _, name := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.WriteFile(name, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		setPerm(t, name, 0o666)
+	}
+
+	// Outside the configured data dir, so only the three files are touched and
+	// the data directory's own mode is not part of this.
+	fakeDataDir(t)
+	TightenPermissions(dbPath)
+
+	for _, name := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if got := permOf(t, name); got != 0o600 {
+			t.Errorf("%s is %#o, want it tightened to 0600", filepath.Base(name), got)
+		}
+	}
+}
+
 // TestOpenDBDoesNotChmodAForeignDirectory: eval, cycle and bench harnesses open
 // databases in scratch trees, and a user can point GHOST_SCRATCH_DIR anywhere.
 // Only the configured DataDir is Ghost's own directory to tighten; the parent

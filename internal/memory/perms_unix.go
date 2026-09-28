@@ -81,7 +81,13 @@ func TightenPermissions(dbPath string) {
 			}
 			continue
 		}
-		chmodTighten(name, info)
+		// The database through a descriptor, the two files SQLite maintains
+		// beside it by name: see fchmodNoFollow for why the split is there.
+		if i == 0 {
+			chmodTighten(name, info)
+		} else {
+			chmodByName(name, info)
+		}
 	}
 }
 
@@ -144,6 +150,16 @@ func chmodTighten(path string, info os.FileInfo) {
 // A database Ghost can open at all needs to read it, so that mode is a
 // curiosity rather than a case, and the alternative — a write-only fallback —
 // would put the name back in the path and reopen the window this closes.
+//
+// It is used for the DATABASE only. The -wal and -shm files keep the
+// name-based chmod, and that is not an oversight: OpenDB calls this pass from
+// inside the open, before the connection is established, and opening either of
+// them read-only at that point changes what a later write records — measured
+// with the e2e suite, where a save after a delete stopped writing its history
+// row at all once this ran on all three files. They are also the files the
+// reasoning above does not reach: SQLite creates and replaces them itself, it
+// will not use a symlinked one, and a swap there cannot outlive the database
+// file the next open validates.
 func fchmodNoFollow(path string, mode os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -154,4 +170,20 @@ func fchmodNoFollow(path string, mode os.FileMode) error {
 		return err
 	}
 	return f.Close()
+}
+
+// chmodByName is the name-based chmod TightenPermissions still uses for the
+// database's -wal and -shm, kept separate from chmodTighten so the reason
+// above sits on the choice rather than in a comment nobody reading the caller
+// will find. Being subtractive, like the descriptor path: it can only narrow.
+func chmodByName(path string, info os.FileInfo) {
+	perm := info.Mode().Perm()
+	tightened := perm &^ permsGroupOther
+	if tightened == perm {
+		return
+	}
+	if err := os.Chmod(path, tightened); err != nil {
+		slog.Warn("could not tighten ghost data permissions",
+			"path", path, "was", perm, "now", tightened, "error", err)
+	}
 }
