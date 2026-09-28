@@ -81,6 +81,14 @@ func wedgedEndpoint(t *testing.T) *httptest.Server {
 	t.Helper()
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only the LIVENESS PROBE wedges. /api/embed is refused immediately, so
+		// a test about the probe's timing is not also paying the client's 30s
+		// per-request timeout once per memory in the embed loop — the loop is
+		// exercised (it re-probes after each failure) but cheaply.
+		if r.URL.Path != "/" {
+			http.Error(w, "embedding backend unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		<-release
 	}))
 	t.Cleanup(func() {
@@ -107,30 +115,70 @@ func TestCheckAlive_StampsTheMarkerOnARepeatedlyInconclusiveProbe(t *testing.T) 
 	srv := wedgedEndpoint(t)
 	dataDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), newMockStore(), logger, time.Minute, dataDir)
+	// No unembedded memories, so each sweep costs one probe and nothing else —
+	// the loop that re-probes after a failed embed is
+	// TestSweepOnce_OneTickDoesNotStampTheMarker's subject, and paying for it
+	// here would put the 30s per-request timeout in a test about a counter.
+	store := newMockStore()
+	store.projects = []string{"proj-a"}
+	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), store, logger, time.Minute, dataDir)
 
-	for probe := 1; probe < inconclusiveStampsAfter; probe++ {
-		if got := worker.checkAlive(context.Background()); got != Inconclusive {
-			t.Fatalf("probe %d = %v, want Inconclusive", probe, got)
-		}
+	start := time.Now()
+	for sweep := 1; sweep < inconclusiveStampsAfter; sweep++ {
+		worker.SweepOnce(context.Background())
 		if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
-			t.Fatalf("probe %d wrote the down-since marker for an endpoint that has not answered once: err=%v", probe, err)
+			t.Fatalf("sweep %d wrote the down-since marker for an endpoint that has not answered once: err=%v", sweep, err)
 		}
 	}
 
-	if got := worker.checkAlive(context.Background()); got != Inconclusive {
-		t.Fatalf("probe %d = %v, want Inconclusive", inconclusiveStampsAfter, got)
-	}
+	worker.SweepOnce(context.Background())
 	since, err := os.ReadFile(markerPath(dataDir))
 	if err != nil {
-		t.Fatalf("an endpoint that never answered left no down-since marker after %d probes: %v", inconclusiveStampsAfter, err)
+		t.Fatalf("an endpoint that never answered left no down-since marker after %d sweeps: %v", inconclusiveStampsAfter, err)
 	}
 	ts, err := time.Parse(time.RFC3339, string(since))
 	if err != nil {
 		t.Fatalf("marker %q is not RFC3339: %v", since, err)
 	}
-	if age := time.Since(ts); age < 0 || age > 10*time.Second {
-		t.Errorf("marker timestamp %v is not close to now (age %v)", ts, age)
+	// Between the start of the run and now, rather than a fixed small number: the
+	// assertion is that the stamp is from THIS run and not a leftover, and each
+	// sweep here costs a full 2s probe deadline.
+	if age := time.Since(ts); age < -time.Second || age > time.Since(start)+time.Second {
+		t.Errorf("marker timestamp %v is not from this run (age %v, run took %v)", ts, age, time.Since(start))
+	}
+}
+
+// TestSweepOnce_OneTickDoesNotStampTheMarker is the second review round's
+// finding, and it is about WHERE the count is advanced rather than how large it
+// is. `checkAlive` is called from three places and more than once per tick:
+// SweepOnce at the top, and inside EmbedPending's loop after every failed
+// embed. On a wedged endpoint one tick therefore produces a dozen probes, so a
+// streak counted per PROBE reaches its threshold inside a single tick — and the
+// busy machine the streak exists to protect against gets the outage marker
+// anyway, which is the whole bug the streak was added to fix.
+//
+// So this drives the real entry point, `SweepOnce`, and asserts that ONE tick
+// of a wedged endpoint — with the store holding several memories, so the embed
+// loop re-probes after each one — writes no marker. The count belongs to the
+// interval, not the probe.
+func TestSweepOnce_OneTickDoesNotStampTheMarker(t *testing.T) {
+	srv := wedgedEndpoint(t)
+	dataDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := newMockStore()
+	// Enough memories that EmbedPending re-probes several times inside this
+	// one tick, which is what made a per-probe count reach its threshold here.
+	store.projects = []string{"proj-a"}
+	for _, id := range []string{"mem-1", "mem-2", "mem-3", "mem-4", "mem-5"} {
+		store.memories[id] = "a memory the index does not have yet"
+	}
+	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), store, logger, time.Minute, dataDir)
+
+	worker.SweepOnce(context.Background())
+
+	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
+		t.Errorf("one sweep of an endpoint that never answered wrote the down-since marker "+
+			"(%d memories, so the embed loop probed many times): err=%v", len(store.memories), err)
 	}
 }
 
@@ -150,17 +198,23 @@ func TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive(t *testing.T)
 		t.Fatalf("seed marker: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), newMockStore(), logger, time.Minute, dataDir)
+	store := newMockStore()
+	store.projects = []string{"proj-a"}
+	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), store, logger, time.Minute, dataDir)
 
-	if got := worker.checkAlive(context.Background()); got != Inconclusive {
-		t.Fatalf("checkAlive = %v, want Inconclusive", got)
-	}
-	data, err := os.ReadFile(markerPath(dataDir))
-	if err != nil {
-		t.Fatalf("marker file missing after an inconclusive probe: %v", err)
-	}
-	if string(data) != real {
-		t.Errorf("marker = %q, want unchanged %q: a probe that did not answer is not evidence the outage is over", data, real)
+	// Below the threshold, every unanswered sweep must leave a marker already on
+	// record exactly as it found it: not answering is not evidence the outage is
+	// over. (At the threshold the streak stamps, but writeDownMarker only writes
+	// when none is there — and the seeded one is the case being protected.)
+	for range inconclusiveStampsAfter - 1 {
+		worker.SweepOnce(context.Background())
+		data, err := os.ReadFile(markerPath(dataDir))
+		if err != nil {
+			t.Fatalf("marker file missing after an unanswered sweep: %v", err)
+		}
+		if string(data) != real {
+			t.Fatalf("marker = %q, want unchanged %q: not answering is not evidence the outage is over", data, real)
+		}
 	}
 }
 
@@ -177,21 +231,27 @@ func TestCheckAlive_ForgetsInconclusiveStreakOnAnAnsweredProbe(t *testing.T) {
 
 	dataDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	worker := NewWorker(NewClient(wedge.URL, "nomic-embed-text", 3), newMockStore(), logger, time.Minute, dataDir)
+	// Through the real entry point, so the assertions are about the behaviour a
+	// daemon actually has rather than about the helper.
+	store := newMockStore()
+	store.projects = []string{"proj-a"}
+	store.memories["mem-1"] = "a memory the index does not have yet"
+	worker := NewWorker(NewClient(wedge.URL, "nomic-embed-text", 3), store, logger, time.Minute, dataDir)
 
-	for probe := 1; probe < inconclusiveStampsAfter; probe++ {
-		worker.checkAlive(context.Background())
+	for range inconclusiveStampsAfter - 1 {
+		worker.SweepOnce(context.Background())
 	}
 	// The endpoint comes back: the count is spent.
 	worker.client = NewClient(ok.URL, "nomic-embed-text", 3)
-	if got := worker.checkAlive(context.Background()); got != Reachable {
-		t.Fatalf("checkAlive = %v, want Reachable once the endpoint answers", got)
+	worker.SweepOnce(context.Background())
+	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
+		t.Fatalf("the marker survived an answered sweep: err=%v", err)
 	}
 	// And it goes back to not answering: this is a FIRST inconclusive again.
 	worker.client = NewClient(wedge.URL, "nomic-embed-text", 3)
-	worker.checkAlive(context.Background())
+	worker.SweepOnce(context.Background())
 	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
-		t.Errorf("the marker was stamped %d probes into a SECOND stall, so the first stall's count carried over: err=%v",
+		t.Errorf("the marker was stamped %d sweeps into a SECOND stall, so the first stall's count carried over: err=%v",
 			inconclusiveStampsAfter, err)
 	}
 }

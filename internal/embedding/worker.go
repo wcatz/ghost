@@ -42,35 +42,42 @@ type Worker struct {
 	interval time.Duration
 	dataDir  string
 
-	// mu guards inconclusive, which checkAlive carries between probes.
+	// mu guards inconclusive, which the sweep carries between intervals.
 	mu sync.Mutex
-	// inconclusive counts consecutive probes that did not answer. It is the
+	// inconclusive counts consecutive SWEEPS that did not answer. It is the
 	// evidence a single probe cannot be: see inconclusiveStampsAfter.
 	inconclusive int
 }
 
-// inconclusiveStampsAfter is how many consecutive probes must fail to answer
+// inconclusiveStampsAfter is how many consecutive SWEEPS must fail to answer
 // before the down-since marker is written for an endpoint that is not REFUSING
 // connections.
 //
-// One probe is not enough, and the asymmetry is the point: a probe that missed
-// its own 2s deadline is far more often a busy machine than a dead endpoint,
-// and a marker written on the first of those is reported by `ghost mcp status`
-// for as long as the machine stays busy. But a marker written only on a
-// conclusive refusal is a regression in the other direction (#287's
-// diagnostic), because the endpoints that need it least are the ones that
-// answer fastest: a wedged accept loop, a remote or tunnelled URL whose packets
-// a firewall drops, and a host that has stopped scheduling all look like "the
-// request did not come back", never like a refusal. Those then report
-// "Ollama unreachable" with no duration beside it, forever.
+// One observation is not enough, and the asymmetry is the point: a probe that
+// missed its own 2s deadline is far more often a busy machine than a dead
+// endpoint, and a marker written on the first of those is reported by
+// `ghost mcp status` for as long as the machine stays busy. But a marker written
+// only on a conclusive refusal is a regression in the other direction (#287's
+// diagnostic), because the endpoints that need it least are the ones that answer
+// fastest: a wedged accept loop, a remote or tunnelled URL whose packets a
+// firewall drops, and a host that has stopped scheduling all look like "the
+// request did not come back", never like a refusal. Those then report "Ollama
+// unreachable" with no duration beside it, forever.
 //
-// So the marker follows the SIGNAL rather than the single probe: three
-// unanswered probes in a row is a pattern, and a streak is spent by any
-// answered probe (see checkAlive), so a stall spread over minutes cannot
-// accumulate into an outage that was never established. Three is roughly two
-// sweep intervals at the daemon's 2 minutes (cmd/ghost/mcp.go), so the
-// shortest real outage this can report is about six minutes — which is the
-// trade a duration line is worth, against a busy machine never reporting one.
+// So the marker follows the SIGNAL rather than a single probe: consecutive
+// sweeps that all went unanswered is a pattern, and any sweep that answers
+// SPENDS the streak (see SweepOnce), so a stall spread over minutes cannot
+// accumulate into an outage that was never established.
+//
+// It counts SWEEPS, and that is the whole difficulty — the count is advanced
+// once per `SweepOnce`, never per probe, because `SweepOnce` probes at the top
+// AND `EmbedPending` re-probes after every failed embed, so a wedged endpoint
+// can produce a dozen probes inside one tick. Counting probes would satisfy the
+// threshold within a single tick and stamp the marker on exactly the busy
+// machine the streak exists to protect against. Three sweeps is about six
+// minutes at the daemon's 2-minute interval (cmd/ghost/mcp.go) — the shortest
+// real outage worth reporting a duration for, against a busy machine never
+// reporting one.
 const inconclusiveStampsAfter = 3
 
 // NewWorker creates a background embedding worker. dataDir is the ghost data
@@ -104,10 +111,8 @@ func NewWorker(client *Client, store memoryStore, logger *slog.Logger, interval 
 // never describes — a wedged accept loop, a dropped remote URL — are exactly
 // the ones that need the duration (see the constant for the full argument).
 //
-// Reachable removes it and SPENDS the streak, so a machine that stalls twice and
-// then answers starts the next stall from zero, and a stall spread over minutes
-// cannot accumulate into an outage that was never established. An inconclusive
-// probe never removes it: not answering is not evidence the outage is over.
+// Reachable removes the marker. An inconclusive probe never does: not answering
+// is not evidence the outage is over.
 //
 // A blank dataDir (set by callers that don't care about the marker) disables
 // this bookkeeping and behaves exactly like calling client.Probe(ctx)
@@ -115,10 +120,58 @@ func NewWorker(client *Client, store memoryStore, logger *slog.Logger, interval 
 // debug level and never changes the reported reachability.
 func (w *Worker) checkAlive(ctx context.Context) Reachability {
 	got := w.client.Probe(ctx)
+	if w.dataDir == "" {
+		return got
+	}
 
-	// The streak is tracked whether or not there is a marker path, so a worker
-	// built without one behaves identically on this axis rather than
-	// accumulating a count nothing reads.
+	// Only the CONCLUSIVE answers, at any call site. A refusal is an answer and
+	// needs no corroboration, so a one-shot `ghost resolve` or `ghost supersede`
+	// pass stamps it too rather than leaving an operator with a refused endpoint
+	// and no timestamp until the next sweep. Reachable removes it. An
+	// inconclusive probe does neither here: it cannot end a real outage, and
+	// ending a stall into an outage is what the streak exists to prevent — see
+	// SweepOnce, which is the one caller on a schedule.
+	markerPath := filepath.Join(w.dataDir, OllamaDownMarkerFilename)
+	switch got {
+	case Reachable:
+		if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+			w.logger.Debug("embed: remove ollama-down marker", "error", err)
+		}
+	case Unreachable:
+		w.writeDownMarker(markerPath)
+	}
+	return got
+}
+
+// writeDownMarker stamps the down-since file if it is not already there, so a
+// still-down endpoint does not reset its own clock on every observation. The
+// write is idempotent for the same reason: the marker's value is when the
+// endpoint went away, and re-stamping it on every poll would reset that to
+// "now" for as long as the outage lasts.
+func (w *Worker) writeDownMarker(markerPath string) {
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		return
+	}
+	if err := os.WriteFile(markerPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0o600); err != nil {
+		w.logger.Debug("embed: write ollama-down marker", "error", err)
+	}
+}
+
+// noteSweep records ONE scheduled observation of the endpoint and stamps the
+// marker once the streak it produces is long enough. It is separate from
+// checkAlive because COUNTING has to happen where the clock is, and the clock is
+// the sweep interval — not the probe.
+//
+// The split is the point. `checkAlive` runs from three places and more than once
+// per tick: `SweepOnce` at the top, and inside `EmbedPending`'s loop after every
+// failed embed, so a wedged endpoint can produce a dozen probes in one tick. A
+// counter advanced there reaches its threshold within a single tick, and the
+// busy machine the streak exists to protect against gets the outage marker
+// anyway. So the streak is per SWEEP, and this is the only caller that has one.
+func (w *Worker) noteSweep(got Reachability) {
+	// Counted whether or not there is a marker path, so a worker built without
+	// one behaves identically on this axis rather than keeping state nothing
+	// reads.
 	w.mu.Lock()
 	if got == Inconclusive {
 		w.inconclusive++
@@ -128,25 +181,10 @@ func (w *Worker) checkAlive(ctx context.Context) Reachability {
 	streak := w.inconclusive
 	w.mu.Unlock()
 
-	if w.dataDir == "" {
-		return got
+	if w.dataDir == "" || got != Inconclusive || streak < inconclusiveStampsAfter {
+		return
 	}
-
-	markerPath := filepath.Join(w.dataDir, OllamaDownMarkerFilename)
-	switch {
-	case got == Reachable:
-		if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
-			w.logger.Debug("embed: remove ollama-down marker", "error", err)
-		}
-	case got == Unreachable || streak >= inconclusiveStampsAfter:
-		if _, err := os.Stat(markerPath); os.IsNotExist(err) {
-			ts := time.Now().UTC().Format(time.RFC3339)
-			if err := os.WriteFile(markerPath, []byte(ts), 0o600); err != nil {
-				w.logger.Debug("embed: write ollama-down marker", "error", err)
-			}
-		}
-	}
-	return got
+	w.writeDownMarker(filepath.Join(w.dataDir, OllamaDownMarkerFilename))
 }
 
 // Run starts the worker loop. Blocks until ctx is cancelled.
@@ -200,9 +238,14 @@ func (w *Worker) safeSweepOnce(ctx context.Context) {
 	w.SweepOnce(ctx)
 }
 
-// SweepOnce embeds unembedded memories across all projects.
+// SweepOnce embeds unembedded memories across all projects. Its probe is the
+// worker's SCHEDULED observation of the endpoint, so it is the one that feeds
+// the down-since streak (noteSweep) — see inconclusiveStampsAfter for why the
+// count is per sweep and not per probe.
 func (w *Worker) SweepOnce(ctx context.Context) {
-	if w.checkAlive(ctx) == Unreachable {
+	got := w.checkAlive(ctx)
+	w.noteSweep(got)
+	if got == Unreachable {
 		return
 	}
 	projects, err := w.store.ListProjects(ctx)
