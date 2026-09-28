@@ -3056,8 +3056,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// lock — cannot close either one.
 	tx := parentTx
 	ownTx := !inTx
+	var lock writeLock
 	if ownTx {
-		if tx, err = s.db.BeginTx(ctx, nil); err != nil {
+		if tx, lock, err = s.beginWrite(ctx, "upsert"); err != nil {
 			return "", "", 0, fmt.Errorf("begin upsert tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
@@ -3078,6 +3079,11 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		if cerr := tx.Commit(); cerr != nil {
 			return fmt.Errorf("commit upsert tx: %w", cerr)
 		}
+		// The lock is free from here, so this is where the hold ends and not
+		// where this function returns: everything after the commit is
+		// bookkeeping (the onSave callback) and would be counted as time the
+		// lock was held when it was not.
+		lock.reportHold("upsert", time.Now())
 		return nil
 	}
 
@@ -4428,7 +4434,11 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	// An edit is a knowledge write like a save, so it gets the same bounded
+	// BEGIN retry and is measured under the same budget: the multi-process
+	// fleet's `cli` role edits as well as saves, and under saturation it is
+	// the edit that failed when the save did not (issue #671).
+	tx, lock, err := s.beginWrite(ctx, "update")
 	if err != nil {
 		return fmt.Errorf("begin update: %w", err)
 	}
@@ -4580,7 +4590,11 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	lock.reportHold("update", time.Now())
+	return nil
 }
 
 // PromoteToGlobal moves a memory into the shared _global project. The memory
@@ -5025,9 +5039,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 
 	tx := parentTx
 	ownTx := !inTx
+	var lock writeLock
 	if ownTx {
-		tx, err = s.db.BeginTx(ctx, nil)
-		if err != nil {
+		if tx, lock, err = s.beginWrite(ctx, "replace"); err != nil {
 			return nil, fmt.Errorf("begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
@@ -5415,6 +5429,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit replace: %w", err)
 		}
+		lock.reportHold("replace", time.Now())
 	}
 	return preserved, nil
 }

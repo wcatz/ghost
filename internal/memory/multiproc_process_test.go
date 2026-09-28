@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -146,14 +147,24 @@ const (
 // match internal/memory/testdata/multiproc/main.go; that file documents why the
 // two are not one shared type.
 type procReport struct {
-	Role     string            `json:"role"`
-	Label    string            `json:"label"`
-	KV       map[string]string `json:"kv"`
-	Observed []string          `json:"observed,omitempty"`
-	IDs      []string          `json:"ids,omitempty"`
-	Errs     []string          `json:"errs,omitempty"`
-	Busy     []string          `json:"busy,omitempty"`
-	Aborted  string            `json:"aborted,omitempty"`
+	Role        string            `json:"role"`
+	Label       string            `json:"label"`
+	KV          map[string]string `json:"kv"`
+	Observed    []string          `json:"observed,omitempty"`
+	LockSamples []lockSample      `json:"lock_samples,omitempty"`
+	IDs         []string          `json:"ids,omitempty"`
+	Errs        []string          `json:"errs,omitempty"`
+	Busy        []string          `json:"busy,omitempty"`
+	Aborted     string            `json:"aborted,omitempty"`
+}
+
+// lockSample is one measured write transaction a child made, in milliseconds.
+type lockSample struct {
+	Op      string  `json:"op"`
+	WaitMS  float64 `json:"wait_ms"`
+	HoldMS  float64 `json:"hold_ms"`
+	Retried bool    `json:"retried,omitempty"`
+	Lost    bool    `json:"lost,omitempty"`
 }
 
 // count reads one measured counter. A key the role never set reads as zero,
@@ -291,9 +302,10 @@ func truncate(s string) string {
 // The invariants, none of which is "nothing crashed":
 //
 //   - every process exits successfully, and no SQLITE_BUSY or
-//     SQLITE_BUSY_SNAPSHOT reaches any of them. Nothing in this test retries a
-//     database error, so a pass is evidence that the documented 5s busy timeout
-//     on its own carried the contention rather than that a backoff hid it.
+//     SQLITE_BUSY_SNAPSHOT reaches any of them. The test retries nothing; the
+//     save path absorbs exactly one BEGIN refusal by design (Store.beginWrite),
+//     so a pass means the documented 5s busy timeout plus that one attempt
+//     carried the contention, not that an unbounded backoff hid it.
 //   - every write a process reported successful left a row, checked afterwards
 //     against a fresh handle by id. A writer that gave up under contention is a
 //     lost memory, and a lost memory is invisible until much later.
@@ -536,6 +548,7 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 		// no-SQLITE_BUSY claims below are about contention the load creates.
 
 		assertLoadWasLive(t, reports)
+		assertWriteLockBudget(t, reports)
 		assertSnapshotInvariant(t, snapshot)
 		assertBatchAtomicity(t, poller)
 	}
@@ -818,6 +831,188 @@ func assertLoadWasLive(t *testing.T, reports map[string]procReport) {
 				"live writer and the overlap the contract promises was not exercised", name)
 		}
 	}
+}
+
+// writeLockBudgets is how much of the busy_timeout a writer is given each kind of
+// write transaction may spend holding SQLite's write lock, as a fraction of the
+// contract's OWN setting, read back from a live connection rather than hardcoded —
+// so the number does not have to be re-derived when the DSN changes.
+//
+// It is reported, NOT asserted, and the reason is the one that matters for this
+// test: a hold is wall-clock time for a transaction that does real work, so it
+// scales with how loaded the machine is. The same fleet measured a save's median
+// hold at 1.3 ms on an idle laptop and 82 ms with three copies of itself fighting
+// over one core, and the 60-row batch at 21-600 ms against 0.5-2.0 s. A gate here
+// would therefore be the first assertion in this test whose verdict depends on
+// runner speed — in the very test whose contention caused #671, whose third ask
+// was to remove exactly that. So the numbers are printed, and the ceiling that
+// actually guards a long write transaction lives where it is load-stable: a unit
+// test on a quiet machine with a stated margin
+// (TestWriteLockHoldLeavesRoomInsideTheBusyTimeout).
+var writeLockBudgets = map[string]float64{
+	"upsert":          0.25,
+	"update":          0.25,
+	"decision-record": 0.25,
+	"reflect-apply":   1,
+	"replace":         1,
+}
+
+// assertWriteLockBudget reports the write-lock distributions the fleet measured,
+// and the budget each write path's hold is read against.
+//
+// The measurement is the issue's first ask and it is a REPORT, not a gate: a pass
+// that prints p50/p99 for every write path is a run whose contention is legible,
+// and #671 could not be diagnosed without one. Each child returns the raw samples
+// rather than its own percentiles because a distribution is a property of the whole
+// fleet — the union across ten processes is the number the contract is written
+// about, and a per-process p99 of a few samples is not it.
+//
+// Wait and hold are reported apart and mean opposite things. Hold is how long this
+// run made every other writer wait; wait is how long this run was made to wait.
+// #671's failure is the second with a small first: a save's transaction held the
+// lock for tens of milliseconds and a writer still waited out its whole five
+// seconds, because the lock was handed straight from one writer to the next. A high
+// hold is a long transaction; a high wait with a low hold is a queue, and only the
+// second one loses a memory.
+func assertWriteLockBudget(t *testing.T, reports map[string]procReport) {
+	t.Helper()
+	// The budget's unit is the busy_timeout the contract's writers actually got,
+	// read back from a live connection (assertConnectionContract checks the
+	// value itself). A run where that read is missing has already failed there,
+	// and dividing by nothing would turn every hold into a budget failure.
+	busyMS, _ := strconv.ParseFloat(reports["mcp/mcp0"].str("busy_timeout_ms"), 64)
+
+	holds := map[string][]float64{}
+	waits := map[string][]float64{}
+	lost := map[string]int{}
+	measured := map[string]int{}
+	retries := 0
+	for name, rep := range reports {
+		retries += rep.count("busy_retries")
+		if len(rep.LockSamples) > 0 {
+			measured[name] = len(rep.LockSamples)
+		}
+		for _, s := range rep.LockSamples {
+			// The wait distribution takes every sample, the one that never got
+			// the lock included: its wait is the whole budget, and a
+			// distribution that dropped it would describe only the contention
+			// this fleet survived.
+			waits[s.Op] = append(waits[s.Op], s.WaitMS)
+			if s.Lost {
+				lost[s.Op]++
+				continue
+			}
+			holds[s.Op] = append(holds[s.Op], s.HoldMS)
+		}
+	}
+	// The numbers are only evidence about contention if the load was contended:
+	// a process that opened no write transaction of its own measured nothing.
+	// Readers legitimately hold none, and the batch is one process's one
+	// transaction, so the requirement is on the writers the fleet is built from.
+	for _, name := range []string{"mcp/mcp0", "mcp/mcp1", "cli/cli0", "cli/cli1"} {
+		if measured[name] == 0 {
+			t.Errorf("%s measured no write transaction, so its handle's lock behaviour is unmeasured", name)
+		}
+	}
+	// Both write paths the load's writers open, not one: the fleet's `cli` role
+	// saves AND edits, and #671's own reproduction lost an edit rather than a
+	// save. A distribution covering only the save would be a measurement of the
+	// half of the write traffic that happened to survive.
+	for _, op := range []string{"upsert", "update"} {
+		if len(holds[op]) == 0 {
+			t.Errorf("no %s transaction was measured, so the load's writes of that kind are outside the "+
+				"write-lock numbers below", op)
+		}
+	}
+	if len(holds) == 0 {
+		t.Fatalf("no process measured a single write transaction; the write-lock numbers below prove nothing")
+	}
+
+	var holdSummary, waitSummary []string
+	for _, op := range sortedKeys(holds) {
+		hold := summarize(holds[op])
+		wait := summarize(waits[op])
+		holdSummary = append(holdSummary, fmt.Sprintf("%s p50=%.2f p99=%.2f max=%.2f n=%d",
+			op, hold.p50, hold.p99, hold.max, hold.n))
+		waitLine := fmt.Sprintf("%s p50=%.2f p99=%.2f max=%.2f n=%d", op,
+			wait.p50, wait.p99, wait.max, wait.n)
+		if n := lost[op]; n > 0 {
+			// Named here rather than left to the failure list: a write that
+			// never took the lock is the number this whole seam exists to make
+			// visible, and every one of them has already failed the run through
+			// its own process. The sample count includes them, so the wait
+			// percentiles above cover what they were held out for.
+			waitLine += fmt.Sprintf(" (%d never took the lock)", n)
+		}
+		waitSummary = append(waitSummary, waitLine)
+		// The budget is printed beside the measurement and never compared
+		// against it. See writeLockBudgets: a hold is wall-clock time, and a
+		// gate here would make this test's verdict a function of the runner.
+		// The ceiling that guards a long write transaction is
+		// TestWriteLockHoldLeavesRoomInsideTheBusyTimeout, on a quiet machine.
+		fraction, budgeted := writeLockBudgets[op]
+		if !budgeted {
+			t.Errorf("measured a %q write transaction that writeLockBudgets does not name; add it with the "+
+				"fraction a reader should expect, or the hold time above has nothing said about it", op)
+			continue
+		}
+		if busyMS > 0 {
+			holdSummary[len(holdSummary)-1] += fmt.Sprintf(" (budget %.0f ms)", busyMS*fraction)
+		}
+	}
+	// Reported on one line, in ms, so a run's contention is readable in the log
+	// and a regression is visible before it is a failure.
+	t.Logf("write-lock hold (BEGIN->COMMIT, ms): %s", strings.Join(holdSummary, "; "))
+	t.Logf("write-lock wait (caller->BEGIN, ms): %s", strings.Join(waitSummary, "; "))
+	t.Logf("write transactions that needed the bounded BEGIN retry: %d", retries)
+}
+
+// dist is one distribution's percentiles, in milliseconds.
+type dist struct {
+	p50, p99, max float64
+	n             int
+}
+
+// summarize takes a nearest-rank percentile of the samples. Nearest-rank rather
+// than an interpolation because the answer wanted here is "the worst transaction
+// this run actually performed", and an interpolated number between two samples
+// describes neither of them.
+func summarize(samples []float64) dist {
+	if len(samples) == 0 {
+		return dist{}
+	}
+	sorted := append([]float64(nil), samples...)
+	sort.Float64s(sorted)
+	return dist{
+		p50: percentile(sorted, 0.50),
+		p99: percentile(sorted, 0.99),
+		max: sorted[len(sorted)-1],
+		n:   len(sorted),
+	}
+}
+
+// percentile is the nearest-rank percentile of an ascending slice.
+func percentile(sorted []float64, q float64) float64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	rank := int(math.Ceil(q*float64(len(sorted)))) - 1
+	if rank < 0 {
+		rank = 0
+	}
+	if rank >= len(sorted) {
+		rank = len(sorted) - 1
+	}
+	return sorted[rank]
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // assertSnapshotInvariant checks the read transaction that was pinned across the

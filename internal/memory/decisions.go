@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // Decision represents an architectural or design decision.
@@ -65,7 +66,12 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	altJSON, _ := json.Marshal(alternatives)
 	tagJSON, _ := json.Marshal(tags)
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	// A decision writes a memory — the companion row below is an ordinary memory,
+	// assembled into every search row and quoted into the next reflect prompt — so
+	// losing this transaction to a lock refusal loses a memory, and
+	// `ghost_decision_record` is a live tool. Bounded BEGIN retry for the same
+	// reason a save has one (issue #671).
+	tx, lock, err := s.beginWrite(ctx, "decision-record")
 	if err != nil {
 		return "", "", false, fmt.Errorf("record decision: begin tx: %w", err)
 	}
@@ -116,6 +122,7 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	if err := tx.Commit(); err != nil {
 		return "", "", false, fmt.Errorf("record decision: commit: %w", err)
 	}
+	lock.reportHold("decision-record", time.Now())
 
 	if s.onSave != nil {
 		s.onSave(projectID)

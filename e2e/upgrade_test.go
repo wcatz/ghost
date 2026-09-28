@@ -110,35 +110,58 @@ func newV16Store(t *testing.T, contents []string) *sandbox {
 	return s
 }
 
-// downgrade removes the v17 and v18 additions and stamps user_version 16. A
-// later schema step must add its own objects here, or the fixture is not a v16
-// store; the version assertion below reads memory.SchemaVersion, so it moves
-// with the schema instead of pinning one release.
+// downgrade removes the v17 and v18 additions and stamps user_version 16.
 func downgrade(s *sandbox, t *testing.T) {
 	t.Helper()
+	downgradeTo(s, t, 16)
+}
+
+// downgradeToV17 removes only the v18 additions and stamps user_version 17: a
+// store one step behind, so an ordinary read-write open migrates exactly one
+// step. #721 needs a store an open would MIGRATE and not a store that merely
+// exists, because a refusal and a no-op open are indistinguishable on a store
+// with nothing to migrate.
+func downgradeToV17(s *sandbox, t *testing.T) {
+	t.Helper()
+	downgradeTo(s, t, 17)
+}
+
+// downgradeTo takes the current schema back to version. A later schema step must
+// add its own objects here, or the fixture is not a store of that version; the
+// version assertions in the tests read memory.SchemaVersion, so they move with
+// the schema instead of pinning one release.
+func downgradeTo(s *sandbox, t *testing.T, version int) {
+	t.Helper()
+	// The v18 objects, in every case: the evidence tables and their indexes.
+	stmts := []string{
+		`DROP INDEX IF EXISTS idx_provenance_memory`,
+		`DROP TABLE IF EXISTS memory_provenance`,
+		`DROP TABLE IF EXISTS memory_snapshot_evidence`,
+	}
+	if version < 17 {
+		// The v17 change log as well. Every history row went with the table,
+		// which is what a pre-v17 store looks like: the log did not exist yet.
+		stmts = append(stmts,
+			`DROP INDEX IF EXISTS idx_history_memory`,
+			`DROP INDEX IF EXISTS idx_history_recorded`,
+			`DROP INDEX IF EXISTS idx_provenance_recorded`,
+			`DROP TABLE IF EXISTS memory_history`,
+		)
+	}
+	stmts = append(stmts, fmt.Sprintf("PRAGMA user_version = %d", version))
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(s.dbPath())+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		t.Fatalf("open the fixture write-write: %v", err)
 	}
 	db.SetMaxOpenConns(1)
 	defer db.Close() //nolint:errcheck
-	for _, stmt := range []string{
-		`DROP INDEX IF EXISTS idx_history_memory`,
-		`DROP INDEX IF EXISTS idx_history_recorded`,
-		`DROP INDEX IF EXISTS idx_provenance_recorded`,
-		`DROP TABLE IF EXISTS memory_history`,
-		`DROP INDEX IF EXISTS idx_provenance_memory`,
-		`DROP TABLE IF EXISTS memory_provenance`,
-		`PRAGMA user_version = 16`,
-	} {
+	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatalf("downgrade the fixture (%s): %v", stmt, err)
 		}
 	}
-	// Every history row went with the table, which is what a v16 store looks
-	// like: the change log did not exist yet.
 	if n := countInFile(t, s.dbPath(), "SELECT COUNT(*) FROM memories"); n == 0 {
-		t.Fatalf("the downgrade emptied the store")
+		t.Fatalf("the downgrade to v%d emptied the store", version)
 	}
 }
 

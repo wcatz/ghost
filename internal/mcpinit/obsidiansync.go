@@ -35,6 +35,11 @@ func ensureObsidianSyncRunning() {
 		return
 	}
 
+	// A GHOST_DEV_FORBID_DATA_DIR refusal stops the spawn, and not only because
+	// this function writes a pid file and a log into the data directory: the
+	// mirror it spawns opens the store, and `ghost obsidian export|sync` refuses
+	// a forbidden data directory (#721). Spawning one that cannot run would claim
+	// the pid, exit on the refusal and be respawned by the next session, forever.
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return

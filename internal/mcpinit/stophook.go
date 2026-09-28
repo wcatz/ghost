@@ -236,6 +236,9 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 		}
 	}
 
+	// A GHOST_DEV_FORBID_DATA_DIR refusal stops the spawn here rather than in the
+	// child's own: the hook must not block, and a chain that read a forbidden
+	// store would do it in a process nobody is watching (#721).
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -338,6 +341,10 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 // project: an unattributable skip cannot be matched to a session later, so
 // recording it would only produce a stray alert. Best-effort throughout.
 func recordReflectSkipMarker(cwd string) {
+	// DataDirPath, not DataDir: this reads the store to attribute a skip to a
+	// project, and a store that does not exist is the reason the directory is
+	// never created here. A GHOST_DEV_FORBID_DATA_DIR refusal is the same
+	// non-event (#721) — and, as with no store at all, nothing is recorded.
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		return

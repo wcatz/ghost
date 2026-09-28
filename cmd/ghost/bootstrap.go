@@ -75,9 +75,14 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level, onBadConfig configHandl
 		cfg = fallback
 	}
 
+	// config.DataDir is where a GHOST_DEV_FORBID_DATA_DIR refusal arrives (#721),
+	// before the directory is created and before memory.OpenDB can migrate or
+	// back up anything in it. Every command that reaches the store through
+	// bootstrap() — the MCP server, reflect, resolve, supersede, project,
+	// backup, an applied import, lifecycle — is covered by that one call.
 	dataDir, err := config.DataDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: cannot create data directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")
