@@ -417,7 +417,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 				// value — the two are told apart by that floor, not by a sentinel
 				// the field never had.
 				row.AgeDays = ageDays(m.CreatedAt, now)
-				row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
+				row.DecayFactor = DecayFactor(m.Category, m.Retention, m.Pinned, row.AgeDays)
 			}
 			row.ProjectMatch, row.RowProject = t.ProjectMatch, t.RowProject
 			row.ScopeMatched = t.ScopeMatched
@@ -450,7 +450,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			row.FTSRank, row.VectorRank, row.VectorScore = -1, -1, -1
 			row.StatusFactor = 1.0
 			row.AgeDays = ageDays(m.CreatedAt, now)
-			row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
+			row.DecayFactor = DecayFactor(m.Category, m.Retention, m.Pinned, row.AgeDays)
 			row.RowProject = m.ProjectID
 			row.ProjectMatch = p.ProjectID == "" || m.ProjectID == p.ProjectID
 			row.ScopeMatched = true

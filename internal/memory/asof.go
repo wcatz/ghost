@@ -491,11 +491,20 @@ func qualifyScopeClause(clause, table string) string {
 // there is a parity test between those two; a third spelling of the decay
 // formula would have no such test and would drift the first time the SQL
 // constant changed.
+//
+// The tier passed is `project`, and that is a statement about what the change
+// log holds rather than a default: memory_history records the state a memory
+// HELD -- its wording, its category, its importance, its pin -- and a tier is a
+// property of the row as it stands now, not of any version of it. Reading
+// today's tier into a past ranking would be a claim about what the store would
+// have done then, made by a table that never recorded it. The cost is that a
+// session memory ranks as durable in a historical read, and the alternative
+// would rank a row by a protection it was not under.
 func sortAsOfRows(rows []AsOfRow, t time.Time) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
-		as := float64(a.Importance) * DecayFactor(a.Category, a.Pinned, ageDays(a.CreatedAt, t))
-		bs := float64(b.Importance) * DecayFactor(b.Category, b.Pinned, ageDays(b.CreatedAt, t))
+		as := float64(a.Importance) * DecayFactor(a.Category, RetentionProject, a.Pinned, ageDays(a.CreatedAt, t))
+		bs := float64(b.Importance) * DecayFactor(b.Category, RetentionProject, b.Pinned, ageDays(b.CreatedAt, t))
 		if as != bs {
 			return as > bs
 		}

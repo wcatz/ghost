@@ -779,6 +779,12 @@ func loadGlobalMemories(dbPath string, sessionScope map[string]string) (globals 
 type sessionMemory struct {
 	ID, Category, Content string
 	Pinned                bool
+	// Retention is the tier the row carries, read by the project loader's Go-side
+	// re-scoring so it applies the same bounded session decay the SQL ordering
+	// applied. The globals loader does not select it: that query ranks on pin,
+	// importance and recency and never consults the decay, so a tier there would
+	// be a field nothing reads.
+	Retention string
 	// Scope is the row's machine-readable scope, decoded with
 	// memory.ParseScopeJSON. It is what the renderer labels the line with and
 	// what the session-scope filter decides on, so both halves read the same
@@ -879,8 +885,12 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	if hasScope && len(injection.SessionScope) > 0 {
 		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", injection.SessionScope)
 	}
+	// retention is selected because DecayRankingSQL -- the ORDER BY below --
+	// reads it: a session-tier row carries a bounded tier decay in that
+	// expression, and a Go re-scoring of the same candidates has to be given the
+	// same value or the two passes disagree about the same corpus.
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, importance, created_at, `+scopeColumn+` FROM memories
+		SELECT id, category, content, pinned, importance, created_at, retention, `+scopeColumn+` FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
 		ORDER BY (`+memory.DecayRankingSQL+`) DESC, importance DESC, created_at DESC, id
 		LIMIT ?
@@ -902,11 +912,11 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	}
 	var cands []candidate
 	for rows.Next() {
-		var id, cat, content, createdAt string
+		var id, cat, content, createdAt, retention string
 		var pinnedInt int
 		var importance float64
 		var rawScope []byte
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt, &rawScope); err != nil {
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt, &retention, &rawScope); err != nil {
 			continue
 		}
 		// 200 bytes per item (vs. globals' 300 above) — project memories
@@ -924,7 +934,7 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 		cands = append(cands, candidate{
 			mem: sessionMemory{
 				ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
-				ProjectID: projectID, Scope: memory.ParseScopeJSON(rawScope),
+				Retention: retention, ProjectID: projectID, Scope: memory.ParseScopeJSON(rawScope),
 			},
 			importance: importance,
 			createdAt:  t,
@@ -967,7 +977,11 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 				w = cfgW
 			}
 		}
-		return c.importance * memory.DecayFactor(c.mem.Category, c.mem.Pinned, float64(now.Sub(c.createdAt).Hours()/24.0)) * w
+		// The tier rides along, exactly as it does on the search path: this is the
+		// same composite score DecayRankingSQL evaluates in SQL below, and a
+		// session-tier row that decayed on one path and not the other would make
+		// the session-start block and a search disagree about the same corpus.
+		return c.importance * memory.DecayFactor(c.mem.Category, c.mem.Retention, c.mem.Pinned, float64(now.Sub(c.createdAt).Hours()/24.0)) * w
 	}
 
 	chosen := make([]sessionMemory, 0, sessionMemoriesCap)

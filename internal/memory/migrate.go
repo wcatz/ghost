@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 18
+const schemaVersion = 19
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -61,6 +61,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV16,
 	migrateV17,
 	migrateV18,
+	migrateV19,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1197,6 +1198,59 @@ WHERE (agent IS NOT NULL OR session_id IS NOT NULL OR source_ref IS NOT NULL OR 
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("%q: %w", stmt[:min(40, len(stmt))], err)
 		}
+	}
+	return nil
+}
+
+// migrateV19 adds the retention tier and its expiry (schema v19, issue #587).
+//
+// Both columns arrive with their DEFAULTs and no UPDATE touches a single row,
+// which is the property this step is judged on: a store that has been running
+// for a year has rows whose created_at, importance and pin state are load-bearing
+// for decay, for the reflection drop guard and for the session-start ordering,
+// and the only value this migration may have an opinion about is the one nothing
+// has ever set. Adding retention NOT NULL DEFAULT 'project' gives every existing
+// row the tier it has in fact always had — a memory that persisted until
+// somebody resolved it was a project memory — without rewriting it, and the
+// DEFAULT covers every writer that never mentions the column at all.
+//
+// The alternative, backfilling an expiry for rows nobody classified, would be
+// writing a claim ("this stops being wanted on the 28th") about a conversation
+// that is not this build's, and the only writer of expires_at is the save that
+// stores a session row.
+//
+// The CHECK is spelled here rather than read from initSQL for the reason every
+// step carries its own DDL: this step is frozen, and initSQL keeps moving. The
+// index is created here too, and for the same reason the v17 step creates its
+// own: a store that already had rows at this version must not end up with a
+// different schema from a fresh install, and a partial index is what keeps a
+// prune off a full scan of a large corpus.
+//
+// Idempotent through the column probes, so a database an operator has already
+// added one of these columns to is stamped rather than failing the open.
+func migrateV19(tx *sql.Tx) error {
+	hasRetention, err := columnExists(tx, "memories", "retention")
+	if err != nil {
+		return err
+	}
+	if !hasRetention {
+		if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN retention TEXT NOT NULL DEFAULT 'project'
+            CHECK (retention IN ('session', 'project', 'persistent'))`); err != nil {
+			return fmt.Errorf("add memories.retention: %w", err)
+		}
+	}
+	hasExpiry, err := columnExists(tx, "memories", "expires_at")
+	if err != nil {
+		return err
+	}
+	if !hasExpiry {
+		if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN expires_at TEXT`); err != nil {
+			return fmt.Errorf("add memories.expires_at: %w", err)
+		}
+	}
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_session_expiry
+        ON memories(expires_at) WHERE retention = 'session'`); err != nil {
+		return fmt.Errorf("create the session-expiry index: %w", err)
 	}
 	return nil
 }

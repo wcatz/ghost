@@ -89,8 +89,13 @@ const decayProbeAgeDays = 1000.0
 
 // categoryDecays reports whether the shipped category-aware time decay would
 // ever reorder a row in this category.
+//
+// The tier is the durable one on purpose: the question is about the CATEGORY
+// half, and a session row also carries a bounded retention decay, so asking
+// with `session` here would classify every category as decaying and answer a
+// different question than the one the label asks.
 func categoryDecays(category string) bool {
-	return memory.DecayFactor(category, false, decayProbeAgeDays) < 1.0
+	return memory.DecayFactor(category, memory.RetentionProject, false, decayProbeAgeDays) < 1.0
 }
 
 // LoadTrapScenarios reads trap scenarios, one JSON per line. A scenario whose
