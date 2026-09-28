@@ -504,11 +504,13 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 		return results
 	}
 	ids := make([]string, len(results))
+	protected := make(map[string]bool, len(results))
 	for i, m := range results {
 		ids[i] = m.ID
+		protected[m.ID] = m.Pinned || RetentionExempt(m)
 	}
 	s.mu.RLock()
-	penalty, err := supersedeVerdicts(ctx, s.queryDB(), ids, p.trace)
+	penalty, err := supersedeVerdicts(ctx, s.queryDB(), ids, p.trace, protected)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("supersede demote: lookup failed", "error", err)

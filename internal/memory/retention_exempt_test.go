@@ -201,7 +201,7 @@ func TestASupersedesEdgeDoesNotSinkAPersistentRow(t *testing.T) {
 		t.Fatalf("CreateLink: %v", err)
 	}
 
-	before, err := SupersedePenalties(ctx, s.queryDB(), []string{newer, older})
+	before, err := SupersedePenalties(ctx, s.queryDB(), []string{newer, older}, protectionOf(t, s, newer, older))
 	if err != nil {
 		t.Fatalf("SupersedePenalties: %v", err)
 	}
@@ -224,7 +224,11 @@ func TestASupersedesEdgeDoesNotSinkAPersistentRow(t *testing.T) {
 	if keepID == "" {
 		t.Fatalf("neither row is persistent: %s=%q %s=%q", newer, getOne(t, s, newer).Retention, older, getOne(t, s, older).Retention)
 	}
-	after, err := SupersedePenalties(ctx, s.queryDB(), ids)
+	// The SAME map expression a caller runs, read fresh after the tier changed —
+	// which is the whole point of the map being the caller's: this test passes
+	// because the caller re-read the row, and would fail if it reused the map it
+	// built before the row was declared keep-forever.
+	after, err := SupersedePenalties(ctx, s.queryDB(), ids, protectionOf(t, s, ids...))
 	if err != nil {
 		t.Fatalf("SupersedePenalties after: %v", err)
 	}
@@ -456,5 +460,80 @@ func TestCreateRefusesToPutAnExpiryOnADurableRow(t *testing.T) {
 	}
 	if got := getOne(t, s, id); got.ExpiresAt == nil || *got.ExpiresAt != stated {
 		t.Errorf("a session row's stated expiry was overwritten: %v", got.ExpiresAt)
+	}
+}
+
+// protectionOf is the caller's obligation, written once so the tests that depend
+// on it and the production callers that perform it say the same thing: a row is
+// protected when it is pinned or its tier may not be taken back. SupersedePenalties
+// and DemotionPenalties are handed ids, not rows, so a caller holding a row it did
+// not read cannot protect it — which is why every one of them hydrates first.
+func protectionOf(t *testing.T, s *Store, ids ...string) map[string]bool {
+	t.Helper()
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		m := getOne(t, s, id)
+		out[id] = m.Pinned || RetentionExempt(m)
+	}
+	return out
+}
+
+// TestTheDemotionLookupsDoNotNameTheTierColumn: both lookups run on handles that
+// cannot migrate. The session-start loaders hold memory.OpenReadDB — read-only,
+// refusing to create — and `ghost context --as-of` opens the same way, so a store
+// from before schema v19 is a store these statements must still run against. A
+// column named in either one fails the WHOLE statement, and both callers answer a
+// failed lookup by returning their results unreordered: a superseded memory
+// outranks its replacement, and a spurious diagnostic reaches the user's stderr on
+// every session start. The exemption therefore arrives as the caller's protection
+// map, and this test drops the column to prove neither statement names it.
+func TestTheDemotionLookupsDoNotNameTheTierColumn(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	newer := retentionTierFixture(t, s, "the decision that replaced the older claim here", RetentionProject)
+	older := retentionTierFixture(t, s, "a claim the newer note superseded entirely", RetentionProject)
+	near := retentionTierFixture(t, s, "the pool timeout is 30 seconds in production", RetentionProject)
+	nearDup := retentionTierFixture(t, s, "the pool timeout is 30 seconds in prod", RetentionProject)
+	if err := s.CreateLink(ctx, newer, older, "supersedes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink(supersedes): %v", err)
+	}
+	if err := s.CreateLink(ctx, near, nearDup, "duplicate", 0.99, "auto"); err != nil {
+		t.Fatalf("CreateLink(duplicate): %v", err)
+	}
+
+	// Back to v18, by dropping the column rather than the whole table: the corpus
+	// and the links stay exactly as they were. The v19 index goes with it, because
+	// SQLite refuses to drop a column an index names.
+	if _, err := s.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_memories_session_expiry`); err != nil {
+		t.Fatalf("drop the v19 index: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE memories DROP COLUMN retention`); err != nil {
+		t.Fatalf("drop the tier column: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE memories DROP COLUMN expires_at`); err != nil {
+		t.Fatalf("drop the expiry column: %v", err)
+	}
+
+	ids := []string{newer, older, near, nearDup}
+	// Read the tiers from a handle that predates the column: every row in such a
+	// store is a `project` row by definition, which is what tierOrProject and
+	// scanMemories both resolve an absent column to.
+	protected := map[string]bool{newer: false, older: false, near: false, nearDup: false}
+	penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, protected)
+	if err != nil {
+		t.Fatalf("SupersedePenalties named a column a v18 store lacks: %v", err)
+	}
+	if penalty[older] != 1 {
+		t.Errorf("the superseded row carries no penalty on a v18 store: %v — the lookup failed open", penalty)
+	}
+	dup, err := DemotionPenalties(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
+	if err != nil {
+		t.Fatalf("DemotionPenalties named a column a v18 store lacks: %v", err)
+	}
+	// Which member of the pair loses is the ranking's business, not this test's; what
+	// matters is that the lookup RAN — a statement that failed returned no map at all
+	// and an empty one is what "failed open" looks like from here.
+	if dup[near] == 0 && dup[nearDup] == 0 {
+		t.Errorf("no near-duplicate was sunk on a v18 store: %v — the lookup failed open", dup)
 	}
 }

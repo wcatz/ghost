@@ -3924,10 +3924,12 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	// when the result fits under limit (order alone still matters).
 	if len(results) >= 2 {
 		ids := make([]string, len(results))
+		supersedeProtected := make(map[string]bool, len(results))
 		for i, m := range results {
 			ids[i] = m.ID
+			supersedeProtected[m.ID] = m.Pinned || RetentionExempt(m)
 		}
-		penalty, err := SupersedePenalties(ctx, s.queryDB(), ids)
+		penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, supersedeProtected)
 		if err != nil {
 			s.logger.Debug("get top memories: supersede demotion lookup failed", "error", err)
 		} else if len(penalty) > 0 {

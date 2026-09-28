@@ -60,12 +60,22 @@ type AsOfRow struct {
 	VersionRecordedAt string
 	VersionPhase      string
 
-	// Retention is the tier the LIVE row carries, read here for the same reason
-	// tags, pin and scope are: they are not versioned, and a version has no tier
-	// of its own. It is therefore the tier the row holds NOW, or `project` for a
-	// memory that has since been deleted, and no historical read may filter on it
-	// (assemble.validateRequest refuses that combination rather than answer from a
-	// value the change log never recorded).
+	// Retention is always EMPTY here, and that is the honest reading rather than
+	// an omission: memory_history records the state a memory HELD, and a tier is
+	// not part of that state. The tags, pin and scope above are not versioned
+	// either, but they existed before the history table did, so the read takes them
+	// from the live row and says so; the tier did not, and a value read from the
+	// live row would be the tier the memory carries TODAY, which is a different
+	// claim from the one this set makes.
+	//
+	// Nothing consumes it: the as_of decay passes RetentionProject (a version
+	// carries no tier, so the pre-tier formula is the one it would have had), and
+	// assemble.validateRequest refuses a tier filter over an as_of read rather than
+	// answering from a value the change log never recorded. The statement does not
+	// SELECT the column either, because this read runs on a handle that cannot
+	// migrate — `ghost context --as-of` opens the store read-only — and naming a
+	// column a pre-v19 store does not have fails the whole read rather than one
+	// field of it.
 
 	// SupersededBy is the memory whose active `supersedes` edge claimed this one
 	// at T, and "" when no claim was live. It is read from the supersede /
@@ -281,15 +291,14 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		       importance, resolved_at, source, superseded_by,
 		       created_at, updated_at, tags, pinned, scope, valid_from, valid_until,
 		       verified_at, access_count, last_accessed, agent, session_id,
-		       source_ref, confidence, retention
+		       source_ref, confidence
 		FROM (
 		    SELECT v.memory_id, v.project_id, 1 AS known, v.phase, v.recorded_at,
 		           v.content, v.category, v.importance, v.resolved_at, v.source,
 		           v.superseded_by,
 		           m.created_at, m.updated_at, m.tags, m.pinned, m.scope,
 		           m.valid_from, m.valid_until, m.verified_at, m.access_count,
-		           m.last_accessed, m.agent, m.session_id, m.source_ref, m.confidence,
-		           m.retention
+		           m.last_accessed, m.agent, m.session_id, m.source_ref, m.confidence
 		    FROM versioned v
 		    LEFT JOIN memories m ON m.id = v.memory_id
 		    UNION ALL
@@ -298,8 +307,7 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		           NULL,
 		           u.created_at, m.updated_at, m.tags, m.pinned, m.scope,
 		           m.valid_from, m.valid_until, m.verified_at, m.access_count,
-		           m.last_accessed, m.agent, m.session_id, m.source_ref, m.confidence,
-		           m.retention
+		           m.last_accessed, m.agent, m.session_id, m.source_ref, m.confidence
 		    FROM unrecorded u
 		    LEFT JOIN memories m ON m.id = u.memory_id
 		)`, asOfArgs(stamp, clauseArgs)...)
@@ -322,13 +330,6 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 			accessCount                                  sql.NullInt64
 			lastAccessed, agent, sessionID, sourceRef    sql.NullString
 			confidence                                   sql.NullFloat64
-			// retention comes from the LIVE row like tags, pin and scope do, so it
-			// is NULL for a memory that has since been deleted -- and NULL resolves
-			// to the same `project` an unset column does, which is the value scanMemories
-			// would have produced. See the AsOfRow comment: a version carries no tier of
-			// its own, which is why the assembler refuses a tier filter over a
-			// historical read rather than answering from this value.
-			retention sql.NullString
 		)
 		if err := rows.Scan(
 			&r.ID, &r.ProjectID, &known, &phase, &recordedAt, &content, &category,
@@ -336,7 +337,6 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 			&createdAt, &updatedAt, &tagsJSON, &pinned, &scopeRaw,
 			&validFrom, &validUntil, &verifiedAt, &accessCount,
 			&lastAccessed, &agent, &sessionID, &sourceRef, &confidence,
-			&retention,
 		); err != nil {
 			return nil, fmt.Errorf("scan memories as of %s: %w", stamp, err)
 		}
@@ -362,13 +362,16 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 			}
 		}
 		r.Scope = parseScope(scopeRaw)
-		// The same normalisation scanMemories applies, because the same shape
-		// reaches it: a deleted row's join is NULL, and an absent tier is not a
-		// fourth tier.
-		r.Retention = retention.String
-		if r.Retention == "" {
-			r.Retention = RetentionProject
-		}
+		// r.Retention is deliberately left empty. The change log records no tier, so
+		// the only value available is the one the row carries NOW, which is not a
+		// property of the instant being asked about -- and nothing consumes it
+		// anyway: the as_of decay passes RetentionProject explicitly, and
+		// assemble.validateRequest refuses a tier filter over an as_of read rather
+		// than answering from this value. It was selected for a while and removed,
+		// because a read that runs on a handle which cannot migrate (ghost context
+		// --as-of opens the store read-only) must not name a column a store predating
+		// schema v19 does not have -- that is a whole failed read, not a missing
+		// field. See AsOfRow.Retention.
 		r.Importance = float32(importance.Float64)
 		if confidence.Valid {
 			v := confidence.Float64

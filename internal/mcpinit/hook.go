@@ -1122,7 +1122,14 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 		for i, m := range memories {
 			ids[i] = m.ID
 		}
-		penalty, penaltyErr := memory.SupersedePenalties(context.Background(), db, ids)
+		// The protection map, not a pin list, and a map rather than a column read
+		// inside SupersedePenalties because this handle is the read-only one
+		// (memory.OpenReadDB), which cannot migrate a store predating the tier.
+		supersedeProtected := make(map[string]bool, len(memories))
+		for _, m := range memories {
+			supersedeProtected[m.ID] = m.Pinned || m.Retention == memory.RetentionPersistent
+		}
+		penalty, penaltyErr := memory.SupersedePenalties(context.Background(), db, ids, supersedeProtected)
 		if penaltyErr != nil {
 			fmt.Fprintln(os.Stderr, "ghost: session injection supersede demotion lookup failed:", penaltyErr)
 		} else if len(penalty) > 0 {

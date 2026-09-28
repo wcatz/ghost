@@ -274,8 +274,8 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // before the row was declared keep-forever sinks it on the next search anyway.
 // The edge stays — withdrawing a claim is the user's own explicit move — and it
 // stops ranking the row it names.
-func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[string]int, error) {
-	penalty, err := supersedeVerdicts(ctx, db, ids, nil)
+func SupersedePenalties(ctx context.Context, db Queryer, ids []string, protected map[string]bool) (map[string]int, error) {
+	penalty, err := supersedeVerdicts(ctx, db, ids, nil, protected)
 	if err != nil {
 		return nil, err
 	}
@@ -288,8 +288,8 @@ func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[stri
 // the ranking path's own lookup already happened: a separate attribution query
 // would be a second chance to disagree with it, on the store's single
 // connection, inside a snapshot a concurrent writer is already locked out of.
-func supersedeVerdicts(ctx context.Context, db Queryer, ids []string, tr *searchTrace) (map[string]int, error) {
-	rows, err := supersedePenaltyRows(ctx, db, ids)
+func supersedeVerdicts(ctx context.Context, db Queryer, ids []string, tr *searchTrace, protected map[string]bool) (map[string]int, error) {
+	rows, err := supersedePenaltyRows(ctx, db, ids, protected)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +315,7 @@ func supersedeVerdicts(ctx context.Context, db Queryer, ids []string, tr *search
 // that decides which endpoint a 'supersedes' edge sinks, so the count a caller
 // demotes by and the ids explain attributes that demotion to cannot come from
 // two different reads.
-func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string) (map[string][]string, error) {
+func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string, protected map[string]bool) (map[string][]string, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -332,7 +332,7 @@ func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string) (map[st
 	list := strings.Join(ph, ",")
 
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT l.source_id, l.target_id, source_mem.scope, target_mem.scope, target_mem.retention
+		SELECT l.source_id, l.target_id, source_mem.scope, target_mem.scope
 		FROM memory_links l
 		JOIN memories source_mem ON source_mem.id = l.source_id
 		JOIN memories target_mem ON target_mem.id = l.target_id
@@ -348,17 +348,16 @@ func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string) (map[st
 	for rows.Next() {
 		var src, tgt string
 		var sourceScope, targetScope sql.NullString
-		var targetRetention string
-		if err := rows.Scan(&src, &tgt, &sourceScope, &targetScope, &targetRetention); err != nil {
+		if err := rows.Scan(&src, &tgt, &sourceScope, &targetScope); err != nil {
 			return nil, fmt.Errorf("supersede penalties: %w", err)
 		}
 		if ScopesConflict(parseScope(sourceScope), parseScope(targetScope)) {
 			continue
 		}
-		// src supersedes tgt: sink the superseded side once per edge. A target
-		// the user declared keep-forever is not sunk by an edge at all — see
-		// the function comment.
-		if targetRetention == RetentionPersistent {
+		// src supersedes tgt: sink the superseded side once per edge. A target the
+		// user declared keep-forever is not sunk by an edge at all — see the
+		// function comment, and DemotionPenalties for why that arrives as a map.
+		if protected[tgt] {
 			continue
 		}
 		// src supersedes tgt: sink the superseded side once per edge.

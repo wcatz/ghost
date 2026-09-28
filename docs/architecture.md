@@ -1243,28 +1243,41 @@ A round is also reported when it compresses hard: a corpus of six consolidatable
 
 `expires_at` has exactly one source. A caller cannot state an expiry on a save, so there is no way for a save to schedule the memory it just wrote for deletion, and a NULL expiry is never a prune candidate.
 
-Two readers cannot name a column a migration added, because they open the store
-read-only and cannot migrate it: the session-start loaders, and anything else on
-`memory.OpenReadDB`. `internal/mcpinit` already had that shape for
-`memories.scope` (`scopeColumnExpr`, and the `NULL AS scope` literal that stands in
-for a store below v12), and the tier column takes the same route:
-`retentionColumnExpr` substitutes `NULL AS retention` below v19 and the ORDER BY
-is built from `memory.DecayRankingSQLWithTier(false)`, the same decay expression
-without the tier half. Both halves have to fall back together — a query that
-selected a literal while ordering by the real column would order by nothing — and
-the scanned value is nullable for the same reason, because scanning NULL into a
-string fails EVERY row and that loop's answer to a scan failure is `continue`:
-a plain string there would drop the whole digest on a pre-v19 store, silently.
+Several readers cannot name a column a migration added, because they open the store
+read-only and cannot migrate it: the session-start loaders, `ghost context --as-of`,
+and anything else on `memory.OpenReadDB`. Two shapes answer that, and which one
+applies depends on whether the reader has the row already.
+
+A reader that has to *select* the tier uses `internal/mcpinit`'s existing pattern —
+`scopeColumnExpr`, and the `NULL AS scope` literal that stands in for a store below
+v12 — so the tier column takes the same route: `retentionColumnExpr` substitutes
+`NULL AS retention` below v19 and the ORDER BY is built from
+`memory.DecayRankingSQLWithTier(false)`, the same decay expression without the tier
+half. Both halves have to fall back together — a query that selected a literal while
+ordering by the real column would order by nothing — and the scanned value is
+nullable for the same reason, because scanning NULL into a string fails EVERY row
+and that loop's answer to a scan failure is `continue`: a plain string there would
+drop the whole digest on a pre-v19 store, silently.
+
+A reader that is *handed ids* takes the protection from its caller instead, which is
+what `DemotionPenalties` already did and what `SupersedePenalties` does now: both
+demotion lookups are called on a read-only handle (`GetTopMemories`, `explain`, the
+session-start loaders), so a statement naming `target_mem.retention` fails in full —
+a superseded memory outranks its replacement and a spurious diagnostic reaches stderr
+on every session start. The caller already holds the hydrated rows, and a caller
+holding a row it did not read is a caller that cannot protect it, so every one of
+them builds the map from the rows it already read. The historical reader's tier was
+removed for the same reason plus one of its own: see below.
 
 A tier is a claim about a memory's owner, not part of its text, and nothing that replays text carries one. The portable artifact does not (an imported memory arrives as `project` — consolidatable, never pruned, which is the direction that keeps a memory rather than the one that schedules it); a consolidation's own output is a `project` row, because a tier the model never chose is not a protection; and `ghost reflect --restore` revives a deleted memory as `project`, because neither `memory_snapshots` nor `memory_history` records a tier and there is nothing to restore one from. All three resolve to the durable default, which is the direction that cannot surprise a user by ending a memory's life.
 
-`persistent` is the one tier a default may not take back, and the exemption is asked in two places, not one. At the write: `ReplaceNonManual` (snapshot, replaceable set, concurrent-save set, output delete), `RestoreSnapshot`'s UPDATE, `ResolveCandidates`/`ResolvedCandidates`/`SetResolved`, and `supersede.SelectCandidates` — before the classify call, so a verdict that could only produce the refused edge is never paid for. And at the consequence: `SupersedePenalties` and `DemotionPenalties` both read the tier, because an edge written before the tier was declared would otherwise sink the row on the next search. A protection that survives one pass and is lost in the next is not a protection, and a user cannot be asked to re-save a memory to defend it. `DemotionPenalties`' pin map is therefore a *protection* map (pin or tier) rather than a list of pins.
+`persistent` is the one tier a default may not take back, and the exemption is asked in two places, not one. At the write: `ReplaceNonManual` (snapshot, replaceable set, concurrent-save set, output delete), `RestoreSnapshot`'s UPDATE, `ResolveCandidates`/`ResolvedCandidates`/`SetResolved`, and `supersede.SelectCandidates` — before the classify call, so a verdict that could only produce the refused edge is never paid for. And at the consequence: `SupersedePenalties` and `DemotionPenalties` both spare it, because an edge written before the tier was declared would otherwise sink the row on the next search. A protection that survives one pass and is lost in the next is not a protection, and a user cannot be asked to re-save a memory to defend it. Both take the caller's *protection* map (pin or tier) rather than a list of pins, for the read-only reason above — and every caller builds it, since all five of them were handed a pin list at one point or another.
 
 `session` rows carry a bounded decay — tau 7 days, floor 0.5 — inside `DecayFactor`, whose SQL mirror `DecayRankingSQL` is formatted from the same constants. The bound has two ends and both matter: the factor never exceeds 1.0, so recency — the strongest signal in the composite score — can never on its own put a conversation-scoped row above the durable memory it duplicates, and it never falls below the floor, so an old session memory is dim rather than unfindable. `explain` reports the tier and the factor per row (`retention`, `retention_factor`) and names the signal in a note when any candidate carries one.
 
 A near-duplicate save **raises** the surviving row's tier and never lowers it, because a protection the caller asked for and did not get is a false report, while lowering would let a `session`-scoped restatement of somebody else's durable memory schedule that memory for deletion. The save result names the row that carries it.
 
-A tier filter and an `as_of` read are refused together, at `assemble.validateRequest`, for the same reason a vector-only request is: the only tier a version could carry is the one its row holds now, and answering from that would say "in the tier it is in today" without saying so. The historical reader does select the live row's tier — the way it already reads tags, pin and scope — so the value exists for a caller that wants it; what cannot be done is filtering on it as though it were a property of the past.
+A tier filter and an `as_of` read are refused together, at `assemble.validateRequest`, for the same reason a vector-only request is: no version records a tier, and the only value on offer would be the one the row holds *today*, so answering from it would say "in the tier it is in today" without saying so. `AsOfRow.Retention` is therefore always empty — deliberately, which is the difference between a field that says nothing and one that lies. Tags, pin and scope are read from the live row for the same reason a version has none of them, but they existed before `memory_history` did, so that read is a documented borrow; the tier did not exist when the change log did, and nothing consumes the value anyway (the as_of decay passes `project` explicitly, because a version's score is the one it would have had). `TestMemoriesAsOfOnAStoreBehindTheTierColumnStillReads` drops both v19 columns and reads on, because that statement runs on a handle `ghost context --as-of` opened read-only.
 
 `ghost prune` is the only thing that removes a `session` row, and it is never run for you: no lifecycle phase, no hook, no scheduler calls it. It is dry-run by default, and the dry run is the same transaction **rolled back** rather than a read-only preview, so the report cannot describe rows the apply would not have selected and the preview provably wrote nothing. Each removal appends a `delete` tombstone to `memory_history` before the DELETE, in that transaction. Its activity term is `COALESCE(last_accessed, updated_at, created_at)`, compared through SQLite's `datetime()` because those three columns do not all hold one shape: `Store.Touch` writes `last_accessed` as RFC 3339 while `datetime('now')` wrote the other two. A text comparison between them agrees across dates and disagrees within one — 'T' sorts above the space — so a row read earlier on the cutoff's own day would be kept and the prune would run a day late. Nothing in production records `last_accessed` today (`Store.Touch` has no caller), which is why that would have been invisible; a guarantee that holds only while a column has no writer is not a guarantee. In practice the grace is measured from the row's last **write**, and the default is a week for that reason.
 

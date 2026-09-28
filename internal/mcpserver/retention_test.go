@@ -22,12 +22,25 @@ func TestGhostMemorySave_RoundTripsTheRetentionTier(t *testing.T) {
 	session := connectedClient(t, srv)
 	ctx := context.Background()
 
-	for _, tier := range memory.RetentionValues() {
-		t.Run(tier, func(t *testing.T) {
-			content := "a " + tier + " tier memory saved through the MCP surface"
+	// Three WHOLLY distinct contents, and the reason is the fold: a near-duplicate
+	// save folds into its predecessor, raising the survivor's tier to the higher of
+	// the two. Three contents sharing a wording ("a <tier> tier memory saved ...")
+	// are near-duplicates, so the second save folded the first and RAISED it out of
+	// `session` — and this test still passed, because each subtest looked up the row
+	// carrying its own text and the fold leaves a copy behind carrying it. The store
+	// ended the test with one `persistent` row and no `session` row at all, which is
+	// the exact opposite of what the test exists to prove. Distinct texts remove the
+	// fold, and the check below is what would have caught it.
+	saved := map[string]string{}
+	for _, tc := range []struct{ tier, content string }{
+		{memory.RetentionSession, "the staging deploy finished at 09:12 and the console is still up"},
+		{memory.RetentionProject, "the migration runner needs its own lock table, decided at the review"},
+		{memory.RetentionPersistent, "run gofmt over cmd and internal before every commit, forever"},
+	} {
+		t.Run(tc.tier, func(t *testing.T) {
 			result, err := session.CallTool(ctx, &mcp.CallToolParams{
 				Name:      "ghost_memory_save",
-				Arguments: map[string]any{"project_id": "test-project", "content": content, "retention": tier},
+				Arguments: map[string]any{"project_id": "test-project", "content": tc.content, "retention": tc.tier},
 			})
 			if err != nil {
 				t.Fatalf("CallTool ghost_memory_save: %v", err)
@@ -39,20 +52,32 @@ func TestGhostMemorySave_RoundTripsTheRetentionTier(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetByCategory: %v", err)
 			}
-			var found *memory.Memory
+			byContent := map[string]memory.Memory{}
 			for i := range mems {
-				if mems[i].Content == content {
-					found = &mems[i]
-				}
+				byContent[mems[i].Content] = mems[i]
 			}
-			if found == nil {
+			found, ok := byContent[tc.content]
+			if !ok {
 				t.Fatalf("the saved row is not in the store: %+v", mems)
 			}
-			if found.Retention != tier {
-				t.Errorf("stored retention = %q, want %q", found.Retention, tier)
+			if found.Retention != tc.tier {
+				t.Errorf("stored retention = %q, want %q", found.Retention, tc.tier)
 			}
-			if !strings.Contains(toolText(t, result), tier) {
+			if !strings.Contains(toolText(t, result), tc.tier) {
 				t.Errorf("the result does not report the tier, so a caller cannot tell it took effect: %q", toolText(t, result))
+			}
+			// Every EARLIER save still reads the tier it was given. A fold raises the
+			// survivor and inserts a copy, so this is the assertion that fails when
+			// two of these contents are near-duplicates of each other.
+			saved[tc.content] = tc.tier
+			for content, want := range saved {
+				got, ok := byContent[content]
+				if !ok {
+					t.Fatalf("an earlier save vanished from the store: %q", content)
+				}
+				if got.Retention != want {
+					t.Errorf("the %q row now reads tier %q, want %q: a later save folded into it and raised it", content, got.Retention, want)
+				}
 			}
 		})
 	}
