@@ -33,7 +33,8 @@ delete tombstone first, so "ghost history <id>" still reports what was lost.
 Flags:
   --project <name-or-id>   Only this project (default: every project)
   --grace <duration>       How long past expiry an untouched row is left alone
-                           (Go duration: 168h, 7d is not a unit; default 168h)
+                           (Go duration: 168h, 7d is not a unit and 0 is
+                           refused; default 168h)
   --apply                  Remove the rows instead of only reporting them
 
 This command is never run for you. No lifecycle pass, no hook and no scheduler
@@ -48,12 +49,12 @@ type pruneOptions struct {
 	// Apply writes. False is the report-only run, and it is the default because
 	// this command deletes.
 	Apply bool
-	// Grace is the parsed --grace. Zero means the store's default; it is carried
-	// as a pointer's absence rather than as a sentinel number so "the user asked
-	// for 0" (prune anything expired) is distinguishable from "the user said
-	// nothing" (a week).
-	Grace    time.Duration
-	HasGrace bool
+	// Grace is the parsed --grace. Zero is the store's default, and an explicit
+	// zero is REFUSED rather than folded into it: the store cannot tell "the
+	// caller said nothing" from "the caller said 0", so the CLI has to refuse the
+	// one request that would otherwise be answered with a different request than
+	// the one made. --grace 1s is as close as this command goes to "expired".
+	Grace time.Duration
 	// Project scopes the run, by name or by id; empty is every project.
 	Project string
 }
@@ -86,7 +87,15 @@ func parsePruneArgs(args []string) (pruneOptions, error) {
 			if d < 0 {
 				return opts, fmt.Errorf("--grace %s is negative: it is how long to WAIT past expiry, not how long ago", d)
 			}
-			opts.Grace, opts.HasGrace = d, true
+			if d == 0 {
+				// A zero grace is a real request — prune the moment a row expires —
+				// and answering it with the default week would report a different
+				// run than the one asked for. The default is not expressible as a
+				// zero here, so the boundary is named instead: the shortest accepted
+				// grace is 1s, and the default stays what it is.
+				return opts, fmt.Errorf("--grace 0 would remove a memory the instant it expires; the shortest accepted grace is 1s, and the default is %s", memory.DefaultPruneGrace)
+			}
+			opts.Grace = d
 		case arg == "--project" || strings.HasPrefix(arg, "--project="):
 			value := ""
 			if arg == "--project" {

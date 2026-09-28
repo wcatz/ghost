@@ -32,16 +32,19 @@ func TestParsePruneArgsReadsTheFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsePruneArgs: %v", err)
 	}
-	if !opts.Apply || opts.Grace != 48*time.Hour || !opts.HasGrace || opts.Project != "ghost" {
+	if !opts.Apply || opts.Grace != 48*time.Hour || opts.Project != "ghost" {
 		t.Errorf("parsed %+v, want apply + 48h + ghost", opts)
 	}
 
-	inline, err := parsePruneArgs([]string{"--apply", "--grace=0s"})
-	if err != nil {
-		t.Fatalf("parsePruneArgs(--grace=0s): %v", err)
-	}
-	if !inline.HasGrace || inline.Grace != 0 {
-		t.Errorf("--grace=0s parsed as %+v; an explicit zero is a request, not an absence", inline)
+	// A zero grace is REFUSED rather than folded into the default. The store
+	// resolves 0 to the documented week, so honouring an explicit zero would
+	// silently run a different command than the one that was asked for — and the
+	// report would carry the default's number, so the substitution would be
+	// invisible in the output too.
+	if _, err := parsePruneArgs([]string{"--grace=0s"}); err == nil {
+		t.Error("--grace=0s was accepted, and will be answered with the default week")
+	} else if !strings.Contains(err.Error(), "1s") || !strings.Contains(err.Error(), "168h0m0s") {
+		t.Errorf("the zero-grace refusal does not name the shortest accepted grace and the default: %v", err)
 	}
 
 	// A bare --grace with no value is a mistake, and the message says what a value

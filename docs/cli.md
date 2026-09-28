@@ -281,7 +281,7 @@ ghost prune --project myproject --grace 168h --apply
 | Flag | Meaning |
 |---|---|
 | `--project <name-or-id>` | Only this project. Default: every project, and the report says so. |
-| `--grace <duration>` | How long past expiry an untouched row is left alone. Go duration (`168h`, `30m`); `7d` is not a unit. Default `168h`. |
+| `--grace <duration>` | How long past expiry an untouched row is left alone. Go duration (`168h`, `30m`); `7d` is not a unit, `0` is refused, and the default is `168h`. |
 | `--apply` | Remove the rows instead of only reporting them. |
 
 A row is a candidate only if **all** of these hold: its tier is `session`, its derived expiry has passed, and nothing has touched it for the grace period. The activity a prune measures is `COALESCE(last_accessed, updated_at, created_at)` — a recorded read is preferred, and nothing in Ghost records one today, so in practice this is the row's last **write**. A `project` or `persistent` row is never a candidate however old it is.
