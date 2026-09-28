@@ -1422,6 +1422,14 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	if res.CausesSweepFailed > 0 {
 		sweptNote = fmt.Sprintf(", %d causes sweep(s) FAILED (unknown)", res.CausesSweepFailed)
 	}
+	// A prediction the pass could not read is its own sentence, beside the sweep
+	// failures rather than inside them: no sweep ran, so "FAILED" would name a
+	// write that never happened — and "would sweep 0" for a read that never
+	// happened would tell an operator about to apply that there is nothing else
+	// to delete.
+	if res.CausesPredictionFailed > 0 {
+		sweptNote += fmt.Sprintf(", %d causes prediction(s) unavailable (read failed, unknown)", res.CausesPredictionFailed)
+	}
 	// Pairs the classifier never answered (#699). The count and the list are
 	// both here because the withdrawal lines below can look like the whole
 	// story: a pass that withdrew six vetoed edges and judged nothing else is a
@@ -1470,11 +1478,14 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		// the veto rows it is the only deletion no model adjudicated. A sweep
 		// that ERRORED says "unknown" rather than a count, because the count is
 		// not knowable after a failed write and a 0 would read as "nothing else
-		// was deleted".
+		// was deleted" — and so does a dry-run row whose PREDICTION could not be
+		// read, which is the same mistake one step earlier.
 		swept := ""
 		switch {
 		case w.SweepFailed:
 			swept = "  [causes sweep FAILED — unknown]"
+		case w.PredictionUnknown:
+			swept = "  [causes edge — unknown: the prediction read failed]"
 		case w.CausesSwept > 0:
 			swept = fmt.Sprintf("  [+%d causes edge]", w.CausesSwept)
 		}

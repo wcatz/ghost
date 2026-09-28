@@ -251,6 +251,12 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 	openNewer, openOlder := seedEdge(t, store, db,
 		"The ingest service now runs Redis 7.2, revision a.",
 		"The ingest service runs Redis 6.2, revision a.")
+	// A 'causes' edge on the vetoed pair, so the assertion below can tell the
+	// OBSERVED count the sweep reports from a prediction the failed read never
+	// produced. Without it both are 0 and the assertion is vacuous.
+	if err := store.CreateLink(ctx, vetoOlder, vetoNewer, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
 
 	fp := &flakyProvider{fails: 2}
 	cls := NewRelationClassifier(fp)
@@ -269,16 +275,26 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 	if len(res.Unjudged) != 1 || res.Unjudged[0].NewerID != openNewer {
 		t.Errorf("Unjudged = %+v, want the pair the classifier never judged", res.Unjudged)
 	}
-	// The vetoed edge is withdrawn, and the sweep's count is what it moved, not
-	// a prediction the failed read never produced.
+	// The vetoed edge is withdrawn, and the sweep's count is what it moved — the
+	// OBSERVED number, from the sweep itself, not the prediction the failed read
+	// never produced (which would have been 1 here if the read had worked, so a
+	// pass that reported the prediction rather than the observation would look
+	// the same; the marker below is what separates them).
 	if res.Withdrawn != 1 || len(withdrawn) != 1 {
 		t.Fatalf("withdrawn = %+v (count %d), want the vetoed edge written despite the read failure", withdrawn, res.Withdrawn)
 	}
 	if !withdrawn[0].Written || !withdrawn[0].Vetoed {
 		t.Errorf("row = %+v, want the vetoed edge, marked written", withdrawn[0])
 	}
-	if withdrawn[0].SweepFailed || withdrawn[0].CausesSwept != 0 {
-		t.Errorf("row = %+v, want no prediction marker and no claimed sweep: the read that would have predicted it failed", withdrawn[0])
+	if withdrawn[0].PredictionUnknown || withdrawn[0].SweepFailed {
+		t.Errorf("row = %+v, want no unknown marker under --apply: the sweep ran and reported what it moved", withdrawn[0])
+	}
+	if withdrawn[0].CausesSwept != 1 || res.CausesWithdrawn != 1 {
+		t.Errorf("row swept %d and the result counted %d, want 1 each: the observed count, not the abandoned prediction",
+			withdrawn[0].CausesSwept, res.CausesWithdrawn)
+	}
+	if res.CausesPredictionFailed != 0 {
+		t.Errorf("CausesPredictionFailed = %d, want 0 under --apply: the prediction is never read, so nothing is unknown", res.CausesPredictionFailed)
 	}
 	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 0 {
 		t.Errorf("the vetoed edge survived a failed prediction read: %d pair(s) remain", len(pairs))
@@ -297,13 +313,13 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 	}
 }
 
-// TestReassessDryRunEndsOnAPredictionItCannotBuild: the asymmetry the apply path
-// above gives up, stated as a test. A dry run's report IS the prediction, so
-// without it the rows below cannot say what each withdrawal would take with it;
-// printing a preview that silently drops the second deletion from every row is
-// the invisibility the [+N causes edge] marker exists to remove. Nothing was
-// written and nothing was decided, so the run ends with the error instead.
-func TestReassessDryRunEndsOnAPredictionItCannotBuild(t *testing.T) {
+// TestReassessDryRunSaysAPredictionItCouldNotReadIsUnknown: the dry-run half of
+// the read failure. The pass still lists what it would withdraw, but a row whose
+// 'causes' prediction could not be read says UNKNOWN rather than 0: the report
+// derives its count from these rows, so returning none of them would print
+// "would withdraw 0" beside a "1 vetoed" and print nothing at all about a second
+// deletion nobody looked for. The error still returns.
+func TestReassessDryRunSaysAPredictionItCouldNotReadIsUnknown(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	vetoNewer, vetoOlder := seedEdge(t, store, db,
@@ -316,16 +332,34 @@ func TestReassessDryRunEndsOnAPredictionItCannotBuild(t *testing.T) {
 	cls := NewRelationClassifier(&fakeProvider{resp: "SUPERSEDES | replaced: never"})
 	res, withdrawn, err := Reassess(ctx, unreadableLinksStore{Store: store}, cls, "p", false, discardLogger())
 	if err == nil {
-		t.Fatal("a dry run that cannot build its report must say so, not print one")
+		t.Fatal("a dry run whose prediction read failed must say so, not exit clean")
 	}
 	if !strings.Contains(err.Error(), "links table is locked") {
 		t.Errorf("error %q does not carry the read failure", err)
 	}
-	if len(withdrawn) != 0 {
-		t.Errorf("withdrawn = %+v, want no list from a run that printed no report", withdrawn)
-	}
 	if res.Withdrawn != 0 {
 		t.Errorf("Withdrawn = %d, want 0: a dry run writes nothing", res.Withdrawn)
+	}
+	// The row is still LISTED, or the report counts zero withdrawals above a
+	// non-zero vetoed count and the operator sees a contradiction instead of a
+	// preview.
+	if len(withdrawn) != 1 || withdrawn[0].NewerID != vetoNewer || withdrawn[0].Written || !withdrawn[0].Vetoed {
+		t.Fatalf("withdrawn = %+v, want the vetoed edge listed as an unwritten prediction", withdrawn)
+	}
+	if !withdrawn[0].PredictionUnknown {
+		t.Errorf("row = %+v, want PredictionUnknown: a count of second deletions nobody looked for is not 0", withdrawn[0])
+	}
+	if withdrawn[0].SweepFailed {
+		t.Errorf("row = %+v, want SweepFailed unset: no sweep ran, the PREDICTION is what could not be read", withdrawn[0])
+	}
+	if res.CausesPredictionFailed != 1 {
+		t.Errorf("CausesPredictionFailed = %d, want 1, and it must not be counted as a failed sweep", res.CausesPredictionFailed)
+	}
+	if res.CausesSweepFailed != 0 {
+		t.Errorf("CausesSweepFailed = %d, want 0: a dry run sweeps nothing, and a failed read is not a failed write", res.CausesSweepFailed)
+	}
+	if res.CausesWithdrawn != 0 {
+		t.Errorf("CausesWithdrawn = %d, want 0: an unknown prediction contributes no count", res.CausesWithdrawn)
 	}
 	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 1 {
 		t.Errorf("a dry run withdrew the edge: %d pair(s) remain", len(pairs))

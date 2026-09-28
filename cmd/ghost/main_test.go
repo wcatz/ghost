@@ -1525,6 +1525,28 @@ func TestSupersedeReassessReport(t *testing.T) {
 		t.Errorf("a failed sweep printed a marker that says nothing was moved:\n%s", failReport)
 	}
 
+	// A dry-run row whose 'causes' PREDICTION could not be read is a different
+	// state from a failed sweep (no sweep ran) and a third from "there is
+	// nothing else to delete" — the report has to say which, or an operator about
+	// to apply is deciding about a deletion nobody looked for.
+	prediction := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 1, Vetoed: 1, CausesPredictionFailed: 1,
+	}, false, []supersede.WithdrawnEdge{
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true, PredictionUnknown: true},
+	}, 0, 0)
+	if !strings.Contains(prediction, "would withdraw 1") {
+		t.Errorf("a dry run whose prediction read failed reported no withdrawal at all:\n%s", prediction)
+	}
+	if !strings.Contains(prediction, "1 causes prediction(s) unavailable (read failed, unknown)") {
+		t.Errorf("the summary must count the unreadable predictions separately from the failed sweeps:\n%s", prediction)
+	}
+	if !strings.Contains(prediction, "[causes edge — unknown: the prediction read failed]") {
+		t.Errorf("the row must say the count is unknown rather than printing a 0:\n%s", prediction)
+	}
+	if strings.Contains(prediction, "causes sweep(s) FAILED") || strings.Contains(prediction, "withdrew ") {
+		t.Errorf("a dry run printed a marker it did not earn:\n%s", prediction)
+	}
+
 	// #699: a classify call that failed leaves its pairs UNJUDGED while the rows
 	// a rule settled still withdraw. The report has to name both, or a partial
 	// repair reads as a complete one — the withdrawal lines look like the whole

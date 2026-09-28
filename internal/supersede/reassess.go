@@ -93,6 +93,14 @@ type ReassessResult struct {
 	// sentences, and an operator who read "would sweep 1" in the dry run needs
 	// the second one.
 	CausesSweepFailed int
+	// CausesPredictionFailed counts the dry-run rows whose 'causes' prediction
+	// the pass could not read at all, so their second-deletion count is unknown
+	// rather than zero. It is 0 in every --apply run, which never reads the
+	// prediction (the sweep's observed count replaces it), and it is counted
+	// rather than silently dropped for the same reason as CausesSweepFailed: a
+	// preview that prints "would sweep 0" for a read that never happened sends
+	// the operator away believing there is nothing else to delete.
+	CausesPredictionFailed int
 	// Unjudged names the pairs the classifier produced no verdict for, because
 	// the call failed on both attempts or the reply's verdict count did not
 	// match the pairs asked about (#699). Their edges are LEFT ALIVE: nothing
@@ -143,6 +151,13 @@ type WithdrawnEdge struct {
 	// SweepFailed marks the row whose 'causes' sweep errored, so the report
 	// says "unknown" where the truth is unknown instead of "0".
 	SweepFailed bool
+	// PredictionUnknown marks the row whose DRY-RUN 'causes' prediction is
+	// missing, because the read that produces it failed (a dry run is the only
+	// mode that reads it: under --apply the field is overwritten with what the
+	// sweep actually moved). It is not SweepFailed — no sweep ran here — and
+	// the report must not print a count of second deletions it never looked
+	// for, or an operator decides about a deletion the preview never showed.
+	PredictionUnknown bool
 	// Written is true only when --apply actually invalidated the edge, so a
 	// dry-run list can never be read as a change that happened.
 	Written bool
@@ -234,12 +249,11 @@ func retriesOf(cls Classifier) int {
 // failure can both be real in one run, so they are joined rather than one
 // replacing the other.
 //
-// A failed read of the 'causes' edges the sweep would take is fatal to a DRY RUN
-// and not to --apply, and the difference is what each mode is for: a dry run's
-// report IS that prediction, so without it the run has nothing to print, while
-// under --apply every row's CausesSwept is overwritten with what the sweep
-// actually moved and the prediction is never read. Either way the error is
-// returned.
+// A read of the 'causes' edges the sweep would take fails the pass too, but it
+// does not stop it: that read only PRODUCES the dry run's per-row prediction
+// (under --apply every count comes from the sweep itself), so a dry run marks the
+// row's second deletion unknown rather than printing a count it does not have,
+// and --apply proceeds and reports what the sweep actually moved.
 //
 // Scope is honoured as an exemption, not a verdict. A scope-conflicting edge
 // asserts no replacement — the ordinary pass leaves it in the graph and every
@@ -333,22 +347,11 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	// depend on it, and 87 edges waiting on a rerun because one call died is the
 	// #699 failure. The pairs move to Unjudged with their edges live, and the
 	// error is returned at the end so the exit still says "rerun me".
+	//
+	// Every failure in this pass is recorded rather than raised, so they are all
+	// joined at the end and the summary is written once, on the single exit that
+	// is left. A run that recorded a partial state has the most to explain.
 	var fail error
-	// The one summary this pass logs, as a closure because it has to be
-	// reachable from more than one exit: a run that recorded a partial state and
-	// then failed a read has the most to explain, not the least.
-	logSummary := func() {
-		if logger == nil {
-			return
-		}
-		logger.Info("supersede reassess",
-			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
-			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
-			"reversed", res.Reversed, "unknown", res.Unclassified, "unjudged", len(res.Unjudged),
-			"withdrawn", res.Withdrawn, "causes_withdrawn", res.CausesWithdrawn,
-			"causes_sweep_failed", res.CausesSweepFailed,
-			"retries", retriesOf(cls), "failed", fail != nil)
-	}
 	if len(open) > 0 {
 		verdicts, err := cls.ClassifyBatch(ctx, open)
 		if err == nil && len(verdicts) != len(open) {
@@ -393,32 +396,18 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	for _, j := range settled {
 		rows = append(rows, judgedEdge{OlderID: j.cand.OlderID, NewerID: j.cand.NewerID})
 	}
+	// The 'causes' prediction is a DRY-RUN read: under --apply every row's
+	// CausesSwept is overwritten with what the sweep actually moved, so a read
+	// that cannot predict must not abandon the withdrawals themselves — that is
+	// #699 again, in the one path left standing. Neither mode prints a count it
+	// does not have, so a dry run marks the row's second deletion unknown
+	// instead of zero. The error is recorded in both modes and returned: a read
+	// failure on a live table is a real fault, and exit 0 would hide it behind
+	// a repair that (under --apply) did complete.
 	causesPairs, err := liveCausesPairs(ctx, store, rows)
+	predictionFailed := err != nil
 	if err != nil {
-		// Recorded, never replaced: a classify failure from above is still
-		// true, and a log line saying failed=false on a run that returns an
-		// error is the one claim this pass cannot make — the log is what an
-		// operator reads when the exit code has scrolled past.
 		fail = errors.Join(fail, err)
-		if !apply {
-			// A dry run IS this report: without the prediction, a row below
-			// cannot say what its withdrawal would take with it, and a preview
-			// that silently under-reports its own deletions is the invisibility
-			// the [+N causes edge] marker exists to remove. Nothing was written
-			// and nothing was decided, so the run ends here — the same exit a
-			// store read failure has always produced.
-			logSummary()
-			return res, nil, fail
-		}
-		// Under --apply the prediction is not read at all: every row's
-		// CausesSwept is overwritten with what the sweep actually moved. So a
-		// read that cannot predict must not abandon the withdrawals themselves.
-		// That is #699 again in the one path left standing: settled decisions,
-		// none of which needed a harness call, dropped because a read of the
-		// 'causes' table failed. What is contested is the sweep's COUNT, and
-		// the report gets the observed one. The error still returns — a read
-		// failure on a live table is a real fault, and exit 0 would hide it
-		// behind a repair that did complete.
 		causesPairs = nil
 	}
 
@@ -430,8 +419,15 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			// edges this withdrawal would take with it. Under --apply the field
 			// is overwritten with what the sweep actually moved, because a report
 			// that claims a deletion which did not happen is the one thing this
-			// pass cannot be for.
-			if causesPairs[[2]string{j.cand.OlderID, j.cand.NewerID}] {
+			// pass cannot be for. And when the read itself failed there is no
+			// prediction to print in EITHER mode, so a dry run says the count is
+			// unknown rather than 0 — an operator who is about to apply has to be
+			// able to tell "there is nothing else to delete" from "nobody looked".
+			switch {
+			case predictionFailed && !apply:
+				w.PredictionUnknown = true
+				res.CausesPredictionFailed++
+			case causesPairs[[2]string{j.cand.OlderID, j.cand.NewerID}]:
 				w.CausesSwept = 1
 			}
 		}
@@ -498,14 +494,22 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		// --apply run reports unless a concurrent pass takes one of those edges
 		// first. A dry run whose summary said 0 above rows marked [+1 causes
 		// edge] would be the invisibility the per-row marker exists to remove,
-		// one line up. Ahead of the failure return, not after it: a dry run that
-		// also hit a classify failure still reports the rows it is about to
-		// print, because that is the pass the operator is being asked about.
+		// one line up. A row whose prediction is unknown contributes nothing to
+		// it: that is what the marker, and CausesPredictionFailed, are for.
 		for _, w := range withdrawn {
 			res.CausesWithdrawn += w.CausesSwept
 		}
 	}
-	logSummary()
+	if logger != nil {
+		logger.Info("supersede reassess",
+			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
+			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
+			"reversed", res.Reversed, "unknown", res.Unclassified, "unjudged", len(res.Unjudged),
+			"withdrawn", res.Withdrawn, "causes_withdrawn", res.CausesWithdrawn,
+			"causes_sweep_failed", res.CausesSweepFailed,
+			"causes_prediction_failed", res.CausesPredictionFailed,
+			"retries", retriesOf(cls), "failed", fail != nil)
+	}
 	if fail != nil {
 		return res, withdrawn, fail
 	}
