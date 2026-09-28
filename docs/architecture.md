@@ -528,12 +528,19 @@ which is the same fact from the other side: a tags-only `ghost memory update` is
 
 The same fact decides `--fix-updated-at`'s **anchor**, and this is where the design almost went wrong. The anchor
 is the newest version the repair will **not** remove, not the newest version that *changed state* — and the
-state-change reading is blind to exactly the rows a deliberate writer produces, because a tags-only edit and a
-merge already at the importance ceiling both record the state of their predecessor while bumping `updated_at` on
+state-change reading is blind to exactly the rows a deliberate writer produces, because a tags-only edit and
+`ReplaceNonManual`'s reuse branch both record the state of their predecessor while bumping `updated_at` on
 purpose. Under it, a pre-#727 no-op reflect row beneath such a writer read as proof that a reflection had moved a
 stamp it had not. The newest-version guard is the one clause deliberately left out of the anchor, for an
 arithmetic reason rather than a judgement one: a removable row is never the newest, so an anchor that always
 included the newest row would sit above every removable row and the repair would never fire at all.
+
+The obvious over-correction is to make *every* non-removable row an anchor, and that is worse than the bug: a
+`supersede` version is non-removable, and `CreateLink` writes no `memories` row at all, so as an anchor it closes
+the gate for that memory permanently — on exactly the store where the supersede landed after the damage. The
+anchor has a second clause, `stampMovingPhases`, and it is three phases long because three writers bump
+`memories.updated_at`. Getting it wrong in the permissive direction is silent: the report reads `0 updated_at
+restored` about a stamp that is still a reflect run's time.
 
 The rules, the reasons, the writers whose deliberate restatements forced the bound, and the gate `--fix-updated-at`
 needs are stated in [invariants.md](invariants.md#ghost-invariants) under "Memory history"; this section is the

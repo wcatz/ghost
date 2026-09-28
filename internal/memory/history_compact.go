@@ -269,6 +269,37 @@ func historyRemovableRowSQL(outer string) string {
 		" AND " + outer + ".rowid <> " + historyNewestVersionSQL(outer+".memory_id")
 }
 
+// stampMovingPhases are the phases whose writer moves a LIVE memory's updated_at
+// in the same statement that files the version. Three, and each one is a site
+// rather than an inference:
+//
+//   - phaseSave — Store.Create's INSERT, whose updated_at is the column default.
+//   - phaseUpdate — UpdateMemoryWithOptions, the `tags = ?, updated_at =
+//     datetime('now')` statement (store.go).
+//   - phaseReflect — ReplaceNonManual's reusePreservesAge and reuse-with-tags
+//     branches, the two `updated_at = datetime('now')` statements there.
+//
+// phaseSave cannot actually produce a state-identical row (a save is a memory's
+// first version, and the first version has no predecessor) and is in the set
+// because it is true rather than because it is load-bearing.
+//
+// Every OTHER phase files a version without touching a live memory's stamp:
+// MarkResolved changes resolved_at and says in as many words that it deliberately
+// leaves updated_at alone, CreateLink writes no memories row at all, and Upsert's
+// fold files phaseMerge with the folded text and moves nothing. That is what
+// stampMovingPhases is FOR, and getting it wrong in the permissive direction is a
+// silent permanent loss of the repair: a state-identical supersede row treated as
+// an anchor closes the gate for that memory for good, and a report that then says
+// "0 updated_at restored" is the same wrong answer as never having run.
+// TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards runs every
+// phase outside this set and pins that none of them closes the gate.
+//
+// Two of them also move NO updated_at while being a deliberate change to what the
+// reader is told, and the difference matters to `ghost supersede`, which orients a
+// candidate pair by updated_at: a link and a resolve are recorded, and neither is
+// evidence about a memory's freshness.
+var stampMovingPhases = []string{phaseSave, phaseUpdate, phaseReflect}
+
 // historyRemovableLikeSQL is historyRemovableRowSQL WITHOUT the newest-version
 // guard, and the two are one function apart on purpose: the guard is a RETENTION
 // rule and the rest is a DAMAGE rule, and --fix-updated-at needs them apart.
@@ -330,11 +361,11 @@ func compactCountStmt(projectID, cutoff string) (string, []any) {
 // negating the state comparison, and that is what made the gate
 // `removableLast > target` answer a question nobody asked. Negating the state
 // comparison cannot see a row that records the same state, whatever else is true of
-// it, and a deliberate writer is exactly that: a tags-only UpdateMemory and a merge
-// whose strengthen is already at the importance ceiling both bump updated_at on
-// purpose while moving no column this table has. So the anchor skipped over them,
-// and any removable no-op reflect row beneath them read as proof that a reflection
-// had moved a stamp it had not.
+// it, and a deliberate writer is exactly that: a tags-only UpdateMemory and
+// ReplaceNonManual's reusePreservesAge branch both bump updated_at on purpose while
+// moving no column this table has. So the anchor skipped over them, and any
+// removable no-op reflect row beneath them read as proof that a reflection had moved
+// a stamp it had not.
 // TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow runs the two
 // shapes and pins the rule this predicate now states: a row this repair will not
 // remove is an anchor.
@@ -373,31 +404,51 @@ func compactCandidatesStmt(projectID, cursor, cutoff string) (string, []any) {
 	// see a sibling FROM item.
 	evidence := `COALESCE((SELECT max(r.rowid) FROM memory_history r
 	        WHERE r.memory_id = h.memory_id AND r.project_id = ? AND ` + historyRemovableRowSQL("r") + `), 0)`
-	// The anchor, and it is the newest version this repair will NOT remove. A row
-	// that is state-identical to its predecessor is invisible to
+	// The anchor: the newest version that is NOT something the repair would remove and
+	// NOT a row whose writer moved no stamp.
+	//
+	// Both halves are needed and neither is the other. The FIRST is the blocker
+	// (TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow): a row
+	// that records the state of its predecessor is invisible to
 	// `NOT historyEqualPredecessorSQL` whatever else is true of it, and a
-	// deliberate writer is exactly that: a tags-only UpdateMemory and a merge
-	// already at the importance ceiling both bump updated_at on purpose while
-	// moving no column this table has. Under the state-change reading the anchor
-	// skipped over both, and the pre-#727 no-op reflect row beneath them read as
-	// evidence of a rewind over a change the store made on purpose.
+	// deliberate writer is exactly that. A tags-only UpdateMemory files one, the
+	// reuse branch of ReplaceNonManual files one, and under the state-change
+	// reading the anchor skipped over both, so a pre-#727 no-op reflect row
+	// beneath a retag read as proof that a reflection had moved a stamp it had not.
+	//
+	// The SECOND is the regression that first half introduced
+	// (TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards): a
+	// `supersede` version is also state-identical, and also not removable, and
+	// CreateLink moves no live memory's updated_at, so as an anchor it closed the
+	// gate for that memory permanently. stampMovingPhases is the list that says
+	// which writers moved the stamp; a state-identical row of any other phase is
+	// transparent, because it is not evidence about a memory's freshness at all.
 	//
 	// Project-scoped, like the delete: a version filed under another project is not
-	// one this run will remove, so it is an anchor. That is the safe direction and
-	// it is why the anchor can only ever move UP relative to the state-change
-	// reading — `removable-like` is a subset of "equal to its predecessor", so
-	// "not removable-like" contains "not equal to its predecessor", and the newer
-	// anchor can only be the same row or a later one.
-	// The parens around the negated predicate are load-bearing, not decoration:
-	// historyRemovableLikeSQL opens with an EXISTS, so `NOT EXISTS (...) AND
-	// phase IN (...)` is `NOT A AND B`, and De Morgan says that is not `NOT (A AND
-	// B)` — it is the one conjunction that is true exactly when the row is
-	// byte-identical AND of a removable phase, which is the set of rows that must
-	// NOT be an anchor. Written without them the anchor comes back NULL for every
-	// memory whose newest non-no-op version is not a reflect, and the repair
-	// silently stops.
+	// one this run will remove and not one whose writer moved this memory's stamp,
+	// so it is an anchor.
+	//
+	// The outer pair of parens is load-bearing, not decoration, and dropping it is
+	// a silent total failure rather than a syntax error: with `A OR B AND C` the
+	// AND binds first, so the predicate stops being "A, or B-and-C" and becomes
+	// "A-and-B, or C", and historyRemovableLikeSQL and historyEqualPredecessorSQL
+	// both open with an EXISTS, so the shape that survives is not the one that was
+	// written. The test that catches it is the damage fixture: it has both kinds of
+	// row in every memory.
+	// A row is the anchor when it is NOT something the repair would remove, AND it
+	// either changed state or its phase is one whose writer moves a live memory's
+	// stamp. Both inner parentheses are load-bearing and dropping either one is a
+	// silent total failure rather than a syntax error: with `NOT A AND NOT B OR C`
+	// the ANDs bind first and the predicate stops being the one that was written —
+	// and both historyRemovableLikeSQL and historyEqualPredecessorSQL open with an
+	// EXISTS, so the shape that survives is not the shape anyone is reading.
+	// TestCompactHistoryFixUpdatedAtRestoresTheLastRealChange catches it: every
+	// memory in it has both kinds of row.
 	anchor := `(SELECT max(a.rowid) FROM memory_history a
-	        WHERE a.memory_id = h.memory_id AND a.project_id = ? AND NOT (` + historyRemovableLikeSQL("a") + `))`
+	        WHERE a.memory_id = h.memory_id AND a.project_id = ?
+	          AND NOT (` + historyRemovableLikeSQL("a") + `)
+	          AND (NOT (` + historyEqualPredecessorSQL("a") + `)
+	               OR a.phase IN (` + placeholders(len(stampMovingPhases)) + `)))`
 	sql := `SELECT c.memory_id, c.target, t.recorded_at, m.updated_at, c.removable_last
 	    FROM (
 	        SELECT h.memory_id AS memory_id, ` + anchor + ` AS target, ` + evidence + ` AS removable_last
@@ -414,10 +465,29 @@ func compactCandidatesStmt(projectID, cursor, cutoff string) (string, []any) {
 	// the evidence sub-select's project, phase list and cutoff, then the
 	// changed-state scan's project, then the live row's project, then the cursor and
 	// the page.
-	args := compactPredicateArgs(projectID, cutoff)
+	args := compactAnchorArgs(projectID, cutoff)
 	args = append(args, compactPredicateArgs(projectID, cutoff)...)
 	args = append(args, projectID, projectID, cursor, cursor, historyCompactBatchSize)
 	return sql, args
+}
+
+// compactAnchorArgs binds the anchor sub-select: the project, then the
+// removable-like predicate's phase list and cutoff, then stampMovingPhases in the
+// order the statement names them. A function like compactPredicateArgs, for the
+// reason those are functions: SQLite binds positionally, and an argument list that
+// lives apart from the statement is one that can be shifted without anything
+// noticing until a predicate starts answering a different question.
+func compactAnchorArgs(projectID, cutoff string) []any {
+	args := make([]any, 0, len(compactablePhases())+len(stampMovingPhases)+2)
+	args = append(args, projectID)
+	for _, p := range compactablePhases() {
+		args = append(args, p)
+	}
+	args = append(args, cutoff)
+	for _, p := range stampMovingPhases {
+		args = append(args, p)
+	}
+	return args
 }
 
 // historyCompactRestoreSQL writes one memory's restored stamp. The project is bound
@@ -664,15 +734,17 @@ type compactStamp struct {
 //     union of the sources' tags, and the tags are not a column here
 //     (TestAReflectReuseChangesTagsWithoutChangingAnyRecordedColumn runs that path),
 //     so the row restates the state byte for byte — the cut keeps it out;
-//   - a merge already at the importance ceiling files a reflect version carrying
-//     related_id that moves no state column at all — related_id keeps it out;
-//   - a tags-only UpdateMemory files an update version on every edit, so its phase
-//     keeps it out.
+//   - a tags-only UpdateMemory files an update version on every edit with no no-op
+//     guard, and its phase keeps it out.
 //
-// None of those is a version that changed nothing, so none of them may be read as
-// proof that a reflection ran. That is the gate, and it is one rule — a row this
-// repair would not remove is not a row it may act on — rather than a list of the
-// ways a writer can be invisible.
+// Neither is a version that changed nothing, so neither may be read as proof that a
+// reflection ran. A third shape is worth naming because it is NOT one of those and
+// would look like a fourth if it were left out: Upsert's importance fold files a
+// state-identical phaseMerge row carrying the folded text, and it moves NO
+// updated_at, so it is not a bump and must not close the gate. Neither must the
+// related_id rows — delete, supersede, unsupersede, none of which touches a live
+// memory's stamp. stampMovingPhases is the list that separates the two groups, and
+// it is three phases long because three writers bump the column.
 //
 // The newest-version clause is deliberately NOT part of the anchor, and the reason
 // is arithmetic rather than judgement: a removable row is by definition not the

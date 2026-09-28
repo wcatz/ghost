@@ -264,12 +264,14 @@ func runHistoryCompact(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	// The warnings go to stderr and BEFORE the report, so they are not scrolled
-	// past by it and a script reading stdout still sees them on the stream a
-	// diagnostic belongs on. The partial path above prints nothing, because it never
-	// got far enough to have decided the bound was the operator's to widen.
-	for _, w := range report.Warnings {
-		fmt.Fprintln(os.Stderr, w)
+	// The warnings go to stderr and BEFORE the report, so they are not scrolled past
+	// by it and a script reading stdout still sees them on the stream a diagnostic
+	// belongs on. The partial path above reaches the same warnings through
+	// printPartialHistoryCompact, which is what makes a failed run's report carry
+	// the bound its numbers were taken at.
+	if err := printHistoryCompactWarnings(os.Stderr, report); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 	if err := printHistoryCompact(os.Stdout, report); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -368,13 +370,42 @@ var compactOneProject = func(ctx context.Context, s *memory.Store, projectID str
 	})
 }
 
+// printHistoryCompactWarnings writes the risks the operator has to be told about
+// before the counts, and it writes nothing at all for a report with none — a blank
+// line where a warning would have been is its own kind of noise, and the default
+// configuration has nothing to warn about.
+//
+// It is a function rather than an inline loop because TWO paths need it and the one
+// that needed it second is the one a run reaches after it has already written:
+// printPartialHistoryCompact. A widened bound is decided before any project is
+// opened, so a run that fails on project 3 has removed rows under that bound and
+// possibly moved stamps, and the report that comes back is the one the operator
+// will read — omitting the bound from it is a report whose numbers say what a run
+// did while the risk that shaped them is withheld.
+func printHistoryCompactWarnings(w io.Writer, r historyCompactReport) error {
+	for _, warning := range r.Warnings {
+		if _, err := fmt.Fprintln(w, warning); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // printPartialHistoryCompact writes the projects a failed run had already reached,
 // under a header that cannot be read as a completed repair. It writes nothing for a
 // report with no project in it, which is the refusal case: nothing was touched, and
 // there is nothing to disclose.
+//
+// The warnings come first, and they are the reason this function is not just a
+// header plus a call to printHistoryCompactLines: a run that failed has already
+// written whatever the bound allowed, so the bound is the context its counts are
+// read in.
 func printPartialHistoryCompact(w io.Writer, r historyCompactReport) error {
 	if len(r.Projects) == 0 {
 		return nil
+	}
+	if err := printHistoryCompactWarnings(w, r); err != nil {
+		return err
 	}
 	if _, err := fmt.Fprintf(w, "history compact stopped partway. These projects were already %s:\n",
 		map[bool]string{true: "compacted", false: "read"}[r.Apply]); err != nil {

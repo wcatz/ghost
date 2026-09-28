@@ -256,140 +256,92 @@ func readUpdatedAt(t *testing.T, s *Store, memoryID string) string {
 }
 
 // TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow is the
-// third review finding on #730, and it is the one the other two left open: both of
-// those made a DELIBERATE writer's row non-removable, and neither of them asked
-// whether a non-removable row is an ANCHOR.
+// blocker, and it is the one the other findings left open: they both made a
+// DELIBERATE writer's row non-removable, and neither asked whether a non-removable
+// row is an ANCHOR.
 //
-// The gate in restorableStamp is "a removable version sits ABOVE the last version
-// that changed state", and the row it called the last state-changing version was
-// found with `NOT historyEqualPredecessorSQL`. That finds the newest row whose
-// state columns differ from its predecessor — so a row that records the same state
-// is invisible to it WHATEVER ELSE is true of that row. A tags-only UpdateMemory
-// bumps updated_at on purpose and records a state-identical `update` version; a
-// merge whose strengthen is already at the ceiling bumps it on purpose and records
-// a state-identical `reflect` version naming the memory it folded. Neither moves a
-// column this table has, so the anchor skipped over both, and the pre-#727 no-op
-// reflect row below them became "evidence" for a rewind over a change the store
-// made on purpose.
+// The gate in restorableStamp is "a removable version sits ABOVE the anchor", and
+// the anchor used to be the newest version that CHANGED its state, found by negating
+// the state comparison. That cannot see a row recording the state of its
+// predecessor, whatever else is true of it — and a deliberate writer's row is always
+// one of those. A tags-only UpdateMemory bumps updated_at on purpose and records a
+// state-identical `update` version; ReplaceNonManual's reuse branch does the same
+// with a `reflect` one. Neither moves a column this table has, so the anchor skipped
+// over both, and the pre-#727 no-op reflect row beneath them read as evidence of a
+// rewind over a change the store made on purpose.
 //
 // The interleaving is the finding, which is why this is not the tags-only test
-// above: there, the two `update` rows are the memory's NEWEST versions, so the
-// phase allowlist alone kept them and the gate never opened. Here the deliberate
-// bump is the newest row and a pre-#727 no-op reflect sits between the save and it,
-// so the gate opens and the two rules stop being redundant.
+// above: there, the two `update` rows are the memory's NEWEST versions, so the phase
+// allowlist alone kept them and the gate never opened. Here the retag is the newest
+// row and a pre-#727 no-op reflect sits between the save and it.
 //
-// The rule the fix has to hold is one sentence: a row this repair will not remove
-// is an anchor. Not "a row that changed state is an anchor" — that is what was
-// there, and a deliberate writer is invisible to it.
+// ONE shape, and it is the only one a shipped writer produces. A second was drafted
+// here — a state-identical `reflect` version carrying related_id, described as the
+// importance fold's version — and no writer emits it: the fold in Upsert files
+// phaseMerge with the folded text and moves no updated_at, and related_id is set on
+// exactly three phases, none of them reflect (delete, supersede, unsupersede). A
+// fixture staging a shape no writer produces pins the predicate against a fiction,
+// and the fiction is what the next reader takes as the reason. The real
+// related_id and merged_content rows are covered by
+// TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards, which is where
+// they belong: they are evidence that those rows must NOT be an anchor.
 func TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow(t *testing.T) {
-	// Two shapes of the same defect, and the second is the one a phase-only fix
-	// misses. A merge's version is filed with phase `reflect` — ReplaceNonManual
-	// files the reuse branch's row as a reflection — and what spares it is
-	// related_id alone. Both fixtures are the same three rows in the same order;
-	// only what makes the third row non-removable differs.
-	for _, tc := range []struct {
-		name       string
-		importance float32
-		stage      func(t *testing.T, s *Store, id string)
-		// wantSpare names the ONE clause of the removable predicate that has to be
-		// holding this row back, and it is asserted rather than described: a
-		// fixture whose deliberate row is spared by two clauses would still pass a
-		// fix that only addressed one of them.
-		wantSpare          string
-		wantPreCutReflects int
-	}{
-		{
-			name:       "a tags-only update, spared by its phase",
-			importance: 0.4,
-			stage: func(t *testing.T, s *Store, id string) {
-				t.Helper()
-				if err := s.UpdateMemory(context.Background(), testProject, id, nil, nil, nil,
-					[]string{"retag", "deliberate"}); err != nil {
-					t.Fatalf("UpdateMemory: %v", err)
-				}
-			},
-			wantSpare:          "phase",
-			wantPreCutReflects: 1,
-		},
-		{
-			name:       "a merge already at the importance ceiling, spared by related_id alone",
-			importance: 1.0,
-			stage: func(t *testing.T, s *Store, id string) {
-				t.Helper()
-				// The strength is at the ceiling already, so the merge's own
-				// strengthen moves no state column and the version it records
-				// restates all five byte for byte — while still naming the memory it
-				// folded. Phase reflect, recorded before the bound: nothing spares
-				// this row except related_id.
-				appendVersionRow(t, s, id, phaseReflect, preFixReflectAt, compactSecondText, "", nil)
-			},
-			wantSpare:          "related_id",
-			wantPreCutReflects: 2,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := testStore(t)
-			id, err := s.Create(context.Background(), testProject, Memory{
-				Category: "architecture", Content: compactFirstText, Source: "mcp",
-				Importance: tc.importance,
-			})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
+	ctx := context.Background()
+	s := testStore(t)
+	id := createCompactMemory(t, s, compactFirstText)
 
-			// The save at an instant of its own, then the damage: a byte-identical
-			// reflect version from before #727. Nothing after the save is a state
-			// change, so under the old rule the save WAS the last state change and
-			// the no-op reflect sat above it as textbook evidence.
-			stampHistoryRow(t, s, id, phaseSave, "2026-01-01 10:00:00")
-			appendVersionRow(t, s, id, phaseReflect, preFixReflectAt, "", "", nil)
+	// The save at an instant of its own, then the damage: a byte-identical reflect
+	// version from before #727. Nothing after the save is a state change, so under
+	// the old rule the save WAS the last state change and the no-op reflect sat
+	// above it as textbook evidence.
+	stampHistoryRow(t, s, id, phaseSave, "2026-01-01 10:00:00")
+	appendVersionRow(t, s, id, phaseReflect, preFixReflectAt, "", "", nil)
 
-			// The deliberate bump, after the damage and above it, at an instant of
-			// its own so a rewind is unambiguous.
-			tc.stage(t, s, id)
-			deliberate := "2026-05-01 12:00:00"
-			setUpdatedAt(t, s, id, deliberate)
+	// The deliberate bump, after the damage and above it, at an instant of its own
+	// so a rewind is unambiguous.
+	if err := s.UpdateMemory(ctx, testProject, id, nil, nil, nil,
+		[]string{"retag", "deliberate"}); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+	deliberate := "2026-05-01 12:00:00"
+	setUpdatedAt(t, s, id, deliberate)
 
-			// The preconditions, asserted rather than assumed. The deliberate row
-			// being state-identical is the whole finding, and its being non-removable
-			// for exactly the stated reason is what makes this the case rather than a
-			// near neighbour of it.
-			if n := historyRowCount(t, s, id); n != 3 {
-				t.Fatalf("history rows = %d, want 3 (the save, the no-op reflect, the deliberate bump)", n)
-			}
-			if n := redundantVersionCount(t, s, id); n != 2 {
-				t.Fatalf("%d versions restate their predecessor byte for byte, want 2: the finding "+
-					"needs a row no state column can tell from a no-op", n)
-			}
-			if n := versionsAtOrBefore(t, s, id, phaseReflect, reflectNoOpCutoff); n != tc.wantPreCutReflects {
-				t.Fatalf("%d of this memory's reflect versions are at or before the bound, want %d: "+
-					"the fixture has to stage pre-#727 rows for the cutoff to be what spares the "+
-					"deliberate one", n, tc.wantPreCutReflects)
-			}
-			if n := versionExemptOnlyBy(t, s, id, tc.wantSpare, reflectNoOpCutoff); n != 1 {
-				t.Fatalf("%d version(s) are exempt on nothing but their %s, want 1: the fixture has "+
-					"to stage a row this rule alone has to hold", n, tc.wantSpare)
-			}
+	// The preconditions, asserted rather than assumed. The retag's version being
+	// state-identical is the whole finding, and its being non-removable on nothing
+	// but its phase is what makes this the case rather than a near neighbour: a
+	// fixture whose deliberate row were spared by two clauses would still pass a fix
+	// that only addressed one of them.
+	if n := historyRowCount(t, s, id); n != 3 {
+		t.Fatalf("history rows = %d, want 3 (the save, the no-op reflect, the deliberate bump)", n)
+	}
+	if n := redundantVersionCount(t, s, id); n != 2 {
+		t.Fatalf("%d versions restate their predecessor byte for byte, want 2: the finding needs a "+
+			"row no state column can tell from a no-op", n)
+	}
+	if n := versionsAtOrBefore(t, s, id, phaseReflect, reflectNoOpCutoff); n != 1 {
+		t.Fatalf("%d reflect version(s) at or before the bound, want 1: the retag's own version is "+
+			"phase update, so the pre-#727 row is the only one this repair owns", n)
+	}
+	if n := versionExemptOnlyBy(t, s, id, "phase", reflectNoOpCutoff); n != 1 {
+		t.Fatalf("%d version(s) are exempt on nothing but their phase, want 1: the fixture has to "+
+			"stage a row the phase alone has to hold back", n)
+	}
 
-			res, err := s.CompactHistory(context.Background(), testProject,
-				HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
-			if err != nil {
-				t.Fatalf("CompactHistory: %v", err)
-			}
-			if res.Removed != 1 {
-				t.Errorf("Removed = %d, want 1: the pre-#727 no-op reflect is real damage whether or "+
-					"not a deliberate bump sits above it", res.Removed)
-			}
-			if res.UpdatedAt != 0 {
-				t.Errorf("UpdatedAt = %d, want 0: the only version above the last state change is one "+
-					"a writer filed on purpose, so nothing here is evidence that a reflection moved "+
-					"the stamp", res.UpdatedAt)
-			}
-			if got := readUpdatedAt(t, s, id); got != deliberate {
-				t.Errorf("updated_at = %q, want the deliberate writer's own %q: a row this repair "+
-					"would not remove is not a row it may read as a no-op", got, deliberate)
-			}
-		})
+	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+	if err != nil {
+		t.Fatalf("CompactHistory: %v", err)
+	}
+	if res.Removed != 1 {
+		t.Errorf("Removed = %d, want 1: the pre-#727 no-op reflect is real damage whether or not a "+
+			"deliberate bump sits above it", res.Removed)
+	}
+	if res.UpdatedAt != 0 {
+		t.Errorf("UpdatedAt = %d, want 0: the only version above the last real change is one a writer "+
+			"filed on purpose, so nothing here is evidence that a reflection moved the stamp", res.UpdatedAt)
+	}
+	if got := readUpdatedAt(t, s, id); got != deliberate {
+		t.Errorf("updated_at = %q, want the deliberate writer's own %q: a row this repair would not "+
+			"remove is not a row it may read as a no-op", got, deliberate)
 	}
 }
 
@@ -1500,13 +1452,15 @@ func TestCompactHistoryCarriesTheStampsItAlreadyCommitted(t *testing.T) {
 
 // versionExemptOnlyBy counts a memory's versions that the compaction's predicate
 // would remove if exactly one clause were dropped, named by that clause. It is the
-// other half of updateVersionsNoOtherClauseExempts — that one is written for the
-// phase allowlist and cannot express "the row is spared by related_id instead" —
-// and it exists because a fixture that leaves its subject spared by TWO clauses
-// passes a fix that only addressed one of them, silently.
+// other half of updateVersionsNoOtherClauseExempts and exists because a fixture
+// that leaves its subject spared by TWO clauses passes a fix that only addressed
+// one of them, silently.
 //
 // The clause is a name rather than SQL so the assertion cannot drift from the
-// predicate: each name expands to the predicate with that one conjunct removed.
+// predicate: each name expands to the predicate with that one conjunct removed. It
+// is spelled per clause and not derived, because a case that no writer can produce
+// is not a case — a `reflect` version carrying related_id was staged here once and
+// removed, because no shipped writer files one.
 func versionExemptOnlyBy(t *testing.T, s *Store, memoryID, clause, cutoff string) int {
 	t.Helper()
 	var predicate string
@@ -1517,25 +1471,13 @@ func versionExemptOnlyBy(t *testing.T, s *Store, memoryID, clause, cutoff string
 			" AND h.rowid <> " + historyNewestVersionSQL("h.memory_id") +
 			" AND h.recorded_at < ?" +
 			" AND h.related_id IS NULL AND h.merged_content IS NULL"
-	case "related_id":
-		predicate = historyEqualPredecessorSQL("h") +
-			" AND h.rowid <> " + historyNewestVersionSQL("h.memory_id") +
-			" AND h.phase IN (" + placeholders(len(compactablePhases())) + ")" +
-			" AND h.recorded_at < ? AND h.merged_content IS NULL"
 	default:
 		t.Fatalf("no such clause %q: name one the predicate is built from", clause)
 	}
-	args := []any{}
-	if clause == "related_id" {
-		for _, p := range compactablePhases() {
-			args = append(args, p)
-		}
-	}
-	args = append(args, cutoff, memoryID)
 	var n int
 	if err := s.db.QueryRow(
 		`SELECT count(*) FROM memory_history h WHERE h.memory_id = ? AND `+predicate,
-		append([]any{memoryID}, args[:len(args)-1]...)...).Scan(&n); err != nil {
+		memoryID, cutoff).Scan(&n); err != nil {
 		t.Fatalf("count the versions exempt only by their %s: %v", clause, err)
 	}
 	return n
@@ -1855,5 +1797,96 @@ func TestWidenedCompactCutoffFollowsTheBoundTheStoreWillUse(t *testing.T) {
 		if got := WidenedCompactCutoff(cut); got != want {
 			t.Errorf("spelling %q resolves to %q, widened = %v, want %v", spelling, cut, got, want)
 		}
+	}
+}
+
+// TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards is the
+// regression the anchor rule introduced, and it is the same sentence read from the
+// other side. The blocker fixed "a row this repair will not remove is an anchor" —
+// and a `supersede` version is a row this repair will not remove, so it became an
+// anchor, which closes the gate for that memory FOREVER.
+//
+// Forever because CreateLink writes no `memories` row at all: it files the
+// supersede version and moves the stamp for nobody, so it can never be the thing
+// that moved the stamp, and treating it as the last change says the stamp is
+// whatever a reflection run left there. The row is byte-identical to its
+// predecessor — links.go says so in as many words, which is why re-writing a live
+// edge deliberately records nothing at all — so the state-change anchor this
+// replaced had skipped it and the repair worked.
+//
+// A superseded memory is not a rare thing, and the orientation it gets is exactly
+// the one this command exists to fix: `ghost supersede` orients a candidate pair by
+// updated_at, and `--skip-unchanged`'s fingerprint carries it as a change proxy.
+func TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards(t *testing.T) {
+	ctx := context.Background()
+	// Every phase that files a version and moves NO live memory's updated_at, and a
+	// state-identical row of each. All of them have to be transparent for the
+	// anchor, or the repair silently stops working on any memory that has been
+	// touched by one — and a report that says "0 updated_at restored" while the
+	// stamp is a reflect run's time is the same wrong answer as never running it.
+	//
+	// driven off stampMovingPhases rather than off a hand-written list, so a phase
+	// added to that set without a writer behind it fails here.
+	for _, phase := range []string{
+		phaseSupersede, phaseUnsupersede, phaseMerge, phaseDelete,
+		phaseImport, phaseRestore, phaseBaseline, phaseResolve, phaseUnresolve,
+	} {
+		t.Run(phase, func(t *testing.T) {
+			s := testStore(t)
+			id := createCompactMemory(t, s, compactFirstText)
+
+			// A save, a real edit above it, then TWO pre-#727 no-op reflect versions,
+			// then the inert event above those.
+			stampHistoryRow(t, s, id, phaseSave, "2026-01-01 10:00:00")
+			if err := s.UpdateMemory(ctx, testProject, id, strPtr(compactSecondText), nil, nil, nil); err != nil {
+				t.Fatalf("UpdateMemory: %v", err)
+			}
+			stampHistoryRow(t, s, id, phaseUpdate, "2026-02-01 10:00:00")
+			appendVerbatimVersion(t, s, id)
+			appendVerbatimVersion(t, s, id)
+			// The event, recorded above the damage and recording nothing new: the
+			// state columns are copied out of the live row, so it is byte-identical
+			// to its predecessor, and the thread columns are what its phase sets.
+			related, merged := "", ""
+			switch phase {
+			case phaseSupersede, phaseUnsupersede, phaseDelete:
+				related = compactSecondText
+			case phaseMerge:
+				merged = compactFirstText
+			}
+			appendVersionRow(t, s, id, phase, "2026-03-01 10:00:00", related, merged, nil)
+			runTo := "2026-08-01 09:30:00"
+			setUpdatedAt(t, s, id, runTo)
+
+			if n := redundantVersionCount(t, s, id); n < 3 {
+				t.Fatalf("%d state-identical versions, want at least 3: this row is the whole "+
+					"finding and it has to record nothing new", n)
+			}
+			if !stampGateIsOpen(t, s, id, reflectNoOpCutoff) {
+				t.Fatal("the gate is closed before the repair runs, so the fixture is not staging " +
+					"the damage")
+			}
+
+			res, err := s.CompactHistory(ctx, testProject,
+				HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+			if err != nil {
+				t.Fatalf("CompactHistory: %v", err)
+			}
+			if res.Removed != 2 {
+				t.Errorf("Removed = %d, want 2: BOTH byte-identical reflect versions go — the inert "+
+					"event above them is not what spares them, the newest-version guard is, because "+
+					"the event is the newest row", res.Removed)
+			}
+			if res.UpdatedAt != 1 {
+				t.Errorf("UpdatedAt = 0, want 1: a %s version moves no live memory's updated_at, so "+
+					"it cannot be the thing that moved the stamp, and treating it as the last "+
+					"change leaves a memory's updated_at reading as a reflect run's time forever",
+					phase)
+			}
+			if got := readUpdatedAt(t, s, id); got != "2026-02-01 10:00:00" {
+				t.Errorf("updated_at = %q, want the last recorded change's own 2026-02-01 10:00:00", got)
+			}
+			_ = runTo
+		})
 	}
 }

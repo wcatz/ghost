@@ -649,3 +649,65 @@ func TestPrintHistoryCompactWarnings(t *testing.T) {
 		t.Fatalf("the report carries %d warnings, want 1", len(report.Warnings))
 	}
 }
+
+// TestPrintPartialHistoryCompactCarriesTheWarning: the run that most needs the
+// widened-bound warning is the one that FAILED, because it has already removed rows
+// under that bound and possibly moved stamps. The plan attaches the warning before
+// it opens a project, so a failing run's report carries it — and the error path
+// printed only the header and the per-project lines, so the one run that had
+// already done the damage said nothing about the bound that shaped the numbers.
+//
+// The warning is the last thing to go, not the first: it is the context that makes
+// the partial counts legible, and an operator reading "beta 5 redundant
+// version(s)" has no way to know those five were removable under a bound that
+// reaches past #727.
+func TestPrintPartialHistoryCompactCarriesTheWarning(t *testing.T) {
+	var out strings.Builder
+	report := historyCompactReport{
+		Apply:    true,
+		Before:   "2030-01-01 00:00:00",
+		Warnings: []string{"warning: --before 2030-01-01 00:00:00 reaches past 2026-09-28 17:14:07"},
+		Projects: []memory.HistoryCompactResult{{ProjectID: "beta", Removed: 5, UpdatedAt: 1}},
+	}
+	if err := printPartialHistoryCompact(&out, report); err != nil {
+		t.Fatalf("printPartialHistoryCompact: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "warning:") {
+		t.Errorf("the partial report drops the warning, so a run that already removed rows under a "+
+			"widened bound says nothing about it:\\n%s", text)
+	}
+	// The warning and the header both have to be there: a header reading as a
+	// finished repair, or a warning with no indication the run stopped, each tell
+	// half the story.
+	if !strings.Contains(text, "stopped partway") {
+		t.Errorf("the partial report lost its header:\\n%s", text)
+	}
+	if !strings.Contains(text, "beta") || !strings.Contains(text, "5") {
+		t.Errorf("the partial report lost its counts:\\n%s", text)
+	}
+}
+
+// TestRunHistoryCompactWarnsBeforeItsReport is the ordering, and it is a separate
+// thing from the warning existing. A warning printed after the counts is one a
+// reader has already scrolled past, and the counts are what they asked for.
+func TestPrintHistoryCompactWarningsOrder(t *testing.T) {
+	var out strings.Builder
+	if err := printHistoryCompactWarnings(&out, historyCompactReport{
+		Warnings: []string{"warning: first", "warning: second"},
+	}); err != nil {
+		t.Fatalf("printHistoryCompactWarnings: %v", err)
+	}
+	if got := out.String(); got != "warning: first\nwarning: second\n" {
+		t.Errorf("warnings printed as %q, want both in order, one per line", got)
+	}
+	// And a report with no warnings writes nothing at all — a blank line where the
+	// risk would have been is its own kind of noise.
+	empty := strings.Builder{}
+	if err := printHistoryCompactWarnings(&empty, historyCompactReport{}); err != nil {
+		t.Fatalf("printHistoryCompactWarnings on an empty report: %v", err)
+	}
+	if empty.String() != "" {
+		t.Errorf("a run with nothing to warn about printed %q", empty.String())
+	}
+}
