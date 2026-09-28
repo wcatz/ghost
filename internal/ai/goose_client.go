@@ -271,6 +271,19 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 	return linkGooseConfigDirsWith(home, env, homeDir, os.Lstat, os.Stat)
 }
 
+// errGooseConfigBrokenLink reports a candidate config root that is a symlink
+// nothing can read a directory through — a link to a regular file, or one whose
+// target has moved.
+//
+// It is a sentinel rather than a wrapped platform error on purpose. For a
+// dangling link os.Stat fails with ENOENT, and the path in the message is the
+// LINK, which is present; wrapping that errno would make
+// errors.Is(err, fs.ErrNotExist) true for a path that exists, which is the
+// misreading the wording above firstExistingAncestor exists to prevent and
+// which TestGooseIsolationNamesTheDirectoryItCouldNotProbe pins against. The
+// errno is still in the message, as text — it is the diagnosis, not a contract.
+var errGooseConfigBrokenLink = errors.New("config root is a symlink that does not resolve to a directory")
+
 // linkGooseConfigDirsWith takes the probe as a parameter so a test can state a
 // classification instead of arranging one. Arranging the interesting case is
 // not possible everywhere: Windows reports "a file where a directory belongs"
@@ -337,8 +350,11 @@ func firstExistingAncestor(path, stop string, probe func(string) (os.FileInfo, e
 // linkGooseConfigDirsWith takes two probes because the leaf and the walk need
 // different ones, and that difference is the point rather than an accident. The
 // leaf is probed WITHOUT following symlinks, so a symlinked config directory is
-// carried as itself instead of being followed somewhere else. The walk resolves
-// them, so a symlinked home or ~/.config is seen as the directory it is.
+// not followed to somewhere else: the link itself is carried, and the user keeps
+// the link they arranged. The walk resolves symlinks, so a symlinked home or
+// ~/.config is seen as the directory it is, and so — on the one path that needs
+// to know what a link at the leaf actually points at — the leaf's own target is
+// checked before the link is carried.
 func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProbe, walkProbe func(string) (os.FileInfo, error)) error {
 	if harnessEnvValue(env, "XDG_CONFIG_HOME") != "" {
 		// An absolute path the child reads directly; HOME plays no part.
@@ -352,7 +368,7 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProb
 		// file where a directory belongs — means the config is there and
 		// unreadable, and skipping it would hand the child an empty profile
 		// with nothing saying Ghost dropped it.
-		if _, err := leafProbe(source); err != nil {
+		if info, err := leafProbe(source); err != nil {
 			// Whether this is "not this platform's location" or a real fault
 			// cannot be read from the source's own errno, because on Windows
 			// "a file where a directory belongs" is ERROR_PATH_NOT_FOUND and
@@ -375,7 +391,10 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProb
 			// Treating a symlink as the fault instead would fail every goose
 			// call on those machines — and name a perfectly good directory as
 			// broken. The leaf probe above stays Lstat, so a symlinked config
-			// DIRECTORY is still carried rather than followed.
+			// DIRECTORY is carried as itself rather than followed; the branch
+			// below asks the walk probe what that link points at, because a link
+			// that resolves to a directory is carried and one that does not is
+			// the same fault as a plain file.
 			ancestor, info, ancestorErr := firstExistingAncestor(source, homeDir, walkProbe)
 			switch {
 			case ancestorErr != nil:
@@ -389,6 +408,70 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProb
 				return fmt.Errorf("goose isolated config %s: %s is not a directory", source, ancestor)
 			}
 			continue
+		} else if info.Mode()&os.ModeSymlink != 0 {
+			// A symlink is not refused on the LEAF's word, because the leaf is
+			// Lstat and an Lstat reports IsDir false for a link to a real
+			// directory just as it does for a link to a file. And
+			// ~/.config/goose symlinked into a dotfiles repository is an ordinary
+			// setup — the very one the Lstat leaf probe exists so the link can
+			// be CARRIED rather than followed. Refusing those would fail every
+			// reflect, resolve and supersede classification through the goose
+			// harness on those machines, and would name a working directory as
+			// broken.
+			//
+			// So the TARGET is what gets asked, through the walk's own
+			// symlink-resolving probe. A link that resolves to a directory falls
+			// through to carryGooseConfigDir, which links the isolated copy at
+			// the SOURCE: the child resolves the chain and the user keeps their
+			// link, which is how this behaved before any of this checking. A
+			// link that resolves to something else, or that dangles because the
+			// target moved, is a config root nobody can read — the same shape as
+			// a plain file, and refused on the same reasoning, rather than
+			// carried into the isolated home and reported as a success.
+			//
+			// A carried link is NOT routed to the copy fallback: that one is
+			// reached only after os.Symlink fails, and nothing here fails.
+			followed, followErr := walkProbe(source)
+			// The target is read for the MESSAGE, and read before the branch
+			// because the dangling case is the one that most needs it: the link
+			// is present and its target is not, so "the link points at X" is the
+			// whole diagnosis. It is also the fact a dotfiles user needs — which
+			// path in their repository is no longer where the link says it is.
+			//
+			// It cannot come from followed.Name(), which is the base name of the
+			// path the stat was GIVEN — the link itself — so a message built from
+			// it would name the same path twice and never what is broken.
+			linkTarget := ""
+			if t, lerr := os.Readlink(source); lerr == nil {
+				linkTarget = t
+			}
+			switch {
+			case followErr != nil:
+				if linkTarget != "" {
+					return fmt.Errorf("goose isolated config %s: %w (it points at %s): %v", source, errGooseConfigBrokenLink, linkTarget, followErr)
+				}
+				return fmt.Errorf("goose isolated config %s: %w: %v", source, errGooseConfigBrokenLink, followErr)
+			case !followed.IsDir():
+				if linkTarget != "" {
+					return fmt.Errorf("goose isolated config %s: %w (it points at %s)", source, errGooseConfigBrokenLink, linkTarget)
+				}
+				return fmt.Errorf("goose isolated config %s: %w", source, errGooseConfigBrokenLink)
+			}
+		} else if !info.IsDir() {
+			// The probe ANSWERED, so nothing below would ever ask whether what
+			// it found was a directory. A plain file at the config root is then
+			// carried into the isolated home as itself and the call reports
+			// success, which hands the child a config "directory" that is a
+			// file — a failure that surfaces as a provider error with nothing
+			// pointing at the cause. The walk above asks this question and
+			// answers it, which is why the miss only showed on the one path
+			// where the probe happened to answer.
+			//
+			// Refused, and on the same reasoning as the walk: the candidates are
+			// alternative locations for the same configuration, so a root that is
+			// not a directory is a root nobody can read, and continuing on the
+			// others would finish the loop on partial information.
+			return fmt.Errorf("goose isolated config %s: %s is not a directory", source, source)
 		}
 		// After the probe, so the isolated home does not gain a
 		// Library/Application Support directory on the platforms that cannot

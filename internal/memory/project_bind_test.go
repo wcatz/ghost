@@ -201,6 +201,85 @@ func TestBindProjectPathStoresPhysicalPath(t *testing.T) {
 	}
 }
 
+// TestBindProjectPathRefusalsNameTheProject is the #608 shape: a project made
+// over MCP is stored under a derived id, so a refusal that names the id alone
+// tells the reader nothing they can act on. The name is what they called the
+// project and what `ghost project merge` and `ghost project bind` take, so all
+// three refusals carry it.
+//
+// One test for all three because the name has to reach every branch of the same
+// switch: a fix on the branch the reporter happened to hit is not a fix.
+func TestBindProjectPathRefusalsNameTheProject(t *testing.T) {
+	// The id is a hash and the name is not, exactly as a project created over
+	// MCP is stored — so a refusal naming only the id fails here.
+	const (
+		innerID   = "6bdc098af7f5"
+		innerName = "roller"
+	)
+
+	t.Run("contains another project's checkout", func(t *testing.T) {
+		ctx := context.Background()
+		s := bindStore(t)
+		sentinelProject(t, s, innerID, innerName)
+		sentinelProject(t, s, "outer", "outer")
+		parent := t.TempDir()
+		inner := filepath.Join(parent, "checkout")
+		if err := os.Mkdir(inner, 0o700); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		if _, err := s.BindProjectPath(ctx, innerID, inner, ""); err != nil {
+			t.Fatalf("binding the inner project: %v", err)
+		}
+		_, err := s.BindProjectPath(ctx, "outer", parent, "")
+		if !errors.Is(err, ErrBindPathContainsOther) {
+			t.Fatalf("err = %v, want ErrBindPathContainsOther", err)
+		}
+		if !strings.Contains(err.Error(), innerName) {
+			t.Errorf("refusal = %q, want it to name the project by its name %q", err, innerName)
+		}
+	})
+
+	t.Run("path already records", func(t *testing.T) {
+		ctx := context.Background()
+		s := bindStore(t)
+		sentinelProject(t, s, innerID, innerName)
+		sentinelProject(t, s, "second", "second")
+		real := t.TempDir()
+		if _, err := s.BindProjectPath(ctx, innerID, real, ""); err != nil {
+			t.Fatalf("binding the first project: %v", err)
+		}
+		_, err := s.BindProjectPath(ctx, "second", real, "")
+		if !errors.Is(err, ErrBindPathClaimed) {
+			t.Fatalf("err = %v, want ErrBindPathClaimed", err)
+		}
+		if !strings.Contains(err.Error(), innerName) {
+			t.Errorf("refusal = %q, want it to name the project by its name %q", err, innerName)
+		}
+	})
+
+	t.Run("path is inside a project with no remote", func(t *testing.T) {
+		ctx := context.Background()
+		s := bindStore(t)
+		sentinelProject(t, s, innerID, innerName)
+		sentinelProject(t, s, "outer", "outer")
+		outer := t.TempDir()
+		nested := filepath.Join(outer, "vendored")
+		if err := os.Mkdir(nested, 0o700); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		if _, err := s.BindProjectPath(ctx, innerID, outer, ""); err != nil {
+			t.Fatalf("binding the outer project: %v", err)
+		}
+		_, err := s.BindProjectPath(ctx, "outer", nested, "")
+		if !errors.Is(err, ErrBindPathInsideOther) {
+			t.Fatalf("err = %v, want ErrBindPathInsideOther", err)
+		}
+		if !strings.Contains(err.Error(), innerName) {
+			t.Errorf("refusal = %q, want it to name the project by its name %q", err, innerName)
+		}
+	})
+}
+
 // TestBindProjectPathRefusesSymlinkToAnotherProject — the same directory
 // reached through a symlink is the same place. Textual comparison treats the
 // two spellings as different projects, and the second binding would then sit

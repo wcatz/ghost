@@ -40,6 +40,18 @@ var (
 	// downloadTimeout bounds one release-asset transfer, which is a
 	// multi-megabyte body on a link of unknown speed rather than a metadata
 	// lookup.
+	//
+	// It is an absolute deadline, not a stall deadline, so it charges the
+	// transfer for its own duration: a slow-but-progressing link is cut off at
+	// the same ten minutes as a dead one. Against maxArchiveBytes that is
+	// about 350 KB/s sustained for the whole 200 MiB the archive cap allows —
+	// comfortable on a wired connection, marginal on a weak mobile hotspot. The
+	// alternative, a deadline that resets while bytes arrive, would let a
+	// transfer that trickles one byte per interval run unbounded, so the cap
+	// would stop bounding anything. A user on a link that slow is better served
+	// by a release asset than by a wait, and nothing is lost by the refusal:
+	// the temp file never reached the rename, so the installed binary is
+	// untouched.
 	downloadTimeout = 10 * time.Minute
 )
 

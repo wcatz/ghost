@@ -865,6 +865,395 @@ func TestRunCodex_TOMLRepairKeepsNestedArray(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLRepairSurvivesMultilineString is the #608 case. A TOML
+// multi-line string — three single quotes, or three double quotes — runs until
+// its own closing delimiter, so a line inside one that happens to start with
+// '[' is string CONTENT and not a table header. Read as a header it ends the
+// ghost table's span early, and the repair then writes ghost's own `args` into a
+// span that already has one — a second args line, which is invalid TOML and
+// makes codex reject the whole file.
+func TestRunCodex_TOMLRepairSurvivesMultilineString(t *testing.T) {
+	for _, delim := range []string{"'''", `"""`} {
+		t.Run(delim, func(t *testing.T) {
+			home, _ := setupCodexTestEnv(t)
+			ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+			seed := "[mcp_servers.ghost]\n" +
+				"command = '/old/install/ghost'\n" +
+				"description = " + delim + "\n" +
+				"[not_a_table]\n" +
+				delim + "\n" +
+				"args = [\"mcp\", \"--stale\"]\n"
+			want := codexMCPServerComment + "\n" +
+				"[mcp_servers.ghost]\n" +
+				"command = " + codexTOMLString(ghostBin) + "\n" +
+				"description = " + delim + "\n" +
+				"[not_a_table]\n" +
+				delim + "\n" +
+				"args = [\"mcp\"]\n"
+
+			if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCodex(&out, false); err != nil {
+				t.Fatalf("RunCodex: %v", err)
+			}
+			got, err := os.ReadFile(codexConfigToml(home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != want {
+				t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+			}
+			if n := countCodexGhostHeaders(string(got)); n != 1 {
+				t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+			}
+		})
+	}
+}
+
+// TestRunCodex_TOMLRepairSurvivesAnUnterminatedMultilineString is the other
+// half of the multi-line case, and the one the first fix got wrong. Honouring a
+// multi-line string means a header inside it is content — but an opener that is
+// never closed would then hold the value open for every remaining line, so the
+// malformation rule could never fire again and every table below the typo would
+// be invisible to all three scanners. A [mcp_servers.ghost] table below the typo
+// would then read as absent, and init would append a SECOND copy of it.
+//
+// The ghost table is above the typo as well as below in the sub-cases, because
+// the same swallowing widens a span past the next header and drops that
+// server's keys — the other half of what the rule prevents.
+func TestRunCodex_TOMLRepairSurvivesAnUnterminatedMultilineString(t *testing.T) {
+	t.Run("ghost table below the typo", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+		seed := "# a user's own table\n" +
+			"[unrelated]\n" +
+			"description = '''\n" +
+			"a string the author never closed\n" +
+			"\n" +
+			"[mcp_servers.ghost]\n" +
+			"command = '/old/install/ghost'\n" +
+			"args = [\"mcp\", \"--stale\"]\n"
+		want := "# a user's own table\n" +
+			"[unrelated]\n" +
+			"description = '''\n" +
+			"a string the author never closed\n" +
+			"\n" +
+			codexMCPServerComment + "\n" +
+			"[mcp_servers.ghost]\n" +
+			"command = " + codexTOMLString(ghostBin) + "\n" +
+			"args = [\"mcp\"]\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := countCodexGhostHeaders(string(got)); n != 1 {
+			t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+		}
+		if string(got) != want {
+			t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+		}
+	})
+
+	t.Run("the next server's keys survive the ghost table above the typo", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+		seed := "[mcp_servers.ghost]\n" +
+			"command = '/old/install/ghost'\n" +
+			"description = '''\n" +
+			"never closed\n" +
+			"\n" +
+			"[mcp_servers.other]\n" +
+			"command = \"/usr/bin/other\"\n" +
+			"args = [\"serve\"]\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := countCodexGhostHeaders(string(got)); n != 1 {
+			t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+		}
+		if !strings.Contains(string(got), `command = "/usr/bin/other"`) {
+			t.Errorf("the neighbouring server's key was swept into the ghost table's span:\n%s", got)
+		}
+		if !strings.Contains(string(got), `args = ["serve"]`) {
+			t.Errorf("the neighbouring server's args were dropped:\n%s", got)
+		}
+		_ = ghostBin
+	})
+}
+
+// TestRunCodex_TOMLRepairKeepsCRLF pins that a repair does not leave a CRLF
+// config.toml with mixed line endings. The file is split on "\n", so every
+// preserved line keeps its "\r" while ghost's own key lines carry none — and a
+// document with two endings in it is one a reviewer cannot read and an editor
+// will rewrite. The repair is not the place to convert the file, so it keeps
+// the ending the file already had.
+func TestRunCodex_TOMLRepairKeepsCRLF(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	seed := "[mcp_servers.ghost]\r\n" +
+		"command = '/old/install/ghost'\r\n" +
+		"args = [\"mcp\", \"--stale\"]\r\n" +
+		"\r\n" +
+		"[mcp_servers.other]\r\n" +
+		"command = \"/usr/bin/other\"\r\n"
+	want := codexMCPServerComment + "\r\n" +
+		"[mcp_servers.ghost]\r\n" +
+		"command = " + codexTOMLString(ghostBin) + "\r\n" +
+		"args = [\"mcp\"]\r\n" +
+		"\r\n" +
+		"[mcp_servers.other]\r\n" +
+		"command = \"/usr/bin/other\"\r\n"
+
+	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	got, err := os.ReadFile(codexConfigToml(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+	// Named on its own, because "the whole file matches" already fails for a
+	// file that kept CRLF everywhere: what this pins is that no line ENDING
+	// changed, and a bare-LF repair of a CRLF file would look identical to a
+	// correct one in every other respect.
+	if i := strings.IndexByte(string(got), '\n'); i > 0 && got[i-1] != '\r' {
+		t.Errorf("the first line lost its CR, so the repair mixed endings:\n%q", got)
+	}
+	if n := bytes.Count(got, []byte("\n")); n != bytes.Count(got, []byte("\r\n")) {
+		t.Errorf("%d newlines but %d CRLFs, so the repair mixed endings:\n%q", n, bytes.Count(got, []byte("\r\n")), got)
+	}
+}
+
+// TestRunCodex_TOMLRepairNormalisesAMixedEndingFile pins what the repair does to
+// a config.toml that already carries both endings: the whole file becomes CRLF,
+// because the join can only be one ending. Pinned because the alternative
+// reading — a mixed file keeps its mix — is what the code was originally
+// described as doing, and it is not what it does.
+//
+// The fixture is ONE CRLF line against SIX bare-LF ones, so it also pins WHICH
+// rule: a majority rule picks LF for this fixture, and the test then fails
+// because `want` is all-CRLF. The rule is presence, on the reasoning in
+// installCodexMCP — a config carrying any CRLF was written by something on
+// Windows, and CRLF is the ending that file wants back.
+func TestRunCodex_TOMLRepairNormalisesAMixedEndingFile(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	// One CRLF, six LF.
+	seed := "[mcp_servers.ghost]\r\n" +
+		"command = '/old/install/ghost'\n" +
+		"args = [\"mcp\", \"--stale\"]\n" +
+		"\n" +
+		"[mcp_servers.other]\n" +
+		"command = \"/usr/bin/other\"\n" +
+		"args = [\"serve\"]\n"
+	want := codexMCPServerComment + "\r\n" +
+		"[mcp_servers.ghost]\r\n" +
+		"command = " + codexTOMLString(ghostBin) + "\r\n" +
+		"args = [\"mcp\"]\r\n" +
+		"\r\n" +
+		"[mcp_servers.other]\r\n" +
+		"command = \"/usr/bin/other\"\r\n" +
+		"args = [\"serve\"]\r\n"
+
+	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	got, err := os.ReadFile(codexConfigToml(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+	if n, crlf := bytes.Count(got, []byte("\n")), bytes.Count(got, []byte("\r\n")); n != crlf {
+		t.Errorf("%d newlines but %d CRLFs, so the file is still mixed:\n%q", n, crlf, got)
+	}
+}
+
+// TestRunCodex_TOMLAppendBacksUpThePreGhostFile pins the path that makes the
+// .bak worth having. The first init APPENDS a ghost table, so on that run the
+// file on disk is the user's config.toml before Ghost ever touched it — and if
+// the backup were taken only on a later repair, every .bak would already
+// contain a ghost table (a repair can only find one) and the pre-ghost copy
+// would never exist at all. The commonest damage, a first merge that went
+// wrong, is what would then have nothing to restore.
+func TestRunCodex_TOMLAppendBacksUpThePreGhostFile(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+	path := codexConfigToml(home)
+
+	seed := "# the user's own file\n[unrelated]\nmodel = \"gpt-5\"\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	// The whole file, exactly: the seed with the managed block appended after a
+	// blank line. That is what establishes the append path — the block is in the
+	// output and nothing else was — and it is asserted as bytes because a looser
+	// check would also pass on the repair path, which is the path this test is
+	// not about. The .bak assertion below is the load-bearing half; this one
+	// proves which path it ran on.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := seed + "\n" + renderCodexMCPServerBlock(ghostBin); string(got) != want {
+		t.Fatalf("appended config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("the first init left no .bak beside the user's config.toml: %v", err)
+	}
+	if string(bak) != seed {
+		t.Errorf(".bak = %q, want the pre-ghost file %q", bak, seed)
+	}
+	if strings.Contains(string(bak), "mcp_servers") {
+		t.Error(".bak already mentions the ghost server, so it is not the pre-ghost file")
+	}
+}
+
+// TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig: a 0-byte config.toml is the one
+// case where a .bak has nothing worth keeping, and because the backup is written
+// O_EXCL and never rolled forward, a 0-byte one would stand forever and suppress
+// the real pre-ghost copy a later repair of a file the user has since filled in
+// would otherwise take. Restoring that would wipe their keys, which is worse than
+// never having written it. A file holding only comments is still backed up — see
+// the guard in installCodexMCP — because its bytes are the user's either way.
+func TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexConfigToml(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("an empty config.toml produced a .bak (Stat err = %v), which would block every later backup", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), "[mcp_servers.ghost]") {
+		t.Errorf("the registration did not happen (err %v):\n%q", err, b)
+	}
+}
+
+// TestRunCodex_TOMLRepairBacksUpOnce pins that a repair of a user's
+// config.toml keeps their pre-ghost file beside it, the same way a save of
+// settings.json does. The repair rewrites lines inside the user's own file, and
+// the one copy of it that predates ghost is the only way back if the rewrite is
+// wrong about what the file said.
+func TestRunCodex_TOMLRepairBacksUpOnce(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+	path := codexConfigToml(home)
+
+	seed := "[mcp_servers.ghost]\n" +
+		"command = '/old/install/ghost'\n" +
+		"args = [\"mcp\", \"--stale\"]\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("the repair left no .bak beside the user's config.toml: %v", err)
+	}
+	if string(bak) != seed {
+		t.Errorf(".bak = %q, want the pre-ghost file %q", bak, seed)
+	}
+	if !strings.Contains(string(bak), "'/old/install/ghost'") {
+		t.Error(".bak is not the file as it was before the repair, so it cannot be a way back")
+	}
+	_ = ghostBin
+
+	// A second run must not roll the backup forward over the first one: the
+	// only pristine copy is the pre-ghost one, and ghost's own output is not a
+	// way back to it.
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("second RunCodex: %v", err)
+	}
+	again, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("read .bak after the second run: %v", err)
+	}
+	if string(again) != seed {
+		t.Errorf(".bak was rolled forward to ghost's own output:\n%q", again)
+	}
+}
+
 // TestRunCodex_TOMLRepairSurvivesMalformedValue pins what happens when a value
 // never closes. A stray unterminated value must not make the repair swallow the
 // rest of config.toml, delete a different MCP server's keys, or hide the ghost

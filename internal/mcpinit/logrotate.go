@@ -75,14 +75,7 @@ var createLog = func(path string) (*os.File, error) {
 // under whoever arranged it, and untangling the target is theirs to do.
 func openLogForAppend(path string) (*os.File, error) {
 	rotatedPath := path + ".1"
-	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() >= logRotateCap {
-		// Rename first, with nothing of this process's own held across it:
-		// Windows refuses to move a file that is open without a delete-sharing
-		// grant, so the open-then-rename order would make the cap a no-op
-		// there. A rename that fails leaves the log where it is, and the open
-		// below proceeds as it did before rotation existed.
-		_ = os.Rename(path, rotatedPath)
-	}
+	rotateLogIfOversized(path, rotatedPath, os.Lstat)
 
 	// Try the log under its own name first — the open every caller did before
 	// rotation existed.
@@ -104,4 +97,56 @@ func openLogForAppend(path string) (*os.File, error) {
 	} else {
 		return nil, fmt.Errorf("open log %s after rotating it to %s: %w", path, rotatedPath, errors.Join(err, err2))
 	}
+}
+
+// rotateLogIfOversized moves path to rotatedPath when path is a regular file
+// that has reached logRotateCap, and reports whether it moved one.
+//
+// The size is read TWICE, and it is the second read that decides. Two Ghost
+// processes can both see an oversized log — the stop hook runs after every
+// turn, and two turns overlap — and one read lets the loser of that race
+// destroy the winner's work: the winner renames the full log into ".1" and its
+// own open creates a small fresh log at the name, and the loser's rename then
+// replaces that ".1" with the small file. Five megabytes of diagnostics, gone,
+// with nothing logged about it. Re-reading immediately before the rename is
+// what catches the ordinary case, because by then the other process's rename
+// has already landed and the name holds a file well under the cap.
+//
+// It does not make the rename atomic with the read: a process that interleaves
+// inside that window still rotates something. Closing that needs a lock around
+// the whole pass, which is a file in the data directory for the sake of a
+// diagnostic log's tail — the loss it would prevent is bounded by one cap, and
+// the cost is a lock every log write has to take.
+//
+// The probe is a parameter so a test can state the two reads a race produces
+// rather than interleave with them, the same reason linkGooseConfigDirsWith
+// takes its probes.
+//
+// The rename happens with nothing of this process's own held across it: Windows
+// refuses to move a file that is open without a delete-sharing grant, so the
+// open-then-rename order would make the cap a no-op there. A rename that fails
+// leaves the log where it is, and the caller's open proceeds as it did before
+// rotation existed.
+func rotateLogIfOversized(path, rotatedPath string, probe func(string) (os.FileInfo, error)) bool {
+	// Read once to decide whether the log is a rotation candidate at all.
+	if !logAtOrOverCap(path, probe) {
+		return false
+	}
+	// Read AGAIN, here, immediately before the rename — and this is the reading
+	// that counts. Written as two separate calls rather than a repeated
+	// expression so the intent is legible: a single read is the bug, and code
+	// that looks like a typo is a poor place to be carrying the fix for one.
+	if !logAtOrOverCap(path, probe) {
+		return false
+	}
+	return os.Rename(path, rotatedPath) == nil
+}
+
+// logAtOrOverCap reports whether path is a regular file that has reached
+// logRotateCap, which is the whole of the rotation test. It is called twice per
+// rotation attempt; see rotateLogIfOversized for why the second call is the one
+// that decides.
+func logAtOrOverCap(path string, probe func(string) (os.FileInfo, error)) bool {
+	info, err := probe(path)
+	return err == nil && info.Mode().IsRegular() && info.Size() >= logRotateCap
 }

@@ -193,12 +193,20 @@ type multiprocPaths struct {
 }
 
 // writerLabels names the load's writers, so the maintenance process knows whose
-// post-announcement write to wait for. The parent's own spawn list is the source of
-// truth; an empty value makes the maintenance process skip that wait, which is
-// only correct for a role that is not the lifecycle writer.
-var writerLabels string
+// post-announcement write to wait for. It is a PARAMETER, not a package
+// variable, and that is the whole point of the shape: as a variable it was
+// assigned after the _txlock probe had already been spawned, so the flag a
+// child received depended on whether its spawn happened to be before or after
+// that assignment — a value read at one point in the run and applied to another.
+// The list is built from the spawn list, and each spawn is now told what to
+// pass, so the two cannot drift apart or arrive out of order.
+//
+// An empty value makes the maintenance process skip that wait, which is correct
+// for every role that is not the lifecycle writer, and is what the probe and
+// the read-only pair are given.
+func writerLabels(labels []string) string { return strings.Join(labels, ",") }
 
-func (c *child) start(ctx context.Context, t *testing.T, p multiprocPaths, role, project, label string, extra ...string) {
+func (c *child) start(ctx context.Context, t *testing.T, p multiprocPaths, role, project, label, writers string, extra ...string) {
 	t.Helper()
 	args := []string{
 		"-role", role,
@@ -212,7 +220,7 @@ func (c *child) start(ctx context.Context, t *testing.T, p multiprocPaths, role,
 		"-query", multiprocQuery,
 		"-batch", fmt.Sprint(multiprocBatchRows),
 		"-after", fmt.Sprint(multiprocLoadAfter),
-		"-writers", writerLabels,
+		"-writers", writers,
 	}
 	args = append(args, extra...)
 	c.name = role + "/" + label
@@ -343,9 +351,9 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 	seedMultiprocDB(t, ctx, paths.db)
 
 	var children []*child
-	spawn := func(c *child, role, project, label string, extra ...string) *child {
+	spawn := func(c *child, role, project, label, writers string, extra ...string) *child {
 		t.Helper()
-		c.start(ctx, t, paths, role, project, label, extra...)
+		c.start(ctx, t, paths, role, project, label, writers, extra...)
 		children = append(children, c)
 		return c
 	}
@@ -365,23 +373,31 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 		}
 	}
 
+	// The steady-state load's writers, named once and handed to each spawn
+	// below. The list is built BEFORE the probe is spawned, because the probe
+	// is one of the writers and used to be told so by a variable assigned after
+	// it had already started.
+	loadLabels := []string{"mcp0", "mcp1", "cli0", "cli1", "probe"}
+	loadWriters := writerLabels(loadLabels)
+
 	// The _txlock=immediate probe is only evidence about its own transaction
 	// while nothing else holds the write lock, so it runs in the first process
 	// against an otherwise idle database. The rest of the fleet waits for it.
-	probe := spawn(&child{}, "cli", multiprocLoadProject, "probe", "-probe")
+	// It is a writer, but it is not the lifecycle writer, so it is told no
+	// writers to wait for — the flag names who the batch waits on, not who the
+	// batch is.
+	probe := spawn(&child{}, "cli", multiprocLoadProject, "probe", "", "-probe")
 	reach("probe-done")
 
 	// The steady-state load: two MCP servers and two CLI children writing, and
 	// two read-only processes searching the rows they are rewriting.
-	loadLabels := []string{"mcp0", "mcp1", "cli0", "cli1", "probe"}
-	writerLabels = strings.Join(loadLabels, ",")
 	load := []*child{
-		spawn(&child{}, "mcp", multiprocLoadProject, "mcp0"),
-		spawn(&child{}, "mcp", multiprocLoadProject, "mcp1"),
-		spawn(&child{}, "cli", multiprocLoadProject, "cli0"),
-		spawn(&child{}, "cli", multiprocLoadProject, "cli1"),
-		spawn(&child{}, "ro", multiprocLoadProject, "ro0"),
-		spawn(&child{}, "ro", multiprocLoadProject, "ro1"),
+		spawn(&child{}, "mcp", multiprocLoadProject, "mcp0", loadWriters),
+		spawn(&child{}, "mcp", multiprocLoadProject, "mcp1", loadWriters),
+		spawn(&child{}, "cli", multiprocLoadProject, "cli0", loadWriters),
+		spawn(&child{}, "cli", multiprocLoadProject, "cli1", loadWriters),
+		spawn(&child{}, "ro", multiprocLoadProject, "ro0", loadWriters),
+		spawn(&child{}, "ro", multiprocLoadProject, "ro1", loadWriters),
 	}
 	// Every load process has reported itself in step, so the writers are provably
 	// live and already contending before the batch looks for them.
@@ -394,22 +410,55 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 	if barrierFailure == nil {
 		writeBarrier(t, paths.barrier, "load-ready")
 
-		// The two observers, then the batch they exist to observe.
-		poller = spawn(&child{}, "poller", multiprocBatchProject, "poller")
-		snapshot = spawn(&child{}, "snapshot", multiprocBatchProject, "snapshot")
-		maint = spawn(&child{}, "maint", multiprocBatchProject, "maint")
+		// The two observers, then the batch they exist to observe. Only the
+		// batch reads -writers, so it alone is told which load processes it
+		// must see commit after it announces itself.
+		poller = spawn(&child{}, "poller", multiprocBatchProject, "poller", "")
+		snapshot = spawn(&child{}, "snapshot", multiprocBatchProject, "snapshot", "")
+		maint = spawn(&child{}, "maint", multiprocBatchProject, "maint", loadWriters)
 
 		// The maintenance process ends the load when it finishes, batch or no
 		// batch. This is the backstop for the case where it never gets there —
 		// killed, or failed before its own deferred write — so the load cannot
 		// outlive the process that releases it and turn a failure into a hung
 		// run.
+		//
+		// Waited for before the test ends, because it is registered as a
+		// cleanup that the t.TempDir removal also runs: a goroutine still
+		// polling a process that the failing path is killing can write the stop
+		// barrier into a directory that is being removed, and the write is then
+		// the only thing racing the removal. Joining it here means the stop file
+		// is written while the directory is still there — which is the whole
+		// point of the backstop.
+		reaper := make(chan struct{})
 		go func() {
+			defer close(reaper)
 			for !maint.finished() {
 				time.Sleep(5 * time.Millisecond)
 			}
 			_ = os.WriteFile(filepath.Join(paths.barrier, "stop"), []byte("backstop"), 0o600)
 		}()
+		// Registered here rather than joined after waitForChildren, because
+		// waitForChildren ends in t.Fatalf on a hung child and that would skip
+		// the join entirely — which is the path the reaper exists for. A
+		// cleanup runs on every exit, and this one was registered after the
+		// temp dir's, so it runs BEFORE the directory is removed.
+		//
+		// Bounded, because that same Fatalf is the case where joining is least
+		// safe: the child the reaper is waiting on is the one that hung, so an
+		// unbounded wait would replace a 60-second failure with a hang until
+		// the package's own go test timeout, and the temp dir would never be
+		// removed. The reaper has one job — write the stop barrier so the load
+		// cannot outlive the process meant to release it — and it does that the
+		// moment the process is gone, so a wait that expires says the process
+		// never went away, which is the fact the failure is about.
+		t.Cleanup(func() {
+			select {
+			case <-reaper:
+			case <-time.After(30 * time.Second):
+				t.Log("the rotation backstop did not finish: the maintenance process never exited")
+			}
+		})
 	} else {
 		// No maintenance process is coming to end the load, so end it here.
 		writeBarrier(t, paths.barrier, "stop")
@@ -471,6 +520,20 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 				"(tx_lock_held=%q): _txlock=immediate is missing or not honoured, so a concurrent commit "+
 				"upgrades this transaction to a SQLITE_BUSY_SNAPSHOT failure", got)
 		}
+		// What the load does NOT prove about _txlock=immediate, so the assertion
+		// above is not read as more than it is. With the parameter removed, the
+		// load processes here never hit SQLITE_BUSY_SNAPSHOT: the deferred
+		// transactions this fleet runs are write-only, and a write-only
+		// transaction that has not read cannot be upgraded out of a shared lock
+		// the way a read-then-write one is. The probe above is the ONLY thing
+		// here that catches the removal, which is why it runs in its own process
+		// against an idle database rather than as one more assertion over the
+		// load's reports.
+		//
+		// The rest of the contract is genuinely load-borne: the settings are
+		// read back from a live connection in every process (see
+		// assertConnectionContract), and the no-dropped-writes and
+		// no-SQLITE_BUSY claims below are about contention the load creates.
 
 		assertLoadWasLive(t, reports)
 		assertSnapshotInvariant(t, snapshot)

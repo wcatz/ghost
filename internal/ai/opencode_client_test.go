@@ -64,6 +64,48 @@ func TestParseOpenCodeOutput_MalformedLineErrors(t *testing.T) {
 	}
 }
 
+// TestParseOpenCodeOutput_AcceptsALongReflectReply is the #608 case. The reader
+// carried a 4 MiB bufio.Scanner cap, the same one the stop hook's transcript
+// reader outgrew in #632, so a reflect reply that reached it failed with
+// bufio.Scanner: token too long — a failure that reads exactly like a
+// malformed stream, on a reply that was merely long. The whole stream is
+// already in memory by the time it is parsed, so the cap was bounding nothing
+// that the caller's own buffer had not already paid for.
+//
+// The ceiling is NOT lowered here: the point is the shipped value, and a test
+// that set the var would be testing its own override. The payload sits past the
+// old 4 MiB cap and well inside the current one, which is the band a real
+// answer lands in.
+func TestParseOpenCodeOutput_AcceptsALongReflectReply(t *testing.T) {
+	// One text event whose own payload is over the old cap, which is the shape
+	// that breaks a line reader: the line is one JSON object, not many.
+	big := strings.Repeat("A", 5<<20)
+	raw := `{"type":"text","part":{"id":"a","type":"text","text":"` + big + `"}}` + "\n"
+
+	got, err := parseOpenCodeOutput(raw)
+	if err != nil {
+		t.Fatalf("a text event of %d bytes failed to parse: %v", len(big), err)
+	}
+	if got != big {
+		t.Errorf("got %d bytes, want the %d the event carried", len(got), len(big))
+	}
+}
+
+// TestParseOpenCodeOutput_StillBoundsALinePastTheCeiling is the other half, so
+// the cap cannot be satisfied by removing it: past the ceiling the read is
+// still an error, because an unbounded parse of a stream the harness produced
+// is a way to run a process out of memory.
+func TestParseOpenCodeOutput_StillBoundsALinePastTheCeiling(t *testing.T) {
+	old := maxOpencodeOutputLine
+	maxOpencodeOutputLine = 4 << 20
+	t.Cleanup(func() { maxOpencodeOutputLine = old })
+
+	raw := `{"type":"text","part":{"id":"a","type":"text","text":"` + strings.Repeat("A", (4<<20)+1) + `"}}` + "\n"
+	if _, err := parseOpenCodeOutput(raw); err == nil {
+		t.Fatal("a line past the ceiling parsed, so nothing bounds the read")
+	}
+}
+
 func TestParseOpenCodeOutput_BlankLinesSkipped(t *testing.T) {
 	raw := `{"type":"text","part":{"id":"a","type":"text","text":"OK"}}
 

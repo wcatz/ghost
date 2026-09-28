@@ -101,21 +101,42 @@ func isGhostSaveTool(name string) bool {
 	return false
 }
 
-// maxTranscriptLine bounds the memory one transcript line may take. A var so
-// tests can lower it.
+// maxTranscriptLine bounds the memory one transcript line's CONTENT may take. A
+// var so tests can lower it — which also means the tests that lower it must not
+// run in parallel with each other, since the value is process-wide and the
+// override is not scoped to a goroutine.
 var maxTranscriptLine = 64 << 20
 
 // errTranscriptLineTooLong reports a line past maxTranscriptLine.
 var errTranscriptLineTooLong = errors.New("transcript line exceeds the memory ceiling")
+
+// transcriptContentLen is the length of line with its line terminator excluded.
+// The ceiling is about how much CONTENT one line may hold, and the bytes that
+// end it are not content: charging them made a line of exactly maxTranscriptLine
+// fail, one byte over for "\n" and two for the "\r\n" a Windows host writes.
+// A chunk that does not end in a terminator is mid-line, so its length is its
+// content and is reported unchanged.
+func transcriptContentLen(line []byte) int {
+	n := len(line)
+	if n > 0 && line[n-1] == '\n' {
+		n--
+		if n > 0 && line[n-1] == '\r' {
+			n--
+		}
+	}
+	return n
+}
 
 // streamJSONL visits each line of a newline-delimited JSON transcript and
 // returns the terminal read error, if any (an I/O failure, or a line past
 // maxTranscriptLine). Lines carry full tool results: an opencode message holds
 // every tool call and output of an agentic turn, so real lines pass the old
 // 4 MiB bufio.Scanner cap and aborted the scan (#632). The ceiling only bounds
-// memory. The visited slice is valid until the next line is read; a trailing
-// "\r" is dropped and a final line without a newline is visited, as with
-// bufio.ScanLines. A partial line cut off by a read error is not visited.
+// memory, and it bounds the content of a line rather than the bytes read for it
+// (see transcriptContentLen). The visited slice is valid until the next line is
+// read; a trailing "\r" is dropped and a final line without a newline is
+// visited, as with bufio.ScanLines. A partial line cut off by a read error is
+// not visited.
 func streamJSONL(r io.Reader, visit func(line []byte)) error {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var line []byte
@@ -124,7 +145,7 @@ func streamJSONL(r io.Reader, visit func(line []byte)) error {
 		for {
 			chunk, err := br.ReadSlice('\n')
 			line = append(line, chunk...)
-			if len(line) > maxTranscriptLine {
+			if transcriptContentLen(line) > maxTranscriptLine {
 				return errTranscriptLineTooLong
 			}
 			if err == bufio.ErrBufferFull {

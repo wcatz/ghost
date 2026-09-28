@@ -175,8 +175,16 @@ func TestDownloadTimesOutOnAStalledServer(t *testing.T) {
 
 	useTestDeadline(t, &downloadTimeout, 20*time.Millisecond)
 
-	if _, err := Download(context.Background(), url); err == nil {
+	_, err := Download(context.Background(), url)
+	if err == nil {
 		t.Fatal("expected a deadline error when the asset server does not answer in time")
+	}
+	// The deadline is carried on the request's context, so a timeout has to
+	// arrive AS a deadline. Asserting only err != nil would pass for an
+	// archive-cap refusal or a truncated read — two failures that mean the
+	// transfer ended for some other reason and the bound did not do its job.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want a deadline error, got: %v", err)
 	}
 }
 

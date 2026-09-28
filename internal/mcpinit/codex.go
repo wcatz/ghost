@@ -223,48 +223,150 @@ func parseCodexTOMLStringArray(val string) []string {
 // A comment ends the value only at depth 0, where the value is finished anyway.
 // Deeper in a bracket the comment is skipped and the scan carries on, because
 // the closing bracket usually sits on a later line.
+//
+// It is codexScanValue's first answer read on its own; the two come from one walk
+// because a multi-line string makes the second answer load-bearing, and two walks
+// of the same value could disagree about where it ended.
 func codexValueComplete(value string) bool {
+	complete, _ := codexScanValue(value)
+	return complete
+}
+
+// codexMultilineStillOpen reports whether value ends inside a TOML multi-line
+// string — one opened by three single quotes or three double quotes — that
+// lines[i:] can still CLOSE.
+//
+// The closing clause is the whole content, and it is not optional. A header
+// line is allowed to end an open value only when that value is malformed,
+// because treating it as yet another line of the value hides every table below
+// the typo from all three scanners: the ghost table itself can become invisible,
+// so init appends a second copy of a table already in the file, or a
+// neighbouring server's keys get swept into the ghost span and dropped. A
+// multi-line string is NOT malformed — it runs to a later line by design — so a
+// bracketed line inside it is content and must not close it, or the repair
+// writes ghost's own `args` beside the user's and codex rejects the file.
+//
+// An opener with no closer anywhere in rest is the case that reconciles the
+// two, and it is decided the other way. codexScanValue cannot tell "a string
+// that will close" from "a typo that never will" at the point the rule is being
+// applied, so the question is put to the rest of the file instead: if the
+// delimiter it is waiting for is not on this line or any later one, the string
+// never closes, the value is malformed after all, and the next header ends it —
+// which is the pre-existing rule, restored for the only shape that earns it.
+func codexMultilineStillOpen(value string, rest []string) bool {
+	delim := codexOpenMultilineDelimiter(value)
+	if delim == "" {
+		return false
+	}
+	for _, line := range rest {
+		if strings.Contains(line, delim) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexOpenMultilineDelimiter returns the triple-quote delimiter value is
+// waiting to close, or "" when value is not inside one. It is the second answer
+// of codexScanValue, read on its own because the delimiter is what the rest of
+// the file has to be searched for.
+func codexOpenMultilineDelimiter(value string) string {
+	_, delim := codexScanValue(value)
+	return delim
+}
+
+// codexScanValue walks value once for brackets, strings and comments and reports
+// whether the value is finished and which triple-quote delimiter it is waiting
+// for, if any. A value that ends inside one is unfinished AND well formed, which
+// is the distinction codexMultilineStillOpen exists to draw; every other
+// unfinished value is malformed.
+func codexScanValue(value string) (complete bool, openDelim string) {
 	depth := 0
 	for i := 0; i < len(value); i++ {
 		switch c := value[i]; c {
 		case '#':
 			if depth == 0 {
-				return true // the rest of the line is a comment, not a value
+				return true, "" // the rest of the line is a comment, not a value
 			}
 			for i < len(value) && value[i] != '\n' {
 				i++ // skip the comment, keeping any bracket depth
 			}
 		case '\'', '"':
-			i = codexStringEnd(value, i)
+			end, open, delim := codexStringEndOpen(value, i)
+			if open {
+				return false, delim
+			}
+			i = end
 		case '[', '{':
 			depth++
 		case ']', '}':
 			depth--
 			if depth < 0 {
-				return true // malformed; treat as self-contained
+				return true, "" // malformed; treat as self-contained
 			}
 		}
 	}
-	return depth == 0
+	return depth == 0, ""
 }
 
 // codexStringEnd returns the index of the quote closing the string that opens at
 // i, or the last index of value when the string is unterminated. Inside a basic
 // "..." string a backslash escapes the next byte, so an escaped quote does not
 // close it; inside a literal '...' string nothing is escaped.
+//
+// It reports only where the closing quote is. A value still inside a multi-line
+// string is a question codexStripComment and the key-name readers do not ask, so
+// they get the last index and carry on; codexScanValue is the one caller that
+// needs the other answer and asks for it through codexStringEndOpen.
 func codexStringEnd(value string, i int) int {
+	end, _, _ := codexStringEndOpen(value, i)
+	return end
+}
+
+// codexStringEndOpen returns the index of the quote closing the string that opens
+// at i, whether the string is still open where value ends, and the triple-quote
+// delimiter it is waiting for when it is.
+//
+// A triple-quote delimiter (three single quotes, or three double quotes) is a
+// multi-line string in its own right: it runs until its own three quotes, across
+// as many lines as the author wrote, so a value carrying only its opener is
+// UNFINISHED rather than malformed — which is the whole reason this function
+// exists. A single-line quoted string cannot span lines at all, so an
+// unterminated one is not reported as open: the two are different TOML, and
+// reading a multi-line opener as an empty one-line string is what let a header
+// inside the string end the ghost table's span.
+//
+// The delimiter is returned so the caller can ask whether the string can still
+// close; being still-open is not by itself a licence to ignore a table header,
+// and see codexMultilineStillOpen.
+func codexStringEndOpen(value string, i int) (end int, open bool, delim string) {
 	quote := value[i]
+	if i+3 <= len(value) && value[i+1] == quote && value[i+2] == quote {
+		triple := value[i : i+3]
+		for j := i + 3; j+3 <= len(value); j++ {
+			if value[j] != quote {
+				continue
+			}
+			if quote == '"' && j > i+2 && value[j-1] == '\\' {
+				continue // a backslash escapes the next byte inside """
+			}
+			if value[j] == quote && value[j+1] == quote && value[j+2] == quote {
+				return j + 2, false, ""
+			}
+		}
+		return len(value) - 1, true, triple
+	}
 	for i++; i < len(value); i++ {
 		switch value[i] {
 		case quote:
-			return i
+			return i, false, ""
 		case '\\':
 			if quote == '"' {
 				i++ // the escaped byte cannot close the string
 			}
 		}
 	}
-	return len(value) - 1
+	return len(value) - 1, false, ""
 }
 
 // codexStripComment returns line with any "#" comment removed. A "#" inside a
@@ -358,11 +460,27 @@ func codexTableName(line string) string {
 // server's keys get swept into the ghost span and dropped. codexHeaderClosesValue
 // draws the line between that and a nested array element, which is bracketed
 // exactly like a header.
+//
+// One open value is NOT malformed, and the header rule must not reach it. A
+// value inside a multi-line string is unfinished because the string runs to a
+// later line by design, so a bracketed line there is string content; letting it
+// close the value ends the ghost table's span in the middle of the user's own
+// text, and the repair then inserts a second `args` beside the first, which is
+// invalid TOML.
+//
+// codexMultilineStillOpen is the test, and it carries the "that can still
+// close" clause on purpose. An opener with no closer anywhere in the file would
+// otherwise hold the value open for every remaining line, so the malformation
+// rule could never fire again and every table below the typo would be
+// invisible — the exact failure the rule exists to prevent, reached through the
+// fix for it. So the bypass is available only while the delimiter is still
+// somewhere ahead; once it is not, this is a malformed value and the next
+// header ends it, as it always did.
 func codexValueContinuationLines(lines []string) map[int]bool {
 	continuation := make(map[int]bool)
 	value, open := "", false
 	for i, line := range lines {
-		if open && !codexHeaderClosesValue(line) {
+		if open && (codexMultilineStillOpen(value, lines[i:]) || !codexHeaderClosesValue(line)) {
 			continuation[i] = true
 			value += "\n" + line
 			if codexValueComplete(value) {
@@ -996,7 +1114,46 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		return false, fmt.Errorf("read config.toml: %w", err)
 	}
 
+	// The file's own line ending decides the join below, and the split strips
+	// the "\r" that goes with it. A repair that split on "\n" and joined on
+	// "\n" left every line ghost does not own with its CR and every line it
+	// does without one: still valid TOML, and a document whose real shape no
+	// editor will show. Stripping at the split rather than at the join is what
+	// lets the file be put back together with one ending.
+	//
+	// What the strip does NOT do is make the "already current" check
+	// CR-tolerant, because that check already was: findCodexTOMLTable reads the
+	// header after a TrimSpace, and splitCodexAssignment and the two value
+	// decoders TrimSpace as well, so a CRLF config compared as current and was
+	// never rewritten. That is why the defect here is the mixed-endings one and
+	// not a repeated repair of a CRLF file, and why the test repairs a stale
+	// command rather than asserting anything about the current check.
+	//
+	// ANY CRLF anywhere in the file makes the WHOLE file CRLF, and a file that
+	// already carries both endings is NORMALISED rather than preserved. The test
+	// is presence, deliberately, and not a count of the two: a config.toml
+	// carrying a single CRLF was written by something on Windows, and a Windows
+	// editor is what will read it back, so CRLF is the ending that file wants
+	// even when one stray line out of five hundred says otherwise. A majority
+	// rule would pick the other way there, and would then have to answer what to
+	// do on a tie.
+	//
+	// Whatever the rule, a mixed file cannot be preserved: the join below can
+	// only be one ending, so the lines ghost owns have to be given one. Ending
+	// up with a file that is not mixed is strictly better than the one it
+	// replaced, and better than a repair that keeps adding to the mix. A file
+	// with no CRLF at all is left entirely alone, as before.
+	eol := "\n"
+	crlf := bytes.Contains(existing, []byte("\r\n"))
+	if crlf {
+		eol = "\r\n"
+	}
 	lines := strings.Split(string(existing), "\n")
+	if crlf {
+		for i, line := range lines {
+			lines[i] = strings.TrimSuffix(line, "\r")
+		}
+	}
 
 	// A ghost entry written as a dotted or inline key is invisible to the
 	// line-wise merge: appending a table next to it would give codex a
@@ -1057,7 +1214,36 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		out = append(out, "") // the registered file ends with a newline
 	}
 
-	if err := writeFileAtomic(path, []byte(strings.Join(out, "\n")), 0644); err != nil {
+	// The user's pre-ghost file, kept once, on BOTH paths. That the append path
+	// is the one that matters is the whole point: this is the first init, so
+	// `existing` is the config.toml the user had before Ghost ever touched it,
+	// and that is the only copy worth having. Backing up only the repair path
+	// would mean the .bak never held a pre-ghost file at all — the bytes there
+	// would already contain a ghost table, because a repair can only find one —
+	// so the commonest damage, a first merge that went wrong, would have nothing
+	// to restore.
+	//
+	// O_EXCL and never rolled forward, for the reason writeBackupOnce gives: a
+	// later run would otherwise overwrite the only pristine copy with Ghost's own
+	// output. Which is why a 0-byte file is skipped rather than copied: a
+	// 0-byte config.toml is the one case where a .bak has nothing worth keeping,
+	// and since the backup is never rolled forward, that empty one would stand
+	// forever and suppress the real copy a later repair of a file the user has
+	// since filled in would otherwise take — a "way back" that wipes their keys.
+	//
+	// 0-BYTE, deliberately, and not "defines no keys". A file holding only
+	// comments or whitespace is also a file with no keys to lose, but its bytes
+	// are still the user's, and skipping those would need a scan of every file on
+	// every init to work out. Restoring a comments-only .bak costs the user
+	// comments, not data, which is a different trade from the one above. A file
+	// that did not exist before this run returned earlier and never gets here.
+	if len(existing) > 0 {
+		if err := writeBackupOnce(path+".bak", existing); err != nil {
+			return false, err
+		}
+	}
+
+	if err := writeFileAtomic(path, []byte(strings.Join(out, eol)), 0644); err != nil {
 		return false, fmt.Errorf("write config.toml: %w", err)
 	}
 	if found {
