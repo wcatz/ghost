@@ -255,6 +255,283 @@ func readUpdatedAt(t *testing.T, s *Store, memoryID string) string {
 	return v
 }
 
+// TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow is the
+// third review finding on #730, and it is the one the other two left open: both of
+// those made a DELIBERATE writer's row non-removable, and neither of them asked
+// whether a non-removable row is an ANCHOR.
+//
+// The gate in restorableStamp is "a removable version sits ABOVE the last version
+// that changed state", and the row it called the last state-changing version was
+// found with `NOT historyEqualPredecessorSQL`. That finds the newest row whose
+// state columns differ from its predecessor — so a row that records the same state
+// is invisible to it WHATEVER ELSE is true of that row. A tags-only UpdateMemory
+// bumps updated_at on purpose and records a state-identical `update` version; a
+// merge whose strengthen is already at the ceiling bumps it on purpose and records
+// a state-identical `reflect` version naming the memory it folded. Neither moves a
+// column this table has, so the anchor skipped over both, and the pre-#727 no-op
+// reflect row below them became "evidence" for a rewind over a change the store
+// made on purpose.
+//
+// The interleaving is the finding, which is why this is not the tags-only test
+// above: there, the two `update` rows are the memory's NEWEST versions, so the
+// phase allowlist alone kept them and the gate never opened. Here the deliberate
+// bump is the newest row and a pre-#727 no-op reflect sits between the save and it,
+// so the gate opens and the two rules stop being redundant.
+//
+// The rule the fix has to hold is one sentence: a row this repair will not remove
+// is an anchor. Not "a row that changed state is an anchor" — that is what was
+// there, and a deliberate writer is invisible to it.
+func TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow(t *testing.T) {
+	// Two shapes of the same defect, and the second is the one a phase-only fix
+	// misses. A merge's version is filed with phase `reflect` — ReplaceNonManual
+	// files the reuse branch's row as a reflection — and what spares it is
+	// related_id alone. Both fixtures are the same three rows in the same order;
+	// only what makes the third row non-removable differs.
+	for _, tc := range []struct {
+		name       string
+		importance float32
+		stage      func(t *testing.T, s *Store, id string)
+		// wantSpare names the ONE clause of the removable predicate that has to be
+		// holding this row back, and it is asserted rather than described: a
+		// fixture whose deliberate row is spared by two clauses would still pass a
+		// fix that only addressed one of them.
+		wantSpare          string
+		wantPreCutReflects int
+	}{
+		{
+			name:       "a tags-only update, spared by its phase",
+			importance: 0.4,
+			stage: func(t *testing.T, s *Store, id string) {
+				t.Helper()
+				if err := s.UpdateMemory(context.Background(), testProject, id, nil, nil, nil,
+					[]string{"retag", "deliberate"}); err != nil {
+					t.Fatalf("UpdateMemory: %v", err)
+				}
+			},
+			wantSpare:          "phase",
+			wantPreCutReflects: 1,
+		},
+		{
+			name:       "a merge already at the importance ceiling, spared by related_id alone",
+			importance: 1.0,
+			stage: func(t *testing.T, s *Store, id string) {
+				t.Helper()
+				// The strength is at the ceiling already, so the merge's own
+				// strengthen moves no state column and the version it records
+				// restates all five byte for byte — while still naming the memory it
+				// folded. Phase reflect, recorded before the bound: nothing spares
+				// this row except related_id.
+				appendVersionRow(t, s, id, phaseReflect, preFixReflectAt, compactSecondText, "", nil)
+			},
+			wantSpare:          "related_id",
+			wantPreCutReflects: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			id, err := s.Create(context.Background(), testProject, Memory{
+				Category: "architecture", Content: compactFirstText, Source: "mcp",
+				Importance: tc.importance,
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			// The save at an instant of its own, then the damage: a byte-identical
+			// reflect version from before #727. Nothing after the save is a state
+			// change, so under the old rule the save WAS the last state change and
+			// the no-op reflect sat above it as textbook evidence.
+			stampHistoryRow(t, s, id, phaseSave, "2026-01-01 10:00:00")
+			appendVersionRow(t, s, id, phaseReflect, preFixReflectAt, "", "", nil)
+
+			// The deliberate bump, after the damage and above it, at an instant of
+			// its own so a rewind is unambiguous.
+			tc.stage(t, s, id)
+			deliberate := "2026-05-01 12:00:00"
+			setUpdatedAt(t, s, id, deliberate)
+
+			// The preconditions, asserted rather than assumed. The deliberate row
+			// being state-identical is the whole finding, and its being non-removable
+			// for exactly the stated reason is what makes this the case rather than a
+			// near neighbour of it.
+			if n := historyRowCount(t, s, id); n != 3 {
+				t.Fatalf("history rows = %d, want 3 (the save, the no-op reflect, the deliberate bump)", n)
+			}
+			if n := redundantVersionCount(t, s, id); n != 2 {
+				t.Fatalf("%d versions restate their predecessor byte for byte, want 2: the finding "+
+					"needs a row no state column can tell from a no-op", n)
+			}
+			if n := versionsAtOrBefore(t, s, id, phaseReflect, reflectNoOpCutoff); n != tc.wantPreCutReflects {
+				t.Fatalf("%d of this memory's reflect versions are at or before the bound, want %d: "+
+					"the fixture has to stage pre-#727 rows for the cutoff to be what spares the "+
+					"deliberate one", n, tc.wantPreCutReflects)
+			}
+			if n := versionExemptOnlyBy(t, s, id, tc.wantSpare, reflectNoOpCutoff); n != 1 {
+				t.Fatalf("%d version(s) are exempt on nothing but their %s, want 1: the fixture has "+
+					"to stage a row this rule alone has to hold", n, tc.wantSpare)
+			}
+
+			res, err := s.CompactHistory(context.Background(), testProject,
+				HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+			if err != nil {
+				t.Fatalf("CompactHistory: %v", err)
+			}
+			if res.Removed != 1 {
+				t.Errorf("Removed = %d, want 1: the pre-#727 no-op reflect is real damage whether or "+
+					"not a deliberate bump sits above it", res.Removed)
+			}
+			if res.UpdatedAt != 0 {
+				t.Errorf("UpdatedAt = %d, want 0: the only version above the last state change is one "+
+					"a writer filed on purpose, so nothing here is evidence that a reflection moved "+
+					"the stamp", res.UpdatedAt)
+			}
+			if got := readUpdatedAt(t, s, id); got != deliberate {
+				t.Errorf("updated_at = %q, want the deliberate writer's own %q: a row this repair "+
+					"would not remove is not a row it may read as a no-op", got, deliberate)
+			}
+		})
+	}
+}
+
+// TestCompactHistoryFixUpdatedAtOnlyMovesBackward is the direction rule's own
+// regression test, and it is here because a mutation to `!current.After(target)` —
+// dropping the case where the stamp is EXACTLY the target — left the whole suite
+// green. Every fixture in this file moves a stamp strictly forward before the
+// repair runs, so the boundary was never the thing under test.
+//
+// The claim is that the damage moved the stamp forward and the repair undoes that,
+// never inventing a freshness Ghost never recorded. A stamp already at the target
+// is not damage, and a stamp BEFORE it is not damage either: it is a writer that
+// moved it without filing a history row, a clock that ran ahead, or a row some
+// other tool edited. Both are left exactly as they are.
+func TestCompactHistoryFixUpdatedAtOnlyMovesBackward(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		current    string
+		wantFixed  int64
+		wantRemain string
+	}{
+		{
+			name:       "a stamp forward of the last real change is taken back to it",
+			current:    "2026-03-01 09:00:00",
+			wantFixed:  1,
+			wantRemain: directionLastRealChange,
+		},
+		{
+			// This is the case the mutation that passed the whole suite would have
+			// broken and no fixture exercised: `current.Equal(target)` is false here,
+			// so the mutated rule takes the stamp FORWARD from a value the store
+			// already had behind the change. Every other fixture in this file moves
+			// a stamp strictly forward, so the mutated rule agreed with the real one
+			// on all of them.
+			name:       "a stamp already behind the last real change is left alone",
+			current:    "2026-01-15 10:00:00",
+			wantFixed:  0,
+			wantRemain: "2026-01-15 10:00:00",
+		},
+		{
+			name:       "a stamp exactly at the last real change is left alone",
+			current:    directionLastRealChange,
+			wantFixed:  0,
+			wantRemain: directionLastRealChange,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			id := createCompactMemory(t, s, compactFirstText)
+
+			// A save, a real edit, then TWO no-op reflect versions above it. Both
+			// counts are forced, and each one was got wrong on the way here:
+			//
+			//   - The edit has to MOVE a state column, or it is not a real change
+			//     and the anchor never moves off the save.
+			//   - There have to be TWO of them. A single reflect version is the
+			//     memory's newest row, the newest-version guard spares it, and there
+			//     is no removable row at all — the gate is closed before direction is
+			//     ever read. This is also the shape the damage really takes: a
+			//     reflect run's LAST version is always its memory's newest row, which
+			//     is why the anchor is the newest row this repair will not remove
+			//     rather than the newest row that changed state.
+			// The edit goes through the real writer, so the live row moves with it
+			// and the reflect versions below copy a state their memory actually
+			// held. Staging the edit's version with an override instead leaves the
+			// LIVE row saying something else, and the next reflect version then
+			// differs from the edit rather than restating it — a fixture that looks
+			// like the damage and is not.
+			stampHistoryRow(t, s, id, phaseSave, "2026-01-01 10:00:00")
+			if err := s.UpdateMemory(ctx, testProject, id, strPtr(compactSecondText), nil, nil, nil); err != nil {
+				t.Fatalf("UpdateMemory: %v", err)
+			}
+			stampHistoryRow(t, s, id, phaseUpdate, directionLastRealChange)
+			appendVerbatimVersion(t, s, id)
+			appendVerbatimVersion(t, s, id)
+			setUpdatedAt(t, s, id, tc.current)
+
+			// The gate has to be open or none of this is about direction. It is
+			// checked as the gate and not as restorableStamp's whole verdict, because
+			// two of the three cases are about the repair declining a stamp it COULD
+			// have moved — the direction rule is the only thing under test here, and
+			// asserting the decision as well would fail the two cases that are
+			// supposed to decline.
+			if open := stampGateIsOpen(t, s, id, reflectNoOpCutoff); !open {
+				t.Fatalf("the fixture's gate is closed, so it tests nothing about direction")
+			}
+
+			res, err := s.CompactHistory(ctx, testProject,
+				HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+			if err != nil {
+				t.Fatalf("CompactHistory: %v", err)
+			}
+			if res.UpdatedAt != tc.wantFixed {
+				t.Errorf("UpdatedAt = %d, want %d", res.UpdatedAt, tc.wantFixed)
+			}
+			if got := readUpdatedAt(t, s, id); got != tc.wantRemain {
+				t.Errorf("updated_at = %q, want %q — the repair only ever moves a stamp BACKWARD",
+					got, tc.wantRemain)
+			}
+		})
+	}
+}
+
+// directionLastRealChange is the instant of the edit every case in
+// TestCompactHistoryFixUpdatedAtOnlyMovesBackward shares, so the three cases differ
+// only in where the stamp sits relative to ONE target.
+const directionLastRealChange = "2026-02-01 10:00:00"
+
+// stampGateIsOpen reports whether restorableStamp's FIRST gate would pass for this
+// memory — a removable version above the anchor — read through the same statement
+// the run reads. It is the precondition a direction test needs, and it is
+// deliberately not restorableStamp's whole verdict: a test about the direction
+// rule has to be able to stage a stamp the repair declines, so asserting the
+// decision here would fail the cases that are supposed to decline.
+func stampGateIsOpen(t *testing.T, s *Store, memoryID, cutoff string) bool {
+	t.Helper()
+	query, args := compactCandidatesStmt(testProject, "", cutoff)
+	var found bool
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		t.Fatalf("read the stamp candidates: %v", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	for rows.Next() {
+		var c compactStamp
+		var recorded, updatedAt string
+		if err := rows.Scan(&c.memoryID, &c.target, &recorded, &updatedAt, &c.removableLast); err != nil {
+			t.Fatalf("scan a stamp candidate: %v", err)
+		}
+		if c.memoryID != memoryID {
+			continue
+		}
+		c.recorded, c.updatedAt = recorded, updatedAt
+		found = c.removableLast != 0 && c.removableLast > c.target
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the stamp candidates: %v", err)
+	}
+	return found
+}
+
 // historyPhases reads the table rather than the reader, for the reason
 // historyRowCount documents: MemoryHistory defaults to the per-memory cap.
 func historyPhases(t *testing.T, s *Store, memoryID string) []string {
@@ -1221,6 +1498,49 @@ func TestCompactHistoryCarriesTheStampsItAlreadyCommitted(t *testing.T) {
 	}
 }
 
+// versionExemptOnlyBy counts a memory's versions that the compaction's predicate
+// would remove if exactly one clause were dropped, named by that clause. It is the
+// other half of updateVersionsNoOtherClauseExempts — that one is written for the
+// phase allowlist and cannot express "the row is spared by related_id instead" —
+// and it exists because a fixture that leaves its subject spared by TWO clauses
+// passes a fix that only addressed one of them, silently.
+//
+// The clause is a name rather than SQL so the assertion cannot drift from the
+// predicate: each name expands to the predicate with that one conjunct removed.
+func versionExemptOnlyBy(t *testing.T, s *Store, memoryID, clause, cutoff string) int {
+	t.Helper()
+	var predicate string
+	switch clause {
+	case "phase":
+		// The phase allowlist dropped, everything else the predicate says.
+		predicate = historyEqualPredecessorSQL("h") +
+			" AND h.rowid <> " + historyNewestVersionSQL("h.memory_id") +
+			" AND h.recorded_at < ?" +
+			" AND h.related_id IS NULL AND h.merged_content IS NULL"
+	case "related_id":
+		predicate = historyEqualPredecessorSQL("h") +
+			" AND h.rowid <> " + historyNewestVersionSQL("h.memory_id") +
+			" AND h.phase IN (" + placeholders(len(compactablePhases())) + ")" +
+			" AND h.recorded_at < ? AND h.merged_content IS NULL"
+	default:
+		t.Fatalf("no such clause %q: name one the predicate is built from", clause)
+	}
+	args := []any{}
+	if clause == "related_id" {
+		for _, p := range compactablePhases() {
+			args = append(args, p)
+		}
+	}
+	args = append(args, cutoff, memoryID)
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_history h WHERE h.memory_id = ? AND `+predicate,
+		append([]any{memoryID}, args[:len(args)-1]...)...).Scan(&n); err != nil {
+		t.Fatalf("count the versions exempt only by their %s: %v", clause, err)
+	}
+	return n
+}
+
 // updateVersionsNoOtherClauseExempts counts a memory's `update` versions that the
 // compaction's predicate would remove if the phase allowed it: byte-identical to
 // their predecessor, not the memory's newest version, older than the cut, and
@@ -1486,5 +1806,54 @@ func TestCompactHistoryReadsEveryColumnTheVersionStores(t *testing.T) {
 	}
 	if fmt.Sprint(historyRowColumns) != "[id recorded_at]" {
 		t.Errorf("historyRowColumns = %v, want [id recorded_at]", historyRowColumns)
+	}
+}
+
+// TestWidenedCompactCutoff is the predicate the command's warning rests on, and it
+// is pinned at the second either side of the default because that is where a
+// comparison goes wrong: `>=` instead of `>` warns on every default run, and `<`
+// instead of `<=` warns one second late, on the first bound that is not a
+// millisecond of risk.
+func TestWidenedCompactCutoff(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cutoff string
+		want   bool
+	}{
+		{name: "the default itself is not widened", cutoff: reflectNoOpCutoff, want: false},
+		{name: "a second before the fix shipped", cutoff: "2026-09-28 17:14:06", want: false},
+		{name: "a day before the fix shipped", cutoff: "2026-09-27 00:00:00", want: false},
+		{name: "a second after the fix shipped", cutoff: "2026-09-28 17:14:08", want: true},
+		{name: "the next day", cutoff: "2026-09-29 00:00:00", want: true},
+		{name: "far later", cutoff: "2030-01-01 00:00:00", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := WidenedCompactCutoff(tc.cutoff); got != tc.want {
+				t.Errorf("WidenedCompactCutoff(%q) = %v, want %v", tc.cutoff, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWidenedCompactCutoffFollowsTheBoundTheStoreWillUse: the command warns off
+// this predicate, so it has to be reading the same instant the delete reads rather
+// than a copy of it. A cutoff resolved from every accepted spelling has to give the
+// same answer as the same instant written out, and a spelling that resolved to a
+// different one would warn about a bound the store is not using.
+func TestWidenedCompactCutoffFollowsTheBoundTheStoreWillUse(t *testing.T) {
+	for _, spelling := range []string{
+		"", reflectNoOpCutoff, "2026-09-28", "2026-09-29", "2026-10-01",
+		"2026-09-28T17:14:07Z", "2026-09-28T17:14:08Z", "2026-10-01T00:00:00Z",
+	} {
+		cut, err := ResolveCompactCutoff(spelling)
+		if err != nil {
+			t.Fatalf("ResolveCompactCutoff(%q): %v", spelling, err)
+		}
+		// A whole-day value means the START of that day, so 2026-09-28 is the
+		// default and every other day is decided by which side of it falls.
+		want := spelling != "" && spelling != "2026-09-28" && cut > reflectNoOpCutoff
+		if got := WidenedCompactCutoff(cut); got != want {
+			t.Errorf("spelling %q resolves to %q, widened = %v, want %v", spelling, cut, got, want)
+		}
 	}
 }

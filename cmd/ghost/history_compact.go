@@ -31,7 +31,10 @@ type historyCompactOptions struct {
 	// Apply writes. Without it nothing is removed and no stamp moves.
 	Apply bool
 	// FixUpdatedAt also restores each live memory's updated_at to the recorded_at
-	// of the last version that changed its state.
+	// of its anchor — the newest version this repair will not remove, which is not
+	// the same as the newest version that changed state, because a deliberate
+	// writer's row records the state of its predecessor and bumps the stamp on
+	// purpose.
 	FixUpdatedAt bool
 	// Project scopes the run to one project, by the same identifiers every other
 	// --project on this CLI takes: an id, a name, or a path.
@@ -126,6 +129,12 @@ type historyCompactReport struct {
 	// reporting half an answer. An operator with a store whose clock is behind has
 	// no other way to tell whether the default bound already reached their rows.
 	Before string
+	// Warnings is what the operator has to be told BEFORE the counts, and it is
+	// here rather than printed as it is discovered because the plan decides and the
+	// command prints: a warning on the wrong stream is one a script never sees, and
+	// a warning interleaved with the report is one a reader skims past on the way
+	// to the number they asked for.
+	Warnings []string
 	// Projects is one line per project, in the store's own order. A project that
 	// FAILED is in here too, carrying the batches it committed before the failure:
 	// they are committed one at a time, so a large store is already rewritten by
@@ -255,6 +264,13 @@ func runHistoryCompact(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	// The warnings go to stderr and BEFORE the report, so they are not scrolled
+	// past by it and a script reading stdout still sees them on the stream a
+	// diagnostic belongs on. The partial path above prints nothing, because it never
+	// got far enough to have decided the bound was the operator's to widen.
+	for _, w := range report.Warnings {
+		fmt.Fprintln(os.Stderr, w)
+	}
 	if err := printHistoryCompact(os.Stdout, report); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -278,6 +294,12 @@ func runHistoryCompactPlan(ctx context.Context, s *memory.Store, dataDir string,
 		return historyCompactReport{}, err
 	}
 	opts.Before = before
+	// The default, read from the store rather than written here, so the warning
+	// cannot quote a bound the store does not use.
+	defaultCut, err := memory.ResolveCompactCutoff("")
+	if err != nil {
+		return historyCompactReport{}, err
+	}
 
 	ids, err := compactTargetProjects(ctx, s, opts.Project)
 	if err != nil {
@@ -293,6 +315,26 @@ func runHistoryCompactPlan(ctx context.Context, s *memory.Store, dataDir string,
 	}
 
 	report := historyCompactReport{Apply: opts.Apply, Before: before}
+	// The widened-bound warning, once, before any project is touched, and it is
+	// emitted for a dry run as well as an apply. A dry run is where an operator
+	// decides whether to apply, so a risk that only the apply realises — and
+	// `--before 2026-10-01 --apply` realises it in the same command — has to be on
+	// the screen while they are reading the numbers, not after.
+	//
+	// Not a refusal, because there is a store this is the only correct bound for:
+	// one whose clock was behind when the rows were written. A refusal would leave
+	// an operator with a store full of damage the command can repair and no way to
+	// ask it to.
+	if memory.WidenedCompactCutoff(before) {
+		report.Warnings = append(report.Warnings, fmt.Sprintf(
+			"warning: --before %s reaches past %s, the instant #727 shipped, so this run can remove "+
+				"'reflect' versions a current build wrote — including the byte-identical ones a "+
+				"consolidation merge files when the survivor carries the union of its sources' tags, "+
+				"which this table has no column for and so cannot tell from the pre-#727 damage it "+
+				"looks like. With --fix-updated-at it can also move a live memory's updated_at back "+
+				"over one of them. Read the dry run's counts against what you expect to find before "+
+				"passing --apply.", before, defaultCut))
+	}
 	for _, id := range ids {
 		res, err := compactOneProject(ctx, s, id, opts)
 		if err != nil {

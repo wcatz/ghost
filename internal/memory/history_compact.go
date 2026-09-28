@@ -131,10 +131,15 @@ func compactablePhases() []string {
 // writer produces (`datetime('now')`, i.e. StoredStampLayout) and for the whole-day
 // form SQLite's date() leaves behind — a whole-day value sorts before any stamp
 // with a time on that day, which is the right answer for a row that old. A
-// recorded_at no layout can read sorts ABOVE the cutoff and is therefore left
-// alone, which is the safe direction again: an unreadable stamp is not evidence
-// that a row is damage, and the repair discloses what it cannot interpret rather
-// than guessing (restorableStamp).
+// recorded_at no layout can read is therefore NOT skipped on account of being
+// unreadable, because the comparison is a string comparison and an unreadable one
+// can land on either side: the epoch form a Unix writer left behind sorts BELOW
+// the cutoff and would be treated as damage, and any other malformed value sorts
+// wherever its characters put it. So the gate does not lean on the comparison for
+// this. A row the run removes is one the delete's own predicate named, and
+// restorableStamp separately reports a stamp it cannot read rather than guessing
+// at one — an unreadable stamp is not evidence that a row is damage, and the run
+// discloses what it cannot interpret.
 const reflectNoOpCutoff = "2026-09-28 17:14:07"
 
 // ResolveCompactCutoff is the cutoff a run will use, normalized to the layout the
@@ -161,6 +166,24 @@ func ResolveCompactCutoff(before string) (string, error) {
 	}
 	return "", fmt.Errorf("--before %q is neither a date (%s) nor an RFC 3339 instant",
 		before, DateStampLayout)
+}
+
+// WidenedCompactCutoff reports whether a RESOLVED cutoff reaches rows that a
+// current build wrote, which is what makes it wider than the default and what the
+// command warns about before it is told to act on one.
+//
+// Strictly after the default, not at-or-after. The default IS reflectNoOpCutoff,
+// so an at-or-after test would fire on every invocation of a command whose zero
+// configuration is the safe one, and a warning that is always on is a warning
+// nobody reads. What an operator has to be told about is a bound that goes past
+// the fix on purpose.
+//
+// Exported rather than left to the caller to compare, because both halves of the
+// comparison are the store's own: the instant and the layout. A caller doing it
+// with string arithmetic gets a warning that disagrees with the bound the store
+// actually used the moment either of them changes.
+func WidenedCompactCutoff(cutoff string) bool {
+	return cutoff > reflectNoOpCutoff
 }
 
 // placeholders is n question marks, comma separated, for an IN list.
@@ -242,8 +265,31 @@ func historyNewestVersionSQL(memoryID string) string {
 // lifecycle does not re-grow what was pruned: the rows it adds are all newer than
 // any cutoff, so they are outside the repair entirely.
 func historyRemovableRowSQL(outer string) string {
+	return historyRemovableLikeSQL(outer) +
+		" AND " + outer + ".rowid <> " + historyNewestVersionSQL(outer+".memory_id")
+}
+
+// historyRemovableLikeSQL is historyRemovableRowSQL WITHOUT the newest-version
+// guard, and the two are one function apart on purpose: the guard is a RETENTION
+// rule and the rest is a DAMAGE rule, and --fix-updated-at needs them apart.
+//
+// A memory's newest version is spared from removal because it is the statement of
+// what the memory says now. That says nothing about whether the row is a record of
+// a deliberate change, which is the other question. A newest version that is a
+// pre-#727 byte-identical reflect is the damage the repair exists for, and it is
+// evidence the stamp was moved; a newest version that is a deliberate retag is a
+// deliberate change, and it is an anchor. The guard cannot tell those two apart —
+// it declines both — so the anchor has to be found without it, and spelling the
+// two predicates as one function plus one conjunct is what keeps the anchor from
+// silently acquiring the guard on the next change.
+//
+// Reading it the other way — the newest row is always an anchor — is not a
+// stricter version of the same rule, it is a dead one: a removable row is by
+// definition not the newest, so the anchor would always sit above every removable
+// row and `removableLast > target` would never hold. --fix-updated-at would report
+// 0 on a store holding nothing but the damage.
+func historyRemovableLikeSQL(outer string) string {
 	return historyEqualPredecessorSQL(outer) +
-		" AND " + outer + ".rowid <> " + historyNewestVersionSQL(outer+".memory_id") +
 		" AND " + outer + ".phase IN (" + placeholders(len(compactablePhases())) + ")" +
 		" AND " + outer + ".recorded_at < ?" +
 		" AND " + outer + ".related_id IS NULL AND " + outer + ".merged_content IS NULL"
@@ -275,10 +321,23 @@ func compactCountStmt(projectID, cutoff string) (string, []any) {
 }
 
 // compactCandidatesStmt is the updated_at pass's read. Per LIVE memory of one
-// project it returns the recorded_at of the newest version that CHANGED its state
-// (c.target), the updated_at the row holds now, and the evidence the decision in
-// restorableStamp needs: the newest removable rowid for that memory and how many
-// rows this project held for it.
+// project it returns the recorded_at of the ANCHOR (c.target) — the newest version
+// this repair will not remove — the updated_at the row holds now, and the evidence
+// the decision in restorableStamp needs: the newest removable rowid for that memory
+// and how many rows this project held for it.
+//
+// The anchor used to be the newest version that CHANGED its state, found by
+// negating the state comparison, and that is what made the gate
+// `removableLast > target` answer a question nobody asked. Negating the state
+// comparison cannot see a row that records the same state, whatever else is true of
+// it, and a deliberate writer is exactly that: a tags-only UpdateMemory and a merge
+// whose strengthen is already at the importance ceiling both bump updated_at on
+// purpose while moving no column this table has. So the anchor skipped over them,
+// and any removable no-op reflect row beneath them read as proof that a reflection
+// had moved a stamp it had not.
+// TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow runs the two
+// shapes and pins the rule this predicate now states: a row this repair will not
+// remove is an anchor.
 //
 // The evidence is the same predicate the delete used, spelled with the same three
 // functions, and it is read for EVERY memory rather than only the ones this run
@@ -314,9 +373,34 @@ func compactCandidatesStmt(projectID, cursor, cutoff string) (string, []any) {
 	// see a sibling FROM item.
 	evidence := `COALESCE((SELECT max(r.rowid) FROM memory_history r
 	        WHERE r.memory_id = h.memory_id AND r.project_id = ? AND ` + historyRemovableRowSQL("r") + `), 0)`
+	// The anchor, and it is the newest version this repair will NOT remove. A row
+	// that is state-identical to its predecessor is invisible to
+	// `NOT historyEqualPredecessorSQL` whatever else is true of it, and a
+	// deliberate writer is exactly that: a tags-only UpdateMemory and a merge
+	// already at the importance ceiling both bump updated_at on purpose while
+	// moving no column this table has. Under the state-change reading the anchor
+	// skipped over both, and the pre-#727 no-op reflect row beneath them read as
+	// evidence of a rewind over a change the store made on purpose.
+	//
+	// Project-scoped, like the delete: a version filed under another project is not
+	// one this run will remove, so it is an anchor. That is the safe direction and
+	// it is why the anchor can only ever move UP relative to the state-change
+	// reading — `removable-like` is a subset of "equal to its predecessor", so
+	// "not removable-like" contains "not equal to its predecessor", and the newer
+	// anchor can only be the same row or a later one.
+	// The parens around the negated predicate are load-bearing, not decoration:
+	// historyRemovableLikeSQL opens with an EXISTS, so `NOT EXISTS (...) AND
+	// phase IN (...)` is `NOT A AND B`, and De Morgan says that is not `NOT (A AND
+	// B)` — it is the one conjunction that is true exactly when the row is
+	// byte-identical AND of a removable phase, which is the set of rows that must
+	// NOT be an anchor. Written without them the anchor comes back NULL for every
+	// memory whose newest non-no-op version is not a reflect, and the repair
+	// silently stops.
+	anchor := `(SELECT max(a.rowid) FROM memory_history a
+	        WHERE a.memory_id = h.memory_id AND a.project_id = ? AND NOT (` + historyRemovableLikeSQL("a") + `))`
 	sql := `SELECT c.memory_id, c.target, t.recorded_at, m.updated_at, c.removable_last
 	    FROM (
-	        SELECT h.memory_id AS memory_id, max(h.rowid) AS target, ` + evidence + ` AS removable_last
+	        SELECT h.memory_id AS memory_id, ` + anchor + ` AS target, ` + evidence + ` AS removable_last
 	        FROM memory_history h
 	        WHERE h.project_id = ? AND NOT ` + historyEqualPredecessorSQL("h") + `
 	        GROUP BY h.memory_id
@@ -326,10 +410,12 @@ func compactCandidatesStmt(projectID, cursor, cutoff string) (string, []any) {
 	    WHERE (? = '' OR c.memory_id > ?)
 	    ORDER BY c.memory_id
 	    LIMIT ?`
-	// Textual order: the evidence sub-select's project, phase list and cutoff, then
-	// the changed-state scan's project, then the live row's project, then the cursor
-	// and the page.
+	// Textual order: the anchor sub-select's project, phase list and cutoff, then
+	// the evidence sub-select's project, phase list and cutoff, then the
+	// changed-state scan's project, then the live row's project, then the cursor and
+	// the page.
 	args := compactPredicateArgs(projectID, cutoff)
+	args = append(args, compactPredicateArgs(projectID, cutoff)...)
 	args = append(args, projectID, projectID, cursor, cursor, historyCompactBatchSize)
 	return sql, args
 }
@@ -543,9 +629,14 @@ func (s *Store) deleteRemovableHistory(ctx context.Context, projectID, cutoff st
 	}
 }
 
-// compactStamp is one live memory's candidate restore: the last version that
-// changed its state (target, recorded_at), the freshness stamp the row holds now,
-// and the newest rowid of this memory's history the compaction can remove.
+// compactStamp is one live memory's candidate restore: the anchor and the instant
+// it was recorded (target, recorded), the freshness stamp the row holds now, and
+// the newest rowid of this memory's history the compaction can remove.
+//
+// The anchor is the newest version the repair will NOT remove, NOT the newest
+// version that changed state — those differ exactly where the second is invisible,
+// which is every row recording the state of its predecessor, and a deliberate
+// writer's row is one of those.
 type compactStamp struct {
 	memoryID      string
 	target        int64
@@ -559,20 +650,37 @@ type compactStamp struct {
 // through it, so a preview and the run it previews cannot disagree.
 //
 // The first gate is the one that keeps the repair from undoing a change the store
-// made on purpose, and it is a single condition: a REMOVABLE version must be newer
-// than the last version that changed state. That is the whole claim the repair
-// makes — the reflect run that moved the stamp is the one whose versions said
-// nothing, and it said nothing AFTER the last real change.
+// made on purpose, and it is a single condition: a REMOVABLE version must sit above
+// the ANCHOR. That is the whole claim the repair makes — the reflect run that moved
+// the stamp is the one whose versions said nothing, and it said nothing AFTER the
+// last thing anybody actually changed.
 //
-// "Removable" is doing the load-bearing work in that sentence, and what it means is
-// the cut, the phase AND the state comparison together. A current build still writes
-// a version that restates the state byte for byte on purpose — a consolidation merge
-// whose survivor is one of its own sources carries the union of the sources' tags,
-// and the tags are not a column here
-// (TestAReflectReuseChangesTagsWithoutChangingAnyRecordedColumn runs that path) —
-// and such a row moves the stamp on purpose too. The cutoff keeps it out of the
-// evidence for the same reason it keeps it out of the delete; a row this repair
-// would not remove is not a row it may treat as proof that a reflection ran.
+// The anchor is the newest version this repair will not remove, and "removable" is
+// doing the load-bearing work in that sentence. It means the cut, the phase, the
+// state comparison AND not being the newest row, and a current build writes rows
+// this gate has to respect for every one of those reasons:
+//
+//   - a consolidation merge whose survivor is one of its own sources carries the
+//     union of the sources' tags, and the tags are not a column here
+//     (TestAReflectReuseChangesTagsWithoutChangingAnyRecordedColumn runs that path),
+//     so the row restates the state byte for byte — the cut keeps it out;
+//   - a merge already at the importance ceiling files a reflect version carrying
+//     related_id that moves no state column at all — related_id keeps it out;
+//   - a tags-only UpdateMemory files an update version on every edit, so its phase
+//     keeps it out.
+//
+// None of those is a version that changed nothing, so none of them may be read as
+// proof that a reflection ran. That is the gate, and it is one rule — a row this
+// repair would not remove is not a row it may act on — rather than a list of the
+// ways a writer can be invisible.
+//
+// The newest-version clause is deliberately NOT part of the anchor, and the reason
+// is arithmetic rather than judgement: a removable row is by definition not the
+// newest, so treating the newest row as an anchor would put the anchor above every
+// removable row and `removableLast > target` would never hold. The whole flag would
+// report 0 on a store holding nothing but the damage. A memory's newest version is
+// the last row a reflect run wrote, so it has to be allowed to be that run's
+// evidence.
 //
 // Then the direction. The damage moved updated_at FORWARD, to the time of a reflect
 // that changed nothing, so the repair moves it BACK to the last real change and only

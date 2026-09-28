@@ -526,6 +526,15 @@ pre-#727 flood, and the repair does not pretend otherwise — the default bound 
 business and a row written before the fix shipped is this repair's. `save` and `update` are not compacted at all,
 which is the same fact from the other side: a tags-only `ghost memory update` is a real change this table cannot see.
 
+The same fact decides `--fix-updated-at`'s **anchor**, and this is where the design almost went wrong. The anchor
+is the newest version the repair will **not** remove, not the newest version that *changed state* — and the
+state-change reading is blind to exactly the rows a deliberate writer produces, because a tags-only edit and a
+merge already at the importance ceiling both record the state of their predecessor while bumping `updated_at` on
+purpose. Under it, a pre-#727 no-op reflect row beneath such a writer read as proof that a reflection had moved a
+stamp it had not. The newest-version guard is the one clause deliberately left out of the anchor, for an
+arithmetic reason rather than a judgement one: a removable row is never the newest, so an anchor that always
+included the newest row would sit above every removable row and the repair would never fire at all.
+
 The rules, the reasons, the writers whose deliberate restatements forced the bound, and the gate `--fix-updated-at`
 needs are stated in [invariants.md](invariants.md#ghost-invariants) under "Memory history"; this section is the
 design narrative, that file the checklist a change is held to.

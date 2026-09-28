@@ -191,17 +191,23 @@ source the memory held once that write landed.
                                 and no state column can tell that from the damage.
                                 Widen it only for a store whose clock is behind (a
                                 restored backup, a copied database) and re-read the
-                                dry run first. Whichever bound was used is named
-                                in the report, because every count is a count AT a
-                                bound.
+                                dry run first. A bound PAST this one is warned about
+                                on stderr, in a dry run as well as an apply, and the
+                                default never warns. Whichever bound was used is
+                                named in the report, because every count is a count
+                                AT a bound.
                 --fix-updated-at  Also move each live memory's updated_at back to
-                                 the recorded_at of the last version that changed
-                                 its state — but only where a version that changed
-                                 nothing sits ABOVE that change, since that version
-                                 is the evidence a reflection run moved the stamp.
-                                 Only ever BACKWARD, and a stamp no version
-                                 explains is left alone. Without the flag the
-                                 redundant versions go and no stamp moves.
+                                 the recorded_at of its ANCHOR — the newest version
+                                 this repair will NOT remove — but only where a
+                                 removable version sits ABOVE that anchor, since
+                                 that version is the evidence a reflection run moved
+                                 the stamp. A row it will not remove is an anchor
+                                 whether or not it changed state, which is what keeps
+                                 a deliberate tags-only edit's bump from being undone
+                                 by a no-op reflect row beneath it. Only ever
+                                 BACKWARD, and a stamp no version explains is left
+                                 alone. Without the flag the redundant versions go
+                                 and no stamp moves.
 
               Pass --apply and --fix-updated-at in the SAME run: the stamp repair
               needs the versions the deletion removes as its evidence, so a second

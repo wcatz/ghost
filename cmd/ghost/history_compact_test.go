@@ -554,3 +554,98 @@ func TestHistoryCompactResolvesAndRefusesAnUnknownProject(t *testing.T) {
 		t.Error("an unknown project compacted the whole store instead of refusing")
 	}
 }
+
+// TestHistoryCompactWarnsOnABoundThatReachesRowsACurrentBuildWrote: a widened
+// --before is the one thing an operator can ask for that the store cannot
+// distinguish from a mistake, and it is not refused — a store whose clock was
+// behind when the rows were written has no other way to be repaired. So it is
+// warned about, and the warning has to be on the screen while the operator reads
+// the numbers rather than after they have decided.
+//
+// The default does not warn, and that is the load-bearing half: the default IS
+// reflectNoOpCutoff, so a test at-or-after the cutoff would have every invocation
+// of a command whose zero configuration is the safe one printing a warning, and a
+// warning that is always on is a warning nobody reads.
+func TestHistoryCompactWarnsOnABoundThatReachesRowsACurrentBuildWrote(t *testing.T) {
+	ctx := context.Background()
+	s := historyCompactTestStore(t)
+	def, err := memory.ResolveCompactCutoff("")
+	if err != nil {
+		t.Fatalf("resolve the default cut: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name      string
+		before    string
+		wantWarns bool
+	}{
+		{name: "the default bound", before: "", wantWarns: false},
+		{name: "the default bound, spelled out", before: def, wantWarns: false},
+		{name: "a whole day earlier", before: "2026-01-01", wantWarns: false},
+		{name: "a second earlier", before: "2026-09-28T17:14:06Z", wantWarns: false},
+		{name: "a second later", before: "2026-09-28T17:14:08Z", wantWarns: true},
+		{name: "a whole day later", before: "2026-10-01", wantWarns: true},
+		{name: "far later", before: "2030-01-01T00:00:00Z", wantWarns: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Both modes, because a risk that only --apply realises is still a risk
+			// the dry run has to disclose: `--before <t> --apply` is one command.
+			for _, apply := range []bool{false, true} {
+				report, err := runHistoryCompactPlan(ctx, s, t.TempDir(),
+					historyCompactOptions{Apply: apply, Before: tc.before})
+				if err != nil {
+					t.Fatalf("runHistoryCompactPlan(apply=%v): %v", apply, err)
+				}
+				if got := len(report.Warnings) > 0; got != tc.wantWarns {
+					t.Fatalf("apply=%v: warned = %v, want %v (warnings %v)",
+						apply, got, tc.wantWarns, report.Warnings)
+				}
+				for _, w := range report.Warnings {
+					// A warning that does not name the risk is a warning about a
+					// bound, and the operator already knows which bound they typed.
+					for _, want := range []string{def, "tags", "dry run"} {
+						if !strings.Contains(w, want) {
+							t.Errorf("the warning does not mention %q, so it does not say what "+
+								"the widened bound risks:\n%s", want, w)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestPrintHistoryCompactWarnings: the warnings ride the report, so a caller that
+// has the report can print them — and printing them in the wrong place is the
+// failure worth pinning, because a warning interleaved with the per-project lines
+// is one a reader scrolls past on the way to the number they asked for.
+func TestPrintHistoryCompactWarnings(t *testing.T) {
+	var out strings.Builder
+	report := historyCompactReport{
+		Apply:  true,
+		Before: "2026-10-01 00:00:00",
+		Warnings: []string{
+			"warning: --before 2026-10-01 00:00:00 reaches past 2026-09-28 17:14:07",
+		},
+		Projects: []memory.HistoryCompactResult{{ProjectID: "alpha", Removed: 3}},
+	}
+	if err := printHistoryCompact(&out, report); err != nil {
+		t.Fatalf("printHistoryCompact: %v", err)
+	}
+	text := out.String()
+	// The report's own lines are still the report's: a warning does not displace
+	// the counts or the bound they were taken at.
+	if !strings.Contains(text, "alpha") || !strings.Contains(text, "2026-10-01 00:00:00") {
+		t.Errorf("the report lost its counts or its bound to the warning:\n%s", text)
+	}
+	// printHistoryCompact does NOT print the warnings itself — they go to stderr
+	// from runHistoryCompact, and a function that wrote them to this writer would
+	// put a diagnostic on the wrong stream.
+	if strings.Contains(text, "warning:") {
+		t.Errorf("printHistoryCompact wrote a warning to the report's stream:\n%s", text)
+	}
+	// And the caller has them, in order, ready for stderr.
+	if len(report.Warnings) != 1 {
+		t.Fatalf("the report carries %d warnings, want 1", len(report.Warnings))
+	}
+}

@@ -2681,6 +2681,18 @@ func TestCLIHistoryCompact(t *testing.T) {
 		// Move the cut past them and they are the damage after all — 19 of 20, the
 		// last being the memory's newest version. Both runs are dry, so the store is
 		// the same store.
+		//
+		// A bound that reaches past the fix is WARNED about, and this is the only
+		// place the warning's stream and its presence in a dry run are observable:
+		// the command prints it from runHistoryCompact, and a unit test on the plan
+		// cannot see which stream it chose.
+		//
+		// stderr, not stdout, because stdout is what a script reads for the counts.
+		// A warning on stdout ends up inside whatever parses that output, and one on
+		// stderr is still seen by the operator at a terminal — which is who has to
+		// act on it. And in a DRY RUN, because that is where the operator decides
+		// whether to pass --apply: a risk disclosed only by the write is disclosed
+		// after the decision.
 		widened := s.mustRun("history", "compact", "--project", e2eProject, "--before", "2026-10-02", "--fix-updated-at")
 		mustMatch(t, "history compact --before", widened.stdout, `19 redundant version`)
 		mustMatch(t, "history compact --before", widened.stdout, `1 updated_at restored`)
@@ -2688,6 +2700,18 @@ func TestCLIHistoryCompact(t *testing.T) {
 		// fall back on.
 		mustContain(t, "history compact --before", widened.stdout, "before 2026-10-02 00:00:00")
 		mustNotContain(t, "history compact --before", widened.stdout, "before 2026-09-28 17:14:07")
+		// The warning is on stderr and nowhere else, and it names the risk rather
+		// than restating the bound the operator just typed: the tags union is the
+		// thing they cannot check from the counts.
+		mustContain(t, "history compact --before warning", widened.stderr, "warning:")
+		mustContain(t, "history compact --before warning", widened.stderr, "2026-09-28 17:14:07")
+		mustContain(t, "history compact --before warning", widened.stderr, "tags")
+		mustNotContain(t, "history compact --before warning", widened.stdout, "warning:")
+		// The default bound does NOT warn, and this run is the same store one flag
+		// narrower. A command whose zero configuration printed a warning would train
+		// its reader to skip the one that matters.
+		underDefaultAgain := s.mustRun("history", "compact", "--project", e2eProject, "--before", "2026-09-28")
+		mustNotContain(t, "history compact (default bound, spelled out)", underDefaultAgain.stderr, "warning:")
 		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, third); n != 22 {
 			t.Errorf("the widened dry run left %d history rows, want all 22 — it was a dry run", n)
 		}

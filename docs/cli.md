@@ -812,9 +812,23 @@ history compact (dry run — nothing was written; pass --apply to write)
   my-project  19 redundant version(s), 1 updated_at restored
 ```
 
+A bound that reaches **past** the default is warned about on **stderr**, in a dry
+run as well as an apply, because a dry run is where you decide whether to pass
+`--apply`, and a risk disclosed only by the write is disclosed after the decision.
+It names the risk rather than restating the bound you typed:
+
+```
+warning: --before 2026-10-02 00:00:00 reaches past 2026-09-28 17:14:07, the instant
+#727 shipped, so this run can remove 'reflect' versions a current build wrote — …
+```
+
+The default does **not** warn. A command whose zero configuration printed a warning
+would train its reader to skip the one that matters.
+
 `--fix-updated-at` is a second, separate repair, behind its own flag. Each live
-memory's `updated_at` becomes the `recorded_at` of the last version that *changed*
-its state, and only where a version that changed nothing sits **above** that change
+memory's `updated_at` becomes the `recorded_at` of its **anchor** — the newest
+version this repair will *not* remove — and only where a version that changed
+nothing sits **above** that anchor
 — that version is the evidence a reflection run moved the stamp, and without it a
 stamp the history cannot account for belongs to some other writer. The bound reaches
 this gate too, for the same reason it reaches the delete: a version this repair
