@@ -790,8 +790,12 @@ func TestPerformUpgradeRefusesAPrereleaseUnlessAsked(t *testing.T) {
 		if installed != "0.34.0-rc.1" {
 			t.Errorf("installed version = %q, want 0.34.0-rc.1", installed)
 		}
-		if !strings.Contains(errOut.String(), "0.34.0-rc.1") {
-			t.Errorf("stderr %q should name the prerelease that was installed deliberately", errOut.String())
+		// Stated as intent, not as a completed act: this line is written before
+		// the download and both digest checks, so a run that fails after it
+		// would otherwise leave a warning describing an install that never
+		// happened, sitting directly above the error saying so.
+		if !strings.Contains(errOut.String(), "about to install the prerelease 0.34.0-rc.1") {
+			t.Errorf("stderr %q should announce the prerelease as what is about to be installed", errOut.String())
 		}
 		if got, _ := os.ReadFile(target); string(got) != "the release candidate" {
 			t.Errorf("installed binary holds %q, want the release candidate", got)
@@ -1017,4 +1021,57 @@ func TestPerformUpgradeReportsUpToDateWithoutInstalling(t *testing.T) {
 		t.Errorf("the server was asked for %v, want only the release metadata", got)
 	}
 	assertUnchanged(t, target, "the installed binary")
+}
+
+// TestPerformUpgradeDoesNotBlameTheBudgetForTheCallersDeadline keeps
+// withBudget honest about which bound fired. performUpgrade documents that a
+// caller may set an earlier one — and every test here hands it a 30-second
+// parent while shortening the budget to a few hundred milliseconds, so a
+// withBudget that reported the budget for any deadline error would be one edit
+// away from telling a user their twelve-minute budget ran out when their own
+// shorter bound did. The budget branch has its own test; this is the other half.
+func TestPerformUpgradeDoesNotBlameTheBudgetForTheCallersDeadline(t *testing.T) {
+	rs := newReleaseServer(t, "v0.34.0", []byte("the new binary"))
+	target := installedGhost(t, "the installed binary")
+
+	// Stalled long past both bounds. The production budget is left alone: the
+	// point is that the caller's deadline is the earlier of the two and so is
+	// the one that fires.
+	rs.setDelay(archiveAssetPath, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	_, err := performUpgrade(ctx, discardStreams(), "0.33.0", upgradeOptions{}, upgradeDeps{
+		fetch:   rs.fetch,
+		install: installOver(target),
+	})
+	if err == nil {
+		t.Fatal("expected the caller's own deadline to stop the run")
+	}
+	if strings.Contains(err.Error(), "budget") {
+		t.Errorf("error %q blames the %s budget, but the deadline the caller set is what expired", err, upgradeBudget)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error %v should still wrap the deadline, so the cause survives the message", err)
+	}
+	assertUnchanged(t, target, "the installed binary")
+}
+
+// TestUpgradeFlagsAgreeAcrossBothHelpSurfaces pins the two lists against each
+// other, because they are two statements of the same thing: the per-command
+// usage handleHelp prints, and the top-level command list `ghost` with no
+// arguments prints. A flag added to one and not the other does not merely look
+// untidy — the summary goes on telling a user that `ghost upgrade` refuses
+// pre-releases unconditionally, which is the opposite of what the command does.
+// This is the drift review-sweeper found on this change; nothing pinned it.
+func TestUpgradeFlagsAgreeAcrossBothHelpSurfaces(t *testing.T) {
+	const usageLine = "upgrade [--allow-downgrade] [--allow-prerelease]"
+
+	if !strings.Contains(upgradeUsage, usageLine) {
+		t.Errorf("upgradeUsage opens with %q, want the usage line to carry %q", firstLine(upgradeUsage, 80), usageLine)
+	}
+	_, summary := captureStreams(t, printUsage)
+	if !strings.Contains(summary, usageLine) {
+		t.Errorf("the top-level command list does not carry %q, so the two help surfaces disagree about what `ghost upgrade` accepts:\n%s", usageLine, summary)
+	}
 }

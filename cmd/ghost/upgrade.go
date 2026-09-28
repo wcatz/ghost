@@ -247,7 +247,7 @@ func performUpgrade(parent context.Context, streams upgradeStreams, running stri
 
 	rel, err := deps.fetch(ctx)
 	if err != nil {
-		return "", withBudget(ctx, err)
+		return "", withBudget(parent, ctx, err)
 	}
 
 	latest := strings.TrimPrefix(rel.TagName, "v")
@@ -266,22 +266,30 @@ func performUpgrade(parent context.Context, streams upgradeStreams, running stri
 
 	// Both warnings say what the flag allowed, on stderr where a warning does
 	// not interleave with the progress a run is reporting. The prerelease one
-	// matters most: the line below it reads like an ordinary upgrade. Neither
-	// write is checked — a warning that could not be printed is not a reason to
-	// refuse an install whose verification has already passed.
+	// matters most: the line below it reads like an ordinary upgrade.
+	//
+	// Stated as what is about to happen, and written here rather than after the
+	// install, because a download is the long part of the run and a user
+	// watching it is exactly who a warning is for. Phrasing it as a completed
+	// act would leave it claiming an install that a later refusal — a missing
+	// asset, a substituted archive, the budget — never performed, sitting
+	// directly above the error saying it did not happen.
+	//
+	// Neither write is checked: a warning that could not be printed is not a
+	// reason to stop a run.
 	if opts.allowPrerelease && selfupdate.IsPrerelease(latest) {
-		_, _ = fmt.Fprintf(streams.err, "warning: installing the prerelease %s over %s — --allow-prerelease was given\n", latest, running)
+		_, _ = fmt.Fprintf(streams.err, "warning: about to install the prerelease %s over %s — --allow-prerelease was given\n", latest, running)
 	}
 	if opts.allowDowngrade && isOlderRelease(running, latest) {
-		_, _ = fmt.Fprintf(streams.err, "warning: installing %s over %s — --allow-downgrade was given\n", latest, running)
+		_, _ = fmt.Fprintf(streams.err, "warning: about to install %s over the newer %s — --allow-downgrade was given\n", latest, running)
 	}
 
 	asset, err := selfupdate.FindAsset(rel)
 	if err != nil {
-		return "", withBudget(ctx, err)
+		return "", withBudget(parent, ctx, err)
 	}
 	if err := installRelease(ctx, streams.out, rel, asset, deps.install); err != nil {
-		return "", withBudget(ctx, err)
+		return "", withBudget(parent, ctx, err)
 	}
 	return latest, nil
 }
@@ -290,16 +298,28 @@ func performUpgrade(parent context.Context, streams upgradeStreams, running stri
 // deadline exceeded" on its own says which request gave up, not that the command
 // as a whole ran out of time, and a user watching an upgrade stop has to be able
 // to tell those apart — the first is a slow link, the second is a run that has to
-// be re-run. A cancelled context is left alone: that is the caller stopping the
-// command, which is not a budget.
-func withBudget(ctx context.Context, err error) error {
+// be re-run.
+//
+// parent and ctx are both needed, because the budget is derived from parent and
+// a deadline on parent is earlier whenever it is shorter — so a parent that
+// expired leaves ctx expired too, and reporting the budget there would be a
+// false statement about why the run stopped. A cancelled context is not a
+// deadline in either direction: that is the caller stopping the command, and
+// saying so would be the one place the command explains itself wrongly.
+func withBudget(parent, ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("ghost upgrade exceeded its %s total budget: %w", upgradeBudget, err)
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
 	}
-	return err
+	if errors.Is(parent.Err(), context.DeadlineExceeded) {
+		// Without the budget named, on purpose: this message exists to say the
+		// budget is not what stopped the run, and quoting it here would put the
+		// word in the one error that must not blame it.
+		return fmt.Errorf("ghost upgrade stopped on the deadline its caller set: %w", err)
+	}
+	return fmt.Errorf("ghost upgrade exceeded its %s total budget: %w", upgradeBudget, err)
 }
 
 // installRelease downloads the release's archive for asset, verifies it against

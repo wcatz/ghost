@@ -195,9 +195,10 @@ Commands:
                                whose id already exists; imported memories are
                                downgraded to source "onboarding" and unpinned
                                unless --trust-provenance)
-  upgrade [--allow-downgrade]
+  upgrade [--allow-downgrade] [--allow-prerelease]
                               Update ghost to the latest release (refuses an older
-                              release unless --allow-downgrade is given)
+                              release unless --allow-downgrade is given, and a
+                              prerelease unless --allow-prerelease is)
   version                     Print version
 
 Flags (reflect):
