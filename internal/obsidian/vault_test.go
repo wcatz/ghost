@@ -158,7 +158,7 @@ func TestPruneGuards(t *testing.T) {
 	renamed := "---\nghost_id: cafe0000\ntype: memory\n---\nbody\n"
 	mustWrite(t, filepath.Join(sub, "old-slug-cafe0000.md"), renamed)
 
-	if err := prune(root, []string{"proj"}, keepSet{"kept-cafe0000.md": {}}, nil); err != nil {
+	if err := prune(root, []string{"proj"}, keepSet{"proj/Memories/kept-cafe0000.md": {}}, nil); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(sub, "kept-cafe0000.md")); err != nil {
@@ -172,6 +172,47 @@ func TestPruneGuards(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(sub, "body-only.md")); err != nil {
 		t.Fatal("file with ghost_id only in the body must survive")
+	}
+}
+
+// TestPruneKeysTheKeepSetOnThePathNotTheBasename is the #608 nit. The keep-set
+// held bare basenames, so a note was kept alive by ANY live record anywhere in
+// the vault that happened to carry the same name — a different project folder,
+// or a different kind (a memory and a task with the same title produce the same
+// slug and can share an id token). The stale copy then survived every prune
+// forever, which is the one outcome a keep-set exists to prevent: the pass
+// cannot tell "this note is current" from "some other note has this name".
+//
+// The path from the vault root is what separates the two. Both notes are named
+// the same, so a basename-keyed set cannot express "keep this one", and a
+// path-keyed set can.
+func TestPruneKeysTheKeepSetOnThePathNotTheBasename(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
+	note := "---\nghost_id: cafe0000\ntype: memory\n---\nbody\n"
+
+	// The same basename in two project folders, and in two kinds of one: the
+	// live note and the copies that must not be kept alive by it.
+	live := filepath.Join(root, "alpha", "Memories")
+	stale := filepath.Join(root, "beta", "Memories")
+	otherKind := filepath.Join(root, "alpha", "Tasks")
+	for _, dir := range []string{live, stale, otherKind} {
+		mustMkdirAll(t, dir)
+		mustWrite(t, filepath.Join(dir, "shared-cafe0000.md"), note)
+	}
+
+	keep := keepSet{"alpha/Memories/shared-cafe0000.md": {}}
+	if err := prune(root, []string{"alpha", "beta"}, keep, nil); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(live, "shared-cafe0000.md")); err != nil {
+		t.Errorf("the note this pass wrote was deleted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stale, "shared-cafe0000.md")); !os.IsNotExist(err) {
+		t.Error("a stale note in another project survived on the strength of a live note with the same name")
+	}
+	if _, err := os.Stat(filepath.Join(otherKind, "shared-cafe0000.md")); !os.IsNotExist(err) {
+		t.Error("a stale note of another kind survived on the strength of a live note with the same name")
 	}
 }
 
