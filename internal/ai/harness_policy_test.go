@@ -192,25 +192,25 @@ func TestHarnessInvocationArgsAreGoldens(t *testing.T) {
 }
 
 // TestCodexFeatureKeysAreDeclaredNames holds the codex policy to the one thing
-// that makes the `-c` list trustworthy: every feature key Ghost passes must be a
-// key codex's own feature registry declares, and codex's `features list` is the
-// command that reports exactly those keys. The list is therefore read from a
-// recorded transcript of that output rather than from a hand-written list, so a
-// key that does not exist upstream cannot be asserted into existence here — the
-// golden above would happily pin a typo, and codex silently ignores a `-c`
-// override whose key it does not know, which is the fail-OPEN direction this
-// whole policy exists to prevent.
+// a CI run can check: every feature key Ghost passes must be a key codex's own
+// feature registry declares. The set comes from a recorded `codex features list`
+// transcript rather than a hand-written list, so a key that does not exist
+// upstream cannot be asserted into existence here — the argv golden would
+// happily pin a typo, and codex silently ignores a `-c` override whose key it
+// does not know, which is the fail-OPEN direction this policy exists to prevent.
 //
-// It also fixes the direction of any future removal: a key dropped from
-// codexInvocationArgs but still present upstream is a policy gap, and a key
-// added to codexInvocationArgs that is absent upstream is a silent no-op. Both
-// are visible here, because the argv is compared against this set.
+// It fixes both directions of drift: a key passed but not declared is a silent
+// no-op, and a required key missing from the transcript says the transcript and
+// the policy must be updated together.
 //
-// The transcript is a RECORD of codex's output, not a live probe: a test that
-// ran the real binary would make this a live test, and a live test cannot fail
-// in CI where no codex is installed. TestLiveCodexDeclaresTheNoToolFeatureKeys
-// is the other half — it runs the real `codex features list` and fails if
-// upstream has renamed or dropped a key this file still passes.
+// WHAT IT DOES NOT DO, stated plainly because the distinction is the whole
+// point: a frozen transcript cannot fail when UPSTREAM renames a key. It only
+// fails when Ghost's own argv drifts from the record, and an upstream rename
+// leaves it passing unchanged. This test pins Ghost's BELIEF about which keys
+// exist; TestLiveCodexDeclaresTheNoToolFeatureKeys is the sole detector of an
+// upstream rename, and it is GHOST_LIVE_TESTS=1-gated, so it is absent from CI.
+// Between them: CI keeps the belief honest, and a machine with codex installed
+// is the only place the belief is actually tested.
 func TestCodexFeatureKeysAreDeclaredNames(t *testing.T) {
 	declared := parseCodexFeaturesList(codexFeaturesListTranscript)
 	for _, arg := range codexInvocationArgs() {

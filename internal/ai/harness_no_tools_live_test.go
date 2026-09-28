@@ -1,7 +1,9 @@
 package ai
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -195,30 +197,85 @@ func TestLiveCodexDeclaresTheNoToolFeatureKeys(t *testing.T) {
 		}
 	}
 	if len(missing) > 0 {
-		t.Errorf("installed codex does not declare %s; codex ignores an unrecognised -c key, so the no-tool policy fails OPEN. Update codexInvocationArgs and codexFeaturesListTranscript together",
+		t.Errorf("installed codex does not declare %s, and it ignores an unrecognised -c key, so those surfaces are ON despite the policy: the no-tool restriction fails OPEN. Update codexInvocationArgs and codexFeaturesListTranscript together",
 			strings.Join(missing, ", "))
 	}
 
-	// Settle the fact the package's comments assert rather than assume, because
-	// the two readings have opposite consequences and the code says only one of
-	// them. An unknown -c key is either a config error (a renamed key fails the
-	// lifecycle pass loudly, which is safe) or silently dropped (the tool comes
-	// back on and nothing says so, which is not). `features list` is read-only
-	// and makes no LLM call, so provoking one costs nothing but a process.
+	probeCodexUnknownFeatureKey(t, bin)
+}
+
+// probeCodexUnknownFeatureKey settles the fact the package's comments assert
+// rather than assume, because the two readings have opposite consequences and
+// only one of them was written down. An unknown -c key is either a config error
+// (a renamed key fails the lifecycle pass loudly, which is safe) or silently
+// dropped (the tool comes back on and nothing says so, which is not).
+// `features list` is read-only and makes no LLM call, so provoking one costs a
+// process and nothing else.
+//
+// Three things make the answer trustworthy rather than merely confident, and
+// each exists because the naive version got it wrong:
+//
+//   - Its OWN deadline. The listing probe above has already spent the budget
+//     this function would otherwise share, and harnessCommand builds the child
+//     with exec.CommandContext — so a reused, expired context fails at Start,
+//     and that non-nil error is indistinguishable from codex rejecting the key.
+//     A cold codex against a fresh CODEX_HOME is exactly the slow first run this
+//     file warns about, so this would be a reproducible false failure.
+//   - A BASELINE. `features list --strict-config` with no unknown key must
+//     succeed first. Only a baseline success followed by a failure is evidence
+//     about the unknown key; a codex that rejects the flag outright, or fails a
+//     migration or an auth check, must not be reported as fail-CLOSED.
+//   - The child's stderr. `exit status 2` alone cannot tell a rejected key from
+//     an unrecognised argument or a migration failure, so a confident wrong
+//     conclusion is worse than none.
+func probeCodexUnknownFeatureKey(t *testing.T, bin string) {
+	t.Helper()
 	const unknownKey = "ghost_definitely_not_a_codex_feature"
-	strict, releaseStrict, _ := harnessCommand(ctx, bin,
-		[]string{"features", "list", "--strict-config", "-c", "features." + unknownKey + "=false"},
-		os.Environ(), harnessCodex)
-	defer releaseStrict()
-	_, err = strict.Output()
-	if err == nil {
+
+	baselineOut, baselineErr := runCodexFeatureProbe(t, bin, "--strict-config")
+	if baselineErr != "" {
+		// Not a verdict on the unknown key. Saying so is the whole point: the
+		// alternative is reporting every cause as "codex REJECTS the key".
+		t.Skipf("baseline `codex features list --strict-config` did not succeed, so this codex cannot settle whether an unrecognised -c key is ignored: %s", baselineErr)
+	}
+	_ = baselineOut
+
+	_, unknownErr := runCodexFeatureProbe(t, bin, "--strict-config", "-c", "features."+unknownKey+"=false")
+	if unknownErr == "" {
 		t.Logf("codex ACCEPTS an unrecognised -c key (%s): it is silently ignored, "+
-			"which is the fail-OPEN behaviour the policy comments describe. The "+
-			"recorded-transcript test and this probe are what guard it.", unknownKey)
+			"which is the fail-OPEN behaviour codexInvocationArgs describes and the "+
+			"reason TestCodexFeatureKeysAreDeclaredNames checks against a recorded "+
+			"transcript. This probe is the sole detector of an upstream rename, and "+
+			"it is opt-in, so CI does not run it.", unknownKey)
 		return
 	}
-	t.Errorf("codex REJECTS an unrecognised -c key (%s): %v. That is fail-CLOSED, "+
-		"so the \"silently ignored / fail OPEN\" wording in codexInvocationArgs, "+
-		"TestCodexFeatureKeysAreDeclaredNames and the CLAUDE.md bullet is now WRONG "+
-		"and every one of those four sites must be corrected to match.", unknownKey, err)
+	t.Errorf("codex REJECTS an unrecognised -c key (%s) after a passing baseline, "+
+		"so it fails CLOSED: %s. That makes the \"silently ignored / fail OPEN\" "+
+		"wording wrong in codexInvocationArgs, TestCodexFeatureKeysAreDeclaredNames "+
+		"and the CLAUDE.md internal/ai bullet, and every one of those sites must be "+
+		"corrected to match.", unknownKey, unknownErr)
+}
+
+// runCodexFeatureProbe runs `codex features list` with its own timeout and
+// returns the child's combined output, or a non-empty diagnostic naming the
+// cause. The diagnostic is built with harnessFailureOutput, the same seam
+// CodexClient.run uses, because "exit status 2" without the child's own words is
+// the difference between a diagnosis and a guess.
+func runCodexFeatureProbe(t *testing.T, bin string, extra ...string) (string, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), noToolsLiveProbeTimeout)
+	defer cancel()
+	args := append([]string{"features", "list"}, extra...)
+	cmd, release, _ := harnessCommand(ctx, bin, args, os.Environ(), harnessCodex)
+	defer release()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Sprintf("codex features list %s: timed out after %s", strings.Join(extra, " "), noToolsLiveProbeTimeout)
+		}
+		return "", fmt.Sprintf("codex features list %s: %v: %s", strings.Join(extra, " "), err, harnessFailureOutput(stdout.String(), stderr.String()))
+	}
+	return stdout.String(), ""
 }

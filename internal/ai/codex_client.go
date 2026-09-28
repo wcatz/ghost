@@ -76,12 +76,22 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 // choice rather than a missing step. A probe would cost a second process per
 // codex call — hundreds per lifecycle, which is the cost model
 // scratch.Open()'s budget exists to bound — to learn a fact that is a property
-// of the codex BUILD, not of the invocation. The two tests cover it instead: the
-// recorded transcript fails when upstream renames a key, and the live test fails
-// when a real binary no longer declares one. An older codex therefore gets the
-// keys it understands and a weaker policy than a current one, and that is
-// recorded here rather than papered over with a version gate that would refuse
-// a working install.
+// of the codex BUILD, not of the invocation. The two tests divide the work, and
+// the division is not even:
+//
+//   - TestCodexFeatureKeysAreDeclaredNames pins Ghost's BELIEF about which keys
+//     exist, against a recorded `codex features list` transcript. It fails when
+//     Ghost's own argv drifts from that record, and it cannot fail when upstream
+//     renames a key — a frozen fixture does not update itself.
+//   - TestLiveCodexDeclaresTheNoToolFeatureKeys is therefore the SOLE detector of
+//     an upstream rename, and it is GHOST_LIVE_TESTS=1-gated, so it is absent
+//     from CI and runs only where a codex is installed.
+//
+// That asymmetry is the honest cost of not probing at runtime, and it is the
+// reason the recorded transcript is checked by a reviewer rather than trusted:
+// CI pins the belief, and the live test is the only thing that can contradict
+// it. An older codex therefore gets the keys it understands and a weaker policy
+// than a current one, and nothing in a lifecycle log says which codex ran.
 //
 // codex has no "no tools" flag — `--sandbox read-only` bounds what a tool may
 // DO, not which tools EXIST — so the policy is the list. The three that matter
