@@ -1661,6 +1661,21 @@ func retryNote(retries int) string {
 // searchable, not a backfill.
 const supersedeEmbedBound = 50
 
+// supersedeEmbedBudget is the whole pre-scan's time budget, and it exists
+// because the bound alone is not a bound on TIME. The client allows 30s per
+// request, so 50 memories against an endpoint that answers its liveness probe and
+// then stalls is half an hour of blocking before the candidate scan starts, with
+// nothing printed for any of it. The budget caps the new blocking work in a
+// command that used to begin scanning immediately.
+//
+// It is a ceiling, not a target: a real nomic embed is tens of milliseconds, so a
+// working endpoint spends seconds here, and one slow request can consume the whole
+// budget on its own. Running out is not a failure and not a silent one —
+// EmbedPending returns what it wrote, the scan reads what is there, and the report
+// says how much of the project had no vector. That is the same honest outcome as a
+// bound that was too small, which is why the ceiling can be this tight.
+const supersedeEmbedBudget = 30 * time.Second
+
 // embedSupersedeCorpus embeds the memories of projectID that have no vector yet,
 // and returns how many it wrote. It runs before the candidate scan, and only when
 // embedding is enabled: with embedding off there is no vector index to fill.
@@ -1691,16 +1706,22 @@ const supersedeEmbedBound = 50
 // the GRAPH is untouched — no link, no invalidation, no cache row — and it still
 // is.
 //
+// budget bounds the whole call, and it is a parameter so a test can hand this a
+// few milliseconds against a stalling endpoint: the ceiling is the property, and a
+// test that has to sit out the production one is a test that does not run.
+//
 // It returns what it wrote and nothing more. What the pass could NOT read is
 // counted by the scan instead (Result.Unscored, via supersedeUnscoredNote),
 // because that is where the fact is true: a bound reached, an endpoint that did
 // not answer, and a vector written under another model all end up as the same
 // honest count of memories the scan proposed nothing for, where a report derived
 // from the embed call could only ever be a guess.
-func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory.Store, projectID string, logger *slog.Logger) int {
+func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory.Store, projectID string, budget time.Duration, logger *slog.Logger) int {
 	if !cfg.Embedding.Enabled {
 		return 0
 	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	client := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
 	return embedding.NewWorker(client, store, logger, 0, "").EmbedPending(ctx, projectID, supersedeEmbedBound)
 }
@@ -1852,7 +1873,7 @@ func runSupersede() {
 	// embedSupersedeCorpus). It is the only phase here that has to do this, and
 	// it happens after the two repair modes have returned, because neither of them
 	// reads the vector index at all.
-	embedded := embedSupersedeCorpus(ctx, cfg, store, projectID, logger)
+	embedded := embedSupersedeCorpus(ctx, cfg, store, projectID, supersedeEmbedBudget, logger)
 
 	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {

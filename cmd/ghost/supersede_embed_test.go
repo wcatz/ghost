@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -25,8 +27,8 @@ import (
 // The candidate scan scores a pair by cosine, so a memory it has no vector for
 // is proposed as no new candidate by that scan
 // (internal/supersede.SelectCandidates) — a correct rule, applied to a state that
-// is simply not there yet. The vectors are
-// written by the embedding worker, and that worker lives in `ghost mcp`: a
+// is simply not there yet. The vectors are written by the embedding worker, and
+// that worker lives in `ghost mcp`: a
 // long-lived daemon this one-shot pass has no part in. A user who saves two
 // notes and runs the pass in the same breath therefore gets a clean, empty
 // report — "0 candidate pairs" — for a pair that was in front of them, and
@@ -208,6 +210,98 @@ func TestRunSupersedeSaysSoWhenItCannotReadTheCorpus(t *testing.T) {
 	if !strings.Contains(out, "0 candidate pairs") {
 		t.Errorf("the pass did not complete its report, so the line above was not the reason this failed:\n%s", out)
 	}
+}
+
+// TestEmbedSupersedeCorpusStopsAtItsBudget: the batch bound is not a bound on
+// TIME, and this is the shape that makes that matter — an endpoint that answers
+// its liveness probe and then stalls every embed. The client allows 30s per
+// request, so 50 memories would be half an hour of blocking before the candidate
+// scan started, with nothing printed for any of it, in a command that used to
+// begin scanning immediately.
+//
+// The budget is a parameter precisely so this can be measured in milliseconds:
+// running out is not a failure and not a silence, it is the same honest outcome as
+// a bound that was too small.
+func TestEmbedSupersedeCorpusStopsAtItsBudget(t *testing.T) {
+	isolatedLifecycleEnv(t)
+	dbPath, ids := seedUnembeddedCorpus(t, 3)
+	store := openStore(t, dbPath)
+
+	// A wedge, not an error: the request is left hanging, which is exactly the
+	// case the client's own 30s timeout is wide open for. The release channel
+	// rather than r.Context(), because a handler that never reads the body gives
+	// the server no way to notice the client walking away — so waiting on the
+	// request context here wedges the FAKE, not just the product, and the
+	// teardown would hang behind it. Defers run last-in-first-out, so the wedge
+	// is released before the server is closed.
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	cfg := &config.Config{}
+	cfg.Embedding.Enabled = true
+	cfg.Embedding.OllamaURL = srv.URL
+	cfg.Embedding.Model = "test-model"
+	cfg.Embedding.Dimensions = 2
+
+	const budget = 150 * time.Millisecond
+	start := time.Now()
+	embedded := embedSupersedeCorpus(context.Background(), cfg, store, "projy", budget, slog.New(slog.DiscardHandler))
+	elapsed := time.Since(start)
+
+	if embedded != 0 {
+		t.Errorf("embedded %d against a stalled endpoint, want 0", embedded)
+	}
+	// Generously over the budget, and nowhere near the client's 30s per request:
+	// a ceiling that only bites at the client timeout is not a ceiling.
+	if elapsed > 5*time.Second {
+		t.Errorf("the pre-scan took %v against its %v budget", elapsed, budget)
+	}
+	// And the pass is left in the state its report can describe: nothing vectored,
+	// which is what supersedeUnscoredNote then reports.
+	for _, id := range ids {
+		if vec, err := store.GetEmbedding(context.Background(), id); err == nil && len(vec) > 0 {
+			t.Errorf("memory %s was vectored by a stalled endpoint", id)
+		}
+	}
+}
+
+// seedUnembeddedCorpus writes n memories into a fresh project in a fresh store
+// and returns the database path and their ids. None has a vector: that is the
+// state a save leaves behind, and the only state in which the pre-scan has
+// anything to do at all.
+func seedUnembeddedCorpus(t *testing.T, n int) (string, []string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "ghost", "ghost.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	store := openStore(t, dbPath)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "projy", "/tmp/projy", "projy"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	words := []string{"alpha", "beta", "gamma", "delta"}
+	var ids []string
+	for _, word := range words[:n] {
+		id, err := store.Create(ctx, "projy", memory.Memory{
+			Category: "architecture", Source: "mcp", Importance: 0.7,
+			Content: fmt.Sprintf("the %s relay holds its queue for thirty seconds before draining", word),
+		})
+		if err != nil {
+			t.Fatalf("create memory: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	store.Close() //nolint:errcheck
+	return dbPath, ids
 }
 
 // captureStdout runs fn with os.Stdout redirected and returns what it printed.
