@@ -225,7 +225,10 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 // verification stamp, in the same transaction, so the rule is written once rather
 // than four times. Say it as the OUTCOME and not as the mechanism: the mechanisms
 // differ on purpose, and a reader who filters MemoryProvenance by kind sees three
-// shapes for one rule.
+// shapes for one rule. One member is an exception to the OUTCOME and it is named
+// as such below — CreateFromCorpus leaves the observation of the ingestion but no
+// record carrying a stamp — so a summary sentence that claims the set holds
+// uniformly would be false, and the per-writer paragraphs below are the claim.
 //
 // The callers of THIS function are the live ones, and they are the ones whose
 // stamp is the store's clock — because Ghost is the party recording the check.
@@ -245,8 +248,14 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 // file" — so the import is not an exception to the store-clock rule, it is the
 // same rule applied to an attested arrival.
 //
-// CreateFromCorpus is the one writer in the set that records nothing, and the
-// reason is the difference between a value and an event. A third-party dataset's
+// CreateFromCorpus is the one writer in the set that leaves NO record carrying a
+// verification stamp — and it still records, because insertMemory appends the
+// `observed` row of the ingestion unconditionally on that route. "No verified
+// record" is the whole of it; "records nothing" would be wrong, and
+// TestCreateFromCorpusRecordsNoVerification is what pins the difference by
+// asserting the observed row is there while no stamp is.
+//
+// The reason is the difference between a value and an event. A third-party dataset's
 // verified_at is a value in a column with NO observation behind it: nobody checked
 // anything through this store, so there is no event to record, and the only stamp
 // a record could carry would be the store's clock — which would manufacture the

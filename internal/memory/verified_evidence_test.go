@@ -2,6 +2,10 @@ package memory
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"strings"
 	"testing"
 )
@@ -344,6 +348,161 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The scan that makes the enumeration in evidence.go a fact about the package
+// rather than a list somebody maintains.
+//
+// The reach enumeration was wrong twice, and both times because a hand-written
+// list cannot notice a writer that is not in it: first CreateFromCorpus, which
+// reaches a verified_at through the shared insertMemory, then ImportMemory, which
+// is in the set and not among the callers. Both times eleven or more tests passed
+// while the paragraph was untrue, because no test read it.
+//
+// So this walks internal/memory with go/parser, finds every function mentioning the
+// `verified_at` column or the VerifiedAt field, and requires each to be in exactly
+// one of three classifications. A new writer, reader, migration or snapshot-side
+// statement has to be placed, and an unplaced one fails here instead of quietly
+// making the paragraph stale.
+//
+// It deliberately does NOT infer whether a mention is a read, a write to memories,
+// or a write to memory_snapshots: that inference is the fragile part, and a wrong
+// guess would let a real writer through. Over-approximating to "mentions the
+// column" costs one line per new reader and cannot miss a writer, which is the
+// direction to be wrong in.
+func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
+	// Each set answers a different question, so a name in two of them is a
+	// documentation failure as much as a name in none.
+	writesMemory := map[string]bool{
+		"store.go:insertMemory":            true, // behind Create; the corpus route opts out
+		"store.go:UpsertWithOptions":       true, // all three branches, one function
+		"store.go:UpdateMemoryWithOptions": true,
+		"portable.go:ImportMemory":         true, // attested by the artifact, on its own record
+		"store.go:RestoreSnapshot":         true, // pure SQL from the snapshot; evidence travels with it
+	}
+	// snapshotSide touches a verified_at that is not a memory row: the snapshot
+	// tables a restore reads back, and the evidence table's own copies. Here so a
+	// new one is a decision rather than an omission.
+	snapshotSide := map[string]bool{
+		"store.go:ReplaceNonManual":             true, // memory_snapshots + memory_snapshot_evidence
+		"evidence.go:appendEvidenceTx":          true,
+		"evidence.go:carryEvidenceTx":           true,
+		"evidence.go:importEvidenceTx":          true,
+		"evidence.go:restoreSnapshotEvidenceTx": true,
+		"portable.go:portableEvidence":          true,
+	}
+	// migrations and readers: they mention the column and change no claim about who
+	// observed a check. A new one belongs in one of the three, not nowhere.
+	//
+	// The four scanners and helpers at the bottom of this set are the ones a
+	// hand-written list reliably misses, because they carry the field through a
+	// struct or a SELECT list rather than naming the column in a write. The scan
+	// found all four on its first run against a list I had written by reading
+	// greps, which is the argument for having it.
+	migrationsAndReaders := map[string]bool{
+		"migrate.go:migrateV13":          true,
+		"migrate.go:migrateV18":          true,
+		"migrate.go:rebuildMemoriesV15":  true,
+		"evidence.go:MemoryProvenance":   true,
+		"evidence.go:evidenceCountsFor":  true,
+		"evidence.go:evidenceCountsOne":  true,
+		"evidence.go:scanEvidence":       true, // the evidence table's row scanner
+		"portable.go:PortableMemories":   true,
+		"portable.go:scanPortableMemory": true, // the artifact's row scanner
+		"store.go:IsZero":                true, // Validity.IsZero — reads the field, no SQL
+		"store.go:scanMemories":          true, // the memories row scanner
+		"store.go:GetAll":                true,
+		"store.go:GetByCategory":         true,
+		"store.go:GetTopMemories":        true,
+		"store.go:ResolveCandidates":     true,
+		"store.go:ResolvedCandidates":    true,
+		"store.go:SearchFTS":             true,
+		"store.go:SearchFTSAll":          true,
+		"vector.go:GetByIDs":             true,
+	}
+
+	found := scanVerifiedAtMentions(t)
+
+	for name := range writesMemory {
+		if snapshotSide[name] || migrationsAndReaders[name] {
+			t.Errorf("%s is classified more than once — the three sets answer different questions", name)
+		}
+	}
+	for name := range snapshotSide {
+		if migrationsAndReaders[name] {
+			t.Errorf("%s is classified more than once", name)
+		}
+	}
+	for name := range found {
+		if !writesMemory[name] && !snapshotSide[name] && !migrationsAndReaders[name] {
+			t.Errorf("%s mentions verified_at but is in no classification: place it, or the enumeration in evidence.go is wrong", name)
+		}
+	}
+	// A name in a set but no longer in the code is the same drift in reverse: the
+	// classification would be describing a function that no longer exists.
+	for name := range writesMemory {
+		if !found[name] {
+			t.Errorf("%s is classified as writing memories.verified_at but no longer mentions the column", name)
+		}
+	}
+}
+
+// scanVerifiedAtMentions finds every function in internal/memory whose body
+// mentions the verified_at column or the VerifiedAt field, keyed "file.go:Func".
+func scanVerifiedAtMentions(t *testing.T) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	found := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if mentionsVerifiedAt(fn.Body) {
+				found[name+":"+fn.Name.Name] = true
+			}
+		}
+	}
+	if len(found) == 0 {
+		t.Fatal("the scan found nothing, so it is broken rather than the package being clean")
+	}
+	return found
+}
+
+// mentionsVerifiedAt reports whether a function body touches the column or the
+// field — the SQL identifier inside a string, or the Go field name.
+func mentionsVerifiedAt(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch v := n.(type) {
+		case *ast.BasicLit:
+			if v.Kind == token.STRING && strings.Contains(v.Value, "verified_at") {
+				found = true
+			}
+		case *ast.Ident:
+			if v.Name == "VerifiedAt" {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // The gate, and the reason the update path needs one at all: a row verified by
