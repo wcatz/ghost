@@ -116,8 +116,9 @@ func AgentLabel(agent string) string {
 
 // MaxRenderedAgentLen is what a listing prints of an agent. It is a DISPLAY
 // bound, not a claim about the column: memory.MaxAgentLen refuses a longer one on
-// the four writers that reach it, and this covers the two byte-exact writers that
-// do not — RestoreSnapshot and CreateFromCorpus.
+// the writers that reach it, and this covers the three that deliberately do not —
+// RestoreSnapshot, CreateFromCorpus, and ReplaceNonManual, which inherits the
+// replaced row's agent onto the row a rewrite becomes.
 const MaxRenderedAgentLen = 128
 
 // MaxRenderedSourceRefLen bounds what a listing prints of a reference. It is a
@@ -126,9 +127,10 @@ const MaxRenderedAgentLen = 128
 // covers what they cannot — a store written before that cap, a snapshot table
 // edited by hand, a row restored from one. It is here rather than only at the
 // writers because the renderer is the one place that cannot assume its input came
-// from a writer that enforces the cap — `RestoreSnapshot`, which writes the
-// column in SQL from the snapshot table, and `CreateFromCorpus`, which reaches
-// insertMemory directly, are the two writers that deliberately do not.
+// from a writer that enforces the cap — `RestoreSnapshot`, which writes the column
+// in SQL from the snapshot table, `CreateFromCorpus`, which reaches insertMemory
+// directly, and `ReplaceNonManual`, which inherits the replaced row's reference
+// onto the row a rewrite becomes, are the three writers that deliberately do not.
 //
 // The value is truncated, not refused, because at this point the row already holds
 // whatever it holds and refusing to show it would be worse than showing part of it.

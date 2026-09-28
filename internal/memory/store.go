@@ -2578,16 +2578,18 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 // leaves a marker in its place, while a truncated path or URL is a different
 // reference, and a wrong one that looks right is worse than an error.
 //
-// Two writers of the column do not reach the bound, and both are the deliberate
-// byte-exact exclusions this codebase already draws for MaxContentLen and the
-// credential guard: `RestoreSnapshot`, which copies the column in SQL from the
-// snapshot table and would need the check per restored row, and
-// `CreateFromCorpus`, which reaches insertMemory's INSERT directly rather than
-// through Create. `assemble.SourceRefLabel` bounds what a listing PRINTS for
-// exactly those two, since the renderer cannot assume its input came from a
-// writer that enforces the cap. A new statement that writes the column has to
-// call boundedSourceRef — the bound is one call each writer remembers, not
-// something the schema enforces.
+// THREE writers of the column do not reach the bound, and all three are the
+// deliberate exclusions this codebase already draws for MaxContentLen and the
+// credential guard. `RestoreSnapshot` copies the column in SQL from the snapshot
+// table and would need the check per restored row; `CreateFromCorpus` reaches
+// insertMemory's INSERT directly rather than through Create; and
+// `ReplaceNonManual`, since #677, inherits the replaced row's provenance onto the
+// row a rewrite becomes — a COPY of a value this database already bounded, not new
+// caller text, and filtering there deletes the stored row rather than refusing one.
+// `assemble.SourceRefLabel` bounds what a listing PRINTS for exactly those three,
+// since the renderer cannot assume its input came from a writer that enforces the
+// cap. A new statement that writes the column has to call boundedSourceRef — the
+// bound is one call each writer remembers, not something the schema enforces.
 const MaxSourceRefLen = 512
 
 // MaxAgentLen is the byte cap on a write-time agent, for the same reason and by
@@ -2599,8 +2601,10 @@ const MaxSourceRefLen = 512
 // bite on an artifact — which is the point. A portable artifact's `agent` is
 // whatever wrote the export, and internal/portable accepts a 1 MiB record, so
 // without a bound an export could plant close to a megabyte of it in a column the
-// renderer had started echoing in this change. The same two writers are exempt
-// (RestoreSnapshot, CreateFromCorpus) and assemble.AgentLabel bounds the display.
+// renderer had started echoing in this change. The same three writers are exempt —
+// RestoreSnapshot, CreateFromCorpus, and ReplaceNonManual, which inherits the
+// replaced row's agent onto the row a rewrite becomes — and assemble.AgentLabel
+// bounds the display.
 const MaxAgentLen = 128
 
 // StoredStampLayout is the layout a writer stores a validity stamp in: SQLite's
@@ -4642,11 +4646,28 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		if err != nil {
 			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", id, err)
 		}
-		if claims.validFrom == nil && validFrom.Valid {
-			claims.validFrom = &validFrom.String
-		}
-		if claims.validUntil == nil && validUntil.Valid {
-			claims.validUntil = &validUntil.String
+		// The window is inherited AS A UNIT, from one source or from none — never
+		// half from one row and half from another.
+		//
+		// Filling the two boundaries independently is what a merge must not do. A
+		// source stating only valid_from and another stating only valid_until
+		// compose a pair neither row ever asserted, and the halves can land
+		// backwards: a row born expired, with both sources' evidence carried onto
+		// it as though the pair were one claim, so stage 2 withholds it from ranked
+		// retrieval with no error anywhere. That is the contradiction
+		// UpdateMemoryWithOptions and UpsertWithOptions' fold both refuse by
+		// running CheckWindowOrder over the pair they compose.
+		//
+		// The check is here as well as the unit, and it is not redundant: a source
+		// row can hold a window that is ITSELF out of order, because Store.Create,
+		// ImportMemory and RestoreSnapshot write the triple with no order check. So
+		// the first source whose OWN pair passes is taken, and a source whose pair
+		// fails is passed over rather than copied.
+		if claims.validFrom == nil && claims.validUntil == nil {
+			candidate := Validity{ValidFrom: nullStringPtr(validFrom), ValidUntil: nullStringPtr(validUntil)}
+			if err := CheckWindowOrder(candidate, Validity{}); err == nil {
+				claims.validFrom, claims.validUntil = candidate.ValidFrom, candidate.ValidUntil
+			}
 		}
 		if claims.verifiedAt == nil && verifiedAt.Valid {
 			claims.verifiedAt = &verifiedAt.String

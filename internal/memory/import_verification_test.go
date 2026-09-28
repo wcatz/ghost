@@ -178,6 +178,139 @@ func TestImportStampsTheArrivalWhenCarriedStampsAreEmptyStrings(t *testing.T) {
 	}
 }
 
+// A merge must not compose a window out of two rows' halves.
+//
+// inheritedClaims filled valid_from, valid_until and verifiedAt independently, each
+// from the first source that had it — so merging A (valid_from 2030) with B
+// (valid_until 2020) produced a row born expired, with both sources' evidence
+// carried onto it as though the pair were one claim. That is the contradiction
+// every other writer refuses: UpsertWithOptions' fold and
+// UpdateMemoryWithOptions both run CheckWindowOrder over the pair they compose,
+// and the tool boundary refuses it at the argument. This path had no check.
+//
+// The assertion is not "some error" but "no successor row holds a window that ends
+// before it starts", because there are two legitimate outcomes — inherit a
+// consistent pair, or inherit none — and the test must not pin which.
+func TestReplaceNonManualNeverComposesAWindowThatEndsBeforeItStarts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A states a start far in the future and no end.
+	a, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the lane switchover is scheduled for 2030", Source: "mcp", Importance: 0.6,
+		ValidFrom: stampPtr("2030-01-01 00:00:00"),
+	})
+	if err != nil {
+		t.Fatalf("Create A: %v", err)
+	}
+	// B states an end in the past and no start.
+	b, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the legacy lane was retired in 2020", Source: "mcp", Importance: 0.6,
+		ValidUntil: stampPtr("2020-06-01 00:00:00"),
+	})
+	if err != nil {
+		t.Fatalf("Create B: %v", err)
+	}
+
+	const merged = "the lane migration is complete and the legacy lane is gone"
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: merged, Importance: 0.7,
+		ReplacesIDs: []string{a, b},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	row := successorRow(t, s, merged)
+	if row.ValidFrom != nil || row.ValidUntil != nil {
+		// Either half on its own is defensible, so the real assertion is the ORDER.
+		if err := CheckWindowOrder(Validity{ValidFrom: row.ValidFrom, ValidUntil: row.ValidUntil}, Validity{}); err != nil {
+			t.Errorf("the merged row holds a window that ends before it starts: %v (from=%v until=%v)",
+				err, row.ValidFrom, row.ValidUntil)
+		}
+	}
+}
+
+// The same class from the other side: one source row that ITSELF holds an
+// out-of-order window, which is reachable because Store.Create, ImportMemory and
+// RestoreSnapshot write the triple with no order check. Inheriting a pair as a
+// unit copies the contradiction, so the check has to run on the inherited pair and
+// not only on a composed one.
+func TestReplaceNonManualDoesNotInheritAnOutOfOrderWindow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create does not check order, so this row is born contradictory — and a
+	// pre-guard store, a hand edit or an import makes exactly this reachable.
+	a, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the cutover window is recorded backwards here", Source: "mcp", Importance: 0.6,
+		ValidFrom:  stampPtr("2030-01-01 00:00:00"),
+		ValidUntil: stampPtr("2020-06-01 00:00:00"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const rewritten = "the cutover window has been recorded correctly since"
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: rewritten, Importance: 0.6,
+		ReplacesIDs: []string{a},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	row := successorRow(t, s, rewritten)
+	if err := CheckWindowOrder(Validity{ValidFrom: row.ValidFrom, ValidUntil: row.ValidUntil}, Validity{}); err != nil {
+		t.Errorf("the rewrite inherited a window that ends before it starts: %v (from=%v until=%v)",
+			err, row.ValidFrom, row.ValidUntil)
+	}
+}
+
+// The mirror: a CONSISTENT pair must still be inherited whole, or the check above
+// is satisfied by dropping every window and the fix is just data loss.
+func TestReplaceNonManualStillInheritsAConsistentWindow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the retention window is ninety days by policy", Source: "mcp", Importance: 0.6,
+		ValidFrom:  stampPtr("2026-01-01 00:00:00"),
+		ValidUntil: stampPtr("2027-12-31 23:59:59"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	const rewritten = "retention is ninety days, and the policy is reviewed annually"
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: rewritten, Importance: 0.6,
+		ReplacesIDs: []string{a},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	row := successorRow(t, s, rewritten)
+	if row.ValidFrom == nil || *row.ValidFrom != "2026-01-01 00:00:00" {
+		t.Errorf("successor valid_from = %v, want the source's 2026-01-01 00:00:00", row.ValidFrom)
+	}
+	if row.ValidUntil == nil || *row.ValidUntil != "2027-12-31 23:59:59" {
+		t.Errorf("successor valid_until = %v, want the source's 2027-12-31 23:59:59", row.ValidUntil)
+	}
+}
+
+// successorRow finds the row a rewrite produced, failing if it is not there.
+func successorRow(t *testing.T, s *Store, content string) Memory {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRow(
+		`SELECT id FROM memories WHERE content = ? AND resolved_at IS NULL`, content,
+	).Scan(&id); err != nil {
+		t.Fatalf("find the successor row %q: %v", content, err)
+	}
+	rows, err := s.GetByIDs(context.Background(), []string{id})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GetByIDs(successor): %v (n=%d)", err, len(rows))
+	}
+	return rows[0]
+}
+
 // The precedence, and the half of the rule the inheritance tests cannot see: when
 // the EMISSION states a value it WINS, and the source is consulted only where the
 // emission is silent. Both halves are the same rule — a value the caller supplied

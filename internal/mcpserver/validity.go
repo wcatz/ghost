@@ -206,10 +206,13 @@ type writeFields struct {
 // reach — UpsertWithOptions and UpdateMemoryWithOptions (the writer tools),
 // Create (the bench seeders) and ImportMemory (`ghost import`) — because a
 // reference is a path, a commit, a URL or a ticket, and a megabyte of it is
-// echoed into every answer that touches the row. The two writers that
-// deliberately do not reach them are RestoreSnapshot (SQL, from the snapshot
-// table) and CreateFromCorpus (insertMemory directly), and
-// assemble.SourceRefLabel bounds what a listing PRINTS for exactly those. The
+// echoed into every answer that touches the row. THREE writers deliberately do not
+// reach them: RestoreSnapshot (SQL, from the snapshot table), CreateFromCorpus
+// (insertMemory directly) and ReplaceNonManual, which since this PR inherits the
+// replaced row's reference onto the row a rewrite becomes — a copy of a value this
+// database already bounded rather than new caller text, and filtering there
+// deletes the stored row. assemble.SourceRefLabel bounds what a listing PRINTS for
+// exactly those three. The
 // same shape is the reason memory.MaxAgentLen and assemble.AgentLabel exist for
 // the agent printed beside it, though on this path the column can only ever
 // hold one of four harness tokens. The tool boundary adds nothing, so there is

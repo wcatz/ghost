@@ -121,7 +121,12 @@ func rejectSecretList(field string, values []string) error {
 //     report-first job described below rather than a side effect of
 //     consolidation.
 //   - A project's NAME, PATH and repo_remote on the MCP save path, and the
-//     agent, session_id and source_ref beside a saved memory.
+//     agent and session_id beside a saved memory. `source_ref` is NOT in this
+//     list any more — it became a caller-supplied argument on the three writer
+//     tools and is guarded on four of the seven writers that reach it. The
+//     paragraph below names the three that do not, because a lead-in that
+//     contradicts its own detail is the failure this whole comment is written
+//     against.
 //
 //     The project name and path are the real gap and they are structural: a save
 //     calls EnsureProjectWithRepo BEFORE the guard, so covering them means
@@ -151,17 +156,30 @@ func rejectSecretList(field string, values []string) error {
 //     What is left unguarded is agent and session_id as the HARNESS states
 //     them, and a project's name and path. `source_ref` is not in that list any
 //     more: it became a caller-supplied argument on the three writer tools, so
-//     the harness route now carries it and is checked on all four writers that
-//     reach the column — Create, UpsertWithOptions, UpdateMemoryWithOptions and
-//     ImportMemory — beside the portable import it was already guarded on. The
-//     two that do not reach it are RestoreSnapshot (SQL, from the snapshot
-//     table) and CreateFromCorpus (insertMemory directly), the same byte-exact
-//     exclusions MaxContentLen draws, and assemble.SourceRefLabel bounds what it
-//     PRINTS for them. That is a length bound, not this guard: an untrusted
-//     `source_ref` is still checked wherever a writer can see it. agent and
-//     session_id as the harness states them are the real gap and it is
-//     structural: a harness is chosen by Ghost, not by the caller, so guarding
-//     it is the wrong layer — see above.
+//     the harness route now carries it, and it is checked on four of the seven
+//     writers that reach the column — Create, UpsertWithOptions,
+//     UpdateMemoryWithOptions and ImportMemory — beside the portable import it was
+//     already guarded on. The other three are named two paragraphs down.
+//
+//     THREE writers do not reach it, and all three are named rather than left as
+//     an invisible remainder. RestoreSnapshot (SQL, from the snapshot table) and
+//     CreateFromCorpus (insertMemory directly) are the byte-exact exclusions
+//     MaxContentLen draws. ReplaceNonManual is the third, and it arrived with
+//     #677: a rewrite or a merge now inherits the replaced row's validity and
+//     provenance onto the row that becomes, so it writes source_ref. It is exempt
+//     for the reason given above rather than by omission — filtering there
+//     DELETES the stored row, so refusing an emission whose inherited reference is
+//     credential-shaped would silently drop a memory from a pre-guard database,
+//     and the value is a copy of one this database already guarded at its own
+//     write rather than new caller text. That is coverage by transitivity, and it
+//     is only true while the source row was itself written through a guard: a
+//     store predating it, or a hand-edited row, breaks the chain — the same
+//     residual the two byte-exact writers have, and the reason
+//     assemble.SourceRefLabel bounds what it PRINTS for all three. That is a
+//     length bound, not this guard: an untrusted `source_ref` is still checked
+//     wherever a writer can see it. agent and session_id as the harness states
+//     them are the real gap and it is structural: a harness is chosen by Ghost,
+//     not by the caller, so guarding it is the wrong layer — see above.
 //
 //     A SECOND COPY is the other way a field is unguarded while its writer is
 //     guarded, and it is the one #673 opened: since memory_provenance exists, a
