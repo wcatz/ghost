@@ -22,8 +22,8 @@ func TestDecayReselectProbe(t *testing.T) {
 	traps := loadTrapTestdata(t)
 
 	ds, vecs := loadTestdataDataset(t)
-	store := newBenchStore(t)
-	queries, err := Seed(ctx, store, ds, vecs)
+	store, db := newBenchStoreWithDB(t)
+	queries, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}

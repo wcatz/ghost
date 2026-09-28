@@ -13,9 +13,9 @@ import (
 func sweepFixture(t *testing.T) (*memory.Store, []Query) {
 	t.Helper()
 	ds, vecs := loadTestdataDataset(t)
-	store := newBenchStore(t)
+	store, db := newBenchStoreWithDB(t)
 	ctx := context.Background()
-	queries, err := Seed(ctx, store, ds, vecs)
+	queries, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}

@@ -3,6 +3,7 @@ package bench
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,7 +31,16 @@ type MemorySpec struct {
 	ValidFrom  *string  `json:"valid_from,omitempty"`
 	ValidUntil *string  `json:"valid_until,omitempty"`
 	VerifiedAt *string  `json:"verified_at,omitempty"`
-}
+	// AgeDays backdates created_at. It is 0 on the headline dataset, which is
+	// what makes the decay factor identical across every candidate there and
+	// the headline table blind to decay; the ranking-state suite sets it
+	// (testdata/ranked_memories.jsonl).
+	AgeDays int `json:"age_days,omitempty"`
+	// Supersedes names the keys this memory REPLACES — the direction the demote
+	// consumes (newer -> older), written through store.CreateLink with the same
+	// relation and source `ghost supersede --apply` uses. Empty on the headline
+	// dataset, whose corpus holds no supersession edge at all.
+	Supersedes []string `json:"supersedes,omitempty"`}
 
 // QuerySpec is one dataset query. Rel maps memory Keys to graded relevance.
 type QuerySpec struct {
@@ -148,7 +158,13 @@ func loadFile[T any](path string, parse func(io.Reader) (T, error)) (T, error) {
 // memory and query has a fixture vector and that every query references only
 // known memory keys, so a malformed dataset fails loudly rather than scoring
 // silently wrong.
-func Seed(ctx context.Context, store *memory.Store, ds Dataset, vecs Vectors) ([]Query, error) {
+//
+// db is the same connection store was built on, and it is used for the two
+// things a store cannot be asked to do through its API: backdating created_at
+// (Create always stamps now) and nothing else — the supersedes edges go through
+// store.CreateLink, the production writer, so a fixture describes a state a store
+// could actually hold rather than one only raw SQL can produce.
+func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs Vectors) ([]Query, error) {
 	if err := store.EnsureProject(ctx, ds.Project, "/bench/"+ds.Project, ds.Project); err != nil {
 		return nil, fmt.Errorf("ensure project: %w", err)
 	}
@@ -185,10 +201,30 @@ func Seed(ctx context.Context, store *memory.Store, ds Dataset, vecs Vectors) ([
 		if err != nil {
 			return nil, fmt.Errorf("create memory %q: %w", m.Key, err)
 		}
+		if m.AgeDays > 0 {
+			if err := backdate(ctx, db, id, m.AgeDays); err != nil {
+				return nil, fmt.Errorf("backdate %q: %w", m.Key, err)
+			}
+		}
 		if err := store.StoreEmbedding(ctx, id, vec, "bench"); err != nil {
 			return nil, fmt.Errorf("embed memory %q: %w", m.Key, err)
 		}
 		keyToID[m.Key] = id
+	}
+
+	// After every row exists, so a supersedes edge can only name a key this
+	// dataset really holds: a typo is a load error, not a demote that silently
+	// does nothing.
+	for _, m := range ds.Memories {
+		for _, older := range m.Supersedes {
+			target, ok := keyToID[older]
+			if !ok {
+				return nil, fmt.Errorf("memory %q supersedes unknown key %q", m.Key, older)
+			}
+			if err := store.CreateLink(ctx, keyToID[m.Key], target, "supersedes", 1.0, "llm"); err != nil {
+				return nil, fmt.Errorf("link %q supersedes %q: %w", m.Key, older, err)
+			}
+		}
 	}
 
 	queries := make([]Query, 0, len(ds.Queries))

@@ -138,8 +138,8 @@ func TestDecayDoesNotPerturbGradedBench(t *testing.T) {
 	ds, vecs := loadTestdataDataset(t)
 	ctx := context.Background()
 
-	store := newBenchStore(t)
-	queries, err := Seed(ctx, store, ds, vecs)
+	store, db := newBenchStoreWithDB(t)
+	queries, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}

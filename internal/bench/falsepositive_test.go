@@ -42,9 +42,9 @@ func TestFalsePositiveReport(t *testing.T) {
 		}
 	}
 
-	store := newBenchStore(t)
+	store, db := newBenchStoreWithDB(t)
 	ctx := context.Background()
-	graded, err := Seed(ctx, store, ds, vecs)
+	graded, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}

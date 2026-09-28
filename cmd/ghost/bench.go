@@ -58,7 +58,7 @@ func runBench() {
 	defer store.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	queries, err := bench.Seed(ctx, store, ds, vecs)
+	queries, err := bench.Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

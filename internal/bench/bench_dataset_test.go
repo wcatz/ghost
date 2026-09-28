@@ -31,9 +31,9 @@ func loadTestdataDataset(t *testing.T) (Dataset, Vectors) {
 func runTestdata(t *testing.T) []Result {
 	t.Helper()
 	ds, vecs := loadTestdataDataset(t)
-	store := newBenchStore(t)
+	store, db := newBenchStoreWithDB(t)
 	ctx := context.Background()
-	queries, err := Seed(ctx, store, ds, vecs)
+	queries, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
