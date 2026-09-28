@@ -478,6 +478,7 @@ Other useful variables:
 - `GHOST_DEBUG` — enable debug logging.
 - `GHOST_LOG_FILE` — redirect MCP logs to a file; useful when a client surfaces stderr as protocol noise.
 - `GHOST_LIVE_TESTS=1` — opt into the live LLM tests; without it, `go test ./...` skips billable harness calls.
+- `GHOST_DEV_FORBID_DATA_DIR` — a list of data directories (separated by the platform's list separator) that a build that is **not a release** refuses to open, so a development build cannot migrate a real store. A release build ignores it entirely, which is what makes it safe to export in a development shell. Unlike every other variable here it is not a config key and never reaches a config file; the full rules, including the canonicalization and the hook paths' fail-open behaviour, are in [`cli.md`](cli.md#development-builds-refusing-a-real-store).
 - `GHOST_TEST_SOURCE` — select the harness source used by opt-in live tests (`claude-code`, `opencode`, `codex`, or `goose`).
 
 ### Harness subprocess environment

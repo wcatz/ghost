@@ -848,7 +848,10 @@ export GHOST_DEV_FORBID_DATA_DIR="$HOME/.local/share/ghost"
   symlinks resolved and a path that does not exist yet handled. A store reached
   through a symlinked home, named relatively, or written with a trailing
   separator is the same store, and refusing one spelling only would be a guard
-  that works for the spelling its author tested.
+  that works for the spelling its author tested. (`git describe --long` is what
+  `make build` stamps for the same reason: without it, a local build on a clean
+  tree at a tag describes as the bare tag, which reads as a published release and
+  would switch the guard off for the one binary that is definitely not one.)
 - **A release build ignores the variable entirely.** "Release" is read from the
   build's own version — the same semantic-version parser `ghost upgrade` orders
   releases with — so `dev`, a `git describe` stamp, a prerelease, and anything
@@ -865,7 +868,7 @@ directory:
 
 ```console
 $ XDG_DATA_HOME=/home/ada/.local/share ghost backup --out /tmp/snap.db
-error: GHOST_DEV_FORBID_DATA_DIR refuses to open the data directory /home/ada/.local/share/ghost: this build is "dev", which is not a release, and a development build migrates a store it opens. Run a released ghost against this directory, or unset GHOST_DEV_FORBID_DATA_DIR
+error: resolve data directory: GHOST_DEV_FORBID_DATA_DIR refuses to open the data directory /home/ada/.local/share/ghost: this build is "dev", which is not a release, and a development build migrates a store it opens. Run a released ghost against this directory, or unset GHOST_DEV_FORBID_DATA_DIR
 $ echo $?
 1
 ```
@@ -892,7 +895,8 @@ Two paths behave differently, and both are deliberate:
   variable asked for.
 - **`ghost mcp status` reports it.** The status report's job is to say what is
   wrong, so a refused directory appears as a failed line naming the variable,
-  and the run exits non-zero.
+  and the run exits non-zero — except under a plugin-managed install, where the
+  report returns after naming the plugin and runs no store checks at all.
 
 `ghost backup verify <file>` is the one command that reads nothing but the file
 it was handed, so it resolves no data directory and has nothing to refuse.

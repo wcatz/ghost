@@ -195,6 +195,11 @@ func TestIsRelease(t *testing.T) {
 		// as a release would leave every local build of a tagged commit
 		// unguarded, which is most of them.
 		{name: "a describe stamp is not a release", tag: "v0.38.0-14-gabc1234", want: false},
+		// The stamp `make build` produces on a CLEAN tree sitting exactly on a
+		// tag, with --long. The same tree without --long describes as the bare
+		// tag, which this would accept -- a locally built, never-published binary
+		// silently classified as a release.
+		{name: "a long describe stamp at a tag is not a release", tag: "v0.38.0-0-gabc1234", want: false},
 		{name: "a dirty describe stamp is not a release", tag: "v0.38.0-0-gabc1234-dirty", want: false},
 		{name: "an rc is not a release", tag: "0.39.0-rc.1", want: false},
 		{name: "a dev build is not a release", tag: "dev", want: false},
