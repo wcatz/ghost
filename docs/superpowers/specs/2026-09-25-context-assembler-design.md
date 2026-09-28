@@ -530,6 +530,7 @@ the `response_fit` post-pass supplies `all_over_budget` after the stage loop.
 | `all_invalid` | 2 | every row was expired or not yet valid |
 | `all_out_of_category` | 3 | every row failed category |
 | `all_out_of_scope` | 3 | every row failed scope |
+| `all_out_of_retention` | 3 | every row failed the retention filter |
 | `all_dedup_dropped` | 6 | every row was removed by a source policy |
 | `all_diversity_capped` | 7 | every row was cut by a diversity quota |
 | `all_over_budget` | fit | every row was cut by the item or response-fit budget |
