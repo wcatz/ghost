@@ -27,13 +27,13 @@ func loadTestdataDataset(t *testing.T) (Dataset, Vectors) {
 }
 
 // runTestdata seeds a fresh store from the committed dataset and evaluates all
-// four ablations against it.
+// three ablations against it.
 func runTestdata(t *testing.T) []Result {
 	t.Helper()
 	ds, vecs := loadTestdataDataset(t)
-	store := newBenchStore(t)
+	store, db := newBenchStoreWithDB(t)
 	ctx := context.Background()
-	queries, err := Seed(ctx, store, ds, vecs)
+	queries, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -44,9 +44,18 @@ func runTestdata(t *testing.T) []Result {
 	return results
 }
 
-// TestBenchDatasetReport runs the four ablations over the committed dataset and
+// TestBenchDatasetReport runs the three ablations over the committed dataset and
 // logs the metric table. It is the human-readable report; run with -v.
 func TestBenchDatasetReport(t *testing.T) {
+	// Parallel: this test seeds and searches the immutable headline corpus and only
+	// reads it, and at 60-130s under -race it is one of the five that decide whether
+	// this package fits Go's 600s per-binary default — a budget it had already
+	// spent down to ~10s when #677 added a sixth corpus-wide test, not a budget that
+	// rows cost. There is no shared state to order against — the
+	// package-level values are embedded bytes and one constant floor slice, and no
+	// bench test sets an env var or the default logger — so the only thing running
+	// these together buys is the overlap. Measured, in the commit that added this.
+	t.Parallel()
 	results := runTestdata(t)
 	t.Logf("%-14s %7s %7s %7s %7s %7s  (n=%d)", "condition", "R@1", "R@5", "R@10", "MRR@10", "NDCG@10", results[0].Queries)
 	for _, r := range results {

@@ -1,0 +1,21 @@
+# Ranking-state suite questions. `rel` grades the LIVE row as the answer; the
+# superseded rows in the same topic are deliberately left ungraded (gain 0)
+# because they are no longer the answer — they are the hard part, since a lexical
+# or vector search finds them first. Every probe is phrased against the CURRENT
+# state (what is it now), which is the query an agent actually asks; a premise
+# probe against the outdated state belongs to the staleness suite, which measures
+# that class on purpose.
+{"name":"q_db_sync_host","text":"which host does cardano-db-sync read blocks from","rel":{"pg_pool_v2":3}}
+{"name":"q_k8s_version","text":"what kubernetes version does the relay cluster run","rel":{"k8s_ver_v3":3}}
+{"name":"q_signer_topology","text":"where does block producer signing run","rel":{"signer_v2":3}}
+{"name":"q_metrics_backend","text":"where are metrics stored","rel":{"metrics_backend_v2":3}}
+{"name":"q_alert_channel","text":"where do paging alerts go","rel":{"alert_channel_v2":3}}
+{"name":"q_backup_window","text":"how often are database snapshots taken","rel":{"backup_window_v2":3}}
+{"name":"q_tls_source","text":"where do the tls certificates come from","rel":{"tls_source_v2":3}}
+{"name":"q_cardano_dir","text":"where is the cardano-node socket","rel":{"cardano_dir_v2":3}}
+{"name":"q_ogmios_port","text":"which port does ogmios listen on","rel":{"ogmios_port":3}}
+{"name":"q_kv_store","text":"how is the key-value store laid out","rel":{"kv_store":3}}
+{"name":"q_retry_budget","text":"what backoff do client retries use","rel":{"retry_budget":3}}
+{"name":"q_log_scrape","text":"should scrape configs carry the instance label","rel":{"log_scrape":3}}
+{"name":"q_wire_protocol","text":"what transport does the memory server speak","rel":{"wire_protocol":3}}
+{"name":"q_index_type","text":"is the block-slot index column unique","rel":{"index_type":3}}
