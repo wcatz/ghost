@@ -26,15 +26,30 @@ func parseStamp(s string) time.Time {
 	return time.Time{}
 }
 
-// parseStampPtr reads a stored timestamp into a pointer, and nil when the value
-// is absent or unreadable. Callers distinguish the two through the trace, not
-// through the pointer.
+// parseStampPtr reads a stored VALIDITY stamp into a pointer, and nil when the
+// value is absent or unreadable. Callers distinguish the two through the trace,
+// not through the pointer.
+//
+// It reads through memory.ParseStamp rather than the local parseStamp, because it
+// has to agree with the rule that decided the state it renders. The two parsers
+// differ on exactly one input: a stamp of 0001-01-01 00:00:00 parses successfully
+// and lands on the zero time, so a zero-rejecting reader cannot tell it from a
+// value that failed to parse. memory.ParseStamp reports it as READABLE —
+// time.Parse accepts it, and the store's own TestImportVerification asserts that
+// it should — and memory.ValidityState therefore calls such a row expired. A label
+// renderer still using the zero-rejecting parse would hand the caller all-nil
+// pointers, take the "nothing to render" early return, and print no marker on a
+// row the search assembler had already dropped as retired.
+//
+// parseStamp above stays as it is, because it reads created_at and resolved_at,
+// where a malformed value being treated as ancient is deliberate (see decayRank:
+// an unparseable created_at must never spuriously win).
 func parseStampPtr(s *string) *time.Time {
 	if s == nil {
 		return nil
 	}
-	t := parseStamp(*s)
-	if t.IsZero() {
+	t, ok := memory.ParseStamp(*s)
+	if !ok {
 		return nil
 	}
 	return &t

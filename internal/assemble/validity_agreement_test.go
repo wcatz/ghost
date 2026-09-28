@@ -1,6 +1,7 @@
 package assemble
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -95,8 +96,66 @@ func TestValidityStateOfAgreesWithTheOneRule(t *testing.T) {
 					"browsing surfaces reach different answers about the same row, which is the two-copies "+
 					"failure this delegation exists to prevent", got, state)
 			}
+
+			// The third leg, and the one that was missed twice: the LABEL has to
+			// agree with the state. A surface that decided "expired" and then
+			// printed no marker has told the reader the row is current, and the
+			// marker is the only thing that settles it — a browsing surface has not
+			// run stage 2, so it gets no other signal that the claim is retired.
+			//
+			// So for a row that states ANYTHING readable, the label must be
+			// non-empty, and it must carry the state's own word.
+			label := ValidityLabel(state, tc.from, tc.until, tc.ver)
+			if anyReadable(tc.from, tc.until, tc.ver) {
+				if label == "" {
+					t.Errorf("ValidityLabel = \"\" for a row whose verdict is %q: the row states a readable "+
+						"claim and was judged %s, so the surface must say so — a decided verdict with no "+
+						"marker reads as current", state, state)
+				}
+				if word := stateWord(state); word != "" && !strings.Contains(label, word) {
+					t.Errorf("ValidityLabel = %q, want it to carry %q for a row the rule calls %s: the state "+
+						"and the label are the same decision rendered twice, and a reader who sees only one "+
+						"of them is being told something the other contradicts", label, word, state)
+				}
+			} else if label != "" {
+				t.Errorf("ValidityLabel = %q for a row that states nothing readable, want \"\": there is no "+
+					"claim to date, so a label would assert one", label)
+			}
 		})
 	}
 }
 
 func strptr(s string) *string { return &s }
+
+// anyReadable reports whether any of the three is a value the store can read, by
+// asking the store's own parser rather than re-implementing readability here —
+// which is the mistake this whole test is about.
+func anyReadable(values ...*string) bool {
+	for _, v := range values {
+		if v == nil {
+			continue
+		}
+		if _, ok := memory.ParseStamp(*v); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// stateWord is the word a label carries for a state, or "" for the states whose
+// label is the dates alone. It mirrors validityLabel's own switch on purpose: the
+// test is checking that the switch still agrees with the STATE it is handed, so
+// deriving the expectation from the same table would be circular — these are the
+// literal words, written out.
+func stateWord(state string) string {
+	switch state {
+	case "expired":
+		return "expired"
+	case "future":
+		return "not yet valid"
+	case "unverified":
+		return "unverified"
+	default:
+		return ""
+	}
+}
