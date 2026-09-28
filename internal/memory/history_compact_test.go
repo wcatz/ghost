@@ -202,6 +202,21 @@ func stampPhaseRows(t *testing.T, s *Store, memoryID, phase, recordedAt string) 
 	}
 }
 
+// versionsAtOrBefore counts a memory's versions recorded at or before a bound. It
+// is the side of the bound a fixture has to be able to state, and asserting it is
+// what turns "the test failed" into "the fixture put the row on the wrong side" —
+// without it the same three assertions fail for a reason the reader cannot see.
+func versionsAtOrBefore(t *testing.T, s *Store, memoryID, cutoff string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_history WHERE memory_id = ? AND recorded_at <= ?`,
+		memoryID, cutoff).Scan(&n); err != nil {
+		t.Fatalf("read how many of %s's versions sit at or before %q: %v", memoryID, cutoff, err)
+	}
+	return n
+}
+
 // stampHistoryRow moves the newest row of the given phase to a fixed instant,
 // which is how a fixture separates events a single-second clock cannot.
 func stampHistoryRow(t *testing.T, s *Store, memoryID, phase, recordedAt string) {
@@ -857,6 +872,18 @@ func TestCompactHistoryLeavesTheRestatementACurrentWriterStillMakes(t *testing.T
 	}
 	retag("kes", "bp", "rotation")
 	retag("kes", "bp", "rotation", "verified")
+
+	// State the instant rather than reading it. appendHistoryGroupTx names no
+	// recorded_at, so both versions carry the schema's datetime('now') default, and
+	// the assertions below are true ONLY because those rows are newer than the bound:
+	// leave them on the clock and the test passes on a machine that reads 17:15 on
+	// the day #727 shipped and fails on every machine that reads anything earlier.
+	stampPhaseRows(t, s, target, phaseReflect, postFixReflectAt)
+	if n := versionsAtOrBefore(t, s, target, reflectNoOpCutoff); n != 0 {
+		t.Fatalf("%d of this memory's versions are recorded at or before the bound %q, so the "+
+			"assertions below would be about a pre-#727 row rather than about the row a current "+
+			"build writes on purpose", n, reflectNoOpCutoff)
+	}
 
 	// The preconditions the whole finding rests on, asserted rather than assumed:
 	// both passes DID write a version, both versions restate the state byte for
