@@ -332,13 +332,24 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	return res, reKept, nil
 }
 
-// maxHoldBackRounds bounds the hold-back re-check. The re-check is monotone — a
-// row held back leaves the pool the frequency count is taken over, which can
-// only make more subject tokens rare, which can only reveal MORE pairings — so
-// it converges on its own, and in practice in two or three rounds. The bound is
-// not a heuristic about how long that takes; it is the guarantee that a repair
-// never spins, and when it is reached with a row still changing, that is a
-// finding the report has to carry rather than a truncation to swallow.
+// maxHoldBackRounds caps how many hold-back re-checks ONE run performs.
+//
+// It is not what makes the loop terminate. What terminates it is that every
+// round which finds anything removes at least one row from the repair set, so
+// the loop is bounded by len(repair) rounds however the pairings move — and
+// those do move, in both directions. A held-back row leaves the pool the
+// re-check reads, and that pool is BOTH the frequency pool and the correction
+// pool, so dropping a row lowers the document frequency of the tokens it
+// carries (which can reveal a pairing the round before was blind to) AND, when
+// the row is correction-marked, takes away every pairing that row was asserting.
+// A later round can report FEWER pairings than the one before it, and
+// TestHoldBackPairingsAreNotMonotoneAcrossRounds is the case that does.
+//
+// The bound is therefore a cap on the WORK ONE RUN DOES, not a termination
+// argument: with it and without it the re-check ends, and what changes is
+// whether one run reaches its fixed point or leaves work for the next. Reaching
+// a bound with a row still changing is a finding the report has to carry rather
+// than a truncation to swallow, which is why the loop reports it.
 const maxHoldBackRounds = 8
 
 // holdBackResult is the hold-back re-check's answer: the rows still repairable,
@@ -377,11 +388,14 @@ type holdBackResult struct {
 // bound reached with a row still changing says so, because the repair is then
 // short of the answer a further pass would give.
 //
-// Dropping is one-way: a row removed because a correction asserted it is never
-// re-added, so a correction that is itself held back cannot free its row again.
-// That errs toward leaving durable knowledge resolved, which is the status quo
-// and the visible, safe direction, rather than toward a repair the next pass
-// undoes.
+// The same removal works the other way too — see maxHoldBackRounds — so a later
+// round can find FEWER pairings than the one before it. Which is why dropping is
+// one-way: a row removed because a correction asserted it is never re-added, so
+// a correction that is itself held back cannot free its row again. Without that
+// rule the answer would depend on how the pairings happened to move between
+// rounds, and the LAST round would win rather than the union. It errs toward
+// leaving durable knowledge resolved, which is the status quo and the visible,
+// safe direction, rather than toward a repair the next pass undoes.
 func holdBack(repair, unresolved []memory.Memory, maxRounds int) holdBackResult {
 	out := holdBackResult{kept: repair, holds: make(map[string][]Hold)}
 	kept := repair
