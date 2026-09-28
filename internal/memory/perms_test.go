@@ -325,32 +325,33 @@ func TestFchmodNoFollowTightensTheRealFile(t *testing.T) {
 	}
 }
 
-// TestTightenPermissionsTakesTheSidecarsByNameOnlyInTheDataDirectory pins the
-// route each file takes, which is otherwise invisible: both routes reach the
-// same mode for any file the descriptor can open read-only.
+// TestTightenPermissionsNeverOpensASQLiteSidecarReadOnly pins the route each
+// file takes, which is otherwise invisible: for any file the descriptor can
+// open, both routes reach the same mode.
 //
-// The two modes are what separate them. A file at 0220 has no owner-read bit,
-// so fchmodNoFollow's O_RDONLY open fails and leaves it alone, while
-// os.Chmod reaches 0200. Seeded at 0220, the sidecars therefore end at 0200
-// when they take the name-based route and stay at 0220 when they do not, and
-// the database — seeded at a readable 0666 — ends at 0600 either way. One pair
-// of assertions, and it fails if the split is reverted.
+// The separating mode is 0220 — no owner-read bit, so fchmodNoFollow's O_RDONLY
+// open fails and leaves the mode alone, while os.Chmod still reaches 0200. A
+// sidecar seeded there and left at 0220 took the descriptor route; one at 0200
+// did not. Both are asserted in the configured data directory and outside it,
+// because the hazard the descriptor poses there is a live connection rather than
+// a location: OpenDB runs this pass from inside its own connection in every
+// tree, so a location-scoped exception would reopen the write loss the eval, bench
+// and scratch trees depend on not having. See fchmodNoFollow.
 //
-// The location is the other half. Inside the configured data directory the
-// sidecars take the name-based route, because the 0700 parent makes the swap
-// fchmodNoFollow closes unstageable there, and because opening them read-only
-// in that pass loses writes (fchmodNoFollow says how that was measured).
-// Outside it — the eval, bench and scratch trees this same function runs in —
-// the parent is the user's own, so every file takes the descriptor and the
-// sidecars end at 0220.
-func TestTightenPermissionsTakesTheSidecarsByNameOnlyInTheDataDirectory(t *testing.T) {
-	// 0220 for the sidecars, 0666 for the database: the first cannot be opened
-	// read-only at all, the second can.
+// Skipped as root, which can read a 0220 file (CAP_DAC_OVERRIDE) and so would
+// reach 0200 through the descriptor too — the assertion would pass for the wrong
+// reason and the test would claim a discrimination it does not have. The same
+// skip the tree uses elsewhere for the same reason.
+func TestTightenPermissionsNeverOpensASQLiteSidecarReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a 0220 file is still readable, so the two routes are indistinguishable")
+	}
 	const (
 		unreadable = 0o220
 		readable   = 0o666
 	)
-	seed := func(t *testing.T, dbPath string) {
+	// One assertion set, run against both locations.
+	assertRoutes := func(t *testing.T, dbPath string) {
 		t.Helper()
 		for i, mode := range []os.FileMode{readable, unreadable, unreadable} {
 			name := []string{dbPath, dbPath + "-wal", dbPath + "-shm"}[i]
@@ -359,43 +360,27 @@ func TestTightenPermissionsTakesTheSidecarsByNameOnlyInTheDataDirectory(t *testi
 			}
 			setPerm(t, name, mode)
 		}
-	}
-
-	t.Run("in the data directory the sidecars go by name", func(t *testing.T) {
-		dbPath := filepath.Join(fakeDataDir(t), "ghost.db")
-		seed(t, dbPath)
 		TightenPermissions(dbPath)
 
 		if got := permOf(t, dbPath); got != 0o600 {
-			t.Errorf("the database is %#o, want 0600", got)
+			t.Errorf("the database is %#o, want 0600 — the descriptor route", got)
 		}
-		// 0220 &^ 077 == 0200, reached only by a chmod that does not open the
-		// file first. Still at 0220 would mean this took the descriptor route,
-		// whose open fails on a file with no owner-read bit.
+		// 0220 &^ 077 == 0200, reachable only by a chmod that does not open the
+		// file first.
 		for _, name := range []string{dbPath + "-wal", dbPath + "-shm"} {
 			if got := permOf(t, name); got != 0o200 {
-				t.Errorf("%s is %#o, want 0200 — the name-based route in the data directory", filepath.Base(name), got)
+				t.Errorf("%s is %#o, want 0200 — it took the name-based route", filepath.Base(name), got)
 			}
 		}
+	}
+
+	t.Run("in the configured data directory", func(t *testing.T) {
+		assertRoutes(t, filepath.Join(fakeDataDir(t), "ghost.db"))
 	})
 
-	t.Run("outside the data directory every file goes by descriptor", func(t *testing.T) {
+	t.Run("outside it, as eval, bench and scratch open a database", func(t *testing.T) {
 		fakeDataDir(t) // XDG_DATA_HOME now names a tree unrelated to the one below
-		dbPath := filepath.Join(t.TempDir(), "ghost.db")
-		seed(t, dbPath)
-		TightenPermissions(dbPath)
-
-		if got := permOf(t, dbPath); got != 0o600 {
-			t.Errorf("the database is %#o, want 0600", got)
-		}
-		// The descriptor route cannot open a 0220 file, so it leaves the mode
-		// alone rather than narrowing it — the documented cost, and the reason
-		// the name-based route exists at all.
-		for _, name := range []string{dbPath + "-wal", dbPath + "-shm"} {
-			if got := permOf(t, name); got != unreadable {
-				t.Errorf("%s is %#o, want it left at %#o — the descriptor route outside the data directory", filepath.Base(name), got, unreadable)
-			}
-		}
+		assertRoutes(t, filepath.Join(t.TempDir(), "ghost.db"))
 	})
 }
 
