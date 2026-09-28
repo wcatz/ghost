@@ -36,10 +36,12 @@ func TestBenchmarksDocAtAGlanceTableIsThreeColumns(t *testing.T) {
 	}
 
 	rows := 0
+	tableEnd := start
 	for i := start; i < len(lines); i++ {
 		l := lines[i]
 		if !strings.HasPrefix(l, "|") {
-			break // the table ends at the first non-row line
+			tableEnd = i // the table ends at the first non-row line
+			break
 		}
 		if strings.HasPrefix(l, "|---") {
 			continue
@@ -58,15 +60,28 @@ func TestBenchmarksDocAtAGlanceTableIsThreeColumns(t *testing.T) {
 		t.Errorf("found only %d at-a-glance rows; the scan probably stopped early", rows)
 	}
 
-	// The statement those rows are not comparable across has to be a PARAGRAPH, so
-	// it is its own line and not inside a cell.
-	for i, l := range lines {
-		if strings.Contains(l, "These rows are not one leaderboard") {
-			if !strings.HasPrefix(l, "These rows are not one leaderboard") {
-				t.Fatalf("the not-one-leaderboard statement is mid-line at %d, so a renderer reads it as cell text: %.100s", i+1, l)
-			}
-			return
+	// The statement those rows are not comparable across has to be a PARAGRAPH in
+	// THIS section, so it is its own line and not inside a cell. Scoped to the
+	// section: a line anywhere else in the file that starts the same way would
+	// satisfy an unbounded search, which is how the paragraph could be moved out
+	// of the at-a-glance section and the test stay green — the same silent loss,
+	// re-openable by an ordinary doc edit.
+	const caveat = "These rows are not one leaderboard"
+	sectionEnd := len(lines)
+	for i := tableEnd; i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "## ") {
+			sectionEnd = i
+			break
 		}
 	}
-	t.Error("the at-a-glance table no longer says the rows are not one leaderboard")
+	for i := tableEnd; i < sectionEnd; i++ {
+		if !strings.Contains(lines[i], caveat) {
+			continue
+		}
+		if !strings.HasPrefix(lines[i], caveat) {
+			t.Fatalf("the not-one-leaderboard statement is mid-line at %d, so a renderer reads it as cell text: %.100s", i+1, lines[i])
+		}
+		return
+	}
+	t.Errorf("the at-a-glance section (%d..%d) no longer says the rows are not one leaderboard", tableEnd+1, sectionEnd)
 }
