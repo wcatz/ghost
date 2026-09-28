@@ -163,13 +163,18 @@ func TestSweepGrid(t *testing.T) {
 //
 // One test because one seed is the expensive part; and the four-memory fixture,
 // NOT the committed corpus, which is a budget decision rather than a shortcut.
-// Measured on this machine with `go test -race ./internal/bench -count=1`: the
-// committed 551-memory corpus puts this package's test binary at 471s on this
-// branch (478s on origin/main, before the commits that brought the ceiling
-// problem in), against Go's 600s per-binary default — so ~130s is all the headroom
-// there is. A second full seed of 551 memories plus a six-point sweep measured
-// 15s without -race; at this tree's race factor that is ~230s, which added to
-// 471s is the timeout. Nothing here is corpus-dependent: which point is the
+// `go test -race ./internal/bench -run '^Test[^L]' -count=1` on the laptop:
+// 188s, 187s, 187s over three runs at this commit, against Go's 600s
+// per-binary default. That is AFTER the five corpus-wide tests were made
+// concurrent, and the number that is not machine-dependent is CI's: before
+// that, #677's four extra rows took this package's test binary past the
+// ceiling and `build-and-test` failed at 600.038s; after it, the same job
+// passes in 7m43s-10m58s. So the headroom is roughly 400s of a LOCAL figure
+// and much less of CI's — quote CI, not the laptop, if you are about to decide
+// whether there is room. A seventh full seed of the 551-memory corpus is about
+// 9s without -race, and the four tests that would join the concurrent set each
+// cost 60-130s, so the honest read is that the ceiling is a shared budget and
+// this package is spending it. Nothing here is corpus-dependent: which point is the
 // reference, that the interval is the one recomputed from the same two Results,
 // that it reaches the report. A four-memory corpus pins all of it. The
 // corpus-scale half of the claim is held elsewhere and for free — TestSweepGrid
