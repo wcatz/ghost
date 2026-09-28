@@ -141,6 +141,22 @@ func readerComplaintForLog(err error) string {
 	return fmt.Sprintf("<withheld: unclassified reader complaint, %T>", err)
 }
 
+// safeTierError renders an error a TIERED run logged on a failed tier. It is not
+// readerComplaintForLog, and the difference is deliberate: a refusal withholds
+// the operation line it quotes, while a transport failure — the common error on
+// that line, and the one with no model text anywhere in it — keeps its message,
+// because a harness that died reporting "signal: killed" and a harness that died
+// reporting nothing are worth telling apart. So only a refusal is redacted, and an
+// error that is not one is logged as it is rather than withheld behind a type
+// name. Both paths still reach the log; only the model prose is withheld.
+func safeTierError(err error) string {
+	var refusal *opRefusal
+	if errors.As(err, &refusal) {
+		return refusal.Safe()
+	}
+	return err.Error()
+}
+
 // clipOpText bounds ONE model-supplied fragment interpolated into a complaint —
 // a hallucinated id, a free-form drop reason, a verb. Clipping the line is not
 // enough on its own: `drop <id> reason: <a paragraph of prose>` puts that whole

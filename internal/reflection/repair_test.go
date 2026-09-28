@@ -266,7 +266,12 @@ func TestOpTierWithholdsTheRejectedLineFromTheLog(t *testing.T) {
 	const secret = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
 	stored := opMem(opID1, "fact", "the deploy token is "+secret, 0.5)
 	badID := opID1 + "X"
-	reply := `{"ops":["rewrite ` + badID + ` -> the deploy token is ` + secret + `"]}`
+	// The replacement text IS the value, with no prose in front of it: clipOpLine
+	// keeps 80 runes of the line, and "rewrite <26-char id> -> " is 38, so the
+	// whole secret is inside the clip. A fixture with a sentence in front of the
+	// value would be truncated at 80 runes and the assertion below would pass
+	// whatever the log did — the probe has to be able to see the whole value.
+	reply := `{"ops":["rewrite ` + badID + ` -> ` + secret + `"]}`
 
 	var buf bytes.Buffer
 	tier, _ := opRepairTier(
@@ -284,7 +289,10 @@ func TestOpTierWithholdsTheRejectedLineFromTheLog(t *testing.T) {
 	if !strings.Contains(logged, "level=WARN") {
 		t.Fatalf("the rejection was not logged at all, so this test proves nothing:\n%s", logged)
 	}
-	if strings.Contains(logged, secret) {
+	// The part of the value inside clipOpLine's 80-rune window, and what the log
+	// must not contain. The full token would not be a real probe: the clip cuts
+	// its tail, so the check would pass whatever the log did.
+	if strings.Contains(logged, secret[:32]) {
 		t.Errorf("the WARN line carries the value the rejected operation quoted:\n%s", logged)
 	}
 	// Fail closed rather than silently: a log line with no line number and no

@@ -211,7 +211,16 @@ func (t *TieredConsolidator) Consolidate(ctx context.Context, input ReflectionIn
 
 		result, err := tier.Consolidate(ctx, input)
 		if err != nil {
-			t.logger.Warn("consolidator failed, trying next tier", "tier", tier.Name(), "error", err)
+			// safeTierError, not err: a reader refusal quotes the rejected
+			// operation line back, and for a merge or a rewrite that line ends in
+			// the model's own replacement prose over stored memory — which is why
+			// the tier redacts its own WARN above and why the three proposal log
+			// lines go through previewContent. This is the last thing between the
+			// tier and the log, and on the unattended path the logger IS the
+			// stderr the stop hook redirects into the append-only lifecycle.log.
+			// A transport failure keeps its own message: it carries no model text,
+			// and "signal: killed" is worth telling apart from a refusal.
+			t.logger.Warn("consolidator failed, trying next tier", "tier", tier.Name(), "error", safeTierError(err))
 			withRepairs(result)
 			lastErr = err
 			continue
