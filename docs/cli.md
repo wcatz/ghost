@@ -154,13 +154,18 @@ Marks resolved-evidence memories so they leave ranked session injection while re
 ghost resolve myproject
 ghost resolve myproject --apply
 ghost resolve myproject --reassess
+ghost resolve myproject --mark a1b2c3d4,e5f6a7b8 --apply
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--apply` | Stamp `resolved_at` on confirmed memories. |
+| `--apply` | Stamp `resolved_at` on confirmed memories, or on the ones `--mark` names. |
 | `--reassess` | Re-judge memories that are already resolved instead of unresolved ones. |
-| `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
+| `--mark <ids>` | Stamp `resolved_at` on these named memories, on your say-so. Comma-separated. Not combinable with `--reassess`. |
+| `--mark-file <path>` | The same list, one id or prefix per line. |
+| `--only <ids>` | With `--reassess`: judge only these memories. |
+| `--only-file <path>` | With `--reassess`: the same, one id or prefix per line. |
+| `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. Not used by `--mark`: nothing is classified. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
 The classifier is KEEP-biased in code, not only in prose. A local keyword prefilter proposes candidates, then a deterministic veto settles a candidate as KEEP with no harness call when its text carries a standing imperative (`never`, `do not`, `don't`, `must`, `always`, `required`) or an open marker (`not yet`, `outstanding`, `still pending`, `still open`, `still stale`, `unresolved`, `todo`) — case-insensitive and word-bounded. The prompt asks whether an agent starting a fresh session would make a mistake, repeat work, or break a rule without the note, and states that a date, PR number, commit hash, or "fixed in" does not resolve one. It also resolves a note that only restates what the repository already holds — the repository is authoritative, so an agent reads the file — while keeping any note that adds a rule, a constraint, or a reason the code does not state, whatever paths it cites. A `RESOLVED` verdict must carry a `closed-by:` fact naming what made the note obsolete; a verdict without one is read as KEEP, so a note the harness cannot explain away stays injectable.
@@ -181,6 +186,33 @@ It is how a wrong resolution gets undone — the ordinary pass never looks at a 
 Rows that the ordinary pass would re-stamp for free are left alone and reported as **still asserted by a link or correction**: the older endpoint of a live `supersedes` link, a row an unresolved correction still pairs with, and a row whose own correction is being repaired in the same run (clearing that correction would put it back in the pool and re-assert the pairing on the next pass). Clearing any of those would print a repair that the next ordinary pass immediately undoes.
 
 Only rows the ordinary pass would actually consider are held back: its pairing mechanism pairs the keyword-prefiltered subset, so a durable rule with no resolution keyword is repaired even when a correction being cleared in the same run shares its subject tokens. A hold is not a soft warning — it is reported as asserted on every later run, so the filter keeps the pass from parking a row nothing asserts.
+
+#### `--mark`
+
+Stamps `resolved_at` on the memories you *name*, rather than on the ones a pass proposes:
+
+```bash
+ghost resolve myproject --mark a1b2c3d4            # preview
+ghost resolve myproject --mark a1b2c3d4 --apply
+ghost resolve myproject --mark-file stale.ids --apply
+```
+
+`--mark` is for the case no pass reaches. The ordinary pass only ever proposes a memory whose text carries a resolution keyword, and even then it asks a KEEP-biased classifier about *that note* — not about whether another memory in the project supersedes it. So a note whose claim a newer memory says was fixed is frequently invisible to every pass: it holds no keyword, so nothing proposes it. When you have read both notes and know the older one is finished, this is the supported way to say so. The previous alternatives were leaving the memory in every session's ranked context or writing `resolved_at` with SQL — and the SQL route bypasses the `memory_history` row every writer appends, so the record of how the memory reached its current state would show it resolved with nothing saying who decided.
+
+Nothing is classified, so no harness is called, nothing is billed, and the command works on a machine that cannot spawn one at all. The refs are the ones `ghost supersede --withdraw` takes and go through the same code, not a copy of its rules: a full id, or an unambiguous prefix of at least 8 **characters** (counted in characters, not bytes, because that is how the reports abbreviate). A full id is accepted whatever its shape — `ghost import` writes an artifact's ids verbatim — and an ambiguous prefix is refused with the matches listed rather than guessed at.
+
+What it writes is the ordinary store path, so the write is the same one the pass makes: the same eligibility guard, the same `resolve` history row, the same transaction. Two things differ, and both matter:
+
+- The `resolve` history row records **you** as the performer. It is the only resolve row in the database that can say a person decided rather than a classifier judged, which is the whole reason this is a command rather than SQL.
+- The memory's cached KEEP verdict is **dropped**. That cache is keyed by content, and a row carrying one is skipped by the ordinary pass as `N KEEP cached`; leaving it would mean a memory buried on purpose came straight back the moment anything rewrote its text.
+
+Only a memory in the project you named is marked. A ref that reaches another project, or a `_global` row (which refs reach, because a promotion moves a row while keeping the links pointing at it), is refused. Naming `_global` as the project is refused too: it holds the promoted memories *every* project injects, so one command cannot decide for all of them. A memory that is **already resolved** is reported as a no-op rather than as a change, and nothing is written on its account — including no history row, since a history row records a write. A **pinned** memory and one in a **standing category** (`convention`, `preference`) are likewise left alone and reported, because a pin is an instruction to keep a memory visible and resolve does not overrule it.
+
+The write is one transaction over the whole request, so a failure rolls the whole thing back and the report says none of them moved — there is no partial mark to interpret. Several ids may be given at once, and the request is settled before anything is written: one bad ref out of five marks none of them.
+
+The eligibility guard is re-checked *where the write happens*, not only where the refs were read, so a memory pinned, recategorized or moved by something else in between is declined rather than stamped. That decline is silent — it is another process's decision, not a failure — so it is reported as its own state (**declined**). Under `--apply` the per-row markers are chosen so the success is never the default: any row state the report does not recognise reads as *not marked*, because a report that claims a change it did not make is worse than one that admits a row it did not write.
+
+Its inverse is `--reassess --only`, and every `--mark --apply` report prints the exact command for the memories it just stamped — scoped, never the project-wide re-judge. The MCP tool `ghost_resolve_mark` does the same thing over the tool surface.
 
 ### `ghost supersede <project>`
 

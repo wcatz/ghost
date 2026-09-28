@@ -1219,6 +1219,158 @@ func TestCLISupersedeReassessFeedsResolveReassess(t *testing.T) {
 	}
 }
 
+// TestCLIResolveMarkNamesTheMemoryItBuries runs the operator's mark against the
+// built binary (#714) and back out through the repair the report names.
+//
+// The corpus is what makes the assertions mean something: a note with NO
+// resolution keyword, so the ordinary pass's prefilter never proposes it and no
+// classifier is ever asked about it. That is the whole case --mark exists for —
+// an operator who has read a newer note in the same project saying the fix
+// landed, where nothing in the pass can see the pair. So the mark has to work on
+// a memory the pass would never have touched.
+//
+// The harness assertions are the load-bearing ones alongside the round trip: --mark
+// judges nothing, so it must not spawn one, and that is what makes the command
+// usable from a hook and free of a bill.
+func TestCLIResolveMarkNamesTheMemoryItBuries(t *testing.T) {
+	s := newSandbox(t)
+	cs := s.mcpSession(t)
+
+	// No resolution keyword, so the prefilter does not propose it. A note the
+	// operator has to be asked about by hand.
+	stale := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "the relay firmware on the edge nodes runs build 4471",
+	}))
+	untouched := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "the staging relay speaks QUIC on port 4471",
+	}))
+
+	// The ordinary pass is offered the corpus and does nothing with it: nothing
+	// carries a resolution keyword. This is what makes the mark's round trip a
+	// repair of a note no pass would have buried.
+	s.setHarnessAnswer("resolve", "RESOLVED | closed-by: it was abandoned")
+	s.mustRun("resolve", e2eProject, "--source", "opencode", "--apply")
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE resolved_at IS NOT NULL`); n != 0 {
+		t.Fatalf("%d memory/memories are resolved before the mark: the fixture needs a corpus the pass ignores", n)
+	}
+	before, _ := s.harnessLog("opencode")
+
+	// Dry run: names the memory, writes nothing, spawns no harness.
+	dry := s.mustRun("resolve", e2eProject, "--mark", stale[:8])
+	mustMatch(t, "mark (dry run)", dry.stdout, `(?i)would mark resolved`)
+	// The report carries the memory itself, so the operator can confirm from the
+	// output that this was the one they meant. A memory buried by mistake is
+	// invisible afterwards, so the check has to happen here.
+	mustContain(t, "mark (dry run) memory", dry.stdout, "the relay firmware on the edge nodes runs build 4471")
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, stale); n != 0 {
+		t.Fatalf("a dry-run mark stamped resolved_at")
+	}
+	if after, _ := s.harnessLog("opencode"); after != before {
+		t.Fatalf("a dry-run mark asked the classifier: it judges nothing, so a harness call here is a billable call for no judgment")
+	}
+
+	applied := s.mustRun("resolve", e2eProject, "--mark", stale, "--apply")
+	mustMatch(t, "mark (apply)", applied.stdout, `(?i)marked resolved`)
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, stale); n != 1 {
+		t.Fatalf("the mark did not stamp the named memory")
+	}
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, untouched); n != 0 {
+		t.Fatalf("the mark touched a memory it was not asked about")
+	}
+	if after, _ := s.harnessLog("opencode"); after != before {
+		t.Fatalf("the mark asked the classifier: it judges nothing, so a harness call here is a billable call for no judgment")
+	}
+	// The 'resolve' history row, with the operator as the performer. This is the
+	// record every writer appends and the SQL route does not, and the performer is
+	// what tells a reader of it that a person decided this rather than a
+	// classifier judging it.
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ? AND phase = 'resolve'`, stale); n != 1 {
+		t.Fatalf("the mark wrote %d resolve history row(s), want 1", n)
+	}
+	if got := s.queryStrings(t, `SELECT agent FROM memory_history WHERE memory_id = ? AND phase = 'resolve'`, stale); len(got) != 1 || got[0] != "operator" {
+		t.Errorf("the resolve history row's agent = %v, want [operator]", got)
+	}
+
+	// Marking it again is a no-op rather than a second stamp, and a second
+	// history row: a history row records a write, and no write happened.
+	again := s.mustRun("resolve", e2eProject, "--mark", stale, "--apply")
+	mustMatch(t, "re-mark", again.stdout, `(?i)already resolved`)
+	if strings.Contains(again.stdout, "marked resolved 1") {
+		t.Errorf("a re-mark claimed a stamp it did not write:\n%s", again.stdout)
+	}
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ? AND phase = 'resolve'`, stale); n != 1 {
+		t.Fatalf("the no-op wrote %d resolve history row(s) in total, want 1", n)
+	}
+
+	// The inverse the report names, run as printed. It is scoped to the memory
+	// this run stamped, so a second resolved memory in the project is left alone
+	// — the failure #698 measured an unscoped repair causing.
+	follower := s.mustRun("resolve", e2eProject, "--mark", untouched[:8], "--apply")
+	// The report's own follow-up, which must be the SCOPED repair and not the
+	// project-wide one (#702 measured 143 rows proposed, ~35% stale).
+	mustMatch(t, "mark (apply) follow-up", follower.stdout, `(?i)resolve .*--reassess --only`)
+	if strings.Contains(follower.stdout, "--reassess --apply") {
+		t.Errorf("the follow-up is the unscoped project-wide repair:\n%s", follower.stdout)
+	}
+	s.setHarnessAnswer("resolve", "KEEP")
+	s.mustRun("resolve", e2eProject, "--source", "opencode", "--reassess", "--only", untouched, "--apply")
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NULL`, untouched); n != 1 {
+		t.Fatalf("the named memory is still resolved: the round trip did not run")
+	}
+
+	// The refusals, which are the ones an operator hits by typing. An ambiguous
+	// prefix is refused with the matches listed rather than guessed at, a ref too
+	// short to be a prefix says THAT, and --mark cannot be combined with
+	// --reassess because they are the two directions of the same stamp.
+	ambiguous := s.mustFail("resolve", e2eProject, "--mark", "not-an-id-at-all", "--apply")
+	mustMatch(t, "unresolvable ref", ambiguous.stderr, `no memory in project .* has an id starting with`)
+	short := s.mustFail("resolve", e2eProject, "--mark", stale[:6], "--apply")
+	mustMatch(t, "short ref", short.stderr, `too short to be a prefix`)
+	both := s.mustFail("resolve", e2eProject, "--mark", stale, "--reassess")
+	mustMatch(t, "mark with reassess", both.stderr, `(?i)run them as two commands`)
+	// An empty --mark must fail rather than fall through to the ordinary pass,
+	// which would judge the whole project and bill a harness call for a request
+	// to mark two memories.
+	empty := s.mustFail("resolve", e2eProject, "--mark", "")
+	mustMatch(t, "empty mark", empty.stderr, `--mark requires at least one memory id or prefix`)
+}
+
+// TestCLIResolveMarkRefusesAMemoryInAnotherProject: the guard that matters most
+// on a shared store. A ref resolves inside the project PLUS `_global` — a
+// promotion moves a row while keeping the links pointing at it, and both ends of
+// an edge have to stay nameable — so a promoted row IS reachable by ref from a
+// project that does not own it. Marking it would bury a memory every project
+// shares, on the say-so of one of them.
+func TestCLIResolveMarkRefusesAMemoryInAnotherProject(t *testing.T) {
+	s := newSandbox(t)
+	cs := s.mcpSession(t)
+	// The project running the mark, so the refusal below is about the ref and not
+	// about a project that does not exist.
+	parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "a note in the project that tries to mark",
+	}))
+	theirs := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": "other-project",
+		"content":    "a note that belongs to another project entirely",
+	}))
+	// Promote it, which is what makes it reachable by a ref in this project. The
+	// tool takes the project the memory currently belongs to — the ownership
+	// check — so the project named here is the one the row was saved into.
+	call(t, cs, "ghost_memory_promote", map[string]any{
+		"project_id": "other-project",
+		"memory_id":  theirs,
+	})
+
+	refused := s.mustFail("resolve", e2eProject, "--mark", theirs, "--apply")
+	mustMatch(t, "global row refused", refused.stderr, `(?i)_global|not to`)
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, theirs); n != 0 {
+		t.Fatalf("a project stamped a memory it does not own")
+	}
+}
+
 // TestCLIProject covers project bind and merge, and the absence of a
 // `ghost project list` subcommand.
 func TestCLIProject(t *testing.T) {

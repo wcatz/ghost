@@ -1,6 +1,6 @@
 # MCP surface
 
-Ghost exposes 21 tools, 4 resources, and 2 prompts over standard MCP. The server runs over stdio, so the client launches the `ghost mcp` process and communicates through JSON-RPC.
+Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server runs over stdio, so the client launches the `ghost mcp` process and communicates through JSON-RPC.
 
 ## Tools
 
@@ -16,6 +16,7 @@ Ghost exposes 21 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Memory | `ghost_memory_promote` | Promote a project memory to `_global` |
 | Memory | `ghost_save_global` | Save a memory that applies to all projects |
 | Memory | `ghost_resolve` | Mark resolved evidence after source-matched classification |
+| Memory | `ghost_resolve_mark` | Stamp `resolved_at` on memories you name |
 | Memory | `ghost_link_withdraw` | Withdraw one named wrong `supersedes` edge |
 | Project | `ghost_project_delete` | Permanently delete a project and its child records |
 | Context | `ghost_project_context` | Load top memories, learned context, tasks, and decisions |
@@ -29,6 +30,8 @@ Ghost exposes 21 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Decisions | `ghost_decisions_list` | List active, superseded, or revisit decisions |
 
 `ghost_resolve` is dry-run by default. `ghost_project_delete` is also dry-run by default and is irreversible when applied. Core memory CRUD and search do not call an LLM; maintenance-oriented tools may use the calling session's CLI harness.
+
+`ghost_resolve_mark` is the other tool that is not dry-run, and it is the mirror of the one gap `ghost_link_withdraw` cannot fill. `ghost_resolve` is a *pass*: it proposes candidates from a keyword prefilter and asks a KEEP-biased classifier, which is right for most of what it stamps and structurally unable to reach a memory whose claim a *newer note* supersedes — such a note often holds no resolution keyword, so nothing ever proposes it. When an agent has read a specific memory and a newer one saying its fix landed, `ghost_resolve_mark` names the memory instead of asking a model: no LLM is called, nothing is billed, and a ref is a full id or an unambiguous 8-or-more-character prefix. Only a memory in the project you named is marked — a promoted `_global` row is refused, because it is a memory every project shares, and so is naming `_global` as the project. It writes the same `resolved_at` the pass writes, through the same store path, so it also writes the `resolve` history row every writer appends, with the calling client as the performer; that row is the one resolve record in the database that says a *reader* decided rather than a classifier judged. A memory that is already resolved, pinned, in a standing category, or declined by the write-time guard is reported as its own state rather than as a change — and the default marker for a row the call does not recognise is *not marked*, because a tool that tells an agent it buried a memory it did not bury is worse than one that admits the row went unwritten. The memory's cached KEEP verdict is dropped so a later pass cannot report it as cached and bring it straight back. The tool is `ghost_resolve_mark`; its inverse is not a tool, and the result says so — there is no MCP surface for *clearing* a `resolved_at`, because `ghost_resolve` is the forward pass and pointing an agent at it would bury more memories rather than restore one. The result prints the scoped `ghost resolve <project> --reassess --only <ids> --apply` instead, rendered by the same helper the CLI uses.
 
 `ghost_link_withdraw` is the one repair that is NOT dry-run: an agent calls a tool to make a change, so it withdraws the named `supersedes` edge and writes the `unsupersede` history row. It is the repair for an edge the classifier still accepts — a pair that is wrong for a reason no rubric can see — which neither `ghost supersede --reassess` (CLI-only, and only withdraws what the current rules reject) nor anything else on this surface can reach. A ref is a full memory id or an unambiguous 8-or-more-character prefix of one; an ambiguous ref is refused with the matches listed, and a pair with no live edge is an error that writes nothing. Withdrawing the edge does not un-bury its target on its own: the `resolved_at` the edge caused stays until a **scoped** `ghost resolve <project> --reassess --only <ids> --apply` clears it, and the result prints that command, rendered by the same helper the CLI uses so a project name holding a space or a metacharacter is quoted. It is a CLI command and the result says so: there is no MCP tool for the repair, because `ghost_resolve` is the *forward* pass — it stamps `resolved_at` on confirmed evidence — so pointing an agent at it would bury more memories. The repair is scoped because an unscoped one re-judges every resolved memory in the project. `ghost_link_withdraw` is in the Claude Code permission allowlist like every other tool.
 

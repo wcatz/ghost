@@ -1326,31 +1326,52 @@ func TestParseResolveArgs(t *testing.T) {
 		reassess bool
 		only     []string
 		onlyFile string
+		mark     []string
+		markFile string
 	}{
-		{"positional", []string{"myproj"}, "myproj", "", false, false, nil, ""},
-		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, false, nil, ""},
-		{"reassess", []string{"myproj", "--reassess"}, "myproj", "", false, true, nil, ""},
-		{"reassess with apply", []string{"myproj", "--reassess", "--apply"}, "myproj", "", true, true, nil, ""},
-		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true, nil, ""},
-		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false, nil, ""},
-		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false, nil, ""},
-		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false, nil, ""},
-		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false, nil, ""},
-		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false, nil, ""},
-		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, nil, ""},
+		{"positional", []string{"myproj"}, "myproj", "", false, false, nil, "", nil, ""},
+		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, false, nil, "", nil, ""},
+		{"reassess", []string{"myproj", "--reassess"}, "myproj", "", false, true, nil, "", nil, ""},
+		{"reassess with apply", []string{"myproj", "--reassess", "--apply"}, "myproj", "", true, true, nil, "", nil, ""},
+		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true, nil, "", nil, ""},
+		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false, nil, "", nil, ""},
+		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false, nil, "", nil, ""},
+		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false, nil, "", nil, ""},
+		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false, nil, "", nil, ""},
+		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false, nil, "", nil, ""},
+		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, nil, "", nil, ""},
 		// The repair scope. Comma-separated on one flag, repeated across flags,
 		// and either spelling of the value form all reach Scope as one list.
-		{"only separate value", []string{"p", "--reassess", "--only", "abcdef01"}, "p", "", false, true, []string{"abcdef01"}, ""},
-		{"only comma list", []string{"p", "--reassess", "--only", "abcdef01,12345678"}, "p", "", false, true, []string{"abcdef01", "12345678"}, ""},
-		{"only equals form", []string{"p", "--reassess", "--only=abcdef01"}, "p", "", false, true, []string{"abcdef01"}, ""},
-		{"only repeated", []string{"p", "--reassess", "--only", "abcdef01", "--only", "12345678"}, "p", "", false, true, []string{"abcdef01", "12345678"}, ""},
-		{"only with spaces and empties", []string{"p", "--reassess", "--only", " abcdef01 , , 12345678 "}, "p", "", false, true, []string{"abcdef01", "12345678"}, ""},
-		{"only file", []string{"p", "--reassess", "--only-file", "/tmp/ids.txt"}, "p", "", false, true, nil, "/tmp/ids.txt"},
-		{"only file equals form", []string{"p", "--reassess", "--only-file=/tmp/ids.txt"}, "p", "", false, true, nil, "/tmp/ids.txt"},
+		{"only separate value", []string{"p", "--reassess", "--only", "abcdef01"}, "p", "", false, true, []string{"abcdef01"}, "", nil, ""},
+		{"only comma list", []string{"p", "--reassess", "--only", "abcdef01,12345678"}, "p", "", false, true, []string{"abcdef01", "12345678"}, "", nil, ""},
+		{"only equals form", []string{"p", "--reassess", "--only=abcdef01"}, "p", "", false, true, []string{"abcdef01"}, "", nil, ""},
+		{"only repeated", []string{"p", "--reassess", "--only", "abcdef01", "--only", "12345678"}, "p", "", false, true, []string{"abcdef01", "12345678"}, "", nil, ""},
+		{"only with spaces and empties", []string{"p", "--reassess", "--only", " abcdef01 , , 12345678 "}, "p", "", false, true, []string{"abcdef01", "12345678"}, "", nil, ""},
+		{"only file", []string{"p", "--reassess", "--only-file", "/tmp/ids.txt"}, "p", "", false, true, nil, "/tmp/ids.txt", nil, ""},
+		{"only file equals form", []string{"p", "--reassess", "--only-file=/tmp/ids.txt"}, "p", "", false, true, nil, "/tmp/ids.txt", nil, ""},
 		// Both at once is the union, flag selectors first: the supersede repair
 		// prints both forms for one set of ids.
-		{"only and only file together", []string{"p", "--reassess", "--only", "abcdef01", "--only-file", "/tmp/ids.txt"}, "p", "", false, true, []string{"abcdef01"}, "/tmp/ids.txt"},
-		{"only with apply", []string{"p", "--reassess", "--only", "abcdef01", "--apply"}, "p", "", true, true, []string{"abcdef01"}, ""},
+		{"only and only file together", []string{"p", "--reassess", "--only", "abcdef01", "--only-file", "/tmp/ids.txt"}, "p", "", false, true, []string{"abcdef01"}, "/tmp/ids.txt", nil, ""},
+		{"only with apply", []string{"p", "--reassess", "--only", "abcdef01", "--apply"}, "p", "", true, true, []string{"abcdef01"}, "", nil, ""},
+		// The targeted mark (#714). It takes the same two forms as the repair
+		// scope — a comma-separated list and a one-per-line file — because it is
+		// the same list of memories named for the other direction of the same
+		// stamp, and an operator who learned one form should not have to learn
+		// another.
+		{"mark separate value", []string{"p", "--mark", "abcdef01"}, "p", "", false, false, nil, "", []string{"abcdef01"}, ""},
+		{"mark comma list", []string{"p", "--mark", "abcdef01,12345678"}, "p", "", false, false, nil, "", []string{"abcdef01", "12345678"}, ""},
+		{"mark equals form", []string{"p", "--mark=abcdef01"}, "p", "", false, false, nil, "", []string{"abcdef01"}, ""},
+		{"mark repeated", []string{"p", "--mark", "abcdef01", "--mark", "12345678"}, "p", "", false, false, nil, "", []string{"abcdef01", "12345678"}, ""},
+		{"mark with spaces and empties", []string{"p", "--mark", " abcdef01 , , 12345678 "}, "p", "", false, false, nil, "", []string{"abcdef01", "12345678"}, ""},
+		{"mark file", []string{"p", "--mark-file", "/tmp/ids.txt"}, "p", "", false, false, nil, "", nil, "/tmp/ids.txt"},
+		{"mark file equals form", []string{"p", "--mark-file=/tmp/ids.txt"}, "p", "", false, false, nil, "", nil, "/tmp/ids.txt"},
+		{"mark and mark file together", []string{"p", "--mark", "abcdef01", "--mark-file", "/tmp/ids.txt"}, "p", "", false, false, nil, "", []string{"abcdef01"}, "/tmp/ids.txt"},
+		{"mark with apply", []string{"p", "--mark", "abcdef01", "--apply"}, "p", "", true, false, nil, "", []string{"abcdef01"}, ""},
+		// A --source on a --mark run parses, because refusing it would be a flag
+		// the parser rejects on some lines and ignores on others. It is simply
+		// not used, which the usage text says — the same treatment --withdraw
+		// gives it on supersede.
+		{"mark with source is accepted and unused", []string{"p", "--mark", "abcdef01", "--source", "opencode"}, "p", "opencode", false, false, nil, "", []string{"abcdef01"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parsed, err := parseResolveArgs(tc.args)
@@ -1358,17 +1379,32 @@ func TestParseResolveArgs(t *testing.T) {
 				t.Fatalf("parseResolveArgs(%v): %v", tc.args, err)
 			}
 			if parsed.project != tc.project || parsed.source != tc.source || parsed.apply != tc.apply ||
-				parsed.reassess != tc.reassess || parsed.onlyFile != tc.onlyFile {
-				t.Errorf("parseResolveArgs(%v) = %+v, want project=%q source=%q apply=%v reassess=%v onlyFile=%q",
-					tc.args, parsed, tc.project, tc.source, tc.apply, tc.reassess, tc.onlyFile)
+				parsed.reassess != tc.reassess || parsed.onlyFile != tc.onlyFile || parsed.markFile != tc.markFile {
+				t.Errorf("parseResolveArgs(%v) = %+v, want project=%q source=%q apply=%v reassess=%v onlyFile=%q markFile=%q",
+					tc.args, parsed, tc.project, tc.source, tc.apply, tc.reassess, tc.onlyFile, tc.markFile)
 			}
-			if len(parsed.only) != len(tc.only) {
-				t.Fatalf("only = %v, want %v", parsed.only, tc.only)
-			}
-			for i := range tc.only {
-				if parsed.only[i] != tc.only[i] {
-					t.Errorf("only = %v, want %v", parsed.only, tc.only)
+			for _, list := range []struct {
+				name      string
+				got, want []string
+			}{
+				{name: "only", got: parsed.only, want: tc.only},
+				{name: "mark", got: parsed.mark, want: tc.mark},
+			} {
+				if len(list.got) != len(list.want) {
+					t.Fatalf("%s = %v, want %v", list.name, list.got, list.want)
 				}
+				for i := range list.want {
+					if list.got[i] != list.want[i] {
+						t.Errorf("%s = %v, want %v", list.name, list.got, list.want)
+					}
+				}
+			}
+			// hasMark is what the dispatch branches on, so it has to agree with
+			// the two fields the parser filled in — a run that asked to mark
+			// nothing would otherwise fall through to the ordinary pass, which
+			// judges the whole project and asks a harness about it.
+			if want := len(tc.mark) > 0 || tc.markFile != ""; parsed.hasMark() != want {
+				t.Errorf("hasMark() = %v, want %v for %v", parsed.hasMark(), want, tc.args)
 			}
 		})
 	}
@@ -1404,6 +1440,26 @@ func TestParseResolveArgs(t *testing.T) {
 		{"only file whitespace separate value", []string{"p", "--reassess", "--only-file", "  "}, "--only-file requires a path"},
 		{"only file missing value", []string{"p", "--reassess", "--only-file"}, "--only-file requires a path"},
 		{"only file empty equals value", []string{"p", "--reassess", "--only-file="}, "--only-file requires a path"},
+		// --mark is the two directions of one stamp, so asking for both would be
+		// a command with two dry-run answers. The reader is told which of the two
+		// repairs they asked for twice rather than being left to work it out.
+		{"mark with reassess", []string{"p", "--mark", "abcdef01", "--reassess"}, "run them as two commands"},
+		{"reassess with mark", []string{"p", "--reassess", "--mark", "abcdef01"}, "run them as two commands"},
+		{"mark file with reassess", []string{"p", "--mark-file", "/tmp/ids.txt", "--reassess"}, "run them as two commands"},
+		{"mark with only", []string{"p", "--mark", "abcdef01", "--reassess", "--only", "12345678"}, "run them as two commands"},
+		// An empty --mark is the same unset-variable mistake as an empty --only,
+		// and it must fail rather than reach the ordinary pass: a run that
+		// classified the whole project and billed a harness call would be the
+		// operator's request to mark two memories.
+		{"mark missing value", []string{"p", "--mark"}, "--mark requires at least one memory id or prefix"},
+		{"mark empty equals value", []string{"p", "--mark="}, "--mark requires at least one memory id or prefix"},
+		{"mark empty separate value", []string{"p", "--mark", ""}, "--mark requires at least one memory id or prefix"},
+		{"mark whitespace separate value", []string{"p", "--mark", "   "}, "--mark requires at least one memory id or prefix"},
+		{"mark separators only", []string{"p", "--mark", ",,"}, "--mark requires at least one memory id or prefix"},
+		{"mark file empty separate value", []string{"p", "--mark-file", ""}, "--mark-file requires a path"},
+		{"mark file whitespace separate value", []string{"p", "--mark-file", "  "}, "--mark-file requires a path"},
+		{"mark file missing value", []string{"p", "--mark-file"}, "--mark-file requires a path"},
+		{"mark file empty equals value", []string{"p", "--mark-file="}, "--mark-file requires a path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := parseResolveArgs(tc.args); err == nil {
@@ -1428,7 +1484,7 @@ func TestParseResolveArgs(t *testing.T) {
 // stored id can hold a '#', and this file is the only surface that can carry some
 // of those ids. The one shape that costs is an id containing " #", which no
 // comment rule can have both ways.
-func TestReadOnlySelectors(t *testing.T) {
+func TestReadRefSelectorsForOnlyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ids.txt")
 	body := "# targets withdrawn by supersede --reassess --apply\r\n" +
@@ -1440,13 +1496,13 @@ func TestReadOnlySelectors(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got, err := readOnlySelectors(path)
+	got, err := readRefSelectors("--only-file", path)
 	if err != nil {
-		t.Fatalf("readOnlySelectors: %v", err)
+		t.Fatalf("readRefSelectors: %v", err)
 	}
 	want := []string{"abcdef0123456789abcdef0123456789", "12345678"}
 	if len(got) != len(want) {
-		t.Fatalf("readOnlySelectors = %v, want %v", got, want)
+		t.Fatalf("readRefSelectors = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -1460,19 +1516,19 @@ func TestReadOnlySelectors(t *testing.T) {
 // artifact can hold one — and this file is the only surface that can carry such an
 // id, so truncating it at the '#' produced a selector naming no row and a repair
 // that reported a miss for a memory it had just called repairable.
-func TestReadOnlySelectorsKeepsAHashInsideAnID(t *testing.T) {
+func TestReadRefSelectorsKeepsAHashInsideAnID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ids.txt")
 	hashy := "import#1 note"
 	if err := os.WriteFile(path, []byte("# a comment line\n"+hashy+"\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got, err := readOnlySelectors(path)
+	got, err := readRefSelectors("--only-file", path)
 	if err != nil {
-		t.Fatalf("readOnlySelectors: %v", err)
+		t.Fatalf("readRefSelectors: %v", err)
 	}
 	if len(got) != 1 || got[0] != hashy {
-		t.Errorf("readOnlySelectors = %q, want [%q]", got, hashy)
+		t.Errorf("readRefSelectors = %q, want [%q]", got, hashy)
 	}
 }
 
@@ -1487,19 +1543,19 @@ func TestReadOnlySelectorsTruncatesAHashThatFollowsWhitespace(t *testing.T) {
 	if err := os.WriteFile(path, []byte("imported note # not part of the id\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	got, err := readOnlySelectors(path)
+	got, err := readRefSelectors("--only-file", path)
 	if err != nil {
-		t.Fatalf("readOnlySelectors: %v", err)
+		t.Fatalf("readRefSelectors: %v", err)
 	}
 	if len(got) != 1 || got[0] != "imported note" {
-		t.Errorf("readOnlySelectors = %q, want the id up to the comment", got)
+		t.Errorf("readRefSelectors = %q, want the id up to the comment", got)
 	}
 }
 
 // TestReadOnlySelectorsRefusesAnEmptyList: a file the operator pointed a repair
 // at and that names nothing must fail, never fall through to an unscoped pass
 // that judges every resolved memory in the project.
-func TestReadOnlySelectorsRefusesAnEmptyList(t *testing.T) {
+func TestReadRefSelectorsRefusesAnEmptyList(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]string{
 		"empty":            "",
@@ -1511,7 +1567,7 @@ func TestReadOnlySelectorsRefusesAnEmptyList(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatalf("write: %v", err)
 			}
-			if _, err := readOnlySelectors(path); err == nil {
+			if _, err := readRefSelectors("--only-file", path); err == nil {
 				t.Fatal("a --only-file that names no ids must be an error, not an unscoped run")
 			} else if !strings.Contains(err.Error(), "names no memory ids") {
 				t.Errorf("error %q must say the file named nothing", err)
@@ -1522,9 +1578,9 @@ func TestReadOnlySelectorsRefusesAnEmptyList(t *testing.T) {
 
 // TestReadOnlySelectorsNamesAMissingFile: the path is in the error, because the
 // operator has to know which of two files in a report they mistyped.
-func TestReadOnlySelectorsNamesAMissingFile(t *testing.T) {
+func TestReadRefSelectorsNamesAMissingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "no-such-file.txt")
-	_, err := readOnlySelectors(path)
+	_, err := readRefSelectors("--only-file", path)
 	if err == nil {
 		t.Fatal("a missing --only-file must be an error")
 	}

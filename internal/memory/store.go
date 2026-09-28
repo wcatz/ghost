@@ -3906,6 +3906,109 @@ func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []strin
 // (32766 on modern builds) so an unusually large batch can't hit that limit.
 const setResolvedBatchSize = 500
 
+// The two statements SetResolved and MarkResolved both issue, written once so
+// the two writers cannot drift apart on the guard that decides what resolve is
+// allowed to stamp. They differ in three placeholders each — the project
+// predicate, the KEEP-cache column and the id list — and in nothing else, which
+// is the point: the ordinary pass and an operator's named mark are the same
+// decision about the same row, so the row must reach the same answer whichever
+// door it came through.
+const (
+	// setResolvedSelectSQL reads the ids an UPDATE is about to change, inside
+	// the transaction that will change them. The project predicate is the `?`
+	// bound to projectID when there is one (SetResolved passes ""); SQLite
+	// treats `project_id = ''` as false against every real id, which is how one
+	// statement serves a caller that has no project to bind and one that must not
+	// reach outside its own.
+	setResolvedSelectSQL = `
+		SELECT id FROM memories
+		WHERE id IN (%s)
+		  AND project_id != ''
+		  AND (? = '' OR project_id = ?)
+		  AND resolved_at IS NULL
+		  AND pinned = 0
+		  AND category NOT IN ('convention', 'preference')`
+	// setResolvedUpdateSQL stamps the row and drops its KEEP cache in ONE
+	// statement, so no reader can observe a resolved row still holding a
+	// verdict the next pass would honour.
+	setResolvedUpdateSQL = `
+		UPDATE memories SET resolved_at = datetime('now'), resolve_kept_hash = ''
+		WHERE id IN (%s)
+		  AND project_id != ''
+		  AND (? = '' OR project_id = ?)
+		  AND resolved_at IS NULL
+		  AND pinned = 0
+		  AND category NOT IN ('convention', 'preference')`
+)
+
+// setResolvedStampTx is the shared body of the two resolve writers: one
+// transaction, batches of setResolvedBatchSize, and one history row per row the
+// UPDATE actually changed. It returns the ids it stamped, which is what a caller
+// that has to report per-row outcomes needs, and len() of it is the count the
+// older caller returns. An error returns NO ids, because an error here is always
+// a rollback of everything this call wrote.
+//
+// projectID empty means the caller's ids are already project-scoped by the
+// selection it made — which is the ordinary pass's position, since it read
+// ResolveCandidates for one project — and is deliberately not "any project":
+// binding the project here costs one compared parameter and makes the guard the
+// same statement as the projection, so a caller cannot forget it.
+func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID string, prov Provenance) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin set resolved: %w", err)
+	}
+	// A rollback is the whole point of one transaction, so every error path
+	// returns an EMPTY id list rather than the ids it had collected. Returning
+	// them would claim a stamp that the rollback undid, which is the one thing a
+	// caller of this method has no way to check for itself.
+	defer func() { _ = tx.Rollback() }()
+
+	var stamped []string
+	for len(ids) > 0 {
+		batch := ids
+		if len(batch) > setResolvedBatchSize {
+			batch = ids[:setResolvedBatchSize]
+		}
+		ids = ids[len(batch):]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, 0, len(batch)+2)
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		args = append(args, projectID, projectID)
+		in := strings.Join(placeholders, ",")
+
+		changed, err := selectIDs(ctx, tx, fmt.Sprintf(setResolvedSelectSQL, in), args...)
+		if err != nil {
+			return nil, fmt.Errorf("select rows to resolve: %w", err)
+		}
+		if len(changed) == 0 {
+			continue
+		}
+		result, err := tx.ExecContext(ctx, fmt.Sprintf(setResolvedUpdateSQL, in), args...)
+		if err != nil {
+			return nil, fmt.Errorf("set resolved: %w", err)
+		}
+		if _, err := result.RowsAffected(); err != nil {
+			return nil, fmt.Errorf("set resolved rows affected: %w", err)
+		}
+		stamped = append(stamped, changed...)
+		if err := appendHistoryForIDsTx(ctx, tx, changed, phaseResolve, prov); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit set resolved: %w", err)
+	}
+	return stamped, nil
+}
+
 // SetResolved stamps resolved_at = now on the given memory IDs, dropping them
 // from the ranked injection/browse surface while leaving them searchable. The
 // WHERE clause re-checks the same eligibility guard as ResolveCandidates
@@ -3919,67 +4022,85 @@ const setResolvedBatchSize = 500
 // this, and when" is answerable from the database. The transaction is what makes
 // the history exact: it has held the write lock since its first statement, so
 // the ids read inside it are the ids the UPDATE goes on to change.
+//
+// It passes no project and no provenance, and both are deliberate. Its ids come
+// from ResolveCandidates for ONE project, so a project predicate would be a
+// second statement of what the caller already ensured — and a lifecycle pass
+// knows no session, so the `resolve` history row it writes carries no performer
+// and an empty field is an admission rather than a claim. An operator's named
+// mark is neither of those things: see MarkResolved.
 func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	stamped, err := s.setResolvedStampTx(ctx, ids, "", Provenance{})
+	return len(stamped), err
+}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("begin set resolved: %w", err)
+// MarkResolved stamps resolved_at on the named ids IN projectID and returns the
+// ids it actually stamped, in the order it stamped them. It is SetResolved for a
+// caller that names its rows — `ghost resolve --mark` (#714) — and the two
+// differences are the point of the separate method rather than a wrapper:
+//
+//   - It BINDS projectID. A ref resolves through the project (plus _global), so
+//     a promoted row is nameable from here; a stamp that reached one would let a
+//     project's repair pass bury a memory every project shares, which is not
+//     what a caller that asked about ONE project meant.
+//   - It RECORDS the performer. The history row an operator's mark writes is the
+//     only resolve row that can say a person did it, and it is the one worth
+//     being able to say: a name on a `resolve` row is a statement that nobody
+//     passed a classifier over that note, which is precisely the judgement a
+//     reader of the audit cannot otherwise check.
+//
+// It also drops resolve_kept_hash on every row it stamps, in the same
+// statement. The cache is a KEEP verdict keyed by content, and a row the
+// operator has just stamped is not a KEEP the next pass may honour: leaving the
+// hash would make the ordinary pass skip the row as `N KEEP cached` for as long
+// as its text stood, so a note buried on purpose came straight back the moment
+// anything rewrote it. SetResolved reaches the same statement, so a row a pass
+// resolves cannot be resurrected by a verdict from before it.
+//
+// Returns the stamped ids and no count, because a caller that names rows has to
+// say which of them moved: an already-resolved row, a pinned one and one in a
+// standing category are all rows this method declines, and they are declined for
+// different reasons the caller can only read off the row it already loaded.
+//
+// An error is fatal for the whole request and returns no ids. One transaction
+// covers every batch, so a failure is a rollback and a caller may treat the error
+// as "nothing happened" — which is the property a repair needs to be reportable
+// as a single outcome rather than as a count of whatever it reached before the
+// failure.
+//
+// That leaves one outcome the caller cannot see, and it is why the guard is a
+// read-time AND a write-time check rather than either: a row that was eligible
+// when the caller read it and is not by the time this runs is simply absent from
+// the returned ids. It is not an error — a concurrent pin or a recategorisation
+// is somebody else's decision, not a failure here — so the caller has to treat
+// "not returned" as its own state rather than as a stamp.
+func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string, prov Provenance) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	total := 0
-	for len(ids) > 0 {
-		batch := ids
-		if len(batch) > setResolvedBatchSize {
-			batch = ids[:setResolvedBatchSize]
-		}
-		ids = ids[len(batch):]
-
-		placeholders := make([]string, len(batch))
-		args := make([]interface{}, len(batch))
-		for i, id := range batch {
-			placeholders[i] = "?"
-			args[i] = id
-		}
-		changed, err := selectIDs(ctx, tx, `
-			SELECT id FROM memories
-			WHERE id IN (`+strings.Join(placeholders, ",")+`)
-			  AND resolved_at IS NULL
-			  AND pinned = 0
-			  AND category NOT IN ('convention', 'preference')`, args...)
-		if err != nil {
-			return 0, fmt.Errorf("select rows to resolve: %w", err)
-		}
-		if len(changed) == 0 {
-			continue
-		}
-		q := `UPDATE memories SET resolved_at = datetime('now')
-		      WHERE id IN (` + strings.Join(placeholders, ",") + `)
-		        AND resolved_at IS NULL
-		        AND pinned = 0
-		        AND category NOT IN ('convention', 'preference')`
-		result, err := tx.ExecContext(ctx, q, args...)
-		if err != nil {
-			return total, fmt.Errorf("set resolved: %w", err)
-		}
-		n, err := result.RowsAffected()
-		if err != nil {
-			return total, fmt.Errorf("set resolved rows affected: %w", err)
-		}
-		total += int(n)
-		if err := appendHistoryForIDsTx(ctx, tx, changed, phaseResolve, Provenance{}); err != nil {
-			return total, err
-		}
+	switch projectID {
+	case "":
+		// The one guard this method exists to hold. A caller with no project has
+		// not asked about a project, and the shared statement treats an empty
+		// binding as "no binding" — so the refusal is here rather than left to
+		// the argument it would otherwise weaken.
+		return nil, fmt.Errorf("mark resolved: a project is required, so no memory can be reached from it")
+	case GlobalProjectID:
+		// And the sentinel, for the same reason one layer up: `_global` is not a
+		// project a caller runs a lifecycle pass against. It holds promoted rows
+		// that EVERY project injects, so naming it would let one command bury a
+		// memory in all of them — and a caller that got there by typing the
+		// reserved name would be doing it deliberately, which is exactly the case
+		// the guard is for. Every other store method that refuses `_global` refuses
+		// it here (see DeleteProject), so the refusal is at this layer rather than
+		// left to each caller to re-derive: a guard one caller re-implements is a
+		// guard the next caller forgets.
+		return nil, fmt.Errorf("mark resolved: refusing to mark in the %s project — it holds the promoted memories every project injects, and a lifecycle pass over one project cannot decide for all of them", GlobalProjectID)
 	}
-	if err := tx.Commit(); err != nil {
-		return total, fmt.Errorf("commit set resolved: %w", err)
-	}
-	return total, nil
+	return s.setResolvedStampTx(ctx, ids, projectID, prov)
 }
 
 // ResolveKeptHashes returns the content hash recorded when resolve last judged

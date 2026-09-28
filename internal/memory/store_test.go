@@ -4093,6 +4093,247 @@ func TestSetResolvedRechecksEligibilityAtWriteTime(t *testing.T) {
 	}
 }
 
+// TestMarkResolvedIsProjectScoped: the store guard, independent of the caller's
+// read. `MemoryIDsByIDPrefix` reaches a project plus `_global` — a promotion
+// moves a row while keeping the links pointing at it, so both ends of an edge
+// have to stay nameable — and a ref that lands on a `_global` row must not be
+// stampable from a project that does not own it. The write binds project_id in
+// the same statement as the stamp, so this holds whatever the caller checked.
+func TestMarkResolvedIsProjectScoped(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "other-id", "/tmp/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	theirs, err := s.Create(ctx, "other-id", Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create in other project: %v", err)
+	}
+	ours, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "postmortem concluded, no follow-up", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	stamped, err := s.MarkResolved(ctx, testProject, []string{theirs, ours}, Provenance{Agent: "operator"})
+	if err != nil {
+		t.Fatalf("MarkResolved: %v", err)
+	}
+	if len(stamped) != 1 || stamped[0] != ours {
+		t.Errorf("MarkResolved stamped %v, want only [%s] — another project's row must not be stamped", stamped, ours)
+	}
+	// ResolveCandidates returns the UNRESOLVED rows, so theirs must still be in
+	// it: a stamp would have taken it out, and the loop below is a guard on the
+	// count above rather than on the write's absence of an error.
+	got, err := s.ResolveCandidates(ctx, "other-id")
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	var found bool
+	for _, m := range got {
+		if m.ID == theirs {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the other project's row left the unresolved set: it was stamped")
+	}
+	// The refusal the shared statement's empty-project case would otherwise make
+	// silent: no project, no reach.
+	if _, err := s.MarkResolved(ctx, "", []string{ours}, Provenance{}); err == nil {
+		t.Error("MarkResolved accepted an empty project, which would unbind the guard it exists to hold")
+	}
+	// And the sentinel, which the project binding does NOT catch: a promoted
+	// row's own project_id IS _global, so naming _global satisfies every
+	// predicate this method has and buries a memory every project injects. The
+	// refusal is a separate one, at this layer, so a caller reaching the store
+	// directly inherits it rather than re-deriving it.
+	promoted, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create promoted: %v", err)
+	}
+	if err := s.PromoteToGlobal(ctx, testProject, promoted); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+	if _, err := s.MarkResolved(ctx, GlobalProjectID, []string{promoted}, Provenance{}); err == nil {
+		t.Error("MarkResolved accepted the _global project, so a promoted memory can be buried for every project at once")
+	}
+	// ResolveCandidates returns the UNRESOLVED rows, so the promoted row must
+	// still be in it. Its presence is the proof the stamp did not happen: a
+	// committed one would have taken it out of that set.
+	globalCands, err := s.ResolveCandidates(ctx, GlobalProjectID)
+	if err != nil {
+		t.Fatalf("ResolveCandidates(_global): %v", err)
+	}
+	var stillThere bool
+	for _, m := range globalCands {
+		if m.ID == promoted {
+			stillThere = true
+		}
+	}
+	if !stillThere {
+		t.Error("the promoted row was stamped: one command buried a memory every project injects")
+	}
+}
+
+// TestMarkResolvedRecordsThePerformerOnItsHistoryRow: the reason an operator's
+// mark is a separate method rather than a SetResolved call. Every `resolve` row a
+// lifecycle pass writes leaves the performer empty, because a pass knows no
+// session — so a reader of the history cannot tell that row's stamp from a
+// person's. MarkResolved is the one resolve writer that can, and the column is
+// what it writes into.
+func TestMarkResolvedRecordsThePerformerOnItsHistoryRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "shipped and archived", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := s.MarkResolved(ctx, testProject, []string{id}, Provenance{Agent: "operator"}); err != nil {
+		t.Fatalf("MarkResolved: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 10)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	var resolves int
+	for _, e := range entries {
+		if e.Phase != "resolve" {
+			continue
+		}
+		resolves++
+		if e.Agent != "operator" {
+			t.Errorf("the resolve history row's agent = %q, want %q", e.Agent, "operator")
+		}
+		if e.ResolvedAt == nil || *e.ResolvedAt == "" {
+			t.Errorf("the resolve history row records no resolved_at, so it is not a version of the stamped state: %+v", e)
+		}
+	}
+	if resolves != 1 {
+		t.Errorf("got %d resolve history row(s), want 1", resolves)
+	}
+
+	// And the pass's own path still leaves it empty, which is the contract the
+	// history comment states: an empty field is an admission, not a claim.
+	other, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "fixed in PR #210, removed", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	if n, err := s.SetResolved(ctx, []string{other}); err != nil || n != 1 {
+		t.Fatalf("SetResolved = %d, %v; want 1 and no error", n, err)
+	}
+	entries, err = s.MemoryHistory(ctx, other, 10)
+	if err != nil {
+		t.Fatalf("MemoryHistory(other): %v", err)
+	}
+	for _, e := range entries {
+		if e.Phase == "resolve" && e.Agent != "" {
+			t.Errorf("SetResolved's resolve row carries agent %q, want empty — a lifecycle pass knows no session", e.Agent)
+		}
+	}
+}
+
+// TestMarkResolvedClearsTheKeptCache: the issue's second effect. A KEEP hash is a
+// verdict keyed by content, and an ordinary pass that finds one skips the row as
+// cached. Leaving it on a row an operator just stamped means the row reports
+// `N KEEP cached` and is never re-judged — so a note buried on purpose returns
+// the moment anything rewrites its text, and the stamp is undone by an edit.
+func TestMarkResolvedClearsTheKeptCache(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	content := "NEVER run restore with one spindle"
+	marked, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: content, Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create marked: %v", err)
+	}
+	untouched, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create untouched: %v", err)
+	}
+	if err := s.MarkResolveKept(ctx, testProject, map[string]string{marked: "h1", untouched: "h2"}); err != nil {
+		t.Fatalf("MarkResolveKept: %v", err)
+	}
+
+	if _, err := s.MarkResolved(ctx, testProject, []string{marked}, Provenance{}); err != nil {
+		t.Fatalf("MarkResolved: %v", err)
+	}
+	hashes, err := s.ResolveKeptHashes(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveKeptHashes: %v", err)
+	}
+	if got := hashes[marked]; got != "" {
+		t.Errorf("the stamped row still carries KEEP hash %q: the next pass skips it as cached", got)
+	}
+	if got := hashes[untouched]; got != "h2" {
+		t.Errorf("the KEEP hash of an unnamed row is %q, want h2 — the clear is scoped to the rows stamped", got)
+	}
+}
+
+// TestMarkResolvedRollsBackWhenTheHistoryAppendFails: "in the same transaction" is
+// not a description of two writes that happen to agree. A memory stamped without
+// its `resolve` history row is exactly the state writing resolved_at by hand
+// leaves behind and the reason this path exists — the record of how a memory
+// reached its current state would show it resolved with nothing saying who said
+// so. So the stamp and the record are one unit, and this makes the record fail
+// AFTER the UPDATE has run, inside the open transaction.
+func TestMarkResolvedRollsBackWhenTheHistoryAppendFails(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "shipped and archived", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// In-package, so the raw handle is reachable: this test is about what a
+	// failed statement does to the open transaction, and that needs a statement
+	// that fails after the UPDATE rather than a fake store.
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE memory_history`); err != nil {
+		t.Fatalf("drop memory_history: %v", err)
+	}
+
+	stamped, err := s.MarkResolved(ctx, testProject, []string{id}, Provenance{})
+	if err == nil {
+		t.Fatal("MarkResolved reported a stamp whose history row could not be written")
+	}
+	// The id list is empty on this path, and deliberately: the transaction rolled
+	// back, so nothing landed, and a caller that treated the attempted ids as
+	// written would be reporting a stamp that is not there.
+	if len(stamped) != 0 {
+		t.Errorf("MarkResolved returned %v with an error, but a rolled-back transaction wrote nothing", stamped)
+	}
+	// ResolveCandidates returns the UNRESOLVED rows, so the row must still be in
+	// it. Its presence is the proof the UPDATE was rolled back rather than
+	// committed: a committed stamp would have taken it out of that set.
+	got, err := s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	var found bool
+	for _, m := range got {
+		if m.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("resolved_at survived a failed history append: the stamp and its record are not one transaction")
+	}
+}
+
 // TestResolvedCandidatesAndClearResolved covers the reassess repair path
 // (issue #640): ResolvedCandidates returns exactly the rows resolve stamped,
 // in ResolveCandidates' eligibility shape with the resolved_at predicate

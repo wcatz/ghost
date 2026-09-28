@@ -215,6 +215,88 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		mustContain(t, "withdraw (unknown project)", fail, "not found")
 	},
 
+	// The mark an agent can make by NAME. Every other way of resolving a memory
+	// goes through a pass that judges the whole project, and the case this tool
+	// exists for is the one no pass can reach: a note whose claim a NEWER note in
+	// the same project says was fixed, where the note itself holds no resolution
+	// keyword and the prefilter never proposes it. An agent that has read both is
+	// the only thing that can decide that.
+	"ghost_resolve_mark": func(t *testing.T, s *sandbox, cs *mcp.ClientSession, _ string) {
+		// No resolution keyword, so nothing here is a candidate for any pass.
+		// That is what makes this a mark of a memory no pass would have buried.
+		stale := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the relay firmware on the edge nodes runs build 4471",
+		}))
+		untouched := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay speaks QUIC on port 4471",
+		}))
+		before, _ := s.harnessLog("opencode")
+
+		out := call(t, cs, "ghost_resolve_mark", map[string]any{
+			"project_id": e2eProject,
+			"memory_ids": []string{stale[:8]},
+		})
+		mustContain(t, "mark", out, "Marked 1")
+		// The memory itself, so an agent reporting this to its user is quoting
+		// the database rather than the call it made.
+		mustContain(t, "mark (memory)", out, "the relay firmware on the edge nodes runs build 4471")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, stale); n != 1 {
+			t.Fatalf("the tool did not stamp the named memory")
+		}
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, untouched); n != 0 {
+			t.Fatalf("the tool touched a memory it was not asked about")
+		}
+		// The 'resolve' history row, with the calling client as the performer —
+		// the same provenance every other mutating tool on this surface records.
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ? AND phase = 'resolve'`, stale); n != 1 {
+			t.Fatalf("the tool wrote %d resolve history row(s), want 1", n)
+		}
+		if got := s.queryStrings(t, `SELECT agent FROM memory_history WHERE memory_id = ? AND phase = 'resolve'`, stale); len(got) != 1 || got[0] != "claude-code" {
+			t.Errorf("the resolve history row's agent = %v, want [claude-code]", got)
+		}
+		// The KEEP cache is dropped, so a later pass cannot report the row as
+		// cached and bring it straight back.
+		if got := s.queryStrings(t, `SELECT resolve_kept_hash FROM memories WHERE id = ?`, stale); len(got) != 1 || got[0] != "" {
+			t.Errorf("resolve_kept_hash = %v, want [\"\"] — a cached KEEP would un-hide this row on the next pass", got)
+		}
+		if after, _ := s.harnessLog("opencode"); after != before {
+			t.Fatalf("the tool asked the harness: it judges nothing, so a call here is billed for no judgment")
+		}
+		// The inverse is a CLI COMMAND, SCOPED to what this call stamped, and
+		// named as a command: there is no MCP tool for clearing a resolved_at,
+		// because ghost_resolve is the forward pass and would stamp MORE memories.
+		mustContain(t, "mark (follow-up)", out, "ghost resolve e2e-proj --reassess --only")
+		mustContain(t, "mark (follow-up) not a tool", out, "no MCP tool for it")
+		mustContain(t, "mark (follow-up) target", out, stale)
+
+		// Marking it again is a no-op, not a second stamp: nothing is written, so
+		// nothing may be claimed.
+		again := call(t, cs, "ghost_resolve_mark", map[string]any{
+			"project_id": e2eProject,
+			"memory_ids": []string{stale},
+		})
+		mustContain(t, "mark (no-op)", again, "already resolved")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ? AND phase = 'resolve'`, stale); n != 1 {
+			t.Fatalf("the no-op wrote %d resolve history row(s) in total, want 1", n)
+		}
+
+		// A ref the project cannot resolve is an error, not a guess.
+		fail := callExpectingError(t, cs, "ghost_resolve_mark", map[string]any{
+			"project_id": e2eProject,
+			"memory_ids": []string{"not-an-id-at-all"},
+		})
+		mustContain(t, "mark (unresolvable ref)", fail, "no memory in project")
+		// And an empty list is a usage error, not a mark of nothing that reads
+		// as a completed no-op.
+		fail = callExpectingError(t, cs, "ghost_resolve_mark", map[string]any{
+			"project_id": e2eProject,
+			"memory_ids": []string{},
+		})
+		mustContain(t, "mark (no ids)", fail, "memory_ids is required")
+	},
+
 	"ghost_memory_promote": func(t *testing.T, s *sandbox, cs *mcp.ClientSession, _ string) {
 		id := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
 			"project_id": e2eProject,

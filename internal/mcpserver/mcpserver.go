@@ -267,6 +267,21 @@ type linkCapableStore interface {
 	supersede.WithdrawStore
 }
 
+// markCapableStore narrows provider.MemoryStore to what ghost_resolve_mark needs
+// beyond it: the ref resolution and the named stamp that records the performer.
+// Neither is on provider.MemoryStore, so s.store is type-asserted at call time;
+// *memory.Store satisfies it, the same shape as every other capable store here.
+//
+// It is a separate interface from resolveCapableStore even though both reach
+// resolved_at, and the reason is the direction: that one drives the FORWARD pass
+// over a whole project and SetResolved's unscoped count is what it needs, while
+// this one names rows and needs the project binding and the history performer
+// that only MarkResolved provides. Merging them would give ghost_resolve a method
+// it must never call, which is the wrong way for a capability surface to grow.
+type markCapableStore interface {
+	resolve.MarkStore
+}
+
 // historyCapableStore narrows provider.MemoryStore's concrete backing store to the
 // two methods ghost_memory_delete needs for the redaction half of its job, which
 // provider.MemoryStore does not carry. *memory.Store satisfies it.
@@ -937,7 +952,7 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		// quoted. An agent told nothing would run the command above, judge fewer
 		// memories than this call orphaned, and report a repair that did not
 		// happen. The id is given verbatim so a person can put it in a file
-		// themselves — one id per line, and readOnlySelectors never splits.
+		// themselves — one id per line, and the --only-file reader never splits.
 		if cmd == "" {
 			sb.WriteString("\nNo --only command can name the target: its id holds a comma, which --only splits on.")
 		}
@@ -978,6 +993,224 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	}
 	return sb.String(), nil
+}
+
+// markMemoriesResolved is the handler behind ghost_resolve_mark. It is the same
+// core `ghost resolve --mark` calls (internal/resolve.Mark), so an agent and an
+// operator burying a memory take the same path, resolve the same refs, and leave
+// the same 'resolve' history row — the one whose performer says a reader decided
+// rather than a classifier judged.
+//
+// Unlike the CLI it does not preview: an agent calls a tool to make a change, and
+// a tool whose answer is "here is what I would do" is one call the agent has to
+// remember to make twice. The memory is not deleted and stays searchable, which is
+// what makes the stamp recoverable at all — a cleared stamp and a deleted row are
+// not the same repair.
+//
+// The result names the memories it stamped WITH their first line, so an agent
+// reporting this to its user is quoting the database rather than the call it made,
+// and it ends by naming the CLI command that undoes it. That has to be a command
+// and not a tool call, and the reason is the direction: there is no MCP surface
+// for CLEARING a resolved_at, because ghost_resolve is the FORWARD pass — it
+// stamps resolved_at on confirmed evidence across a whole project — so pointing an
+// agent at it here would bury more memories rather than restore one. An agent
+// with no shell cannot undo this, and should say so rather than reach for
+// ghost_resolve.
+//
+// The guidance about wording lives in this function's doc comment rather than in
+// the returned string: the string is the tool's whole answer, and a clause
+// addressed to the implementer inside it reads as an instruction to the agent
+// reading it.
+func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequest, projectID string, refs []string) (string, error) {
+	if projectID == "" {
+		return "", fmt.Errorf("project_id is required")
+	}
+	if len(refs) == 0 {
+		return "", fmt.Errorf("memory_ids is required: name at least one memory id or 8-or-more-character prefix")
+	}
+	resolvedProjectID, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
+	if resolvedProjectID == "" {
+		return "", fmt.Errorf("project %q not found", projectID)
+	}
+	ms, ok := s.store.(markCapableStore)
+	if !ok {
+		return "", fmt.Errorf("ghost_resolve_mark: store does not support a targeted mark")
+	}
+	res, err := resolve.Mark(ctx, ms, resolve.MarkRequest{
+		ProjectID: resolvedProjectID,
+		Refs:      refs,
+		// The calling client as the performer, the same provenance every other
+		// mutating tool on this surface records — so the 'resolve' row this
+		// writes reads like every other write in the history rather than like a
+		// row a person typed at a terminal.
+		Provenance: provenanceFor(req),
+		Apply:      true,
+	}, s.logger)
+	if err != nil {
+		// The per-row result is NOT thrown away with the error. MarkResolved is one
+		// transaction, so nothing moved — but "nothing moved" is only half an answer
+		// to an agent: it asked about N named memories and is told a store error
+		// with no statement of which ones, so it cannot tell the user which
+		// memories are still live and cannot retry the ones it can. The CLI prints
+		// its report before raising the same error, for the same reason; this is the
+		// same thing in the one shape a tool result has.
+		return "", fmt.Errorf("ghost_resolve_mark: %w%s", err, markFailureRows(res.Memories))
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Marked %d of %d named memory/memories resolved. The rest are unchanged:\n", res.Marked, res.Resolved)
+	for _, m := range res.Memories {
+		// The default is the CLAIM, not the absence of one, and that ordering is
+		// the point: a row state this switch does not know about must fall
+		// through to a marker that says nothing was stamped. The store re-checks
+		// its eligibility guard at write time, so a row pinned or recategorized
+		// between the read and the write is declined SILENTLY — and an agent told
+		// "marked" for it will tell its user the memory is buried when it is not.
+		marker := "not marked"
+		switch {
+		case m.Marked:
+			marker = "marked"
+		case m.MarkFailed:
+			marker = "FAILED"
+		case m.AlreadyResolved:
+			// A no-op, and not a change: nothing was written on this row's
+			// account, so calling it a mark would be claiming a write that did
+			// not happen.
+			marker = "already resolved"
+		case m.Pinned:
+			marker = "pinned (kept visible on purpose)"
+		case m.ExemptCategory:
+			marker = "standing category (never marked)"
+		case m.Declined:
+			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
+		}
+		fmt.Fprintf(&sb, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, firstLine(m.Content, 70))
+	}
+	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.Declined > 0 {
+		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, or in a standing category is left as it is, and a\n"+
+			"report saying otherwise would be claiming a change that did not happen.\n")
+	}
+	stamped := markedMemoryIDs(res.Memories)
+	if len(stamped) == 0 {
+		sb.WriteString("\nNothing was stamped, so there is nothing to undo.")
+		return sb.String(), nil
+	}
+	// The inverse, rendered by internal/followup — the same renderer the CLI and
+	// ghost_link_withdraw use, so the project-name quoting that decides whether
+	// the command RUNS is decided once. And named as a command, because that is
+	// what it is.
+	cmd, viaFileOnly, unnameable := followup.ResolveCommand(projectID, stamped)
+	if cmd != "" {
+		fmt.Fprintf(&sb, "\nThese are now out of ranked session-start injection. To put them back, a SCOPED repair has to\n"+
+			"clear the stamp, and it is a CLI command rather than a tool call — there is no MCP tool for it, because\n"+
+			"ghost_resolve is the FORWARD pass and would stamp MORE memories rather than restore these. An agent\n"+
+			"with no shell cannot run it and should say so rather than call ghost_resolve:\n  %s\n", cmd)
+	}
+	if len(viaFileOnly) > 0 {
+		// Named rather than dropped, for internal/followup's reason: `--only`
+		// splits on commas, so an id holding one becomes two selectors that name
+		// nothing however it is quoted, and an agent told nothing would run the
+		// command above, clear fewer memories than this call stamped, and report a
+		// repair that did not happen.
+		if cmd == "" {
+			sb.WriteString("\nNo --only command can name these: their ids hold a comma, which --only splits on.")
+		}
+		fmt.Fprintf(&sb, "\n%d id(s) below are reachable only through `ghost resolve --reassess --only-file` with one id per\n"+
+			"line — write that file yourself, or hand the ids to someone with a shell. Do NOT fall back on the same\n"+
+			"command without --only: that re-judges every resolved memory in the project.\n", len(viaFileOnly))
+		for _, id := range viaFileOnly {
+			fmt.Fprintf(&sb, "  %s\n", id)
+		}
+	}
+	if len(unnameable) > 0 {
+		fmt.Fprintf(&sb, "\n%d id(s) can be named by NO surface — the id holds a newline, which both --only (it splits on\n"+
+			"commas) and --only-file (one id per line) cannot carry. These memories stay resolved until the row is\n"+
+			"rewritten: delete and re-save the memory, or re-import it under an id with no newline.\n", len(unnameable))
+		for _, id := range unnameable {
+			fmt.Fprintf(&sb, "  %q\n", id)
+		}
+	}
+	// The context resource carries the ranked surface this call just changed, so
+	// a client subscribed to it would otherwise keep serving a ranking with
+	// memories the agent has buried still in it. Every other mutating handler in
+	// this file pushes that update after its write.
+	if res.Marked > 0 {
+		s.notifyProjectResource(ctx, resolvedProjectID, "context")
+	}
+	return sb.String(), nil
+}
+
+// markFailureRows names the memories a failed mark was asked about, one per line
+// with their first line of text, so an agent reading a store error knows which
+// memories it named and which of them are still live.
+//
+// It says nothing moved, because on this path nothing did: MarkResolved is one
+// transaction, so an error is a rollback. That is worth stating rather than
+// leaving to the agent's inference, since "database is locked" reads like a
+// transient failure to retry — and it must not be retried blindly, because these
+// rows are unchanged and a retry is the operator's decision to make again, not a
+// continuation.
+//
+// Empty when no row was resolved, which is the case where the error came from the
+// request rather than the write — a refused ref writes nothing, so there is no
+// list of memories to report.
+func markFailureRows(rows []resolve.MarkedMemory) string {
+	// Split before rendering, because the two populations need opposite
+	// sentences. On this path resolve.Mark returns every row it resolved and marks
+	// them all failed, including rows it had ALREADY found resolved — nothing was
+	// written for those and nothing was rolled back, and they are not live, so
+	// lumping them in with "unchanged and still live" tells an agent that a memory
+	// Ghost has already buried is live. It relays that to its user and stops
+	// looking. The success path above already gets this state right, and the two
+	// reports disagreeing about one row is the defect.
+	already := make([]resolve.MarkedMemory, 0, len(rows))
+	live := make([]resolve.MarkedMemory, 0, len(rows))
+	for _, m := range rows {
+		if m.AlreadyResolved {
+			already = append(already, m)
+			continue
+		}
+		live = append(live, m)
+	}
+	if len(live) == 0 && len(already) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	if len(live) > 0 {
+		fmt.Fprintf(&b, "\nNothing was marked: the stamp, its history row and its cache clear are one transaction, so this rolled all %d back. These are unchanged and still live:", len(live))
+		for _, m := range live {
+			fmt.Fprintf(&b, "\n  %s  [%s]  %s", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+		}
+	}
+	if len(already) > 0 {
+		if len(live) == 0 {
+			fmt.Fprintf(&b, "\nNothing was written, and nothing needed to be: the %d below were already resolved before this call, so the write declined them and there was nothing to roll back.", len(already))
+		} else {
+			fmt.Fprintf(&b, "\nThe %d below were already resolved before this call: nothing was written for them and nothing was rolled back.", len(already))
+		}
+		for _, m := range already {
+			fmt.Fprintf(&b, "\n  already resolved  %s  [%s]  %s", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+		}
+	}
+	return b.String()
+}
+
+// markedMemoryIDs is the ids THIS call stamped, in the order they were reported.
+// Only stamped rows: the follow-up is for memories this call buried, and a row
+// that was already resolved before it ran is not something the command would
+// change — naming it would point a repair at a memory the pass would report as
+// nothing to do, having cost a classifier call to learn it.
+func markedMemoryIDs(rows []resolve.MarkedMemory) []string {
+	out := make([]string, 0, len(rows))
+	for _, m := range rows {
+		if m.Marked {
+			out = append(out, m.ID)
+		}
+	}
+	return out
 }
 
 // withdrawnTargets is the follow-up's selector list: the targets this call
@@ -1982,6 +2215,31 @@ func (s *Server) registerTools() {
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args linkWithdrawArgs) (*mcp.CallToolResult, any, error) {
 		msg, err := s.withdrawSupersedesLink(ctx, args.ProjectID, args.SourceID, args.TargetID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+		}, nil, nil
+	})
+
+	// ghost_resolve_mark — stamp resolved_at on the memories a caller NAMES.
+	type markArgs struct {
+		ProjectID string   `json:"project_id" jsonschema:"Project name the memories belong to (required for ownership check)"`
+		MemoryIDs []string `json:"memory_ids" jsonschema:"IDs of the memories to mark resolved. Each may be a full memory id or an unambiguous 8-or-more-character prefix of one."`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_resolve_mark",
+		Title:       "Mark named memories resolved",
+		Description: "Mark ONE OR MORE NAMED memories resolved, dropping them from ranked session-start injection while leaving them searchable. Use it when you have read a specific memory and a newer one in the same project and concluded the older is finished work that no pass will ever propose: a note whose claim a newer note says was fixed, a status snapshot the same project has since superseded. Nothing is classified and no LLM is called, so this costs nothing and asks nothing. A ref may be a full memory id or an unambiguous 8-or-more-character prefix of one, as every Ghost report abbreviates them; an ambiguous prefix is refused with the matches listed rather than guessed at, and a memory already resolved is reported as a no-op rather than as a change. Only a memory in the project you named is marked. This is the same write `ghost resolve` performs, through the same store path, and it records a 'resolve' history row naming YOU as the performer — the one resolve row in the database that says a reader decided rather than a classifier judged. It also drops the memory's cached KEEP verdict, so a later pass does not report it as cached and bring it straight back. It is the OPPOSITE direction from a repair: there is no MCP tool for clearing a resolved_at, because `ghost_resolve` is the forward pass and calling it would stamp MORE memories rather than fewer — so this tool's result names `ghost resolve <project> --reassess --only <ids> --apply` as the CLI command that undoes it, scoped to exactly these memories.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(true),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args markArgs) (*mcp.CallToolResult, any, error) {
+		msg, err := s.markMemoriesResolved(ctx, req, args.ProjectID, args.MemoryIDs)
 		if err != nil {
 			return nil, nil, err
 		}
