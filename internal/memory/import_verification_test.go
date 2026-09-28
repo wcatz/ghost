@@ -569,6 +569,98 @@ func TestReplaceNonManualRecordsTheEmptyMomentAsNoClaim(t *testing.T) {
 	}
 }
 
+// verified_at is the THIRD value of the same triple, and it gets the same rule.
+//
+// The readability fix covered the two window boundaries, and this diff binds
+// verified_at through nullIfEmptyPtr — which maps only the empty string. So a
+// source whose verified_at holds text no layout reads was still copied onto the
+// successor verbatim, and readValidity puts it in `unparseable`, so stage 2 emits
+// validity_unparseable for a row the store believes carries a readable claim. The
+// same defect, one column over, in the statement this change edited.
+func TestReplaceNonManualDoesNotWriteAnUnreadableVerifiedAtOntoTheSuccessor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	junk, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the check was recorded as prose once", Source: "mcp", Importance: 0.6,
+		VerifiedAt: stampPtr("last Tuesday, give or take"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if row := successorRowByID(t, s, junk); row.VerifiedAt == nil || *row.VerifiedAt != "last Tuesday, give or take" {
+		t.Fatalf("premise broken: the source holds verified_at %v, not the prose", row.VerifiedAt)
+	}
+
+	const content = "the check is recorded in a form the reader can use"
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{junk},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	var raw sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT verified_at FROM memories WHERE content = ? AND resolved_at IS NULL`, content,
+	).Scan(&raw); err != nil {
+		t.Fatalf("read the successor's raw verified_at: %v", err)
+	}
+	if raw.Valid {
+		t.Errorf("the successor carries verified_at = %q, which no layout reads; "+
+			"readValidity reports it unparseable and stage 2 emits validity_unparseable forever", raw.String)
+	}
+}
+
+// "Readable" has to mean readable by the READER the rule exists to satisfy.
+//
+// ParseStamp accepts the zero instant — time.Parse("0001-01-01 00:00:00") succeeds
+// and yields the zero time — but the reader that consumes the column disagrees on
+// exactly that value: assemble.parseStampPtr maps t.IsZero() to nil, so readValidity
+// records it in `unparseable` and stage 2 emits validity_unparseable for a row the
+// store believes carries a readable claim. Narrow in reach (a hand-edited artifact
+// or a restored snapshot), but a value the reader cannot read is not a stated claim
+// however cleanly it parses.
+func TestReplaceNonManualDoesNotTreatTheZeroInstantAsAStatedWindow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A real window to lose, so the test is not satisfied by dropping everything.
+	real, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the support window is open through next year", Source: "mcp", Importance: 0.6,
+		ValidFrom: stampPtr("2026-01-01 00:00:00"), ValidUntil: stampPtr("2027-03-01 00:00:00"),
+	})
+	if err != nil {
+		t.Fatalf("Create (real): %v", err)
+	}
+	// A row whose window is the zero instant, which parses cleanly and reads as
+	// nothing at all.
+	zero, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the window was recorded as the zero instant", Source: "mcp", Importance: 0.6,
+		ValidFrom: stampPtr("0001-01-01 00:00:00"), ValidUntil: stampPtr("0001-01-01 00:00:01"),
+	})
+	if err != nil {
+		t.Fatalf("Create (zero): %v", err)
+	}
+	if at, ok := ParseStamp("0001-01-01 00:00:00"); !ok || !at.IsZero() {
+		t.Fatalf("premise broken: ParseStamp no longer reports the zero instant as ok-and-zero (ok=%v at=%v)", ok, at)
+	}
+
+	const content = "the support window is open through next year, and the zero-instant note is retired"
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{zero, real},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	row := successorRow(t, s, content)
+	if row.ValidFrom == nil || *row.ValidFrom != "2026-01-01 00:00:00" {
+		t.Errorf("valid_from = %v, want the real window's 2026-01-01 00:00:00 — the zero instant was treated as a stated claim", row.ValidFrom)
+	}
+	if row.ValidUntil == nil || *row.ValidUntil != "2027-03-01 00:00:00" {
+		t.Errorf("valid_until = %v, want the real window's 2027-03-01 00:00:00", row.ValidUntil)
+	}
+}
+
 // successorRowByID is successorRow for a row named by id rather than by content,
 // so a test can inspect the SOURCE's window as a premise.
 func successorRowByID(t *testing.T, s *Store, id string) Memory {

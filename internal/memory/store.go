@@ -2792,7 +2792,15 @@ func readableStampPtr(s sql.NullString) *string {
 	if !s.Valid {
 		return nil
 	}
-	if _, ok := ParseStamp(s.String); !ok {
+	// A zero time is not readable either, even though ParseStamp reports it ok:
+	// time.Parse succeeds on "0001-01-01 00:00:00" and yields the zero time, while
+	// the reader that consumes the column — assemble.parseStampPtr — maps
+	// t.IsZero() to nil, so readValidity records it in `unparseable` and stage 2
+	// emits validity_unparseable. Readable here has to mean readable by the reader
+	// the rule exists to satisfy, not by ParseStamp alone, or this function and
+	// the renderer disagree about exactly one value and the store believes it
+	// carries a claim stage 2 says it does not.
+	if at, ok := ParseStamp(s.String); !ok || at.IsZero() {
 		return nil
 	}
 	return &s.String
@@ -4643,8 +4651,11 @@ type rowClaims struct {
 // the resolution below for the order of preference. verified_at, confidence, agent,
 // session_id and source_ref remain first-source-wins: each is one value with no
 // partner to disagree with, and a half-window problem cannot arise for any of
-// them. A maintainer reading this paragraph must not reimplement the window the
-// per-value way — that is the bug, and the resolution below exists because of it.
+// them. verified_at is a single value by that same reasoning AND is read by the
+// same reader as the two boundaries, so it is judged by readability too rather
+// than for pairing alone. A maintainer reading this paragraph must not
+// reimplement the window the per-value way — that is the bug, and the resolution
+// below exists because of it.
 //
 // It is the SOURCES rather than the emission alone because an emission carries none
 // of this: reflectMemoriesToMemory builds it from the consolidator's output and has
@@ -4708,8 +4719,13 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 			// Exactly one boundary: a genuine half, and the fallback's source.
 			firstHalfWindow, haveHalf = candidate, true
 		}
-		if claims.verifiedAt == nil && verifiedAt.Valid {
-			claims.verifiedAt = &verifiedAt.String
+		// verified_at is the third value of the same triple and is read by the same
+		// reader, so it takes the same rule: a value no layout reads is not a stated
+		// verification. nullIfEmptyPtr at the INSERT maps only the empty string, so
+		// without this a source's prose in the column was copied onto the successor
+		// verbatim and stage 2 reported validity_unparseable forever.
+		if claims.verifiedAt == nil {
+			claims.verifiedAt = readableStampPtr(verifiedAt)
 		}
 		if claims.confidence == nil && confidence.Valid {
 			f := confidence.Float64
