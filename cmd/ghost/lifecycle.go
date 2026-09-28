@@ -1814,6 +1814,30 @@ func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory
 	return embedded, expired
 }
 
+// runSupersede implements `ghost supersede <project> [--apply]` — the creation
+// half of staleness-aware ranking. It proposes newer→older 'supersedes' links
+// over the project's live memories (cosine-similar candidates, a deterministic
+// imperative veto, then CLI-harness confirmation) and, with --apply, writes
+// them. Dry-run by default. Re-runnable: it self-heals after `ghost reflect`
+// cascade-deletes links. Consumed by search only when SupersedeDemote is set. A
+// reversed verdict is reported and refused, never written (#641); a pair whose
+// older note states a rule the newer note never retires is vetoed for free
+// (#686). See docs/benchmarks.md Phase 3.
+//
+// --withdraw and --reassess are the two repair modes, and they are dispatched
+// before anything else because --withdraw makes NO harness call: it is the
+// operator's own judgement, so a machine with no detectable calling harness can
+// still repair an edge, and nothing about it is billed. Both are dry-run by
+// default; the --withdraw report also names the `ghost resolve --reassess --apply`
+// step that clears a resolution a withdrawn edge caused, which is the half of
+// this repair the graph cannot do on its own.
+//
+// Which leaves the creation path, and the one thing it does before any of that is
+// embed the project's memories that have no vector yet (embedSupersedeCorpus).
+// It has to: candidates are proposed by cosine, and those vectors are written by
+// the embedding worker in another process, so a pass started seconds after a save
+// would otherwise report an empty result for a corpus the operator can see (#716).
+// The other two modes read no vectors, which is why the pre-scan sits after them.
 func runSupersede() {
 	projectName, source, apply, reassess, threshold, withdrawPairs, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
