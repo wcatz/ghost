@@ -204,6 +204,17 @@ func OpencodeMajorVersion(out string) int {
 // answers such a request with 403 provider.auth ("free tier can only be used
 // from within OpenCode"), which failed every lifecycle phase. An empty MCP map
 // and an empty plugin list keep the user's servers and plugins out of the child.
+//
+// `opencode run` has no flag to disable tools — its only permission flag is
+// `--auto`, which moves in the WRONG direction (it approves everything not
+// explicitly denied) — so the config is the only lever, which is why this lives
+// in the isolated tree Ghost already writes and not in argv.
+//
+// The wildcard is what makes it total, and opencode's own defaults are the
+// reason it is needed: every permission defaults to "allow" when unset, so a
+// config naming a few tools leaves the rest open. A name opencode adds later
+// (a skill, an LSP query, a `question` call) is covered by `*` on the day it
+// ships rather than on the day someone remembers it.
 const openCodeAskConfig = `{
   "$schema": "https://opencode.ai/config.json",
   "permission": {
@@ -216,7 +227,9 @@ const openCodeAskConfig = `{
 // openCodeDenyConfig is the policy for opencode V1, whose handling of an ask in
 // a non-interactive run has not been verified: the wildcard permission denies
 // every tool, and the explicit tool map keeps older versions from exposing a
-// built-in tool that predates the wildcard rule.
+// built-in tool that predates the wildcard rule (and is still what opencode
+// documents as the legacy spelling of the same policy). The `mcp_*` rule closes
+// the MCP half for a version whose wildcard predates namespaced tool names.
 const openCodeDenyConfig = `{
   "$schema": "https://opencode.ai/config.json",
   "permission": {

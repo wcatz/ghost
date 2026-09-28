@@ -40,17 +40,7 @@ func (c *GooseClient) run(ctx context.Context, prompt string) (string, error) {
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 		defer cancel()
 	}
-	// --no-profile prevents the configured developer/MCP extensions from
-	// loading; --no-session keeps the untrusted prompt out of Goose's state.
-	args := []string{"run", "-q", "--no-profile", "--no-session"}
-	// The prompt goes on stdin, never as an argv element (issue #560): the
-	// kernel caps one argument at 32 pages and a reflect prompt is built from
-	// up to 2000 memories of 8000 bytes, so a large project produced a prompt
-	// that failed the spawn with E2BIG. `-i -` is goose's documented
-	// instructions-from-stdin form, and it lands in the same place a text
-	// argument does — both become the run's input contents.
-	args = append(args, "-i", "-")
-	cmd, release, err := c.subprocessEnv(ctx, args)
+	cmd, release, err := c.subprocessEnv(ctx, gooseInvocationArgs())
 	if err != nil {
 		return "", err
 	}
@@ -63,6 +53,31 @@ func (c *GooseClient) run(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("goose run: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// gooseInvocationArgs is the whole argv of a `goose run` turn, kept as a named
+// value so the no-tool policy can be pinned as a golden (a substring grep over
+// the joined argv would pass on a flag that arrived in the wrong position or
+// with the wrong value).
+//
+// goose has NO flag that turns tools off. Its documented extension options only
+// ADD extensions (`--with-extension`, `--with-builtin`,
+// `--with-streamable-http-extension`), and `--no-profile` governs the configured
+// profile, not which extensions load. So the restriction is not an argv element
+// at all: it is GOOSE_MODE, set on the child environment in
+// configureGooseIsolation, where goose's own reference says "auto" (the
+// default) is fully autonomous and "chat" is the mode that engages in chat with
+// no extension use. The argv here is therefore only the rest of the policy —
+// no profile, no session — and the two must be read together.
+//
+// `-i -` is goose's documented instructions-from-stdin form (issue #560): the
+// prompt must never be an argv element, because the kernel caps one argument at
+// 32 pages and a reflect prompt is built from up to 2000 memories of 8000
+// bytes, so a large project produced a prompt that failed the spawn with E2BIG.
+// `-` lands in the same place a text argument does — both become the run's
+// input contents.
+func gooseInvocationArgs() []string {
+	return []string{"run", "-q", "--no-profile", "--no-session", "-i", "-"}
 }
 
 // subprocessEnv builds the goose child command and confines it, returning the
@@ -102,9 +117,16 @@ func (c *GooseClient) subprocessEnv(ctx context.Context, args []string) (*exec.C
 	return cmd, func() { _ = os.RemoveAll(dir) }, nil
 }
 
+// gooseNoToolsMode is goose's tool-execution mode for a harness child. goose
+// documents "chat" as the mode in which it only engages in chat, with no
+// extension use and no file modification, against a default of "auto" (fully
+// autonomous). It is set on the child environment rather than passed as a flag
+// because goose has no flag for it: its extension options only ADD extensions.
+const gooseNoToolsMode = "chat"
+
 // configureGooseIsolation gives the goose child a home that cannot contain a
-// discoverable plugin package, and keeps it pointed at the configuration it
-// authenticates from.
+// discoverable plugin package, keeps it pointed at the configuration it
+// authenticates from, and turns its tools off (GOOSE_MODE, below).
 //
 // goose discovers user-scope Agent Plugins under $HOME/.agents/plugins/, and
 // that path is home-relative BY SPECIFICATION rather than XDG-relative, so
@@ -176,6 +198,18 @@ func configureGooseIsolation(cmd *exec.Cmd) error {
 	env = setHarnessEnvValue(env, "USERPROFILE", home)
 	env = setHarnessEnvValue(env, "HOMEDRIVE", "")
 	env = setHarnessEnvValue(env, "HOMEPATH", "")
+	// The no-tools half of the policy, and the only one goose actually
+	// implements. GOOSE_MODE is goose's tool-execution mode; its own reference
+	// lists "auto" (the default, "full file modification, extension usage, edit,
+	// create and delete files freely") and "chat" (engages in chat with no
+	// extension use), and environment variables take precedence over
+	// config.yaml — so this overrides whatever mode the user's own config sets,
+	// and it is set rather than inherited so nothing has to be left off a list.
+	// That is why GOOSE_MODE is deliberately absent from harnessEnv's goose
+	// allowlist: an inherited value could only ever weaken it, and dropping it
+	// on the floor returns the child to goose's autonomous default, which is
+	// the failure this line exists to prevent.
+	env = setHarnessEnvValue(env, "GOOSE_MODE", gooseNoToolsMode)
 	confined, err := confineGoosePathRoot(home, env)
 	if err != nil {
 		return err

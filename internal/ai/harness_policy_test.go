@@ -38,6 +38,7 @@ func setHarnessPolicyParentEnv(t *testing.T) {
 		"CODEX_HOME":            "/decoy/codex",
 		"GOOSE_PATH_ROOT":       "/decoy/goose",
 		"OPENCODE_API_KEY":      "opencode-secret",
+		"GOOSE_MODE":            "auto",
 		"HOME":                  "/decoy/home",
 		"USERPROFILE":           "/decoy/home",
 		"XDG_CONFIG_HOME":       "/decoy/config",
@@ -95,6 +96,101 @@ func TestConfigureOpenCodeIsolationWritesAskConfig(t *testing.T) {
 	}
 	if len(config.MCP) != 0 || len(config.Plugin) != 0 {
 		t.Errorf("MCP/plugins survived isolation: mcp=%v plugin=%v", config.MCP, config.Plugin)
+	}
+}
+
+// TestHarnessInvocationArgsAreGoldens pins the exact argv each harness builds.
+// A per-flag grep is what let a whole tool surface go missing: it passes when the
+// flags it checks are present and says nothing about a flag that was never added
+// at all. The full slice is the assertion, so a dropped or reordered element is
+// a diff a reviewer reads rather than a gap a test waves through.
+//
+// These are the flags as the harnesses' own help and config registries document
+// them, so a rename upstream shows up here as a failing golden.
+func TestHarnessInvocationArgsAreGoldens(t *testing.T) {
+	cases := []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{
+			name: "claude",
+			got: func() []string {
+				args, err := claudeInvocationArgs(claudeCapabilities{
+					safeMode: true, restricted: true, strictMCP: true,
+					tools: true, disallowedTools: true,
+					disableSlash: true, settingSources: true,
+				})
+				if err != nil {
+					t.Fatalf("claudeInvocationArgs: %v", err)
+				}
+				return args
+			}(),
+			want: []string{
+				"-p",
+				"--safe-mode",
+				"--restricted",
+				"--strict-mcp-config",
+				"--tools", "",
+				"--disallowedTools", "mcp__*",
+				"--disable-slash-commands",
+				"--setting-sources", "project,local",
+			},
+		},
+		{
+			name: "codex",
+			got:  codexInvocationArgs(),
+			want: []string{
+				"exec",
+				"--sandbox", "read-only",
+				"--ignore-user-config",
+				"--ignore-rules",
+				"--skip-git-repo-check",
+				"--ephemeral",
+				"-c", "features.shell_tool=false",
+				"-c", "features.unified_exec=false",
+				"-c", "features.view_image=false",
+				"-c", "features.apps=false",
+				"-c", "features.plugins=false",
+				"-c", "features.tool_suggest=false",
+				"-c", "features.skill_mcp_dependency_install=false",
+				"-c", "features.remote_plugin=false",
+				"-c", "features.hooks=false",
+				"-c", "features.multi_agent=false",
+				"-c", "agents.enabled=false",
+				"-c", `web_search="disabled"`,
+				"-",
+			},
+		},
+		{
+			name: "goose",
+			got:  gooseInvocationArgs(),
+			want: []string{"run", "-q", "--no-profile", "--no-session", "-i", "-"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.Join(tc.got, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Errorf("argv =\n%q\nwant\n%q", tc.got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGooseNoToolsModeIsChat: goose has no flag for this (its extension options
+// only ADD extensions), so the restriction is the GOOSE_MODE environment
+// variable, and its value is load-bearing. "auto" is goose's own default and
+// means it approves tool calls; "chat" is the mode it documents as no tool calls
+// at all. A typo or a future edit that picks any other value re-opens the
+// developer extension's shell on a prompt built from memory text.
+func TestGooseNoToolsModeIsChat(t *testing.T) {
+	if gooseNoToolsMode != "chat" {
+		t.Fatalf("gooseNoToolsMode = %q, want chat", gooseNoToolsMode)
+	}
+	// And it must not be settable from the parent: the allowlist drops it, so a
+	// user with GOOSE_MODE=auto exported cannot weaken the child.
+	if _, ok := namesOf(harnessEnv([]string{"PATH=/usr/bin", "GOOSE_MODE=auto"}, harnessGoose))["GOOSE_MODE"]; ok {
+		t.Error("GOOSE_MODE passed through the allowlist, so a parent value could override the child's no-tools mode")
 	}
 }
 
@@ -244,6 +340,16 @@ case "$args" in *" --safe-mode"*) ;; *) echo "missing --safe-mode" >&2; exit 1;;
 case "$args" in *" --strict-mcp-config"*) ;; *) echo "missing --strict-mcp-config" >&2; exit 1;; esac
 case "$args" in *" --disable-slash-commands"*) ;; *) echo "missing --disable-slash-commands" >&2; exit 1;; esac
 case "$args" in *" --tools "*) ;; *) echo "missing --tools" >&2; exit 1;; esac
+# The EMPTY value is the restriction, and "$*" cannot show it: a missing value
+# and an empty one join to the same string. So the child walks its own argv and
+# checks the element AFTER --tools, which a tool name would make non-empty.
+tools_value=missing
+prev=
+for arg in "$@"; do
+  [ "$prev" = "--tools" ] && tools_value="$arg"
+  prev="$arg"
+done
+[ "$tools_value" = "" ] || { echo "--tools value is '$tools_value', want empty (all tools disabled)" >&2; exit 1; }
 case "$args" in *" --disallowedTools mcp__*"*) ;; *) echo "missing MCP deny rule" >&2; exit 1;; esac
 printf '%s' '{"memories":[]}'
 `)
@@ -268,12 +374,26 @@ done
 [ -z "$OPENCODE_API_KEY" ] || { echo "OpenCode key leaked to Codex" >&2; exit 1; }
 [ -z "$CLAUDE_CONFIG_DIR" ] || { echo "Claude config leaked to Codex" >&2; exit 1; }
 args="$*"
+# Both exec tools, not one: codex registers either the unified PTY-backed tool
+# or the one-shot exec, so disabling only features.shell_tool leaves the other.
+case "$args" in *"features.shell_tool=false"*) ;; *) echo "shell tool not disabled" >&2; exit 1;; esac
+case "$args" in *"features.unified_exec=false"*) ;; *) echo "unified exec not disabled" >&2; exit 1;; esac
+# A local file read the read-only sandbox does not cover.
+case "$args" in *"features.view_image=false"*) ;; *) echo "view_image not disabled" >&2; exit 1;; esac
+# Each can contribute a tool: a local plugin's, an offered install, a connector,
+# and an MCP server installed on demand (which runs a command).
+case "$args" in *"features.plugins=false"*) ;; *) echo "plugins not disabled" >&2; exit 1;; esac
+case "$args" in *"features.tool_suggest=false"*) ;; *) echo "tool_suggest not disabled" >&2; exit 1;; esac
+case "$args" in *"features.apps=false"*) ;; *) echo "apps not disabled" >&2; exit 1;; esac
+case "$args" in *"features.skill_mcp_dependency_install=false"*) ;; *) echo "on-demand MCP install not disabled" >&2; exit 1;; esac
+case "$args" in *"features.remote_plugin=false"*) ;; *) echo "remote plugin not disabled" >&2; exit 1;; esac
+case "$args" in *"features.hooks=false"*) ;; *) echo "hooks not disabled" >&2; exit 1;; esac
+case "$args" in *"features.multi_agent=false"*) ;; *) echo "multi_agent not disabled" >&2; exit 1;; esac
+case "$args" in *"agents.enabled=false"*) ;; *) echo "agents not disabled" >&2; exit 1;; esac
 case "$args" in *" --ignore-user-config"*) ;; *) echo "missing --ignore-user-config" >&2; exit 1;; esac
 case "$args" in *" --ignore-rules"*) ;; *) echo "missing --ignore-rules" >&2; exit 1;; esac
 case "$args" in *" --skip-git-repo-check"*) ;; *) echo "missing --skip-git-repo-check" >&2; exit 1;; esac
 case "$args" in *" --ephemeral"*) ;; *) echo "missing --ephemeral" >&2; exit 1;; esac
-case "$args" in *"features.shell_tool=false"*) ;; *) echo "shell feature not disabled" >&2; exit 1;; esac
-case "$args" in *"features.unified_exec=false"*) ;; *) echo "unified exec not disabled" >&2; exit 1;; esac
 case "$args" in *"web_search=\"disabled\""*) ;; *) echo "web search not disabled" >&2; exit 1;; esac
 printf '%s' 'KEEP'
 `)
@@ -302,6 +422,11 @@ case "$GOOSE_PATH_ROOT" in "/decoy/goose") echo "GOOSE_PATH_ROOT passed through 
 args="$*"
 case "$args" in *" --no-profile"*) ;; *) echo "missing --no-profile" >&2; exit 1;; esac
 case "$args" in *" --no-session"*) ;; *) echo "missing --no-session" >&2; exit 1;; esac
+# goose's own answer to "run a turn with no tools" is GOOSE_MODE=chat, where it
+# does not enable extensions at all. The parent is set to the permissive
+# "auto" (the goose default), so a child that merely inherited it would run
+# every configured extension's tools unattended.
+[ "$GOOSE_MODE" = "chat" ] || { echo "GOOSE_MODE=$GOOSE_MODE, want chat (extensions off)" >&2; exit 1; }
 printf '%s' 'KEEP'
 `)
 
