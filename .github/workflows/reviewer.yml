@@ -406,7 +406,7 @@ jobs:
           # our prompt's control.
           mkdir -p .review-context
           git fetch --depth=1 origin "${GITHUB_BASE_REF}" 2>/dev/null || true
-          for f in best_practices.md CLAUDE.md; do
+          for f in best_practices.md CLAUDE.md docs/invariants.md; do
             git show "origin/${GITHUB_BASE_REF}:${f}" 2>/dev/null \
               >> .review-context/conventions.md || true
           done
@@ -485,6 +485,7 @@ jobs:
           # e.g. Agents.md/claude.md would otherwise survive this sweep.
           find . -path ./.review-context -prune -o \
             \( -iname AGENTS.md -o -iname CLAUDE.md -o -iname .mcp.json \
+            -o -ipath ./docs/invariants.md \
             -o -iname opencode.json -o -iname opencode.jsonc \
             -o -iname .opencode \) -exec rm -rf {} + 2>/dev/null || true
 
