@@ -14,16 +14,19 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 	"github.com/wcatz/ghost/internal/repo"
 	"github.com/wcatz/ghost/internal/resolve"
+	"github.com/wcatz/ghost/internal/supersede"
 )
 
 // Embedder generates vector embeddings for text. Optional — when nil, search falls back to FTS only.
@@ -251,6 +254,19 @@ type resolveCapableStore interface {
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
 }
 
+// linkCapableStore narrows provider.MemoryStore's concrete backing store to what
+// ghost_link_withdraw needs beyond it: the ref resolution, the live-edge read
+// scoped to the project that owns the edge, and the invalidation that writes the
+// `unsupersede` history row. None of those three is on provider.MemoryStore, so
+// s.store is type-asserted to this interface at call time; *memory.Store
+// satisfies it — the same shape resolveCapableStore and historyCapableStore
+// take. The fourth method it embeds, GetByIDs, IS on provider.MemoryStore and
+// needs no assertion: the result quotes the memory each edge was burying, and
+// that read is one the interface already offers.
+type linkCapableStore interface {
+	supersede.WithdrawStore
+}
+
 // historyCapableStore narrows provider.MemoryStore's concrete backing store to the
 // two methods ghost_memory_delete needs for the redaction half of its job, which
 // provider.MemoryStore does not carry. *memory.Store satisfies it.
@@ -277,10 +293,17 @@ type asOfCapableStore interface {
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
-// memory and task IDs), mirroring cmd/ghost/main.go's local `short` closure.
+// memory and task IDs), mirroring cmd/ghost's package-level shortID.
+//
+// By characters, not bytes: an id is not necessarily hex (`ghost import` writes
+// an artifact's ids verbatim), and `id[:8]` on a CJK id returns invalid UTF-8 — a
+// preview line that cannot be read, and a selector that can never resolve. The
+// eight-hex ids Ghost mints have byte length == rune count, so this changes
+// nothing for them and is the difference between working and nonsense for the
+// rest.
 func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
+	if utf8.RuneCountInString(id) > 8 {
+		return string([]rune(id)[:8])
 	}
 	return id
 }
@@ -792,6 +815,181 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	s.notifyResourceUpdated(ctx, "ghost://memories/global")
 	return fmt.Sprintf("Memory promoted to global scope (id: %s).", memoryID), nil
+}
+
+// withdrawSupersedesLink is the handler behind ghost_link_withdraw. It is the
+// same core `ghost supersede --withdraw` calls (internal/supersede.Withdraw), so
+// an agent and an operator repairing an edge take the same path, resolve the
+// same refs, and leave the same `unsupersede` history row.
+//
+// Unlike the CLI it does not preview: an agent calls a tool to make a change, and
+// a tool whose answer is "here is what I would do" is one call the agent has to
+// remember to make twice. The graph is the thing that survives being wrong about
+// it — the edge is soft-invalidated, not deleted, and a later pass that still
+// judges the pair a supersession re-creates it.
+//
+// The result names the memory the edge was burying and the step that un-hides it,
+// because a caller that sees "withdrew 1 edge" and no more has been told the
+// repair finished when half of it has. That is also the reason the message ends
+// there: an agent that reports the repair as complete will tell its user the
+// memory is back, which it is not until the resolve pass runs. The reminder
+// belongs in the tool's answer rather than in guidance about how to use it —
+// guidance concatenated into that answer is text the agent may act on, and a
+// clause addressed to the implementer inside it reads as an instruction to the
+// agent rather than as part of the answer.
+func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID, targetID string) (string, error) {
+	if projectID == "" || sourceID == "" || targetID == "" {
+		return "", fmt.Errorf("project_id, source_id and target_id are required")
+	}
+	resolvedProjectID, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
+	if resolvedProjectID == "" {
+		return "", fmt.Errorf("project %q not found", projectID)
+	}
+	ws, ok := s.store.(linkCapableStore)
+	if !ok {
+		return "", fmt.Errorf("ghost_link_withdraw: store does not support link withdrawal")
+	}
+	res, err := supersede.Withdraw(ctx, ws, resolvedProjectID, []supersede.WithdrawPair{{Source: sourceID, Target: targetID}}, true, s.logger)
+	if err != nil {
+		return "", fmt.Errorf("ghost_link_withdraw: %w", err)
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Withdrew %d of %d named supersedes link(s).\n", res.Withdrawn, res.Resolved)
+	for _, l := range res.Links {
+		marker := "withdrew"
+		switch {
+		case l.Withdrawn:
+		case l.NotAttempted:
+			marker = "not reached"
+		case l.WithdrawalFailed:
+			marker = "FAILED"
+		default:
+			marker = "already gone"
+		}
+		fmt.Fprintf(&sb, "  %s  %s -> %s  [%s]  %s\n", marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, firstLine(l.TargetText, 70))
+	}
+	targets := withdrawnTargets(res.Links)
+	if len(targets) == 0 {
+		// Every row was one this call never wrote and never reached, so every
+		// edge is still live and resolve's floor still defends every target: there
+		// is nothing repairable to name. (A row a CONCURRENT pass took is not this
+		// case — its target is repairable, which is why withdrawnTargets keeps it.)
+		sb.WriteString("\nNothing was orphaned by this call: the edges it named are still live, so no target is " +
+			"repairable yet. A target stamped resolved while an edge still points at it is held down deliberately, " +
+			"and clearing it is what withdrawing that edge is for.")
+		return sb.String(), nil
+	}
+	// The repair as a CLI COMMAND, rendered by the same helper the CLI uses, and
+	// named as a command rather than as a tool call: there is no MCP surface for
+	// this repair. `ghost_resolve` is the FORWARD pass — it stamps resolved_at on
+	// confirmed evidence — and it takes no id selector, so an agent told to call it
+	// here would bury MORE memories and pay a harness call for it. The repair lives
+	// at `ghost resolve --reassess --only … --apply`, and the project name goes
+	// through the renderer's quoting, which is what makes the command run at all.
+	//
+	// Scoped, and named as such: an unscoped repair re-judges every resolved memory
+	// in the project, and #702 measured that proposing to un-hide 143 rows on a
+	// real store, about 35% of them stale.
+	//
+	// It ends at the instruction, with nothing about how to word it to the user:
+	// this string is the tool's whole answer, and a clause addressed to the
+	// implementer inside it reads as an instruction to the agent reading it. That
+	// guidance lives in this function's doc comment instead.
+	cmd, viaFileOnly, unnameable := followup.ResolveCommand(projectID, targets)
+	// The heading says "a SCOPED repair" because the command below it is scoped —
+	// so when no id is carriable there is no command, and the sentence has to
+	// change rather than dangle over an empty line. The unscoped form is never
+	// printed: it is the project-wide re-judge #698 measured, and an agent handed
+	// it verbatim would run the one command that does the most harm.
+	if cmd != "" {
+		fmt.Fprintf(&sb, "\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of\n"+
+			"ranked injection until a SCOPED repair clears it. There is no MCP tool for that repair, so it is a CLI\n"+
+			"command — an agent with no shell cannot run it, and should say so rather than reach for ghost_resolve,\n"+
+			"which is the forward pass and would stamp more memories resolved:\n  %s\n", cmd)
+		sb.WriteString("That pass honours a live edge as a floor, which is why the edge has to go first.")
+	}
+	if len(viaFileOnly) > 0 {
+		// Named rather than omitted, because this surface writes no --only-file and
+		// the command cannot carry these ids at all: `--only` splits on commas, so
+		// an id holding one becomes two selectors that name nothing however it is
+		// quoted. An agent told nothing would run the command above, judge fewer
+		// memories than this call orphaned, and report a repair that did not
+		// happen. The id is given verbatim so a person can put it in a file
+		// themselves — one id per line, and readOnlySelectors never splits.
+		if cmd == "" {
+			sb.WriteString("\nNo --only command can name the target: its id holds a comma, which --only splits on.")
+		}
+		// The unscoped repair is described, never written out: a copy-pasteable
+		// line that re-judges every resolved memory in the project is exactly what
+		// this answer must not hand an agent.
+		fmt.Fprintf(&sb, "\n%d id(s) below are reachable only through `ghost resolve --reassess --only-file` with\n"+
+			"one id per line — write that file yourself, or hand the ids to someone with a shell. Do NOT fall\n"+
+			"back on the same command without --only: that re-judges every resolved memory in the project.\n",
+			len(viaFileOnly))
+		for _, id := range viaFileOnly {
+			fmt.Fprintf(&sb, "  %s\n", id)
+		}
+	}
+	if len(unnameable) > 0 {
+		// The file is one id per line, so an id holding a newline is two selectors
+		// there too. No surface can name it, and the only honest answer says so:
+		// an agent that believes otherwise leaves a memory resolved with nothing
+		// able to clear it.
+		fmt.Fprintf(&sb, "\n%d id(s) can be named by NO surface — the id holds a newline, which both --only (it\n"+
+			"splits on commas) and --only-file (one id per line) cannot carry. These memories stay resolved\n"+
+			"until the row is rewritten: delete and re-save the memory, or re-import it under an id with no\n"+
+			"newline.\n", len(unnameable))
+		for _, id := range unnameable {
+			fmt.Fprintf(&sb, "  %q\n", id)
+		}
+	}
+	if cmd == "" && len(viaFileOnly) == 0 && len(unnameable) == 0 {
+		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
+	}
+	// Invalidating a live edge changes what the context resource serves: the
+	// supersede ranking guard demotes an edge's target while the edge stands, so
+	// ghost://project/<id>/context is stale the moment this call returns. Every
+	// other mutating handler in this file pushes that update after its write, and
+	// this was the only write path that did not — a client subscribed to the
+	// resource would keep serving a ranking the withdrawal just invalidated.
+	if res.Withdrawn > 0 {
+		s.notifyProjectResource(ctx, resolvedProjectID, "context")
+	}
+	return sb.String(), nil
+}
+
+// withdrawnTargets is the follow-up's selector list: the targets this call
+// withdrew, deduplicated, in full. Full ids and not the eight-character
+// abbreviations the reports use — a selector is a repair about to be run, and a
+// prefix that is unambiguous now may not be after the caller's next save.
+//
+// Only rows that were actually withdrawn are in it. A row a concurrent pass took
+// first orphaned nothing, so naming it would point a repair at a target that has
+// no live edge to clear; a row a failed write or an unreached row is in no state
+// to have orphaned anything either.
+func withdrawnTargets(links []supersede.WithdrawnLink) []string {
+	var out []string
+	seen := make(map[string]bool, len(links))
+	for _, l := range links {
+		// A row this call never WROTE still counts when its edge is gone, because
+		// a concurrent pass that took it first left the same state behind: no live
+		// edge, and a resolved_at nothing defends any more. Dropping it would leave
+		// a memory that is just as repairable out of the list the caller is about to
+		// run. A row never reached, or one whose write failed, is the opposite case:
+		// its edge is STILL live, so the target is still held down on purpose and
+		// naming it would send the repair after a row its own floor reports as
+		// still asserted.
+		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
+			continue
+		}
+		seen[l.TargetID] = true
+		out = append(out, l.TargetID)
+	}
+	return out
 }
 
 // purgeDeletedMemoryHistory answers ghost_memory_delete for an id whose row is
@@ -1732,6 +1930,32 @@ func (s *Server) registerTools() {
 			fmt.Fprintf(&sb, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}}}, nil, nil
+	})
+
+	// ghost_link_withdraw — remove one named 'supersedes' edge.
+	type linkWithdrawArgs struct {
+		ProjectID string `json:"project_id" jsonschema:"Project name the superseding memory belongs to (required for ownership check)"`
+		SourceID  string `json:"source_id" jsonschema:"ID of the SUPERSEDING memory — the newer note the edge points FROM. A full id, or 8 or more characters of one."`
+		TargetID  string `json:"target_id" jsonschema:"ID of the SUPERSEDED memory — the older note the edge points AT, the one being buried. A full id, or 8 or more characters of one."`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_link_withdraw",
+		Title:       "Withdraw a supersedes link",
+		Description: "Withdraw ONE wrong 'supersedes' link, naming the newer memory it points from and the older memory it points at. Use it when a supersession is wrong for a reason no classifier can see — the newer note is not a replacement of the older one at all, or the 'newer' note is the stale one. The link is not informational: ranking demotes its target and resolve's supersedes piggyback stamps resolved_at on it, so a wrong edge takes a live memory out of every later session, and a repair path is the only way to undo it — the `ghost supersede --reassess` CLI pass withdraws only what the current rules reject, so an edge they still accept needs this. a ref may be a full memory id or an unambiguous 8-or-more-character prefix of one, as every Ghost report abbreviates them. A pair with no live link is an error and nothing is written; an ambiguous prefix is refused with the matches listed rather than guessed at. The withdrawal writes the 'unsupersede' history row, so the audit shows the claim and the withdrawal, and it is soft — a later pass that still judges the pair a supersession re-creates the edge. It does NOT un-bury the target by itself: the resolved_at the edge caused stays until a SCOPED `ghost resolve <project> --reassess --only <those ids> --apply` clears it, and the result prints that command — scoped, because an unscoped repair re-judges every resolved memory in the project. That repair is a CLI command, not a tool: ghost_resolve is the FORWARD pass and would stamp MORE memories resolved. Do not use this to retire a memory — the target stays searchable and editable, which is the point.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(true),
+			IdempotentHint:  false,
+			OpenWorldHint:   boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args linkWithdrawArgs) (*mcp.CallToolResult, any, error) {
+		msg, err := s.withdrawSupersedesLink(ctx, args.ProjectID, args.SourceID, args.TargetID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+		}, nil, nil
 	})
 
 	// ghost_task_list — list project tasks.

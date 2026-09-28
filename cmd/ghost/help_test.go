@@ -521,6 +521,58 @@ func TestHelp_ValueFlagsSkipTheirValue(t *testing.T) {
 	}
 }
 
+// TestHelp_MultiOperandValueFlagSkipsBothOperands: `supersede --withdraw` takes
+// TWO operands, so the help scan has to get past both before it decides what the
+// next token means. The generic loop above drives every registered flag with ONE
+// value, which is the right generic case and the wrong one here — with a single
+// "value" the scan lands on the help token and passes, so nothing covered the
+// second operand. That matters because the scan is what decides whether a reader's
+// question is answered or their command runs: if the target id were read as a
+// flag, `-h` behind it would be skipped as an unknown flag and the withdrawal
+// would run.
+//
+// wantsHelp is driven directly rather than through dispatchCommand, because the
+// inline-help path exits the process and a test cannot survive it; the argv this
+// asserts is the one the binary was checked against (it prints the usage and
+// exits 0).
+//
+// One boundary this does NOT claim: `--withdraw <src> -h`, with the target
+// missing, leaves the help token in the TARGET slot and the scan answers it, so
+// the reader gets usage rather than the parser's "needs a source id and a target
+// id". The scan records value flags as a set, not with an arity, so a two-token
+// flag is indistinguishable from a one-token one here; the answer is a harmless
+// one and saying so beats implying the scan models the flag's shape.
+func TestHelp_MultiOperandValueFlagSkipsBothOperands(t *testing.T) {
+	const command = "supersede"
+	if !valueFlagRegistered(t, command, "--withdraw") {
+		t.Fatal("--withdraw is not registered as a value flag, so this test would pass for the wrong reason")
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"help after both operands", []string{"myproj", "--withdraw", "aaaabbbb", "ccccdddd", "-h"}, true},
+		{"long help after both operands", []string{"myproj", "--withdraw", "aaaabbbb", "ccccdddd", "--help"}, true},
+		{"the operands are not help requests", []string{"myproj", "--withdraw", "aaaabbbb", "ccccdddd"}, false},
+		{"an operand that looks like help is still the operand", []string{"myproj", "--withdraw", "-h", "ccccdddd"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wantsHelp(command, tc.args); got != tc.want {
+				t.Errorf("wantsHelp(%q, %v) = %v, want %v", command, tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// valueFlagRegistered reports whether command is registered with flag, so a test
+// that exercises the flag's handling cannot pass because the flag is absent.
+func valueFlagRegistered(t *testing.T, command, flag string) bool {
+	t.Helper()
+	_, ok := helpValueFlagsByCommand[command][flag]
+	return ok
+}
+
 // valueFlagOwners maps each function in this package that parses a value flag to
 // the subcommand paths whose help scan has to honour those flags. One function
 // can serve two commands (parseMCPClient is how both `mcp init` and `mcp status`
@@ -696,15 +748,23 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 // advancesIndex reports whether cc advances the argument index — the signal
 // that a matched flag consumed the following token instead of being a
 // boolean flag of its own. The signal is tied to the index variable itself:
-// an increment (`i++`), an `+= 1`, or a `+ 1` only counts when its
-// identifier is in indexed — the identifiers appearing inside IndexExprs in
-// the clause or its switch tag (`args[i]`, `os.Args[i]`, `args[i+1]`) — and
-// a reslice only counts when it re-slices one of them with a literal low
-// bound (`args = args[1:]`). Looser rules would mark unrelated clauses —
-// `counts[m.Category]++`, `s = s[:i]` — as value-flag parsers, and the fix
-// this test then suggests (register the flag) would make wantsHelp skip the
-// token after a BOOLEAN flag, so `-h` behind it would run the command
-// instead of printing usage: the very bug the guard exists to prevent.
+// an increment (`i++`), an `+= n` for any positive n, or a `+ n` only counts
+// when its identifier is in indexed — the identifiers appearing inside
+// IndexExprs in the clause or its switch tag (`args[i]`, `os.Args[i]`,
+// `args[i+1]`) — and a reslice only counts when it re-slices one of them
+// with a literal low bound (`args = args[1:]`).
+//
+// `n` rather than only 1, because a flag can take MORE THAN ONE token: the
+// `supersede --withdraw <source> <target>` clause advances `i += 2`, which is
+// the idiom rather than an accident, and a guard that only knew `+= 1` would
+// report that clause as a boolean flag and tell the author to delete a correct
+// registration. Looser rules would still mark unrelated clauses — `counts[
+// m.Category]++`, `s = s[:i]` — as value-flag parsers, so every form here stays
+// keyed to the index variable: an `x[i+2]` data read is an IndexExpr and a
+// BinaryExpr, never an `+=` on the index, so it cannot match. The fix this test
+// then suggests (register the flag) would make wantsHelp skip the token after a
+// BOOLEAN flag, so `-h` behind it would run the command instead of printing
+// usage: the very bug the guard exists to prevent.
 func advancesIndex(indexed map[string]bool, cc *ast.CaseClause) bool {
 	advance := false
 	ast.Inspect(cc, func(n ast.Node) bool {
@@ -718,7 +778,7 @@ func advancesIndex(indexed map[string]bool, cc *ast.CaseClause) bool {
 			}
 		case *ast.AssignStmt:
 			switch {
-			case x.Tok == token.ADD_ASSIGN && anyIntOne(x.Rhs) && anyLhsIndexed(x.Lhs, indexed): // i += 1
+			case x.Tok == token.ADD_ASSIGN && anyPositiveInt(x.Rhs) && anyLhsIndexed(x.Lhs, indexed): // i += n
 				advance = true
 			default:
 				for i, rhs := range x.Rhs {
@@ -733,15 +793,17 @@ func advancesIndex(indexed map[string]bool, cc *ast.CaseClause) bool {
 					}
 				}
 			}
-		case *ast.BinaryExpr: // i + 1
+		case *ast.BinaryExpr: // i + n
 			if x.Op != token.ADD {
 				break
 			}
+			// Only the "index op constant" shape, and only with a POSITIVE
+			// constant: `i - 1` walks the index backwards and consumes nothing.
 			var other ast.Expr
 			switch {
-			case isIntOne(x.X) && !isIntOne(x.Y):
+			case isPositiveInt(x.X) && !isIntLit(x.Y):
 				other = x.Y
-			case isIntOne(x.Y):
+			case isIntLit(x.Y):
 				other = x.X
 			default:
 				break
@@ -793,9 +855,12 @@ func anyLhsIndexed(lhs []ast.Expr, ids map[string]bool) bool {
 	return false
 }
 
-func anyIntOne(exprs []ast.Expr) bool {
+// anyPositiveInt reports whether any rhs is a positive integer literal — the
+// `+=` forms (`i += 1`, `i += 2`) that consume the following token(s). Zero is
+// excluded because it consumes nothing.
+func anyPositiveInt(exprs []ast.Expr) bool {
 	for _, e := range exprs {
-		if isIntOne(e) {
+		if isPositiveInt(e) {
 			return true
 		}
 	}
@@ -805,4 +870,20 @@ func anyIntOne(exprs []ast.Expr) bool {
 func isIntOne(n ast.Node) bool {
 	lit, ok := n.(*ast.BasicLit)
 	return ok && lit.Kind == token.INT && lit.Value == "1"
+}
+
+// isIntLit is any integer literal, so the `i + n` arm can tell an index from a
+// constant and only accept the shape "index op constant".
+func isIntLit(n ast.Node) bool {
+	lit, ok := n.(*ast.BasicLit)
+	return ok && lit.Kind == token.INT
+}
+
+func isPositiveInt(n ast.Node) bool {
+	lit, ok := n.(*ast.BasicLit)
+	if !ok || lit.Kind != token.INT {
+		return false
+	}
+	v, err := strconv.Atoi(lit.Value)
+	return err == nil && v > 0
 }

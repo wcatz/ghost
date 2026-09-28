@@ -18,6 +18,7 @@ var ghostPermissions = []string{
 	"mcp__ghost__ghost_decision_record",
 	"mcp__ghost__ghost_decisions_list",
 	"mcp__ghost__ghost_health",
+	"mcp__ghost__ghost_link_withdraw",
 	"mcp__ghost__ghost_list_projects",
 	"mcp__ghost__ghost_memories_list",
 	"mcp__ghost__ghost_memory_delete",

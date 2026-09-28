@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -116,6 +117,102 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		if n := s.queryInt(t, `SELECT pinned FROM memories WHERE id = ?`, seeded); n != 0 {
 			t.Fatalf("pinned after unpin = %d, want 0", n)
 		}
+	},
+
+	// The repair for a wrong supersession an agent can SEE. Both repair passes
+	// are CLI-only, and one of them only withdraws what the current rules reject,
+	// so an edge the classifier still accepts had no path out of the graph at all
+	// before this tool.
+	"ghost_link_withdraw": func(t *testing.T, s *sandbox, cs *mcp.ClientSession, _ string) {
+		// Saved stale-first and then a second later, because the pass orients a
+		// pair by updated_at and a same-second pair ties — the direction this case
+		// asserts on would then be whatever the query happened to return.
+		older := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the relay backlog takes about forty minutes to drain",
+		}))
+		time.Sleep(1100 * time.Millisecond)
+		newer := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the relay backlog drains in under a minute now",
+		}))
+		// The edge is created by the real pass rather than by a fixture row: this
+		// suite's store is opened read-only, so an edge that exists here is one
+		// the product wrote. The stub answer names the retired claim, which the
+		// KEEP-biased rubric requires.
+		//
+		// claude, not opencode: the stub wraps an answer in one JSONL text event,
+		// which cannot hold the multi-line answer a BATCH of pairs needs, and this
+		// project's other notes make the scan propose more than one pair. The
+		// claude backend takes bare stdout, so a numbered batch parses.
+		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the forty minute drain was the two-worker backlog")
+		// The creation pass, retried a bounded number of times, because the
+		// candidate scan reads every memory's embedding from the stub endpoint and
+		// a read that fails leaves that memory with no similarity candidates BY
+		// DESIGN (internal/supersede.SelectCandidates) — so one transient read
+		// failure proposes nothing and the pass reports a clean no-op. The
+		// failure message carries the pass's own report, so a genuine failure (a
+		// verdict the parser refuses, a write error) is still diagnosable from
+		// the output rather than hidden behind the retry.
+		const attempts = 3
+		for attempt := 1; ; attempt++ {
+			created := s.mustRun("supersede", e2eProject, "--source", "claude-code", "--threshold", "0.1", "--apply")
+			if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links
+				WHERE relation = 'supersedes' AND invalidated_at IS NULL AND source_id = ? AND target_id = ?`, newer, older); n == 1 {
+				break
+			} else if attempt == attempts {
+				t.Fatalf("the creation pass left %d edge(s) between these two notes, want 1, after %d attempts:\n%s",
+					n, attempts, created.stdout+created.stderr)
+			}
+		}
+		before, _ := s.harnessLog("claude")
+
+		out := call(t, cs, "ghost_link_withdraw", map[string]any{
+			"project_id": e2eProject,
+			"source_id":  newer[:8],
+			"target_id":  older[:8],
+		})
+		mustContain(t, "withdraw", out, "Withdrew 1")
+		// The result names the memory the edge was burying and the step that
+		// un-hides it. Without the second, an agent reads a finished repair where
+		// half of one happened: the resolved_at the edge caused is still there.
+		mustContain(t, "withdraw (target)", out, "about forty minutes")
+		// The repair is a CLI COMMAND, SCOPED to the ids this call withdrew, and
+		// named as a command: there is no MCP tool for it. `ghost_resolve` is the
+		// forward pass — it stamps resolved_at on confirmed evidence — so an agent
+		// pointed at it would bury MORE memories and pay a harness call.
+		mustContain(t, "withdraw (follow-up)", out, "ghost resolve e2e-proj --reassess --only")
+		mustContain(t, "withdraw (follow-up) scope", out, "SCOPED")
+		mustContain(t, "withdraw (follow-up) target", out, older)
+		mustContain(t, "withdraw (follow-up) not a tool", out, "no MCP tool for that repair")
+		// Scoped to this pair: the stub answer above confirmed every candidate the
+		// scan proposed, so the project holds other live edges this call was not
+		// asked about and must not have touched.
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links
+			WHERE relation = 'supersedes' AND invalidated_at IS NULL AND source_id = ? AND target_id = ?`, newer, older); n != 0 {
+			t.Fatalf("the withdrawal left the named edge live (%d)", n)
+		}
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ? AND phase = 'unsupersede'`, older); n != 1 {
+			t.Fatalf("the withdrawal wrote %d unsupersede history row(s), want 1", n)
+		}
+		if after, _ := s.harnessLog("claude"); after != before {
+			t.Fatalf("the tool asked the harness: it judges nothing, so a call here is billed for no judgment")
+		}
+
+		// A pair with no live edge is an error, not a quiet success, and an
+		// unknown project never reaches another project's graph.
+		fail := callExpectingError(t, cs, "ghost_link_withdraw", map[string]any{
+			"project_id": e2eProject,
+			"source_id":  newer,
+			"target_id":  older,
+		})
+		mustContain(t, "withdraw (no live edge)", fail, "no live supersedes link")
+		fail = callExpectingError(t, cs, "ghost_link_withdraw", map[string]any{
+			"project_id": "no-such-project-here",
+			"source_id":  newer,
+			"target_id":  older,
+		})
+		mustContain(t, "withdraw (unknown project)", fail, "not found")
 	},
 
 	"ghost_memory_promote": func(t *testing.T, s *sandbox, cs *mcp.ClientSession, _ string) {

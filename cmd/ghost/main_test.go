@@ -1416,10 +1416,18 @@ func TestParseResolveArgs(t *testing.T) {
 }
 
 // TestReadOnlySelectors pins the --only-file format: one id or prefix per line,
-// '#' starting a comment anywhere on the line, blank lines and CRLF ignored. The
-// comment rule is safe because a selector can never contain a '#' — an id is
-// hex, and so is any prefix of one — and it is what lets a person annotate the
-// file they are about to paste into a repair.
+// a '#' starting a comment, blank lines and CRLF ignored.
+//
+// A comment is a '#' that begins the line or FOLLOWS WHITESPACE, so an annotated
+// line (`<id>   # the changelog note`) still works — which matters more than it
+// looks, because the alternative makes the annotation part of the selector, and a
+// selector holding a comment is not a prefix, so the repair refuses the file and
+// judges nothing. The old rule was "the first '#' anywhere", on the stated premise
+// that a selector can never contain one — an id is hex, and so is any prefix of
+// one. `ghost import` made that false: it writes an artifact's ids verbatim, so a
+// stored id can hold a '#', and this file is the only surface that can carry some
+// of those ids. The one shape that costs is an id containing " #", which no
+// comment rule can have both ways.
 func TestReadOnlySelectors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ids.txt")
@@ -1427,6 +1435,7 @@ func TestReadOnlySelectors(t *testing.T) {
 		"abcdef0123456789abcdef0123456789   # the changelog note\r\n" +
 		"\r\n" +
 		"  12345678  \n" +
+		"   # an indented comment, the annotation form that still works\n" +
 		"# trailing comment with no ids\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -1443,6 +1452,47 @@ func TestReadOnlySelectors(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("selector %d = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// A '#' glued to the text is part of the id, not the start of a comment. The only
+// way to tell the two apart is whether whitespace precedes it, and an imported
+// artifact can hold one — and this file is the only surface that can carry such an
+// id, so truncating it at the '#' produced a selector naming no row and a repair
+// that reported a miss for a memory it had just called repairable.
+func TestReadOnlySelectorsKeepsAHashInsideAnID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ids.txt")
+	hashy := "import#1 note"
+	if err := os.WriteFile(path, []byte("# a comment line\n"+hashy+"\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := readOnlySelectors(path)
+	if err != nil {
+		t.Fatalf("readOnlySelectors: %v", err)
+	}
+	if len(got) != 1 || got[0] != hashy {
+		t.Errorf("readOnlySelectors = %q, want [%q]", got, hashy)
+	}
+}
+
+// The one shape the whitespace rule cannot have both ways: an id containing " #".
+// The line reads as an id plus a comment, so the id is truncated at the '#'. That
+// is a documented cost rather than an oversight — the alternative (a '#' anywhere
+// starts a comment) truncates every id holding a '#', including a word-internal
+// one, and this file is the only surface that can carry those.
+func TestReadOnlySelectorsTruncatesAHashThatFollowsWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ids.txt")
+	if err := os.WriteFile(path, []byte("imported note # not part of the id\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := readOnlySelectors(path)
+	if err != nil {
+		t.Fatalf("readOnlySelectors: %v", err)
+	}
+	if len(got) != 1 || got[0] != "imported note" {
+		t.Errorf("readOnlySelectors = %q, want the id up to the comment", got)
 	}
 }
 
@@ -1745,7 +1795,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, 0.80},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			project, source, apply, reassess, threshold, err := parseSupersedeArgs(tc.args)
+			project, source, apply, reassess, threshold, withdraw, err := parseSupersedeArgs(tc.args)
 			if err != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", tc.args, err)
 			}
@@ -1754,6 +1804,9 @@ func TestParseSupersedeArgs(t *testing.T) {
 				t.Errorf("parseSupersedeArgs(%v) = (%q, %q, %v, %v, %v), want (%q, %q, %v, %v, %v)",
 					tc.args, project, source, apply, reassess, threshold,
 					tc.project, tc.source, tc.apply, tc.reassess, tc.threshold)
+			}
+			if len(withdraw) != 0 {
+				t.Errorf("parseSupersedeArgs(%v) withdrew %+v, want nothing: no case names an edge", tc.args, withdraw)
 			}
 		})
 	}
@@ -1768,7 +1821,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"threshold missing value", []string{"myproj", "--threshold"}, `unknown flag "--threshold"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, _, _, err := parseSupersedeArgs(tc.args)
+			_, _, _, _, _, _, err := parseSupersedeArgs(tc.args)
 			if err == nil {
 				t.Fatalf("parseSupersedeArgs(%v) must fail", tc.args)
 			}
@@ -1838,12 +1891,15 @@ func TestDashProjectLifecycleRoundTrip(t *testing.T) {
 			}
 			got, apply = p.project, p.apply
 		case "supersede":
-			project, _, a, reassess, _, perr := parseSupersedeArgs(args)
+			project, _, a, reassess, _, withdraw, perr := parseSupersedeArgs(args)
 			if perr != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", ph.args, perr)
 			}
 			if reassess {
 				t.Errorf("the supersede phase must never emit --reassess (phase argv: %v)", ph.args)
+			}
+			if len(withdraw) != 0 {
+				t.Errorf("the supersede phase must never emit --withdraw (phase argv: %v)", ph.args)
 			}
 			got, apply = project, a
 		default:

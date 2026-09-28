@@ -34,6 +34,13 @@ import (
 // rather than a value. A command's own flags are the mirror of its parser, and
 // TestHelp_ValueFlagsCoverEveryParser holds the two to each other in both
 // directions, per command.
+//
+// A flag that takes TWO operands is registered like one that takes a single
+// value, and the scan skips one token after it — the most it can skip. So
+// `ghost supersede --withdraw <id> -h` prints usage rather than reading the help
+// token as the pair's second id, and `ghost supersede --withdraw -h` reaches the
+// parser, which reports the missing operands. Both are the same contract as a
+// project named "-h".
 var helpValueFlagsByCommand = map[string]map[string]bool{
 	"backup":                    {"--out": true},
 	"context":                   {"--cwd": true, "--as-of": true},
@@ -47,7 +54,7 @@ var helpValueFlagsByCommand = map[string]map[string]bool{
 	"opencode cleanup-sessions": {"--grace": true, "--limit": true},
 	"reflect":                   {"--project": true, "--source": true, "--tier": true},
 	"resolve":                   {"--project": true, "--source": true, "--only": true, "--only-file": true},
-	"supersede":                 {"--project": true, "--source": true, "--threshold": true},
+	"supersede":                 {"--project": true, "--source": true, "--threshold": true, "--withdraw": true},
 }
 
 // isHelpToken reports whether arg is one of the two spellings of a help request.

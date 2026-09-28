@@ -188,7 +188,9 @@ func hasCloseSurvivorInAny(inTokens map[string]bool, outTokens []map[string]bool
 	return false
 }
 
-// memIDKey normalizes a stored or emitted id for comparison. Ids are ULIDs, but
+// memIDKey normalizes a stored or emitted id for comparison. A stored id is 32 hex
+// characters (`hex(randomblob(16))` — ULID-shaped in that it is a 128-bit random value
+// rendered in hex, though the ULID time prefix is not there), but
 // a model that lower-cases one still means the memory it was shown, and the
 // comparison must not depend on which side of the contract the spelling came
 // from.
