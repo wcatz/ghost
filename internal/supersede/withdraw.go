@@ -320,12 +320,32 @@ func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref 
 	// The exact match wins before anything else, whatever the ref's length. It is
 	// the only reading under which the ref names ONE row, so a short full id that
 	// also happens to prefix a longer one resolves rather than being refused as
-	// ambiguous — which is what "the floor applies to a prefix" means. Ids are
-	// unique, so this cannot itself be ambiguous.
+	// ambiguous — which is what "the floor applies to a prefix" means.
+	//
+	// Uniqueness does NOT make this unambiguous, because the comparison is
+	// case-insensitive while `memories.id` is a BINARY-unique TEXT key: a store
+	// holding both "abc" and "ABC" — reachable, since `ghost import` writes an
+	// artifact's ids verbatim and its presence check is case-sensitive, so it
+	// admits both — returns two rows here, and the query's BINARY ORDER BY puts
+	// the uppercase one first. Taking the first would be picking which memory to
+	// delete a link from on a coin toss, so two matches are refused.
+	var exact []string
 	for _, id := range ids {
 		if strings.EqualFold(id, ref) {
-			return id, nil
+			exact = append(exact, id)
 		}
+	}
+	switch len(exact) {
+	case 1:
+		return exact[0], nil
+	case 0:
+		// No exact match: the prefix rules below decide.
+	default:
+		// Neither spelling disambiguates them here, so the message does not
+		// pretend it does: it names the collision and the one surface that takes
+		// an id the way the store holds it.
+		return "", fmt.Errorf("the %s ref %q names %d memories whose ids differ only in letter case (%s), and ids are matched case-insensitively here, so this cannot say which you meant — 'ghost history <id>' takes the exact spelling",
+			which, ref, len(exact), strings.Join(exact, ", "))
 	}
 	if len(ref) < minRefLen {
 		// Deliberately WITHOUT the match list. A ref this short names a slice of

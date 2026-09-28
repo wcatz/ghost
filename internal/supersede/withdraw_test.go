@@ -605,19 +605,58 @@ func TestWithdrawMarksTheRowsAFailedWriteNeverReached(t *testing.T) {
 func TestWithdrawRefusesAShortRefWithoutDumpingTheProject(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
-	// Twenty memories sharing a one-character prefix, so the slice is a slice.
+	// Twenty memories sharing a one-character prefix, and the ref is that ONE
+	// character — so the slice the comment describes is really the slice the query
+	// returns. A ref matching nothing would take the zero-match branch instead and
+	// would pass against code that printed the whole slice.
 	for i := 0; i < 20; i++ {
 		pinID(t, db, "z"+string(rune('a'+i))+strings.Repeat("0", 30), "A note whose id starts with z.")
 	}
-	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "zz", Target: "z" + "a" + strings.Repeat("0", 30)}}, true, discardLogger())
+	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "z", Target: "za" + strings.Repeat("0", 30)}}, true, discardLogger())
 	if err == nil {
-		t.Fatal("a two-character ref was accepted")
+		t.Fatal("a one-character ref was accepted")
 	}
 	if !strings.Contains(err.Error(), "too short to be a prefix") {
 		t.Errorf("the refusal does not say the ref is too short: %v", err)
 	}
 	if strings.Contains(err.Error(), strings.Repeat("0", 30)) {
 		t.Errorf("the refusal listed the project's ids, which is a dump of what the caller could not enumerate: %v", err)
+	}
+}
+
+// TestWithdrawRefusesIdsThatDifferOnlyInCase: the store matches refs
+// case-insensitively, and `memories.id` is BINARY-unique, so a corpus holding both
+// "abc" and "ABC" — which `ghost import` admits, its presence check being
+// case-sensitive — returns two exact matches. Taking the first would withdraw a
+// link nobody named, and ORDER BY id puts the uppercase one first, so it is not
+// even a stable guess.
+func TestWithdrawRefusesIdsThatDifferOnlyInCase(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	lowerTarget := pinID(t, db, "abcd", "The note the lower-case id supersedes.")
+	upperTarget := pinID(t, db, "ABCD", "The note the upper-case id supersedes.")
+	lower := pinID(t, db, "abc", "An imported note whose id is lower case.")
+	upper := pinID(t, db, "ABC", "An imported note whose id is upper case.")
+	if err := store.CreateLink(ctx, lower, lowerTarget, string(RelationSupersedes), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateLink(ctx, upper, upperTarget, string(RelationSupersedes), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "abc", Target: lowerTarget}}, true, discardLogger())
+	if err == nil {
+		t.Fatal("a ref naming two case-variant ids was resolved to one of them")
+	}
+	if !strings.Contains(err.Error(), "differ only in letter case") {
+		t.Errorf("the refusal does not name the collision: %v", err)
+	}
+	// And it changed nothing: the guess this prevents is a withdrawn link.
+	if n := liveEdgeCount(t, store, lowerTarget); n != 1 {
+		t.Errorf("live edges into the lower-case target = %d, want 1: a refused ref must write nothing", n)
+	}
+	if n := liveEdgeCount(t, store, upperTarget); n != 1 {
+		t.Errorf("live edges into the upper-case target = %d, want 1: a refused ref must write nothing", n)
 	}
 }
 
