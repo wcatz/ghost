@@ -12,17 +12,27 @@ import (
 // does.
 func TestPairedBootstrapIsDeterministic(t *testing.T) {
 	diffs := []float64{0.1, -0.2, 0.3, 0.0, 0.05, -0.1, 0.2, 0.4, -0.3, 0.15}
-	lo1, hi1, mean1 := bootstrapMeanCI(diffs, 2000, 7)
-	lo2, hi2, mean2 := bootstrapMeanCI(diffs, 2000, 7)
+	lo1, hi1, mean1 := bootstrapMeanCI(diffs, 2000)
+	lo2, hi2, mean2 := bootstrapMeanCI(diffs, 2000)
 	if lo1 != lo2 || hi1 != hi2 || mean1 != mean2 {
 		t.Errorf("bootstrap is not deterministic: (%.6f, %.6f, %.6f) then (%.6f, %.6f, %.6f)", lo1, hi1, mean1, lo2, hi2, mean2)
 	}
-	// A different seed must move the interval — otherwise the resampling is not
-	// doing anything and the interval is a constant.
-	lo3, hi3, _ := bootstrapMeanCI(diffs, 2000, 8)
+	// The interval has to be an interval and not a constant, and it has to be
+	// built from draws rather than from the sample's own order: the resample
+	// count is the only knob left, and more of it must move the edges (the
+	// percentile index moves with it) while the observed mean must not.
+	lo3, hi3, mean3 := bootstrapMeanCI(diffs, 20001)
 	if lo3 == lo1 && hi3 == hi1 {
-		t.Errorf("a different seed gave the same interval (%.6f, %.6f): the resamples are not being drawn", lo1, hi1)
+		t.Errorf("a different resample count gave the same interval (%.6f, %.6f): the resamples are not being drawn", lo1, hi1)
 	}
+	if mean3 != mean1 {
+		t.Errorf("the resample count changed the reported mean (%.9f vs %.9f); it must be the observed one", mean3, mean1)
+	}
+	if lo1 == hi1 {
+		t.Errorf("interval collapsed to a point (%.6f): no spread was estimated", lo1)
+	}
+	// The reported mean is the OBSERVED one — the mean of the sample, not of the
+	// resampled means — and the interval has to bracket it.
 	var wantMean float64
 	for _, d := range diffs {
 		wantMean += d
@@ -46,7 +56,7 @@ func TestPairedBootstrapCoversTheMeanItShould(t *testing.T) {
 	for i := range helped {
 		helped[i] = 0.05
 	}
-	lo, hi, mean := bootstrapMeanCI(helped, 5000, 3)
+	lo, hi, mean := bootstrapMeanCI(helped, 5000)
 	if lo <= 0 {
 		t.Errorf("a difference positive on every query gave an interval reaching zero: (%.4f, %.4f)", lo, hi)
 	}
@@ -64,7 +74,7 @@ func TestPairedBootstrapCoversTheMeanItShould(t *testing.T) {
 			noise[i] = -0.1
 		}
 	}
-	lo, hi, mean = bootstrapMeanCI(noise, 5000, 3)
+	lo, hi, mean = bootstrapMeanCI(noise, 5000)
 	if lo > 0 || hi < 0 {
 		t.Errorf("alternating noise gave an interval that excludes zero: (%.4f, %.4f)", lo, hi)
 	}
@@ -124,7 +134,7 @@ func TestBootstrapMeanCIRefusesToInventAnInterval(t *testing.T) {
 		return sum / float64(len(diffs))
 	}()
 	for _, resamples := range []int{0, -1} {
-		lo, hi, mean := bootstrapMeanCI(diffs, resamples, 1)
+		lo, hi, mean := bootstrapMeanCI(diffs, resamples)
 		if lo != mean || hi != mean || mean != want {
 			t.Errorf("resamples=%d gave (%.6f, %.6f, %.6f), want the observed mean %.6f three times",
 				resamples, lo, hi, mean, want)
@@ -133,28 +143,33 @@ func TestBootstrapMeanCIRefusesToInventAnInterval(t *testing.T) {
 	// One resample is not degenerate in the same way — it is a distribution of
 	// one, so the interval is that resample and both edges are it. Asserted only
 	// so the shape is stated rather than left to be discovered.
-	if lo, hi, _ := bootstrapMeanCI(diffs, 1, 1); lo != hi {
+	if lo, hi, _ := bootstrapMeanCI(diffs, 1); lo != hi {
 		t.Errorf("resamples=1 gave a two-edged interval (%.6f, %.6f)", lo, hi)
 	}
 	// An empty sample is the other degenerate input, and it is not a panic either.
-	if lo, hi, mean := bootstrapMeanCI(nil, 100, 1); lo != 0 || hi != 0 || mean != 0 {
+	if lo, hi, mean := bootstrapMeanCI(nil, 100); lo != 0 || hi != 0 || mean != 0 {
 		t.Errorf("empty sample gave (%.3f, %.3f, %.3f), want zeros", lo, hi, mean)
 	}
 }
 
-// TestFusionGateDecision pins the rule the regression gate applies, on intervals
-// the committed dataset does not produce. The two that matter are the first pair:
-// the old gate was a comparison of point estimates, so it rejected an interval
-// whose evidence says fusion is not behind, and that is the brittleness #561 is
-// about. The gate has to accept it and still reject the case below it, or the
-// tolerance is a way of switching the assertion off.
+// TestFusionGateDecision pins the rule the regression gate applies. Only the first
+// case is a real interval — the rest are hand-built so the rule is pinned on inputs
+// the committed dataset does not produce, which is how a real regression is told
+// from a hypothetical one. The two that matter are the first pair: the old gate was
+// a comparison of point estimates, so it rejected an interval whose evidence says
+// fusion is not behind, and that is the brittleness #561 is about. The gate has to
+// accept it and still reject the case below it, or the tolerance is a way of
+// switching the assertion off.
 func TestFusionGateDecision(t *testing.T) {
 	cases := []struct {
 		name string
 		ci   PairDiff
 		want bool // true = accepted
 	}{
-		{"measured: ahead of vector by a hair", PairDiff{Leg: CondVector, Mean: 0.0171, Lo: 0.0022, Hi: 0.0328, Queries: 220}, true},
+		// The measured interval over the committed v2 dataset, so "measured" in
+		// the case name is a fact the test can be held to: TestBenchRegressionFloors
+		// logs +0.0171 [+0.0020, +0.0325] from the same code and the same seed pair.
+		{"measured: ahead of vector by a hair", PairDiff{Leg: CondVector, Mean: 0.0171, Lo: 0.0020, Hi: 0.0325, Queries: 220}, true},
 		{"point estimate dipped below zero, the interval still excludes a real loss",
 			PairDiff{Leg: CondVector, Mean: -0.001, Lo: -0.015, Hi: 0.010, Queries: 220}, true},
 		{"a consistent loss inside the tolerance", PairDiff{Leg: CondFTS, Mean: -0.015, Lo: -0.019, Hi: -0.008, Queries: 220}, true},

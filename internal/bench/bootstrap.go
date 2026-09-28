@@ -2,7 +2,7 @@ package bench
 
 import (
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"sort"
 )
 
@@ -23,19 +23,25 @@ import (
 // ranking, which is the thing under test. The interval is the honest statement of
 // how much of the observed gap the data supports.
 //
-// Determinism is a fixed seed and a fixed resample count, so a given toolchain
-// reproduces the interval exactly. It is NOT a cross-Go-version guarantee:
-// `math/rand` documents its output stream as unstable across releases, so a
-// future Go bump can move the fourth decimal and the intervals printed in
-// docs/benchmarks.md become a historical record rather than something to
-// re-derive by hand.
+// Determinism is a fixed seed pair and a fixed resample count over an explicitly
+// seeded PCG, so the interval reproduces exactly and is not at the mercy of a
+// future toolchain's change to the default generator.
 
 // Bootstrap defaults. 20000 resamples puts the 2.5th and 97.5th percentile on
 // the 500th and 19500th order statistic, which is as fine as the interval's three
 // printed digits are meaningful.
+//
+// The source is math/rand/v2's PCG, not the v1 package: an explicit PCG has a
+// documented, version-stable stream, whereas math/rand/v1's global functions
+// changed algorithm in Go 1.20 and its Source is documented as unstable. This
+// repo already uses `rand.NewPCG` for a reproducible stream
+// (internal/memory/vector_bench_test.go), and a number published to four
+// decimals in docs/benchmarks.md is worth not re-deriving by hand after a toolchain
+// bump. The seed is a pair because NewPCG takes two; both are fixed here.
 const (
 	bootstrapResamples = 20000
-	bootstrapSeed      = 1
+	bootstrapSeed1     = 1
+	bootstrapSeed2     = 2
 	bootstrapAlpha     = 0.05
 )
 
@@ -75,17 +81,25 @@ func pairedNDiff(a, b Result) ([]float64, error) {
 	return diffs, nil
 }
 
-// CompareFusion returns the paired bootstrap for hybrid minus one single leg.
-func CompareFusion(hybrid, leg Result) (PairDiff, error) {
-	diffs, err := pairedNDiff(hybrid, leg)
+// pairedCI is the comparison both call sites want: the paired bootstrap of a over
+// b, with b's condition recorded as the thing a is measured against. The pairing
+// is over the same query names in the same order, so a and b must have been
+// produced from one query set.
+func pairedCI(a, b Result) (PairDiff, error) {
+	diffs, err := pairedNDiff(a, b)
 	if err != nil {
 		return PairDiff{}, err
 	}
-	lo, hi, mean := bootstrapMeanCI(diffs, bootstrapResamples, bootstrapSeed)
+	lo, hi, mean := bootstrapMeanCI(diffs, bootstrapResamples)
 	return PairDiff{
-		Leg: leg.Condition, Mean: mean, Lo: lo, Hi: hi,
+		Leg: b.Condition, Mean: mean, Lo: lo, Hi: hi,
 		Queries: len(diffs), Resamples: bootstrapResamples,
 	}, nil
+}
+
+// CompareFusion returns the paired bootstrap for hybrid minus one single leg.
+func CompareFusion(hybrid, leg Result) (PairDiff, error) {
+	return pairedCI(hybrid, leg)
 }
 
 // fusionTolerance is how much worse than a single leg hybrid fusion is allowed to
@@ -93,13 +107,13 @@ func CompareFusion(hybrid, leg Result) (PairDiff, error) {
 //
 // The number is a judgement, and it is deliberately LARGER than the effect it
 // protects. Measured on the committed v2 dataset (220 graded queries, paired, 95%
-// percentile bootstrap, 20k resamples, fixed seed):
+// percentile bootstrap, 20k resamples, fixed PCG seed pair):
 //
-//	hybrid - vector-only   mean +0.0171   CI [+0.0022, +0.0328]
-//	hybrid - fts-only      mean +0.0689   CI [+0.0470, +0.0918]
+//	hybrid - vector-only   mean +0.0171   CI [+0.0020, +0.0325]
+//	hybrid - fts-only      mean +0.0689   CI [+0.0468, +0.0921]
 //
 // So fusion is genuinely ahead of both legs here, and ahead of the vector leg by
-// 0.0022 at the interval's lower edge — just under half of one query's worth of
+// 0.0020 at the interval's lower edge — under half of one query's worth of
 // margin (1/220 = 0.0045). The old gate was `hybrid.NDCG10 >= vector.NDCG10` on
 // that 0.017 point estimate, which is the same claim with none of the
 // uncertainty: a dataset edit worth 0.001 tripped it while the evidence said
@@ -148,7 +162,7 @@ func fusionGate(ci PairDiff) error {
 // price of not estimating two corrections from the same 20k numbers, and the gate
 // reads the LOWER edge, so under-coverage there is the conservative direction for
 // the one claim it makes.
-func bootstrapMeanCI(diffs []float64, bootResamples int, seed int64) (lo, hi, mean float64) {
+func bootstrapMeanCI(diffs []float64, bootResamples int) (lo, hi, mean float64) {
 	n := len(diffs)
 	if n == 0 {
 		return 0, 0, 0
@@ -169,13 +183,13 @@ func bootstrapMeanCI(diffs []float64, bootResamples int, seed int64) (lo, hi, me
 		return mean, mean, mean
 	}
 
-	rng := rand.New(rand.NewSource(seed))
+	rng := rand.New(rand.NewPCG(bootstrapSeed1, bootstrapSeed2))
 	means := make([]float64, bootResamples)
 	buf := make([]float64, n)
 	for r := range means {
 		var sum float64
 		for i := range buf {
-			buf[i] = diffs[rng.Intn(n)]
+			buf[i] = diffs[rng.IntN(n)] // IntN, not Intn: v2 spells the unbounded one with the capital N
 		}
 		for _, v := range buf {
 			sum += v
