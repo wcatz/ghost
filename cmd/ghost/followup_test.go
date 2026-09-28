@@ -253,16 +253,64 @@ func TestSupersedeReassessFollowupNeverPrintsTheUnscopedRepair(t *testing.T) {
 // No surface can carry an id holding a newline — `--only` splits on commas and the
 // file is one id per line — so the block has to say the memory stays resolved
 // rather than implying a repair exists.
+//
+// The two ways an empty command happens are different facts, and a block that
+// words both as "a comma" contradicts itself: it says the file is the only way and
+// that nothing can name the id. It must also not point at a file that names
+// nothing, since writeReassessTargets omits a newline-bearing id and
+// readOnlySelectors then refuses the whole list — the operator's run of the
+// printed repair would fail.
 func TestSupersedeReassessFollowupSaysNoSurfaceCanNameANewlineID(t *testing.T) {
-	got := supersedeReassessFollowup("myproj", []string{"two\nlines"}, "/data/x.ids")
+	got := supersedeReassessFollowup("myproj", []string{"two\nlines"}, "")
 	if !strings.Contains(got, "no --only or --only-file form can carry") {
 		t.Errorf("the follow-up does not say the id is unreachable:\n%s", got)
 	}
-	if !strings.Contains(got, `\"two\\nlines\"`) && !strings.Contains(got, "two") {
-		t.Errorf("the follow-up does not name the id at all:\n%s", got)
-	}
 	if !strings.Contains(got, "stay resolved") {
 		t.Errorf("the follow-up does not say what happens to that memory:\n%s", got)
+	}
+	if strings.Contains(got, "comma") {
+		t.Errorf("the follow-up blames a comma for an id no surface can name:\n%s", got)
+	}
+	if strings.Contains(got, "/data/x.ids") {
+		t.Errorf("the follow-up points at a file that names nothing:\n%s", got)
+	}
+}
+
+// The mixed case: some ids are carriable by the file and some by nothing, so the
+// file line, the comma sentence and the newline sentence must all be present and
+// none of them may claim the file reaches the newline id.
+func TestSupersedeReassessFollowupSeparatesFileOnlyFromUnnameable(t *testing.T) {
+	got := supersedeReassessFollowup("myproj", []string{"aaaaaaaa1111111111111111111111", "one,two", "three\nfour"}, "/data/x.ids")
+	if !strings.Contains(got, "--only 'aaaaaaaa1111111111111111111111'") {
+		t.Errorf("the command lost the id it can carry:\n%s", got)
+	}
+	if !strings.Contains(got, "/data/x.ids") {
+		t.Errorf("the file line is missing though the file names ids:\n%s", got)
+	}
+	if !strings.Contains(got, "hold a comma") {
+		t.Errorf("the comma sentence is missing:\n%s", got)
+	}
+	if !strings.Contains(got, "no --only or --only-file form can carry") {
+		t.Errorf("the newline sentence is missing:\n%s", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "ghost resolve") && !strings.Contains(line, "--only") && !strings.Contains(line, "--only-file") {
+			t.Errorf("the follow-up printed an unscoped repair line: %q", line)
+		}
+	}
+}
+
+// writeReassessTargets refuses a set it cannot name, rather than writing a list
+// readOnlySelectors rejects — the file is a --only-file INPUT, so a file that
+// names nothing is not a degraded list, it is a list the repair refuses.
+func TestWriteReassessTargetsRefusesASetItCannotName(t *testing.T) {
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
+	path, err := writeReassessTargets("myproj", []string{"two\nlines"}, "ghost supersede --reassess --apply")
+	if err == nil {
+		t.Fatalf("wrote %q, want a refusal: no id in that set is nameable through --only-file", path)
+	}
+	if !strings.Contains(err.Error(), "newline") {
+		t.Errorf("error %q must say why, in the one word that explains it", err)
 	}
 }
 

@@ -2012,18 +2012,24 @@ func readOnlySelectors(path string) ([]string, error) {
 	}
 	var out []string
 	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-		// A '#' starts a comment only at the first non-space position. It used to
-		// truncate the line at the first '#' ANYWHERE, on the premise that "a
-		// selector can never contain a '#': an id is hex". That premise stopped
-		// holding when `ghost import` made a stored id whatever the artifact said,
-		// and this file is the only surface that can carry a comma-bearing id — so
-		// a '#' inside one truncated it to a selector naming no row, and the repair
-		// reported a miss for a memory it had just said was repairable. A comment
-		// column still works (`# …`, `   # …`); a `#` inside a word does not.
-		if idx := strings.IndexFunc(line, func(r rune) bool { return r != ' ' && r != '\t' }); idx >= 0 && line[idx] == '#' {
-			continue
+		// A '#' starts a comment when it begins the line or follows whitespace, and
+		// is part of the id otherwise. The rule used to be "the first '#' anywhere",
+		// on the stated premise that a selector can never contain one — an id is
+		// hex. `ghost import` made that false, and this file is the only surface
+		// that can carry some of those ids.
+		//
+		// "Follows whitespace" is what keeps the old behaviour. The first attempt at
+		// this rule was "a '#' only at the first non-space character", which is
+		// narrower than it reads: `<id>   # the changelog note` became ONE selector,
+		// prefixKey refused it as non-hex, and the repair aborted having judged
+		// nothing — a file that worked now failing wholesale over its own
+		// annotation. So a comment is a '#' that starts a word, and the one shape
+		// that costs is an id containing " #", which no comment rule can have both
+		// ways.
+		if idx := strings.IndexByte(line, '#'); idx > 0 && (line[idx-1] == ' ' || line[idx-1] == '\t') {
+			line = line[:idx]
 		}
-		if line = strings.TrimSpace(line); line != "" {
+		if line = strings.TrimSpace(line); line != "" && line[0] != '#' {
 			out = append(out, line)
 		}
 	}
@@ -2051,8 +2057,9 @@ Flags:
                   this list is comma-separated — --only-file can, and an id
                   holding a newline is reachable through neither.
   --only-file p   With --reassess: the same, read from a file: one id or prefix
-                  per line, where '#' starts a comment. For a list too long to
-                  type on one line.
+                  per line. A '#' starts a comment when it begins the line or
+                  follows whitespace, so "<id>   # note" annotates and
+                  "<id>#note" is one id. For a list too long to type on one line.
   --source string CLI harness to classify through: claude-code, opencode,
                   codex, or goose. Defaults to the calling harness (detected
                   from the environment and process ancestry); an undetectable

@@ -127,23 +127,45 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 	if cmd != "" {
 		fmt.Fprintf(&b, "  %s\n", cmd)
 	}
-	if path != "" {
+	// The file line is printed only when the file can name something, which is
+	// `len(ids) > len(unnameable)`: writeReassessTargets omits the newline-bearing
+	// ids rather than writing two half-ids, so a file holding only those names no
+	// selector at all and readOnlySelectors refuses it — pointing the operator at
+	// it would be pointing at a command that cannot run.
+	fileHoldsSomething := path != "" && len(unnameable) < len(ids)
+	if fileHoldsSomething {
 		// Quoted for the same reason as the project name, and because the path
 		// is not Ghost's to control: $GHOST_SCRATCH_DIR and a data directory
 		// under a spaced path both reach it.
 		fmt.Fprintf(&b, "  (the same ids are in %s, for `ghost resolve --project %s --reassess --only-file %s --apply`)\n",
 			path, shellQuote(projectName), shellQuote(path))
 	}
+	// Every branch is driven by the buckets, not by `cmd == ""`, which has two
+	// causes: ids holding a comma (the file reaches them) and ids holding a
+	// newline (nothing does). Keying the wording off the empty command made a
+	// newline-only report claim the file was the only way and, three lines later,
+	// that no surface could name the id.
 	switch {
-	case cmd == "" && path != "":
-		// The unscoped repair is DESCRIBED and not written out. Rendering it here,
-		// even inside a warning, puts a copy-pasteable line that re-judges every
-		// resolved memory in the project directly under the block promising that
-		// nothing outside this list is judged.
-		fmt.Fprintf(&b, "  (no --only command can name them — every id holds a comma and --only splits on commas —\n"+
-			"   so the file above is the only way to run this repair. Do NOT fall back on the same command\n"+
-			"   without --only: that re-judges every resolved memory in the project)\n")
-	case len(viaFileOnly) > 0 && path != "":
+	case len(viaFileOnly) == 0 && len(unnameable) == 0:
+		// Nothing to explain: every id is in the command above.
+	case len(viaFileOnly) == len(ids):
+		// Every id needs the file. The unscoped repair is DESCRIBED and not written
+		// out: rendering it here, even inside a warning, puts a copy-pasteable line
+		// that re-judges every resolved memory in the project directly under the
+		// block promising that nothing outside this list is judged.
+		if fileHoldsSomething {
+			fmt.Fprintf(&b, "  (no --only command can name them — every id holds a comma, which --only splits on —\n"+
+				"   so the file above is the only way to run this repair. Do NOT fall back on the same command\n"+
+				"   without --only: that re-judges every resolved memory in the project)\n")
+		} else {
+			fmt.Fprintf(&b, "  (no --only command can name them and the id file could not be written, so they are\n"+
+				"   named here: put each on its own line in a file and use --only-file. Do NOT fall back on the\n"+
+				"   same command without --only: that re-judges every resolved memory in the project)\n")
+			for _, id := range viaFileOnly {
+				fmt.Fprintf(&b, "    %s\n", id)
+			}
+		}
+	case len(viaFileOnly) > 0 && fileHoldsSomething:
 		// `--only` splits on commas, so an id holding one is not nameable by that
 		// flag however it is quoted, and the command above leaves it out rather
 		// than splitting it into selectors that name nothing. The file is the only
@@ -218,18 +240,34 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 	if err != nil {
 		return "", err
 	}
+	head, viaFileOnly, unnameable := resolveFollowupCommand(projectName, ids)
+	if len(unnameable) == len(ids) {
+		// Nothing this file could name. Writing it anyway produces a list
+		// readOnlySelectors refuses with "names no memory ids or prefixes", and the
+		// report would point the operator at a command that cannot run. The ids are
+		// named in the report instead, which is the only place they can be.
+		return "", fmt.Errorf("no id in this set is nameable through --only-file: all %d hold a newline", len(ids))
+	}
 	var b strings.Builder
 	// The header carries the command, and an id the command cannot carry makes it
 	// name fewer ids than the list below — so the header says so rather than
-	// letting the operator compare the two and wonder which was dropped. The
-	// format is unchanged otherwise, because this file is a --only-file input and
-	// readOnlySelectors reads one id per line whatever the comment says.
-	head, viaFileOnly, unnameable := resolveFollowupCommand(projectName, ids)
-	if head != "" {
+	// letting the operator compare the two and wonder which was dropped. Which
+	// claim is made is driven by the buckets and not by `head == ""`, because an
+	// empty command has two causes and only one of them is a comma: an id holding
+	// a newline is one no surface can name, and calling that a comma says the
+	// file is the answer when the file is not carrying it.
+	// The format is unchanged otherwise, because this file is a --only-file input
+	// and readOnlySelectors reads one id per line whatever the comment says.
+	switch {
+	case head != "":
 		fmt.Fprintf(&b, "# %s\n", head)
-	} else {
+	case len(viaFileOnly) > 0:
 		fmt.Fprintf(&b, "# No --only command can name these ids: every one of them holds a comma,\n"+
 			"# which --only splits on. This file is the only surface that can, so run\n"+
+			"# `ghost resolve <project> --reassess --only-file <this file> --apply`.\n")
+	default:
+		fmt.Fprintf(&b, "# No --only command can name these ids (some hold a comma, which --only splits on, and\n"+
+			"# none of those are nameable any other way). The ids this file CAN name are below; run\n"+
 			"# `ghost resolve <project> --reassess --only-file <this file> --apply`.\n")
 	}
 	if len(viaFileOnly) > 0 {

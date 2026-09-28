@@ -1416,22 +1416,23 @@ func TestParseResolveArgs(t *testing.T) {
 }
 
 // TestReadOnlySelectors pins the --only-file format: one id or prefix per line,
-// a '#' starting a COMMENT LINE (optionally indented), blank lines and CRLF
-// ignored.
+// a '#' starting a comment, blank lines and CRLF ignored.
 //
-// The comment used to be stripped from the first '#' anywhere on a line, on the
-// premise that a selector can never contain one — an id is hex, and so is any
-// prefix of one. `ghost import` made that false: it writes an artifact's ids
-// verbatim, so a stored id can hold a '#'. This file is the only surface that can
-// carry some of those ids, so truncating one at its '#' turned it into a selector
-// naming no row and the repair reported a miss for a memory it had just called
-// repairable. A comment therefore has to be a line of its own, which is also the
-// shape the file Ghost writes uses.
+// A comment is a '#' that begins the line or FOLLOWS WHITESPACE, so an annotated
+// line (`<id>   # the changelog note`) still works — which matters more than it
+// looks, because the alternative makes the annotation part of the selector, and a
+// selector holding a comment is not a prefix, so the repair refuses the file and
+// judges nothing. The old rule was "the first '#' anywhere", on the stated premise
+// that a selector can never contain one — an id is hex, and so is any prefix of
+// one. `ghost import` made that false: it writes an artifact's ids verbatim, so a
+// stored id can hold a '#', and this file is the only surface that can carry some
+// of those ids. The one shape that costs is an id containing " #", which no
+// comment rule can have both ways.
 func TestReadOnlySelectors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ids.txt")
 	body := "# targets withdrawn by supersede --reassess --apply\r\n" +
-		"abcdef0123456789abcdef0123456789\r\n" +
+		"abcdef0123456789abcdef0123456789   # the changelog note\r\n" +
 		"\r\n" +
 		"  12345678  \n" +
 		"   # an indented comment, the annotation form that still works\n" +
@@ -1454,10 +1455,11 @@ func TestReadOnlySelectors(t *testing.T) {
 	}
 }
 
-// A '#' inside an id is part of the id, not the start of a comment. The only way to
-// tell the two apart is where the '#' sits: a comment line's first non-space
-// character, a mid-line '#' is data. An imported artifact can hold one, and this
-// file is the only surface that can carry it.
+// A '#' glued to the text is part of the id, not the start of a comment. The only
+// way to tell the two apart is whether whitespace precedes it, and an imported
+// artifact can hold one — and this file is the only surface that can carry such an
+// id, so truncating it at the '#' produced a selector naming no row and a repair
+// that reported a miss for a memory it had just called repairable.
 func TestReadOnlySelectorsKeepsAHashInsideAnID(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ids.txt")
@@ -1471,6 +1473,26 @@ func TestReadOnlySelectorsKeepsAHashInsideAnID(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != hashy {
 		t.Errorf("readOnlySelectors = %q, want [%q]", got, hashy)
+	}
+}
+
+// The one shape the whitespace rule cannot have both ways: an id containing " #".
+// The line reads as an id plus a comment, so the id is truncated at the '#'. That
+// is a documented cost rather than an oversight — the alternative (a '#' anywhere
+// starts a comment) truncates every id holding a '#', including a word-internal
+// one, and this file is the only surface that can carry those.
+func TestReadOnlySelectorsTruncatesAHashThatFollowsWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ids.txt")
+	if err := os.WriteFile(path, []byte("imported note # not part of the id\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := readOnlySelectors(path)
+	if err != nil {
+		t.Fatalf("readOnlySelectors: %v", err)
+	}
+	if len(got) != 1 || got[0] != "imported note" {
+		t.Errorf("readOnlySelectors = %q, want the id up to the comment", got)
 	}
 }
 
