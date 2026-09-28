@@ -41,24 +41,11 @@ const (
 	ValidityUnverified = "unverified"
 )
 
-// validityStampLayouts are the layouts SQLite's datetime() and date() produce.
-// Both are accepted because the columns are unconstrained text: a row written
-// with a date is as readable as one written with a timestamp, and rejecting the
-// shorter form would silently turn a real claim into no claim.
-var validityStampLayouts = []string{"2006-01-02 15:04:05", "2006-01-02"}
-
-// ParseStamp reads a stored validity timestamp, or the zero time when it cannot
-// be read. A malformed stamp is not a claim about the zero moment; callers get
-// the zero time and decide, because "unreadable" and "the epoch" are different
-// facts and only the caller knows which one it can afford to treat as unset.
-func ParseStamp(s string) time.Time {
-	for _, layout := range validityStampLayouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t
-		}
-	}
-	return time.Time{}
-}
+// The stamp PARSER is the store's own — ParseStamp over StampLayouts, from
+// #677's validity writers — rather than a second one here. A writer judging a
+// value it did not store and a reader interpreting one have to reach the same
+// verdict on what that value means, which is the same reason this file owns the
+// STATE rule and internal/assemble delegates to it rather than keeping a copy.
 
 // ValidityState names a memory's validity against a clock, and reports any
 // stored value no layout could read.
@@ -78,8 +65,8 @@ func ValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) (st
 		if s == nil {
 			return nil, false
 		}
-		t := ParseStamp(*s)
-		if t.IsZero() {
+		t, ok := ParseStamp(*s)
+		if !ok {
 			unreadable = append(unreadable, *s)
 			return nil, false
 		}

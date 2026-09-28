@@ -115,19 +115,9 @@ func TestValidityStateNamesAContract(t *testing.T) {
 	}
 }
 
-// TestParseStampRejectsRatherThanGuesses: the zero time is how ParseStamp says
-// "unreadable", and it is what keeps a malformed value from being read as a
-// claim about the epoch.
-func TestParseStampRejectsRatherThanGuesses(t *testing.T) {
-	if got := ParseStamp("2026-09-28 12:00:00"); got.IsZero() {
-		t.Error("a timestamp layout the store writes was rejected")
-	}
-	if got := ParseStamp("2026-09-28"); got.IsZero() {
-		t.Error("the date-only layout was rejected")
-	}
-	for _, bad := range []string{"", "yesterday", "28/09/2026", "2026-13-45"} {
-		if got := ParseStamp(bad); !got.IsZero() {
-			t.Errorf("ParseStamp(%q) = %v, want the zero time", bad, got)
-		}
-	}
-}
+// ParseStamp itself is NOT tested here. It belongs to #677's validity writers and
+// is exercised by their own tests; this file's subject is the STATE rule, and the
+// one thing worth asserting about the parser from here is that the state rule
+// reads a value through it rather than through a parser of its own — which is
+// what the "date-only" and "unreadable" cases above already prove, since a
+// second parser with a different layout set would fail them.
