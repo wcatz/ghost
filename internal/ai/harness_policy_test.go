@@ -1,15 +1,18 @@
 package ai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 )
@@ -138,8 +141,11 @@ func TestHarnessInvocationArgsAreGoldens(t *testing.T) {
 			},
 		},
 		{
+			// A nil key set is what an unanswering probe yields, and it means
+			// "pass everything" — the behaviour before the probe existed. So the
+			// golden is the FULL policy, which is also the worst case.
 			name: "codex",
-			got:  codexInvocationArgs(),
+			got:  codexInvocationArgs(nil),
 			want: []string{
 				"exec",
 				"--sandbox", "read-only",
@@ -211,9 +217,174 @@ func TestHarnessInvocationArgsAreGoldens(t *testing.T) {
 // upstream rename, and it is GHOST_LIVE_TESTS=1-gated, so it is absent from CI.
 // Between them: CI keeps the belief honest, and a machine with codex installed
 // is the only place the belief is actually tested.
+// codexFeaturesFake builds a fake codex that answers `features list` with the
+// given rows and records every invocation, so a test can assert both what the
+// probe learned and how many times it ran. `rows` of nil makes `features list`
+// fail, which is the probe-failure case.
+func codexFeaturesFake(t *testing.T, rows string) string {
+	t.Helper()
+	// The log path is a file, not a Go variable, because the fake is a shell
+	// script in a child process: a shared in-process counter would be invisible
+	// to it, and a channel would need a reader goroutine to outlive the test.
+	//
+	// Both variables reach the child through GHOST_PASSTHROUGH_ENV, the escape
+	// hatch harnessEnv exists for, rather than by being added to the allowlist.
+	// That is deliberate twice over: a test-only name in the production allowlist
+	// would be a hole in the very policy these tests verify, and the hatch is the
+	// only sanctioned way to add a variable for one invocation.
+	t.Setenv("CODEX_PROBE_LOG", filepath.Join(t.TempDir(), "probes"))
+	t.Setenv("FAKE_FEATURE_ROWS", rows)
+	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_LOG,FAKE_FEATURE_ROWS")
+	return fakeHarnessPolicyBinary(t, "codex", `
+if [ "$1" = "features" ]; then
+  printf 'probed\n' >> "$CODEX_PROBE_LOG"
+  [ -n "$FAKE_FEATURE_ROWS" ] || { echo "no features subcommand" >&2; exit 2; }
+  printf '%s' "$FAKE_FEATURE_ROWS"
+  exit 0
+fi
+printf '%s' 'KEEP'
+`)
+}
+
+// resetCodexFeatureProbe puts the process-wide probe cache and warning latch
+// back to their cold state. Both are deliberately process-wide (one probe per
+// binary identity, one warning per process), which is exactly what makes them
+// untestable without this.
+func resetCodexFeatureProbe(t *testing.T) {
+	t.Helper()
+	codexFeatureCache.Clear()
+	codexWeakPolicyWarned = sync.Once{}
+	t.Cleanup(func() {
+		codexFeatureCache.Clear()
+		codexWeakPolicyWarned = sync.Once{}
+	})
+}
+
+// captureCodexWarnings redirects slog for the duration of a test and returns the
+// buffer holding what was logged. The warning is a WARN because it has to
+// interrupt a lifecycle phase's output, and a test that cannot see it cannot
+// prove it fires once rather than once per call.
+func captureCodexWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &logs
+}
+
+// TestCodexProbePassesEveryKeyWhenAllAreDeclared: the ordinary case must be
+// silent. A warning here would be a false alarm on every correct install, and a
+// lifecycle run logs enough that one per phase would be noise.
+func TestCodexProbePassesEveryKeyWhenAllAreDeclared(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	logs := captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	bin := codexFeaturesFake(t, "shell_tool stable true\nunified_exec stable true\nview_image stable true\napps stable true\nplugins stable true\ntool_suggest stable true\nskill_mcp_dependency_install stable true\nremote_plugin stable true\nhooks stable true\nmulti_agent stable true\n")
+
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("a codex declaring every key logged %q, want silence", logs.String())
+	}
+}
+
+// TestCodexProbeOmitsUndeclaredKeysAndWarnsOnce is the reason the probe exists.
+// An older codex must get the keys it understands, be told once that its policy
+// is weaker, and still be driven — refusing would fail every lifecycle call on a
+// working install.
+func TestCodexProbeOmitsUndeclaredKeysAndWarnsOnce(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	logs := captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	// A codex predating the plugin/connector group: view_image and the four
+	// keys after it are absent, and `tool_suggest` is declared so the assertion
+	// covers a key that is missing in the MIDDLE of the list rather than a
+	// suffix of it.
+	bin := codexFeaturesFake(t, "shell_tool stable true\nunified_exec stable true\nhooks stable true\ntool_suggest stable true\nmulti_agent stable true\n")
+	for range 3 {
+		if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+			t.Fatalf("Reflect: %v", err)
+		}
+	}
+	if got := strings.Count(logs.String(), "WEAKER than on a current codex"); got != 1 {
+		t.Errorf("weaker-policy warning appeared %d times over 3 calls, want exactly 1:\n%s", got, logs.String())
+	}
+	for _, key := range []string{"view_image", "apps", "plugins", "skill_mcp_dependency_install", "remote_plugin"} {
+		if !strings.Contains(logs.String(), key) {
+			t.Errorf("warning does not name the missing key %q:\n%s", key, logs.String())
+		}
+	}
+	// Declared keys are still passed, and the non-feature restrictions are
+	// never filtered: `agents.enabled` and the top-level web_search are not
+	// feature keys, so `features list` says nothing about them.
+	if n := probeCallLog(t); n != 1 {
+		t.Errorf("probe ran %d times over 3 calls on one binary, want 1", n)
+	}
+}
+
+// TestCodexProbeFailureFallsBackToEveryKeyAndWarnsOnce: a probe that cannot
+// answer is not evidence about the codex, so it must not strip the policy. The
+// pre-probe behaviour is the correct fallback, and it is said out loud.
+func TestCodexProbeFailureFallsBackToEveryKeyAndWarnsOnce(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	logs := captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	// Empty rows: the fake answers `features list` with a non-zero exit, which
+	// is also what a codex without the subcommand does.
+	bin := codexFeaturesFake(t, "")
+
+	for range 3 {
+		if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+			t.Fatalf("Reflect: %v", err)
+		}
+	}
+	if got := strings.Count(logs.String(), "feature probe did not answer"); got != 1 {
+		t.Errorf("unverified-policy warning appeared %d times over 3 calls, want exactly 1:\n%s", got, logs.String())
+	}
+	if strings.Contains(logs.String(), "WEAKER than on a current codex") {
+		t.Errorf("an unanswered probe was reported as a weaker POLICY, which claims the codex lacks features it was never asked about:\n%s", logs.String())
+	}
+}
+
+// TestCodexProbeRunsOncePerBinaryIdentity is the cost half. A lifecycle run
+// spawns hundreds of harness processes on one codex; a probe per call would
+// double the process count of the whole run.
+func TestCodexProbeRunsOncePerBinaryIdentity(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	bin := codexFeaturesFake(t, "shell_tool stable true\nunified_exec stable true\nview_image stable true\napps stable true\nplugins stable true\ntool_suggest stable true\nskill_mcp_dependency_install stable true\nremote_plugin stable true\nhooks stable true\nmulti_agent stable true\n")
+
+	for range 5 {
+		if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+			t.Fatalf("Reflect: %v", err)
+		}
+	}
+	if n := probeCallLog(t); n != 1 {
+		t.Errorf("probe ran %d times over 5 calls on one binary identity, want 1", n)
+	}
+}
+
+// probeCallLog counts how many times the fake codex answered `features list`.
+// The fake appends one line per probe to a file named by CODEX_PROBE_LOG, which
+// is how a shell fake can be observed without a channel or a shared Go variable.
+func probeCallLog(t *testing.T) int {
+	t.Helper()
+	data, err := os.ReadFile(os.Getenv("CODEX_PROBE_LOG"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("read probe log: %v", err)
+	}
+	return strings.Count(string(data), "probed")
+}
+
 func TestCodexFeatureKeysAreDeclaredNames(t *testing.T) {
 	declared := parseCodexFeaturesList(codexFeaturesListTranscript)
-	for _, arg := range codexInvocationArgs() {
+	for _, arg := range codexInvocationArgs(nil) {
 		key, ok := strings.CutPrefix(arg, "features.")
 		if !ok {
 			continue // "--sandbox", "agents.enabled", the top-level web_search
@@ -233,21 +404,6 @@ func TestCodexFeatureKeysAreDeclaredNames(t *testing.T) {
 			t.Errorf("required key %q is not in the recorded codex features list; update the transcript and the policy together", required)
 		}
 	}
-}
-
-// parseCodexFeaturesList reads `codex features list` output. codex prints one
-// row per feature as "<key>  <stage>  <enabled>" in a fixed-width layout, so
-// the first field of each line is the key and the rest is prose about it.
-func parseCodexFeaturesList(out string) map[string]bool {
-	keys := make(map[string]bool)
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		keys[fields[0]] = true
-	}
-	return keys
 }
 
 // codexFeaturesListTranscript is the recorded output of `codex features list`

@@ -186,7 +186,7 @@ func TestLiveCodexDeclaresTheNoToolFeatureKeys(t *testing.T) {
 
 	declared := parseCodexFeaturesList(string(out))
 	var missing []string
-	for _, arg := range codexInvocationArgs() {
+	for _, arg := range codexInvocationArgs(nil) {
 		key, ok := strings.CutPrefix(arg, "features.")
 		if !ok {
 			continue

@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
+	"time"
 )
 
 type CodexClient struct {
@@ -35,7 +39,10 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 		defer cancel()
 	}
-	cmd, release, _ := harnessCommand(ctx, c.binary, codexInvocationArgs(), os.Environ(), harnessCodex)
+	support := codexFeaturesFor(ctx, c.binary)
+	args := codexInvocationArgs(support.declared)
+	warnOnWeakerCodexPolicy(support)
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessCodex)
 	defer release()
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
@@ -50,48 +57,41 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 // codexInvocationArgs is the whole argv of a `codex exec` turn, kept as a named
 // value so the no-tool policy can be pinned as a golden rather than grepped for.
 //
-// Every `-c features.<key>` below is a key codex's own feature registry
-// declares (features/src/lib.rs, matched by `key:`), and every one of them is
-// on by default, so omitting one re-opens a surface.
+// The no-tools keys are codexNoToolFeatureKeys, FILTERED against what the
+// installed codex declares. The probe is codexFeaturesFor; the two reasons it
+// exists are load-bearing and point opposite ways.
 //
-// A key codex does NOT recognise is SILENTLY IGNORED — the fail-OPEN direction,
-// and the reason two tests exist rather than a comment. `-c` overrides are
-// collected as raw strings and applied onto the config tree
+// codex SILENTLY IGNORES a `-c` key it does not know — the fail-OPEN direction.
+// `-c` overrides are collected as raw strings and applied onto the config tree
 // (utils/cli/src/config_override.rs: apply_toml_override just inserts the
 // segment), and `FeaturesToml` deserialises without `deny_unknown_fields`, so a
 // key renamed or removed upstream is dropped without complaint: the tool comes
 // back on, the call still succeeds, and nothing in a lifecycle log says so. The
 // strict reading is opt-in (`--strict-config`, default off) and Ghost does not
-// pass it. TestCodexFeatureKeysAreDeclaredNames checks the keys against a
-// recorded `codex features list` transcript, and
-// TestLiveCodexDeclaresTheNoToolFeatureKeys runs the real binary.
+// pass it, so TestLiveCodexDeclaresTheNoToolFeatureKeys provokes an unknown key
+// and reports which way the installed codex actually goes. Passing a key to a
+// codex that does not have the FEATURE is harmless, so the filter is about not
+// claiming a policy the binary cannot honour — not about avoiding a silent
+// no-op that costs nothing.
 //
-// The consequence is stated rather than hidden: on a codex that does not declare
-// one of these keys, the policy is WEAKER than intended and Ghost cannot tell.
-// That is why the live test exists and why the recorded transcript is a fixture
-// a reviewer can check against upstream — not a comment asserting a behaviour
-// codex does not have.
+// The filter warns and NEVER refuses. A codex missing a key is codex without the
+// surface that key governs, and Ghost picks codex by exec.LookPath with no
+// version floor anywhere, so refusing would fail every reflect, resolve and
+// supersede call on a working install over a surface that may not exist — a
+// worse failure than the one this policy prevents, and one with a much larger
+// blast radius. The weaker policy is reported once per process (a lifecycle run
+// makes hundreds of calls on the same binary, and a warning per call would bury
+// the phase output it exists to interrupt) and recorded nowhere else, which is
+// the honest limit of what a diagnostic can do.
 //
-// Ghost does NOT probe the installed codex at runtime, and that is a deliberate
-// choice rather than a missing step. A probe would cost a second process per
-// codex call — hundreds per lifecycle, which is the cost model
-// scratch.Open()'s budget exists to bound — to learn a fact that is a property
-// of the codex BUILD, not of the invocation. The two tests divide the work, and
-// the division is not even:
-//
-//   - TestCodexFeatureKeysAreDeclaredNames pins Ghost's BELIEF about which keys
-//     exist, against a recorded `codex features list` transcript. It fails when
-//     Ghost's own argv drifts from that record, and it cannot fail when upstream
-//     renames a key — a frozen fixture does not update itself.
-//   - TestLiveCodexDeclaresTheNoToolFeatureKeys is therefore the SOLE detector of
-//     an upstream rename, and it is GHOST_LIVE_TESTS=1-gated, so it is absent
-//     from CI and runs only where a codex is installed.
-//
-// That asymmetry is the honest cost of not probing at runtime, and it is the
-// reason the recorded transcript is checked by a reviewer rather than trusted:
-// CI pins the belief, and the live test is the only thing that can contradict
-// it. An older codex therefore gets the keys it understands and a weaker policy
-// than a current one, and nothing in a lifecycle log says which codex ran.
+// The probe runs ONCE per binary identity, cached in codexFeatureCache and keyed
+// by path/size/mtime exactly as claudeCapabilitiesFor keys its own probe: a
+// long-lived Ghost process (the MCP server) must re-probe a codex upgraded in
+// place rather than reuse a stale answer, and a per-call probe would double the
+// process count of a lifecycle that spawns one harness per consolidation, per
+// resolve candidate and per supersede pair. A probe that gets no answer is NOT
+// cached, so a codex mid-upgrade is re-asked rather than remembered as
+// declaring nothing.
 //
 // codex has no "no tools" flag — `--sandbox read-only` bounds what a tool may
 // DO, not which tools EXIST — so the policy is the list. The three that matter
@@ -132,26 +132,209 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 // #560): the kernel caps one argument at 32 pages and a reflect prompt is built
 // from up to 2000 memories of 8000 bytes, so a large project produced a prompt
 // that failed the spawn with E2BIG.
-func codexInvocationArgs() []string {
-	return []string{
+func codexInvocationArgs(declared map[string]bool) []string {
+	// The flags below are unconditional, and two of them are not feature keys at
+	// all: agents.enabled is an `agents` table key and web_search is the
+	// top-level setting, so `codex features list` says nothing about either and
+	// filtering them by that list would drop a restriction on every codex.
+	args := []string{
 		"exec",
 		"--sandbox", "read-only",
 		"--ignore-user-config",
 		"--ignore-rules",
 		"--skip-git-repo-check",
 		"--ephemeral",
-		"-c", "features.shell_tool=false",
-		"-c", "features.unified_exec=false",
-		"-c", "features.view_image=false",
-		"-c", "features.apps=false",
-		"-c", "features.plugins=false",
-		"-c", "features.tool_suggest=false",
-		"-c", "features.skill_mcp_dependency_install=false",
-		"-c", "features.remote_plugin=false",
-		"-c", "features.hooks=false",
-		"-c", "features.multi_agent=false",
-		"-c", "agents.enabled=false",
-		"-c", `web_search="disabled"`,
-		"-",
 	}
+	for _, key := range codexNoToolFeatureKeys {
+		// A nil map means the probe did not answer (an unresolvable binary, a
+		// codex without `features list`, a timeout). Passing every key is then
+		// the same behaviour as before the probe existed, and codex ignores the
+		// ones it does not know — so the fallback is today's policy rather than
+		// a weaker one.
+		if declared != nil && !declared[key] {
+			continue
+		}
+		args = append(args, "-c", "features."+key+"=false")
+	}
+	return append(args, "-c", "agents.enabled=false", "-c", `web_search="disabled"`, "-")
+}
+
+// codexNoToolFeatureKeys is the no-tools policy, as data rather than as literal
+// argv, because it now has to be FILTERED against what the installed codex
+// declares. Order is the order they appear in the argv, so a reviewer can diff
+// this list against a golden without reformatting anything.
+var codexNoToolFeatureKeys = []string{
+	"shell_tool",
+	"unified_exec",
+	"view_image",
+	"apps",
+	"plugins",
+	"tool_suggest",
+	"skill_mcp_dependency_install",
+	"remote_plugin",
+	"hooks",
+	"multi_agent",
+}
+
+// codexFeatureSupport is what the probe learned about one codex binary: the
+// keys it declares, and whether the probe actually answered.
+//
+// `probed` is separate from an empty `declared` because the two cases are
+// different. An empty set means codex ran `features list` and declares none of
+// the keys — a policy that is genuinely much weaker, and worth warning about. A
+// nil set means the probe never got an answer, which is not evidence about the
+// codex at all, so nothing is filtered and nothing is claimed.
+type codexFeatureSupport struct {
+	declared map[string]bool
+	probed   bool
+}
+
+// codexBinaryID identifies a codex install by identity rather than by name, so
+// an in-place upgrade is re-probed instead of reusing a stale answer, and a
+// long-lived Ghost process (the MCP server) notices.
+type codexBinaryID struct {
+	path    string
+	size    int64
+	modTime time.Time
+}
+
+// codexFeatureCache holds one probe result per codex binary identity. A
+// lifecycle run spawns hundreds of harness processes, and Ghost spawns one
+// process per consolidation, resolve candidate and supersede pair, so probing
+// per call would double the process count. Keyed by identity for the same
+// reason claudeCapabilitiesFor is: a cached answer about a binary that has since
+// been replaced is a wrong answer.
+var codexFeatureCache sync.Map // codexBinaryID -> codexFeatureSupport
+
+// codexFeaturesFor is the whole of the no-tools policy's runtime half, and it
+// has three properties that are each load-bearing.
+//
+// NEVER ERRORS. A diagnostic that can fail a harness call is worse than the
+// weaker policy it measures, so every failure path yields the zero value — a nil
+// key set, meaning "pass everything" — and is reported by
+// warnOnWeakerCodexPolicy. There is no code path from here to a refused
+// invocation, on purpose: see warnOnWeakerCodexPolicy.
+//
+// CACHED PER BINARY IDENTITY, never per call. A lifecycle run spawns hundreds of
+// harness processes on one codex — one per consolidation, per resolve candidate
+// and per supersede pair — so a per-call probe would double the process count of
+// the whole run. Keyed by path/size/mtime exactly as claudeCapabilitiesFor keys
+// its own probe, so a long-lived Ghost process (the MCP server) re-probes a codex
+// upgraded in place rather than reusing a stale answer.
+//
+// A FAILED PROBE IS NOT CACHED. Caching "this binary declares nothing" after one
+// timeout would strip the policy for the life of the process, so a codex that is
+// mid-upgrade or slow on a cold first run is simply re-asked. The cost is one
+// extra process per call in that window, which is the right trade: the
+// alternative is a permanently weaker policy that nothing reports.
+//
+// codexFeaturesFor probes the installed codex once per binary identity for the
+// feature keys it declares, using the same `codex features list` a person would
+// run, and caches the answer.
+//
+// It never returns an error. A probe that cannot answer yields a nil key set,
+// which codexInvocationArgs treats as "pass everything" — the behaviour before
+// this probe existed — and warnOnWeakerCodexPolicy reports once. A harness call
+// failing because a diagnostic could not run would be a worse outcome than the
+// weaker policy the diagnostic is measuring.
+func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		return codexFeatureSupport{}
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return codexFeatureSupport{}
+	}
+	id := codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
+	if cached, ok := codexFeatureCache.Load(id); ok {
+		return cached.(codexFeatureSupport)
+	}
+
+	// Bounded like the claude capability probe: an unanswering probe must not
+	// spend the caller's budget, which the caller needs for the model call.
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	probe, release, _ := harnessCommand(probeCtx, path, []string{"features", "list"}, os.Environ(), harnessCodex)
+	defer release()
+	out, err := probe.Output()
+	if err != nil {
+		// Not cached. A codex that is mid-upgrade, or a probe that timed out on
+		// a cold first run, should be re-asked on the next call rather than
+		// remembered as "declares nothing" for the life of the process.
+		return codexFeatureSupport{}
+	}
+	declared := parseCodexFeaturesList(string(out))
+	if len(declared) == 0 {
+		// Output that is not a feature table. Treating it as an empty answer
+		// would strip the whole policy on a codex that merely printed something
+		// unexpected, so it is treated as no answer at all.
+		return codexFeatureSupport{}
+	}
+	support := codexFeatureSupport{declared: declared, probed: true}
+	codexFeatureCache.Store(id, support)
+	return support
+}
+
+// codexWeakPolicyWarned makes the weaker-policy warning fire ONCE per process.
+// It has to be once: a lifecycle run makes hundreds of harness calls on the same
+// binary, and a warning per call would bury the phase output it is meant to
+// interrupt. The once is per process rather than per key so that a codex
+// missing two keys and a codex missing one are reported the same number of
+// times.
+var codexWeakPolicyWarned sync.Once
+
+// warnOnWeakerCodexPolicy reports, once per process, that this codex does not
+// support every key the no-tools policy asks for — and that Ghost will run
+// anyway.
+//
+// The two cases are worded differently because they mean different things. A
+// missing key is codex not having the feature at all, so the surface it governs
+// is not there to restrict. A failed probe is us not knowing, and passing every
+// key is the pre-probe behaviour. Neither refuses: refusing would fail every
+// reflect, resolve and supersede call on a working install over a surface that
+// may not exist, which is a worse failure than the one this policy prevents.
+func warnOnWeakerCodexPolicy(support codexFeatureSupport) {
+	if !support.probed {
+		codexWeakPolicyWarned.Do(func() {
+			slog.Warn("codex feature probe did not answer; passing the whole no-tools key list, which is the behaviour before the probe existed. This is not evidence that any tool is on: the codex may be older than this policy, or `codex features list` may be unavailable.",
+				"policy", "unverified")
+		})
+		return
+	}
+	missing := missingCodexFeatureKeys(support.declared)
+	if len(missing) == 0 {
+		return
+	}
+	codexWeakPolicyWarned.Do(func() {
+		slog.Warn("installed codex does not declare every no-tools feature key, so the no-tools policy is WEAKER than on a current codex. Running anyway: a missing key means this codex does not have the surface it governs, and refusing would fail every reflect, resolve and supersede call over a surface that may not exist.",
+			"missing", strings.Join(missing, ","))
+	})
+}
+
+// parseCodexFeaturesList reads `codex features list` output. codex prints one
+// row per feature as "<key>  <stage>  <enabled>" in a fixed-width layout, so
+// the first field of each line is the key and the rest is prose about it.
+func parseCodexFeaturesList(out string) map[string]bool {
+	keys := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		keys[fields[0]] = true
+	}
+	return keys
+}
+
+// missingCodexFeatureKeys names the policy keys this codex does not declare, in
+// policy order so the message is stable between runs.
+func missingCodexFeatureKeys(declared map[string]bool) []string {
+	var missing []string
+	for _, key := range codexNoToolFeatureKeys {
+		if !declared[key] {
+			missing = append(missing, key)
+		}
+	}
+	return missing
 }
