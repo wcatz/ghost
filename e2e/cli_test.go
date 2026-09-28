@@ -1929,10 +1929,11 @@ func TestCLIBench(t *testing.T) {
 // from the same committed corpus, each sweeping the FULL six-point grid over all
 // 220 queries with its intervals. The in-process test in internal/bench compares
 // two seeds at the one affected grid point, because a second full sweep there
-// costs ~75s under -race against a package already at 336s of Go's 600s
-// per-binary budget; here a whole sweep is 14s. If the two tables ever differ
-// again, the first place to look is what a seeded row's id and created_at are
-// drawn from — corpusID and corpusStamp in internal/bench/corpusstore.go.
+// costs ~75s under -race against a package whose CI budget is nearly spent (that
+// budget and its headroom are written down in its package-map bullet); here a
+// whole sweep is 14s. If the two tables ever differ again, the first place to
+// look is what a seeded row's id and created_at are drawn from — corpusID and
+// corpusStamp in internal/bench/corpusstore.go.
 func TestCLIBenchSweepReproducesAcrossProcesses(t *testing.T) {
 	t.Parallel()
 	s := newSandbox(t)

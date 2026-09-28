@@ -13,11 +13,10 @@ import (
 // sweepReproGrid is the grid this test sweeps: the one point where the two legs
 // are weighted EQUALLY, which is where RRF scores collide often enough for the
 // tie-break to decide results (#708). It is one point and not SweepGrid's six
-// because this is a corpus-wide test and the package is at 336s of Go's 600s
-// per-binary budget in CI (see the package-map bullet in CLAUDE.md, and the
-// measurement that put the five existing corpus-wide tests on t.Parallel): every
-// extra point is ~75s of -race on the laptop, which is the price of a second
-// corpus load AND a second full pass over 220 queries. What the other five points
+// because this is a corpus-wide test and this package's CI budget is the binding
+// constraint on adding one: the budget, and the headroom left in it, are written
+// down once in the internal/bench package-map bullet, and a second full sweep
+// here costs ~75s of -race. What the other five points
 // do not need re-measuring — they were byte-identical across every run precisely
 // because they barely tie — and the whole six-point table is compared across two
 // processes of the real binary by the e2e suite, which is where a full sweep
