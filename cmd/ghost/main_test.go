@@ -1538,10 +1538,10 @@ func TestSupersedeReassessReport(t *testing.T) {
 		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true, Written: true},
 	}, 2, 1)
 	for _, want := range []string{
-		"0 UNKNOWN, 1 unjudged (their classify call failed; their edges stand), withdrew 1",
+		"0 UNKNOWN, 1 unjudged (no verdict: the classify call failed or answered with the wrong number of verdicts; their edges stand), withdrew 1",
 		"(2 classify call(s), 1 retried after a failed call)",
 		"  withdrew     abcdef01 -> 98765432  [veto, no harness call]",
-		"  unjudged    55667788 -> 44556677  [no verdict: the classify call failed, so the edge stands and the next pass re-asks it]",
+		"  unjudged    55667788 -> 44556677  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]",
 	} {
 		if !strings.Contains(partial, want) {
 			t.Errorf("partial-repair report missing %q:\n%s", want, partial)

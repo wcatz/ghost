@@ -218,6 +218,56 @@ func TestReassessAppliesVetoedWithdrawalsWhenABatchFails(t *testing.T) {
 	}
 }
 
+// unreadableLinksStore fails GetLinks, the read liveCausesPairs makes to predict
+// the 'causes' sweep. It is the one failure the classify failure has to survive
+// alongside: the pass has already recorded which pairs it could not judge, and
+// an exit that dropped that record would report the unjudged edges as nothing
+// happened at all.
+type unreadableLinksStore struct {
+	*memory.Store
+}
+
+func (unreadableLinksStore) GetLinks(context.Context, string) ([]memory.Link, error) {
+	return nil, errors.New("links table is locked")
+}
+
+// TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails: two failures
+// in one run are joined, not replaced, and the summary is still logged. The
+// unjudged edges are half of what the operator has to fix, and this is the exit
+// that would otherwise return neither their text nor the log that explains the
+// partial state.
+func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	openNewer, _ := seedEdge(t, store, db,
+		"The ingest service now runs Redis 7.2, revision a.",
+		"The ingest service runs Redis 6.2, revision a.")
+
+	fp := &flakyProvider{fails: 2}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	var buf strings.Builder
+	res, _, err := Reassess(ctx, unreadableLinksStore{Store: store}, cls, "p", true, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err == nil {
+		t.Fatal("an unreadable link read must fail the pass")
+	}
+	if !strings.Contains(err.Error(), "links table is locked") {
+		t.Errorf("error %q does not carry the read failure", err)
+	}
+	if !strings.Contains(err.Error(), "classify") {
+		t.Errorf("error %q dropped the classify failure: the unjudged edge is half of what the operator has to fix", err)
+	}
+	if len(res.Unjudged) != 1 || res.Unjudged[0].NewerID != openNewer {
+		t.Errorf("Unjudged = %+v, want the pair the classifier never judged", res.Unjudged)
+	}
+	if !strings.Contains(buf.String(), "supersede reassess") {
+		t.Errorf("this exit must still log the summary; a run with the most to explain logged nothing:\n%s", buf.String())
+	}
+}
+
 // TestReassessDryRunWritesNothingWhenABatchFails: a dry run that hits the same
 // failure has the same report and the same non-zero exit, and still writes
 // nothing — the repair pass previews a deletion, so a preview that moved the

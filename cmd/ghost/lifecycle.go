@@ -1426,10 +1426,14 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	// both here because the withdrawal lines below can look like the whole
 	// story: a pass that withdrew six vetoed edges and judged nothing else is a
 	// partial repair, and the edges it never reached have to be findable rather
-	// than countable.
+	// than countable. The wording names BOTH ways a pair reaches this list — a
+	// call that failed and a reply whose verdict count did not match the pairs
+	// asked about — because on the second one the harness is fine and sending
+	// the operator after the network would be a wrong lead printed by the
+	// report whose whole job is the partial state.
 	unjudgedNote := ""
 	if n := len(res.Unjudged); n > 0 {
-		unjudgedNote = fmt.Sprintf(", %d unjudged (their classify call failed; their edges stand)", n)
+		unjudgedNote = fmt.Sprintf(", %d unjudged (no verdict: the classify call failed or answered with the wrong number of verdicts; their edges stand)", n)
 	}
 	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN%s, %s %d, %s %d causes edge(s)%s (%d classify call(s)%s)\n",
 		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
@@ -1479,9 +1483,10 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	// One line per unjudged edge, in the same shape as the withdrawn rows so a
 	// reader can tell at a glance which edges moved and which did not. The
 	// reason is the same in every row — no verdict exists — so it is the state,
-	// not a per-edge finding, and the pass exits non-zero for the rerun.
+	// not a per-edge finding, and the pass exits non-zero for the rerun. It
+	// names both causes for the reason the summary does.
 	for _, u := range res.Unjudged {
-		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed, so the edge stands and the next pass re-asks it]\n",
+		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]\n",
 			short(u.NewerID), short(u.OlderID))
 	}
 	if !apply && len(withdrawn) > 0 {

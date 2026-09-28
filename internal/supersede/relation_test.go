@@ -490,6 +490,7 @@ func TestRelationClassifierBatchFallsBackWhenNothingParses(t *testing.T) {
 func TestRelationClassifierBatchTransportErrorIsFatal(t *testing.T) {
 	cls := NewRelationClassifier(&fakeProvider{err: errors.New("api down")})
 	cls.batchSize = 2
+	cls.SetRetryDelay(0) // the retry is its own tests; this one is about the error
 	_, err := cls.ClassifyBatch(context.Background(), []Candidate{
 		{NewerContent: "a", OlderContent: "a"},
 		{NewerContent: "b", OlderContent: "b"},

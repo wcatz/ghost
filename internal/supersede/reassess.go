@@ -327,6 +327,21 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	// #699 failure. The pairs move to Unjudged with their edges live, and the
 	// error is returned at the end so the exit still says "rerun me".
 	var fail error
+	// The one summary this pass logs, as a closure because it has to be
+	// reachable from more than one exit: a run that recorded a partial state and
+	// then failed a read has the most to explain, not the least.
+	logSummary := func() {
+		if logger == nil {
+			return
+		}
+		logger.Info("supersede reassess",
+			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
+			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
+			"reversed", res.Reversed, "unknown", res.Unclassified, "unjudged", len(res.Unjudged),
+			"withdrawn", res.Withdrawn, "causes_withdrawn", res.CausesWithdrawn,
+			"causes_sweep_failed", res.CausesSweepFailed,
+			"retries", retriesOf(cls), "failed", fail != nil)
+	}
 	if len(open) > 0 {
 		verdicts, err := cls.ClassifyBatch(ctx, open)
 		if err == nil && len(verdicts) != len(open) {
@@ -373,7 +388,12 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	}
 	causesPairs, err := liveCausesPairs(ctx, store, rows)
 	if err != nil {
-		return res, nil, err
+		// Joined, not replaced, and logged before returning: a classify failure
+		// recorded above is still true, and this is the one exit that would
+		// otherwise drop both its text and the summary line explaining a run
+		// that had already recorded a partial state.
+		logSummary()
+		return res, nil, errors.Join(fail, err)
 	}
 
 	withdrawn := make([]WithdrawnEdge, 0, len(settled))
@@ -459,15 +479,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			res.CausesWithdrawn += w.CausesSwept
 		}
 	}
-	if logger != nil {
-		logger.Info("supersede reassess",
-			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
-			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
-			"reversed", res.Reversed, "unknown", res.Unclassified, "unjudged", len(res.Unjudged),
-			"withdrawn", res.Withdrawn, "causes_withdrawn", res.CausesWithdrawn,
-			"causes_sweep_failed", res.CausesSweepFailed,
-			"retries", retriesOf(cls), "failed", fail != nil)
-	}
+	logSummary()
 	if fail != nil {
 		return res, withdrawn, fail
 	}
