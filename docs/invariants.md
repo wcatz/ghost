@@ -146,9 +146,9 @@ warn-once latches are untouched. The freshness test for codex therefore lives in
 places and a check-then-probe pair with that test in only one of them is how a
 long-lived parent stops noticing a codex upgraded in place. The mutex-map argument
 is CLAUDE'S, and codex is the case that would survive without the group:
-`probeCodexFeatures` caches a verdict the probe could not REACH, so a per-key
-lock would leave each follower a fresh negative to return. (A verdict reached under a
-DEAD context is the one that is not cached — a cancellation, not an answer — which does
+the flight caches a verdict the probe could not REACH, so a per-key lock would
+leave each follower a fresh negative to return. (A verdict reached under a DEAD
+context is the one that is not cached — a cancellation, not an answer — which does
 not change this.) Both use the same mechanism, chosen once, rather than a claim each
 probe needs a guarantee it lacks.
 
@@ -174,21 +174,22 @@ must not start a fresh attempt under a dead context, which is why
 `isSharedProbeCancellation` requires a LIVE `ctx` as well as the marker.
 
 **A cancelled caller leaves NOTHING behind.** The negative a killed probe produces says
-more about the caller's connection than about the codex, so the flight that runs
-`probeCodexFeatures` stores its verdict only while THAT caller's context is alive, and
-marks the flight instead when it is not. The store lives in the flight rather than in the
-probe because the decision needs both facts at once — is the answer worth keeping, and was
-the caller that produced it still alive — and a check-then-act split across two functions
-disagrees with itself in the window between them. It is measured on the CALLER's context
-and not on `probeCtx`: a probe that hit its own 10s cap also knows nothing, and that one IS
-cached, for `codexFeatureRetry`, because an unanswering codex is the install this design
-supports. Nothing was cached by the round that died, so the next round's re-read misses
-and a live caller really does re-probe rather than inherit the negative. For the same
-reason a caller that stopped waiting gets no `warnOnWeakerCodexPolicy` at all
-(`CodexClient.run` checks `ctx.Err()` first): nothing was learned about the codex, so the
-placeholder it was handed is not a probe result, and reporting it would fire the
-`unverified` WARN and CONSUME its once-per-process latch — silencing the real diagnostic
-for the rest of a long-lived server, over the one turn that lost the most information.
+more about the caller's connection than about the codex, so the flight inside
+`codexFeaturesFor` stores the verdict of `probeCodexFeatures` only while THAT caller's
+context is alive, and marks the flight instead when it is not. The store lives in the
+flight rather than in the probe because the decision needs both facts at once — is the
+answer worth keeping, and was the caller that produced it still alive — and a
+check-then-act split across two functions disagrees with itself in the window between
+them. It is measured on the CALLER's context and not on `probeCtx`: a probe that hit
+its own 10s cap also knows nothing, and that one IS cached, for `codexFeatureRetry`,
+because an unanswering codex is the install this design supports. Nothing was cached by
+the round that died, so the next round's re-read misses and a live caller really does
+re-probe rather than inherit the negative. For the same reason a caller that stopped
+waiting gets no `warnOnWeakerCodexPolicy` at all (`CodexClient.run` checks `ctx.Err()`
+first): nothing was learned about the codex, so the placeholder it was handed is not a
+probe result, and reporting it would fire the `unverified` WARN and CONSUME its
+once-per-process latch — silencing the real diagnostic for the rest of a long-lived
+server, over the one turn that lost the most information.
 
 **Both arms of the probe's `select` check the caller's own context.** When a caller's
 context is already done AND the flight channel already holds a result, both `select` cases

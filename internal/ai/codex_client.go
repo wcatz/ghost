@@ -266,12 +266,12 @@ var codexFeatureCache sync.Map // codexBinaryID -> codexFeatureSupport
 // that arrives before the first one stores runs its own (#741).
 //
 // The group is here for the SHAPE claudeCapabilitiesFor needs it for, and this
-// probe would survive without it: a per-key mutex map would do, because
-// probeCodexFeatures caches a verdict the probe could NOT reach, so the leader
-// leaves a FRESH negative and each follower finds it in codexCachedSupport and
-// returns without spawning. (A verdict reached under a DEAD context is the one
-// it refuses to cache, which is a cancellation rather than an answer and does
-// not change this.) The difference that makes singleflight necessary for
+// probe would survive without it: a per-key mutex map would do, because the
+// flight caches a verdict the probe could NOT reach, so the leader leaves a
+// FRESH negative and each follower finds it in codexCachedSupport and returns
+// without spawning. (A verdict reached under a DEAD context is the one the
+// flight refuses to cache, which is a cancellation rather than an answer and
+// does not change this.) The difference that makes singleflight necessary for
 // claude — a failure not being cached — is the opposite of this probe's design,
 // which caches precisely so an old codex costs one process for the whole run.
 // It is the same mechanism in both, chosen once, rather than a claim that this
@@ -287,9 +287,9 @@ var codexFeatureCache sync.Map // codexBinaryID -> codexFeatureSupport
 // leader whose context died would hand every follower the NEGATIVE that its
 // killed probe produced, and that negative is a statement about one cancelled
 // turn rather than about the codex. Both halves are handled at the call site
-// below: the dead leader stores nothing (probeCodexFeatures), and a live caller
-// goes round again under its own context. The shared half is
-// isSharedProbeCancellation in probe.go.
+// below: the dead leader's flight stores nothing, and a live caller goes round
+// again under its own context. The shared half is isSharedProbeCancellation in
+// probe.go.
 var codexProbeGroup singleflight.Group
 
 // codexCachedSupport returns the verdict cached for this identity when it is
@@ -371,8 +371,8 @@ func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
 	// context. Re-entering the GROUP rather than probing directly is the point —
 	// a direct re-probe would put this burst back to one child per caller, the
 	// bug #741 removes, on the rare path out of a common one. Nothing was cached
-	// by the round that died (probeCodexFeatures stores only under a live
-	// context), so the next round's re-read misses and really does re-probe
+	// by the round that died (the flight stores only while its caller's context
+	// is alive), so the next round's re-read misses and really does re-probe
 	// rather than serve the dead leader's negative.
 	//
 	// Each round consumes one more cancellation, so the rounds are bounded by
