@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -200,7 +199,7 @@ func TestHarnessRefusalsNameTheFieldAndNotTheValue(t *testing.T) {
 			t.Errorf("the refusal leaked part of the value (%q): %v", unwanted, err)
 		}
 	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("source_ref")) {
+	if !strings.Contains(err.Error(), "source_ref") {
 		t.Errorf("the refusal does not name the field: %v", err)
 	}
 }
