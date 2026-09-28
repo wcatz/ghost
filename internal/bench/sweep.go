@@ -38,11 +38,16 @@ func SweepGrid() []memory.SearchParams {
 // Sweep evaluates every parameter combination with the hybrid searcher over an
 // already-seeded store (one store serves every point). Results are sorted by
 // NDCG@10 descending, ties broken by MRR@10 then recall@1.
+//
+// The sweep is a relevance search, so it scores the graded set only: a
+// no-answer query in the set would be measured for false positives
+// (Result.NoAnswer) and read nowhere here, and the false-positive rate is
+// reported per condition by FormatResults rather than per grid point.
 func Sweep(ctx context.Context, store *memory.Store, queries []Query, grid []memory.SearchParams) ([]SweepPoint, error) {
 	points := make([]SweepPoint, 0, len(grid))
 	for _, p := range grid {
 		cond := fmt.Sprintf("vec=%.2f", p.VecWeight)
-		res, err := runCondition(ctx, cond, queries, func(q Query) ([]string, error) {
+		res, err := runCondition(ctx, store, cond, queries, func(q Query) ([]string, error) {
 			return idsFromMemories(store.SearchHybridParams(ctx, q.ProjectID, q.Text, q.Vector, scoreK, p))
 		})
 		if err != nil {

@@ -52,7 +52,11 @@ func BuiltinDataset() (Dataset, Vectors, error) {
 	return Dataset{Project: "bench", Memories: mems, Queries: qs, Negatives: negs}, vecs, nil
 }
 
-// FormatResults renders the ablation results as an aligned text table.
+// FormatResults renders the ablation results as an aligned text table, with the
+// no-answer false-positive table directly beneath it. Beside rather than
+// elsewhere on purpose: a graded table on its own reads as if recall were the
+// whole of retrieval quality, and the false-positive rate is the half that says
+// what the recall was retrieved at the cost of.
 func FormatResults(results []Result) string {
 	var b bytes.Buffer
 	n := 0
@@ -65,7 +69,21 @@ func FormatResults(results []Result) string {
 			r.Condition, r.Recall1, r.Recall5, r.Recall10, r.MRR10, r.NDCG10)
 	}
 	fmt.Fprintf(&b, "\n%d graded queries, %d memories. Retrieval-only, no LLM judge.\n", n, len(builtinMemoryKeys()))
+	b.WriteString(FormatNoAnswer(summariesOf(results)))
 	return b.String()
+}
+
+// summariesOf reduces each condition's no-answer measurements to its summary, in
+// the order the conditions were run.
+func summariesOf(results []Result) []NoAnswerSummary {
+	out := make([]NoAnswerSummary, 0, len(results))
+	for _, r := range results {
+		if len(r.NoAnswer) == 0 {
+			continue
+		}
+		out = append(out, SummarizeNoAnswer(r.Condition, r.NoAnswer))
+	}
+	return out
 }
 
 // builtinMemoryKeys parses just the memory count for the report footer.

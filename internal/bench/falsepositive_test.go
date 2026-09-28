@@ -52,7 +52,19 @@ func TestFalsePositiveReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NegativeQueries: %v", err)
 	}
-	rep, err := FalsePositives(ctx, store, noAnswer, graded)
+	// The no-answer set is measured by the RUNNER, per condition, and the
+	// hybrid condition's measurement is what this report is built on: one
+	// search per query rather than one per query per report.
+	all := append(append([]Query{}, graded...), noAnswer...)
+	results, err := Run(ctx, store, all)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	measured := NoAnswerFor(results, CondHybrid)
+	if len(measured) != len(noAnswer) {
+		t.Fatalf("runner measured %d no-answer queries, fixture has %d", len(measured), len(noAnswer))
+	}
+	rep, err := FalsePositives(ctx, store, measured, graded)
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
@@ -105,7 +117,37 @@ func TestFalsePositiveReport(t *testing.T) {
 	if rep.NoAnswerMax < rep.MeanTop {
 		t.Errorf("no-answer maximum %.3f is below the mean %.3f", rep.NoAnswerMax, rep.MeanTop)
 	}
-	t.Logf("no-answer queries against the graded corpus:\n%s", FormatFalsePositives(rep))
+	t.Logf("no-answer queries against the graded corpus:\n%s", FormatFalsePositives(rep, CondHybrid))
+}
+
+// measureNoAnswers runs a set of no-answer queries through the shipped hybrid
+// path and returns their measurements, which is what the runner hands the report.
+// Tests that only care about the report build their input this way rather than
+// searching again, so the report and the per-condition rate are always the same
+// numbers.
+func measureNoAnswers(t *testing.T, store *memory.Store, noAnswer []Query) []NoAnswerQuery {
+	t.Helper()
+	ctx := context.Background()
+	rank := func(q Query) ([]string, error) {
+		results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(results))
+		for i, m := range results {
+			ids[i] = m.ID
+		}
+		return ids, nil
+	}
+	out := make([]NoAnswerQuery, 0, len(noAnswer))
+	for _, q := range noAnswer {
+		m, err := measureNoAnswer(ctx, store, q, rank)
+		if err != nil {
+			t.Fatalf("measure %s: %v", q.Name, err)
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // vectorMemory is one row of a store built to order search deliberately: the
@@ -185,7 +227,7 @@ func TestFalsePositivesScoresKeywordOnlyResults(t *testing.T) {
 	// Every row in this fixture sits at or above the lowest floor, so every
 	// returned result has to clear it. Counting fewer means one of them was
 	// scored as a non-match.
-	rep, err := FalsePositives(ctx, store, []Query{q}, nil)
+	rep, err := FalsePositives(ctx, store, measureNoAnswers(t, store, []Query{q}), nil)
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
@@ -313,7 +355,8 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	// answerable side off the leg's ranking instead of the window would report
 	// 0.99 against the no-answer set's own window reading.
 	answerable := Query{Name: "a1", ProjectID: project, Text: "fleet scheduler", Vector: unitVector(1)}
-	rep, err := FalsePositives(ctx, store, []Query{{Name: "n1", ProjectID: project, Text: "nothing matches this", Vector: unitVector(1)}}, []Query{answerable})
+	noAnswer := []Query{{Name: "n1", ProjectID: project, Text: "nothing matches this", Vector: unitVector(1)}}
+	rep, err := FalsePositives(ctx, store, measureNoAnswers(t, store, noAnswer), []Query{answerable})
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
@@ -323,20 +366,26 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	}
 }
 
-// TestCountAboveFloorIsStrict pins the boundary rule directly, which the corpus
-// cannot do: real cosines essentially never land exactly on 0.3/0.4/0.5, so this
-// is the only place the strictness is enforced. A floor at 0.3 keeps a candidate
-// scored above it, and drops one sitting on it — the same rule
+// TestCountHitsAboveFloorIsStrict pins the boundary rule directly, which the
+// corpus cannot do: real cosines essentially never land exactly on 0.3/0.4/0.5,
+// so this is the only place the strictness is enforced. A floor at 0.3 keeps a
+// candidate scored above it, and drops one sitting on it — the same rule
 // memory.filterVectorFloor applies, and the one NoAnswerMax/Unseparable is
-// measured against.
-func TestCountAboveFloorIsStrict(t *testing.T) {
-	results := []memory.Memory{{ID: "on"}, {ID: "above"}, {ID: "below"}, {ID: "unscored"}}
-	cosines := map[string]float32{"on": 0.3, "above": 0.30001, "below": 0.29999}
-	if got := countAboveFloor(cosines, results, 0.3); got != 1 {
-		t.Errorf("countAboveFloor(0.3) = %d, want 1: only the row strictly above the floor counts, and an unscored row counts as no match", got)
+// measured against. A returned row with no score in the map is not counted
+// either: it has no comparable cosine, which reads as 0, below every floor.
+func TestCountHitsAboveFloorIsStrict(t *testing.T) {
+	cosines := map[string]float32{"on": 0.3, "above": 0.30001, "below": 0.29999, "unscored": 0}
+	if got := countHitsAboveFloor(cosines, 0.3); got != 1 {
+		t.Errorf("countHitsAboveFloor(0.3) = %d, want 1: only the row strictly above the floor counts, and an unscored row counts as no match", got)
 	}
-	if got := countAboveFloor(cosines, results, 0.29999); got != 2 {
-		t.Errorf("countAboveFloor(0.29999) = %d, want 2 (the row on 0.3 and the one above it)", got)
+	if got := countHitsAboveFloor(cosines, 0.29999); got != 2 {
+		t.Errorf("countHitsAboveFloor(0.29999) = %d, want 2 (the row on 0.3 and the one above it)", got)
+	}
+	// A row the caller was shown but whose vector could not be scored must not
+	// be counted as a match, which is the whole reason the report scores rows
+	// from their own stored vectors rather than from a leg's list.
+	if got := countHitsAboveFloor(map[string]float32{}, 0.0); got != 0 {
+		t.Errorf("countHitsAboveFloor over no scored rows = %d, want 0", got)
 	}
 }
 
@@ -354,8 +403,8 @@ func TestFalsePositivesUnseparableCountsExactTies(t *testing.T) {
 		key: "only", content: "The only memory in this store.", category: "fact", vec: unitVector(1),
 	}})
 	q := unitVector(1)
-	rep, err := FalsePositives(context.Background(), store,
-		[]Query{{Name: "n1", ProjectID: project, Text: "anything", Vector: q}},
+	noAnswer := []Query{{Name: "n1", ProjectID: project, Text: "anything", Vector: q}}
+	rep, err := FalsePositives(context.Background(), store, measureNoAnswers(t, store, noAnswer),
 		[]Query{{Name: "a1", ProjectID: project, Text: "only memory", Vector: q, Rel: Relevance{"x": 1}}})
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
