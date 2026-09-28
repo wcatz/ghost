@@ -317,35 +317,41 @@ func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref 
 	if err != nil {
 		return "", err
 	}
-	// The exact match wins before anything else, whatever the ref's length. It is
-	// the only reading under which the ref names ONE row, so a short full id that
-	// also happens to prefix a longer one resolves rather than being refused as
-	// ambiguous — which is what "the floor applies to a prefix" means.
-	//
-	// Uniqueness does NOT make this unambiguous, because the comparison is
-	// case-insensitive while `memories.id` is a BINARY-unique TEXT key: a store
-	// holding both "abc" and "ABC" — reachable, since `ghost import` writes an
-	// artifact's ids verbatim and its presence check is case-sensitive, so it
-	// admits both — returns two rows here, and the query's BINARY ORDER BY puts
-	// the uppercase one first. Taking the first would be picking which memory to
-	// delete a link from on a coin toss, so two matches are refused.
-	var exact []string
+	// Byte-exact first, at any length. `memories.id` is a BINARY-unique key, so at
+	// most one stored id can equal the ref — which makes the spelling the caller
+	// typed decisive rather than a guess, and it is what lets a short full id that
+	// also happens to prefix a longer one resolve rather than be refused as
+	// ambiguous. This is the reading that makes the repair performable: a store
+	// holding both "abc" and "ABC" still names ONE of them per spelling.
 	for _, id := range ids {
-		if strings.EqualFold(id, ref) {
-			exact = append(exact, id)
+		if id == ref {
+			return id, nil
 		}
 	}
-	switch len(exact) {
-	case 1:
-		return exact[0], nil
+	// Then case-folded, for a ref spelled in a case the store does not hold. A
+	// single fold match is one row, so it is not ambiguous either.
+	//
+	// Two fold matches and no byte-exact one means the ref is a THIRD casing
+	// ("aBc") of ids that differ only in letter case. That is a genuine dead end
+	// and this message says so: the SQL match is case-insensitive, so no spelling
+	// the caller can type reaches either row, and a remedy that named a command
+	// would be naming a step that cannot open this one. Naming a remedy also
+	// belongs to the caller, not here — this text is returned verbatim by
+	// ghost_link_withdraw to an agent that may have no shell at all.
+	var folded []string
+	for _, id := range ids {
+		if strings.EqualFold(id, ref) {
+			folded = append(folded, id)
+		}
+	}
+	switch len(folded) {
 	case 0:
-		// No exact match: the prefix rules below decide.
+		// No case-insensitive match either: the prefix rules below decide.
+	case 1:
+		return folded[0], nil
 	default:
-		// Neither spelling disambiguates them here, so the message does not
-		// pretend it does: it names the collision and the one surface that takes
-		// an id the way the store holds it.
-		return "", fmt.Errorf("the %s ref %q names %d memories whose ids differ only in letter case (%s), and ids are matched case-insensitively here, so this cannot say which you meant — 'ghost history <id>' takes the exact spelling",
-			which, ref, len(exact), strings.Join(exact, ", "))
+		return "", fmt.Errorf("the %s ref %q matches %d memories whose stored ids differ only in letter case (%s), and it is spelled as neither: ids are matched case-insensitively here, so this ref cannot address either of them",
+			which, ref, len(folded), strings.Join(folded, ", "))
 	}
 	if len(ref) < minRefLen {
 		// Deliberately WITHOUT the match list. A ref this short names a slice of

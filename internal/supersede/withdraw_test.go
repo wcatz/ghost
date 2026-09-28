@@ -624,34 +624,69 @@ func TestWithdrawRefusesAShortRefWithoutDumpingTheProject(t *testing.T) {
 	}
 }
 
-// TestWithdrawRefusesIdsThatDifferOnlyInCase: the store matches refs
-// case-insensitively, and `memories.id` is BINARY-unique, so a corpus holding both
-// "abc" and "ABC" — which `ghost import` admits, its presence check being
-// case-sensitive — returns two exact matches. Taking the first would withdraw a
-// link nobody named, and ORDER BY id puts the uppercase one first, so it is not
-// even a stable guess.
-func TestWithdrawRefusesIdsThatDifferOnlyInCase(t *testing.T) {
+// TestWithdrawPrefersTheSpellingThatWasTyped: the store matches case-insensitively
+// and `memories.id` is BINARY-unique, so a corpus holding both "abc" and "ABC" —
+// which `ghost import` admits, its presence check being case-sensitive — is
+// addressable by the spelling the caller typed, and only by that. Reading it the
+// other way (a case-insensitive match, then a guess) would make the repair
+// unavailable for such a store, since no spelling would ever be accepted.
+func TestWithdrawPrefersTheSpellingThatWasTyped(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	lowerTarget := pinID(t, db, "abcd", "The note the lower-case id supersedes.")
 	upperTarget := pinID(t, db, "ABCD", "The note the upper-case id supersedes.")
 	lower := pinID(t, db, "abc", "An imported note whose id is lower case.")
 	upper := pinID(t, db, "ABC", "An imported note whose id is upper case.")
-	if err := store.CreateLink(ctx, lower, lowerTarget, string(RelationSupersedes), 0.9, "llm"); err != nil {
+	for _, pair := range [][2]string{{lower, lowerTarget}, {upper, upperTarget}} {
+		if err := store.CreateLink(ctx, pair[0], pair[1], string(RelationSupersedes), 0.9, "llm"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Each spelling withdraws ITS OWN edge, and only that one.
+	for _, tc := range []struct{ ref, target string }{{"abc", lowerTarget}, {"ABC", upperTarget}} {
+		res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: tc.ref, Target: tc.target}}, true, discardLogger())
+		if err != nil {
+			t.Fatalf("Withdraw(%s): %v", tc.ref, err)
+		}
+		if res.Withdrawn != 1 || res.Links[0].SourceID != tc.ref {
+			t.Errorf("Withdraw(%s) resolved to %+v, want that exact id", tc.ref, res.Links)
+		}
+	}
+	if n := liveEdgeCount(t, store, lowerTarget) + liveEdgeCount(t, store, upperTarget); n != 0 {
+		t.Errorf("%d live edge(s) left, want 0: each spelling withdrew its own", n)
+	}
+}
+
+// TestWithdrawRefusesAThirdCasingOfCaseVariantIDs: a ref spelled as NEITHER of two
+// ids that differ only in letter case is the one shape no spelling can address,
+// because the match is case-insensitive. That is a real dead end, so the refusal
+// says so and names no remedy — naming a command would be naming a step that
+// cannot open this one, and the same text is returned verbatim to an MCP caller
+// that may have no shell.
+func TestWithdrawRefusesAThirdCasingOfCaseVariantIDs(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	lowerTarget := pinID(t, db, "abcd", "The note the lower-case id supersedes.")
+	upperTarget := pinID(t, db, "ABCD", "The note the upper-case id supersedes.")
+	if err := store.CreateLink(ctx, pinID(t, db, "abc", "An imported note whose id is lower case."), lowerTarget, string(RelationSupersedes), 0.9, "llm"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateLink(ctx, upper, upperTarget, string(RelationSupersedes), 0.9, "llm"); err != nil {
+	if err := store.CreateLink(ctx, pinID(t, db, "ABC", "An imported note whose id is upper case."), upperTarget, string(RelationSupersedes), 0.9, "llm"); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "abc", Target: lowerTarget}}, true, discardLogger())
+	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "aBc", Target: lowerTarget}}, true, discardLogger())
 	if err == nil {
-		t.Fatal("a ref naming two case-variant ids was resolved to one of them")
+		t.Fatal("a third casing of two case-variant ids was resolved to one of them")
 	}
 	if !strings.Contains(err.Error(), "differ only in letter case") {
 		t.Errorf("the refusal does not name the collision: %v", err)
 	}
-	// And it changed nothing: the guess this prevents is a withdrawn link.
+	if strings.Contains(err.Error(), "ghost ") {
+		t.Errorf("the refusal names a command as the way out, and the match is case-insensitive so no command argument opens it: %v", err)
+	}
+	// And it moved nothing.
 	if n := liveEdgeCount(t, store, lowerTarget); n != 1 {
 		t.Errorf("live edges into the lower-case target = %d, want 1: a refused ref must write nothing", n)
 	}
