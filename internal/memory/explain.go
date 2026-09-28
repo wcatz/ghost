@@ -397,7 +397,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			row.StatusFactor = statusDemotionFactor(m.ResolvedAt != nil, m.ProjectID, p.ProjectID)
 			row.ScopeMatched = true
 		}
-		statusDemoted = statusDemoted || row.StatusFactor != 1.0
+		statusDemoted = statusDemoted || (t != nil && t.Scored && row.StatusFactor != 1.0)
 
 		// Validity is reported, never applied: the search ranking does not read
 		// it, so the state is the row's own currency and the penalty is zero
@@ -434,7 +434,12 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		ex.Rows = append(ex.Rows, row)
 	}
 	if statusDemoted {
-		ex.Notes = append(ex.Notes, "status_factor is applied to the fused score inside window selection, before the cut: multiply rrf_score by status_factor for the score the window actually ranked on (decay_factor then multiplies that)")
+		// Only a row fusion actually SCORED can set the flag, so this sentence is
+		// only ever a claim about rows whose score was multiplied. A row the
+		// vector floor removed carries a status factor too — it would be demoted —
+		// but nothing multiplied its rrf_score, and a note saying otherwise is a
+		// claim about a decision the ranking never made.
+		ex.Notes = append(ex.Notes, "status_factor is applied to the fused score inside window selection, before the cut: multiply rrf_score by status_factor for the score the window actually ranked on (decay_factor then multiplies that). A candidate the vector floor removed before fusion carries a status_factor too — the factor that would apply to it — but nothing multiplied its rrf_score, which is absent there")
 	}
 	// The budget is applied last, so it sees every row the diagnosis produced,
 	// and the marker is attached before the notes so it reads first: a note list

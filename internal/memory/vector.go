@@ -774,6 +774,7 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 			// The 0-based rank, recorded where fusion read the leg's order —
 			// the same order RRF awarded from, so the two cannot disagree.
 			t.FTSRank = rank
+			t.Scored = true
 		}
 	}
 	for rank, scored := range vecResults {
@@ -782,6 +783,7 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 		if t := p.trace.row(scored.MemoryID); t != nil {
 			t.VectorRank = rank
 			t.VectorScore = float64(scored.Score)
+			t.Scored = true
 		}
 		// Only fill in scope from the vector leg when the keyword leg did not
 		// supply it: both describe the same row, so they agree, and a nil map

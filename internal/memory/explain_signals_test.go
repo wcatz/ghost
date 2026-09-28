@@ -447,6 +447,14 @@ func TestExplainFloorDroppedSharedRowKeepsItsStatusFactor(t *testing.T) {
 			"reads as a demotion that was considered and declined",
 			row.StatusFactor, globalDemotionFactor)
 	}
+	// And the payload must not claim a demotion it never applied. Every row
+	// fusion actually scored here is a live project row, so nothing was
+	// demoted, and the note telling a reader to multiply rrf_score by
+	// status_factor would be a claim about a decision that did not happen.
+	if hasExplainNote(ex.Notes, "status_factor is applied") {
+		t.Errorf("notes = %v, want no status-demotion note: this payload demoted nothing, so the "+
+			"sentence is a claim about a decision the ranking never made", ex.Notes)
+	}
 }
 
 // TestExplainReportsConfidenceAndProvenanceAsNotApplied: both are readable
