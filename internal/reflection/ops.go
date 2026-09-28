@@ -208,22 +208,29 @@ func clipOpText(s string) string {
 	// `AGE-SECRET-KEY-1…` are upper, so no single fold reaches both and each fold
 	// is a no-op on a fragment already in that case.
 	//
-	// Both directions are reachable from model text, which is why both are probed.
+	// All three are reachable from model text, which is why all three are probed.
 	// The parser upper-cases a supersession's target so it coincides with the
 	// stored spelling (hex(randomblob) renders upper-case), which HIDES a
 	// `gh[pousr]_` token from an as-written-only probe; and the free-form drop tail
-	// and the verb are taken in the spelling the model wrote, which HIDES a
-	// lower-case `AKIA…` from a lower-fold-only probe.
+	// is taken in the spelling the model wrote, which HIDES a lower-case `AKIA…`
+	// from a lower-fold-only probe (folding that one down is a no-op).
 	//
-	// KNOWN RESIDUAL, stated rather than implied closed: the MIXED-case literals
-	// — google-api-key `AIza…`, pypi `pypi-AgEIcHlwaS5vcmc…`, JWT `eyJ…`, PuTTY
-	// `PuTTY-User-Key-File-` — match only the as-written probe. A model that
-	// re-spells one of them differently (`aizasyd-…`) is caught by none of the
-	// three. Folding cannot fix that without lower-casing the rules themselves,
-	// which would change what internal/secret matches everywhere it is called —
-	// including the write boundary, where a re-spelled credential must be judged
-	// the same way. It is a gap in the rules, not in this probe set, and closing
-	// it is a change to internal/secret with its own callers.
+	// The as-written probe is not redundant, and this is the case only IT covers:
+	// the MIXED-case literals — google-api-key `AIza…`, pypi `pypi-AgEIcHlwaS5vcmc…`,
+	// JWT `eyJ…`, PuTTY `PuTTY-User-Key-File-` — match neither fold, so a
+	// re-spelled one (`aizasyd-…`) is caught by the original probe alone. Note the
+	// consequence for the parser, which is why the verb site above keeps a raw copy
+	// instead of gating the folded verb: lower-casing a token before this function
+	// sees it converts a mixed-case literal into a shape no probe recognises, which
+	// is the leak this gate exists to close. Pinned by
+	// TestReaderComplaintGatesAMixedCaseLiteral, which fails if either the
+	// as-written probe or the raw verb is removed.
+	//
+	// KNOWN RESIDUAL, stated rather than implied closed: closing the re-spelling
+	// case itself would mean lower-casing the rules in internal/secret, which
+	// changes what they match everywhere they are called — including the write
+	// boundary, where a re-spelled credential must be judged the same way. That is
+	// a change to internal/secret with its own callers, not to this probe set.
 	//
 	// A stored id trips none of the three, for two separate reasons the detector's
 	// own constants give: 32 hex characters is under the two bare-hex floors
@@ -305,6 +312,15 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 	s := strings.TrimSpace(raw)
 	verb, rest, _ := strings.Cut(s, " ")
 	rest = strings.TrimSpace(rest)
+	// Fold a COPY for the switch; the raw token is what reaches the unknown-verb
+	// refusal below, because that is the one place the model's own words are the
+	// complaint's subject. Gating the folded form would lower-case the fragment
+	// BEFORE the value-shape check, and the mixed-case literals (AIza…, eyJ…,
+	// PuTTY-User-Key-File-) match only as written — so an ops line beginning with
+	// a credential-shaped token would have been re-spelled into a shape no probe
+	// recognises, and then clipped and logged. The fold is a lookup convenience
+	// and must not rewrite what the refusal quotes.
+	rawVerb := verb
 	verb = strings.ToLower(verb)
 	if verb == "" {
 		return memOp{}, fail("empty operation")
@@ -383,7 +399,7 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 		return memOp{kind: opDrop, ids: []string{id}, target: strings.ToUpper(target), line: lineNo}, nil
 
 	default:
-		return memOp{}, fail("unknown operation %q — use keep, merge, rewrite or drop", clipOpText(verb))
+		return memOp{}, fail("unknown operation %q — use keep, merge, rewrite or drop", clipOpText(rawVerb))
 	}
 }
 

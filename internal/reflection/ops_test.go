@@ -821,3 +821,40 @@ func TestClipOpTextStillGatesARealId(t *testing.T) {
 		}
 	}
 }
+
+// TestReaderComplaintGatesAMixedCaseLiteral pins the ONE probe the folds cannot
+// replace. Every other fixture in this package uses a `gh[pousr]_` token or a
+// lower-cased AKIA, and a fold catches both — which means deleting the as-written
+// `secret.Detect(s)` call outright leaves this file green. The rules that need
+// it are the mixed-case literals: google-api-key `AIza…`, pypi
+// `pypi-AgEIcHlwaS5vcmc…`, JWT `eyJ…`, PuTTY `PuTTY-User-Key-File-`. Neither
+// ToLower nor ToUpper can produce those, so the as-written probe is the only
+// thing standing between one of them and the log.
+//
+// The fixture is an unknown OPERATION whose first token is the value, which is
+// also the case that defeated the gate once already: parseOpLine lower-cases the
+// verb before the switch, so gating the folded form lower-cased this token before
+// any probe saw it. It is refused as an unknown operation, which is exactly the
+// refusal that quotes the model's own words.
+func TestReaderComplaintGatesAMixedCaseLiteral(t *testing.T) {
+	const googleKey = "AIzaSyD-1234567890abcdefghijklmnopqrstuv"
+	err := opErr(t, opInput(), `{"ops":["`+googleKey+` the whole line"]}`)
+	if err == nil {
+		t.Fatal("an unknown operation whose first token is a value was accepted")
+	}
+	if !strings.Contains(err.Error(), "unknown operation") {
+		t.Fatalf("the refusal is not the unknown-operation one, so this fixture tests a different path:\n%s", err)
+	}
+	safe := readerComplaintForLog(err)
+	// Case-insensitively, and this is the whole point of the fixture: a
+	// case-sensitive check for a value the parser can RE-SPELL passes while the
+	// gate is open, because the leak arrives folded. Comparing case-insensitively
+	// is what makes this a probe of the as-written path rather than a check that
+	// the string happens to be spelled the way the test wrote it.
+	if strings.Contains(strings.ToUpper(safe), strings.ToUpper(googleKey)) {
+		t.Errorf("safe rendering carries a mixed-case literal only the as-written probe can match:\n%s", safe)
+	}
+	if !strings.Contains(safe, "unknown operation") {
+		t.Errorf("safe rendering dropped the reason a reader needs:\n%s", safe)
+	}
+}
