@@ -20,22 +20,27 @@ var retireMarkers = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bno longer\b`),
 	// Every inflection, and the noun wherever the verb has one: a note that
 	// says it is "retiring" the rule, or that "retirement of the no-merge rule
-	// starts next sprint", has retired it as far as this veto is concerned. The
-	// exceptions are the two markers called out below (relax, waive) and the
-	// three verbs with no English noun form of their own (drop, loosen, lift).
-	// Each form here has a word in
-	// TestNamesRetirementCoversEveryInflection, and that test exists because a
-	// form that stops matching is silent — on the creation pass it costs a
-	// supersession, and on the repair pass it costs an edge. It also exists
-	// because the form that was missing was the BARE PRESENT TENSE on six of
-	// these stems — drop, deprecate, relax, loosen, lift and waive. Those six
-	// entries named only the past and the progressive, so they recognised the
-	// note people write once the change has happened ("we dropped the rule") and
-	// missed the note they write while it is current ("we drop the rule"), which
-	// left the veto standing on genuine supersessions. A marker written as a bare
-	// stem with no right boundary would fix that and cost the other direction,
-	// matching "dropdown" and "relaxation", so the boundary is the load-bearing
-	// half: every verb marker lists its forms explicitly and ends in \b.
+	// starts next sprint", has retired it as far as this veto is concerned. Only
+	// two markers carry no noun on purpose — relax and waive, both called out
+	// below. drop, loosen and lift have no separate noun to carry: their gerund
+	// doubles as the noun and is already the -ing alternative.
+	//
+	// Every form here has a word in TestNamesRetirementCoversEveryInflection —
+	// verbs, nouns and near-misses — or, for the five phrase markers ("no
+	// longer", "obsolete", "must now", "not required", "exception to"), in
+	// TestVetoSupersedeLetsEveryRetirementMarkerThrough. Both tests exist
+	// because a form that stops matching is silent: on the creation pass it
+	// costs a supersession, and on the repair pass it costs an edge. The
+	// inflection test also exists because the form that was missing was the BARE
+	// PRESENT TENSE on six of these stems — drop, deprecate, relax, loosen, lift
+	// and waive. Those six entries named only the past and the progressive, so
+	// they recognised the note people write once the change has happened ("we
+	// dropped the rule") and missed the note they write while it is current
+	// ("we drop the rule"), which left the veto standing on genuine
+	// supersessions. A marker written as a bare stem with no right boundary would
+	// fix that and cost the other direction, matching "dropdown" and
+	// "relaxation", so the boundary is the load-bearing half: every verb marker
+	// lists its forms explicitly and ends in \b.
 	regexp.MustCompile(`(?i)\bretir(?:e|es|ed|ing|al|ement)\b`),
 	regexp.MustCompile(`(?i)\bremov(?:e|es|ed|ing|al)\b`),
 	regexp.MustCompile(`(?i)\bdeprecat(?:e|es|ed|ing|ion)\b`),

@@ -364,11 +364,11 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 // first place — the previous one was checked against the past tense, which is
 // the one form every marker already had.
 //
-// The noun forms are here for the same reason, and were NOT all pinned before:
-// `retirement` and `removal` were held by the sibling marker's word list, but
-// `retiral`, `deprecation`, `replacement` and `supersession` were asserted
-// nowhere in the package, and a noun can stop matching with every verb form in
-// this table still passing.
+// The noun forms are here for the same reason: a noun can stop matching with
+// every verb form in this table still passing. Measured against main,
+// `retirement` and `removal` were pinned only by the sibling marker's word list
+// and `retiral`, `deprecation`, `replacement` and `supersession` by nothing at
+// all, so this loop is the only place any of the five is held.
 func TestNamesRetirementCoversEveryInflection(t *testing.T) {
 	// The real four-way verb inflections, base first.
 	verbs := []struct {
