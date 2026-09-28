@@ -1070,30 +1070,36 @@ func TestRunCodex_TOMLRepairKeepsCRLF(t *testing.T) {
 }
 
 // TestRunCodex_TOMLRepairNormalisesAMixedEndingFile pins what the repair does to
-// a config.toml that already carries both endings. The answer is that the whole
-// file becomes CRLF, because the join can only be one ending and the file's own
-// majority already says which. Pinned because the alternative reading — a mixed
-// file keeps its mix — is what the code was originally described as doing, and
-// it is not what it does: the CRs are stripped from every line and one ending is
-// joined back.
+// a config.toml that already carries both endings: the whole file becomes CRLF,
+// because the join can only be one ending. Pinned because the alternative
+// reading — a mixed file keeps its mix — is what the code was originally
+// described as doing, and it is not what it does.
+//
+// The fixture is ONE CRLF line against FIVE bare-LF ones, so it also pins WHICH
+// rule: a majority rule would pick LF here and leave the file mixed, and the
+// test would fail. The rule is presence, on the reasoning in installCodexMCP —
+// a config carrying any CRLF was written by something on Windows, and CRLF is
+// the ending that file wants back.
 func TestRunCodex_TOMLRepairNormalisesAMixedEndingFile(t *testing.T) {
 	home, _ := setupCodexTestEnv(t)
 	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
-	// Three CRLF lines and two bare-LF ones.
+	// One CRLF, five LF.
 	seed := "[mcp_servers.ghost]\r\n" +
-		"command = '/old/install/ghost'\r\n" +
+		"command = '/old/install/ghost'\n" +
 		"args = [\"mcp\", \"--stale\"]\n" +
-		"\r\n" +
+		"\n" +
 		"[mcp_servers.other]\n" +
-		"command = \"/usr/bin/other\"\n"
+		"command = \"/usr/bin/other\"\n" +
+		"args = [\"serve\"]\n"
 	want := codexMCPServerComment + "\r\n" +
 		"[mcp_servers.ghost]\r\n" +
 		"command = " + codexTOMLString(ghostBin) + "\r\n" +
 		"args = [\"mcp\"]\r\n" +
 		"\r\n" +
 		"[mcp_servers.other]\r\n" +
-		"command = \"/usr/bin/other\"\r\n"
+		"command = \"/usr/bin/other\"\r\n" +
+		"args = [\"serve\"]\r\n"
 
 	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
 		t.Fatal(err)

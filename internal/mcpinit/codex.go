@@ -1123,15 +1123,20 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	// not while the CRs were part of the compared text — so a CRLF config was
 	// rewritten on every single run.
 	//
-	// ANY CRLF in the file makes the whole file CRLF, and a file that already
-	// carries both endings is NORMALISED rather than preserved. That is a
-	// decision, not an accident of the test: a mixed file is one an editor
-	// already rewrote once, and there is no way to join it back together without
-	// picking an ending for the lines ghost owns. Picking the one the majority
-	// of the file already uses is the choice that leaves the user's own bytes
-	// closest to what they had, and it means the file stops being mixed — which
-	// is strictly better than it was, and better than a repair that keeps adding
-	// to the mix. A file with no CRLF at all is left entirely alone, as before.
+	// ANY CRLF anywhere in the file makes the WHOLE file CRLF, and a file that
+	// already carries both endings is NORMALISED rather than preserved. The test
+	// is presence, deliberately, and not a count of the two: a config.toml
+	// carrying a single CRLF was written by something on Windows, and a Windows
+	// editor is what will read it back, so CRLF is the ending that file wants
+	// even when one stray line out of five hundred says otherwise. A majority
+	// rule would pick the other way there, and would then have to answer what to
+	// do on a tie.
+	//
+	// Whatever the rule, a mixed file cannot be preserved: the join below can
+	// only be one ending, so the lines ghost owns have to be given one. Ending
+	// up with a file that is not mixed is strictly better than the one it
+	// replaced, and better than a repair that keeps adding to the mix. A file
+	// with no CRLF at all is left entirely alone, as before.
 	eol := "\n"
 	crlf := bytes.Contains(existing, []byte("\r\n"))
 	if crlf {
