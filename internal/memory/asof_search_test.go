@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +146,60 @@ func TestCandidatesAsOfCannotResurrectARedactedCredential(t *testing.T) {
 		t.Errorf("the read returns %q, want the redaction marker: the pre-rotation version is the "+
 			"one the read is about, so an unmarked answer would mean the wrong version was returned",
 			row.Content)
+	}
+}
+
+// TestCandidatesAsOfBoundsTheTailLikeTheCurrentPath: the current path caps the
+// tail at the window, so a candidate set never exceeds roughly twice Fetch.Limit
+// however many rows matched. A historical read that returns every match instead
+// materialises the whole matching corpus — one Memory with its full content per
+// match — and then walks all of it through every assembler stage and the trace's
+// signals. The bound is parity, not a new policy: the leg status already discloses
+// that the keyword leg was truncated, so a capped tail stays honest about what it
+// did not read.
+func TestCandidatesAsOfBoundsTheTailLikeTheCurrentPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for i := range 25 {
+		if _, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact",
+			fmt.Sprintf("the snapshot retention window is %d days for bucket %c", i%7+1, 'a'+i),
+			"mcp", 0.5, nil, Provenance{}); err != nil {
+			t.Fatalf("save %d: %v", i, err)
+		}
+	}
+	at := asOfAt(t, asOfStampFarFuture)
+	set, err := s.Candidates(ctx, CandidateRequest{
+		ProjectID: testProject,
+		Mode:      ProjectScoped,
+		Query:     "snapshot retention",
+		Condition: CondFTSOnly,
+		Params:    DefaultSearchParams(),
+		Now:       at,
+		AsOf:      &at,
+		Fetch:     Fetch{FTSTopK: 20, VectorTopK: 20, Limit: 10},
+	})
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	if len(set.Rows) > 20 {
+		t.Errorf("the set holds %d rows for a window of 10, want at most 20: hydrateTail caps the tail at the window, and an unbounded one walks the whole matching corpus", len(set.Rows))
+	}
+	if !set.Widened {
+		t.Error("Widened is false, want true: a set capped at the window with more matches behind it is exactly the widened case the assembler filters over")
+	}
+	// The rows it does return are the TOP of the historical order, not an arbitrary
+	// slice: every row here shares a category, so the score is the base and the
+	// window's bases outrank the tail's by construction. An ascending pair would
+	// mean a tail row was placed inside the window.
+	for i := 1; i < len(set.Rows); i++ {
+		if set.Rows[i-1].Score < set.Rows[i].Score {
+			t.Errorf("row %d scores %v and row %d scores %v, want the window's rows ahead of the tail's", i-1, set.Rows[i-1].Score, i, set.Rows[i].Score)
+		}
+	}
+	// The disclosure has to cover the bound: the leg says it was cut short, and a
+	// caller that trusts CoverageComplete would otherwise read a short set as whole.
+	if !set.Legs["fts"].Truncated {
+		t.Error("the keyword leg does not report truncation, so a capped set would read as a complete one")
 	}
 }
 

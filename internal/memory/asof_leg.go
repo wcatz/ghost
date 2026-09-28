@@ -282,7 +282,7 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 	selected := decayRank(windowRows, scores, p, req.Fetch.Limit, at)
 	selected = asOfSupersedeDemote(selected, hits)
 
-	tail := asOfTail(hits, req.Fetch.Limit, scores, p, at)
+	tail := asOfTail(hits, req.Fetch.Limit, scores, at)
 
 	rows := make([]Candidate, 0, len(selected)+len(tail))
 	for _, m := range append(selected, tail...) {
@@ -336,19 +336,30 @@ func asOfSupersedeDemote(window []Memory, hits []asOfHit) []Memory {
 }
 
 // asOfTail is the rows the window cut, in the same order the window came back
-// in. It exists as a function rather than a sort.SliceStable at the call site
-// because the current path's tail and this one must agree on the order: a
-// predicate that reaches past the window is backfilled from it, and two
-// orderings would make the same predicate reach for different rows.
-func asOfTail(hits []asOfHit, limit int, scores map[string]float64, p SearchParams, at time.Time) []Memory {
+// in, and BOUNDED at the window like hydrateTail's. It exists as a function
+// rather than a sort.SliceStable at the call site because the current path's tail
+// and this one must agree on both the order and the bound: a predicate that
+// reaches past the window is backfilled from it, so two orderings would make the
+// same predicate reach for different rows, and an unbounded tail would walk the
+// whole matching corpus — one hydrated Memory per match — through every
+// assembler stage and the trace's signals, which is the work the current path caps
+// at roughly twice the window.
+//
+// The bound is disclosed rather than silent: the keyword leg's Truncated status
+// says the leg was cut short, and a caller that trusts CoverageComplete instead
+// learns nothing from this function either way.
+func asOfTail(hits []asOfHit, limit int, scores map[string]float64, at time.Time) []Memory {
 	taken := make(map[string]bool, limit)
 	for i := range hits {
 		if i < limit {
 			taken[hits[i].row.ID] = true
 		}
 	}
-	tail := make([]Memory, 0, len(hits)-min(len(hits), limit))
+	tail := make([]Memory, 0, min(len(hits), limit))
 	for _, h := range hits {
+		if len(tail) == limit {
+			break
+		}
 		if !taken[h.row.ID] {
 			taken[h.row.ID] = true
 			tail = append(tail, h.row.Memory)
