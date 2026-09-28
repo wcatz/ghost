@@ -56,7 +56,14 @@ func TestLiveOpenCodeDebugPathsHonourScratchRoot(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", userData)
 
 	c := &OpenCodeClient{binary: bin}
-	cmd, cleanup, err := c.subprocessEnv(context.Background(), []string{"debug", "paths"}, openCodeAskConfig)
+	// Bound the real-binary spawn, as every other opencode spawn in the tree
+	// does (openCodeCleanupRunner.run, verifyOpencodeRegistration). A first run
+	// against a fresh data dir can do migrations or a version check; without a
+	// bound a stall would burn the package's whole go test timeout and panic
+	// with every other test's goroutines in the dump, instead of failing here.
+	ctx, cancel := context.WithTimeout(context.Background(), sessionCommandTimeout)
+	defer cancel()
+	cmd, cleanup, err := c.subprocessEnv(ctx, []string{"debug", "paths"}, openCodeAskConfig)
 	if err != nil {
 		t.Fatalf("subprocessEnv: %v", err)
 	}
@@ -66,6 +73,9 @@ func TestLiveOpenCodeDebugPathsHonourScratchRoot(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			t.Fatalf("opencode debug paths: timed out after %s", sessionCommandTimeout)
+		}
 		t.Fatalf("opencode debug paths: %v", err)
 	}
 
@@ -74,9 +84,22 @@ func TestLiveOpenCodeDebugPathsHonourScratchRoot(t *testing.T) {
 		t.Fatalf("no paths parsed from debug paths output:\n%s", stdout.String())
 	}
 	// The store and the session-scoped siblings. `tmp` is deliberately NOT in
-	// this set: `opencode debug paths` reports OpenCode's own /tmp/opencode
-	// there regardless of TMPDIR (observed on v2.0.15), so asserting it would
-	// pin down a behaviour of the temp files rather than of the session store.
+	// this set, and the reason is worth stating precisely, because "opencode
+	// ignores TMPDIR" is the wrong reading and would undercut the temp-file
+	// confinement this package depends on (see subprocessEnv's comment on the
+	// per-invocation JIT object).
+	//
+	// `opencode debug paths` reports `tmp` as OpenCode's own global namespace
+	// (/tmp/opencode on v2.0.15) even when TMPDIR points elsewhere, so that
+	// field is NOT where the child's temporary files go. The per-invocation JIT
+	// object is a different file and it does follow TMPDIR: a .bun-<uid>-*.so
+	// of ~5.6 MiB was found inside Ghost's own scratch directory
+	// (<root>/<pid>-<token>/.bun-*.so) on this machine, and #465 recorded the
+	// same check when it added the pinning ("a reflect run with a private
+	// TMPDIR left exactly one such file in it and none elsewhere"). So nothing
+	// is uncovered by leaving `tmp` out — it is a separate namespace, and
+	// asserting it would pin down a path with no bearing on the session store
+	// this test exists to check.
 	owned := []string{"home", "data", "cache", "config", "state", "bin", "log", "repos", "db"}
 	var missing []string
 	for _, key := range owned {
