@@ -231,12 +231,16 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		-- is dated D and says what the memory held at D, which is not a claim about
 		-- T.
 		--
-		-- The two halves are NOT disjoint, and the id test is what makes them so:
-		-- "tombstoned" does not imply "not live", because a snapshot restore
-		-- reinstates the row under the id it recorded (and appends its own restore
-		-- row). A memory that was deleted and then restored is live, is in scope by
-		-- created_at, and has no version at or before T — so without this it was in
-		-- both halves and one memory was disclosed as two, which reaches
+		-- The two halves are NOT disjoint, and two things are needed for one memory
+		-- to be counted once. First, "tombstoned" does not imply "not live": a
+		-- snapshot restore reinstates the row under the id it recorded (and appends
+		-- its own restore row), so a memory that was deleted and then restored is
+		-- live, is in scope by created_at, and has no version at or before T — it
+		-- matched both halves, and one memory was disclosed as two. Second, a memory
+		-- can hold MORE THAN ONE tombstone (delete, restore, delete again), so the
+		-- tombstone half is ranked per memory and keeps its newest row — the same
+		-- (recorded_at DESC, rowid DESC) ranking the version set uses, because both
+		-- are the same question: one row per memory. Either defect alone reaches
 		-- CandidateSet.Unrecorded and every surface's count.
 		unrecorded AS (
 		    SELECT m.id AS memory_id, m.project_id, m.created_at
@@ -246,13 +250,17 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 		                      WHERE h.memory_id = m.id AND h.recorded_at <= ?)
 		      AND `+memoryScope+`
 		    UNION ALL
-		    SELECT h.memory_id, h.project_id, NULL
-		    FROM memory_history h
-		    WHERE h.phase = '`+phaseDelete+`'
-		      AND NOT EXISTS (SELECT 1 FROM memory_history v
-		                      WHERE v.memory_id = h.memory_id AND v.recorded_at <= ?)
-		      AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = h.memory_id)
-		      AND `+historyScope+`
+		    SELECT memory_id, project_id, NULL FROM (
+		        SELECT h.memory_id, h.project_id,
+		               ROW_NUMBER() OVER (PARTITION BY h.memory_id
+		                                  ORDER BY h.recorded_at DESC, h.rowid DESC) AS rn
+		        FROM memory_history h
+		        WHERE h.phase = '`+phaseDelete+`'
+		          AND NOT EXISTS (SELECT 1 FROM memory_history v
+		                          WHERE v.memory_id = h.memory_id AND v.recorded_at <= ?)
+		          AND NOT EXISTS (SELECT 1 FROM memories m WHERE m.id = h.memory_id)
+		          AND `+historyScope+`
+		    ) WHERE rn = 1
 		)
 		SELECT memory_id, project_id, known, phase, recorded_at, content, category,
 		       importance, resolved_at, source, superseded_by,

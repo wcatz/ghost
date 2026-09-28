@@ -798,6 +798,67 @@ func TestMemoriesAsOfCountsARestoredMemoryOnce(t *testing.T) {
 	}
 }
 
+// TestMemoriesAsOfCountsAMemoryWithTwoTombstonesOnce: the id test above makes the
+// two halves disjoint; it does not make the tombstone half one row per memory. A
+// memory can hold more than one delete row — delete, restore under the same id,
+// delete again — and every one of them satisfies the half's two tests, so without a
+// ranking the same id was appended to Unknown once per tombstone.
+func TestMemoriesAsOfCountsAMemoryWithTwoTombstonesOnce(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const content = "a memory deleted, restored, and deleted again"
+
+	id := mustSave(t, s, content)
+	dropHistory(t, s, id)
+	if err := s.DeleteWithOptions(ctx, id, DeleteOptions{}); err != nil {
+		t.Fatalf("first delete: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO memory_snapshots
+		    (snapshot_id, project_id, category, content, importance, source, created_at, memory_id, scope_captured)
+		VALUES ('snap2', ?, 'fact', ?, 0.5, 'mcp', ?, ?, 1)`,
+		testProject, content, asOfStampSave, id); err != nil {
+		t.Fatalf("insert the snapshot: %v", err)
+	}
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	// The id is live again, so the second delete is a second tombstone rather than
+	// a no-op — which is what makes this shape reachable at all.
+	if err := s.DeleteWithOptions(ctx, id, DeleteOptions{}); err != nil {
+		t.Fatalf("second delete: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	tombstones := 0
+	for _, e := range entries {
+		if e.Phase == phaseDelete {
+			tombstones++
+		}
+	}
+	if tombstones < 2 {
+		t.Fatalf("the fixture holds %d tombstone(s), want 2: this is the case under test", tombstones)
+	}
+	stamps := make([]string, len(entries))
+	for i := range stamps {
+		stamps[i] = asOfStampLate
+	}
+	stampHistory(t, s, id, stamps...)
+
+	set := mustAsOf(t, s, asOfStampSave)
+	times := 0
+	for _, row := range set.Unknown {
+		if row.ID == id {
+			times++
+		}
+	}
+	if times != 1 {
+		t.Errorf("a memory with %d tombstones is reported as a gap %d times, want 1", tombstones, times)
+	}
+}
+
 // mustSave is the fixture's save, returning the id.
 func mustSave(t *testing.T, s *Store, content string) string {
 	t.Helper()
