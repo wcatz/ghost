@@ -334,6 +334,11 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 		"remove", "removes", "removed", "removing", "removal",
 		"deprecated", "obsolete", "replace", "replaced", "superseded", "dropped",
 		"relaxed", "loosened", "lifted", "waived", "must now", "not required",
+		// The marker's (?:be )? branch. It is the only marker here with an
+		// alternation inside a phrase rather than on a stem, so nothing else in
+		// the suite would notice an edit that dropped it — and dropping it costs
+		// a supersession on every note phrased "shall not be required".
+		"not be required",
 		"exception to",
 	}
 	for _, c := range cases {
@@ -344,6 +349,104 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 	for _, w := range words {
 		if !namesRetirement(w) {
 			t.Errorf("marker word %q is recognised by no entry in retireMarkers, so the veto stands on a pair the newer note retires", w)
+		}
+	}
+}
+
+// TestNamesRetirementCoversEveryInflection pins the shape of retireMarkers from
+// both sides at once. A marker that recognises only the past tense recognises
+// the note people actually write ("we dropped the rule") and misses the note
+// they write when the change is current ("we drop the rule"), which leaves the
+// veto standing on a genuine supersession — a false veto, and the direction that
+// costs recall. A marker written as a bare stem with no right boundary does the
+// opposite: it fires on "dropdown" and "relaxation", so a newer note about
+// neither passes a pair the veto should have settled for free.
+//
+// The forms are spelled out rather than generated from a stem, because
+// "drop", "relax", "loosen" and "lift" do not take a silent e: a stem/suffix
+// cross product asserts the non-words "drope" and "droped" instead of the
+// forms a note actually contains. A hand-written word list is what rotted in the
+// first place — the previous one was checked against the past tense, which is
+// the one form every marker already had.
+//
+// The noun forms are here for the same reason: a noun can stop matching with
+// every verb form in this table still passing. Measured against main,
+// `retirement` and `removal` were pinned only by the sibling marker's word list
+// and `retiral`, `deprecation`, `replacement` and `supersession`/
+// `supersessions` by nothing at all, so this loop is the only place any of the
+// five is held.
+func TestNamesRetirementCoversEveryInflection(t *testing.T) {
+	// The real four-way verb inflections, base first.
+	verbs := []struct {
+		word  string
+		forms []string
+	}{
+		{"retire", []string{"retire", "retires", "retired", "retiring"}},
+		{"remove", []string{"remove", "removes", "removed", "removing"}},
+		{"replace", []string{"replace", "replaces", "replaced", "replacing"}},
+		{"supersede", []string{"supersede", "supersedes", "superseded", "superseding"}},
+		{"drop", []string{"drop", "drops", "dropped", "dropping"}},
+		{"deprecate", []string{"deprecate", "deprecates", "deprecated", "deprecating"}},
+		{"relax", []string{"relax", "relaxes", "relaxed", "relaxing"}},
+		{"loosen", []string{"loosen", "loosens", "loosened", "loosening"}},
+		{"lift", []string{"lift", "lifts", "lifted", "lifting"}},
+		{"waive", []string{"waive", "waives", "waived", "waiving"}},
+	}
+	// drop, deprecate, relax, loosen, lift and waive are the six the bare
+	// present-tense form was missing from; the other four already had all four.
+	for _, v := range verbs {
+		for _, form := range v.forms {
+			if !namesRetirement(form) {
+				t.Errorf("namesRetirement(%q) = false, want true: it is a way to retire %q, and a veto that misses it stands on a genuine supersession (costs recall)", form, v.word)
+			}
+		}
+	}
+
+	// The noun forms the markers carry. "retirement of the no-merge rule starts
+	// next sprint" and "the supersession is complete" retire the rule exactly as
+	// "we retire it" does, and no verb form above would notice if a noun stopped
+	// matching.
+	for _, noun := range []string{
+		"retiral", "retirement", "removal", "deprecation", "replacement",
+		"supersession", "supersessions",
+	} {
+		if !namesRetirement(noun) {
+			t.Errorf("namesRetirement(%q) = false, want true: it is the noun form of a retirement marker, and no verb form in this test would notice it rotting (costs recall)", noun)
+		}
+	}
+
+	// Each of these is one stem plus a suffix that is not an inflection, so a
+	// marker that matched on the stem alone would recognise it. They have to
+	// stay unrecognised, or a note about a UI control or a policy term lets a
+	// standing rule through to the classifier for free.
+	nearMiss := []string{
+		"dropdown",   // drop + "down"
+		"droplet",    // drop + "let"
+		"liftoff",    // lift + "off"
+		"looseners",  // loosen + "ers"
+		"waiver",     // waiv + "er"
+		"relaxation", // relax + "ation"
+	}
+	for _, w := range nearMiss {
+		if namesRetirement(w) {
+			t.Errorf("namesRetirement(%q) = true, want false: it is not a way to retire a rule, so recognising it lets a note that retires nothing through the veto (costs precision)", w)
+		}
+	}
+}
+
+// TestVetoSupersedeStillFiresOnANearMissWord is the user-visible half of the
+// near-miss contract. namesRetirement matching "dropdown" is only interesting
+// because it drops the veto, and the veto is what settles the pair — so this
+// pins the outcome the operator sees, not the regex that produces it.
+func TestVetoSupersedeStillFiresOnANearMissWord(t *testing.T) {
+	rule := "NEVER merge on Fridays; the release is cut on Tuesdays instead."
+	for _, newer := range []string{
+		"The settings page has a dropdown for the merge window.",
+		"There is a long relaxation period before the canary gate promotes.",
+		"The waiver form lives in the ops repo.",
+	} {
+		if reason, vetoed := VetoSupersede(Candidate{OlderContent: rule, NewerContent: newer}); !vetoed {
+			t.Errorf("newer note %q let the pair through (reason %q), but it retires nothing: the older note's rule still binds", newer, reason)
 		}
 	}
 }
