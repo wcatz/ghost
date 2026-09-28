@@ -128,12 +128,25 @@ func openLogForAppend(path string) (*os.File, error) {
 // leaves the log where it is, and the caller's open proceeds as it did before
 // rotation existed.
 func rotateLogIfOversized(path, rotatedPath string, probe func(string) (os.FileInfo, error)) bool {
-	oversized := func() bool {
-		info, err := probe(path)
-		return err == nil && info.Mode().IsRegular() && info.Size() >= logRotateCap
+	// Read once to decide whether the log is a rotation candidate at all.
+	if !logAtOrOverCap(path, probe) {
+		return false
 	}
-	if !oversized() || !oversized() {
+	// Read AGAIN, here, immediately before the rename — and this is the reading
+	// that counts. Written as two separate calls rather than a repeated
+	// expression so the intent is legible: a single read is the bug, and code
+	// that looks like a typo is a poor place to be carrying the fix for one.
+	if !logAtOrOverCap(path, probe) {
 		return false
 	}
 	return os.Rename(path, rotatedPath) == nil
+}
+
+// logAtOrOverCap reports whether path is a regular file that has reached
+// logRotateCap, which is the whole of the rotation test. It is called twice per
+// rotation attempt; see rotateLogIfOversized for why the second call is the one
+// that decides.
+func logAtOrOverCap(path string, probe func(string) (os.FileInfo, error)) bool {
+	info, err := probe(path)
+	return err == nil && info.Mode().IsRegular() && info.Size() >= logRotateCap
 }
