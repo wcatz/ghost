@@ -303,6 +303,31 @@ func TestOpTierWithholdsTheRejectedLineFromTheLog(t *testing.T) {
 	if !strings.Contains(logged, "withheld") {
 		t.Errorf("the WARN line does not say the operation line was withheld:\n%s", logged)
 	}
+	// The same gate has to hold for a reason that quotes the model rather than
+	// the line: a `drop <id> reason: <value>` is refused BECAUSE the tail is
+	// free-form, so the value is in the reason and the withheld line never
+	// covered it. A rewrite fixture above cannot catch that — its replacement
+	// text sits inside the line, which IS withheld.
+	t.Run("free-form drop reason", func(t *testing.T) {
+		var buf2 bytes.Buffer
+		tier2, _ := opRepairTier(
+			scriptedAnswer{reply: `{"ops":["drop ` + opID1 + ` reason: the deploy token is ` + secret + `"]}`},
+			scriptedAnswer{reply: `{"ops":["keep ` + opID1 + `"]}`},
+		)
+		tier2.SetLogger(slog.New(slog.NewTextHandler(&buf2, nil)))
+		if _, err := tier2.Consolidate(context.Background(), ReflectionInput{
+			ProjectName: "ghost", ExistingMemories: []memory.Memory{stored},
+		}); err != nil {
+			t.Fatalf("Consolidate: %v", err)
+		}
+		if !strings.Contains(buf2.String(), "level=WARN") {
+			t.Fatalf("the rejection was not logged, so this test proves nothing:\n%s", buf2.String())
+		}
+		if strings.Contains(buf2.String(), secret[:32]) {
+			t.Errorf("the WARN line carries the value the REFUSED REASON quoted, which the withheld line never covered:\n%s", buf2.String())
+		}
+	})
+
 	// The repair prompt is the one place the line is quoted on purpose: it goes
 	// back to the model that wrote it, inside the prompt's own data delimiters.
 	_, harness := opRepairTier(scriptedAnswer{reply: reply}, scriptedAnswer{reply: `{"ops":["keep ` + opID1 + `"]}`})

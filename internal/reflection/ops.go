@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // The per-id operation contract (#639).
@@ -82,9 +83,16 @@ type memOp struct {
 // is withheld, because an operation's replacement text is model-written prose over
 // stored memory — a rewrite can quote a memory nearly verbatim — and a log
 // outlives the run that produced it, which is the same reason the three log lines
-// that report a proposal go through previewContent instead of printing it. The
-// reason and the ids stay in both: they are the diagnostic, and an id is not
-// content.
+// that report a proposal go through previewContent instead of printing it.
+//
+// The reason and the ids stay in both, because they are the diagnostic and an id
+// is not content — but "the reason" is not automatically safe, since two of them
+// quote a model-supplied fragment: the free-form drop tail and an unknown verb
+// (parseOpLine) and a hallucinated id (executeOps). Those go through
+// clipOpText, which runs the same value-shape gate previewContent applies, so a
+// `drop <id> reason: <a credential>` refusal withholds the credential in the log
+// rendering too. What reaches a log is therefore the reason MINUS any fragment
+// the gate caught, not the reason unconditionally.
 type opRefusal struct {
 	full  string
 	safe  string
@@ -170,7 +178,20 @@ func safeTierError(err error) string {
 // paragraph in the message, and the message is quoted back into a prompt and
 // written to a log. A real id is 26 characters, so this bound never truncates a
 // legitimate one.
+//
+// It also runs the value-shape gate, because bounding the fragment is not the
+// same as making it safe to print: 60 runes of a hallucinated id or a free-form
+// drop tail is room for a whole credential, and a `drop <id> reason: <token>` is
+// refused PRECISELY because the tail is free-form, so the refused text is the
+// model's own. This is the same gate previewContent applies to the three other
+// in-tier log lines, and it belongs in the one function every fragment goes
+// through rather than at each call site — see previewContent for why. The
+// detection runs BEFORE the clip, so a value that straddles the boundary is
+// judged whole.
 func clipOpText(s string) string {
+	if finding, ok := secret.Detect(s); ok {
+		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(s))
+	}
 	const max = 60
 	if r := []rune(s); len(r) > max {
 		return string(r[:max]) + "…"

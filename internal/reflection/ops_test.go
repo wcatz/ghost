@@ -702,3 +702,57 @@ func (f *fakeReflector) Reflect(_ context.Context, _ string) (string, ai.TokenUs
 	}
 	return f.reply, ai.TokenUsage{}, nil
 }
+
+// TestReaderComplaintWithholdsAValueFromTheReasonToo: withholding the operation
+// LINE is not enough, because two of the reasons quote a model-supplied fragment
+// and a refusal is often triggered BY that fragment being free-form. A
+// `drop <id> reason: <a credential>` is refused precisely because the tail is
+// neither "obsolete" nor "superseded by <id>", so the refused text is the
+// model's own and 60 runes of it is room for the whole value — well inside
+// clipOpText's clip. Without the value-shape gate this string is what
+// readerComplaintForLog and safeTierError write to the append-only lifecycle.log,
+// and it would be the one in-tier log sink without the gate its three siblings
+// get from previewContent.
+func TestReaderComplaintWithholdsAValueFromTheReasonToo(t *testing.T) {
+	// A credential-shaped value: the shape, not a real one, and long enough that
+	// clipOpText's 60-rune clip would keep most of it.
+	const secretValue = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+	for name, in := range map[string]ReflectionInput{
+		// The free-form drop tail, quoted by the unreadable-reason refusal.
+		"free-form drop reason": opInput(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := opErr(t, in, `{"ops":["drop `+opID1+` reason: `+secretValue+`"]}`)
+			if err == nil {
+				t.Fatal("a free-form drop reason was accepted")
+			}
+			safe := readerComplaintForLog(err)
+			if !strings.Contains(safe, "unreadable drop reason") {
+				t.Errorf("safe rendering dropped the reason a reader needs:\n%s", safe)
+			}
+			if strings.Contains(safe, secretValue) {
+				t.Errorf("safe rendering carries a value the refused reason quoted:\n%s", safe)
+			}
+			if !strings.Contains(safe, "withheld") {
+				t.Errorf("safe rendering does not say the value was withheld:\n%s", safe)
+			}
+		})
+	}
+
+	// The same gate on a hallucinated id, which executeOps quotes by name: the
+	// model invents an id that IS the value, and the reader refuses it for not
+	// being one of the input.
+	t.Run("hallucinated id that is a value", func(t *testing.T) {
+		err := opErr(t, opInput(), `{"ops":["keep `+secretValue+`"]}`)
+		if err == nil {
+			t.Fatal("a hallucinated id was accepted")
+		}
+		safe := readerComplaintForLog(err)
+		if !strings.Contains(safe, "is not one of the memories this run was given") {
+			t.Errorf("safe rendering dropped the reason:\n%s", safe)
+		}
+		if strings.Contains(safe, secretValue) {
+			t.Errorf("safe rendering carries the hallucinated id verbatim:\n%s", safe)
+		}
+	})
+}
