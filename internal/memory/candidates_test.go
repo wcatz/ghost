@@ -48,6 +48,70 @@ func sameIDs(a, b []string) bool {
 	return true
 }
 
+// TestCandidatesCarriesTheEvidenceCounts: the assembler's only route to the store
+// is this one read, so the support counts have to arrive with the rows. A row
+// whose counts read zero when the memory has evidence would make the trace report
+// "no recorded evidence" about a memory two agents had already reported — a false
+// claim about the corpus, produced by a read that silently did nothing.
+func TestCandidatesCarriesTheEvidenceCounts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	corroborated, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact",
+		"the readiness probe gate misconfiguration is in the api deployment", "mcp", 0.5, nil,
+		Provenance{Agent: "claude-code", SessionID: "ses_a"})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if _, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact",
+		"the readiness probe gate misconfiguration is in the api deployment, per the runbook", "mcp", 0.5, nil,
+		Provenance{Agent: "codex", SessionID: "ses_b"}); err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`UPDATE memory_provenance SET verified_at = datetime('now') WHERE memory_id = ? AND agent = 'codex'`,
+		corroborated,
+	); err != nil {
+		t.Fatalf("stamp a verification: %v", err)
+	}
+	unattributed, duplicateOf, _, err := s.Upsert(ctx, testProject, "fact",
+		"readiness probe timeout budget for the control plane", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert(unattributed): %v", err)
+	}
+	if duplicateOf != "" {
+		t.Fatalf("the third save folded into %s, so it is no longer the unattributed row the fixture needs", duplicateOf)
+	}
+
+	set, err := s.Candidates(ctx, candidateRequest("readiness probe", 5, now))
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	counts := map[string]EvidenceCounts{}
+	for _, c := range set.Rows {
+		counts[c.ID] = c.Evidence
+	}
+	if got := counts[corroborated]; got.Observations != 2 || got.Verified != 1 {
+		t.Errorf("the corroborated row's counts = %+v, want 2 observations and 1 verified", got)
+	}
+	if got := counts[unattributed]; got.Observations != 1 || got.Verified != 0 {
+		t.Errorf("the unattributed row's counts = %+v, want its own single unverified observation", got)
+	}
+	// Every other row the set returned is cross-checked against the store, so a
+	// read that reported a plausible-looking zero for a row it never looked up
+	// cannot pass.
+	for _, c := range set.Rows {
+		want, err := s.MemoryEvidenceCounts(ctx, c.ID)
+		if err != nil {
+			t.Fatalf("MemoryEvidenceCounts(%s): %v", c.ID, err)
+		}
+		if c.Evidence != want {
+			t.Errorf("row %s reported %+v, want the store's %+v", c.ID, c.Evidence, want)
+		}
+	}
+}
+
 // TestCandidatesWindowMatchesSearchHybrid is the equivalence the seam depends
 // on: with no predicate, the rows a candidate request returns, closed to the
 // requested window, must be exactly what the production search returns. The

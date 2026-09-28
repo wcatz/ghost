@@ -134,8 +134,31 @@ func TestExportImportRoundTripIntoAnEmptyStore(t *testing.T) {
 		t.Fatalf("memories after round trip = %d, want %d", len(dstMemories), len(srcMemories))
 	}
 	for i := range srcMemories {
-		if !reflect.DeepEqual(srcMemories[i], dstMemories[i]) {
-			t.Errorf("memory %d differs:\n src %+v\n dst %+v", i, srcMemories[i], dstMemories[i])
+		// The row must come back identical, and the evidence must come back
+		// PLUS the one record of the arrival itself (#673). The artifact is not a
+		// fixed point of an import, and it must not be: a destination that adopted
+		// the source's records verbatim and nothing else would say nothing about
+		// how the fact reached IT.
+		wantEvidence, gotEvidence := srcMemories[i].Evidence, dstMemories[i].Evidence
+		srcRow, dstRow := srcMemories[i], dstMemories[i]
+		srcRow.Evidence, dstRow.Evidence = nil, nil
+		if !reflect.DeepEqual(srcRow, dstRow) {
+			t.Errorf("memory %d differs:\n src %+v\n dst %+v", i, srcRow, dstRow)
+		}
+		if len(gotEvidence) != len(wantEvidence)+1 {
+			t.Errorf("memory %d has %d evidence record(s) after the round trip, want the %d carried plus one for the import",
+				i, len(gotEvidence), len(wantEvidence))
+			continue
+		}
+		for j := range wantEvidence {
+			// DeepEqual, not ==: the record carries pointers, and comparing those
+			// compares addresses, which two equal values never share.
+			if !reflect.DeepEqual(wantEvidence[j], gotEvidence[j]) {
+				t.Errorf("memory %d evidence %d differs:\n src %+v\n dst %+v", i, j, wantEvidence[j], gotEvidence[j])
+			}
+		}
+		if arrival := gotEvidence[len(gotEvidence)-1]; arrival.Kind != "imported" {
+			t.Errorf("memory %d last evidence record is %q, want the import's own arrival", i, arrival.Kind)
 		}
 	}
 
@@ -304,8 +327,127 @@ func TestExportIsDeterministic(t *testing.T) {
 	// added here would break byte-reproducibility while every field the test
 	// looked for would still be there.
 	head := strings.SplitN(string(first), "\n", 2)[0]
-	if want := `{"type":"header","schema_version":1}`; head != want {
+	if want := `{"type":"header","schema_version":2}`; head != want {
 		t.Errorf("header line = %s, want exactly %s", head, want)
+	}
+}
+
+// TestExportCarriesTheEvidenceRecords: the artifact has to move the SUPPORT for a
+// memory, not only the memory. A restore that kept the row and dropped the
+// evidence would report "supported by 0 observations" about a fact two agents
+// had already reported, which is the one thing the table exists to prevent.
+func TestExportCarriesTheEvidenceRecords(t *testing.T) {
+	src := newTestStore(t)
+	ctx := context.Background()
+	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, _, _, err := src.UpsertWithProvenance(ctx, "p1", "fact", "a fact two agents report", "mcp", 0.5, nil,
+		memory.Provenance{Agent: "claude-code", SessionID: "ses_a", SourceRef: "docs/a.md"})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// A second, folding report by a different agent: the survivor is the row that
+	// ends up in the artifact, and it is the one carrying both observations.
+	if _, _, _, err := src.UpsertWithProvenance(ctx, "p1", "fact", "a fact two agents report, per the runbook", "mcp", 0.5, nil,
+		memory.Provenance{Agent: "codex", SessionID: "ses_b"}); err != nil {
+		t.Fatalf("second Upsert: %v", err)
+	}
+
+	memories, err := src.PortableMemories(ctx, []string{"p1"})
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+	var carried *memory.PortableMemory
+	for i := range memories {
+		if memories[i].ID == id {
+			carried = &memories[i]
+		}
+	}
+	if carried == nil {
+		t.Fatalf("the survivor %s is not in the portable read", id)
+	}
+	// Both reports are on the row the fold left standing, and the artifact carries
+	// both. The first is the save; the second is the folding agent's report, which
+	// is the one that used to be discarded with the incoming wording.
+	if len(carried.Evidence) != 2 {
+		t.Fatalf("the survivor's exported evidence = %+v, want both agents' observations", carried.Evidence)
+	}
+	if carried.Evidence[0].Agent != "claude-code" || carried.Evidence[1].Agent != "codex" {
+		t.Errorf("exported evidence = %+v, want claude-code then codex, in the order they were reported", carried.Evidence)
+	}
+	if carried.Evidence[0].ObservedAt == nil || carried.Evidence[1].ObservedAt == nil {
+		t.Errorf("exported evidence = %+v, want each record to carry when it was observed", carried.Evidence)
+	}
+	if carried.Evidence[1].ID == "" || carried.Evidence[1].ID == carried.Evidence[0].ID {
+		t.Errorf("exported evidence ids = %q and %q, want two distinct ids", carried.Evidence[0].ID, carried.Evidence[1].ID)
+	}
+}
+
+// TestImportStillReadsAV1Artifact: the evidence list is why the artifact is v2,
+// and the readable range has to include v1 or every artifact written before this
+// build would be refused — for a change that only ADDED a field. A range that
+// silently narrowed is how a user's backup stops being restorable.
+func TestImportStillReadsAV1Artifact(t *testing.T) {
+	store := newTestStore(t)
+	body := `{"type":"header","schema_version":1}` + "\n" +
+		`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n" +
+		`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"fact",` +
+		`"content":"a fact from a v1 artifact","source":"manual","importance":0.5,` +
+		`"tags":null,"pinned":false,"created_at":"2026-01-01 00:00:00",` +
+		`"updated_at":"2026-01-01 00:00:00"}}` + "\n"
+
+	report, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: true}, nil)
+	if err != nil {
+		t.Fatalf("a v1 artifact must still import: %v", err)
+	}
+	if report.Rejected != 0 {
+		t.Fatalf("a v1 artifact had %d rejected record(s): %v", report.Rejected, report.Errors)
+	}
+	if report.Created["memory"] != 1 {
+		t.Errorf("created memories = %d, want 1", report.Created["memory"])
+	}
+	// A v1 record carries no evidence, so the destination holds only the record of
+	// the arrival — never a fabricated observation from the importing machine.
+	ev, err := store.MemoryProvenance(context.Background(), "m1")
+	if err != nil {
+		t.Fatalf("MemoryProvenance: %v", err)
+	}
+	if len(ev) != 1 || ev[0].Kind != "imported" {
+		t.Errorf("evidence = %+v, want only the arrival record", ev)
+	}
+}
+
+// TestImportRejectsEvidenceWithAnUnknownKind: a hand-edited artifact whose record
+// names a kind the table cannot store must be rejected BY NAME, in the dry run as
+// well as the apply. Dropping the record instead would import a memory with less
+// support than the file claims, with nothing to say so.
+func TestImportRejectsEvidenceWithAnUnknownKind(t *testing.T) {
+	for _, apply := range []bool{false, true} {
+		t.Run(fmt.Sprintf("apply=%v", apply), func(t *testing.T) {
+			store := newTestStore(t)
+			body := `{"type":"header","schema_version":2}` + "\n" +
+				`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n" +
+				`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"fact",` +
+				`"content":"a fact with a made-up evidence kind","source":"manual",` +
+				`"importance":0.5,"tags":null,"pinned":false,` +
+				`"created_at":"2026-01-01 00:00:00","updated_at":"2026-01-01 00:00:00",` +
+				`"evidence":[{"kind":"vibes"}]}}` + "\n"
+
+			report, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: apply}, nil)
+			if err != nil {
+				t.Fatalf("Import: %v", err)
+			}
+			if report.Rejected != 1 {
+				t.Fatalf("rejected = %d, want the one memory record", report.Rejected)
+			}
+			if !strings.Contains(report.Errors[0].Error(), "vibes") {
+				t.Errorf("error = %q, want it to name the offending kind", report.Errors[0])
+			}
+			if got, _ := store.PortableMemories(context.Background(), nil); len(got) != 0 {
+				t.Errorf("a rejected record still wrote %d memories", len(got))
+			}
+		})
 	}
 }
 
@@ -442,7 +584,11 @@ func TestImportDryRunWritesNothing(t *testing.T) {
 // mean whatever this build guesses, which is the one outcome an import must
 // never produce.
 func TestImportRejectsAnUnknownSchemaVersion(t *testing.T) {
-	for _, version := range []string{"2", "99", "0"} {
+	// 3 and 0 are outside the readable range; 1 is inside it, and is checked by
+	// TestImportStillReadsAV1Artifact — the range is a list of the versions whose
+	// rules hold, so a test that forgot a version inside it would let a break
+	// through silently.
+	for _, version := range []string{"3", "99", "0"} {
 		t.Run("version "+version, func(t *testing.T) {
 			store := newTestStore(t)
 			body := `{"type":"header","schema_version":` + version + "}\n" +

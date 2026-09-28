@@ -1475,13 +1475,17 @@ func TestImportRefusesAnIDThatStillHasHistory(t *testing.T) {
 	ctx := context.Background()
 
 	id := "AAAAAAAABBBBBBBBCCCCCCCCDDDDDDDD"
-	if _, _, _, err := s.Upsert(ctx, testProject, "fact", "a fact that was deleted here", "mcp", 0.5, nil); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	// Rename the live row to the id the artifact will carry, then delete it, so
-	// the id is free but its history is not.
-	if _, err := s.db.Exec(`UPDATE memories SET id = ? WHERE content = ?`, id, "a fact that was deleted here"); err != nil {
-		t.Fatalf("rename: %v", err)
+	// Seeded under the id the artifact will carry, by a direct INSERT rather than
+	// an Upsert and a rename: memory_provenance cascades FROM memories with no ON
+	// UPDATE, so a row that carries evidence can no longer be renamed. That is
+	// right — the id IS the memory, and its evidence names it — and it means a
+	// fixture wanting a chosen id inserts it. The delete then frees the id while
+	// its history stays.
+	if _, err := s.db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source)
+		 VALUES (?, ?, 'fact', 'a fact that was deleted here', 'mcp')`, id, testProject,
+	); err != nil {
+		t.Fatalf("seed the row to be deleted: %v", err)
 	}
 	if err := s.Delete(ctx, id); err != nil {
 		t.Fatalf("Delete: %v", err)
@@ -1697,6 +1701,13 @@ func countOccurrences(t *testing.T, db *sql.DB, text string) (int, error) {
 		{"memory_history.content", `SELECT count(*) FROM memory_history WHERE content = ?`},
 		{"memory_history.merged_content", `SELECT count(*) FROM memory_history WHERE merged_content = ?`},
 		{"memory_snapshots", `SELECT count(*) FROM memory_snapshots WHERE content = ?`},
+		// The evidence tables, because a purge that empties the history while a
+		// snapshot still holds the text has erased nothing an operator can observe —
+		// and the same is true of an agent or a reference a redaction was asked to
+		// remove. Scanned by their identifying fields, not by content, since they
+		// hold no content.
+		{"memory_provenance.source_ref", `SELECT count(*) FROM memory_provenance WHERE source_ref = ?`},
+		{"memory_snapshot_evidence.source_ref", `SELECT count(*) FROM memory_snapshot_evidence WHERE source_ref = ?`},
 	} {
 		var n int
 		if err := db.QueryRow(q.query, text).Scan(&n); err != nil {

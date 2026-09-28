@@ -64,6 +64,13 @@ type Signals struct {
 	// two assignments that compute the contributions together.
 	ProvenanceWeight       string
 	ProvenanceContribution float64
+	// Evidence is what supports the memory: how many observations the store holds
+	// for it, and how many of them carry a verification. It is RECORDED, never
+	// acted on -- the weight above is what would act, and it is pinned at 1.0 --
+	// so the trace can already say "supported by 2 observations, 1 verified" for a
+	// reader who asks what a memory rests on. Render it with
+	// memory.EvidenceCounts.Label; nothing here ranks on it.
+	Evidence memory.EvidenceCounts
 }
 
 // StageTrace is one stage's counts and the rows it removed.
