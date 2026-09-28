@@ -1488,11 +1488,14 @@ func TestSupersedeReassessReport(t *testing.T) {
 	if !strings.Contains(apply, "  withdrew     11223344 -> 88776655  [classifier]  [+1 causes edge]") {
 		t.Errorf("apply report does not mark the edge it wrote, or the causes edge it swept with it:\n%s", apply)
 	}
-	if !strings.Contains(apply, "  would withdraw  abcdef01 -> 98765432  [veto, no harness call]") {
-		t.Errorf("apply report does not mark the edge a concurrent pass withdrew first:\n%s", apply)
-	}
 	if strings.Contains(apply, "Re-run with --apply") {
 		t.Errorf("an applied report must not offer to apply again:\n%s", apply)
+	}
+	// A row a concurrent pass withdrew first is neither of the other two
+	// markers: calling it "would withdraw" under --apply claims a deletion that
+	// did not happen.
+	if !strings.Contains(apply, "  already gone  abcdef01 -> 98765432") {
+		t.Errorf("apply report mislabels the edge a concurrent pass withdrew first:\n%s", apply)
 	}
 }
 

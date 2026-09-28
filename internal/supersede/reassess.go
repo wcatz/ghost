@@ -62,6 +62,7 @@ import (
 // writes nothing but the invalidation.
 type reassessStore interface {
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
+	GetLinks(ctx context.Context, memoryID string) ([]memory.Link, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	InvalidateLink(ctx context.Context, sourceID, targetID, relation string) (int64, error)
 }
@@ -114,19 +115,46 @@ type WithdrawnEdge struct {
 
 // liveCausesPairs returns the [olderID, newerID] pairs carrying a live
 // 'causes'/'llm' edge — the orientation 'causes' is written in (the cause
-// precedes its effect), which is the reverse of a supersedes edge. It is read
-// once per pass, and only to make the report honest about the second graph row a
-// withdrawal drops.
-func liveCausesPairs(ctx context.Context, store reassessStore, projectID string) (map[[2]string]bool, error) {
-	links, err := store.LinksByRelationSource(ctx, projectID, string(RelationCauses), "llm")
-	if err != nil {
-		return nil, fmt.Errorf("load causes links: %w", err)
+// precedes its effect), which is the reverse of a supersedes edge.
+//
+// It is read through each pair's OWN endpoints rather than through a
+// project-scoped query, and that is not a style choice. The sweep deletes by id
+// with no project predicate, so a pair whose older endpoint has LEFT the project
+// — promoted to _global by `ghost reflect --promote-globals`, or moved by
+// `ghost project merge` — is still swept, while a project-scoped read (which
+// joins on the edge's source, and a 'causes' edge's source is the OLDER note)
+// cannot see it. Reading the older endpoint's own links sees exactly the
+// population the deletion can reach, which is the one the report has to be about.
+func liveCausesPairs(ctx context.Context, store reassessStore, settled []judgedEdge) (map[[2]string]bool, error) {
+	ids := make([]string, 0, len(settled))
+	seen := make(map[string]bool, len(settled))
+	for _, j := range settled {
+		if seen[j.OlderID] {
+			continue
+		}
+		seen[j.OlderID] = true
+		ids = append(ids, j.OlderID)
 	}
-	out := make(map[[2]string]bool, len(links))
-	for _, l := range links {
-		out[[2]string{l.SourceID, l.TargetID}] = true
+	out := make(map[[2]string]bool, len(settled))
+	for _, id := range ids {
+		links, err := store.GetLinks(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("load links of %s: %w", id, err)
+		}
+		for _, l := range links {
+			if l.Relation == string(RelationCauses) && l.SourceID == id {
+				out[[2]string{l.SourceID, l.TargetID}] = true
+			}
+		}
 	}
 	return out, nil
+}
+
+// judgedEdge is the projection liveCausesPairs needs: the ids of one settled
+// pair, with nothing else.
+type judgedEdge struct {
+	OlderID string
+	NewerID string
 }
 
 // Reassess re-judges every live 'supersedes'/'llm' edge in the project with the
@@ -261,12 +289,15 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		}
 	}
 
-	// The live 'causes' edges, read once, so the report can say how many the
-	// sweep will drop alongside each withdrawal — in a dry run as well, because
-	// an operator deciding whether to pass --apply is deciding about that
-	// second deletion too. Read before any write, so a dry run stays
-	// side-effect-free.
-	causesPairs, err := liveCausesPairs(ctx, store, projectID)
+	// The live 'causes' edges on the pairs this pass is about to withdraw, read
+	// once and before any write, so a dry run can say how many rows each
+	// withdrawal would take with it. An operator deciding whether to pass
+	// --apply is deciding about that second deletion too.
+	rows := make([]judgedEdge, 0, len(settled))
+	for _, j := range settled {
+		rows = append(rows, judgedEdge{OlderID: j.cand.OlderID, NewerID: j.cand.NewerID})
+	}
+	causesPairs, err := liveCausesPairs(ctx, store, rows)
 	if err != nil {
 		return res, nil, err
 	}
@@ -276,6 +307,11 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	for _, j := range settled {
 		w := WithdrawnEdge{NewerID: j.cand.NewerID, OlderID: j.cand.OlderID, Reason: j.reason, Vetoed: j.vetoed}
 		if j.sweep {
+			// A PREDICTION, for a dry run only: the row says how many 'causes'
+			// edges this withdrawal would take with it. Under --apply the field
+			// is overwritten with what the sweep actually moved, because a report
+			// that claims a deletion which did not happen is the one thing this
+			// pass cannot be for.
 			if causesPairs[[2]string{j.cand.OlderID, j.cand.NewerID}] {
 				w.CausesSwept = 1
 			}
@@ -314,6 +350,11 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			// InvalidateLink writes no history row for a non-supersedes
 			// relation, so this leaves the audit exactly as Run leaves it.
 			n, err := store.InvalidateLink(ctx, w.OlderID, w.NewerID, string(RelationCauses))
+			// The row already carries the prediction; what actually moved is the
+			// observed count, and a failed sweep leaves it at zero because
+			// nothing is known to have moved.
+			w.CausesSwept = int(n)
+			withdrawn[len(withdrawn)-1] = w
 			if err != nil {
 				fail = fmt.Errorf("withdraw causes link %s→%s: %w", w.OlderID, w.NewerID, err)
 				break

@@ -1378,9 +1378,17 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		return id
 	}
 	for _, w := range withdrawn {
+		// Three markers, because under --apply a row can be neither of the two
+		// the other modes use: a concurrent pass withdrew the supersedes edge
+		// first, and this run's own sweep may still have taken the 'causes' one.
+		// Calling that "would withdraw" would claim a deletion that did not
+		// happen and hide one that did.
 		marker := "would withdraw"
-		if w.Written {
+		switch {
+		case w.Written:
 			marker = "withdrew   "
+		case apply:
+			marker = "already gone"
 		}
 		// A vetoed row was settled with no harness call, and a false veto here
 		// deletes a correct edge the ordinary pass will not re-create, so the
