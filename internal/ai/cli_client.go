@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // defaultTimeout bounds a claude -p subprocess call when the caller's context
@@ -33,7 +36,41 @@ type claudeBinaryID struct {
 	modTime time.Time
 }
 
+// probeKey is this identity as the string claudeProbeGroup keys on, and it is
+// built from exactly the three fields the cache key compares — no more, so two
+// identities can never share a flight, and no fewer, so the same binary always
+// lands on the same one. NUL joins them because a path cannot contain one, so
+// no combination of values can spell another identity's key.
+func (id claudeBinaryID) probeKey() string {
+	return id.path + "\x00" + strconv.FormatInt(id.size, 10) + "\x00" + strconv.FormatInt(id.modTime.UnixNano(), 10)
+}
+
 var claudeCapabilityCache sync.Map // claudeBinaryID -> claudeCapabilities
+
+// claudeProbeGroup collapses a cold burst into ONE `--help` child, keyed on the
+// binary identity, so N concurrent first-callers spawn 1 process and all share
+// its answer. Without it the cache is check-then-probe and every caller that
+// arrives before the first one stores runs its own (#741).
+//
+// It is a singleflight.Group and not a per-key mutex map because of the failure
+// path, which is the whole difference between the two HERE. A mutex map
+// serializes the burst: the leader probes, and each follower then takes the lock,
+// finds the cache STILL EMPTY (a failed claude probe is deliberately not cached,
+// so the next call retries with its own live context), and probes again — N
+// processes for the same burst, which is the bug rather than a fix for it.
+// singleflight shares the outcome of the concurrent call whether it succeeded or
+// not. The codex probe would tolerate a mutex map, because its negative verdict
+// IS cached; see codexProbeGroup for that difference stated where it applies.
+//
+// What the group does NOT do is decide what is RETAINED. A flight is forgotten
+// the moment it lands and keeps nothing of its own, so the cache above still owns
+// that decision — a success is stored, a failure is not, and nothing here can
+// turn an unprobed identity into a cached one.
+//
+// What it does cost is the caller's own context, which singleflight never
+// consults: both consequences are handled at the call site below and the shared
+// half is isSharedProbeCancellation in probe.go.
+var claudeProbeGroup singleflight.Group
 
 func parseClaudeCapabilities(help string) claudeCapabilities {
 	help = strings.ToLower(help)
@@ -62,6 +99,84 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 		return cached.(claudeCapabilities), nil
 	}
 
+	// A cold miss runs ONE probe for the whole burst. The re-read inside is the
+	// re-check, not a second guess: a flight that landed between the lookup above
+	// and this call has already stored its answer. A caller arriving after even
+	// that is served from the cache by the first check and never reaches the
+	// group at all, so the warm path costs what it always did.
+	//
+	// The loop covers the one case a single round cannot: the leader's context
+	// died mid-probe, so the flight's answer is that leader's accident rather than
+	// this caller's answer, and this caller goes round again under its own
+	// context. Re-entering the GROUP rather than probing directly is the point — a
+	// direct re-probe puts this burst back to one child per caller, the bug #741
+	// removes, on the rare path out of a common one. Re-reading the cache instead
+	// would not do it either: the followers all arrive within microseconds of each
+	// other, so a cache check they all make before the first one has answered is a
+	// check they all miss.
+	//
+	// Each round consumes one more cancellation, so the rounds are bounded by the
+	// callers sharing this key, and a caller whose OWN context is dead leaves
+	// without looping: isSharedProbeCancellation requires a live ctx, and both
+	// arms of the select below check it. It is never worse than the behaviour
+	// before #741, which was one probe per caller, however many rounds that took.
+	for {
+		flight := claudeProbeGroup.DoChan(id.probeKey(), func() (any, error) {
+			if cached, ok := claudeCapabilityCache.Load(id); ok {
+				return cached.(claudeCapabilities), nil
+			}
+			caps, err := probeClaudeCapabilities(ctx, path, id)
+			if err != nil && ctx.Err() != nil {
+				// This is OUR context dying, and a follower cannot see that from the
+				// error alone — see probeContextError. Marking it here is the only
+				// place the two facts are both known.
+				return claudeCapabilities{}, probeContextError{err}
+			}
+			return caps, err
+		})
+		// DoChan and this select are two halves of the same requirement: a
+		// caller's own context governs its own call, and the flight's outcome is
+		// somebody else's. Neither a shared error nor a wait for an answer this
+		// caller cannot use may be handed back as if it were this caller's own.
+		select {
+		case <-ctx.Done():
+			// This is a change of error SHAPE for a caller cancelled mid-probe:
+			// it used to get the killed child's "signal: killed" wrapped, and
+			// now gets its own context error, so errors.Is(err, context.Canceled)
+			// holds. Nothing matched the old text.
+			return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", ctx.Err())
+		case res := <-flight:
+			// BOTH arms have to agree, because this one cannot be assumed: when a
+			// caller's context is already done AND the flight channel already
+			// holds a result, both cases are ready and Go picks at random, so a
+			// dead caller leaves by this arm about half the time — and an
+			// unchecked `res.Err == nil` here would report the leader's success as
+			// this caller's own answer, which is the one outcome the arm above
+			// exists to prevent. Checking the caller's own context first is what
+			// makes the choice between the two arms immaterial, instead of leaving
+			// it to a coin.
+			if ctx.Err() != nil {
+				return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", ctx.Err())
+			}
+			if res.Err == nil {
+				return res.Val.(claudeCapabilities), nil
+			}
+			if isSharedProbeCancellation(res.Err, ctx) {
+				// The leader's context died, not this caller's, so this failure is
+				// not this caller's to report and not this caller's to inherit as
+				// an answer. Round again under this caller's own context.
+				continue
+			}
+			return claudeCapabilities{}, res.Err
+		}
+	}
+}
+
+// probeClaudeCapabilities is the body of the single flight: the one child, and
+// the store on the answer path ONLY. Not caching the failure is deliberate and
+// predates #741 — an unanswered probe leaves the identity cold, so the next
+// caller re-asks rather than inheriting this caller's error.
+func probeClaudeCapabilities(ctx context.Context, path string, id claudeBinaryID) (claudeCapabilities, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	probe, release, _ := harnessCommand(probeCtx, path, []string{"--help"}, os.Environ(), harnessClaude)

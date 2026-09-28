@@ -129,6 +129,79 @@ process is the opposite failure, because a codex upgraded in place under a
 long-lived MCP server would never be noticed. A positive answer does not expire at
 all.
 
+**Both capability probes are SINGLE-FLIGHTED on a cold cache.** `codexFeaturesFor`
+and `claudeCapabilitiesFor` each pair their per-identity `sync.Map` with a
+`singleflight.Group` keyed on the SAME identity (`codexBinaryID`/`claudeBinaryID`
+`probeKey`, built from the same three fields the cache key compares), so N
+concurrent first-callers run ONE child process and all receive that probe's answer.
+The cache alone cannot do this — it is check-then-probe, so every caller arriving
+before the first one stores ran its own (measured: 50 spawns for 50 callers). A
+`singleflight.Group` rather than a per-key mutex map because the two differ on the
+FAILURE path, which is the whole difference: a mutex map serializes the burst, and
+since a failed claude probe is deliberately NOT cached, each follower would take
+the lock, find the cache still empty, and probe again — N processes, the bug rather
+than a fix for it. The group shares the concurrent call's outcome whether it
+succeeded or not, and retains NOTHING of its own, so the caches above keep owning
+retention exactly as documented: a positive is kept for the life of the process, a
+negative expires at `codexFeatureRetry`, a failure is never stored, and the
+warn-once latches are untouched. The freshness test for codex therefore lives in
+`codexCachedSupport` rather than at the lookup, because it is now read from two
+places and a check-then-probe pair with that test in only one of them is how a
+long-lived parent stops noticing a codex upgraded in place. The mutex-map argument
+is CLAUDE'S, and codex is the case that would survive without the group:
+the flight caches a verdict the probe could not REACH, so a per-key lock would
+leave each follower a fresh negative to return. (A verdict reached under a DEAD
+context is the one that is not cached — a cancellation, not an answer — which does
+not change this.) Both use the same mechanism, chosen once, rather than a claim each
+probe needs a guarantee it lacks.
+
+**A caller's own context still governs its own call.** `Do` blocks on the leader's
+flight and never consults the follower, so both probes use `DoChan` and `select` on
+`ctx.Done()`: a caller whose context is dead reports its own error instead of waiting
+out a verdict it cannot use — and on claude that error REFUSES the whole harness
+call. The other half is that a leader whose context dies must not fail the followers
+whose contexts are fine, or hand them its negative: in the long-lived `ghost mcp`
+server one disconnected client would fail every concurrent turn in the burst. The
+follower cannot tell those cases apart, because `exec.CommandContext` kills the child
+and `Wait` reports `signal: killed`, never the context error — so the leader MARKS its
+own failure (`probeContextError`, `internal/ai/probe.go`) and a live follower goes round
+AGAIN, re-entering the same `singleflight.Group` under its own context. Re-entering the
+group is load-bearing on the retry: a direct re-probe would restore the #741 burst (one
+child per follower) on the rare path out of a common one, and re-reading the cache would
+not do it either, because the followers all arrive within microseconds of each other and
+would all miss it. Each round consumes one more cancellation, so rounds are bounded by
+the callers sharing the key, and a caller whose OWN context is dead leaves without looping
+— `isSharedProbeCancellation` requires a live `ctx`, and both arms of the select check it.
+The converse is not treated as shared — a leader sees the same marker, and a dead caller
+must not start a fresh attempt under a dead context, which is why
+`isSharedProbeCancellation` requires a LIVE `ctx` as well as the marker.
+
+**A cancelled caller leaves NOTHING behind.** The negative a killed probe produces says
+more about the caller's connection than about the codex, so the flight inside
+`codexFeaturesFor` stores the verdict of `probeCodexFeatures` only while THAT caller's
+context is alive, and marks the flight instead when it is not. The store lives in the
+flight rather than in the probe because the decision needs both facts at once — is the
+answer worth keeping, and was the caller that produced it still alive — and a
+check-then-act split across two functions disagrees with itself in the window between
+them. It is measured on the CALLER's context and not on `probeCtx`: a probe that hit
+its own 10s cap also knows nothing, and that one IS cached, for `codexFeatureRetry`,
+because an unanswering codex is the install this design supports. Nothing was cached by
+the round that died, so the next round's re-read misses and a live caller really does
+re-probe rather than inherit the negative. For the same reason a caller that stopped
+waiting gets no `warnOnWeakerCodexPolicy` at all (`CodexClient.run` checks `ctx.Err()`
+first): nothing was learned about the codex, so the placeholder it was handed is not a
+probe result, and reporting it would fire the `unverified` WARN and CONSUME its
+once-per-process latch — silencing the real diagnostic for the rest of a long-lived
+server, over the one turn that lost the most information.
+
+**Both arms of the probe's `select` check the caller's own context.** When a caller's
+context is already done AND the flight channel already holds a result, both `select` cases
+are ready and Go picks between them at random, so a dead caller leaves by the flight arm
+about half the time. The flight arm therefore re-checks `ctx.Err()` before it treats a
+result as this caller's answer, rather than leaving the outcome to a coin — otherwise a
+caller whose context died while the probe was running would report the leader's success
+(or its kill) as its own, which is the one outcome the `ctx.Done()` arm exists to prevent.
+
 The filter matters because codex **silently IGNORES** a `-c` key it does not know
 (the fail-OPEN direction): `-c` overrides are applied onto the config tree without
 a `deny_unknown_fields` check, so a key renamed upstream leaves the tool on and

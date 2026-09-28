@@ -7,9 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type CodexClient struct {
@@ -41,7 +44,21 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 	}
 	support := codexFeaturesFor(ctx, c.binary)
 	args := codexInvocationArgs(support.declared)
-	warnOnWeakerCodexPolicy(support)
+	// The warning is skipped for a caller that stopped waiting. It learned
+	// nothing about this codex, so the placeholder it was handed is not a probe
+	// result and must not be reported as one: `probed == false` is indistinguishable
+	// from a real "did not answer" here, and reporting it would fire the
+	// unverified WARN and CONSUME its latch. The latch exists so a later genuine
+	// unverified verdict is not silenced, so one cancelled turn in a long-lived
+	// server would swallow the real diagnostic for the rest of the process — and
+	// the turn that swallows it is the one that lost the most information.
+	//
+	// Nothing is lost by skipping: the turn fails on its own context below, and
+	// any real verdict is still reported by the next call, because the verdict is
+	// cached per identity and only a real one may spend the latch.
+	if ctx.Err() == nil {
+		warnOnWeakerCodexPolicy(support)
+	}
 	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessCodex)
 	defer release()
 	cmd.Stdin = strings.NewReader(prompt)
@@ -232,7 +249,67 @@ type codexBinaryID struct {
 // per call would double the process count. Keyed by identity for the same
 // reason claudeCapabilitiesFor is: a cached answer about a binary that has since
 // been replaced is a wrong answer.
+// probeKey is this identity as the string codexProbeGroup keys on, and it is
+// built from exactly the three fields the cache key compares — no more, so two
+// identities can never share a flight, and no fewer, so the same binary always
+// lands on the same one. NUL joins them because a path cannot contain one, so
+// no combination of values can spell another identity's key.
+func (id codexBinaryID) probeKey() string {
+	return id.path + "\x00" + strconv.FormatInt(id.size, 10) + "\x00" + strconv.FormatInt(id.modTime.UnixNano(), 10)
+}
+
 var codexFeatureCache sync.Map // codexBinaryID -> codexFeatureSupport
+
+// codexProbeGroup collapses a cold burst into ONE `features list` child, keyed
+// on the binary identity, so N concurrent first-callers spawn 1 process and all
+// share its answer. Without it the cache is check-then-probe and every caller
+// that arrives before the first one stores runs its own (#741).
+//
+// The group is here for the SHAPE claudeCapabilitiesFor needs it for, and this
+// probe would survive without it: a per-key mutex map would do, because the
+// flight caches a verdict the probe could NOT reach, so the leader leaves a
+// FRESH negative and each follower finds it in codexCachedSupport and returns
+// without spawning. (A verdict reached under a DEAD context is the one the
+// flight refuses to cache, which is a cancellation rather than an answer and
+// does not change this.) The difference that makes singleflight necessary for
+// claude — a failure not being cached — is the opposite of this probe's design,
+// which caches precisely so an old codex costs one process for the whole run.
+// It is the same mechanism in both, chosen once, rather than a claim that this
+// probe needs a guarantee it does not.
+//
+// What it does NOT do is decide what is RETAINED or when that changes. A flight
+// is forgotten the moment it lands, so codexCachedSupport below still owns both
+// halves of the policy this package documents: a positive is kept for the life
+// of the process, and a negative is kept only until codexFeatureRetry.
+//
+// What it does cost is the caller's own context, which singleflight never
+// consults. Here the cost is not a refusal — this probe never errors — but a
+// leader whose context died would hand every follower the NEGATIVE that its
+// killed probe produced, and that negative is a statement about one cancelled
+// turn rather than about the codex. Both halves are handled at the call site
+// below: the dead leader's flight stores nothing, and a live caller goes round
+// again under its own context. The shared half is isSharedProbeCancellation in
+// probe.go.
+var codexProbeGroup singleflight.Group
+
+// codexCachedSupport returns the verdict cached for this identity when it is
+// still one Ghost may hand out, and reports false when it is not — either
+// nothing is cached, or what is has EXPIRED. The expiry is the second case and
+// must stay inside this function, because it is read from two places now (the
+// caller below and the flight) and a check-then-probe pair with the freshness
+// test in only one of them is how a long-lived parent stops noticing a codex
+// upgraded in place.
+func codexCachedSupport(id codexBinaryID) (codexFeatureSupport, bool) {
+	cached, ok := codexFeatureCache.Load(id)
+	if !ok {
+		return codexFeatureSupport{}, false
+	}
+	support := cached.(codexFeatureSupport)
+	if support.probed || time.Since(support.at) < codexFeatureRetry {
+		return support, true
+	}
+	return codexFeatureSupport{}, false
+}
 
 // codexFeaturesFor is the whole of the no-tools policy's runtime half, and it
 // has three properties that are each load-bearing.
@@ -279,15 +356,116 @@ func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
 		return codexFeatureSupport{}
 	}
 	id := codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
-	if cached, ok := codexFeatureCache.Load(id); ok {
-		if support := cached.(codexFeatureSupport); support.probed || time.Since(support.at) < codexFeatureRetry {
-			return support
-		}
-		// A negative verdict older than the interval. Re-probe rather than keep
-		// it: this is where a codex upgraded in place, or one whose PATH entry
-		// went missing and came back, is noticed by a long-lived parent.
+	if support, ok := codexCachedSupport(id); ok {
+		return support
 	}
+	// Cold, or a negative verdict older than codexFeatureRetry. Either way ONE
+	// probe answers for the whole burst, and the re-read inside it catches the
+	// flight that landed between the lookup above and this call — including a
+	// positive one, which lands for the life of the process and is therefore
+	// worth the second check rather than a wasted spawn.
+	//
+	// The loop covers the one case a single round cannot: the leader's context
+	// died mid-probe, so the flight's verdict is that leader's accident rather
+	// than this caller's answer, and this caller goes round again under its own
+	// context. Re-entering the GROUP rather than probing directly is the point —
+	// a direct re-probe would put this burst back to one child per caller, the
+	// bug #741 removes, on the rare path out of a common one. Nothing was cached
+	// by the round that died (the flight stores only while its caller's context
+	// is alive), so the next round's re-read misses and really does re-probe
+	// rather than serve the dead leader's negative.
+	//
+	// Each round consumes one more cancellation, so the rounds are bounded by
+	// the callers sharing this key, and a caller whose OWN context is dead
+	// leaves without looping: isSharedProbeCancellation requires a live ctx, and
+	// both arms of the select below check it. It is never worse than the
+	// behaviour before #741, which was one probe per caller, however many rounds
+	// that took.
+	for {
+		flight := codexProbeGroup.DoChan(id.probeKey(), func() (any, error) {
+			if support, ok := codexCachedSupport(id); ok {
+				return support, nil
+			}
+			support := probeCodexFeatures(ctx, path, id)
+			if ctx.Err() != nil {
+				// This is OUR context dying, and the verdict above says nothing
+				// about the codex — see probeContextError. Marking it is what
+				// stops a dead leader from answering on behalf of the live
+				// callers sharing its flight, who are entitled to a probe of
+				// their own rather than to one turn of the pre-probe policy.
+				// Marked even if the probe somehow answered, because a verdict
+				// from a context that was already cancelled is not one to hand a
+				// caller that is still running.
+				//
+				// The store lives HERE rather than in probeCodexFeatures, and this
+				// single check is why: it is the one place that knows both facts,
+				// so "was the caller alive when this probe was killed" and "is
+				// this verdict worth keeping" cannot be answered a moment apart by
+				// two pieces of code. A probe killed by this context ALWAYS returns
+				// after the cancellation was recorded — that is what killed it — so
+				// the check below cannot miss it, and a probe that failed on its
+				// own terms or hit its 10s cap leaves this context alive and is
+				// cached, which is the policy codexFeatureRetry exists for.
+				return support, probeContextError{ctx.Err()}
+			}
+			codexFeatureCache.Store(id, support)
+			return support, nil
+		})
+		// A caller's own context governs its own call, and singleflight hands
+		// back the leader's outcome without consulting it. Neither failure is a
+		// refusal here: this probe cannot return one, so the worst outcome
+		// available is the weaker policy — which is what this caller would have
+		// got had it probed for itself, and never something worse.
+		select {
+		case <-ctx.Done():
+			// This caller's context is dead, so it gets the zero verdict — "pass
+			// everything", the behaviour before this probe existed — rather than a
+			// wait for a verdict it cannot act on. Nothing is stored for it: it
+			// stores nothing itself, and a flight it led stored nothing either,
+			// because the store above is behind the same check as the marker.
+			return codexFeatureSupport{}
+		case res := <-flight:
+			// BOTH arms have to agree, because this one cannot be assumed: when a
+			// caller's context is already done AND the flight channel already
+			// holds a result, both cases are ready and Go picks at random, so a
+			// dead caller leaves by this arm about half the time. Checking the
+			// caller's own context first is what makes the choice between the two
+			// arms immaterial, instead of leaving the answer to a coin.
+			if ctx.Err() != nil {
+				return codexFeatureSupport{}
+			}
+			// The marker's error is the one error a live caller can answer for
+			// itself, so it is tested BEFORE the blanket handling below.
+			if isSharedProbeCancellation(res.Err, ctx) {
+				// The leader's context died; this caller's did not. Round again
+				// rather than accepting a verdict this caller cannot distinguish
+				// from one its own probe would have produced.
+				continue
+			}
+			// The flight's error is nil except for the marker handled above, and
+			// this function has no error to return — the zero value is what a
+			// probe that could not answer means here, so an error is handled
+			// rather than asserted past into a nil-interface panic.
+			if res.Err != nil {
+				return codexFeatureSupport{}
+			}
+			return res.Val.(codexFeatureSupport)
+		}
+	}
+}
 
+// probeCodexFeatures is the body of the single flight: the one child.
+//
+// It runs under the FIRST caller's context, so a burst takes the first caller's
+// deadline for its shared probe rather than a deadline of its own. That is the
+// accepted cost of one probe rather than N, and it is bounded twice over: the
+// probe is a diagnostic capped at 10s, and the flight stores its verdict only
+// while that caller's context is alive, so it never hands a cancellation nobody
+// else had to anyone who comes after it.
+//
+// It stores nothing. That belongs to the flight, which is the only place that
+// knows whether the answer is worth keeping — see the store there.
+func probeCodexFeatures(ctx context.Context, path string, id codexBinaryID) codexFeatureSupport {
 	// Bounded like the claude capability probe: an unanswering probe must not
 	// spend the caller's budget, which the caller needs for the model call.
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -324,11 +502,12 @@ func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
 			support.declared = parseCodexFeaturesList(text)
 		}
 	}
-	// Cached whether it answered or not: an unanswering codex is the old-codex
-	// case this whole design supports, and re-probing it on every call would
-	// double a lifecycle's process count for the entire run. Only the
-	// unanswered case expires (see codexFeatureRetry).
-	codexFeatureCache.Store(id, support)
+	// Cached by the flight, not here: probeCodexFeatures is the PROBE, and the
+	// decision to keep its answer belongs with the decision to mark it, in one
+	// place that knows both. Storing unconditionally would hand every caller
+	// "this codex declares nothing" for codexFeatureRetry over one client that
+	// disconnected; a follower cannot repair that afterwards, because a flight is
+	// over by the time anyone hears about it.
 	return support
 }
 
