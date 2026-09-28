@@ -179,6 +179,48 @@ func TestSaveResponseSaysItStoredTheNoteAnyway(t *testing.T) {
 	}
 }
 
+// TestGlobalSaveAdvisesToo: the instructions promise a repository-fact save is
+// stored "with a note saying so" and then send an agent to ghost_save_global for
+// the cross-project case, so the advisory that promise describes has to be on
+// both write paths that store a memory. A global save is the one that gets read
+// by every later project, which is the more expensive place to leave a stale
+// code-location fact.
+func TestGlobalSaveAdvisesToo(t *testing.T) {
+	srv, session := newCapSession(t)
+	_ = srv
+
+	for _, tc := range []struct {
+		content      string
+		wantAdvisory bool
+	}{
+		// The issue's bad example, verbatim, saved as a global memory.
+		{"foo.go contains HandleFoo()", true},
+		{"Always use 2-space YAML indentation", false},
+	} {
+		res := callTool(t, session, "ghost_save_global", map[string]any{
+			"content":  tc.content,
+			"category": "fact",
+		})
+		resp := resultText(res)
+		if !strings.Contains(resp, "Global memory saved (id: ") {
+			t.Fatalf("global save response reports no stored id: %q", resp)
+		}
+		if got := strings.Contains(resp, "ADVISORY"); got != tc.wantAdvisory {
+			t.Errorf("global save of %q: advisory present = %v, want %v; got %q", tc.content, got, tc.wantAdvisory, resp)
+		}
+		// Advisory or not, the memory exists and is findable — the advisory is
+		// advice, never a refusal, on this path too.
+		found := callTool(t, session, "ghost_memory_search", map[string]any{
+			"project_id": "test-project",
+			"query":      tc.content,
+			"limit":      5,
+		})
+		if !strings.Contains(resultText(found), "«"+tc.content+"»") {
+			t.Errorf("global save of %q was not stored: %q", tc.content, resultText(found))
+		}
+	}
+}
+
 // TestDurableSavesCarryNoAdvisory is the false-positive guard on the live path
 // rather than on the shape function: durable knowledge is saved through the
 // real tool and must come back with a response that says nothing about

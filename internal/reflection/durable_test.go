@@ -45,7 +45,10 @@ func TestBuildReflectionPrompt_TreatsRepositoryFactsAsDropCandidates(t *testing.
 		"reading the file settles it",
 		// the boundary, with the issue's own good example
 		"Production schema changes require explicit approval.",
-		"never a candidate",
+		// "candidate" is qualified because the next bullet reads "Every category
+		// is a candidate" about something else, and a model reading the list
+		// literally would have to pick between the two senses.
+		"never an obsolete-drop candidate",
 		"stays whatever files or paths it mentions",
 	} {
 		if !strings.Contains(rule, want) {

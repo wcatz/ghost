@@ -1785,6 +1785,13 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", duplicateOf, moved)
 			}
 		}
+		// The same advisory the project save carries, and for the same reason:
+		// the instructions promise a repository-fact save is stored WITH a note
+		// saying so, and they send an agent to this tool for exactly the
+		// cross-project case. Advisory only — the id above is already written,
+		// and it follows the fold notice because both describe the stored
+		// result, and the fold notice names the row that actually answered.
+		msg += repoFactHint(args.Content)
 		if globalTruncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
