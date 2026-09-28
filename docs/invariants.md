@@ -126,6 +126,31 @@ process is the opposite failure, because a codex upgraded in place under a
 long-lived MCP server would never be noticed. A positive answer does not expire at
 all.
 
+**Both capability probes are SINGLE-FLIGHTED on a cold cache.** `codexFeaturesFor`
+and `claudeCapabilitiesFor` each pair their per-identity `sync.Map` with a
+`singleflight.Group` keyed on the SAME identity (`codexBinaryID`/`claudeBinaryID`
+`probeKey`, built from the same three fields the cache key compares), so N
+concurrent first-callers run ONE child process and all receive that probe's answer.
+The cache alone cannot do this — it is check-then-probe, so every caller arriving
+before the first one stores ran its own (measured: 50 spawns for 50 callers). A
+`singleflight.Group` rather than a per-key mutex map because the two differ on the
+FAILURE path, which is the whole difference: a mutex map serializes the burst, and
+since a failed claude probe is deliberately NOT cached, each follower would take
+the lock, find the cache still empty, and probe again — N processes, the bug rather
+than a fix for it. The group shares the concurrent call's outcome whether it
+succeeded or not, and retains NOTHING of its own, so the caches above keep owning
+retention exactly as documented: a positive is kept for the life of the process, a
+negative expires at `codexFeatureRetry`, a failure is never stored, and the
+warn-once latches are untouched. The freshness test for codex therefore lives in
+`codexCachedSupport` rather than at the lookup, because it is now read from two
+places and a check-then-probe pair with that test in only one of them is how a
+long-lived parent stops noticing a codex upgraded in place. What the group DOES
+change is whose deadline the shared probe runs under: the probe is the function
+INSIDE `Do`, so a burst inherits the first caller's context. That is the accepted
+cost of one probe rather than N, and it is bounded twice — the probe is a diagnostic
+capped at 10s, and an unanswered flight is re-asked after the retry interval rather
+than left cached as a verdict only one caller agreed to.
+
 The filter matters because codex **silently IGNORES** a `-c` key it does not know
 (the fail-OPEN direction): `-c` overrides are applied onto the config tree without
 a `deny_unknown_fields` check, so a key renamed upstream leaves the tool on and

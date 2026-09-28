@@ -7,9 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type CodexClient struct {
@@ -232,7 +235,49 @@ type codexBinaryID struct {
 // per call would double the process count. Keyed by identity for the same
 // reason claudeCapabilitiesFor is: a cached answer about a binary that has since
 // been replaced is a wrong answer.
+// probeKey is this identity as the string codexProbeGroup keys on, and it is
+// built from exactly the three fields the cache key compares — no more, so two
+// identities can never share a flight, and no fewer, so the same binary always
+// lands on the same one. NUL joins them because a path cannot contain one, so
+// no combination of values can spell another identity's key.
+func (id codexBinaryID) probeKey() string {
+	return id.path + "\x00" + strconv.FormatInt(id.size, 10) + "\x00" + strconv.FormatInt(id.modTime.UnixNano(), 10)
+}
+
 var codexFeatureCache sync.Map // codexBinaryID -> codexFeatureSupport
+
+// codexProbeGroup collapses a cold burst into ONE `features list` child, keyed
+// on the binary identity, so N concurrent first-callers spawn 1 process and all
+// share its answer. Without it the cache is check-then-probe and every caller
+// that arrives before the first one stores runs its own (#741) — the same shape
+// as claudeProbeGroup, and for the same reason: a singleflight.Group shares the
+// outcome of the concurrent call, where a per-key mutex map would only serialize
+// the burst and leave each follower to probe the expired negative for itself.
+//
+// What it does NOT do is decide what is RETAINED or when that changes. A flight
+// is forgotten the moment it lands, so codexCachedSupport below still owns both
+// halves of the policy this package documents: a positive is kept for the life
+// of the process, and a negative is kept only until codexFeatureRetry.
+var codexProbeGroup singleflight.Group
+
+// codexCachedSupport returns the verdict cached for this identity when it is
+// still one Ghost may hand out, and reports false when it is not — either
+// nothing is cached, or what is has EXPIRED. The expiry is the second case and
+// must stay inside this function, because it is read from two places now (the
+// caller below and the flight) and a check-then-probe pair with the freshness
+// test in only one of them is how a long-lived parent stops noticing a codex
+// upgraded in place.
+func codexCachedSupport(id codexBinaryID) (codexFeatureSupport, bool) {
+	cached, ok := codexFeatureCache.Load(id)
+	if !ok {
+		return codexFeatureSupport{}, false
+	}
+	support := cached.(codexFeatureSupport)
+	if support.probed || time.Since(support.at) < codexFeatureRetry {
+		return support, true
+	}
+	return codexFeatureSupport{}, false
+}
 
 // codexFeaturesFor is the whole of the no-tools policy's runtime half, and it
 // has three properties that are each load-bearing.
@@ -279,15 +324,34 @@ func codexFeaturesFor(ctx context.Context, binary string) codexFeatureSupport {
 		return codexFeatureSupport{}
 	}
 	id := codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
-	if cached, ok := codexFeatureCache.Load(id); ok {
-		if support := cached.(codexFeatureSupport); support.probed || time.Since(support.at) < codexFeatureRetry {
-			return support
-		}
-		// A negative verdict older than the interval. Re-probe rather than keep
-		// it: this is where a codex upgraded in place, or one whose PATH entry
-		// went missing and came back, is noticed by a long-lived parent.
+	if support, ok := codexCachedSupport(id); ok {
+		return support
 	}
+	// Cold, or a negative verdict older than codexFeatureRetry. Either way ONE
+	// probe answers for the whole burst, and the re-read inside it catches the
+	// flight that landed between the lookup above and this call — including a
+	// positive one, which lands for the life of the process and is therefore
+	// worth the second check rather than a wasted spawn.
+	outcome, _, _ := codexProbeGroup.Do(id.probeKey(), func() (any, error) {
+		if support, ok := codexCachedSupport(id); ok {
+			return support, nil
+		}
+		return probeCodexFeatures(ctx, path, id), nil
+	})
+	return outcome.(codexFeatureSupport)
+}
 
+// probeCodexFeatures is the body of the single flight: the one child, and the
+// store whether it answered or not.
+//
+// It is the function, not a cache lookup, that runs under the FIRST caller's
+// context, so a burst takes the first caller's deadline for its shared probe
+// rather than a deadline of its own. That is the accepted cost of one probe
+// rather than N, and it is bounded twice over: the probe is a diagnostic capped
+// at 10s, and an unanswered flight caches only until codexFeatureRetry, so a
+// caller that arrives afterwards probes again rather than inheriting a
+// cancellation nobody else had.
+func probeCodexFeatures(ctx context.Context, path string, id codexBinaryID) codexFeatureSupport {
 	// Bounded like the claude capability probe: an unanswering probe must not
 	// spend the caller's budget, which the caller needs for the model call.
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

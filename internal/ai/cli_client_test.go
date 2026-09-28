@@ -42,6 +42,20 @@ func fakeClaudeBinary(t *testing.T, script string) string {
 	return path
 }
 
+// resetClaudeCapabilityProbe puts the process-wide capability cache back to its
+// cold state, for the same reason resetCodexFeatureProbe exists: one probe per
+// binary identity is deliberate, and a process-wide cache is therefore not
+// testable without a way to empty it.
+//
+// The single-flight group beside the cache needs no reset, and that asymmetry is
+// the property rather than an oversight: a flight is forgotten the moment it
+// lands, so there is no state here that outlives the call that created it.
+func resetClaudeCapabilityProbe(t *testing.T) {
+	t.Helper()
+	claudeCapabilityCache.Clear()
+	t.Cleanup(claudeCapabilityCache.Clear)
+}
+
 func TestCLIClient_Reflect_StripsAPIKeyAndReturnsStdout(t *testing.T) {
 	bin := fakeClaudeBinary(t, `
 if [ -n "$ANTHROPIC_API_KEY" ]; then

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // defaultTimeout bounds a claude -p subprocess call when the caller's context
@@ -33,7 +36,35 @@ type claudeBinaryID struct {
 	modTime time.Time
 }
 
+// probeKey is this identity as the string claudeProbeGroup keys on, and it is
+// built from exactly the three fields the cache key compares — no more, so two
+// identities can never share a flight, and no fewer, so the same binary always
+// lands on the same one. NUL joins them because a path cannot contain one, so
+// no combination of values can spell another identity's key.
+func (id claudeBinaryID) probeKey() string {
+	return id.path + "\x00" + strconv.FormatInt(id.size, 10) + "\x00" + strconv.FormatInt(id.modTime.UnixNano(), 10)
+}
+
 var claudeCapabilityCache sync.Map // claudeBinaryID -> claudeCapabilities
+
+// claudeProbeGroup collapses a cold burst into ONE `--help` child, keyed on the
+// binary identity, so N concurrent first-callers spawn 1 process and all share
+// its answer. Without it the cache is check-then-probe and every caller that
+// arrives before the first one stores runs its own (#741).
+//
+// It is a singleflight.Group and not a per-key mutex map because of the failure
+// path, which is the whole difference between the two. A mutex map serializes
+// the burst: the leader probes, and each follower then takes the lock, finds the
+// cache STILL EMPTY (a failed claude probe is deliberately not cached, so the
+// next call retries with its own live context), and probes again — N processes
+// for the same burst, which is the bug rather than a fix for it. singleflight
+// shares the outcome of the concurrent call whether it succeeded or not.
+//
+// What it does NOT do is decide what is RETAINED. A flight is forgotten the
+// moment it lands and keeps nothing of its own, so the cache above still owns
+// that decision — a success is stored, a failure is not, and nothing here can
+// turn an unprobed identity into a cached one.
+var claudeProbeGroup singleflight.Group
 
 func parseClaudeCapabilities(help string) claudeCapabilities {
 	help = strings.ToLower(help)
@@ -62,6 +93,28 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 		return cached.(claudeCapabilities), nil
 	}
 
+	// A cold miss runs ONE probe for the whole burst. The re-read inside is the
+	// re-check, not a second guess: a flight that landed between the lookup above
+	// and this call has already stored its answer. A caller arriving after even
+	// that is served from the cache by the first check and never reaches the
+	// group at all, so the warm path costs what it always did.
+	outcome, err, _ := claudeProbeGroup.Do(id.probeKey(), func() (any, error) {
+		if cached, ok := claudeCapabilityCache.Load(id); ok {
+			return cached.(claudeCapabilities), nil
+		}
+		return probeClaudeCapabilities(ctx, path, id)
+	})
+	if err != nil {
+		return claudeCapabilities{}, err
+	}
+	return outcome.(claudeCapabilities), nil
+}
+
+// probeClaudeCapabilities is the body of the single flight: the one child, and
+// the store on the answer path ONLY. Not caching the failure is deliberate and
+// predates #741 — an unanswered probe leaves the identity cold, so the next
+// caller re-asks rather than inheriting this caller's error.
+func probeClaudeCapabilities(ctx context.Context, path string, id claudeBinaryID) (claudeCapabilities, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	probe, release, _ := harnessCommand(probeCtx, path, []string{"--help"}, os.Environ(), harnessClaude)
