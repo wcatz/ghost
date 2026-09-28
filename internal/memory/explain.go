@@ -31,16 +31,25 @@ const explainProvenanceOff = "off"
 // so with a zero or "off" rather than carrying an invented contribution; the
 // payload's notes say which is which.
 type ExplainRow struct {
-	ID                   string  `json:"memory_id"`
-	Category             string  `json:"category"`
-	Content              string  `json:"content"`
-	Included             bool    `json:"included"`
-	Rank                 int     `json:"rank"`                   // 1-based; 0 when excluded
-	FTSRank              int     `json:"fts_rank"`               // -1 when the FTS leg had no match
-	VectorRank           int     `json:"vector_rank"`            // -1 when the vector leg had no match
-	VectorScore          float64 `json:"vector_score"`           // cosine; -1 when absent
-	RRFScore             float64 `json:"rrf_score"`              // base before decay: 1/(K+rank+1) when no vector leg fused, the weighted sum otherwise
-	StatusFactor         float64 `json:"status_factor"`          // multiplicative resolved/_global demotion applied to rrf_score before the cut; 1.0 when neither applies
+	ID          string  `json:"memory_id"`
+	Category    string  `json:"category"`
+	Content     string  `json:"content"`
+	Included    bool    `json:"included"`
+	Rank        int     `json:"rank"`         // 1-based; 0 when excluded
+	FTSRank     int     `json:"fts_rank"`     // -1 when the FTS leg had no match
+	VectorRank  int     `json:"vector_rank"`  // -1 when the vector leg had no match
+	VectorScore float64 `json:"vector_score"` // cosine; -1 when absent
+	RRFScore    float64 `json:"rrf_score"`    // base before decay: 1/(K+rank+1) when no vector leg fused, the weighted sum otherwise
+	// StatusFactor is the multiplicative resolved/_global demotion — 1.0, 0.5 or
+	// 0.25 — applied to rrf_score before the cut; 1.0 means neither applies.
+	//
+	// For a row the ranking never scored (the vector floor removed it, so no
+	// demotion ever ran on it) it is the factor that WOULD apply to that row,
+	// from the same function the fusion uses. A hardcoded 1.0 there would pair
+	// with project_match=false on a shared row into the one combination a reader
+	// cannot act on — a project row that is not a match, and was not demoted for
+	// it. "No demotion ran" is true of the scoring and misleading about the row.
+	StatusFactor         float64 `json:"status_factor"`
 	DecayFactor          float64 `json:"decay_factor"`           // category/age multiplier applied to the base
 	AgeDays              float64 `json:"age_days"`               //
 	SupersedePenalty     int     `json:"supersede_penalty"`      // window-scoped as demoteResults applies it; 0 for rows outside the window
@@ -375,19 +384,17 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			// Unreachable while the trace covers every leg row, which it does: the
 			// floor site stamps the rows fusion never saw. Kept because a nil
 			// dereference in a diagnostic path is a worse failure than a
-			// conservative row, and the sentinels say exactly that. Every axis is
-			// set to the value the ranking could have produced, not to a Go zero:
-			// StatusFactor 1.0 is "no demotion was applied" (a 0 there would invent
-			// a factor and fire the note below about a demotion this payload never
-			// applied), and RowProject is the row's own project, because
-			// project_match=true beside an omitted project is the one combination a
-			// reader cannot check.
+			// conservative row. Both axes come from the one decision function
+			// rather than from hardcoded values, so a fallback row reports what the
+			// ranking WOULD have decided about it: project_match=false beside
+			// status_factor=1.0 is the combination a reader cannot act on, and it is
+			// exactly what a _global row in a project search would get wrong.
 			row.FTSRank, row.VectorRank, row.VectorScore = -1, -1, -1
-			row.StatusFactor = 1.0
 			row.AgeDays = ageDays(m.CreatedAt, now)
 			row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
 			row.RowProject = m.ProjectID
 			row.ProjectMatch = p.ProjectID == "" || m.ProjectID == p.ProjectID
+			row.StatusFactor = statusDemotionFactor(m.ResolvedAt != nil, m.ProjectID, p.ProjectID)
 			row.ScopeMatched = true
 		}
 		statusDemoted = statusDemoted || row.StatusFactor != 1.0

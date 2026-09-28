@@ -1120,6 +1120,14 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 				// never attributed to one.
 				t.RowProject = v.ProjectID
 				t.ProjectMatch = p.ProjectID == "" || v.ProjectID == p.ProjectID
+				// StatusFactor comes from the same function demoteStatus uses
+				// rather than a hardcoded 1.0, because 1.0 beside
+				// project_match=false is the one combination this row cannot be: a
+				// shared row in a project search IS status-demoted, it simply never
+				// got far enough for the demotion to run. Reporting the factor that
+				// applies to the row is what a reader needs; "nothing was done" is
+				// true of the scoring and misleading about the row.
+				t.StatusFactor = statusDemotionFactor(v.Resolved, v.ProjectID, p.ProjectID)
 			}
 		}
 	}

@@ -304,7 +304,19 @@ func TestExplainProjectMatchDistinguishesASharedRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(_global): %v", err)
 	}
-	for _, id := range []string{live, shared} {
+	// A second shared row, resolved, so the no-project case below can tell the
+	// two halves of statusDemotionFactor apart instead of only checking the one
+	// its fixture happens to exercise.
+	sharedResolved, err := store.Create(ctx, "_global", Memory{
+		Category: "fact", Content: needle, Source: "manual", Importance: 0.8, Tags: []string{"test"},
+	})
+	if err != nil {
+		t.Fatalf("Create(_global, resolved): %v", err)
+	}
+	if n, err := store.SetResolved(ctx, []string{sharedResolved}); err != nil || n != 1 {
+		t.Fatalf("SetResolved = (%d, %v), want (1, nil)", n, err)
+	}
+	for _, id := range []string{live, shared, sharedResolved} {
 		if err := store.StoreEmbedding(ctx, id, []float32{0.8, 0.6}, "test-model"); err != nil {
 			t.Fatalf("StoreEmbedding(%s): %v", id, err)
 		}
@@ -339,28 +351,101 @@ func TestExplainProjectMatchDistinguishesASharedRow(t *testing.T) {
 	// A search that names NO project. Both legs then run the shared-row
 	// predicate literally, so only `_global` rows are candidates — this is not
 	// the cross-project entry point (`SearchHybridAll`, which explain never
-	// reaches), and the payload does not span projects. What it does pin is the
-	// other half of the rule: with no project expressed there is no bucket for a
-	// row to fail to match, so the same shared row that reports false above
-	// reports true here. That is `p.ProjectID == ""` in demoteStatus, and the
-	// global demotion factor's `searchProjectID != ""` guard, tested together.
+	// reaches), and the payload does not span projects. What it pins is
+	// statusDemotionFactor's two halves at once, which is why the fixture holds
+	// one resolved shared row beside the live one: the global demotion is guarded
+	// on `searchProjectID != ""` and must not fire here, while the resolved
+	// demotion carries no such guard and must.
 	noProject, err := store.ExplainSearch(ctx, "", needle, []float32{0.8, 0.6}, 5)
 	if err != nil {
 		t.Fatalf("ExplainSearch(no project): %v", err)
 	}
+	rowsNoProject := explainRowByID(noProject)
 	if len(noProject.Rows) == 0 {
-		t.Fatal("a search naming no project returned nothing: the _global row should still be a candidate")
+		t.Fatal("a search naming no project returned nothing: the shared rows should still be candidates")
 	}
 	for _, row := range noProject.Rows {
 		if !row.ProjectMatch {
 			t.Errorf("a search naming no project reports row %s (%s) as project_match=false, but it "+
 				"expressed no project of its own for a row to fail to match", row.ID, row.RowProject)
 		}
-		if row.StatusFactor != 1.0 {
-			t.Errorf("row %s is demoted by %v with no project being searched, but the global demotion "+
-				"exists to stop a shared row padding a PROJECT's results — there is no project here",
-				row.ID, row.StatusFactor)
-		}
+	}
+	if !rowsNoProject[sharedResolved].Included {
+		t.Fatalf("the resolved shared row is missing from a search naming no project: %+v", noProject.Rows)
+	}
+	if got := rowsNoProject[sharedResolved].StatusFactor; got != resolvedDemotionFactor {
+		t.Errorf("the resolved shared row's status_factor = %v, want %v: resolved demotion is not "+
+			"project-scoped — it applies wherever the row is, which is why SearchHybridAll's own "+
+			"comment says it demotes resolved rows there but never global ones", got, resolvedDemotionFactor)
+	}
+	if got := rowsNoProject[shared].StatusFactor; got != 1.0 {
+		t.Errorf("a live shared row's status_factor = %v with no project being searched, want 1.0: the "+
+			"global demotion exists to stop a shared row padding a PROJECT's results, and there is no "+
+			"project here to pad", got)
+	}
+}
+
+// TestExplainFloorDroppedSharedRowKeepsItsStatusFactor: a candidate the vector
+// floor removes never reaches fusion, so no demotion ever runs on it — and the
+// floor site is therefore the only place its status can be recorded. Getting
+// that wrong produces the one combination a reader cannot act on: a shared row
+// that is not a project match and reports status_factor=1.0, which reads as
+// "this is a _global row and nothing was done about it" when the demotion is
+// precisely what would have happened.
+func TestExplainFloorDroppedSharedRowKeepsItsStatusFactor(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	if err := store.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+	// A shared row the keyword leg cannot reach, embedded just above the floor
+	// so the vector leg returns it and the floor then removes it. Nothing else
+	// can put it in the pool, so the floor stamp is the only record of it.
+	shared, err := store.Create(ctx, "_global", Memory{
+		Category: "fact", Content: "postgres autovacuum thresholds for wraparound protection",
+		Source: "manual", Importance: 0.8, Tags: []string{"test"},
+	})
+	if err != nil {
+		t.Fatalf("Create(_global): %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, shared, []float32{0.999, 0.0447}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	// A live project row that matches the query, so the search has an answer and
+	// the explanation is not one floor-dropped row.
+	createTestMemory(t, store, ctx, "the compaction schedule runs on the first sunday of each month")
+	store.SetVectorMinSimilarity(0.9999)
+
+	ex, err := store.ExplainSearch(ctx, "test-proj", "compaction schedule sunday", []float32{1, 0}, 5)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	row, ok := explainRowByID(ex)[shared]
+	if !ok {
+		t.Fatalf("the floor-dropped shared row is missing from the explanation: %+v", ex.Rows)
+	}
+	if !row.FloorDropped {
+		t.Fatalf("the shared row is not reported as floor-dropped, so this fixture is not exercising "+
+			"the floor site: %+v", row)
+	}
+	if row.Included {
+		t.Errorf("a floor-dropped row is reported included: %+v", row)
+	}
+	if !strings.Contains(row.Reason, "floor") {
+		t.Errorf("reason = %q, want the floor named", row.Reason)
+	}
+	if row.ProjectMatch || row.RowProject != "_global" {
+		t.Errorf("the floor-dropped shared row reports project_match=%v row_project=%q, want false / "+
+			"_global: it belongs to no searched project however the floor judged it",
+			row.ProjectMatch, row.RowProject)
+	}
+	// The whole point: the factor that WOULD have applied, from the one function
+	// the fusion uses. A hardcoded 1.0 here is the "claim nothing acted on" the
+	// field's doc rules out.
+	if row.StatusFactor != globalDemotionFactor {
+		t.Errorf("the floor-dropped shared row's status_factor = %v, want %v: the demotion never RAN on "+
+			"this row, but it is the factor that applies to it, and 1.0 beside project_match=false "+
+			"reads as a demotion that was considered and declined",
+			row.StatusFactor, globalDemotionFactor)
 	}
 }
 
