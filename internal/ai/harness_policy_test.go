@@ -484,6 +484,80 @@ func TestGooseIsolationCarriesASymlinkedConfigRoot(t *testing.T) {
 	}
 }
 
+// TestGooseIsolationRefusesABrokenSymlinkedConfigRoot is the other side of the
+// symlink branch, and the reason it asks the walk probe what the link points at
+// rather than exempting every symlink. A link to a regular file, and a link
+// whose target has moved, are both a config root nobody can read — and carrying
+// them into the isolated home with a success is the exact failure the
+// not-a-directory check exists for, arriving through the check's own exemption.
+//
+// A link to a real directory is the case that must keep working, and
+// TestGooseIsolationCarriesASymlinkedConfigRoot is what pins that; this is the
+// other side of the same branch, and neither test passes if the two are merged
+// into a single "not a directory" test.
+func TestGooseIsolationRefusesABrokenSymlinkedConfigRoot(t *testing.T) {
+	cases := map[string]func(t *testing.T, dir string) string{
+		"a link to a regular file": func(t *testing.T, dir string) string {
+			target := filepath.Join(dir, "elsewhere.yaml")
+			if err := os.WriteFile(target, []byte("mode: smart\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(dir, "goose")
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("this host cannot create a symlink: %v", err)
+			}
+			return link
+		},
+		"a link whose target moved": func(t *testing.T, dir string) string {
+			link := filepath.Join(dir, "goose")
+			if err := os.Symlink(filepath.Join(dir, "gone"), link); err != nil {
+				t.Skipf("this host cannot create a symlink: %v", err)
+			}
+			return link
+		},
+	}
+
+	for name, stage := range cases {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			link := stage(t, t.TempDir())
+			if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			// ~/.config/goose is the link, one level below the location staged
+			// above, so the leaf is what the test is about.
+			leaf := filepath.Join(home, ".config", "goose")
+			if err := os.Symlink(mustReadLink(t, link), leaf); err != nil {
+				t.Skipf("this host cannot create a symlink: %v", err)
+			}
+
+			// No XDG_CONFIG_HOME, so the first candidate root is the one under test.
+			isolated := t.TempDir()
+			err := linkGooseConfigDirs(isolated, []string{"HOME=" + home}, home)
+			if err == nil {
+				t.Fatalf("a config root at %s that is %s was carried and reported as a success", leaf, name)
+			}
+			if !strings.Contains(err.Error(), leaf) {
+				t.Errorf("error %q does not name the path (%s)", err, leaf)
+			}
+			if _, err := os.Lstat(filepath.Join(isolated, ".config", "goose")); !os.IsNotExist(err) {
+				t.Errorf("the broken link was carried into the isolated home anyway, Lstat err = %v", err)
+			}
+		})
+	}
+}
+
+// mustReadLink returns the target path a staged symlink points at, so the test
+// can re-link it where the production path looks.
+func mustReadLink(t *testing.T, link string) string {
+	t.Helper()
+	target, err := os.Readlink(link)
+	if err != nil {
+		t.Fatalf("readlink %q: %v", link, err)
+	}
+	return target
+}
+
 // TestGooseIsolationRefusesAConfigRootThatIsAFile: the leaf probe succeeded, so
 // nothing asked whether what it found was a directory. A plain file at
 // ~/.config/goose was then carried into the isolated home as itself and the
