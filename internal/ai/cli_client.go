@@ -140,6 +140,10 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 		// caller cannot use may be handed back as if it were this caller's own.
 		select {
 		case <-ctx.Done():
+			// This is a change of error SHAPE for a caller cancelled mid-probe:
+			// it used to get the killed child's "signal: killed" wrapped, and
+			// now gets its own context error, so errors.Is(err, context.Canceled)
+			// holds. Nothing matched the old text.
 			return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", ctx.Err())
 		case res := <-flight:
 			// BOTH arms have to agree, because this one cannot be assumed: when a
