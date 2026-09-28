@@ -336,17 +336,30 @@ func TestExplainProjectMatchDistinguishesASharedRow(t *testing.T) {
 			rows[live].ProjectMatch, rows[live].RowProject)
 	}
 
-	// The same search with no project: nothing to match against, so every row
-	// matches — the rule BucketUnexpected states for the assembler, applied
-	// where the project is known.
-	cross, err := store.ExplainSearch(ctx, "", needle, []float32{0.8, 0.6}, 5)
+	// A search that names NO project. Both legs then run the shared-row
+	// predicate literally, so only `_global` rows are candidates — this is not
+	// the cross-project entry point (`SearchHybridAll`, which explain never
+	// reaches), and the payload does not span projects. What it does pin is the
+	// other half of the rule: with no project expressed there is no bucket for a
+	// row to fail to match, so the same shared row that reports false above
+	// reports true here. That is `p.ProjectID == ""` in demoteStatus, and the
+	// global demotion factor's `searchProjectID != ""` guard, tested together.
+	noProject, err := store.ExplainSearch(ctx, "", needle, []float32{0.8, 0.6}, 5)
 	if err != nil {
-		t.Fatalf("ExplainSearch(cross-project): %v", err)
+		t.Fatalf("ExplainSearch(no project): %v", err)
 	}
-	for _, row := range cross.Rows {
+	if len(noProject.Rows) == 0 {
+		t.Fatal("a search naming no project returned nothing: the _global row should still be a candidate")
+	}
+	for _, row := range noProject.Rows {
 		if !row.ProjectMatch {
-			t.Errorf("a cross-project search reports row %s as project_match=false, but it expressed no "+
-				"project of its own for a row to fail to match", row.ID)
+			t.Errorf("a search naming no project reports row %s (%s) as project_match=false, but it "+
+				"expressed no project of its own for a row to fail to match", row.ID, row.RowProject)
+		}
+		if row.StatusFactor != 1.0 {
+			t.Errorf("row %s is demoted by %v with no project being searched, but the global demotion "+
+				"exists to stop a shared row padding a PROJECT's results — there is no project here",
+				row.ID, row.StatusFactor)
 		}
 	}
 }

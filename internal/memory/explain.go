@@ -375,16 +375,20 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			// Unreachable while the trace covers every leg row, which it does: the
 			// floor site stamps the rows fusion never saw. Kept because a nil
 			// dereference in a diagnostic path is a worse failure than a
-			// conservative row, and the sentinels say exactly that. StatusFactor
-			// is 1.0 rather than left at 0, which is the trace's own sentinel for
-			// "no demotion was applied" and is a value the ranking can actually
-			// produce — a 0 there would both invent a factor and fire the note
-			// below about a demotion this payload never applied.
+			// conservative row, and the sentinels say exactly that. Every axis is
+			// set to the value the ranking could have produced, not to a Go zero:
+			// StatusFactor 1.0 is "no demotion was applied" (a 0 there would invent
+			// a factor and fire the note below about a demotion this payload never
+			// applied), and RowProject is the row's own project, because
+			// project_match=true beside an omitted project is the one combination a
+			// reader cannot check.
 			row.FTSRank, row.VectorRank, row.VectorScore = -1, -1, -1
 			row.StatusFactor = 1.0
 			row.AgeDays = ageDays(m.CreatedAt, now)
 			row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
-			row.ProjectMatch, row.ScopeMatched = true, true
+			row.RowProject = m.ProjectID
+			row.ProjectMatch = p.ProjectID == "" || m.ProjectID == p.ProjectID
+			row.ScopeMatched = true
 		}
 		statusDemoted = statusDemoted || row.StatusFactor != 1.0
 
