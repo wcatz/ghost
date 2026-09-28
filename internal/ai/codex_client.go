@@ -52,10 +52,36 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 //
 // Every `-c features.<key>` below is a key codex's own feature registry
 // declares (features/src/lib.rs, matched by `key:`), and every one of them is
-// on by default, so omitting one re-opens a surface. A key codex does not
-// recognise is not silently ignored either: `-c` is a config override and an
-// unknown key is a config error, so a rename upstream fails the call loudly
-// rather than quietly restoring a tool.
+// on by default, so omitting one re-opens a surface.
+//
+// A key codex does NOT recognise is SILENTLY IGNORED — the fail-OPEN direction,
+// and the reason two tests exist rather than a comment. `-c` overrides are
+// collected as raw strings and applied onto the config tree
+// (utils/cli/src/config_override.rs: apply_toml_override just inserts the
+// segment), and `FeaturesToml` deserialises without `deny_unknown_fields`, so a
+// key renamed or removed upstream is dropped without complaint: the tool comes
+// back on, the call still succeeds, and nothing in a lifecycle log says so. The
+// strict reading is opt-in (`--strict-config`, default off) and Ghost does not
+// pass it. TestCodexFeatureKeysAreDeclaredNames checks the keys against a
+// recorded `codex features list` transcript, and
+// TestLiveCodexDeclaresTheNoToolFeatureKeys runs the real binary.
+//
+// The consequence is stated rather than hidden: on a codex that does not declare
+// one of these keys, the policy is WEAKER than intended and Ghost cannot tell.
+// That is why the live test exists and why the recorded transcript is a fixture
+// a reviewer can check against upstream — not a comment asserting a behaviour
+// codex does not have.
+//
+// Ghost does NOT probe the installed codex at runtime, and that is a deliberate
+// choice rather than a missing step. A probe would cost a second process per
+// codex call — hundreds per lifecycle, which is the cost model
+// scratch.Open()'s budget exists to bound — to learn a fact that is a property
+// of the codex BUILD, not of the invocation. The two tests cover it instead: the
+// recorded transcript fails when upstream renames a key, and the live test fails
+// when a real binary no longer declares one. An older codex therefore gets the
+// keys it understands and a weaker policy than a current one, and that is
+// recorded here rather than papered over with a version gate that would refuse
+// a working install.
 //
 // codex has no "no tools" flag — `--sandbox read-only` bounds what a tool may
 // DO, not which tools EXIST — so the policy is the list. The three that matter

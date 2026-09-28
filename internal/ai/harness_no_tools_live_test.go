@@ -198,4 +198,27 @@ func TestLiveCodexDeclaresTheNoToolFeatureKeys(t *testing.T) {
 		t.Errorf("installed codex does not declare %s; codex ignores an unrecognised -c key, so the no-tool policy fails OPEN. Update codexInvocationArgs and codexFeaturesListTranscript together",
 			strings.Join(missing, ", "))
 	}
+
+	// Settle the fact the package's comments assert rather than assume, because
+	// the two readings have opposite consequences and the code says only one of
+	// them. An unknown -c key is either a config error (a renamed key fails the
+	// lifecycle pass loudly, which is safe) or silently dropped (the tool comes
+	// back on and nothing says so, which is not). `features list` is read-only
+	// and makes no LLM call, so provoking one costs nothing but a process.
+	const unknownKey = "ghost_definitely_not_a_codex_feature"
+	strict, releaseStrict, _ := harnessCommand(ctx, bin,
+		[]string{"features", "list", "--strict-config", "-c", "features." + unknownKey + "=false"},
+		os.Environ(), harnessCodex)
+	defer releaseStrict()
+	_, err = strict.Output()
+	if err == nil {
+		t.Logf("codex ACCEPTS an unrecognised -c key (%s): it is silently ignored, "+
+			"which is the fail-OPEN behaviour the policy comments describe. The "+
+			"recorded-transcript test and this probe are what guard it.", unknownKey)
+		return
+	}
+	t.Errorf("codex REJECTS an unrecognised -c key (%s): %v. That is fail-CLOSED, "+
+		"so the \"silently ignored / fail OPEN\" wording in codexInvocationArgs, "+
+		"TestCodexFeatureKeysAreDeclaredNames and the CLAUDE.md bullet is now WRONG "+
+		"and every one of those four sites must be corrected to match.", unknownKey, err)
 }
