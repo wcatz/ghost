@@ -3,9 +3,89 @@ package bench
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// TestFormatFusionGapsLabelsTheCaseBehindTheLeg: the verdict has three cases, not
+// two. An interval entirely below zero is separable, and it is the one
+// fusionGate fails the build on, so a two-case verdict has the command and the
+// gate describing one measurement two opposite ways — and contradicts the
+// footnote this same table prints.
+func TestFormatFusionGapsLabelsTheCaseBehindTheLeg(t *testing.T) {
+	per := func(vals ...float64) []QueryScore {
+		out := make([]QueryScore, len(vals))
+		for i, v := range vals {
+			out[i] = QueryScore{Name: fmt.Sprintf("q%d", i), NDCG: v}
+		}
+		return out
+	}
+	results := []Result{
+		// The fused condition LOSES to the vector leg on every query, so the whole
+		// interval sits below zero: separable, and the case that must not be
+		// reported as a tie.
+		{Condition: CondHybrid, NDCG10: 0.4, Queries: 3, PerQuery: per(0.2, 0.3, 0.4)},
+		{Condition: CondVector, NDCG10: 0.6, Queries: 3, PerQuery: per(0.7, 0.8, 0.9)},
+		// And a leg it is exactly level with, which IS a tie.
+		{Condition: CondFTS, NDCG10: 0.4, Queries: 3, PerQuery: per(0.2, 0.3, 0.4)},
+	}
+	out := FormatFusionGaps(results)
+	if !strings.Contains(out, "behind the leg") {
+		t.Errorf("a fused condition below the leg on every query is not labelled behind it:\n%s", out)
+	}
+	if !strings.Contains(out, "not separable from the leg") {
+		t.Errorf("a leg the fused condition is level with is not labelled not separable:\n%s", out)
+	}
+	// The footnote's rule and the cells must agree: no row may carry a label
+	// that contradicts its own interval.
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "fused - ") {
+			continue
+		}
+		cells := strings.Fields(line)
+		lo, err1 := strconv.ParseFloat(cells[2], 64)
+		hi, err2 := strconv.ParseFloat(cells[3], 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		separable := lo > 0 || hi < 0
+		labelledTie := strings.Contains(line, "not separable from the leg")
+		if separable && labelledTie {
+			t.Errorf("row is separable ([%s, %s]) and labelled a tie: %q", cells[2], cells[3], line)
+		}
+		if !separable && !labelledTie {
+			t.Errorf("row is not separable ([%s, %s]) and not labelled a tie: %q", cells[2], cells[3], line)
+		}
+	}
+}
+
+// TestFormatFusionGapsRefusesAnEmptyPairing: pairedNDiff sees two empty PerQuery
+// slices as a valid pairing (the names all match, because there are none) and
+// bootstrapMeanCI returns (0, 0, 0) for an empty sample. The result is a
+// confident-looking all-zero row that reads as "identical" and is in fact "not
+// measured", printed under a header that says how many queries were graded — and
+// not hypothetical: FormatResults is called that way by an existing test, so
+// that report carries two such rows today.
+func TestFormatFusionGapsRefusesAnEmptyPairing(t *testing.T) {
+	results := []Result{
+		{Condition: CondHybrid, NDCG10: 0.8, Queries: 2},
+		{Condition: CondVector, NDCG10: 0.7, Queries: 2},
+		{Condition: CondFTS, NDCG10: 0.6, Queries: 2},
+	}
+	out := FormatFusionGaps(results)
+	if strings.Contains(out, "+0.0000") {
+		t.Errorf("an empty pairing printed a confident zero row:\n%s", out)
+	}
+	if n := strings.Count(out, "not comparable: no paired queries"); n != 2 {
+		t.Errorf("%d rows refused an empty pairing, want 2:\n%s", n, out)
+	}
+	// And through the report the command actually prints.
+	full := FormatResults(results)
+	if strings.Contains(full, "+0.0000") {
+		t.Errorf("`ghost bench` output carries a confident zero row for results carrying no per-query scores:\n%s", full)
+	}
+}
 
 // TestFormatFusionGapsPrintsTheHeadlineInterval: the fusion margin is the
 // headline number in docs/benchmarks.md and README.md, and it used to exist only

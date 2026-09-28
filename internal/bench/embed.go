@@ -112,9 +112,28 @@ func FormatFusionGaps(results []Result) string {
 			rows++
 			continue
 		}
-		verdict := "not separable from the leg"
-		if gap.Lo > 0 {
+		if gap.Queries == 0 {
+			// CompareFusion is happy to pair two empty PerQuery slices — the names
+			// all match, because there are none — and bootstrapMeanCI returns
+			// (0, 0, 0) for an empty sample. The result is a confident-looking
+			// all-zero row that reads as "identical" and is in fact "not measured",
+			// printed under a header that says how many queries were graded.
+			fmt.Fprintf(&b, "%-28s  not comparable: no paired queries\n", "fused - "+lr.Condition)
+			rows++
+			continue
+		}
+		// Three cases, not two: an interval entirely BELOW zero is separable too,
+		// and it is the case fusionGate fails the build on. A two-case verdict
+		// would have the command and the gate describing one measurement two
+		// opposite ways, and would contradict the footnote this table prints.
+		var verdict string
+		switch {
+		case gap.Lo > 0:
 			verdict = "ahead of the leg"
+		case gap.Hi < 0:
+			verdict = "behind the leg"
+		default:
+			verdict = "not separable from the leg"
 		}
 		fmt.Fprintf(&b, "%-28s %+9.4f %+9.4f %+9.4f  %4d  %s\n",
 			"fused - "+lr.Condition, gap.Mean, gap.Lo, gap.Hi, gap.Queries, verdict)
