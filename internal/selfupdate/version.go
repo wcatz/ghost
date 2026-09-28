@@ -38,6 +38,20 @@ func CompareVersions(a, b string) (int, error) {
 	return comparePrerelease(pa.prerelease, pb.prerelease), nil
 }
 
+// IsPrerelease reports whether a release tag names a prerelease — a candidate
+// that is not a release yet, like "0.35.0-rc.1" or "1.0.0-beta".
+//
+// It is a different question from CompareVersions, which orders two versions
+// against each other; this one looks at one tag and answers whether installing
+// it is installing something unfinished. A tag that is not a semantic version —
+// "dev", "nightly", a two-component "1.0" — is not a prerelease, because
+// nothing about it says it is one, and refusing every tag this package cannot
+// parse would block a build tagged something else entirely.
+func IsPrerelease(s string) bool {
+	v, err := parseVersion(s)
+	return err == nil && v.prerelease != ""
+}
+
 // version is a parsed semantic version. Build metadata is dropped: it never
 // takes part in precedence.
 type version struct {
