@@ -101,8 +101,10 @@ type Memory struct {
 	// expiry, only past a grace period, and only behind `ghost prune --apply`.
 	//
 	// Empty means "this row came from a query that did not select the column",
-	// which no production reader does; it is never read as session, because the
-	// one tier whose absence has consequences is the one no reader may infer.
+	// or "no version ever recorded one" — the historical read is the second, and
+	// leaves it empty on purpose (see AsOfRow.Retention). It is never read as
+	// session, because the one tier whose absence has consequences is the one no
+	// reader may infer.
 	Retention string `json:"retention"`
 	// ExpiresAt is when a session row stops being wanted, derived on save as
 	// now+SessionTTL. NULL for every other tier, and NULL means "no expiry is

@@ -274,6 +274,24 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // before the row was declared keep-forever sinks it on the next search anyway.
 // The edge stays — withdrawing a claim is the user's own explicit move — and it
 // stops ranking the row it names.
+//
+// protected is the caller's PROTECTION map, built exactly as it is for
+// DemotionPenalties below (a pin, or a `persistent` tier). It is a parameter
+// rather than a column read here for the reason that is a parameter there: this
+// function is called from four places and two of them cannot migrate: the
+// session-start loaders hold `memory.OpenReadDB`, where a store predating the
+// tier has no such column, so naming it fails the statement in FULL —
+// unreordered results plus a diagnostic on stderr, on every session start.
+// (`GetTopMemories` and `explain` hold the migrating `OpenDB` handle and would
+// not have failed; one un-migratable caller is enough.) The caller already has
+// the hydrated rows — the session loaders select the tier for exactly this — and
+// a caller holding a row it did not read is a caller that cannot protect it.
+//
+// A PINNED target is spared too, which the comment above does not say and this
+// parameter does: a pin already means "not dimmed out of ranking" to DecayFactor
+// (a pinned row scores as if brand new), so sparing it here and not from the
+// near-duplicate demotion would be the inconsistency. Same rule as
+// DemotionPenalties; TestASupersedesEdgeDoesNotSinkAPinnedRow.
 func SupersedePenalties(ctx context.Context, db Queryer, ids []string, protected map[string]bool) (map[string]int, error) {
 	penalty, err := supersedeVerdicts(ctx, db, ids, nil, protected)
 	if err != nil {
