@@ -360,6 +360,138 @@ func TestRunHistoryPurgePurgesTheStoredSpellingOfAFoldedRef(t *testing.T) {
 	}
 }
 
+// TestRunHistoryPurgeRefusesWhenTwoIdsDifferOnlyInCase: whether a ref IS a stored
+// id is a ref rule, and the purge gate used to re-derive it — a case-insensitive
+// scan taking the first match. `ghost import` writes an artifact's ids verbatim and
+// its presence probe is case-sensitive, so a store can legitimately hold both
+// `ABC…` and `abc…`, and SQLite's BINARY collation sorts the upper case first. The
+// scan would then hand the purge the wrong memory: a THIRD casing destroys `ABC…`'s
+// row and recorded text irreversibly, while the memory the operator named keeps its
+// secret. The read path gets this right through memref; the gate is the one place
+// that must not re-derive the rule.
+func TestRunHistoryPurgeRefusesWhenTwoIdsDifferOnlyInCase(t *testing.T) {
+	s, ctx := casePairStore(t)
+	const (
+		upper = "ABCDEF0123456789ABCDEF0123456789"
+		lower = "abcdef0123456789abcdef0123456789"
+	)
+
+	// A third casing reaches NEITHER stored id, and memref refuses it because of
+	// that. A gate that did not would take whichever sort came first and erase it.
+	err := purgeHistoryMemory(ctx, s, "AbcDef0123456789abcdef0123456789")
+	if err == nil {
+		t.Fatal("a third casing of two stored spellings was purged as though it named one")
+	}
+	for _, want := range []string{upper, lower} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %s, so the reader cannot choose: %v", want, err)
+		}
+	}
+	for _, id := range []string{upper, lower} {
+		if entries, err := s.MemoryHistory(ctx, id, 0); err != nil {
+			t.Fatalf("MemoryHistory(%s): %v", id, err)
+		} else if len(entries) == 0 {
+			t.Fatalf("a refused purge erased the recorded text of %s", id)
+		}
+	}
+
+	// Each stored spelling is then addressable, one row each — byte-exact beats the
+	// fold, so the operator's own spelling is decisive rather than a guess about
+	// which of two rows they meant.
+	if err := purgeHistoryMemory(ctx, s, upper); err != nil {
+		t.Fatalf("purging the stored upper-case id: %v", err)
+	}
+	if entries, err := s.MemoryHistory(ctx, lower, 0); err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	} else if len(entries) == 0 {
+		t.Error("purging the upper-case id erased the lower-case memory's text too")
+	}
+}
+
+// TestRunHistoryPurgeTakesTheStoredSpellingOverTheCallers: the byte-exact match
+// wins and it is one row, so the caller's own spelling is also the right one — and
+// when the store holds a single spelling in another case, that spelling is what the
+// case-sensitive reads below need.
+func TestRunHistoryPurgeTakesTheStoredSpellingOverTheCallers(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p", "/tmp/p", "p"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	const id = "abcdef0123456789abcdef0123456789"
+	if _, _, _, err := s.ImportMemory(ctx, memory.PortableMemory{
+		ID: id, ProjectID: "p", Category: "fact", Content: "the only spelling this store holds", Source: "mcp",
+	}, memory.ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+
+	if err := purgeHistoryMemory(ctx, s, strings.ToUpper(id)); err != nil {
+		t.Fatalf("a case-folded whole id was refused: %v", err)
+	}
+	if rows, err := s.GetByIDs(ctx, []string{id}); err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	} else if len(rows) != 0 {
+		t.Error("the purge left the live row")
+	}
+}
+
+// TestRunHistoryPurgeReportsAFailedIDReadAsAFailure: the gate reads the id set
+// before it can decide anything, and a read that fails has told us nothing about
+// the argument. Folding that into "not a whole id" would report a prefix to an
+// operator whose id was already correct — a wrong answer, in the one place where
+// being wrong has consequences nobody can undo. A closed database is a real read
+// failure, and runHistory's own os.Exit is not reachable from a test.
+func TestRunHistoryPurgeReportsAFailedIDReadAsAFailure(t *testing.T) {
+	s, _, _ := refTestStore(t)
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	err := purgeHistoryMemory(context.Background(), s, refTestLiveID)
+	if err == nil {
+		t.Fatal("a failed id read was reported as a decision")
+	}
+	// Not the prefix refusal — that sentence sends the operator after a full id they
+	// may already have, and it would be a claim about an argument nobody examined.
+	if strings.Contains(err.Error(), "whole memory id") {
+		t.Errorf("a failed read was reported as a prefix: %v", err)
+	}
+	if !strings.Contains(err.Error(), "against this store") {
+		t.Errorf("the error does not say what failed: %v", err)
+	}
+}
+
+// casePairStore holds two memories whose ids differ only in letter case, which is
+// the shape `ghost import` can produce and the one a first-match scan gets wrong.
+func casePairStore(t *testing.T) (*memory.Store, context.Context) {
+	t.Helper()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "p", "/tmp/p", "p"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	for _, f := range []struct{ id, content string }{
+		{"ABCDEF0123456789ABCDEF0123456789", "a memory whose id is stored in upper case"},
+		{"abcdef0123456789abcdef0123456789", "a memory whose id is stored in lower case"},
+	} {
+		if _, _, _, err := s.ImportMemory(ctx, memory.PortableMemory{
+			ID: f.id, ProjectID: "p", Category: "fact", Content: f.content, Source: "mcp",
+		}, memory.ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
+			t.Fatalf("ImportMemory(%s): %v", f.id, err)
+		}
+	}
+	return s, ctx
+}
+
 // TestReportHistoryRefusalUsesTheFormTheCallerAskedFor: a --json run's every line
 // is otherwise an entry, so a refusal has to be the one `{"error": ...}` object a
 // script can branch on — on stdout, because that is where the stream is, with

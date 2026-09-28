@@ -609,14 +609,24 @@ match. So the prefix is refused and the full id it names is printed, and the way
 through is `ghost history <prefix>`, which resolves the ref and shows the id. Two
 consequences of the asymmetry, both tested. An id the store never held is a
 **miss**, not a prefix — which is also what re-running a successful purge looks
-like, since a purge removes the id from both tables. And the whole-id test returns
-the **stored spelling** rather than a boolean: ids are matched case-insensitively
-when a ref is resolved, and a report can print a hex id uppercased whatever the
-column holds, but every read a purge then makes compares case-SENSITIVELY (neither
-`memories.id` nor `memory_history.memory_id` carries `COLLATE NOCASE`) — so a
-boolean would accept a folded spelling through the gate and then erase nothing,
-reporting "nothing to purge" on the redaction path while the text was still in the
-database.
+like, since a purge removes the id from both tables. And the whole-id test asks
+`memref.ResolveIn` rather than testing membership itself, which is the one gate in
+this path and the subject of the second review round. A case-insensitive scan is
+wrong twice over. It answers a BOOL, and every read a purge then makes compares
+case-SENSITIVELY (neither `memories.id` nor `memory_history.memory_id` carries
+`COLLATE NOCASE`), so a folded spelling passes the gate and then erases nothing —
+"nothing to purge" on the redaction path, with the text still in the database. And
+taking the FIRST match is wrong in a store holding two ids differing only in letter
+case, which `ghost import` can produce (verbatim ids, case-sensitive presence
+probe): SQLite's BINARY collation sorts the upper case first, so a third casing
+that memref refuses as addressing neither row would instead destroy the upper-case
+memory's text irreversibly while the memory the operator named kept it. Asking
+`ResolveIn` gets byte-exact precedence, the ambiguity and third-casing refusals and
+the stored spelling from the one place that already implements them, and the gate's
+own question — is the resolved id THIS ref — is a single `EqualFold`. The id-set
+read is propagated when it fails, because a store that cannot be read has told us
+nothing about the argument, and a prefix sentence there would send the operator
+after a full id they may already have.
 
 Three properties are deliberate:
 

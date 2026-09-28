@@ -436,20 +436,29 @@ func runHistory() {
 // next command, and refusing without it would leave the operator to find the id in
 // a report again.
 func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) error {
-	if stored, ok := wholeMemoryID(ctx, s, memoryID); ok {
-		// The STORED spelling, never the caller's. Ids are matched
-		// case-insensitively here — a report can print a hex id uppercased
-		// whatever the column holds — and every read below compares case-
-		// SENSITIVELY, because neither `memories.id` nor `memory_history.memory_id`
-		// carries COLLATE NOCASE. Purging the caller's spelling of an id stored in
-		// another one would find no row and no history and report "nothing to
-		// purge" on the redaction path, while the text sat in the database. The
-		// read path does not have this hazard because memref returns the stored
-		// spelling too; this gate is the one that has to remember it.
-		memoryID = stored
-	} else {
-		return purgePrefixRefusal(ctx, s, memoryID)
+	// ONE read of the id set, and both decisions made from it: whether the argument
+	// is a whole id, and — if it is not — what to say about it. Reading it twice
+	// would mean two reads that could disagree, on a path whose whole job is to
+	// erase the right text.
+	ids, err := s.AnyMemoryIDsByIDPrefix(ctx, memoryID)
+	if err != nil {
+		// Propagated, not folded into "not a whole id": a store that cannot be
+		// read has told us nothing about the argument, and a prefix sentence here
+		// would send the operator after a full id they may already have.
+		return fmt.Errorf("check the memory id against this store: %w", err)
 	}
+	stored, ok := wholeMemoryID(ids, memoryID)
+	if !ok {
+		return purgePrefixRefusal(ids, memoryID)
+	}
+	// The STORED spelling, never the caller's. Ids are matched case-insensitively
+	// when a ref is resolved — a report can print a hex id uppercased whatever the
+	// column holds — and every read below compares case-SENSITIVELY, because neither
+	// `memories.id` nor `memory_history.memory_id` carries COLLATE NOCASE. Purging
+	// the caller's spelling of an id stored in another one would find no row and no
+	// history and report "nothing to purge" on the redaction path, while the text
+	// sat in the database.
+	memoryID = stored
 	entries, err := s.MemoryHistory(ctx, memoryID, 0)
 	if err != nil {
 		return err
@@ -482,32 +491,46 @@ func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) e
 	return nil
 }
 
-// wholeMemoryID reports the id this store holds under ref, and whether it holds
-// one — the whole-id test a purge is gated on. It returns the STORED spelling,
-// which is the half that matters: the reads a purge then makes compare
-// case-sensitively, so a boolean would let a case-folded spelling through the gate
-// and then find nothing.
+// wholeMemoryID reports the id in ids that ref names WHOLE, and whether it names
+// one — the test a purge is gated on. It returns the STORED spelling, which is the
+// half that matters: the reads a purge then makes compare case-sensitively, so a
+// boolean would let a case-folded spelling through the gate and then find nothing.
 //
-// It is a membership test, not a length test, and that is the whole decision: a
-// length test would have to hardcode what a full id looks like, and nothing says an
-// id is 32 hex characters — `ghost import` writes an artifact's ids verbatim, and a
-// store full of imported notes is a store whose ids are whatever the artifacts
-// held. A store holding an eight-character id answers true for those eight
-// characters, and that id is a whole one.
-func wholeMemoryID(ctx context.Context, s *memory.Store, ref string) (string, bool) {
-	ids, err := s.AnyMemoryIDsByIDPrefix(ctx, ref)
+// It asks `memref.ResolveIn` rather than scanning for a case-insensitive match, and
+// that is the whole design. Whether a ref IS a stored id is a ref rule — the 8-
+// character floor, byte-exact precedence, the ambiguity and third-casing refusals —
+// and a gate that re-derived any of it would be the second implementation this
+// package exists to prevent. Re-deriving it wrongly is not hypothetical: a store can
+// hold two ids differing only in letter case (`ghost import` writes an artifact's
+// ids verbatim and its presence probe is case-sensitive, so it can land both), and a
+// first-match scan over that set picks whichever SQLite's BINARY collation sorts
+// first. `ghost history purge abc…` would then erase `ABC…` — the wrong memory's
+// text, irreversibly, while the one named kept it. `ResolveIn` refuses the set
+// instead, because no single spelling reaches both.
+//
+// So the whole id is whatever `ResolveIn` resolved, checked against the ref with
+// EqualFold: a resolved PREFIX is not a whole id, and a refusal is not one either —
+// including a miss, and including a third casing, which memref refuses because no
+// spelling of the caller's reaches the stored ones.
+//
+// It is a membership test, not a length test: a length test would have to hardcode
+// what a full id looks like, and nothing says an id is 32 hex characters — a store
+// full of imported notes holds ids that are whatever the artifacts held, and an
+// eight-character id there is a whole one.
+func wholeMemoryID(ids []string, ref string) (string, bool) {
+	id, err := memref.ResolveIn(ids, "id", ref)
 	if err != nil {
-		// A failed read is not a verdict. Reporting the argument as a prefix sends
-		// the operator after a full id they may already have, so this is the safer
-		// of the two wrong answers: nothing is erased either way.
+		// Every refusal, without distinguishing them. The gate's question is
+		// "is this a whole id", and no refusal means yes; what the refusal SAID
+		// is the refusal's job, one function along.
 		return "", false
 	}
-	for _, id := range ids {
-		if strings.EqualFold(id, ref) {
-			return id, true
-		}
+	if !strings.EqualFold(id, ref) {
+		// Resolved to a longer id this ref begins with: a prefix, which is the
+		// case this command refuses for its own reason.
+		return "", false
 	}
-	return "", false
+	return id, true
 }
 
 // purgePrefixRefusal explains that a prefix is not enough here, and names the full
@@ -525,11 +548,7 @@ func wholeMemoryID(ctx context.Context, s *memory.Store, ref string) (string, bo
 // here for the same reason memref measures the floor in characters: a byte count
 // would call a four-byte ref a "4-character prefix" of an id whose own characters
 // are not bytes.
-func purgePrefixRefusal(ctx context.Context, s *memory.Store, ref string) error {
-	ids, err := s.AnyMemoryIDsByIDPrefix(ctx, ref)
-	if err != nil {
-		return fmt.Errorf("purge needs a whole memory id and %q could not be checked against this store: %w", ref, err)
-	}
+func purgePrefixRefusal(ids []string, ref string) error {
 	if len(ids) == 0 {
 		// The "nothing to purge" answer, not the prefix one. Which is right
 		// depends on nothing this call can see: the id may be a whole id whose
