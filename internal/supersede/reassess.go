@@ -234,6 +234,13 @@ func retriesOf(cls Classifier) int {
 // failure can both be real in one run, so they are joined rather than one
 // replacing the other.
 //
+// A failed read of the 'causes' edges the sweep would take is fatal to a DRY RUN
+// and not to --apply, and the difference is what each mode is for: a dry run's
+// report IS that prediction, so without it the run has nothing to print, while
+// under --apply every row's CausesSwept is overwritten with what the sweep
+// actually moved and the prediction is never read. Either way the error is
+// returned.
+//
 // Scope is honoured as an exemption, not a verdict. A scope-conflicting edge
 // asserts no replacement — the ordinary pass leaves it in the graph and every
 // reader ignores it — so this pass does not judge it and does not delete it.
@@ -388,14 +395,31 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	}
 	causesPairs, err := liveCausesPairs(ctx, store, rows)
 	if err != nil {
-		// Joined, not replaced, and recorded BEFORE the summary is logged: a
-		// classify failure from above is still true, and a log line saying
-		// failed=false on a run that returns an error is the one claim this
-		// pass cannot make — the log is the thing an operator reads when the
-		// exit code has scrolled past.
+		// Recorded, never replaced: a classify failure from above is still
+		// true, and a log line saying failed=false on a run that returns an
+		// error is the one claim this pass cannot make — the log is what an
+		// operator reads when the exit code has scrolled past.
 		fail = errors.Join(fail, err)
-		logSummary()
-		return res, nil, fail
+		if !apply {
+			// A dry run IS this report: without the prediction, a row below
+			// cannot say what its withdrawal would take with it, and a preview
+			// that silently under-reports its own deletions is the invisibility
+			// the [+N causes edge] marker exists to remove. Nothing was written
+			// and nothing was decided, so the run ends here — the same exit a
+			// store read failure has always produced.
+			logSummary()
+			return res, nil, fail
+		}
+		// Under --apply the prediction is not read at all: every row's
+		// CausesSwept is overwritten with what the sweep actually moved. So a
+		// read that cannot predict must not abandon the withdrawals themselves.
+		// That is #699 again in the one path left standing: settled decisions,
+		// none of which needed a harness call, dropped because a read of the
+		// 'causes' table failed. What is contested is the sweep's COUNT, and
+		// the report gets the observed one. The error still returns — a read
+		// failure on a live table is a real fault, and exit 0 would hide it
+		// behind a repair that did complete.
+		causesPairs = nil
 	}
 
 	withdrawn := make([]WithdrawnEdge, 0, len(settled))
