@@ -116,18 +116,29 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	// the other: a pairing that exists nowhere on disk and that no production call
 	// would ever build. The same class of misleading answer the test exists to
 	// prevent, arrived at from the opposite direction.
+	//
+	// The REAL home is captured BEFORE it is replaced. Order matters here and it
+	// is not cosmetic: liveGooseConfigRoots reads HOME to find the config this
+	// test has to carry, so replacing HOME first would make it look under an empty
+	// temp dir and the test would skip on every host — which is the same class of
+	// dead test as one that can only fail, and harder to notice because a skip
+	// reads as a pass. The helpers take the real home as a parameter so they
+	// mirror production (gooseHomeDir reads the real one) while the isolated home
+	// is only ever a copy TARGET.
+	realHome := liveGooseRealHome()
+	realXDG := os.Getenv("XDG_CONFIG_HOME")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	roots := liveGooseConfigRoots(t)
+	roots := liveGooseConfigRoots(t, realHome, realXDG)
 	if len(roots) == 0 {
-		t.Skip("no real goose config root to carry credentials from; run this where `goose configure` has been done")
+		t.Skipf("no real goose config root under %s; run this where `goose configure` has been done", realHome)
 	}
 	carried := 0
 	for _, source := range roots {
-		// The rel path is the SOURCE's own, relative to its home, so the target
-		// sits where the child would look for it under the isolated home.
-		rel, ok := liveGooseRelPathFor(t, source)
+		// The rel path is the SOURCE's own, relative to the real home, so the
+		// target sits where the child would look for it under the isolated home.
+		rel, ok := liveGooseRelPathFor(source, realHome)
 		if !ok {
 			continue
 		}
@@ -167,22 +178,23 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	// which root a given pair uses, so a test must not invent one. When the parent
 	// had none, the carried home-relative roots are what the child resolves, which
 	// is the production path this test is exercising.
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg", "goose"))
+	if realXDG != "" {
+		xdgCopy := filepath.Join(home, "xdg", "goose")
+		t.Setenv("XDG_CONFIG_HOME", xdgCopy)
 		// liveGooseConfigRoots resolved the parent's XDG root first, so roots[0] is
 		// its copy's source and the target mirrors where the child will look.
-		if err := os.MkdirAll(filepath.Join(home, "xdg", "goose"), 0o700); err != nil {
+		if err := os.MkdirAll(xdgCopy, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		skipped, err := copyGooseConfigDir(roots[0], filepath.Join(home, "xdg", "goose"))
+		skipped, err := copyGooseConfigDir(roots[0], xdgCopy)
 		if err != nil {
 			t.Fatalf("carry the XDG config root: %v", err)
 		}
 		if len(skipped) > 0 {
 			t.Logf("carry from %s skipped %v, exactly as production would log it", roots[0], skipped)
 		}
-		if !liveGooseConfigPresent(filepath.Join(home, "xdg", "goose")) {
-			t.Skipf("nothing to authenticate under %s", xdg)
+		if !liveGooseConfigPresent(xdgCopy) {
+			t.Skipf("nothing to authenticate under %s", realXDG)
 		}
 	}
 	// gooseInvocationArgs is the production argv, read here rather than
@@ -213,8 +225,23 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	}
 }
 
+// liveGooseRealHome is the home a real `goose configure` wrote to, or "" when
+// there is not one. It is read HERE, before the test replaces HOME, which is the
+// whole reason it is a separate call: a helper that read HOME itself would look
+// under the empty isolated home the test just made, find nothing, and skip on
+// every host. A skip reads as a pass, so a test that can only skip is as dead as
+// one that can only fail.
+func liveGooseRealHome() string {
+	if home := os.Getenv("HOME"); home != "" {
+		return home
+	}
+	return os.Getenv("USERPROFILE")
+}
+
 // liveGooseConfigRoots returns every config root the CHILD would resolve, in the
-// order production resolves them.
+// order production resolves them. `home` and `xdg` are passed in rather than read
+// from the environment, so a caller that has replaced either cannot make this
+// resolve against something other than the real configuration.
 //
 // The order is the point, and it is not a detail. linkGooseConfigDirsWith returns
 // immediately when XDG_CONFIG_HOME is set, so in production an inherited
@@ -230,34 +257,28 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 // carries all of them, so a macOS host with both ~/.config/goose and
 // ~/Library/Application Support/goose populated gets both, and using one would
 // again be a difference from production.
-func liveGooseConfigRoots(t *testing.T) []string {
+//
+// One home, not both: gooseHomeDir takes the FIRST non-empty of HOME and
+// USERPROFILE, so consulting the second as well would carry a root production
+// would never look at.
+func liveGooseConfigRoots(t *testing.T, home, xdg string) []string {
 	t.Helper()
 	// An inherited XDG_CONFIG_HOME is absolute and the child reads it directly, so
 	// it is the only root that matters when it is set.
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+	if xdg != "" {
 		path := filepath.Join(xdg, "goose")
 		if liveGooseIsDir(path) {
 			return []string{path}
 		}
 		return nil
 	}
+	if home == "" {
+		return nil
+	}
 	// gooseHomeConfigRelPaths, not a list spelled out here: it is the same list
 	// configureGooseIsolation uses to decide what to carry, so a test spelling its
 	// own would test a platform this build does not support and would pass on one
 	// machine and skip on another.
-	// One home, not both: gooseHomeDir takes the FIRST non-empty of HOME and
-	// USERPROFILE, so consulting the second as well would carry a root production
-	// would never look at. The test replaces both anyway, so on a POSIX host the
-	// two name the same directory and only the first would matter — but a helper
-	// that reads both cannot be trusted to mirror production on a host where they
-	// differ.
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = os.Getenv("USERPROFILE")
-	}
-	if home == "" {
-		return nil
-	}
 	var roots []string
 	for _, rel := range gooseHomeConfigRelPaths {
 		path := filepath.Join(append([]string{home}, rel...)...)
@@ -268,18 +289,16 @@ func liveGooseConfigRoots(t *testing.T) []string {
 	return roots
 }
 
-// liveGooseRelPathFor returns the home-relative path a source root sits at, which
-// is what makes the isolated copy resolvable at the same place the real one was.
+// liveGooseRelPathFor returns the home-relative path a source root sits at under
+// the REAL home, which is what makes the isolated copy resolvable at the same
+// place the real one was. It is relative to the passed home, not the ambient one,
+// for the reason liveGooseRealHome documents.
+//
 // The SECOND root matters: on macOS both ~/.config/goose and
 // ~/Library/Application Support/goose can exist, and a child that must be able to
 // resolve either needs the target at the matching path rather than a single
 // merged directory.
-func liveGooseRelPathFor(t *testing.T, source string) ([]string, bool) {
-	t.Helper()
-	home := os.Getenv("HOME")
-	if home == "" {
-		home = os.Getenv("USERPROFILE")
-	}
+func liveGooseRelPathFor(source, home string) ([]string, bool) {
 	for _, rel := range gooseHomeConfigRelPaths {
 		if filepath.Join(append([]string{home}, rel...)...) == source {
 			return rel, true
