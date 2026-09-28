@@ -13,11 +13,15 @@ import (
 // consolidation re-emission from appending a byte-identical `reflect` version;
 // these are the tests for the command that removes the ones already stored.
 //
-// The fixtures build the damaged history DIRECTLY rather than through writers.
-// That is not a shortcut: the damage is defined as rows a pre-#727 build wrote
-// and no current writer produces any more (reuseChangesNothing makes a
-// re-emission that changed nothing a no-op), so there is no call left to make
-// and a test that drove one would assert the fix rather than the repair.
+// The fixtures build the damaged history DIRECTLY rather than through writers, and
+// the one writer that would produce it no longer exists. The verbatim re-emission
+// is a no-op since #727, so there is no call left to make, and a test that drove
+// one would assert the fix rather than the repair. The damage is dated, too: every
+// fixture below states the instant it wrote its rows at, because a row's recorded_at
+// is one of the three things that decides whether it is removable (the cut is a
+// time), and a fixture leaning on datetime('now') would stop being damaged the day
+// the wall clock passed the cutoff. The two instants below are the two sides of
+// that cut.
 
 // firstVersionText and secondVersionText are the two states the shared fixture
 // moves between, so an assertion can name which version survived rather than
@@ -25,6 +29,21 @@ import (
 const (
 	compactFirstText  = "the relay listens on port 2222 in staging"
 	compactSecondText = "the relay listens on port 2222 in production"
+)
+
+// preFixReflectAt is when the restatements in this file were "written": a month
+// before #727 reached main, so every one of them is older than reflectNoOpCutoff
+// and the compaction is looking at exactly the rows it is meant to. A test that
+// needs a row on the other side of the cut passes its own instant and says why.
+//
+// postFixReflectAt is the other side: an hour after the fix landed, which is what
+// "a row a current build wrote" looks like to the repair. It is a fixed instant
+// rather than the clock, because a fixture reading datetime('now') would depend on
+// where the cutoff sits relative to the day the suite runs — and the cutoff is a
+// historical fact, so a test about it should not be.
+const (
+	preFixReflectAt  = "2026-08-01 09:00:00"
+	postFixReflectAt = "2026-09-28 18:00:00"
 )
 
 // appendVersionRow records ONE history row the way a write path does: the state
@@ -71,10 +90,12 @@ func appendVersionRow(t *testing.T, s *Store, memoryID, phase string, recordedAt
 
 // appendVerbatimVersion is the damage in one call: a version row that restates
 // the memory's current state exactly, which is what every applied reflection
-// used to leave behind for every memory it kept.
+// used to leave behind for every memory it kept, recorded at preFixReflectAt
+// because that is when such a row was written and a row's age is part of what
+// makes it removable.
 func appendVerbatimVersion(t *testing.T, s *Store, memoryID string) {
 	t.Helper()
-	appendVersionRow(t, s, memoryID, phaseReflect, nil, "", "", nil)
+	appendVersionRow(t, s, memoryID, phaseReflect, preFixReflectAt, "", "", nil)
 }
 
 func lastRowID(t *testing.T, s *Store) int64 {
@@ -165,6 +186,20 @@ func seedStampedHistory(t *testing.T, s *Store, runs int) (id, savedAt, updatedA
 	runTo = fmt.Sprintf("2026-01-01 13:%02d:00", runs-1)
 	setUpdatedAt(t, s, id, runTo)
 	return id, savedAt, updatedAt, resolvedAt, runTo
+}
+
+// stampPhaseRows moves EVERY row of one phase to a fixed instant, which a fixture
+// needs when a phase's rows all have to sit on the same side of a bound. It is not
+// stampHistoryRow: that one moves the newest row of a phase, so calling it twice
+// for two rows of the same phase restamps the same row twice and leaves the other
+// where the clock put it.
+func stampPhaseRows(t *testing.T, s *Store, memoryID, phase, recordedAt string) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`UPDATE memory_history SET recorded_at = ? WHERE memory_id = ? AND phase = ?`,
+		recordedAt, memoryID, phase); err != nil {
+		t.Fatalf("stamp the %s rows of %s at %q: %v", phase, memoryID, recordedAt, err)
+	}
 }
 
 // stampHistoryRow moves the newest row of the given phase to a fixed instant,
@@ -315,8 +350,8 @@ func TestCompactHistoryKeepsTombstonesAndEdgeEvents(t *testing.T) {
 		// the SAME state. The predecessor matters — with none, the "identical to
 		// the previous row" test would never be reached and the row would
 		// survive for the wrong reason.
-		appendVersionRow(t, s, id, phaseReflect, nil, "", "", nil)
-		appendVersionRow(t, s, id, c.phase, nil, c.related, c.merged, nil)
+		appendVersionRow(t, s, id, phaseReflect, preFixReflectAt, "", "", nil)
+		appendVersionRow(t, s, id, c.phase, preFixReflectAt, c.related, c.merged, nil)
 	}
 	// And one genuinely no-op version after the last of them, so the fixture
 	// also proves the compaction still runs over a memory whose history is full
@@ -386,8 +421,8 @@ func TestCompactHistoryEqualityCoversEveryRecordedColumn(t *testing.T) {
 			ctx := context.Background()
 			id := createCompactMemory(t, s, compactFirstText)
 
-			appendVersionRow(t, s, id, phaseReflect, nil, "", "", nil)
-			appendVersionRow(t, s, id, phaseReflect, nil, "", "", map[string]any{tc.column: tc.edited})
+			appendVersionRow(t, s, id, phaseReflect, preFixReflectAt, "", "", nil)
+			appendVersionRow(t, s, id, phaseReflect, preFixReflectAt, "", "", map[string]any{tc.column: tc.edited})
 			appendVerbatimVersion(t, s, id)
 			if got := historyRowCount(t, s, id); got != 4 {
 				t.Fatalf("fixture wrote %d history rows, want 4 (1 save + 3 reflect)", got)
@@ -583,7 +618,6 @@ func TestCompactHistoryFixUpdatedAtOnlyTouchesLiveMemories(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	id := createCompactMemory(t, s, compactFirstText)
-	appendVersionRow(t, s, id, phaseSave, "2026-01-01 10:00:00", "", "", nil)
 	// Delete files its own tombstone, recorded from the last live state — so
 	// the row that would be compacted if it were eligible is the one the store
 	// writes here, not one a fixture invents.
@@ -597,6 +631,13 @@ func TestCompactHistoryFixUpdatedAtOnlyTouchesLiveMemories(t *testing.T) {
 	}
 	if res.UpdatedAt != 0 {
 		t.Errorf("UpdatedAt = %d, want 0: a deleted memory has no row to stamp", res.UpdatedAt)
+	}
+	// Nothing is removed either, and the count says so rather than leaving the row
+	// count to imply it: the two rows a deleted memory has are its save — the only
+	// record of what it said — and its tombstone, and neither is a phase the repair
+	// touches even when the state comparison would allow it.
+	if res.Removed != 0 {
+		t.Errorf("Removed = %d, want 0: a deleted memory's own save and tombstone are the only records it left", res.Removed)
 	}
 	if got := historyRowCount(t, s, id); got != 2 {
 		t.Errorf("a deleted memory kept %d history rows, want 2 (the save and its tombstone)", got)
@@ -769,35 +810,40 @@ func TestCompactHistoryIsScopedToOneProject(t *testing.T) {
 	}
 }
 
-// TestCompactHistoryKeepsTheRestatementACurrentWriterStillMakes is #730's review
-// finding, reproduced against the real writer rather than a fixture.
+// TestCompactHistoryLeavesTheRestatementACurrentWriterStillMakes is #730's review
+// finding, reproduced against the real writer rather than a fixture, and the test
+// that decides what the compaction is bounded BY.
 //
 // ReplaceNonManual's reusePreservesAge branch (#623) re-tags a reused row and
 // records a version of it, and #727 was RIGHT that this is a real change: a re-tag
-// is a change to what the memory says about itself, and TestReplacedNonManual…
-// EveryRecordedFieldBreaksTheNoOp pins that the version is appended. But the
-// version restates content, category, importance, resolved_at and source byte for
-// byte, because this table has no column for tags or scope — so from here it is
-// indistinguishable from the pre-#727 damage this command removes.
+// is a change to what the memory says about itself, and
+// TestReplaceNonManualEveryRecordedFieldBreaksTheNoOp pins that the version is
+// appended. But the version restates content, category, importance, resolved_at
+// and source byte for byte, because this table has no column for tags or scope —
+// so from here it is indistinguishable, by any state column, from the pre-#727
+// damage this command removes.
 //
 // A compaction that deleted it would re-grow the rows the repair just pruned on
 // every lifecycle pass, and --fix-updated-at would move the stamp back over the
-// bump the same branch made. The newest-version guard is what prevents both, and
-// this drives the real pass to prove it: one re-tag pass, then a full apply, and
-// both the version and the stamp it produced survive.
+// bump the same branch made. No column can prevent that, so what prevents it is a
+// time: both versions here are recorded by a current build, and a current build's
+// rows are outside the repair.
 //
-// And the convergence, because "survives once" is not the same as "does not
-// re-grow": a SECOND pass over the same unchanged re-tag makes the first version
-// non-newest, and that is exactly the row the flood is made of.
-func TestCompactHistoryKeepsTheRestatementACurrentWriterStillMakes(t *testing.T) {
+// The convergence is the load-bearing half. TWO passes, not one, so the first
+// version is NOT the memory's newest and the newest-version guard cannot be what
+// spared it — the case the guard was previously credited with. If the bound is the
+// cut rather than the guard, the second run still removes nothing.
+func TestCompactHistoryLeavesTheRestatementACurrentWriterStillMakes(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	ids := seedVerbatimCorpus(t, s)
 	target := ids[0] // the one carrying tags
 	before := memoryUpdatedAt(t, s, target)
 
-	// One pass that changes the tags and nothing else: the reusePreservesAge
-	// branch, since content and category match byte for byte.
+	// A pass that changes the tags and nothing else: the reusePreservesAge branch,
+	// since content and category match byte for byte. A DIFFERENT tag set each
+	// time, because a pass that re-states the tags the row already has is the
+	// #727 no-op and writes nothing at all.
 	retag := func(tags ...string) {
 		t.Helper()
 		emitted := []Memory{keptReemit(t, s, target)}
@@ -810,19 +856,26 @@ func TestCompactHistoryKeepsTheRestatementACurrentWriterStillMakes(t *testing.T)
 		}
 	}
 	retag("kes", "bp", "rotation")
+	retag("kes", "bp", "rotation", "verified")
 
-	// The precondition the whole finding rests on, asserted rather than assumed:
-	// the pass DID write a version, and that version restates the state byte for
-	// byte. If either stopped being true the finding would be moot and this test
-	// would be passing for the wrong reason.
-	if n := historyRowCount(t, s, target); n != 2 {
-		t.Fatalf("the re-tag pass left %d history rows, want 2 (the save and the re-tag's version)", n)
+	// The preconditions the whole finding rests on, asserted rather than assumed:
+	// both passes DID write a version, both versions restate the state byte for
+	// byte, and the first is no longer the memory's newest version. If any of that
+	// stopped being true the finding would be moot and this test would be passing
+	// for the wrong reason.
+	if n := historyRowCount(t, s, target); n != 3 {
+		t.Fatalf("the two re-tag passes left %d history rows, want 3 (the save and one version per pass)", n)
 	}
-	if !sameStoredState(t, s, target) {
-		t.Fatal("the re-tag's version is not byte-identical over the recorded state, so this is no longer the case the finding is about")
+	if n := redundantVersionCount(t, s, target); n != 2 {
+		t.Fatalf("%d of the re-tag's versions restate their predecessor byte for byte, want 2: "+
+			"this is no longer the case the finding is about", n)
+	}
+	if newestRemovableVersion(t, s, target) == 0 {
+		t.Fatal("no restatement is removable at any bound, so the first version being non-newest " +
+			"no longer means the newest-version guard spared it and the test proves nothing")
 	}
 	if memoryUpdatedAt(t, s, target) == before {
-		t.Fatal("the re-tag pass did not move updated_at, so there is no stamp for --fix-updated-at to take back")
+		t.Fatal("the re-tag passes did not move updated_at, so there is no stamp for --fix-updated-at to take back")
 	}
 
 	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
@@ -830,52 +883,34 @@ func TestCompactHistoryKeepsTheRestatementACurrentWriterStillMakes(t *testing.T)
 		t.Fatalf("CompactHistory: %v", err)
 	}
 	if res.Removed != 0 {
-		t.Errorf("Removed = %d, want 0: the re-tag's version is this memory's newest, and nothing removes that", res.Removed)
+		t.Errorf("Removed = %d, want 0: both versions were written by a current build, and a row this "+
+			"build wrote is not this repair's to remove", res.Removed)
 	}
 	if res.UpdatedAt != 0 {
-		t.Errorf("UpdatedAt = %d, want 0: there is no removable version above the last change, so the repair recognises no damage", res.UpdatedAt)
+		t.Errorf("UpdatedAt = %d, want 0: neither version is evidence of a pre-#727 run, so there is no "+
+			"damage to take the stamp back over", res.UpdatedAt)
 	}
-	if n := historyRowCount(t, s, target); n != 2 {
-		t.Errorf("history rows = %d, want 2: the compaction removed a version the store deliberately recorded", n)
+	if n := historyRowCount(t, s, target); n != 3 {
+		t.Errorf("history rows = %d, want 3: the compaction removed a version the store deliberately recorded", n)
 	}
-
-	// And the convergence: a second identical pass makes the first version
-	// removable, and the compaction takes it — the flood, once there is one.
-	// A DIFFERENT tag set, because a pass that re-states the tags the row already
-	// has is the #727 no-op and writes nothing at all.
-	retag("kes", "bp", "rotation", "verified")
-	rowsAfterSecond := historyRowCount(t, s, target)
-	if rowsAfterSecond != 3 {
-		t.Fatalf("the second re-tag pass left %d history rows, want 3", rowsAfterSecond)
-	}
-	second, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true})
-	if err != nil {
-		t.Fatalf("second CompactHistory: %v", err)
-	}
-	if second.Removed != 1 {
-		t.Errorf("Removed = %d, want 1: the FIRST re-tag's version is no longer the newest and is exactly the redundant row", second.Removed)
-	}
-	if n := historyRowCount(t, s, target); n != 2 {
-		t.Errorf("history rows = %d, want 2: the compaction left the table growing", n)
+	if got := memoryUpdatedAt(t, s, target); got == before {
+		t.Error("updated_at was rewound over a deliberate retag, which is the failure the bound exists to prevent")
 	}
 }
 
-// sameStoredState reports whether a memory holds a version that records exactly
-// what the row before it records, over every column a version stores. It is the
-// finding's precondition written as a check, in the compaction's own spelling, so
-// the test above fails loudly if a future change makes the re-tag visible to the
-// table — at which point the case it guards stops existing and the test would
-// otherwise be passing for the wrong reason.
-func sameStoredState(t *testing.T, s *Store, memoryID string) bool {
+// newestRemovableVersion reports whether ANY of a memory's versions satisfies the
+// compaction's own predicate with every time bound taken out. It is what lets the
+// test above say the guard is not what spared the row, rather than assuming it.
+func newestRemovableVersion(t *testing.T, s *Store, memoryID string) int64 {
 	t.Helper()
-	var n int
+	predicate := historyRemovableRowSQL("h")
+	predicate = strings.Replace(predicate, " AND h.recorded_at < ?", "", 1)
+	var n int64
 	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_history cur
-		 WHERE cur.memory_id = ? AND `+historyEqualPredecessorSQL("cur"),
-		memoryID).Scan(&n); err != nil {
-		t.Fatalf("read a version's predecessor comparison: %v", err)
+		`SELECT max(h.rowid) FROM memory_history h WHERE `+predicate, "reflect", memoryID).Scan(&n); err != nil {
+		t.Fatalf("read the removable versions of %s with no time bound: %v", memoryID, err)
 	}
-	return n > 0
+	return n
 }
 
 // TestCompactHistoryFixUpdatedAtNeedsARunAboveTheLastChange: the other half of
@@ -963,6 +998,437 @@ func TestCompactHistoryBatchesTheSameAnswer(t *testing.T) {
 	}
 	if got := historyPhases(t, s, id); !wantPhases(got, []string{phaseSave, phaseUpdate, phaseResolve}) {
 		t.Fatalf("surviving phases = %v, want [save update resolve]", got)
+	}
+}
+
+// TestCompactHistoryLeavesATagsOnlyEditAndItsStamp is #730's second review
+// finding, reproduced against the real writer: a tags-only edit is a REAL change
+// that this table cannot see.
+//
+// UpdateMemory appends its `update` version unconditionally (store.go, the branch
+// that sets `tags = ?, updated_at = datetime('now')`) — it has no no-op guard the
+// way reuseChangesNothing gives the reflect path one — and the version it appends
+// records content, category, importance, resolved_at and source, none of which
+// moved. `memory_history` has no tags column, so two deliberate retags produce two
+// rows byte-identical to their predecessors over every column the equality
+// predicate compares.
+//
+// So on a store with no #730 damage at all, the repair read those two rows as the
+// evidence that a reflection moved the stamp, took the stamp back to the save's
+// instant — undoing two deliberate edits' bumps — and deleted one of the rows
+// recording them. The whole trace runs here through the real UpdateMemory, and
+// the outcome the repair has to give is that a row it cannot classify as damage
+// is a row it leaves alone.
+func TestCompactHistoryLeavesATagsOnlyEditAndItsStamp(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id := createCompactMemory(t, s, compactFirstText)
+	// The save at an instant of its own, because the edits below move updated_at to
+	// the store's clock and datetime('now') has one-second resolution: with the
+	// save in the same second as the edits, a stamp that is "past the last real
+	// change" is indistinguishable from one that is not, and the rewind this test
+	// exists to catch would not fire at all.
+	stampHistoryRow(t, s, id, phaseSave, "2026-01-01 10:00:00")
+
+	// Two tags-only edits, the shape `ghost_memory_update` takes with no content,
+	// category or importance. Neither may be treated as noise.
+	for _, tags := range [][]string{{"retag", "one"}, {"retag", "one", "two"}} {
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, nil, tags); err != nil {
+			t.Fatalf("UpdateMemory(%v): %v", tags, err)
+		}
+	}
+
+	// The preconditions, asserted rather than assumed: both edits filed a version,
+	// both versions restate the state byte for byte, and both moved the stamp. If
+	// any stopped being true the finding would be moot and this test would be
+	// passing for the wrong reason.
+	if n := countPhase(t, s, id, phaseUpdate); n != 2 {
+		t.Fatalf("the two retags filed %d update version(s), want 2", n)
+	}
+	if n := redundantVersionCount(t, s, id); n != 2 {
+		t.Fatalf("%d of the retag's versions restate their predecessor byte for byte, want 2: "+
+			"this is no longer the case the finding is about", n)
+	}
+	deliberate := readUpdatedAt(t, s, id)
+
+	// The edits are then dated a month before #727 shipped, which is where a store
+	// that made them sat, and it is what makes this a test of the PHASE rather than
+	// of the cut. Dated on either side of the cut the two rules are redundant: an
+	// `update` row newer than the cut is spared by the cut whether or not its phase
+	// is removable, so a test that left the clock to decide would pass with the
+	// phase allowlist back at four phases — and the phase is the rule that has to
+	// hold for the row a store wrote when no cut existed.
+	stampPhaseRows(t, s, id, phaseUpdate, preFixReflectAt)
+	// Every other clause of the predicate is asserted, so the phase is provably the
+	// only thing standing between the older of the two and the delete. The clause
+	// list is spelled out rather than called on purpose: the point is to name which
+	// rule is being isolated, and a query that asked the real predicate would answer
+	// zero whichever way the rule went. One row, not two — the newer edit's version
+	// is the memory's newest version, and nothing removes that whatever its phase.
+	if n := updateVersionsNoOtherClauseExempts(t, s, id, reflectNoOpCutoff); n != 1 {
+		t.Fatalf("%d of the retag's versions are exempt on nothing but their phase, want 1: "+
+			"the fixture has to stage a row the PHASE alone has to decline", n)
+	}
+
+	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+	if err != nil {
+		t.Fatalf("CompactHistory: %v", err)
+	}
+	if n := countPhase(t, s, id, phaseUpdate); n != 2 {
+		t.Errorf("compaction left %d of the two deliberate retags recorded, want both: "+
+			"a version no column can tell from a no-op is still a recorded change", n)
+	}
+	if got := readUpdatedAt(t, s, id); got != deliberate {
+		t.Errorf("updated_at = %q, want it untouched at %q — the repair rewound the stamp over a deliberate retag", got, deliberate)
+	}
+	if res.Removed != 0 {
+		t.Errorf("Removed = %d, want 0: nothing here is a reflect restatement", res.Removed)
+	}
+	if res.UpdatedAt != 0 {
+		t.Errorf("UpdatedAt = %d, want 0: a version this repair cannot attribute to a reflection is not evidence of one", res.UpdatedAt)
+	}
+}
+
+// TestCompactHistoryCarriesTheCountsItAlreadyCommitted: a run over a store with
+// tens of thousands of redundant rows commits many batches, and a failure part way
+// through leaves every one of them durable. The counts a caller is handed on the
+// error path are the only record that this run rewrote part of the store, and a
+// zero is an answer about a store that no longer exists.
+//
+// The failure is injected in SQL rather than through a seam, because a seam would
+// be a new thing in the production code to make a test possible: a trigger that
+// aborts the delete of one specific row makes the SECOND batch fail exactly the
+// way a real statement error makes a later batch fail, with the first already
+// committed.
+func TestCompactHistoryCarriesTheCountsItAlreadyCommitted(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id, _, _, _ := seedDamagedHistory(t, s)
+
+	prev := historyCompactBatchSize
+	historyCompactBatchSize = 1
+	t.Cleanup(func() { historyCompactBatchSize = prev })
+
+	// The second row the delete would take, so the first batch commits and the
+	// second one is the one that fails.
+	armed := armVersionDelete(t, s, testProject, 2)
+	if armed == 0 {
+		t.Fatal("the fixture holds fewer than two removable versions, so nothing can fail after a committed batch")
+	}
+
+	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true})
+	if err == nil {
+		t.Fatalf("the run succeeded with a row the store refuses to delete: %+v", res)
+	}
+	if res.Removed != 1 {
+		t.Errorf("Removed = %d, want 1: the first batch committed, and its count is the only record this run changed anything", res.Removed)
+	}
+	// And the committed batch is genuinely gone — the count is not a guess about a
+	// rollback that did not happen.
+	if got := historyRowCount(t, s, id); got != 27 {
+		t.Errorf("history kept %d rows, want 27 (28 minus the one committed batch)", got)
+	}
+}
+
+// TestCompactHistoryCarriesTheStampsItAlreadyCommitted is the same contract on
+// the other pass, and it is the half with the sharper edge: a stamp this pass
+// moved is a row's freshness, so a count that included a stamp whose batch rolled
+// back would send an operator looking for damage that is still there.
+//
+// The counts are added AFTER the commit for that reason, and the test pins it by
+// failing the SECOND memory's stamp in the second batch.
+func TestCompactHistoryCarriesTheStampsItAlreadyCommitted(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	var ids [2]string
+	for i := range ids {
+		id, _, _, _, runTo := seedStampedHistory(t, s, 3)
+		ids[i] = id
+		if got := readUpdatedAt(t, s, id); got != runTo {
+			t.Fatalf("fixture %d did not stage the damage: updated_at = %q, want %q", i, got, runTo)
+		}
+	}
+	// The pass pages the scan `ORDER BY memory_id`, so the memory whose id sorts
+	// LAST is the one in the second batch of a page size of one. Arming the other
+	// would fail the FIRST batch and the count under test would be zero for a
+	// reason that has nothing to do with the commit ordering.
+	first, refused := ids[0], ids[1]
+	if refused < first {
+		first, refused = refused, first
+	}
+
+	prev := historyCompactBatchSize
+	historyCompactBatchSize = 1
+	t.Cleanup(func() { historyCompactBatchSize = prev })
+
+	armMemoryStamp(t, s, refused)
+
+	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+	if err == nil {
+		t.Fatalf("the run succeeded with a memory the store refuses to stamp: %+v", res)
+	}
+	if res.UpdatedAt != 1 {
+		t.Errorf("UpdatedAt = %d, want 1: the first stamp committed and the failed one rolled back with its batch", res.UpdatedAt)
+	}
+	// Which one is the load-bearing half: the memory the trigger refused must NOT
+	// be counted, because its batch was rolled back and its stamp is untouched.
+	if got := readUpdatedAt(t, s, first); got != "2026-01-01 12:00:00" {
+		t.Errorf("the committed memory's stamp is %q, want the last real change at 2026-01-01 12:00:00: "+
+			"the count is not reporting a write that happened", got)
+	}
+	if got := readUpdatedAt(t, s, refused); got == "2026-01-01 12:00:00" {
+		t.Error("the refused memory's stamp was restored, so the count included a write that rolled back")
+	}
+}
+
+// updateVersionsNoOtherClauseExempts counts a memory's `update` versions that the
+// compaction's predicate would remove if the phase allowed it: byte-identical to
+// their predecessor, not the memory's newest version, older than the cut, and
+// naming no other memory.
+//
+// It is the retag finding's precondition written as a check, and it is the one that
+// makes the phase allowlist load-bearing rather than incidental — every other clause
+// is satisfied, so a compaction that removed them would be removing a deliberate
+// change that happened to look like a no-op. The two state-column helpers are the
+// store's own; the phase and the cut are named here because naming them is the
+// whole point.
+// cutoff is passed rather than assumed, because the instant a fixture wrote its
+// rows at is not the bound the run compares them against: a row stamped AT
+// preFixReflectAt is older than the #727 cut and is inside the repair, which is
+// the whole reason the fixture dates the rows there.
+func updateVersionsNoOtherClauseExempts(t *testing.T, s *Store, memoryID, cutoff string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`
+		SELECT count(*) FROM memory_history h
+		WHERE h.memory_id = ? AND h.phase = ? AND h.recorded_at < ?
+		  AND `+historyEqualPredecessorSQL("h")+`
+		  AND h.rowid <> `+historyNewestVersionSQL("h.memory_id")+`
+		  AND h.related_id IS NULL AND h.merged_content IS NULL`,
+		memoryID, phaseUpdate, cutoff).Scan(&n); err != nil {
+		t.Fatalf("count the retag's versions against every clause but the phase: %v", err)
+	}
+	return n
+}
+
+// redundantVersionCount counts the versions of one memory that record exactly
+// what the row before them records, over every column a version stores — the
+// compaction's own equality predicate, read directly, so a test can assert the
+// precondition a finding rests on rather than assume it.
+func redundantVersionCount(t *testing.T, s *Store, memoryID string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_history cur
+		 WHERE cur.memory_id = ? AND `+historyEqualPredecessorSQL("cur"),
+		memoryID).Scan(&n); err != nil {
+		t.Fatalf("read a version's predecessor comparison: %v", err)
+	}
+	return n
+}
+
+// armVersionDelete installs a trigger that aborts the delete of one removable
+// version and reports that row's rowid, so the caller can be sure the failure
+// lands on the batch it was aimed at. The row is chosen off the DELETE's OWN
+// predicate rather than off a hand-written one, so the test arms the row the run
+// will really reach.
+func armVersionDelete(t *testing.T, s *Store, projectID string, nth int) int64 {
+	t.Helper()
+	cutoff, err := ResolveCompactCutoff("")
+	if err != nil {
+		t.Fatalf("resolve the default cutoff: %v", err)
+	}
+	rows, err := s.db.Query(
+		`SELECT h.rowid FROM memory_history h WHERE h.project_id = ? AND `+historyRemovableRowSQL("h")+` ORDER BY h.rowid`,
+		compactPredicateArgs(projectID, cutoff)...)
+	if err != nil {
+		t.Fatalf("read the removable versions: %v", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var target int64
+	for i := 1; rows.Next(); i++ {
+		var rowid int64
+		if err := rows.Scan(&rowid); err != nil {
+			t.Fatalf("scan a removable version's rowid: %v", err)
+		}
+		if i == nth {
+			target = rowid
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the removable versions: %v", err)
+	}
+	if target == 0 {
+		return 0
+	}
+	if _, err := s.db.Exec(fmt.Sprintf(`
+		CREATE TRIGGER refuse_one_version_delete BEFORE DELETE ON memory_history
+		WHEN OLD.rowid = %d
+		BEGIN SELECT RAISE(ABORT, 'injected: this version is not deletable'); END`, target)); err != nil {
+		t.Fatalf("arm the delete refusal: %v", err)
+	}
+	return target
+}
+
+// armMemoryStamp refuses to restore one memory's updated_at, the same way, so the
+// stamp pass can be failed after a committed batch.
+func armMemoryStamp(t *testing.T, s *Store, memoryID string) {
+	t.Helper()
+	if _, err := s.db.Exec(fmt.Sprintf(`
+		CREATE TRIGGER refuse_one_stamp BEFORE UPDATE OF updated_at ON memories
+		WHEN OLD.id = '%s'
+		BEGIN SELECT RAISE(ABORT, 'injected: this stamp is not writable'); END`, memoryID)); err != nil {
+		t.Fatalf("arm the stamp refusal: %v", err)
+	}
+}
+
+// TestCompactHistoryOnlyRemovesWhatTheCutAllows: the bound is the third rule, and
+// this is the test that says it is load-bearing rather than decorative.
+//
+// Four restatements, two on each side of the cut, and the LAST of them is the
+// memory's newest version so that row is protected for a second, unrelated reason.
+// Under the default cut the two pre-#727 rows go and the two post-#727 rows stay —
+// and the second of those is byte-identical to its predecessor, is not the newest
+// version, and names no other memory, so nothing about the row itself keeps it.
+//
+// The second half moves the cut past the later rows and watches them go, which is
+// what shows the first half was the cut and not a coincidence. It is also the
+// honest cost of the rule stated as a test: an operator whose store's clock is
+// behind — a restored backup, a copied database — has rows that LOOK like damage
+// and are not, and --before is how they say so.
+func TestCompactHistoryOnlyRemovesWhatTheCutAllows(t *testing.T) {
+	// Four restatements after the save, the two halves interleaved by instant so a
+	// single mistake in one instant cannot make the fixture pass either way.
+	seedBothSides := func(t *testing.T) *Store {
+		t.Helper()
+		s := testStore(t)
+		id := createCompactMemory(t, s, compactFirstText)
+		for _, at := range []string{preFixReflectAt, postFixReflectAt, preFixReflectAt, postFixReflectAt} {
+			appendVersionRow(t, s, id, phaseReflect, at, "", "", nil)
+		}
+		if got := historyRowCount(t, s, id); got != 5 {
+			t.Fatalf("fixture wrote %d history rows, want 5 (the save and four restatements)", got)
+		}
+		if n := redundantVersionCount(t, s, id); n != 4 {
+			t.Fatalf("%d of the four restatements restate their predecessor, want 4: the fixture has to "+
+				"stage rows that are byte-identical on BOTH sides of the cut", n)
+		}
+		return s
+	}
+
+	t.Run("the default cut spares everything a current build wrote", func(t *testing.T) {
+		s := seedBothSides(t)
+		res, err := s.CompactHistory(context.Background(), testProject, HistoryCompactOptions{Apply: true})
+		if err != nil {
+			t.Fatalf("CompactHistory: %v", err)
+		}
+		if res.Before != reflectNoOpCutoff {
+			t.Errorf("the run used the cut %q, want the default %q", res.Before, reflectNoOpCutoff)
+		}
+		if res.Removed != 2 {
+			t.Errorf("Removed = %d, want 2 (the two restatements older than %s)", res.Removed, reflectNoOpCutoff)
+		}
+	})
+
+	t.Run("moving the cut past them takes them too", func(t *testing.T) {
+		s := seedBothSides(t)
+		// One second past the later rows, spelled as an RFC 3339 instant so this
+		// half also carries the operator's spelling of a bound through to the store.
+		const widened = "2026-09-28T18:00:01Z"
+		res, err := s.CompactHistory(context.Background(), testProject, HistoryCompactOptions{
+			Apply:  true,
+			Before: widened,
+		})
+		if err != nil {
+			t.Fatalf("CompactHistory: %v", err)
+		}
+		if res.Removed != 3 {
+			t.Errorf("Removed = %d, want 3: with the cut past %s only the newest version is left", res.Removed, postFixReflectAt)
+		}
+		if res.Before != "2026-09-28 18:00:01" {
+			t.Errorf("the run used the cut %q, want the one second past %s it was given — "+
+				"the bound is reported, not merely applied", res.Before, postFixReflectAt)
+		}
+	})
+}
+
+// TestResolveCompactCutoff: the bound is half the meaning of every count this
+// command prints, so it is resolved by one function that is exercised directly.
+// The whole-day form is here because an operator who wants a wider bound knows the
+// DATE the fix shipped and not the second it did, and the stored layout is here
+// because the function has to be safe to call twice on the same value — the
+// command resolves a flag to report it and hands the resolved stamp back.
+func TestResolveCompactCutoff(t *testing.T) {
+	for _, tc := range []struct {
+		name, before, want string
+	}{
+		{name: "empty is the default", before: "", want: reflectNoOpCutoff},
+		{name: "a whole day is its first second", before: "2026-09-28", want: "2026-09-28 00:00:00"},
+		{name: "an RFC 3339 instant is read as written", before: "2026-09-28T18:00:01Z", want: "2026-09-28 18:00:01"},
+		{name: "an offset instant is normalized to UTC", before: "2026-09-28T20:00:01+02:00", want: "2026-09-28 18:00:01"},
+		{name: "the store's own layout round-trips", before: "2026-09-28 18:00:01", want: "2026-09-28 18:00:01"},
+		{name: "the default is older than a row written an hour later", before: "2026-09-28T18:00:01Z", want: "2026-09-28 18:00:01"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveCompactCutoff(tc.before)
+			if err != nil {
+				t.Fatalf("ResolveCompactCutoff(%q): %v", tc.before, err)
+			}
+			if got != tc.want {
+				t.Errorf("ResolveCompactCutoff(%q) = %q, want %q", tc.before, got, tc.want)
+			}
+			// Twice, because the command does exactly that: resolve to report, hand
+			// the resolved value to the store, which resolves it again.
+			again, err := ResolveCompactCutoff(got)
+			if err != nil || again != got {
+				t.Errorf("resolving the resolved cut gave (%q, %v), want (%q, nil): the function is not idempotent", again, err, got)
+			}
+		})
+	}
+	for _, bad := range []string{"not a time", "2026-13-01", "28/09/2026", "2026-09-28 18:00"} {
+		t.Run("refused: "+bad, func(t *testing.T) {
+			if got, err := ResolveCompactCutoff(bad); err == nil {
+				t.Errorf("ResolveCompactCutoff(%q) = %q, want a refusal: a bound this repair cannot read is a bound it must not apply", bad, got)
+			}
+		})
+	}
+}
+
+// TestCompactHistoryRefusesACutItCannotRead: the bound decides what is deleted, so
+// a cut nobody can read is refused rather than defaulted. Defaulting would be the
+// worst of the three answers — it would delete the rows an operator asked to spare
+// while reporting the default's numbers.
+func TestCompactHistoryRefusesACutItCannotRead(t *testing.T) {
+	s := testStore(t)
+	id := createCompactMemory(t, s, compactFirstText)
+	appendVerbatimVersion(t, s, id)
+	before := historyRowCount(t, s, id)
+
+	res, err := s.CompactHistory(context.Background(), testProject, HistoryCompactOptions{
+		Apply:  true,
+		Before: "yesterday-ish",
+	})
+	if err == nil {
+		t.Fatalf("the run accepted an unreadable cut: %+v", res)
+	}
+	if res.Removed != 0 {
+		t.Errorf("Removed = %d, want 0: a run that refused its bound removed nothing", res.Removed)
+	}
+	if got := historyRowCount(t, s, id); got != before {
+		t.Errorf("history went from %d rows to %d, want it untouched", before, got)
+	}
+}
+
+// TestCompactHistoryCompactsOnlyReflectVersions pins the phase allowlist itself.
+// It is one phase, and that is a decision rather than an oversight, so a phase
+// added to it has to be a deliberate edit of a pinned list — the state columns
+// cannot tell a deliberate change from a no-op (see the test named for the retag),
+// which is the whole reason the phase is what the repair goes by.
+func TestCompactHistoryCompactsOnlyReflectVersions(t *testing.T) {
+	if got := compactablePhases(); !wantPhases(got, []string{phaseReflect}) {
+		t.Fatalf("compactablePhases() = %v, want [%s]: every other phase records a change somebody made "+
+			"on purpose, and the recorded state cannot always see it", got, phaseReflect)
 	}
 }
 

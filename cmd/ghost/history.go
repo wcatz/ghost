@@ -125,7 +125,7 @@ func parseHistoryLimit(value string) (int, error) {
 // both, so the two cannot drift.
 const historyUsage = `Usage: ghost history <memory-ref> [--limit N] [--json]
        ghost history purge <memory-id>
-       ghost history compact [--project <p>] [--fix-updated-at] [--apply]
+       ghost history compact [--project <p>] [--before <t>] [--fix-updated-at] [--apply]
 
 Prints one memory's append-only history: every insert, edit, reflection
 rewrite, duplicate fold, resolve, supersession, restore, import and deletion,
@@ -169,14 +169,31 @@ source the memory held once that write landed.
               A version row is removed ONLY when it records the same state as the
               row before it of the same memory, compared over every column a
               version stores: content, category, importance, resolved_at and
-              source. Four things always stay: a memory's FIRST version (the only
-              statement of what it said), its NEWEST version (the statement of
-              what it says now, and the same row the retention cap declines to
-              trim), every event that records a claim the state does not (a
-              tombstone, a supersede or its withdrawal, a resolve or its clearing, a
-              merge, an import, a restore), and any row naming another memory.
+              source, AND it was recorded before the bound below. Five things
+              always stay: a memory's FIRST version (the only statement of what it
+              said), its NEWEST version (the statement of what it says now, and
+              the same row the retention cap declines to trim), every event that
+              records a claim the state does not (a tombstone, a supersede or its
+              withdrawal, a resolve or its clearing, a merge, an import, a
+              restore), any row naming another memory, and every 'reflect' version
+              except those — a retag filed as an update is a change somebody made
+              on purpose and this table has no column for tags, so the recorded
+              state cannot tell it from a no-op.
 
                 --project <p>   Compact one project only (id, name or path)
+                --before <t>    Only consider versions recorded before <t>, a
+                                2006-01-02 date or an RFC 3339 instant. The
+                                default is 2026-09-28T17:14:07Z, the moment #727
+                                reached main, because a current build writes a
+                                byte-identical 'reflect' version of its own — a
+                                consolidation merge carries the union of its
+                                sources' tags, and the tags are not a column here —
+                                and no state column can tell that from the damage.
+                                Widen it only for a store whose clock is behind (a
+                                restored backup, a copied database) and re-read the
+                                dry run first. Whichever bound was used is named
+                                in the report, because every count is a count AT a
+                                bound.
                 --fix-updated-at  Also move each live memory's updated_at back to
                                  the recorded_at of the last version that changed
                                  its state — but only where a version that changed

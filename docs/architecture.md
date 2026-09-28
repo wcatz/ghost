@@ -47,7 +47,7 @@ ghost context                     Render passive session context
 ghost context --as-of <RFC3339>   Render it as the store stood at an instant
 ghost history <memory-id>         Print one memory's append-only history
 ghost history purge <memory-id>   Erase a memory and every recorded version of it
-ghost history compact [--apply]   Remove history versions that changed nothing
+ghost history compact [--apply]   Remove history versions that changed nothing (bounded by --before)
 ghost bench [--sweep]             Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
 ghost version                     Print the version
@@ -513,11 +513,22 @@ The filter runs on **every** appended row whether or not anything is redacted, b
 reflection from appending a byte-identical `reflect` version per kept memory and from moving that memory's
 `updated_at` to the run's own time, which measured at 80% of this table on one real store. A version row goes only
 when it records the same state as the row before it of the same memory, in rowid order, compared over **every**
-column a version stores — and four things never go: a memory's first version, its newest version, the phases that
-record a claim the state does not, and any row naming another memory. The rules, the reasons, the writer whose
-deliberate restatement forced the newest-version guard, and the gate `--fix-updated-at` needs are stated in
-[invariants.md](invariants.md#ghost-invariants) under "Memory history"; this section is the design narrative, that
-file the checklist a change is held to.
+column a version stores — and it is a `reflect` version recorded before a bound. Five things never go: a memory's
+first version, its newest version, the phases that record a claim the state does not, any row naming another memory,
+and any version at or after the bound.
+
+The bound is the interesting one, and it exists because a **current** build still files a byte-identical `reflect`
+version on purpose: a consolidation merge whose survivor is one of its own sources carries the union of that source's
+tags, `ReplaceNonManual`'s `reusePreservesAge` branch writes them, and the version restates every column this table
+stores, because the tags are not a column of it. So the recorded state cannot tell a deliberate retag from the
+pre-#727 flood, and the repair does not pretend otherwise — the default bound is the instant #727 reached main
+(`--before` widens it for a store whose clock is behind), so a row a current build wrote is a current writer's
+business and a row written before the fix shipped is this repair's. `save` and `update` are not compacted at all,
+which is the same fact from the other side: a tags-only `ghost memory update` is a real change this table cannot see.
+
+The rules, the reasons, the writers whose deliberate restatements forced the bound, and the gate `--fix-updated-at`
+needs are stated in [invariants.md](invariants.md#ghost-invariants) under "Memory history"; this section is the
+design narrative, that file the checklist a change is held to.
 
 **The name is a distinction, not a description.** This is a change log — one
 row per write, holding the state the memory had once that write landed. Evidence

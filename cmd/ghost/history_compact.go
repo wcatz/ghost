@@ -36,13 +36,28 @@ type historyCompactOptions struct {
 	// Project scopes the run to one project, by the same identifiers every other
 	// --project on this CLI takes: an id, a name, or a path.
 	Project string
+	// Before bounds the repair to versions recorded before a time, spelled the way
+	// memory.ResolveCompactCutoff reads: a 2006-01-02 date or an RFC 3339 instant.
+	// Empty is the default, and the default is the safe one rather than the
+	// absent-minded one: the instant #727 shipped, so a version a current build
+	// wrote is never removed even where the state columns cannot tell it from the
+	// damage. An operator whose store's clock is behind — a restored backup, a
+	// copied database — widens it deliberately, and the report names whichever
+	// bound was used.
+	Before string
 }
 
 // parseHistoryCompactArgs parses `ghost history compact [flags]`. Only --apply,
-// --fix-updated-at and --project are recognized, and anything else is an error
-// rather than being ignored: a silently dropped --fix-updated-at would report a
-// repair that never ran, and a silently dropped --project would compact a store
+// --fix-updated-at, --project and --before are recognized, and anything else is an
+// error rather than being ignored: a silently dropped --fix-updated-at would report
+// a repair that never ran, and a silently dropped --project would compact a store
 // the reader believed they had narrowed.
+//
+// --before is checked here as well as in the store, and that is not a second
+// parser: a bound the command cannot read is refused before it opens a single
+// project, which is the only place the refusal is free — from inside the store it
+// would arrive having already told the operator the first of twenty projects was
+// compactable.
 func parseHistoryCompactArgs(args []string) (historyCompactOptions, error) {
 	var opts historyCompactOptions
 	for i := 0; i < len(args); i++ {
@@ -67,11 +82,29 @@ func parseHistoryCompactArgs(args []string) (historyCompactOptions, error) {
 				return opts, fmt.Errorf("flag --project needs a value")
 			}
 			opts.Project = value
+		case arg == "--before":
+			if i+1 >= len(args) {
+				return opts, fmt.Errorf("flag %s needs a value", arg)
+			}
+			i++
+			if args[i] == "" {
+				return opts, fmt.Errorf("flag %s needs a value", arg)
+			}
+			opts.Before = args[i]
+		case strings.HasPrefix(arg, "--before="):
+			value := strings.TrimPrefix(arg, "--before=")
+			if value == "" {
+				return opts, fmt.Errorf("flag --before needs a value")
+			}
+			opts.Before = value
 		case strings.HasPrefix(arg, "-"):
 			return opts, fmt.Errorf("unknown flag %q", arg)
 		default:
 			return opts, fmt.Errorf("history compact takes flags, got %q", arg)
 		}
+	}
+	if _, err := memory.ResolveCompactCutoff(opts.Before); err != nil {
+		return opts, err
 	}
 	return opts, nil
 }
@@ -86,20 +119,39 @@ func parseHistoryCompactArgs(args []string) (historyCompactOptions, error) {
 type historyCompactReport struct {
 	// Apply is whether this run wrote.
 	Apply bool
-	// Projects is one line per project, in the store's own order.
+	// Before is the bound the run used, normalized to the store's stamp layout.
+	// It is on the report rather than only in the caller's hands because every
+	// count below is a count AT a bound: "18 redundant versions" is a different
+	// number at each one, and a report printing the number without the bound is
+	// reporting half an answer. An operator with a store whose clock is behind has
+	// no other way to tell whether the default bound already reached their rows.
+	Before string
+	// Projects is one line per project, in the store's own order. A project that
+	// FAILED is in here too, carrying the batches it committed before the failure:
+	// they are committed one at a time, so a large store is already rewritten by
+	// the time anything goes wrong, and dropping the project for having failed
+	// would tell an operator to re-run the whole store.
 	Projects []memory.HistoryCompactResult
+	// FailedProject is the project the run stopped in, or "" if it finished. It
+	// marks ONE line rather than colouring the whole report: the other projects'
+	// lines are finished repairs, and a marker on every line would say nothing.
+	FailedProject string
 }
 
-// printHistoryCompact renders the report: a header saying whether this run wrote,
-// then one line per project naming it and both counts. The header is not
-// decoration — it is the line that answers "is the store fixed yet", which the
-// counts alone cannot when both are zero.
+// printHistoryCompact renders the report: a header saying whether this run wrote and
+// which bound it used, then one line per project naming it and both counts. The
+// header is not decoration — it is the line that answers "is the store fixed yet",
+// which the counts alone cannot when both are zero, and the bound is what makes the
+// counts mean anything.
 func printHistoryCompact(w io.Writer, r historyCompactReport) error {
 	mode := "dry run — nothing was written; pass --apply to write"
 	if r.Apply {
 		mode = "compacted"
 	}
 	if _, err := fmt.Fprintf(w, "history compact (%s)\n", mode); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  removing only versions recorded before %s\n", r.Before); err != nil {
 		return err
 	}
 	if len(r.Projects) == 0 {
@@ -134,6 +186,14 @@ func printHistoryCompactLines(w io.Writer, r historyCompactReport) error {
 		// says the repair finished.
 		if p.StampsUnreadable > 0 {
 			if _, err := fmt.Fprintf(w, " (%d stamp(s) unreadable, left alone)", p.StampsUnreadable); err != nil {
+				return err
+			}
+		}
+		// The same reasoning, for the same reason: these are the batches this
+		// project committed before the run stopped, and a line that reads exactly
+		// like a finished project's would be counted as a finished repair.
+		if p.ProjectID == r.FailedProject {
+			if _, err := fmt.Fprint(w, " (stopped partway here — these are the batches it committed)"); err != nil {
 				return err
 			}
 		}
@@ -207,6 +267,18 @@ func runHistoryCompact(args []string) {
 // os.Exit, and the refusal is the part of this command most worth testing.
 func runHistoryCompactPlan(ctx context.Context, s *memory.Store, dataDir string,
 	opts historyCompactOptions) (historyCompactReport, error) {
+	// The bound first, and it is the one thing resolved before a single project is
+	// opened. A run that cannot read its own --before would otherwise get as far as
+	// the first project's write, and the refusal would arrive having already said
+	// the store was compactable. The resolved value replaces the raw one so there
+	// is exactly one bound in flight, and ResolveCompactCutoff is idempotent, so
+	// the store resolving it again lands on the same stamp.
+	before, err := memory.ResolveCompactCutoff(opts.Before)
+	if err != nil {
+		return historyCompactReport{}, err
+	}
+	opts.Before = before
+
 	ids, err := compactTargetProjects(ctx, s, opts.Project)
 	if err != nil {
 		return historyCompactReport{}, err
@@ -220,17 +292,20 @@ func runHistoryCompactPlan(ctx context.Context, s *memory.Store, dataDir string,
 		return historyCompactReport{}, err
 	}
 
-	report := historyCompactReport{Apply: opts.Apply}
+	report := historyCompactReport{Apply: opts.Apply, Before: before}
 	for _, id := range ids {
 		res, err := compactOneProject(ctx, s, id, opts)
 		if err != nil {
-			// The error names the project it happened in, and the report so far
-			// goes back with it rather than being dropped. Each project is its own
-			// set of committed batches, so by the time project N fails the projects
-			// before it HAVE been rewritten, and returning an empty report here
-			// would answer "this run changed nothing" about a store it changed.
-			// printPartialHistoryCompact is what keeps the lines from reading as a
-			// finished repair.
+			// The error names the project it happened in, and the report goes back
+			// with it rather than being dropped. Each project is its own set of
+			// committed batches, so by the time project N fails the projects before
+			// it HAVE been rewritten — and so has N, which is why its own partial
+			// counts are appended rather than discarded. Returning an empty report
+			// here would answer "this run changed nothing" about a store it changed,
+			// and returning N's counts without marking them would answer "this
+			// project is finished".
+			report.Projects = append(report.Projects, res)
+			report.FailedProject = id
 			return report, fmt.Errorf("project %s: %w", id, err)
 		}
 		report.Projects = append(report.Projects, res)
@@ -242,11 +317,12 @@ func runHistoryCompactPlan(ctx context.Context, s *memory.Store, dataDir string,
 // destroy part of a store is reachable from a test. A mid-run failure is
 // unreachable otherwise — a store that answers for the first project and not the
 // second does not exist in a fixture — and it is exactly the path where the report
-// has to carry what already happened.
+// has to carry what already happened. The seam therefore returns the store's
+// counts alongside the error, because that is what the store does.
 var compactOneProject = func(ctx context.Context, s *memory.Store, projectID string,
 	opts historyCompactOptions) (memory.HistoryCompactResult, error) {
 	return s.CompactHistory(ctx, projectID, memory.HistoryCompactOptions{
-		Apply: opts.Apply, FixUpdatedAt: opts.FixUpdatedAt,
+		Apply: opts.Apply, FixUpdatedAt: opts.FixUpdatedAt, Before: opts.Before,
 	})
 }
 

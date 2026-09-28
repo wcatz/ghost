@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -66,6 +67,17 @@ func TestParseHistoryCompactArgs(t *testing.T) {
 		{name: "--project= form", args: []string{"--project=alpha"}, want: historyCompactOptions{Project: "alpha"}},
 		{name: "a project named like a flag still needs its own value", args: []string{"--project", "--apply"},
 			want: historyCompactOptions{Project: "--apply"}},
+		{name: "--before bounds the repair", args: []string{"--before", "2026-09-01"},
+			want: historyCompactOptions{Before: "2026-09-01"}},
+		{name: "--before= form", args: []string{"--before=2026-09-01T00:00:00Z"},
+			want: historyCompactOptions{Before: "2026-09-01T00:00:00Z"}},
+		// The bound is checked rather than passed through: a --before this
+		// command cannot read is a bound the store would refuse anyway, and
+		// refusing it here means the refusal arrives before any project is opened
+		// rather than inside the first one.
+		{name: "a bound this command cannot read", args: []string{"--before", "sometime"}, wantErr: true},
+		{name: "--before with no value", args: []string{"--before"}, wantErr: true},
+		{name: "--before= with no value", args: []string{"--before="}, wantErr: true},
 		{name: "an unknown flag", args: []string{"--fixit"}, wantErr: true},
 		{name: "a second operand", args: []string{"alpha", "beta"}, wantErr: true},
 		{name: "--limit has nothing to limit here", args: []string{"--limit", "2"}, wantErr: true},
@@ -176,21 +188,32 @@ func TestHistoryCompactRefusesWhileTheLifecycleLockIsHeld(t *testing.T) {
 // N leaves projects 1..N-1 REWRITTEN. An error that carried no counts would answer
 // "this run changed nothing" about a store it changed, and an operator reading it
 // has no way to know which projects to re-check.
+//
+// The failing project is in that set too, and that is the half this pins: its
+// batches are committed one at a time, so a store with tens of thousands of
+// redundant versions has already deleted thousands of them by the time anything
+// fails. The store carries those counts back on its error
+// (HistoryCompactResult beside the error), and the run has to hand them on rather
+// than dropping the project for having failed — a report that names only the
+// projects that finished tells an operator to re-run the whole store, which
+// re-checks twenty projects because one of them failed partway through its own
+// batches.
 func TestHistoryCompactReportsWhatAFailedRunAlreadyCompacted(t *testing.T) {
 	ctx := context.Background()
 	s := historyCompactTestStore(t)
 	dataDir := t.TempDir()
 
-	// The seam: the first project succeeds, the second fails. A store that answers
-	// for one project and not the next does not exist in a fixture, and this is
-	// exactly the path that needs one.
+	// The seam: the first project succeeds, the second fails AFTER committing
+	// batches of its own. A store that answers for one project and not the next
+	// does not exist in a fixture, and this is exactly the path that needs one.
 	prev := compactOneProject
 	var calls []string
 	compactOneProject = func(_ context.Context, _ *memory.Store, projectID string,
 		opts historyCompactOptions) (memory.HistoryCompactResult, error) {
 		calls = append(calls, projectID)
 		if projectID == "beta" {
-			return memory.HistoryCompactResult{}, errors.New("database is locked")
+			return memory.HistoryCompactResult{ProjectID: projectID, Removed: 5, UpdatedAt: 1},
+				errors.New("database is locked")
 		}
 		return memory.HistoryCompactResult{ProjectID: projectID, Removed: 7, UpdatedAt: 3}, nil
 	}
@@ -203,17 +226,29 @@ func TestHistoryCompactReportsWhatAFailedRunAlreadyCompacted(t *testing.T) {
 	if !strings.Contains(err.Error(), "beta") {
 		t.Errorf("error %q does not name the project that failed", err)
 	}
-	// The first project WAS compacted, so its counts are in the report that comes
-	// back with the error.
-	if len(report.Projects) != 1 || report.Projects[0].ProjectID != "alpha" {
-		t.Fatalf("report = %+v, want the one project that was compacted before the failure", report.Projects)
+	// Both projects are in the report: the first finished, the second did not, and
+	// each carries the batches it committed.
+	if len(report.Projects) != 2 {
+		t.Fatalf("report = %+v, want both projects — the one that finished and the one that "+
+			"committed batches before it failed", report.Projects)
+	}
+	if report.Projects[0].ProjectID != "alpha" || report.Projects[0].Removed != 7 {
+		t.Errorf("alpha = %+v, want the finished project's own counts", report.Projects[0])
+	}
+	if report.Projects[1].ProjectID != "beta" || report.Projects[1].Removed != 5 {
+		t.Errorf("beta = %+v, want the batches it committed before failing", report.Projects[1])
+	}
+	if report.FailedProject != "beta" {
+		t.Errorf("the report's failed project = %q, want beta: a line that cannot be read as "+
+			"a finished repair is the only thing that keeps these counts from being a claim", report.FailedProject)
 	}
 	if calls[0] != "alpha" {
 		t.Errorf("the first project compacted was %q, want alpha (the store's own order)", calls[0])
 	}
 
 	// And it reaches the operator, under a header that cannot be read as a finished
-	// repair.
+	// repair, with the failure marked on its own line rather than only in the
+	// header: an operator reading one line needs to know which project it is.
 	var out strings.Builder
 	if err := printPartialHistoryCompact(&out, report); err != nil {
 		t.Fatalf("printPartialHistoryCompact: %v", err)
@@ -225,8 +260,23 @@ func TestHistoryCompactReportsWhatAFailedRunAlreadyCompacted(t *testing.T) {
 	if !strings.Contains(text, "stopped partway") {
 		t.Errorf("the partial report has no header saying the run stopped:\n%s", text)
 	}
-	if strings.Contains(text, "beta") {
-		t.Errorf("the partial report names the project that FAILED as compacted:\n%s", text)
+	if !strings.Contains(text, "beta") {
+		t.Errorf("the partial report drops the project that failed, whose committed batches are "+
+			"the ones an operator most needs to know about:\n%s", text)
+	}
+	if !strings.Contains(text, "stopped partway here") {
+		t.Errorf("the partial report does not mark which project it stopped in:\n%s", text)
+	}
+	// And the marker is on that project's line, not on the finished one: a marker on
+	// every line tells the operator nothing.
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		marked := strings.Contains(line, "stopped partway here")
+		if strings.Contains(line, "beta") && !marked {
+			t.Errorf("beta's line is not marked as where the run stopped:\n%s", text)
+		}
+		if strings.Contains(line, "alpha") && marked {
+			t.Errorf("alpha's line is marked as where the run stopped, and it finished:\n%s", text)
+		}
 	}
 
 	// A refusal is not a partial: nothing was touched, so there is nothing to
@@ -238,6 +288,190 @@ func TestHistoryCompactReportsWhatAFailedRunAlreadyCompacted(t *testing.T) {
 	}
 	if empty.String() != "" {
 		t.Errorf("an untouched run printed a partial report: %q", empty.String())
+	}
+}
+
+// TestHistoryCompactRefusesACutItCannotRead: the bound decides what is deleted, so
+// a --before the command cannot read is refused before any project is opened. The
+// alternative — handing it down and letting the store refuse it — would fail on the
+// first project of a twenty-project store, having already told the operator the
+// store was compactable.
+func TestHistoryCompactRefusesACutItCannotRead(t *testing.T) {
+	ctx := context.Background()
+	s := historyCompactTestStore(t)
+
+	var reached []string
+	prev := compactOneProject
+	compactOneProject = func(_ context.Context, _ *memory.Store, projectID string,
+		_ historyCompactOptions) (memory.HistoryCompactResult, error) {
+		reached = append(reached, projectID)
+		return memory.HistoryCompactResult{ProjectID: projectID}, nil
+	}
+	t.Cleanup(func() { compactOneProject = prev })
+
+	report, err := runHistoryCompactPlan(ctx, s, t.TempDir(),
+		historyCompactOptions{Apply: true, Before: "the day before the fix"})
+	if err == nil {
+		t.Fatalf("a run with an unreadable --before succeeded: %+v", report)
+	}
+	if !strings.Contains(err.Error(), "day before") {
+		t.Errorf("the refusal %q does not quote the bound it could not read", err)
+	}
+	if len(reached) != 0 {
+		t.Errorf("the run reached %v after refusing its bound", reached)
+	}
+	if len(report.Projects) != 0 {
+		t.Errorf("the refusal still reported %d project result(s)", len(report.Projects))
+	}
+}
+
+// TestHistoryCompactNamesTheCutInItsReport: every count this command prints is a
+// count AT a bound, and "18 redundant versions" is a different number at each one.
+// A report that printed the number without the bound would be reporting half an
+// answer, and an operator with a store whose clock is behind has no way to tell
+// whether the default bound already covered it.
+func TestHistoryCompactNamesTheCutInItsReport(t *testing.T) {
+	ctx := context.Background()
+	s := historyCompactTestStore(t)
+
+	// The default, and the whole point of printing it: a store that predates #727
+	// has been cut at this instant whether or not anybody asked for it.
+	report, err := runHistoryCompactPlan(ctx, s, t.TempDir(), historyCompactOptions{})
+	if err != nil {
+		t.Fatalf("runHistoryCompactPlan: %v", err)
+	}
+	cut, err := memory.ResolveCompactCutoff("")
+	if err != nil {
+		t.Fatalf("resolve the default cut: %v", err)
+	}
+	if report.Before != cut {
+		t.Errorf("the report's cut = %q, want the default %q", report.Before, cut)
+	}
+	for _, p := range report.Projects {
+		if p.Before != cut {
+			t.Errorf("%s reports the cut %q, want the same %q the report header names", p.ProjectID, p.Before, cut)
+		}
+	}
+	var out strings.Builder
+	if err := printHistoryCompact(&out, report); err != nil {
+		t.Fatalf("printHistoryCompact: %v", err)
+	}
+	if !strings.Contains(out.String(), cut) {
+		t.Errorf("the printed report does not name the cut %q it used:\n%s", cut, out.String())
+	}
+
+	// And a widened bound is the one named, not the default: printing the default
+	// over a run that used another would be the half-answer with an extra step.
+	report, err = runHistoryCompactPlan(ctx, s, t.TempDir(),
+		historyCompactOptions{Before: "2026-09-28T18:00:01Z"})
+	if err != nil {
+		t.Fatalf("runHistoryCompactPlan with a bound: %v", err)
+	}
+	if report.Before != "2026-09-28 18:00:01" {
+		t.Errorf("the report's cut = %q, want the normalized 2026-09-28 18:00:01", report.Before)
+	}
+	out.Reset()
+	if err := printHistoryCompact(&out, report); err != nil {
+		t.Fatalf("printHistoryCompact: %v", err)
+	}
+	if !strings.Contains(out.String(), "2026-09-28 18:00:01") {
+		t.Errorf("the printed report does not name the cut this run used:\n%s", out.String())
+	}
+}
+
+// TestHistoryCompactBeforeChangesWhatIsRemoved drives the flag all the way through:
+// the string in argv, the parser, the resolver, the store's predicate and the
+// printed report. The store tests prove what a bound means; this proves the
+// command's flag is the one that means it, which is a different bug and just as
+// expensive — a --before the parser swallowed would leave an operator widening a
+// bound they had every reason to believe was in force.
+//
+// The fixture dates its own rows, because a store seeded with datetime('now') has
+// nothing on either side of the default cut to tell the two answers apart.
+func TestHistoryCompactBeforeChangesWhatIsRemoved(t *testing.T) {
+	ctx := context.Background()
+	// A dry run, so the two runs can be compared: the first has to leave the
+	// store alone for the second to still be reading the same rows.
+	seed := func(t *testing.T) *memory.Store {
+		t.Helper()
+		dbPath := filepath.Join(t.TempDir(), "compact.db")
+		db, err := memory.OpenDB(dbPath)
+		if err != nil {
+			t.Fatalf("OpenDB: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		s := memory.NewStore(db, nil)
+		if err := s.EnsureProject(ctx, "alpha", "/tmp/alpha", "Alpha"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		id, err := s.Create(ctx, "alpha", memory.Memory{
+			Category: "gotcha", Content: "the relay listens on port 2222 in staging",
+			Source: "mcp", Importance: 0.5,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		restate(t, dbPath, id, cliPreFixReflectAt)
+		restate(t, dbPath, id, cliPreFixReflectAt)
+		restate(t, dbPath, id, cliPostFixReflectAt)
+		restate(t, dbPath, id, cliPostFixReflectAt)
+		// Four restatements, each byte-identical to the row before it. The two on
+		// the older side of the cut are removable, and the two on the later side
+		// are not: the first of those is spared by the cut and the second because it
+		// is the memory's newest version, which nothing removes.
+		return s
+	}
+
+	underDefault, err := runHistoryCompactPlan(ctx, seed(t), t.TempDir(), historyCompactOptions{})
+	if err != nil {
+		t.Fatalf("dry run under the default cut: %v", err)
+	}
+	if got := underDefault.Projects[0].Removed; got != 2 {
+		t.Errorf("Removed = %d under the default cut, want 2 (the two restatements older than %s)",
+			got, cliPreFixReflectAt)
+	}
+	widened, err := runHistoryCompactPlan(ctx, seed(t), t.TempDir(),
+		historyCompactOptions{Before: "2026-09-28T18:00:01Z"})
+	if err != nil {
+		t.Fatalf("dry run with a widened cut: %v", err)
+	}
+	if got := widened.Projects[0].Removed; got != 3 {
+		t.Errorf("Removed = %d with the cut past %s, want 3: --before did not reach the store",
+			got, cliPostFixReflectAt)
+	}
+}
+
+// The two sides of the #727 cut, in the store's own stamp layout. They are fixed
+// instants rather than the clock: a bound is a historical fact, and a fixture that
+// read datetime('now') would put every row on the same side of it forever.
+const (
+	cliPreFixReflectAt  = "2026-08-01 09:00:00"
+	cliPostFixReflectAt = "2026-09-28 18:00:00"
+)
+
+// restate appends one reflect version that restates the memory's newest version
+// byte for byte, recorded at the given instant. It copies the recorded state out of
+// the row before it rather than writing literals, so the row it stages is exactly
+// the kind this repair is meant to look at — and a fixture that hand-wrote the
+// columns would be staging something the store's writers never produce.
+func restate(t *testing.T, dbPath, memoryID, recordedAt string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open the store for staging: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	_, err = db.Exec(`
+		INSERT INTO memory_history
+			(memory_id, project_id, phase, recorded_at,
+			 content, category, importance, resolved_at, source)
+		SELECT memory_id, project_id, 'reflect', ?,
+			content, category, importance, resolved_at, source
+		FROM memory_history
+		WHERE rowid = (SELECT max(rowid) FROM memory_history WHERE memory_id = ?)`,
+		recordedAt, memoryID)
+	if err != nil {
+		t.Fatalf("append a restatement at %s: %v", recordedAt, err)
 	}
 }
 

@@ -767,12 +767,13 @@ ghost history compact                                  # dry run, every project
 ghost history compact --project my-project             # dry run, one project
 ghost history compact --apply                          # remove the redundant versions
 ghost history compact --apply --fix-updated-at         # and restore updated_at too
+ghost history compact --before 2026-10-01              # widen the bound (see below)
 ```
 
 A version row is removed **only** when it records the same state as the row before
 it of the same memory, in rowid order, compared over every column a version stores:
-`content`, `category`, `importance`, `resolved_at` and `source`. Nothing else
-decides it. Four things always stay:
+`content`, `category`, `importance`, `resolved_at` and `source`; and only when it is
+a `reflect` version recorded before the bound. Five things always stay:
 
 - a memory's **first** version — the only statement of what it said, with nothing
   to duplicate;
@@ -784,13 +785,40 @@ decides it. Four things always stay:
   been classified;
 - any row carrying a `related_id` or `merged_content` — it is the thread a reader
   follows from one memory's past into its successor's, not a statement about this
-  one.
+  one;
+- any version recorded at or after the bound.
+
+`save`, `update` and `baseline` are never compacted even though they record a state
+and nothing else, and the reason is a real one rather than caution: `ghost memory
+update` appends an `update` version on **every** edit, and a **tags-only** edit is a
+change to what the memory says about itself that this table cannot see, because it
+has no column for tags. Both `update` versions and the stamps they moved survive.
+
+`--before <t>` bounds the repair, and the default is `2026-09-28T17:14:07Z` — the
+instant #727 reached main. A current build still files a byte-identical `reflect`
+version on purpose: a consolidation merge whose survivor is one of its own sources
+carries the union of that source's tags, and nothing in this table can see that,
+because the tags are not a column. So the repair does not try to tell such a row
+from the damage; it declines to touch any row a current build wrote. Widen the bound
+only for a store whose clock is behind — a restored backup, a copied database —
+and read the dry run at the wider bound before applying it. `<t>` is a `2006-01-02`
+date or an RFC 3339 instant, and a bound the command cannot read is refused rather
+than defaulted. **Every count is a count at a bound**, and the report names the one
+it used:
+
+```
+history compact (dry run — nothing was written; pass --apply to write)
+  removing only versions recorded before 2026-09-28 17:14:07
+  my-project  19 redundant version(s), 1 updated_at restored
+```
 
 `--fix-updated-at` is a second, separate repair, behind its own flag. Each live
 memory's `updated_at` becomes the `recorded_at` of the last version that *changed*
 its state, and only where a version that changed nothing sits **above** that change
 — that version is the evidence a reflection run moved the stamp, and without it a
-stamp the history cannot account for belongs to some other writer. It moves **only
+stamp the history cannot account for belongs to some other writer. The bound reaches
+this gate too, for the same reason it reaches the delete: a version this repair
+would not remove is not a version it may treat as proof that a reflection ran. It moves **only
 backward** — the damage moved a stamp forward, so the repair undoes that — and a
 memory whose stamp is already at or before the target, or which no version explains,
 is left exactly as it is. Both stamps are read through the store's own layouts and
@@ -827,6 +855,11 @@ like the rest of the command and, under `--apply`, deletes `memory_history` rows
 updates `memories.updated_at`. Both are repairs rather than edits: a version row is
 removed only when the row before it of the same memory says the same thing, so no
 event and no state a reader could want is lost.
+
+A run that fails partway through says what it had already done, per project,
+including the project it stopped in — its committed batches are a store already
+rewritten, and a report that dropped the project for having failed would send an
+operator re-running a whole store to find out about one.
 
 ### `ghost bench`
 

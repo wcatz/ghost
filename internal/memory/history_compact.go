@@ -10,8 +10,8 @@ import (
 
 // Issue #730. Before #727 every applied reflection appended a byte-identical
 // `reflect` version for each memory it kept and set that memory's updated_at to
-// the run's own time. #727 stopped writing new ones; this is the repair for the
-// ones already stored, and it is two repairs because the damage is two things:
+// the run's own time. This removes the ones already stored, and it is two repairs
+// because the damage is two things:
 //
 //   - memory_history is mostly rows that changed nothing, which crowds real
 //     events toward the per-memory and per-store retention caps, and
@@ -22,6 +22,26 @@ import (
 // The first is a DELETE and the second is a WRITE, so they are two options and
 // not one: a caller who wants the history back under its caps does not have to
 // accept a stamp moving.
+//
+// #727 stopped the FLOOD, not every row of this shape, and the difference is the
+// whole design of this file. A verbatim re-emission — content, category,
+// importance, tags and scope all unchanged — is now a no-op, and that was the
+// case a lifecycle pass hit on nearly every memory it kept. A consolidation
+// MERGE or REWRITE that lands on a stored row's own text is not verbatim: it
+// carries the union of its sources' tags, and ReplaceNonManual's reusePreservesAge
+// branch writes them and files a version. That version records content, category,
+// importance, resolved_at and source — none of which moved, because this table has
+// no column for tags. So one writer can still produce a byte-identical `reflect`
+// version, deliberately, and no state-column predicate can tell it from the damage.
+//
+// Three rules follow, and each is a separate question with a separate answer.
+// WHICH PHASE: only `reflect` is removable, because that is the only phase a
+// no-op run ever wrote — `UpdateMemory` files an `update` version for a retag with
+// no no-op guard at all, and a version recording a deliberate retag is the record
+// of a deliberate change. WHEN: only rows recorded before #727 shipped, because a
+// row this build wrote is a current writer's business and not this repair's (see
+// reflectNoOpCutoff). WHICH ROW: only one that records what the row before it
+// records, is not the memory's newest version, and names no other memory.
 
 // historyVersionColumns are the columns a history VERSION records: the state the
 // memory held once that write landed, which is what makes a row a version and not
@@ -65,21 +85,82 @@ var historyRowColumns = []string{"id", "recorded_at"}
 var historyCompactBatchSize = 500
 
 // compactablePhases are the phases a redundant version may be removed from, and
-// it is an ALLOWLIST rather than the issue's list of what must survive. The two
-// are the same set over the schema's CHECK list, and the allowlist is the safer
-// spelling: a phase added to memory_history later is not deletable until somebody
-// classifies it here, so a new event's first redundant version is a row that
-// stays rather than one that disappears because a name nobody thought about is
-// missing from a list of exemptions.
+// it is an ALLOWLIST of ONE phase, which is a deliberate narrowing rather than an
+// oversight. Every other phase records a change somebody made on purpose, and the
+// state columns cannot always see it — so the phase, not the state, is what
+// separates #730's damage from a legitimate event.
 //
-// `save`, `update`, `reflect` and `baseline` record a state and nothing else.
-// `delete` is the tombstone and the only record a deleted memory left;
+// `reflect` is the phase the damage is. A pre-#727 run appended one per kept
+// memory; #727 stopped the verbatim re-emission that produced nearly all of them;
+// and a merge that lands on a stored row's own text still appends one, which the
+// cutoff below handles rather than this list.
+//
+// `save` and `baseline` record the first statement of what a memory said, and a
+// redundant one of those is rare enough that leaving it costs nothing.
+// `update` is the case that decides the list: UpdateMemory files its version
+// UNCONDITIONALLY, with no no-op guard the way reuseChangesNothing gives the
+// reflect path one, so a tags-only `ghost_memory_update` appends a row that
+// restates content, category, importance, resolved_at and source byte for byte and
+// moves the stamp on purpose. Deleting that row would erase the record of a
+// deliberate retag, and restoring the stamp would undo its bump — the exact failure
+// the phase allowlist exists to make impossible
+// (TestCompactHistoryLeavesATagsOnlyEditAndItsStamp).
+//
+// The rest are excluded because each says something the state does not: `delete` is
+// the tombstone and the only record a deleted memory left;
 // `supersede`/`unsupersede` record a claim about the memory's standing, and only
 // the sequence says which claim is live; `resolve`/`unresolve` say who decided;
-// `merge` records the fold; `import` and `restore` say a row arrived from
-// outside. None of those is recoverable from the state it happens to record.
+// `merge` records the fold; `import` and `restore` say a row arrived from outside.
+//
+// It stays a list and an IN clause so a phase added to the schema later is not
+// deletable until somebody classifies it here.
 func compactablePhases() []string {
-	return []string{phaseSave, phaseUpdate, phaseReflect, phaseBaseline}
+	return []string{phaseReflect}
+}
+
+// reflectNoOpCutoff is the instant #727 reached main (d60aa301, 2026-09-28
+// 17:14:07 UTC), and it is the DEFAULT bound on the repair: a version recorded
+// before it may have been written by a build that appended a restatement for
+// every kept memory, and one recorded at or after it was written by a build that
+// has the fix — or, if it looks redundant, by the merge reuse this file cannot
+// distinguish from the damage. Leaving those alone is the safe direction: an
+// undamaged store keeps one version per deliberate change, while a row left behind
+// costs a slot under a cap that has room, and a re-run after an upgrade reaches it.
+//
+// The comparison is a STRING comparison, which is exact for the layout every
+// writer produces (`datetime('now')`, i.e. StoredStampLayout) and for the whole-day
+// form SQLite's date() leaves behind — a whole-day value sorts before any stamp
+// with a time on that day, which is the right answer for a row that old. A
+// recorded_at no layout can read sorts ABOVE the cutoff and is therefore left
+// alone, which is the safe direction again: an unreadable stamp is not evidence
+// that a row is damage, and the repair discloses what it cannot interpret rather
+// than guessing (restorableStamp).
+const reflectNoOpCutoff = "2026-09-28 17:14:07"
+
+// ResolveCompactCutoff is the cutoff a run will use, normalized to the layout the
+// comparison above is exact for. Exported because the report has to NAME the bound
+// that produced its numbers: a count with an unstated bound is not a number an
+// operator can reason about, and a bound they cannot see is a bound they cannot
+// widen.
+//
+// An empty before is the default (reflectNoOpCutoff). RFC 3339, the whole-day form
+// and the store's own layout are all accepted, because an operator who wants a wider
+// bound knows the DATE the fix shipped and not the second it did; a whole-day value
+// means the start of that day in UTC, which is EARLIER than the default and so
+// restores less — the conservative direction, and the one the date spelling implies.
+// The store's own layout is accepted so the function is idempotent, which lets a
+// caller resolve a flag once to report it and hand the resolved value straight back.
+func ResolveCompactCutoff(before string) (string, error) {
+	if before == "" {
+		return reflectNoOpCutoff, nil
+	}
+	for _, layout := range []string{DateStampLayout, StoredStampLayout, time.RFC3339} {
+		if at, err := time.Parse(layout, before); err == nil {
+			return at.UTC().Format(StoredStampLayout), nil
+		}
+	}
+	return "", fmt.Errorf("--before %q is neither a date (%s) nor an RFC 3339 instant",
+		before, DateStampLayout)
 }
 
 // placeholders is n question marks, comma separated, for an IN list.
@@ -131,32 +212,40 @@ func historyNewestVersionSQL(memoryID string) string {
 
 // historyRemovableRowSQL is the full predicate, and it is what #730 deletes by:
 // a row that recorded exactly what the row before it of the same memory recorded,
-// is not that memory's newest version, names no other memory, and is of a phase
-// whose only content is the state it recorded.
+// is not that memory's newest version, was recorded before the cutoff, names no
+// other memory, and is of a phase whose only content is the state it recorded.
 //
-// The newest-version guard is the one that makes the repair safe on a store that
-// keeps running the lifecycle, and it is the same rule pruneHistoryTx already
-// applies to its per-memory trim: "Ranking by rowid DESC also means the predicate
-// can never take a memory's newest row: it is rank 1." A memory's newest version
-// is the statement of what it says now, so nothing removes it — not the growth
-// policy, and not this.
+// The newest-version guard is the same rule pruneHistoryTx already applies to its
+// per-memory trim: "Ranking by rowid DESC also means the predicate can never take
+// a memory's newest row: it is rank 1." A memory's newest version is the statement
+// of what it says now, so nothing removes it — not the growth policy, and not this.
 //
-// It is also what keeps the store and the repair from disagreeing. ONE case needs
-// it, and it is the one place a CURRENT build still writes a version that
-// restates the state byte for byte: ReplaceNonManual's reusePreservesAge branch
-// (#623) re-tags or re-scopes a reused row, and the version it appends records
-// content, category, importance, resolved_at and source — none of which moved —
-// because this table has no column for tags or scope. #727 was right that the row
-// is a real change and recorded on purpose, and the guard is what reconciles that
-// with removing byte-identical rows: the change is the memory's newest version, so
-// it is kept, and only the SECOND restatement of the same restatement is
-// removable. A store running the lifecycle therefore settles at one such row per
-// memory rather than re-growing the table this command just pruned, and
-// --fix-updated-at leaves that row's bump alone (see restorableStamp).
+// The cutoff is what makes the repair safe on a store that keeps running the
+// lifecycle, and the newest-version guard is NOT. A current build still writes a
+// version that restates the state byte for byte, on purpose: a consolidation merge
+// whose survivor is one of its own sources carries the union of the sources' tags,
+// ReplaceNonManual's reusePreservesAge branch writes them, and the version it
+// appends records content, category, importance, resolved_at and source — none of
+// which moved, because this table has no column for tags. #727 was right that the
+// row is a real change. What no state-column predicate can do is recognise it
+// (TestAReflectReuseChangesTagsWithoutChangingAnyRecordedColumn runs the path
+// that writes one), so the bound is a time rather than a column: a row this build
+// wrote is a current writer's business, and a row written before the fix shipped is
+// this repair's.
+//
+// The guard still earns its place, and the case is the one the guard is the only
+// answer for: a store whose clock is behind — a restored backup, a copied database,
+// a machine whose clock was wrong when the rows were written — can hold a
+// byte-identical reflect version older than the cutoff, and the guard is what keeps
+// the compaction from taking a memory's own latest statement about itself. One
+// such row per memory, never the last, which is also why a store running the
+// lifecycle does not re-grow what was pruned: the rows it adds are all newer than
+// any cutoff, so they are outside the repair entirely.
 func historyRemovableRowSQL(outer string) string {
 	return historyEqualPredecessorSQL(outer) +
 		" AND " + outer + ".rowid <> " + historyNewestVersionSQL(outer+".memory_id") +
 		" AND " + outer + ".phase IN (" + placeholders(len(compactablePhases())) + ")" +
+		" AND " + outer + ".recorded_at < ?" +
 		" AND " + outer + ".related_id IS NULL AND " + outer + ".merged_content IS NULL"
 }
 
@@ -169,20 +258,20 @@ func historyRemovableRowSQL(outer string) string {
 // one project's memories, oldest rowid first. The batch is the DELETE's own LIMIT
 // over an ordered sub-select of rowids, so the next batch starts where the last
 // stopped with no cursor argument that could disagree with it.
-func compactDeleteStmt(projectID string) (string, []any) {
+func compactDeleteStmt(projectID, cutoff string) (string, []any) {
 	sql := `DELETE FROM memory_history WHERE rowid IN (
 	    SELECT h.rowid FROM memory_history h
 	    WHERE h.project_id = ? AND ` + historyRemovableRowSQL("h") + `
 	    ORDER BY h.rowid
 	    LIMIT ?)`
-	return sql, append(compactPhaseArgs(projectID), historyCompactBatchSize)
+	return sql, append(compactPredicateArgs(projectID, cutoff), historyCompactBatchSize)
 }
 
 // compactCountStmt is the same predicate, counted.
-func compactCountStmt(projectID string) (string, []any) {
+func compactCountStmt(projectID, cutoff string) (string, []any) {
 	sql := `SELECT count(*) FROM memory_history h
 	    WHERE h.project_id = ? AND ` + historyRemovableRowSQL("h")
-	return sql, compactPhaseArgs(projectID)
+	return sql, compactPredicateArgs(projectID, cutoff)
 }
 
 // compactCandidatesStmt is the updated_at pass's read. Per LIVE memory of one
@@ -197,6 +286,13 @@ func compactCountStmt(projectID string) (string, []any) {
 // run's count and the apply's write cannot disagree, and a memory whose rows were
 // removed by an earlier batch of the same pass is still judged correctly.
 //
+// The cutoff reaches the evidence for the same reason it reaches the delete. If it
+// did not, a post-#727 byte-identical reflect version — a deliberate retag the
+// state columns cannot see — would count as proof that a reflection moved the
+// stamp, and the pass would rewind updated_at over the change the store just made
+// and recorded. The evidence and the row that would be deleted are the same
+// statement, so the gate can never read a row this run would not remove.
+//
 // The join to memories is what makes this the updated_at repair rather than a
 // second history pass: a deleted memory has no row to stamp, and its tombstone is
 // evidence about a memory that is gone. The cursor pages the scan and is stable
@@ -209,7 +305,7 @@ func compactCountStmt(projectID string) (string, []any) {
 // separate first-page spelling: `? = ” OR c.memory_id > ?` is a branch SQLite folds
 // away, and two statements differing only in their WHERE clause are two things to
 // keep in step.
-func compactCandidatesStmt(projectID, cursor string) (string, []any) {
+func compactCandidatesStmt(projectID, cursor, cutoff string) (string, []any) {
 	// The evidence the decision needs, spelled with the delete's own predicate and
 	// over the same project, so "was there a version NEWER than the last real
 	// change that said nothing" is answered by the delete's rule rather than by a
@@ -230,10 +326,10 @@ func compactCandidatesStmt(projectID, cursor string) (string, []any) {
 	    WHERE (? = '' OR c.memory_id > ?)
 	    ORDER BY c.memory_id
 	    LIMIT ?`
-	// Textual order: the evidence sub-select's project and phase list, then the
-	// changed-state scan's project, then the live row's project, then the cursor
+	// Textual order: the evidence sub-select's project, phase list and cutoff, then
+	// the changed-state scan's project, then the live row's project, then the cursor
 	// and the page.
-	args := compactPhaseArgs(projectID)
+	args := compactPredicateArgs(projectID, cutoff)
 	args = append(args, projectID, projectID, cursor, cursor, historyCompactBatchSize)
 	return sql, args
 }
@@ -244,15 +340,18 @@ func compactCandidatesStmt(projectID, cursor string) (string, []any) {
 // it no longer belongs to.
 const historyCompactRestoreSQL = `UPDATE memories SET updated_at = ? WHERE id = ? AND project_id = ?`
 
-// compactPhaseArgs binds the project predicate and then compactablePhases, in the
-// order the statements name them.
-func compactPhaseArgs(projectID string) []any {
-	args := make([]any, 0, len(compactablePhases())+1)
+// compactPredicateArgs binds the project predicate, then compactablePhases, then
+// the cutoff, in the order historyRemovableRowSQL names them. The three statements
+// that read the predicate take the cutoff as a binding rather than naming the
+// constant, because it is an argument of the run (ResolveCompactCutoff) and a
+// constant written into the SQL would be a second, unreported bound.
+func compactPredicateArgs(projectID, cutoff string) []any {
+	args := make([]any, 0, len(compactablePhases())+2)
 	args = append(args, projectID)
 	for _, p := range compactablePhases() {
 		args = append(args, p)
 	}
-	return args
+	return append(args, cutoff)
 }
 
 // HistoryCompactOptions is what one project's compaction does.
@@ -266,6 +365,14 @@ type HistoryCompactOptions struct {
 	// be removed on their own, and a caller who wants the history back under its
 	// caps without a stamp moving does not have to accept a stamp moving.
 	FixUpdatedAt bool
+	// Before bounds the repair to versions recorded before a time, as a
+	// 2006-01-02 date or an RFC 3339 instant. Empty means reflectNoOpCutoff, the
+	// instant #727 shipped, and the default is the safe one: a version recorded
+	// after it was written by a build that has the fix, and one that still looks
+	// redundant was written by the merge reuse this repair cannot see through. See
+	// ResolveCompactCutoff, which reports the bound a run actually used so a
+	// caller can name it.
+	Before string
 }
 
 // HistoryCompactResult is what one project's compaction found and did. The counts
@@ -274,6 +381,12 @@ type HistoryCompactOptions struct {
 type HistoryCompactResult struct {
 	// ProjectID is the project the counts are for.
 	ProjectID string `json:"project_id"`
+	// Before is the cutoff the run used, normalized to StoredStampLayout. It is on
+	// the result rather than only in the caller's hands because the counts below are
+	// meaningless without it: "18 redundant versions" answers a different question
+	// at each bound, and a report that printed the number without the bound would be
+	// reporting half an answer.
+	Before string `json:"before"`
 	// Removed is the number of redundant versions deleted, or — in a dry run — the
 	// number the apply would delete.
 	Removed int64 `json:"removed"`
@@ -315,12 +428,16 @@ func (s *Store) CompactHistory(ctx context.Context, projectID string, opts Histo
 	if projectID == "" {
 		return HistoryCompactResult{}, fmt.Errorf("compact history: a project is required")
 	}
-	res := HistoryCompactResult{ProjectID: projectID}
+	cutoff, err := ResolveCompactCutoff(opts.Before)
+	if err != nil {
+		return HistoryCompactResult{ProjectID: projectID}, err
+	}
+	res := HistoryCompactResult{ProjectID: projectID, Before: cutoff}
 
 	if !opts.Apply {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		return s.compactHistoryPreview(ctx, projectID, opts, res)
+		return s.compactHistoryPreview(ctx, projectID, cutoff, opts, res)
 	}
 
 	// The write lock, for the reason every other writer here takes it: the batches
@@ -337,15 +454,23 @@ func (s *Store) CompactHistory(ctx context.Context, projectID string, opts Histo
 	// that deleted nothing would restore something: a preview and the run it
 	// previews, disagreeing. The delete's own predicate does not depend on the pass,
 	// which only ever writes memories.updated_at.
+	//
+	// The counts are carried on the error path, and that is not decoration. A store
+	// with tens of thousands of redundant versions commits many batches before
+	// anything can fail, and every one of them is durable; the counts are the only
+	// record that this run rewrote part of the store, and a zero handed back beside
+	// an error describes a store that no longer exists.
 	if opts.FixUpdatedAt {
-		fixed, unreadable, err := s.restoreUpdatedAt(ctx, projectID, true)
+		fixed, unreadable, err := s.restoreUpdatedAt(ctx, projectID, cutoff, true)
 		if err != nil {
+			res.UpdatedAt, res.StampsUnreadable = fixed, unreadable
 			return res, err
 		}
 		res.UpdatedAt, res.StampsUnreadable = fixed, unreadable
 	}
-	removed, err := s.deleteRemovableHistory(ctx, projectID)
+	removed, err := s.deleteRemovableHistory(ctx, projectID, cutoff)
 	if err != nil {
+		res.Removed = removed
 		return res, err
 	}
 	res.Removed = removed
@@ -357,16 +482,17 @@ func (s *Store) CompactHistory(ctx context.Context, projectID string, opts Histo
 // the same decision the apply makes, in the same ORDER, off the same table — a
 // preview and the run it previews cannot disagree, including about a row whose clock
 // is ambiguous.
-func (s *Store) compactHistoryPreview(ctx context.Context, projectID string, opts HistoryCompactOptions,
+func (s *Store) compactHistoryPreview(ctx context.Context, projectID, cutoff string, opts HistoryCompactOptions,
 	res HistoryCompactResult) (HistoryCompactResult, error) {
 	if opts.FixUpdatedAt {
-		fixed, unreadable, err := s.restoreUpdatedAt(ctx, projectID, false)
+		fixed, unreadable, err := s.restoreUpdatedAt(ctx, projectID, cutoff, false)
 		if err != nil {
+			res.UpdatedAt, res.StampsUnreadable = fixed, unreadable
 			return res, err
 		}
 		res.UpdatedAt, res.StampsUnreadable = fixed, unreadable
 	}
-	query, args := compactCountStmt(projectID)
+	query, args := compactCountStmt(projectID, cutoff)
 	var removed int64
 	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&removed); err != nil {
 		return res, fmt.Errorf("count removable history versions: %w", err)
@@ -377,8 +503,8 @@ func (s *Store) compactHistoryPreview(ctx context.Context, projectID string, opt
 
 // deleteRemovableHistory removes this project's removable versions in bounded
 // BEGIN IMMEDIATE batches, and reports how many went.
-func (s *Store) deleteRemovableHistory(ctx context.Context, projectID string) (int64, error) {
-	query, args := compactDeleteStmt(projectID)
+func (s *Store) deleteRemovableHistory(ctx context.Context, projectID, cutoff string) (int64, error) {
+	query, args := compactDeleteStmt(projectID, cutoff)
 	var total int64
 	for {
 		// beginWrite, not s.db.BeginTx: this opens a write transaction per batch
@@ -436,18 +562,17 @@ type compactStamp struct {
 // made on purpose, and it is a single condition: a REMOVABLE version must be newer
 // than the last version that changed state. That is the whole claim the repair
 // makes — the reflect run that moved the stamp is the one whose versions said
-// nothing, and it said nothing AFTER the last real change — and it covers the case
-// that has no state-column answer.
+// nothing, and it said nothing AFTER the last real change.
 //
-// ReplaceNonManual's reusePreservesAge branch (#623) re-tags or re-scopes a reused
-// row, and the version it appends restates content, category, importance,
-// resolved_at and source byte for byte, because this table has no column for tags
-// or scope. #727 was right that the row is a real change and recorded on purpose.
-// The newest-version guard (historyRemovableRowSQL) keeps that row, so nothing is
-// removable for a memory whose only restatement is that one, and this gate leaves
-// the bump it made alone. Without the guard the compaction would delete the row and
-// this would move the stamp back over a change the store deliberately made and
-// recorded — the exact failure #730 is a repair for, reproduced by the repair.
+// "Removable" is doing the load-bearing work in that sentence, and what it means is
+// the cut, the phase AND the state comparison together. A current build still writes
+// a version that restates the state byte for byte on purpose — a consolidation merge
+// whose survivor is one of its own sources carries the union of the sources' tags,
+// and the tags are not a column here
+// (TestAReflectReuseChangesTagsWithoutChangingAnyRecordedColumn runs that path) —
+// and such a row moves the stamp on purpose too. The cutoff keeps it out of the
+// evidence for the same reason it keeps it out of the delete; a row this repair
+// would not remove is not a row it may treat as proof that a reflection ran.
 //
 // Then the direction. The damage moved updated_at FORWARD, to the time of a reflect
 // that changed nothing, so the repair moves it BACK to the last real change and only
@@ -494,7 +619,16 @@ func restorableStamp(s compactStamp) (stamp string, restorable, unreadable bool)
 // modes: a dry run reads on the pool and opens no transaction at all, because there
 // is nothing to write and a transaction here would take the write lock to look at a
 // table nobody asked it to change.
-func (s *Store) restoreUpdatedAt(ctx context.Context, projectID string, apply bool) (fixed, unreadable int64, err error) {
+//
+// fixed counts COMMITTED stamps and nothing else, which is why a batch's decisions
+// are added after its commit rather than inside the loop. A stamp is a row's
+// freshness: a count that included a write whose batch rolled back would send an
+// operator looking for damage that is still exactly where it was, and the count is
+// the only thing they have to go on when a run over a large store failed part way
+// through. unreadable is counted as it is decided instead, because an unreadable
+// stamp is a statement about the data rather than a write, and it survives the
+// rollback of the batch that noticed it.
+func (s *Store) restoreUpdatedAt(ctx context.Context, projectID, cutoff string, apply bool) (fixed, unreadable int64, err error) {
 	cursor := ""
 	for {
 		// tx is nil in a dry run and this batch's transaction in an apply, and it is
@@ -518,13 +652,14 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID string, apply bo
 		if tx != nil {
 			q = tx
 		}
-		batch, readErr := s.stampBatchQuery(ctx, q, projectID, cursor)
+		batch, readErr := s.stampBatchQuery(ctx, q, projectID, cursor, cutoff)
 		if readErr != nil {
 			if tx != nil {
 				_ = tx.Rollback() //nolint:errcheck
 			}
 			return fixed, unreadable, readErr
 		}
+		stamped := int64(0)
 		for _, c := range batch {
 			stamp, restorable, bad := restorableStamp(c)
 			if bad {
@@ -533,7 +668,7 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID string, apply bo
 			if !restorable {
 				continue
 			}
-			fixed++
+			stamped++
 			if tx == nil {
 				continue
 			}
@@ -548,6 +683,7 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID string, apply bo
 			}
 			lock.reportHold("history-compact-stamp", time.Now())
 		}
+		fixed += stamped
 		if len(batch) < historyCompactBatchSize {
 			return fixed, unreadable, nil
 		}
@@ -559,8 +695,8 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID string, apply bo
 // and paged. An apply runs it on the transaction it will write in, so a memory that
 // is deleted or moved between the read and the write cannot be stamped from a row
 // the run has already read.
-func (s *Store) stampBatchQuery(ctx context.Context, q stampQuerier, projectID, cursor string) ([]compactStamp, error) {
-	query, args := compactCandidatesStmt(projectID, cursor)
+func (s *Store) stampBatchQuery(ctx context.Context, q stampQuerier, projectID, cursor, cutoff string) ([]compactStamp, error) {
+	query, args := compactCandidatesStmt(projectID, cursor, cutoff)
 	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read memories to restore updated_at: %w", err)

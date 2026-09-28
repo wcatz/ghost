@@ -2554,6 +2554,11 @@ func TestCLIHistoryCompact(t *testing.T) {
 		mustContain(t, "history compact (dry run)", dry.stdout, "dry run")
 		mustContain(t, "history compact (dry run)", dry.stdout, e2eProject)
 		mustMatch(t, "history compact (dry run)", dry.stdout, `19 redundant version`)
+		// The bound is named, because every count is a count AT one: "19" answers a
+		// different question at each instant, and an operator with a store whose
+		// clock is behind has no other way to tell whether the default already
+		// reached their rows.
+		mustContain(t, "history compact (dry run)", dry.stdout, "before 2026-09-28 17:14:07")
 		if got := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, id); got != before {
 			t.Errorf("the dry run left %d history rows, want the %d it started with", got, before)
 		}
@@ -2632,6 +2637,62 @@ func TestCLIHistoryCompact(t *testing.T) {
 		}
 	})
 
+	t.Run("a version a current build wrote is left to --before", func(t *testing.T) {
+		// Twenty restatements recorded AFTER #727 shipped, which is what a current
+		// build's own byte-identical version looks like: a consolidation merge whose
+		// survivor is one of its sources carries the union of the sources' tags, and
+		// this table has no column for tags. Nothing in the row says so, so the
+		// default bound cannot tell these from the damage and leaves them alone —
+		// which is the safe direction, and the one an operator re-runs after an
+		// upgrade to reach.
+		third := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "a current build's own restatement is not the damage",
+			"category":   "architecture",
+			"importance": 0.5,
+		}))
+		call(t, cs, "ghost_memory_update", map[string]any{
+			"project_id": e2eProject,
+			"memory_id":  third,
+			"content":    "a current build's own restatement is not the damage, restated",
+		})
+		const (
+			thirdUpdate = "2026-03-01 11:00:00"
+			thirdRun    = "2026-10-01 12:00:00"
+		)
+		seedPreFixReflectHistory(t, s, third, 20, thirdUpdate, thirdRun, thirdRun)
+
+		// Under the default bound the store has nothing left to remove: the first
+		// memory was already compacted and these twenty are newer than the cut.
+		underDefault := s.mustRun("history", "compact", "--project", e2eProject, "--fix-updated-at")
+		mustMatch(t, "history compact (default bound)", underDefault.stdout, `0 redundant version`)
+		mustMatch(t, "history compact (default bound)", underDefault.stdout, `0 updated_at restored`)
+		mustContain(t, "history compact (default bound)", underDefault.stdout, "before 2026-09-28 17:14:07")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, third); n != 22 {
+			t.Errorf("the default bound left %d history rows, want all 22", n)
+		}
+		// And the stamp is untouched, because the twenty rows that would have been
+		// its evidence are rows this repair will not remove.
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, third).text; got != thirdRun {
+			t.Errorf("updated_at = %q, want the run's own time (%q): a row outside the repair is not "+
+				"evidence that a reflection moved the stamp", got, thirdRun)
+		}
+
+		// Move the cut past them and they are the damage after all — 19 of 20, the
+		// last being the memory's newest version. Both runs are dry, so the store is
+		// the same store.
+		widened := s.mustRun("history", "compact", "--project", e2eProject, "--before", "2026-10-02", "--fix-updated-at")
+		mustMatch(t, "history compact --before", widened.stdout, `19 redundant version`)
+		mustMatch(t, "history compact --before", widened.stdout, `1 updated_at restored`)
+		// The bound is the one THIS run used, not the default it did not have to
+		// fall back on.
+		mustContain(t, "history compact --before", widened.stdout, "before 2026-10-02 00:00:00")
+		mustNotContain(t, "history compact --before", widened.stdout, "before 2026-09-28 17:14:07")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, third); n != 22 {
+			t.Errorf("the widened dry run left %d history rows, want all 22 — it was a dry run", n)
+		}
+	})
+
 	t.Run("it refuses while the project's lifecycle lock is held", func(t *testing.T) {
 		claim := filepath.Join(s.dataDir(), "lifecycle-"+e2eProject+".pid")
 		if err := os.WriteFile(claim, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
@@ -2665,5 +2726,14 @@ func TestCLIHistoryCompact(t *testing.T) {
 		// And a project that names nothing is an error, not an empty report: the
 		// alternative is a whole-store compaction by a reader who mistyped.
 		s.mustFail("history", "compact", "--project", "no-such-project")
+		// A bound the command cannot read is refused before it opens a project. It
+		// is not defaulted and it is not passed down: defaulting would delete the
+		// rows the operator asked to spare while reporting the default's numbers,
+		// and passing it down would refuse it from inside the first project, having
+		// already said the store was compactable.
+		refused := s.mustFail("history", "compact", "--before", "the day it shipped")
+		mustContain(t, "history compact --before refusal", refused.stderr+refused.stdout, "--before")
+		s.mustFail("history", "compact", "--before")
+		s.mustFail("history", "compact", "--before=")
 	})
 }
