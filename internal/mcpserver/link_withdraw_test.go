@@ -86,7 +86,7 @@ func TestLinkWithdrawRemovesTheNamedEdge(t *testing.T) {
 	// `ghost_resolve` is the FORWARD pass — it stamps resolved_at on confirmed
 	// evidence — and takes no id selector, so an agent pointed at it would bury MORE
 	// memories and pay a harness call for it.
-	want, _ := followup.ResolveCommand("test-project", []string{older})
+	want, _, _ := followup.ResolveCommand("test-project", []string{older})
 	if !strings.Contains(msg, want) {
 		t.Errorf("the result does not carry the scoped repair command %q: %q", want, msg)
 	}
@@ -330,8 +330,8 @@ func TestLinkWithdrawNamesAnIDThatOnlyTheFileFormCanCarry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("withdrawSupersedesLink: %v", err)
 	}
-	if !strings.Contains(msg, "hold a comma") {
-		t.Errorf("the result does not say the id needs the file form: %q", msg)
+	if !strings.Contains(msg, "No --only command can name the target") {
+		t.Errorf("the result does not say there is no --only command: %q", msg)
 	}
 	if !strings.Contains(msg, commy) {
 		t.Errorf("the result does not name the id that only the file can carry: %q", msg)
@@ -339,11 +339,58 @@ func TestLinkWithdrawNamesAnIDThatOnlyTheFileFormCanCarry(t *testing.T) {
 	if !strings.Contains(msg, "--only-file") {
 		t.Errorf("the result does not point at the surface that can carry it: %q", msg)
 	}
-	// And the command it printed must not carry it, or the agent runs something
-	// that judges the wrong rows.
+	// And no command it printed may carry it, or the agent runs something that
+	// judges the wrong rows. Nor may it print the UNSCOPED repair: that is the
+	// project-wide re-judge, and a copy-pasteable line naming it is the one thing
+	// this answer must not hand over.
 	for _, line := range strings.Split(msg, "\n") {
+		if strings.Contains(line, "ghost resolve") && !strings.Contains(line, "--only") && !strings.Contains(line, "--only-file") {
+			t.Errorf("the result printed an unscoped repair line: %q", line)
+		}
 		if strings.Contains(line, "--only ") && strings.Contains(line, commy) {
 			t.Errorf("the printed command carries a comma-bearing id: %q", line)
 		}
+	}
+}
+
+// No surface can carry an id holding a newline — `--only` splits on commas and the
+// --only-file is one id per line — so the answer has to say the memory stays
+// resolved rather than implying a repair exists. An agent that believes otherwise
+// leaves a memory out of every session with nothing able to clear it.
+func TestLinkWithdrawSaysNoSurfaceCanNameANewlineID(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	wrapped := "imported\nnote"
+	if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
+		ID: wrapped, ProjectID: "test-project", Category: "fact",
+		Content: "The restore path needs two spindles to be safe.", Source: "mcp",
+	}, memory.ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	newer, err := store.Create(ctx, "test-project", memory.Memory{
+		Category: "fact", Content: "The restore path is safe on one spindle.", Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.CreateLink(ctx, newer, wrapped, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", newer, wrapped)
+	if err != nil {
+		t.Fatalf("withdrawSupersedesLink: %v", err)
+	}
+	if !strings.Contains(msg, "no\n") && !strings.Contains(msg, "newline") {
+		t.Errorf("the result does not say the id holds a newline: %q", msg)
+	}
+	if !strings.Contains(msg, "stay resolved") {
+		t.Errorf("the result does not say what happens to that memory: %q", msg)
+	}
+	if !strings.Contains(msg, "re-import it under an id") {
+		t.Errorf("the result does not say what actually clears it: %q", msg)
 	}
 }

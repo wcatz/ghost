@@ -27,9 +27,9 @@ func TestResolveFollowupCommandRunsAndJudgesWhatItNames(t *testing.T) {
 		{name: "a three-character id", project: "myproj", ids: []string{"abc"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd, viaFile := followup.ResolveCommand(tc.project, tc.ids)
-			if len(viaFile) != 0 {
-				t.Fatalf("these ids are not comma-bearing, so none may need the file form: %v", viaFile)
+			cmd, viaFile, unnameable := followup.ResolveCommand(tc.project, tc.ids)
+			if len(viaFile) != 0 || len(unnameable) != 0 {
+				t.Fatalf("these ids need no other surface: viaFile %v, unnameable %v", viaFile, unnameable)
 			}
 
 			// A POSIX shell, which concatenates adjacent quoted words: this is the
@@ -81,7 +81,7 @@ func TestResolveFollowupCommandRunsAndJudgesWhatItNames(t *testing.T) {
 func TestResolveFollowupCommandToleratesOneWrongID(t *testing.T) {
 	real := "aaaaaaaa1111111111111111111111"
 	cleared := "cccccccc3333333333333333333333"
-	cmd, _ := followup.ResolveCommand("myproj", []string{real, cleared})
+	cmd, _, _ := followup.ResolveCommand("myproj", []string{real, cleared})
 	parsed, err := parseResolveArgs(shellSplit(t, cmd)[2:])
 	if err != nil {
 		t.Fatalf("parse: %v", err)

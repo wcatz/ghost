@@ -54,12 +54,12 @@ func TestResolveFollowupCommandIsCopyable(t *testing.T) {
 	// metacharacter, and unquoted one word-splits into selectors the repair
 	// refuses (or executes, when pasted).
 	want := "ghost resolve myproj --reassess --only 'aaaaaaaa1111111111111111111111','bbbbbbbb2222222222222222222222' --apply"
-	got, viaFile := resolveFollowupCommand("myproj", ids)
+	got, viaFile, unnameable := resolveFollowupCommand("myproj", ids)
 	if got != want {
 		t.Errorf("resolveFollowupCommand() = %q, want %q", got, want)
 	}
-	if len(viaFile) != 0 {
-		t.Errorf("ordinary ids were pushed to the file form: %v", viaFile)
+	if len(viaFile) != 0 || len(unnameable) != 0 {
+		t.Errorf("ordinary ids were pushed out of the command: viaFile %v, unnameable %v", viaFile, unnameable)
 	}
 }
 
@@ -86,7 +86,7 @@ func TestResolveFollowupCommandQuotesAnAwkwardProjectName(t *testing.T) {
 		{"substitution", "$(id)", "ghost resolve --project '$(id)' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got, _ := resolveFollowupCommand(tc.project, ids); got != tc.want {
+			if got, _, _ := resolveFollowupCommand(tc.project, ids); got != tc.want {
 				t.Errorf("resolveFollowupCommand(%q) = %q, want %q", tc.project, got, tc.want)
 			}
 		})
@@ -103,8 +103,8 @@ func TestPrintedFollowupRuns(t *testing.T) {
 		t.Run(project, func(t *testing.T) {
 			ids := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
 			// argv[2:], exactly as main hands the parser a command's own words.
-			line, viaFile := resolveFollowupCommand(project, ids)
-			if len(viaFile) != 0 {
+			line, viaFile, unnameable := resolveFollowupCommand(project, ids)
+			if len(viaFile) != 0 || len(unnameable) != 0 {
 				t.Fatalf("these ids are not comma-bearing, so none may need the file form: %v", viaFile)
 			}
 			words := shellSplit(t, line)
@@ -208,6 +208,61 @@ func TestSupersedeReassessFollowupNamesTheCommandAndTheFile(t *testing.T) {
 	}
 	if strings.Contains(commy, "--only 'aaaaaaaa1111111111111111111111','imported,note'") {
 		t.Errorf("the follow-up printed a command carrying an id --only cannot name:\n%s", commy)
+	}
+}
+
+// The file is the only surface that can name a comma-bearing id, so a block that
+// points at the file when the file write FAILED points at nothing and lists the
+// id nowhere — the invisibility this block exists to remove. writeReassessTargets
+// returns an empty path on failure, so "no file" is exactly an empty path.
+func TestSupersedeReassessFollowupNamesTheIDsWhenTheFileIsMissing(t *testing.T) {
+	got := supersedeReassessFollowup("myproj", []string{"imported,note"}, "")
+	if strings.Contains(got, "are in the file") || strings.Contains(got, "they are in the file") {
+		t.Errorf("the follow-up points at a file that was never written:\n%s", got)
+	}
+	if !strings.Contains(got, "imported,note") {
+		t.Errorf("the follow-up neither wrote nor named the id, so nothing can reach it:\n%s", got)
+	}
+	if !strings.Contains(got, "id file could not be written") {
+		t.Errorf("the follow-up does not say the file is missing:\n%s", got)
+	}
+}
+
+// When EVERY id holds a comma there is no --only command, and the block must not
+// fall back to the command without --only: that is the project-wide re-judge #698
+// measured, printed under a heading that promises nothing outside this list is
+// judged. The file is the way, and the block says so.
+func TestSupersedeReassessFollowupNeverPrintsTheUnscopedRepair(t *testing.T) {
+	got := supersedeReassessFollowup("myproj", []string{"one,two", "three,four"}, "/data/x.ids")
+	// Every line naming a command must name a SCOPED one, and the unscoped repair
+	// must not even be written out in the warning: a copy-pasteable line that
+	// re-judges the whole project is what this block exists to avoid handing over.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "ghost resolve") && !strings.Contains(line, "--only") && !strings.Contains(line, "--only-file") {
+			t.Errorf("the follow-up printed an unscoped repair line: %q\n%s", line, got)
+		}
+	}
+	if !strings.Contains(got, "Do NOT fall back on the same command") {
+		t.Errorf("the follow-up does not warn the operator off the unscoped form:\n%s", got)
+	}
+	if !strings.Contains(got, "/data/x.ids") {
+		t.Errorf("the follow-up does not point at the file that can name them:\n%s", got)
+	}
+}
+
+// No surface can carry an id holding a newline — `--only` splits on commas and the
+// file is one id per line — so the block has to say the memory stays resolved
+// rather than implying a repair exists.
+func TestSupersedeReassessFollowupSaysNoSurfaceCanNameANewlineID(t *testing.T) {
+	got := supersedeReassessFollowup("myproj", []string{"two\nlines"}, "/data/x.ids")
+	if !strings.Contains(got, "no --only or --only-file form can carry") {
+		t.Errorf("the follow-up does not say the id is unreachable:\n%s", got)
+	}
+	if !strings.Contains(got, `\"two\\nlines\"`) && !strings.Contains(got, "two") {
+		t.Errorf("the follow-up does not name the id at all:\n%s", got)
+	}
+	if !strings.Contains(got, "stay resolved") {
+		t.Errorf("the follow-up does not say what happens to that memory:\n%s", got)
 	}
 }
 

@@ -1416,17 +1416,25 @@ func TestParseResolveArgs(t *testing.T) {
 }
 
 // TestReadOnlySelectors pins the --only-file format: one id or prefix per line,
-// '#' starting a comment anywhere on the line, blank lines and CRLF ignored. The
-// comment rule is safe because a selector can never contain a '#' — an id is
-// hex, and so is any prefix of one — and it is what lets a person annotate the
-// file they are about to paste into a repair.
+// a '#' starting a COMMENT LINE (optionally indented), blank lines and CRLF
+// ignored.
+//
+// The comment used to be stripped from the first '#' anywhere on a line, on the
+// premise that a selector can never contain one — an id is hex, and so is any
+// prefix of one. `ghost import` made that false: it writes an artifact's ids
+// verbatim, so a stored id can hold a '#'. This file is the only surface that can
+// carry some of those ids, so truncating one at its '#' turned it into a selector
+// naming no row and the repair reported a miss for a memory it had just called
+// repairable. A comment therefore has to be a line of its own, which is also the
+// shape the file Ghost writes uses.
 func TestReadOnlySelectors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ids.txt")
 	body := "# targets withdrawn by supersede --reassess --apply\r\n" +
-		"abcdef0123456789abcdef0123456789   # the changelog note\r\n" +
+		"abcdef0123456789abcdef0123456789\r\n" +
 		"\r\n" +
 		"  12345678  \n" +
+		"   # an indented comment, the annotation form that still works\n" +
 		"# trailing comment with no ids\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -1443,6 +1451,26 @@ func TestReadOnlySelectors(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("selector %d = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// A '#' inside an id is part of the id, not the start of a comment. The only way to
+// tell the two apart is where the '#' sits: a comment line's first non-space
+// character, a mid-line '#' is data. An imported artifact can hold one, and this
+// file is the only surface that can carry it.
+func TestReadOnlySelectorsKeepsAHashInsideAnID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ids.txt")
+	hashy := "import#1 note"
+	if err := os.WriteFile(path, []byte("# a comment line\n"+hashy+"\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := readOnlySelectors(path)
+	if err != nil {
+		t.Fatalf("readOnlySelectors: %v", err)
+	}
+	if len(got) != 1 || got[0] != hashy {
+		t.Errorf("readOnlySelectors = %q, want [%q]", got, hashy)
 	}
 }
 

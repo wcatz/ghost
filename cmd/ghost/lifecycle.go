@@ -1987,11 +1987,19 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 }
 
 // readOnlySelectors reads a --only-file: one memory id or 8+ character hex
-// prefix per line, '#' starting a comment, blank lines ignored. Comments are
-// stripped from the first '#', not only from a whole line, because a file a
-// human annotated ("the changelog note") is the expected input here and a line
-// with a trailing note is not worth failing a repair over. It is safe because a
-// selector can never contain a '#': an id is hex and so is a prefix of one.
+// prefix per line, '#' starting a comment, blank lines ignored. A comment is a
+// WHOLE line starting with '#' (after optional leading space), which is what an
+// annotated file looks like, and the id is taken verbatim from the rest of the
+// line.
+//
+// It used to strip from the first '#' anywhere, including mid-line, on the
+// premise that a selector can never contain one — an id is hex, and so is a
+// prefix of one. That stopped being true when `ghost import` made a stored id
+// whatever its artifact said, and this file is the only surface that can carry
+// some of those ids, so truncating one at a '#' turned it into a selector naming
+// no row and the repair reported a miss for a memory it had just called
+// repairable. A trailing comment therefore has to be a line of its own; the cost
+// is one annotation style, and it buys an id that is still nameable.
 //
 // A file that yields no selectors is an error rather than an unscoped run. The
 // operator pointed the pass at a file, and judging the whole project because
@@ -2004,8 +2012,16 @@ func readOnlySelectors(path string) ([]string, error) {
 	}
 	var out []string
 	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-		if idx := strings.IndexByte(line, '#'); idx >= 0 {
-			line = line[:idx]
+		// A '#' starts a comment only at the first non-space position. It used to
+		// truncate the line at the first '#' ANYWHERE, on the premise that "a
+		// selector can never contain a '#': an id is hex". That premise stopped
+		// holding when `ghost import` made a stored id whatever the artifact said,
+		// and this file is the only surface that can carry a comma-bearing id — so
+		// a '#' inside one truncated it to a selector naming no row, and the repair
+		// reported a miss for a memory it had just said was repairable. A comment
+		// column still works (`# …`, `   # …`); a `#` inside a word does not.
+		if idx := strings.IndexFunc(line, func(r rune) bool { return r != ' ' && r != '\t' }); idx >= 0 && line[idx] == '#' {
+			continue
 		}
 		if line = strings.TrimSpace(line); line != "" {
 			out = append(out, line)
@@ -2030,9 +2046,10 @@ Flags:
   --only ids      With --reassess: judge only these memories — a comma-separated
                   list of memory ids, or of 8+ character hex prefixes of them.
                   A full id is taken as given whatever its shape (an imported
-                  one can hold a space or a dash); the hex rule is about a
-                  prefix. An id holding a comma cannot be named here, because
-                  this list is comma-separated — use --only-file for it.
+                  one can hold a space, a dash or a '#'); the hex rule is about
+                  a prefix. An id holding a comma cannot be named here, because
+                  this list is comma-separated — --only-file can, and an id
+                  holding a newline is reachable through neither.
   --only-file p   With --reassess: the same, read from a file: one id or prefix
                   per line, where '#' starts a comment. For a list too long to
                   type on one line.
