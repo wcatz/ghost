@@ -150,31 +150,9 @@ func writeBackupManifest(dest string, counts BackupCounts, at time.Time) (string
 	// Chmod before a byte is written, so the window vacuumInto closes for the
 	// snapshot is closed here too, on the replacing path as well as the
 	// creating one.
-	// Classified before the create, for the reason reserveBackupPath classifies
-	// the snapshot — but the classification is NOT the defence here, and the
-	// difference is load-bearing. reserveBackupPath's create is O_EXCL, so its
-	// Lstat and its claim are one atomic step with no window between them; this
-	// open cannot be O_EXCL, because a manifest is replaced rather than refused
-	// and O_EXCL would refuse exactly the case the replace exists to serve. The
-	// enforcement is therefore the flag in manifestOpenFlags (O_NOFOLLOW), and
-	// the Lstat is here so the refusal says which case it is rather than
-	// reporting ELOOP to a reader who has no idea what a symlink at this path
-	// means.
-	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
-		return "", fmt.Errorf("refusing to write the manifest to %s, which is not a regular file", path)
-	} else if err != nil && !os.IsNotExist(err) {
-		return "", fmt.Errorf("check the manifest path %s: %w", path, err)
-	}
-	f, err := os.OpenFile(path, manifestOpenFlags, 0o600)
+	f, err := openManifestFile(path)
 	if err != nil {
-		// The window the Lstat cannot close. A link planted between the
-		// classification and this open is refused by the kernel rather than
-		// followed, and saying so is more use than "too many levels of
-		// symbolic links" to someone who did not know a link was involved.
-		if errors.Is(err, syscall.ELOOP) {
-			return "", fmt.Errorf("refusing to write the manifest to %s, which became a symlink and I will not write through it", path)
-		}
-		return "", fmt.Errorf("create manifest %s: %w", path, err)
+		return "", err
 	}
 	if err := f.Chmod(0o600); err != nil {
 		_ = f.Close()
@@ -197,6 +175,50 @@ func writeBackupManifest(dest string, counts BackupCounts, at time.Time) (string
 	}
 	TightenPermissions(path)
 	return path, nil
+}
+
+// openManifestFile opens the sidecar for writing, classifying the path first and
+// enforcing the classification in the same step. It is a seam rather than four
+// lines inline so that the O_NOFOLLOW refusal and the message it maps to are
+// reachable from a test: the window the flag closes is a race, and a race is not
+// something a test can win, so the two pieces that close it are pinned here
+// instead and the comment below says which is which.
+func openManifestFile(path string) (*os.File, error) {
+	// The CLASSIFICATION. reserveBackupPath does the same before its create, and
+	// gets safety for free because that create is O_EXCL — the Lstat and the
+	// claim are one atomic step. This create cannot be O_EXCL, because a manifest
+	// is replaced rather than refused and O_EXCL would refuse exactly the case
+	// the replace exists to serve, so the Lstat here is for the message: it says
+	// which case it is rather than leaving a reader to decode ELOOP.
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("refusing to write the manifest to %s, which is not a regular file", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("check the manifest path %s: %w", path, err)
+	}
+
+	// The ENFORCEMENT, in manifestOpenFlags. This is what closes the window the
+	// Lstat leaves, and the ELOOP it produces is mapped to the same refusal so a
+	// link planted in that window is described rather than reported as "too many
+	// levels of symbolic links" to someone who did not know a link was involved.
+	//
+	// A link ALREADY at this path is caught by the Lstat above, so this branch
+	// is reached only by a link created in between — which is why the test for it
+	// drives the two pieces separately rather than pretending to win that race.
+	f, err := os.OpenFile(path, manifestOpenFlags, 0o600)
+	if err != nil {
+		return nil, manifestOpenError(path, err)
+	}
+	return f, nil
+}
+
+// manifestOpenError turns a failed create into a message that says what happened.
+// Split out so the ELOOP mapping is testable on its own, for the reason
+// openManifestFile is split out: nothing can make the window happen on purpose.
+func manifestOpenError(path string, err error) error {
+	if errors.Is(err, syscall.ELOOP) {
+		return fmt.Errorf("refusing to write the manifest to %s, which became a symlink and I will not write through it", path)
+	}
+	return fmt.Errorf("create manifest %s: %w", path, err)
 }
 
 // ReadBackupManifest reads a manifest written by writeBackupManifest. A missing
