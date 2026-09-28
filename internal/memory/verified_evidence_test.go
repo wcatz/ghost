@@ -211,6 +211,141 @@ func TestCreateStillRecordsAVerificationBesideTheCorpusOptOut(t *testing.T) {
 	}
 }
 
+// The reach enumeration, as a test rather than a comment.
+//
+// `appendVerificationIfStatedTx`'s comment claims a set of writers, and the two
+// times that comment has been wrong were both because prose is not checkable: it
+// listed CreateFromCorpus as reaching a verified_at "without calling" it when the
+// shared insertMemory appended anyway, and then listed the set as two writers when
+// ImportMemory is a third. A claim about reach has to enumerate the set, and the
+// only enumeration that stays true is one a test walks.
+//
+// So: every writer that stores memories.verified_at, and what each leaves behind.
+// The rule being pinned is the OUTCOME, not the mechanism — a record carrying a
+// verification stamp, in the same transaction — because the mechanisms differ on
+// purpose (the import rides its own `imported` record; the corpus route has no
+// event to record) and a test asserting "a `verified` record" would be asserting
+// an implementation detail and would be wrong about the import.
+//
+// The corpus row is the one that records nothing, and the reason is the whole
+// point: a third-party dataset's verified_at is a value in a column with NO
+// observation behind it. Nobody checked anything through this store, so there is
+// no event, and the only stamp available to a record would be the store's clock —
+// which would manufacture the event. The import is the contrast case and shows why
+// the distinction is real: its artifact carries an OBSERVATION, so a check
+// happened and is attested, and the store keeps that attestation (deliberately
+// stamping its arrival with its own clock rather than copying a date in from a
+// file, per #682).
+func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
+	const claimed = "2026-09-20 00:00:00"
+
+	for _, tc := range []struct {
+		name string
+		// write stores a verified_at through this writer.
+		write func(*testing.T, *Store) string
+		// wantVerifiedKinds are the record kinds that may carry the stamp. Empty
+		// means the writer must leave NO record carrying one.
+		wantVerifiedKinds []string
+		// why is the reason this writer is or is not in the set, kept next to the
+		// assertion so the table cannot drift from the comment.
+		why string
+	}{
+		{
+			name: "Create",
+			write: func(t *testing.T, s *Store) string {
+				id, err := s.Create(context.Background(), testProject, Memory{
+					Category: "fact", Content: "a fact checked by its author",
+					Source: "mcp", VerifiedAt: verifiedStamp(claimed),
+				})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				return id
+			},
+			wantVerifiedKinds: []string{evidenceVerified},
+			why:               "a live save; Ghost recorded the check, so the store's clock is the honest stamp",
+		},
+		{
+			name: "CreateFromCorpus",
+			write: func(t *testing.T, s *Store) string {
+				id, err := s.CreateFromCorpus(context.Background(), testProject, Memory{
+					Category: "fact", Content: "a dataset row carrying a verified_at value",
+					Source: "mcp", VerifiedAt: verifiedStamp(claimed),
+				})
+				if err != nil {
+					t.Fatalf("CreateFromCorpus: %v", err)
+				}
+				return id
+			},
+			wantVerifiedKinds: nil,
+			why:               "a bare value in a third-party dataset with no observation behind it — no event, and the only stamp available would manufacture one",
+		},
+		{
+			name: "ImportMemory",
+			write: func(t *testing.T, s *Store) string {
+				const id = "enumimport00000000000000000AA"
+				_, _, _, err := s.ImportMemory(context.Background(), PortableMemory{
+					ID: id, ProjectID: testProject, Category: "fact",
+					Content: "a fact an artifact records as checked", Source: "onboarding",
+					VerifiedAt: verifiedStamp(claimed),
+				}, ImportOptions{Apply: true})
+				if err != nil {
+					t.Fatalf("ImportMemory: %v", err)
+				}
+				return id
+			},
+			wantVerifiedKinds: []string{evidenceImported},
+			why:               "the artifact carries an OBSERVATION, so a check happened and is attested; it rides the import's own record rather than adding a `verified` one",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			id := tc.write(t, s)
+
+			records, err := s.MemoryProvenance(context.Background(), id)
+			if err != nil {
+				t.Fatalf("MemoryProvenance: %v", err)
+			}
+			var stamped []string
+			for _, r := range records {
+				if r.VerifiedAt != nil {
+					stamped = append(stamped, r.Kind)
+				}
+			}
+
+			// The outcome the comment claims, and the one a reader filtering by
+			// kind actually sees.
+			counts, err := s.MemoryEvidenceCounts(context.Background(), id)
+			if err != nil {
+				t.Fatalf("MemoryEvidenceCounts: %v", err)
+			}
+			if len(tc.wantVerifiedKinds) == 0 {
+				if counts.Verified != 0 {
+					t.Errorf("Verified = %d, want 0 — %s", counts.Verified, tc.why)
+				}
+				if len(stamped) != 0 {
+					t.Errorf("records carrying a verification stamp = %v, want none — %s", stamped, tc.why)
+				}
+			} else {
+				if counts.Verified < 1 {
+					t.Errorf("Verified = %d, want at least 1 — %s", counts.Verified, tc.why)
+				}
+				var found bool
+				for _, want := range tc.wantVerifiedKinds {
+					for _, got := range stamped {
+						if got == want {
+							found = true
+						}
+					}
+				}
+				if !found {
+					t.Errorf("stamped record kinds = %v, want one of %v — %s", stamped, tc.wantVerifiedKinds, tc.why)
+				}
+			}
+		})
+	}
+}
+
 // The gate, and the reason the update path needs one at all: a row verified by
 // an EARLIER save keeps its verified_at through COALESCE, so an edit that never
 // mentions a verification still finds the column populated. Appending on that

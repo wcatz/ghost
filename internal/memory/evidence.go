@@ -221,29 +221,53 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 // when Ghost learned of the check. Two facts, two places, and a verifier cannot
 // date its own check.
 //
-// Every writer that stores a verified_at calls this, so the rule is written once
-// rather than four times.
+// Every writer that stores a verified_at leaves a record carrying a
+// verification stamp, in the same transaction, so the rule is written once rather
+// than four times. Say it as the OUTCOME and not as the mechanism: the mechanisms
+// differ on purpose, and a reader who filters MemoryProvenance by kind sees three
+// shapes for one rule.
 //
-// The reach is a SET and the set is two writers, not one. RestoreSnapshot is
-// plainly outside it — it writes in pure SQL from the snapshot table, a restore is
-// a faithful copy of a corpus whose evidence rows travel with it (the portable
-// artifact carries them), so appending per restored row would double-count every
-// check the snapshot already holds. That is the same byte-exact exclusion
-// MaxContentLen and the credential guard draw.
+// The callers of THIS function are the live ones, and they are the ones whose
+// stamp is the store's clock — because Ghost is the party recording the check.
+// That covers insertMemory (behind Create, and gated by insertOptions so the
+// corpus route below can decline) and all three of UpsertWithOptions' branches
+// and UpdateMemoryWithOptions.
 //
-// CreateFromCorpus reaches a verified_at through the SHARED insertMemory, and an
-// earlier version of this comment listed it beside RestoreSnapshot as reaching
-// one "without calling" this — which was true of the intended design and false of
-// the code, because insertMemory appended whenever the Memory carried a stamp and
-// nothing let the corpus route opt out. The review that caught it was right about
-// the consequence and wrong about how dormant it is: ingesting a dataset is not a
-// check, and the record's stamp is the store's clock, so the append asserted that
-// a third-party benchmark's own verified_at — possibly years old — was checked
-// NOW. That is the inversion the store-clock rule exists to prevent, reached on
-// the one path the rule had not been stated on. insertOptions.recordVerification
-// is the flag that fixes it and carries the argument; this sentence is here so the
-// next reader does not have to re-derive why the set has two members and why one
-// of them needed a parameter rather than a comment.
+// Two more writers store a verified_at and are deliberately NOT callers.
+//
+// ImportMemory is the interesting one, because it is in the SET and not in the
+// callers: the artifact carries an OBSERVATION, so a check happened and is
+// attested, and the import keeps that attestation on its own `imported` record
+// rather than adding a second one. EvidenceCounts.Verified counts any record
+// carrying a stamp whatever its kind, so the count a reader sees is right without
+// the import knowing this function exists. Its stamp is the store's clock too —
+// deliberately not the artifact's text, per #682: "no date is copied in from a
+// file" — so the import is not an exception to the store-clock rule, it is the
+// same rule applied to an attested arrival.
+//
+// CreateFromCorpus is the one writer in the set that records nothing, and the
+// reason is the difference between a value and an event. A third-party dataset's
+// verified_at is a value in a column with NO observation behind it: nobody checked
+// anything through this store, so there is no event to record, and the only stamp
+// a record could carry would be the store's clock — which would manufacture the
+// event and assert that a benchmark's own claim was checked now. That is the exact
+// inversion the store-clock rule exists to prevent, reached on the one path the
+// rule had never been stated on. insertOptions.recordVerification is the flag that
+// makes it so, and its comment carries the argument in full; the column keeps the
+// dataset's value verbatim, because losing the dataset's own data would be the
+// opposite defect.
+//
+// RestoreSnapshot is plainly outside the set — it writes in pure SQL from the
+// snapshot table, a restore is a faithful copy of a corpus whose evidence rows
+// travel with it (the portable artifact carries them), so appending per restored
+// row would double-count every check the snapshot already holds. That is the same
+// byte-exact exclusion MaxContentLen and the credential guard draw.
+//
+// This enumeration has now been wrong twice, both times because a comment is not
+// checkable, so the set is a TEST: TestEveryVerifiedAtWriterIsEnumerated walks
+// these four writers and asserts the outcome each leaves. A new writer that stores
+// a verified_at belongs in that table before it belongs in this paragraph, and
+// the table fails if the paragraph and the code disagree about it.
 func appendVerificationIfStatedTx(ctx context.Context, tx *sql.Tx, memoryID string, prov Provenance, stated *string) error {
 	if stated == nil {
 		return nil
