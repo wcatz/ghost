@@ -471,8 +471,16 @@ func TestGooseIsolationCarriesASymlinkedConfigRoot(t *testing.T) {
 	if string(got) != "mode: smart\n" {
 		t.Errorf("carried config.yaml = %q, want the user's own file", got)
 	}
-	if resolved, err := filepath.EvalSymlinks(carried); err != nil || resolved != real {
-		t.Errorf("the carried path resolves to %q (err %v), want the user's own %q", resolved, err, real)
+	// Compared against the resolved form of real, not real itself:
+	// t.TempDir hands back a SHORT path on Windows (RUNNER~1 for the profile
+	// directory) and EvalSymlinks returns the long one, so comparing the two
+	// strings would fail on Windows for a carry that is correct.
+	wantReal, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", real, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(carried); err != nil || resolved != wantReal {
+		t.Errorf("the carried path resolves to %q (err %v), want the user's own %q", resolved, err, wantReal)
 	}
 }
 
