@@ -458,6 +458,88 @@ func TestSupersededDropTargetMustSurvive(t *testing.T) {
 	}
 }
 
+// TestReaderComplaintsAreBounded: a complaint is quoted back into a prompt,
+// written to an append-only log, and printed as the run's failure, so every
+// model-supplied fragment in it is bounded where it is interpolated — clipping
+// the operation LINE is not enough on its own. `drop <id> reason: <a paragraph>`
+// is the case that makes this load-bearing: the reason tail is model prose, and
+// unbounded it would put a whole paragraph of it (and of whatever stored memory
+// the model was echoing) into all three of those sinks.
+func TestReaderComplaintsAreBounded(t *testing.T) {
+	// Long enough that no clip of it survives, and shaped like prose over a stored
+	// memory rather than like an id, which is what a hallucinated id looks like
+	// too.
+	// The sentinel sits past BOTH clips — the 80-rune line quote and the 60-rune
+	// fragment clip — so it can only appear in the message if one of them stopped
+	// working, and it stands in for whatever prose the model was echoing out of
+	// stored memory.
+	const sentinel = "SENTINEL-PAST-BOTH-CLIPS"
+	noise := strings.Repeat("x", 150) + sentinel + strings.Repeat("y", 2000)
+
+	t.Run("unreadable drop reason", func(t *testing.T) {
+		err := opErr(t, opInput(), `{"ops":["drop `+opID1+` reason: `+noise+`"]}`)
+		if err == nil {
+			t.Fatal("a free-form drop reason was accepted")
+		}
+		// The line quote (80 runes) plus the bounded fragment clip, plus the fixed
+		// prose around them. Generous: the claim is that the message cannot grow
+		// with the response, not that it is short.
+		if n := len(err.Error()); n > 400 {
+			t.Errorf("complaint is %d bytes, want a bound that does not grow with the response:\n%s", n, err.Error())
+		}
+		if strings.Contains(err.Error(), sentinel) {
+			t.Errorf("the complaint carries model text from past the fragment clip:\n%s", err.Error())
+		}
+	})
+
+	t.Run("hallucinated id", func(t *testing.T) {
+		err := opErr(t, opInput(), `{"ops":["keep `+noise+opID2+`"]}`)
+		if err == nil {
+			t.Fatal("a hallucinated id was accepted")
+		}
+		if n := len(err.Error()); n > 400 {
+			t.Errorf("complaint is %d bytes, want a bound that does not grow with the response:\n%s", n, err.Error())
+		}
+		if strings.Contains(err.Error(), sentinel) {
+			t.Errorf("the complaint carries model text from past the fragment clip:\n%s", err.Error())
+		}
+	})
+}
+
+// TestReaderComplaintForLogWithholdsTheLine: the log rendering is the one a sink
+// that outlives the run may carry, so the quoted operation line is withheld
+// while the reason and the id — the diagnostic, and neither of them content —
+// survive. It also has to fail CLOSED on an error this package did not build as a
+// complaint, because an unrecognised renderer is exactly the case where a log
+// line must not guess.
+func TestReaderComplaintForLogWithholdsTheLine(t *testing.T) {
+	err := opErr(t, opInput(), `{"ops":["keep 00000000000000000000000000000000"]}`)
+	if err == nil {
+		t.Fatal("an unknown id was accepted")
+	}
+	safe := readerComplaintForLog(err)
+	if !strings.Contains(safe, "00000000000000000000000000000000") {
+		t.Errorf("safe rendering dropped the id that was refused:\n%s", safe)
+	}
+	if !strings.Contains(safe, "is not one of the memories this run was given") {
+		t.Errorf("safe rendering dropped the reason:\n%s", safe)
+	}
+	if !strings.Contains(safe, "withheld") {
+		t.Errorf("safe rendering does not say the operation line was withheld:\n%s", safe)
+	}
+	if strings.Contains(safe, `"keep 00000000000000000000000000000000"`) {
+		t.Errorf("safe rendering quotes the operation line back:\n%s", safe)
+	}
+
+	fellback := readerComplaintForLog(fmt.Errorf("something else went wrong"))
+	if !strings.Contains(fellback, "unclassified") {
+		t.Errorf("an unrecognised error = %q, want it withheld whole and named by type", fellback)
+	}
+	if strings.Contains(fellback, "went wrong") {
+		t.Errorf("an unrecognised error was printed verbatim: %q", fellback)
+	}
+}
+
 // TestParseOpResponseRejectsTheOldMemoriesShape: the pre-#639 contract had the
 // model return a "memories" array. Accepting it would silently keep the free-text
 // path alive for any harness that still answers that way, which is the exact
@@ -619,4 +701,160 @@ func (f *fakeReflector) Reflect(_ context.Context, _ string) (string, ai.TokenUs
 		return "", ai.TokenUsage{}, f.err
 	}
 	return f.reply, ai.TokenUsage{}, nil
+}
+
+// TestReaderComplaintWithholdsAValueFromTheReasonToo: withholding the operation
+// LINE is not enough, because six reasons quote a model-supplied fragment (the
+// source enumerates all six) and a refusal is often triggered BY that fragment
+// being free-form. A
+// `drop <id> reason: <a credential>` is refused precisely because the tail is
+// neither "obsolete" nor "superseded by <id>", so the refused text is the
+// model's own, and a short-format token fits inside clipOpText's clip whole. Without the value-shape gate this string is what
+// readerComplaintForLog and safeTierError write to the append-only lifecycle.log,
+// and it would be the one in-tier log sink without the gate its three siblings
+// get from previewContent.
+func TestReaderComplaintWithholdsAValueFromTheReasonToo(t *testing.T) {
+	// A credential-shaped value: the shape, not a real one, and long enough that
+	// clipOpText's 60-rune clip would keep most of it.
+	const secretValue = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+	for name, in := range map[string]ReflectionInput{
+		// The free-form drop tail, quoted by the unreadable-reason refusal.
+		"free-form drop reason": opInput(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := opErr(t, in, `{"ops":["drop `+opID1+` reason: `+secretValue+`"]}`)
+			if err == nil {
+				t.Fatal("a free-form drop reason was accepted")
+			}
+			safe := readerComplaintForLog(err)
+			if !strings.Contains(safe, "unreadable drop reason") {
+				t.Errorf("safe rendering dropped the reason a reader needs:\n%s", safe)
+			}
+			if strings.Contains(safe, secretValue) {
+				t.Errorf("safe rendering carries a value the refused reason quoted:\n%s", safe)
+			}
+			if !strings.Contains(safe, "withheld") {
+				t.Errorf("safe rendering does not say the value was withheld:\n%s", safe)
+			}
+		})
+	}
+
+	// The mirror direction, and the one a lower-fold-only gate misses. The
+	// free-form drop tail is probed in the spelling the MODEL WROTE, so a
+	// lower-case AKIA key — which secret.Detect only recognises upper-cased,
+	// since its rule is `(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}` — reaches the gate
+	// with neither the original nor the lower-folded spelling matching. The
+	// superseded-by case below is the same token in the other position: the parser
+	// upper-cases that one, so it IS caught there. Both directions are reachable,
+	// which is what makes the gate's third probe load-bearing.
+	t.Run("free-form drop reason holding a lower-case upper-only token", func(t *testing.T) {
+		const akia = "akiaiosfodnn7example"
+		err := opErr(t, opInput(), `{"ops":["drop `+opID1+` reason: the deploy token is `+akia+`"]}`)
+		if err == nil {
+			t.Fatal("a free-form drop reason was accepted")
+		}
+		safe := readerComplaintForLog(err)
+		if strings.Contains(strings.ToUpper(safe), strings.ToUpper(akia)) {
+			t.Errorf("safe rendering carries an upper-only-shaped token the lower fold missed:\n%s", safe)
+		}
+	})
+
+	// A third site, and the one a reader is most likely to assume is covered by
+	// the other two: a `superseded by` TARGET. It is a different executeOps
+	// branch from the unknown id above, quoting a different fragment, and
+	// clipOpText is the only thing between it and the log — so if a future
+	// refactor routes this one differently, only a test on THIS branch notices.
+	t.Run("superseded-by target that is a value", func(t *testing.T) {
+		err := opErr(t, opInput(), `{"ops":["drop `+opID1+` reason: superseded by `+secretValue+`"]}`)
+		if err == nil {
+			t.Fatal("a supersession to an id this run was not given was accepted")
+		}
+		safe := readerComplaintForLog(err)
+		if !strings.Contains(safe, "superseded-by target") {
+			t.Errorf("safe rendering dropped the reason a reader needs:\n%s", safe)
+		}
+		// Case-insensitively, and deliberately: the parser UPPER-CASES a
+		// supersession's target (it matches the stored spelling, hex(randomblob)
+		// being upper-case), so the value reaching this complaint is not the
+		// string this test wrote. A case-sensitive Contains here passes whether
+		// or not the gate ran — which is exactly what the mutation below caught
+		// doing on the first version of this case.
+		if strings.Contains(strings.ToUpper(safe), strings.ToUpper(secretValue)) {
+			t.Errorf("safe rendering carries the hallucinated supersession target verbatim:\n%s", safe)
+		}
+	})
+
+	// The same gate on a hallucinated id, which executeOps quotes by name: the
+	// model invents an id that IS the value, and the reader refuses it for not
+	// being one of the input.
+	t.Run("hallucinated id that is a value", func(t *testing.T) {
+		err := opErr(t, opInput(), `{"ops":["keep `+secretValue+`"]}`)
+		if err == nil {
+			t.Fatal("a hallucinated id was accepted")
+		}
+		safe := readerComplaintForLog(err)
+		if !strings.Contains(safe, "is not one of the memories this run was given") {
+			t.Errorf("safe rendering dropped the reason:\n%s", safe)
+		}
+		if strings.Contains(safe, secretValue) {
+			t.Errorf("safe rendering carries the hallucinated id verbatim:\n%s", safe)
+		}
+	})
+}
+
+// TestClipOpTextStillGatesARealId: the case-insensitive probe exists to catch a
+// folded token, and its cost is a second Detect call on every fragment in every
+// complaint. What must not regress is the other direction — a real stored id
+// reaching a diagnostic, which happens on every unknown-id refusal that is
+// merely a typo rather than an attack. A stored id must pass through untouched,
+// for two separate reasons the detector's own constants give: it is 32 hex
+// characters, which is under the two bare-hex floors (cardanoKeyMinRun 68,
+// longHexFloor 132) though ABOVE assignedSecretFloor (20) — so "it is short"
+// is not the general answer either — and it carries no provider prefix and no
+// `key: value` assignment, which is what every other rule needs. If a future
+// rule widened enough to catch one, this fails and the fix belongs in the rule
+// rather than in the gate.
+func TestClipOpTextStillGatesARealId(t *testing.T) {
+	for _, id := range []string{opID1, opID2, opID3, strings.ToLower(opID1), "A1B2C3D4E5F6A7B8C9D0E1F2A3B4C5D6"} {
+		if got := clipOpText(id); got != id {
+			t.Errorf("clipOpText(%q) = %q, want it unchanged: a real id is a diagnostic, not a value", id, got)
+		}
+	}
+}
+
+// TestReaderComplaintGatesAMixedCaseLiteral pins the ONE probe the folds cannot
+// replace. Every other fixture in this package uses a `gh[pousr]_` token or a
+// lower-cased AKIA, and a fold catches both — which means deleting the as-written
+// `secret.Detect(s)` call outright leaves this file green. The rules that need
+// it are the mixed-case literals: google-api-key `AIza…`, pypi
+// `pypi-AgEIcHlwaS5vcmc…`, JWT `eyJ…`, PuTTY `PuTTY-User-Key-File-`. Neither
+// ToLower nor ToUpper can produce those, so the as-written probe is the only
+// thing standing between one of them and the log.
+//
+// The fixture is an unknown OPERATION whose first token is the value, which is
+// also the case that defeated the gate once already: parseOpLine lower-cases the
+// verb before the switch, so gating the folded form lower-cased this token before
+// any probe saw it. It is refused as an unknown operation, which is exactly the
+// refusal that quotes the model's own words.
+func TestReaderComplaintGatesAMixedCaseLiteral(t *testing.T) {
+	const googleKey = "AIzaSyD-1234567890abcdefghijklmnopqrstuv"
+	err := opErr(t, opInput(), `{"ops":["`+googleKey+` the whole line"]}`)
+	if err == nil {
+		t.Fatal("an unknown operation whose first token is a value was accepted")
+	}
+	if !strings.Contains(err.Error(), "unknown operation") {
+		t.Fatalf("the refusal is not the unknown-operation one, so this fixture tests a different path:\n%s", err)
+	}
+	safe := readerComplaintForLog(err)
+	// Case-insensitively, and this is the whole point of the fixture: a
+	// case-sensitive check for a value the parser can RE-SPELL passes while the
+	// gate is open, because the leak arrives folded. Comparing case-insensitively
+	// is what makes this a probe of the as-written path rather than a check that
+	// the string happens to be spelled the way the test wrote it.
+	if strings.Contains(strings.ToUpper(safe), strings.ToUpper(googleKey)) {
+		t.Errorf("safe rendering carries a mixed-case literal only the as-written probe can match:\n%s", safe)
+	}
+	if !strings.Contains(safe, "unknown operation") {
+		t.Errorf("safe rendering dropped the reason a reader needs:\n%s", safe)
+	}
 }

@@ -66,6 +66,21 @@ type ReflectionResult struct {
 	// used to be a log line inside the tier and nothing else, so the report
 	// showed the sources as if the model had never asked.
 	Refusals []Refusal `json:"refusals,omitempty"`
+	// RepairTurns is how many extra harness calls this run spent re-reading an
+	// answer the strict ops reader rejected (see opRepairTurns): 0 when the first
+	// answer parsed, 1 when the repair turn did. It is scoped to the RUN, not to
+	// one tier's result: a tiered run that repaired and then fell through to the
+	// mechanical tier carries the count onto that result, because a summary that
+	// showed a Jaccard-only outcome with no repair count would hide exactly the
+	// degradation this count exists to make visible.
+	//
+	// It is a measurement and not a decision — nothing branches on it, and the
+	// result is the same either way, because a repair is a re-read under the same
+	// rules rather than a looser reading. It travels on the result because
+	// otherwise the frequency is unobservable: a run that repaired read exactly
+	// like a run handed a good answer first time, and the measured cost of the
+	// defect was that a third of all runs were losing a consolidation to it.
+	RepairTurns int `json:"repair_turns,omitempty"`
 }
 
 // Merge is one merge operation and what it produced. Text and not just the ids so

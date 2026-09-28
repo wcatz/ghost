@@ -273,6 +273,12 @@ func parseLifecycleArgs(args []string) (project, source string, err error) {
 //
 // Zero or negative means NO bound: context.WithTimeout(parent, 0) would cancel
 // the call immediately, which is the opposite of what "unset" should mean.
+//
+// It wraps the whole consolidation, so the LLM tier's one repair turn shares this
+// budget rather than getting a deadline of its own: a run that needs the repair
+// has what is left of it. That is deliberate — the phase timeout above is the
+// bound an operator can raise, and a per-call budget here would let a single
+// pass outlive the phase it runs in.
 func consolidationContext(parent context.Context, minutes int) (context.Context, context.CancelFunc) {
 	if minutes <= 0 {
 		return context.WithCancel(parent)
@@ -962,7 +968,7 @@ func runReflect() {
 	}
 	result.Memories = validMemories
 
-	fmt.Printf("Result:       %d memories (%s)\n", len(result.Memories), reflectCategoryParts(result.Memories))
+	fmt.Print(reflectResultLine(result))
 	fmt.Println()
 
 	var projectMems, globalMems []reflection.ReflectMemory

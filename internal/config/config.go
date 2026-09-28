@@ -192,8 +192,10 @@ type ReflectionConfig struct {
 	// the opencode backend, so runs were killed mid-flight ("opencode run:
 	// signal: killed") and — because the autonomous path passes --require-llm —
 	// the whole reflect then failed with no fallback. 0 disables the bound.
-	// Keep it below reflection.lifecycle_timeout_minutes, which bounds the
-	// outer lifecycle phase that runs this command.
+	// It covers the whole consolidation, harness calls included: the LLM tier's
+	// one repair turn (#689) spends what is left rather than getting a budget of
+	// its own. Keep it below reflection.lifecycle_timeout_minutes, which bounds
+	// the outer lifecycle phase that runs this command.
 	ConsolidationTimeoutMinutes int `koanf:"consolidation_timeout_minutes"`
 
 	// LifecycleTimeoutMinutes bounds each phase of the auto-consolidation
