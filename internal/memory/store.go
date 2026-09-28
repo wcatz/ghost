@@ -2385,7 +2385,7 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 // was true only of the corpora in this repository, and a downloaded corpus
 // proved it wrong on the first CI run.
 func (s *Store) CreateFromCorpus(ctx context.Context, projectID string, m Memory) (string, error) {
-	return s.insertMemory(ctx, projectID, m)
+	return s.insertMemory(ctx, projectID, m, insertOptions{})
 }
 
 // secretTagFields is the guard's view of a memory's tags.
@@ -2446,14 +2446,46 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 	if _, err := boundedAgent(m.Agent); err != nil {
 		return "", err
 	}
-	return s.insertMemory(ctx, projectID, m)
+	return s.insertMemory(ctx, projectID, m, insertOptions{recordVerification: true})
+}
+
+// insertOptions is the one bit insertMemory cannot infer from the Memory it is
+// given, so the caller has to say it.
+//
+// It is a parameter rather than a field on Memory because Memory is what a reader
+// gets back: a stored verified_at is true of the row whichever route wrote it, and
+// a flag on the read shape would suggest the two rows differ when the only
+// difference is who observed them.
+type insertOptions struct {
+	// recordVerification appends a `verified` evidence record when m carries a
+	// VerifiedAt. Every writer that stores a verified_at from a live call sets it.
+	//
+	// CreateFromCorpus does not, and the reason is the stamp rather than the
+	// claim. A corpus row's verified_at is DATA ABOUT THE DATASET — a third-party
+	// benchmark asserting when its own rows were checked, possibly years ago — and
+	// the record's verified_at is the STORE's clock by design, because a verifier
+	// that could date its own check could date it before the thing it checked.
+	// Appending one therefore says "this fact was checked now", which is the exact
+	// inversion that rule exists to prevent, reached through a path the rule was
+	// never stated on. The column keeps the dataset's value verbatim: losing the
+	// dataset's own data would be the opposite defect, and appendVerificationIf
+	// StatedTx's comment is what says so.
+	//
+	// Nothing can read the fabricated record today — this path's own contract says
+	// the row is never injected, mirrored or quoted, and it lands in a scratch
+	// database that dies with the run — which is exactly why the invariant is
+	// stated and pinned rather than left to the accident that no corpus sets the
+	// field yet. TestCreateFromCorpusRecordsNoVerification is that pin, and
+	// TestCreateStillRecordsAVerificationBesideTheCorpusOptOut is what keeps the
+	// opt-out from being implemented by dropping the append wholesale.
+	recordVerification bool
 }
 
 // insertMemory is Create's statement, with the credential guard and nothing
 // else above it. Split out so CreateFromCorpus is the same write rather than a
 // second copy of an INSERT that has to stay in step with the schema — a worse
 // failure mode than a less obvious call graph.
-func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (string, error) {
+func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, opts insertOptions) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2495,8 +2527,16 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 	// trust. appendVerificationIfStatedTx carries the "stated in THIS call" rule;
 	// here a fresh INSERT has no stored value to keep, so m.VerifiedAt is exactly
 	// the caller's statement.
-	if err := appendVerificationIfStatedTx(ctx, tx, id, provenanceFromMemory(m), m.VerifiedAt); err != nil {
-		return "", err
+	//
+	// Gated on opts.recordVerification as well, and the gate is the only reason
+	// this is not simply "append whenever m.VerifiedAt is set": the record's stamp
+	// is the store's clock, so on the corpus route it would assert that a dataset's
+	// own check happened now. See insertOptions.recordVerification, which is where
+	// that argument is written down in full.
+	if opts.recordVerification {
+		if err := appendVerificationIfStatedTx(ctx, tx, id, provenanceFromMemory(m), m.VerifiedAt); err != nil {
+			return "", err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit create: %w", err)

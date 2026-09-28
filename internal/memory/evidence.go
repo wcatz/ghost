@@ -222,13 +222,28 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 // date its own check.
 //
 // Every writer that stores a verified_at calls this, so the rule is written once
-// rather than four times. The two writers that reach a verified_at WITHOUT
-// calling it are the byte-exact ones — RestoreSnapshot (SQL, from the snapshot
-// table) and CreateFromCorpus (insertMemory directly) — and they are the same
-// exclusions MaxContentLen and the credential guard draw: a restore is a
-// faithful copy of a corpus, and a corpus's evidence rows come back with it
-// (MemoryProvenance travels in the portable artifact), so inventing a record for
-// each restored row would double-count the checks the artifact already carries.
+// rather than four times.
+//
+// The reach is a SET and the set is two writers, not one. RestoreSnapshot is
+// plainly outside it — it writes in pure SQL from the snapshot table, a restore is
+// a faithful copy of a corpus whose evidence rows travel with it (the portable
+// artifact carries them), so appending per restored row would double-count every
+// check the snapshot already holds. That is the same byte-exact exclusion
+// MaxContentLen and the credential guard draw.
+//
+// CreateFromCorpus reaches a verified_at through the SHARED insertMemory, and an
+// earlier version of this comment listed it beside RestoreSnapshot as reaching
+// one "without calling" this — which was true of the intended design and false of
+// the code, because insertMemory appended whenever the Memory carried a stamp and
+// nothing let the corpus route opt out. The review that caught it was right about
+// the consequence and wrong about how dormant it is: ingesting a dataset is not a
+// check, and the record's stamp is the store's clock, so the append asserted that
+// a third-party benchmark's own verified_at — possibly years old — was checked
+// NOW. That is the inversion the store-clock rule exists to prevent, reached on
+// the one path the rule had not been stated on. insertOptions.recordVerification
+// is the flag that fixes it and carries the argument; this sentence is here so the
+// next reader does not have to re-derive why the set has two members and why one
+// of them needed a parameter rather than a comment.
 func appendVerificationIfStatedTx(ctx context.Context, tx *sql.Tx, memoryID string, prov Provenance, stated *string) error {
 	if stated == nil {
 		return nil

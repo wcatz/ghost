@@ -129,6 +129,88 @@ func TestCreateWithoutVerifiedRecordsNoVerification(t *testing.T) {
 	}
 }
 
+// A corpus row's verified_at is DATA ABOUT THE CORPUS, not a check Ghost
+// observed, and those are different claims with different stamps. The record's
+// stamp is the store's own clock, so appending one for a corpus row asserts "this
+// fact was checked at <now>" for a dataset that may be asserting a check from
+// years earlier — the inversion the whole store-clock rule exists to prevent,
+// reached through a path the rule was never stated on.
+//
+// CreateFromCorpus opts out. Its own contract already says the row is never
+// injected, mirrored or quoted, so nothing can read the fabricated record; the
+// point is that the invariant is stated and enforced rather than held by the
+// accident that no corpus sets the field today.
+func TestCreateFromCorpusRecordsNoVerification(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Far enough in the past that a store clock could not have produced it, which
+	// is what makes a fabricated record distinguishable from a real one.
+	const claimed = "2019-03-04 00:00:00"
+	id, err := s.CreateFromCorpus(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "a corpus row that asserts a check from long ago",
+		Source:     "mcp",
+		VerifiedAt: verifiedStamp(claimed),
+	})
+	if err != nil {
+		t.Fatalf("CreateFromCorpus: %v", err)
+	}
+
+	// The COLUMN is the corpus's own claim and is stored verbatim: refusing it
+	// would be losing the dataset's data, which is the opposite of the defect.
+	mems, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("GetByIDs: %v (n=%d)", err, len(mems))
+	}
+	if mems[0].VerifiedAt == nil || *mems[0].VerifiedAt != claimed {
+		t.Errorf("memories.verified_at = %v, want the corpus's own claim %q preserved", mems[0].VerifiedAt, claimed)
+	}
+
+	// And no EVENT was recorded.
+	counts, err := s.MemoryEvidenceCounts(ctx, id)
+	if err != nil {
+		t.Fatalf("MemoryEvidenceCounts: %v", err)
+	}
+	if counts.Verified != 0 {
+		t.Errorf("Verified = %d for a corpus row, want 0: the table records events, and ingesting a dataset is not a check", counts.Verified)
+	}
+	if kinds := recordsByKind(t, s, id); kinds[evidenceVerified] != 0 {
+		t.Errorf("records = %v, want no verified record on a corpus row", kinds)
+	}
+	// The observation still happens: a corpus row was ingested, and that much
+	// Ghost did do. Opting out of the verification is not opting out of the
+	// evidence table.
+	if kinds := recordsByKind(t, s, id); kinds[evidenceObserved] != 1 {
+		t.Errorf("records = %v, want the ingestion's one observed record", kinds)
+	}
+}
+
+// The other side, so the opt-out cannot be implemented by dropping the append
+// wholesale: Create writes the same Memory and MUST record the verification.
+func TestCreateStillRecordsAVerificationBesideTheCorpusOptOut(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "a written fact whose author checked it",
+		Source:     "mcp",
+		VerifiedAt: verifiedStamp("2026-09-20 00:00:00"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	counts, err := s.MemoryEvidenceCounts(ctx, id)
+	if err != nil {
+		t.Fatalf("MemoryEvidenceCounts: %v", err)
+	}
+	if counts.Verified != 1 {
+		t.Errorf("Verified = %d after a verifying Create, want 1 — the corpus opt-out leaked into the harness path", counts.Verified)
+	}
+}
+
 // The gate, and the reason the update path needs one at all: a row verified by
 // an EARLIER save keeps its verified_at through COALESCE, so an edit that never
 // mentions a verification still finds the column populated. Appending on that
