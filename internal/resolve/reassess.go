@@ -113,6 +113,11 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		return res, nil, err
 	}
 
+	// The subject of every unresolved note, for the one case where the veto is
+	// not allowed to settle a note on its own (#698). Built once over the whole
+	// pool; only a vetoed note is looked up in it.
+	newerSubjects := indexSubjects(unresolved)
+
 	// Settle the free decisions first: the veto and the KEEP cache both answer
 	// KEEP without a harness call. reKeptIDs collects every KEEP outcome, and
 	// the returned list is built from it in the store's own order below, so a
@@ -126,12 +131,26 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			continue
 		}
 		if reason, vetoed := VetoKeep(m.Content); vetoed {
-			res.Vetoed++
-			reKeptIDs[m.ID] = true
-			if logger != nil {
-				logger.Debug("reassess veto kept memory", "id", m.ID, "pattern", reason)
+			// A veto is a KEEP here, and on THIS pass a KEEP un-hides the note.
+			// It does not get to do that on a phrase alone when a newer memory
+			// in the same project is demonstrably about the same thing: the veto
+			// protects the wording of a changelog entry, not the claim in it
+			// (#698). The note goes to the classifier instead. The ordinary
+			// pass's veto is untouched — there the same false veto costs one
+			// noisy memory, not a permanent un-hiding.
+			if newer, shared, shadowed := newerSubjects.shadowing(m); shadowed {
+				if logger != nil {
+					logger.Debug("reassess veto deferred to the classifier: a newer note names the same identifiers",
+						"id", m.ID, "pattern", reason, "newer", newer, "shared_identifiers", shared)
+				}
+			} else {
+				res.Vetoed++
+				reKeptIDs[m.ID] = true
+				if logger != nil {
+					logger.Debug("reassess veto kept memory", "id", m.ID, "pattern", reason)
+				}
+				continue
 			}
-			continue
 		}
 		if keptHashes[m.ID] == ContentHash(m.Content) {
 			res.Cached++
