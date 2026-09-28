@@ -151,11 +151,17 @@ func TestSupersedeUnscoredNoteNamesWhatThePassCouldNotRead(t *testing.T) {
 	if !strings.Contains(note, "2") {
 		t.Errorf("the note does not count what was unscored: %q", note)
 	}
-	// It must not read as a verdict on the pairs it did judge: those pairs are
-	// listed below it, and a reader who took this line as "nothing was found"
-	// would be right about a project the pass could not read.
-	if !strings.Contains(note, "no pair this run considered") {
+	// It must name the CONSEQUENCE correctly and narrowly. The consequence is
+	// about NEW candidates: a memory with no vector cannot be proposed by the
+	// scan, but it CAN still turn up in a reclassified pair, because that half of
+	// the pass re-reads live edges from their link rows. Claiming the stronger
+	// "in no pair this run considered" is what would contradict the
+	// "N reclassified" line printed just above it.
+	if !strings.Contains(note, "proposed no new candidate") {
 		t.Errorf("the note does not say what an unscored memory means for the pass: %q", note)
+	}
+	if strings.Contains(note, "in no pair this run considered") {
+		t.Errorf("the note claims an unscored memory is in no pair at all, which a reclassified edge above it can contradict: %q", note)
 	}
 	// With embedding off, naming the worker is a dead end: nothing is running to
 	// keep the index current, and that is the thing to say.

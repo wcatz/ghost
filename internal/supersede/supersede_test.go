@@ -401,6 +401,59 @@ func TestRunSkipsUnchangedExistingLink(t *testing.T) {
 	}
 }
 
+// TestRunUnscoredMemoriesCanStillAppearInAReclassifiedPair is the coupling the
+// report's wording rests on, pinned so nobody "simplifies" it back into a
+// falsehood.
+//
+// Result.Unscored counts project memories the SCAN could not score. The
+// reclassify half of the pass reads live 'supersedes' edges from their link rows
+// and never looks at a vector, so one of those same memories can still be an
+// endpoint of a pair this run considered — which is exactly what a model change
+// produces, since retiring the old vectors makes every memory in the project
+// unscored while the edges written under the old model are still in the graph and
+// still need re-judging. A report sentence reading "in no pair this run
+// considered" would then contradict its own "1 reclassified" line.
+func TestRunUnscoredMemoriesCanStillAppearInAReclassifiedPair(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer := add(t, store, db, "the relay drains the queue in under a minute now", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, "the relay takes about forty minutes to drain", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+
+	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	// A model change: the vectors are retired, so GetEmbedding returns nil for
+	// both memories and the scan can score neither. The edge, however, is still
+	// live and its endpoint was edited after it was written, so the reclassify
+	// half proposes it.
+	if _, err := db.ExecContext(ctx, `DELETE FROM memory_embeddings WHERE memory_id IN (?, ?)`, newer, older); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`, newer, older); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = '2026-07-15 00:00:00' WHERE id = ?`, older); err != nil {
+		t.Fatal(err)
+	}
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Unscored != 2 {
+		t.Errorf("Result.Unscored = %d, want 2: a model change retires every vector, so the scan can score neither memory", res.Unscored)
+	}
+	// The pair the run DID consider is made of exactly those two unscored
+	// memories. This is the fact the report's sentence has to stay narrower than.
+	if res.Candidates != 1 {
+		t.Errorf("Result.Candidates = %d, want 1: the live edge is re-proposed from its link row, with no vector involved", res.Candidates)
+	}
+	if cls.batchCalls == 0 {
+		t.Error("the reclassified pair was never classified")
+	}
+}
+
 func TestRunRetriggersReclassifyWhenEndpointChanges(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()

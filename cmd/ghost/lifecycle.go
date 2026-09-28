@@ -1721,30 +1721,38 @@ func supersedeEmbedNote(embedded int) string {
 }
 
 // supersedeUnscoredNote reports the part of the project the candidate scan could
-// not read at all — a memory with no usable vector is in no pair the pass could
-// find, so every other number on the report is a total over the REST of the
-// project. It is counted where it is true (SelectCandidates, one pass over the
-// corpus) rather than inferred from what the pre-scan embed managed to write, so
-// it cannot disagree with the totals printed beside it: a bound reached, an
-// endpoint down, a list query that failed and a vector written under another
-// model all arrive here as the same honest fact.
+// not read at all — a memory with no usable vector is skipped by the scan, so it
+// is in no pair the SCAN proposes, and every other number on the report is a
+// total over the rest of the project. It is counted where it is true
+// (SelectCandidates, one pass over the corpus) rather than inferred from what the
+// pre-scan embed managed to write, so it cannot disagree with the totals printed
+// beside it: a bound reached, an endpoint down, a list query that failed and a
+// vector written under another model all arrive here as the same honest fact.
 //
 // It says nothing at all when every memory was scorable, because an ordinary
 // pass's answer to the operator's question is that there was nothing missing.
+//
+// The sentence is about NEW candidates, and that is load-bearing rather than
+// careful wording. A memory with no vector CAN still turn up in a pair this run
+// considered: the reclassify half of the pass re-proposes live 'supersedes' edges
+// from their link rows and never reads a vector. After a model change every
+// vector in a project is retired, so this count can be the whole corpus while a
+// reclassified edge printed above it is made of exactly those memories — and a
+// report that contradicts itself two lines apart is worse than no line.
 func supersedeUnscoredNote(unscored int, embeddingEnabled bool) string {
 	switch unscored {
 	case 0:
 		return ""
 	case 1:
 		if !embeddingEnabled {
-			return "  1 memory had no vector when the pass scanned, so it is in no pair this run considered — embedding is disabled, so nothing is keeping the vector index up to date\n"
+			return "  1 memory had no vector when the pass scanned, so it proposed no new candidate pair (an edge already in the graph is re-judged from the link, not the vector) — embedding is disabled, so nothing is keeping the vector index up to date\n"
 		}
-		return "  1 memory had no vector when the pass scanned, so it is in no pair this run considered — the index is filled by the embedding worker in `ghost mcp`, and `ghost mcp status` reports its coverage\n"
+		return "  1 memory had no vector when the pass scanned, so it proposed no new candidate pair (an edge already in the graph is re-judged from the link, not the vector) — the index is filled by the embedding worker in `ghost mcp`, and `ghost mcp status` reports its coverage\n"
 	default:
 		if !embeddingEnabled {
-			return fmt.Sprintf("  %d memories had no vector when the pass scanned, so they are in no pair this run considered — embedding is disabled, so nothing is keeping the vector index up to date\n", unscored)
+			return fmt.Sprintf("  %d memories had no vector when the pass scanned, so they proposed no new candidate pairs (edges already in the graph are re-judged from the link, not the vector) — embedding is disabled, so nothing is keeping the vector index up to date\n", unscored)
 		}
-		return fmt.Sprintf("  %d memories had no vector when the pass scanned, so they are in no pair this run considered — the index is filled by the embedding worker in `ghost mcp`, and `ghost mcp status` reports its coverage\n", unscored)
+		return fmt.Sprintf("  %d memories had no vector when the pass scanned, so they proposed no new candidate pairs (edges already in the graph are re-judged from the link, not the vector) — the index is filled by the embedding worker in `ghost mcp`, and `ghost mcp status` reports its coverage\n", unscored)
 	}
 }
 

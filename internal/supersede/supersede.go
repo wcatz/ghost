@@ -151,9 +151,17 @@ type Selection struct {
 	Candidates []Candidate
 	// Unscored counts the memories skipped for want of a usable vector: none at
 	// all yet, or one written under a different model, width or task prefix
-	// (memory.Store.GetEmbedding returns nil for both). They cannot be
-	// candidates for anything, so a caller that does not report this number
-	// reports a total that silently omits part of the project.
+	// (memory.Store.GetEmbedding returns nil for both). They are in no pair THIS
+	// scan proposes, so a caller that does not report this number reports a
+	// total that silently omits part of the project.
+	//
+	// It is about the scan, not the run: a memory counted here can still be an
+	// endpoint of a pair Run re-proposes, because the reclassify half re-reads
+	// live 'supersedes' edges from their link rows and never looks at a vector.
+	// A caller must therefore say "proposed no new candidate", never "was in no
+	// pair this run considered" — after a model change retires every vector in a
+	// project, both counts describe the same corpus and only one of the two
+	// sentences is true.
 	Unscored int
 }
 
@@ -290,12 +298,18 @@ type Result struct {
 	Vetoed int
 	// Unscored counts the project's memories the candidate scan could not score
 	// at all, for want of a usable vector — none yet, or one written under
-	// another model, width or task prefix. They are in no pair this pass
-	// considered, so every other number here is a total over the REST of the
-	// project: a caller that reports them without this one reports a partial
-	// scan in the voice of a complete one. It is the difference between "this
-	// project holds no near-duplicate pair" and "this pass could not read all of
-	// it", and the vectors it is waiting for belong to the embedding worker.
+	// another model, width or task prefix. They are in no pair the SCAN proposes,
+	// so every other number here is a total over the rest of the project: a
+	// caller that reports them without this one reports a partial scan in the
+	// voice of a complete one. It is the difference between "this project holds
+	// no near-duplicate pair" and "this pass could not read all of it", and the
+	// vectors it is waiting for belong to the embedding worker.
+	//
+	// "The scan", specifically: a counted memory can still be an endpoint of a
+	// reclassified pair, because that half of the pass works from link rows and
+	// reads no vector. A report that says such a memory is "in no pair this run
+	// considered" is wrong the first time a model change retires a project's
+	// vectors and an edited edge comes back for re-judging.
 	Unscored int
 	// ReclassifiedNoWrite counts the reclassify pairs whose --apply effect is
 	// purely destructive: a reversal and a NEITHER both only invalidate the
