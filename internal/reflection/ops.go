@@ -86,12 +86,18 @@ type memOp struct {
 // that report a proposal go through previewContent instead of printing it.
 //
 // The reason and the ids stay in both, because they are the diagnostic and an id
-// is not content — but "the reason" is not automatically safe, since three
-// reasons quote a model-supplied fragment (parseOpLine's unreadable drop tail
-// and unknown verb, executeOps' hallucinated id). Every one of them is routed
-// through clipOpText — six call sites, eight invocations, since the
-// not-carried-forward supersession passes three fragments at once — which runs
-// the same value-shape gate previewContent applies, so a
+// is not content — but "the reason" is not automatically safe, since SIX reasons
+// quote a model-supplied fragment rather than describing one. All six are listed
+// here so the list can be audited against the code, and every one is routed
+// through clipOpText (six call sites, eight invocations — the not-carried-
+// forward supersession quotes three fragments on one line):
+//
+//	parseOpLine:  the unreadable drop tail, and an unknown operation verb
+//	executeOps:   an id that is not one of the input, a superseded-by target
+//	              that is not, an id claimed twice, and a supersession whose
+//	              target this response does not carry forward
+//
+// clipOpText runs the same value-shape gate previewContent applies, so a
 // `drop <id> reason: <a credential>` refusal withholds the credential in the log
 // rendering too. What reaches a log is therefore the reason MINUS any fragment
 // the gate caught, not the reason unconditionally.
@@ -178,8 +184,9 @@ func safeTierError(err error) string {
 // a hallucinated id, a free-form drop reason, a verb. Clipping the line is not
 // enough on its own: `drop <id> reason: <a paragraph of prose>` puts that whole
 // paragraph in the message, and the message is quoted back into a prompt and
-// written to a log. A real id is 26 characters, so this bound never truncates a
-// legitimate one.
+// written to a log. A stored id is 32 characters — every `id` default in the
+// schema is `hex(randomblob(16))` — so 60 leaves room for an id plus a label or
+// a separator and never truncates a legitimate one.
 //
 // It also runs the value-shape gate, because bounding the fragment is not the
 // same as making it safe to print. 60 runes holds a whole short-format token
