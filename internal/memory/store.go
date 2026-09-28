@@ -2773,6 +2773,31 @@ func nullStringPtr(s sql.NullString) *string {
 	return &s.String
 }
 
+// readableStampPtr is nullStringPtr for the places that must not treat a value
+// Ghost cannot read as a claim.
+//
+// nullStringPtr maps only SQL NULL to nil, so a stored empty string — or any text
+// no layout parses — arrives as a non-nil boundary. That is the right answer when
+// the caller is reporting what is in the column, and the wrong one when a value is
+// being judged for whether it says anything: CheckWindowOrder deliberately returns
+// nil for a pair it cannot read, so an unreadable pair passes the check meant to
+// qualify it and looks like a real assertion. So a boundary counts as stated only
+// when ParseStamp reads it, which is the same rule nullIfEmptyPtr applies to the
+// empty moment at the writers that bind the triple.
+//
+// Such a value is reachable rather than hypothetical: Store.Create stores a stamp
+// verbatim, and ImportMemory and RestoreSnapshot write the column with no check at
+// all, so a database can hold a window recorded in prose.
+func readableStampPtr(s sql.NullString) *string {
+	if !s.Valid {
+		return nil
+	}
+	if _, ok := ParseStamp(s.String); !ok {
+		return nil
+	}
+	return &s.String
+}
+
 // nullIfEmptyPtr maps a validity stamp to SQL NULL, and an empty string to NULL
 // as well, so no writer can record a claim about the empty moment. A nil pointer
 // is the caller's statement that no claim was made; an empty string would be a
@@ -4610,6 +4635,17 @@ type rowClaims struct {
 // source stating a value supplies it, so the result is a function of the proposal
 // rather than of rowid order.
 //
+// THE WINDOW IS THE EXCEPTION, and it is not a smaller version of that rule. The
+// two boundaries are resolved TOGETHER after every source has been read, because
+// filling them independently composes a pair no row ever asserted, and deciding
+// per source lets a single-boundary row lock the unit and lose a later source's
+// complementary end — a loss that depends on the order the consolidator named. See
+// the resolution below for the order of preference. verified_at, confidence, agent,
+// session_id and source_ref remain first-source-wins: each is one value with no
+// partner to disagree with, and a half-window problem cannot arise for any of
+// them. A maintainer reading this paragraph must not reimplement the window the
+// per-value way — that is the bug, and the resolution below exists because of it.
+//
 // It is the SOURCES rather than the emission alone because an emission carries none
 // of this: reflectMemoriesToMemory builds it from the consolidator's output and has
 // nothing to copy a window from, so binding only the emission's columns would store
@@ -4653,8 +4689,11 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		}
 		// This source is a WINDOW CANDIDATE, remembered rather than decided on.
 		// See the resolution after the loop for why, and for what a candidate is
-		// allowed to become.
-		candidate := Validity{ValidFrom: nullStringPtr(validFrom), ValidUntil: nullStringPtr(validUntil)}
+		// allowed to become. Only a boundary readableStampPtr recognises counts:
+		// a source whose window is prose in the column states nothing Ghost can
+		// act on, and letting it qualify as a complete pair would let it win rule
+		// 1 from any position and discard a real window.
+		candidate := Validity{ValidFrom: readableStampPtr(validFrom), ValidUntil: readableStampPtr(validUntil)}
 		switch {
 		case candidate.ValidFrom != nil && candidate.ValidUntil != nil:
 			// A source states a COMPLETE window. It is preferred, but only if the
@@ -4701,8 +4740,11 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 	// Order of preference, and the second rule is the one a single-pass version
 	// gets wrong:
 	//
-	//  1. A source holding a COMPLETE consistent pair wins, whichever id the
-	//     consolidator named first. Deciding per source instead would let a
+	//  1. A source holding a COMPLETE consistent pair of READABLE stamps wins,
+	//     whichever id the consolidator named first. Readable is load-bearing
+	//     here, not decoration: rule 1 is position-independent, so an unreadable
+	//     pair that qualified would win from anywhere and discard a real window,
+	//     which is the mirror of the loss these rules exist to remove. Deciding per source instead would let a
 	//     single-boundary row claim the unit and lock the window, discarding a
 	//     later source's complete pair — and a row that inherits a start and
 	//     loses its end never retires, which is the outcome valid_until exists to
@@ -5013,7 +5055,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			        ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
 		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope),
-			claims.validFrom, claims.validUntil, claims.verifiedAt,
+			nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
 			nullIfEmpty(claims.sourceRef)).Scan(&newID); err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)

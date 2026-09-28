@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 )
 
@@ -416,6 +417,167 @@ func TestReplaceNonManualNeverComposesHalvesWhenNoSourceHasBoth(t *testing.T) {
 	if row.ValidFrom == nil && row.ValidUntil == nil {
 		t.Error("no source supplied a complete pair, yet the merge inherited no boundary at all — the fallback dropped a real half")
 	}
+}
+
+// A window Ghost cannot READ is not a window, and it must not outrank a real one.
+//
+// Rule 1 is position-independent by design — a complete consistent pair wins
+// whatever id the consolidator named first — and that is what makes an unreadable
+// pair dangerous. nullStringPtr maps only SQL NULL to nil, so a stored empty
+// string, or any text no layout parses, is a non-nil boundary. CheckWindowOrder
+// deliberately returns nil for a pair it cannot read ("a half no layout reads is
+// not a claim"), so the very check meant to qualify the candidate records it as a
+// COMPLETE consistent pair, and it then wins and discards a real window named by
+// another source — the mirror image of the loss rule 1 exists to remove.
+//
+// Such a row is reachable: Store.Create stores a stamp verbatim (nullIfEmptyPtr
+// maps only the empty string), and ImportMemory and RestoreSnapshot write the
+// column with no check at all. So this is a pre-existing row in a pre-existing
+// database, not a hypothetical one.
+//
+// Both id orders, because position-independence is the property under test.
+func TestReplaceNonManualAnUnreadableWindowNeverOutranksARealOne(t *testing.T) {
+	for _, order := range []struct {
+		name            string
+		unreadableFirst bool
+	}{
+		{"unreadable named first", true},
+		{"unreadable named last", false},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+
+			// A real, complete, consistent window.
+			real, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: "the support window runs to the end of next year", Source: "mcp", Importance: 0.6,
+				ValidFrom: stampPtr("2026-01-01 00:00:00"), ValidUntil: stampPtr("2027-03-01 00:00:00"),
+			})
+			if err != nil {
+				t.Fatalf("Create (real): %v", err)
+			}
+			// A row whose window is text no layout reads. Create stores a stamp
+			// verbatim, which is exactly how such a row gets into a real database.
+			junk, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: "the migration window was recorded in prose", Source: "mcp", Importance: 0.6,
+				ValidFrom: stampPtr("sometime last spring"), ValidUntil: stampPtr("when the dust settles"),
+			})
+			if err != nil {
+				t.Fatalf("Create (unreadable): %v", err)
+			}
+			// Prove the premise: the junk row really does hold unreadable text.
+			junkRow := successorRowByID(t, s, junk)
+			if junkRow.ValidFrom == nil || *junkRow.ValidFrom != "sometime last spring" {
+				t.Fatalf("premise broken: the source row holds %v, not the unreadable text", junkRow.ValidFrom)
+			}
+
+			ids := []string{real, junk}
+			if order.unreadableFirst {
+				ids = []string{junk, real}
+			}
+			content := "the support window runs to the end of next year, and the prose note is retired"
+			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+				Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: ids,
+			}}, ""); err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+
+			row := successorRow(t, s, content)
+			if row.ValidFrom == nil || *row.ValidFrom != "2026-01-01 00:00:00" {
+				t.Errorf("valid_from = %v, want the readable window's 2026-01-01 00:00:00 — an unreadable boundary was treated as a stated claim", row.ValidFrom)
+			}
+			if row.ValidUntil == nil || *row.ValidUntil != "2027-03-01 00:00:00" {
+				t.Errorf("valid_until = %v, want the readable window's 2027-03-01 00:00:00", row.ValidUntil)
+			}
+		})
+	}
+}
+
+// And the unreadable value is not propagated onto the successor either. Without
+// this the row would read validity_unparseable from then on, which stage 2
+// surfaces on every answer that touches it with nothing to explain why — the
+// permanently-confusing row nullIfEmptyPtr's own doc says no writer should leave
+// behind. Asserted on the raw column, because a reader that cannot parse the value
+// is exactly the thing being asserted about.
+func TestReplaceNonManualDoesNotWriteAnUnreadableStampOntoTheSuccessor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	junk, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the rollback was scheduled in prose once", Source: "mcp", Importance: 0.6,
+		ValidFrom: stampPtr("whenever the deploy lands"), ValidUntil: stampPtr("soon after"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const content = "the rollback is scheduled, in a form the reader can use"
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: content, Importance: 0.6, ReplacesIDs: []string{junk},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	var rawFrom, rawUntil sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT valid_from, valid_until FROM memories WHERE content = ? AND resolved_at IS NULL`, content,
+	).Scan(&rawFrom, &rawUntil); err != nil {
+		t.Fatalf("read the successor's raw window: %v", err)
+	}
+	if rawFrom.Valid || rawUntil.Valid {
+		t.Errorf("the successor carries a window no layout can read (from=%q until=%q); "+
+			"it will report validity_unparseable forever with no way to tell why",
+			rawFrom.String, rawUntil.String)
+	}
+}
+
+// The same rule at the INSERT, from the other side. Every other writer binds the
+// triple through nullIfEmptyPtr, and this one bound it raw — so an emission that
+// stated the empty moment wrote "" into the column, which reads as a claim with no
+// readable value. The row is the successor of a real rewrite, so it is a row a
+// search will meet.
+func TestReplaceNonManualRecordsTheEmptyMomentAsNoClaim(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the freeze happens before the release", Source: "mcp", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	const content = "the freeze happens before the release, and lasts a day"
+	empty := ""
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: content, Importance: 0.6,
+		ValidFrom:   &empty, // the empty moment, which is not a claim
+		ReplacesIDs: []string{a},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	var rawFrom sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT valid_from FROM memories WHERE content = ? AND resolved_at IS NULL`, content,
+	).Scan(&rawFrom); err != nil {
+		t.Fatalf("read the successor's raw valid_from: %v", err)
+	}
+	if rawFrom.Valid {
+		t.Errorf("the successor stored valid_from = %q; the empty moment is no claim, and every other "+
+			"writer maps it to NULL through nullIfEmptyPtr", rawFrom.String)
+	}
+}
+
+// successorRowByID is successorRow for a row named by id rather than by content,
+// so a test can inspect the SOURCE's window as a premise.
+func successorRowByID(t *testing.T, s *Store, id string) Memory {
+	t.Helper()
+	rows, err := s.GetByIDs(context.Background(), []string{id})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GetByIDs(%s): %v (n=%d)", id, err, len(rows))
+	}
+	return rows[0]
 }
 
 // The precedence, and the half of the rule the inheritance tests cannot see: when
