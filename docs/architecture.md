@@ -444,8 +444,11 @@ row under `bench:<project>:<key>` and stamps the whole corpus with one
 categories by their categories — rather than by a draw from
 `hex(randomblob(16))` or by which side of a wall-clock second a seeded row landed
 on ([#708](https://github.com/wcatz/ghost/issues/708)). Production rows are
-untouched: nothing but the benchmark chooses an id, and `Store.Create` still
-mints one.
+untouched: `Store.Create` still mints every id a live save gets, and the only
+caller that hands the store a key it computed for a fresh row is the benchmark.
+The two writers that do take an id from a caller are preserving one Ghost already
+held rather than being given a new one — `ImportMemory` writes the id an artifact
+carries, and `RestoreSnapshot` brings a row back under the id it had.
 
 The formatted `ghost_memory_search` path does not call that entry point
 directly. It goes through `assemble.Run` (see [Context assembly](#context-assembly-target-design)),

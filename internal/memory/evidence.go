@@ -232,9 +232,21 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 //
 // The callers of THIS function are the live ones, and they are the ones whose
 // stamp is the store's clock — because Ghost is the party recording the check.
-// That covers insertMemory (behind Create, and gated by insertOptions so the
-// corpus route below can decline) and all three of UpsertWithOptions' branches
-// and UpdateMemoryWithOptions.
+// That covers insertMemory (behind Create AND CreateWithID, and gated by
+// insertOptions so the corpus route below can decline) and all three of
+// UpsertWithOptions' branches and UpdateMemoryWithOptions.
+//
+// CreateWithID is named apart from Create because it is a writer of its own
+// rather than a synonym, and the reason it needs saying here is that it arrived
+// after this paragraph and TestEveryVerifiedAtWriterIsEnumerated were written:
+// a fourth writer of memories.verified_at that the enumeration did not name
+// left every test in this file green, which is the same drift this comment has
+// already been wrong about twice. It is Create's write with a caller-chosen
+// primary key and nothing else, and a benchmark's corpus row is a LIVE write, so
+// a verified_at stated on one is a check Ghost observed and takes the store's
+// clock exactly as Create's does. That test's CreateWithID row is what holds
+// this sentence now, and dropping the flag that records the verification is what
+// makes the row fail.
 //
 // Two more writers store a verified_at and are deliberately NOT callers.
 //
