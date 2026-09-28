@@ -158,6 +158,13 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
+      # The built-binary suite (e2e/, build tag e2e): every MCP tool, CLI
+      # subcommand and hook against a sandboxed HOME with fake harnesses.
+      # Without this step nothing ran it, so a change to a verdict format
+      # could break it unseen.
+      - name: E2E (built binary)
+        run: go test -tags e2e -count=1 ./e2e/
+
       - name: Build
         run: go build -o /dev/null ./cmd/ghost
 

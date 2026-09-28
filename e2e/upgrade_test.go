@@ -10,10 +10,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // v16Fixture is a database as a v16 release left it: the current schema minus
-// everything the v17 step adds, stamped at user_version 16.
+// everything the v17 and later steps add, stamped at user_version 16.
 //
 // The fixture is built by asking the BUILT binary to create a store and then
 // undoing v17 on it, rather than by carrying a copy of the v16 DDL here. That is
@@ -101,7 +103,10 @@ func newV16Store(t *testing.T, contents []string) *sandbox {
 	return s
 }
 
-// downgrade removes the v17 additions and stamps user_version 16.
+// downgrade removes the v17 and v18 additions and stamps user_version 16. A
+// later schema step must add its own objects here, or the fixture is not a v16
+// store; the version assertion below reads memory.SchemaVersion, so it moves
+// with the schema instead of pinning one release.
 func downgrade(s *sandbox, t *testing.T) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(s.dbPath()))
@@ -115,6 +120,8 @@ func downgrade(s *sandbox, t *testing.T) {
 		`DROP INDEX IF EXISTS idx_history_recorded`,
 		`DROP INDEX IF EXISTS idx_provenance_recorded`,
 		`DROP TABLE IF EXISTS memory_history`,
+		`DROP INDEX IF EXISTS idx_provenance_memory`,
+		`DROP TABLE IF EXISTS memory_provenance`,
 		`PRAGMA user_version = 16`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
@@ -167,8 +174,8 @@ func TestUpgradeFromV16(t *testing.T) {
 	hist := s.mustRun("history", sortedKeys(before)[0])
 	mustMatch(t, "history against the migrated store", hist.stdout+hist.stderr, "(?i)memory|history|version")
 
-	if v := s.userVersion(t); v != 17 {
-		t.Fatalf("after the open the store is at user_version %d, want 17 (the current schema)", v)
+	if v, want := s.userVersion(t), memory.SchemaVersion(); v != want {
+		t.Fatalf("after the open the store is at user_version %d, want %d (the current schema)", v, want)
 	}
 
 	t.Run("every memory survived", func(t *testing.T) {
@@ -293,7 +300,7 @@ func TestUpgradeFromV16(t *testing.T) {
 		// takes a second backup — the store is current and stays that way.
 		countBefore := len(backupsIn(t, s.dataDir()))
 		s.mustRun("history", sortedKeys(before)[0])
-		if v := s.userVersion(t); v != 17 {
+		if v := s.userVersion(t); v != memory.SchemaVersion() {
 			t.Fatalf("the second open left the store at user_version %d", v)
 		}
 		if got := len(backupsIn(t, s.dataDir())); got != countBefore {

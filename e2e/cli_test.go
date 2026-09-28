@@ -922,7 +922,7 @@ func TestCLIResolveSupersede(t *testing.T) {
 			"project_id": e2eProject,
 			"content":    "the staging relay port is 3333 now",
 		}))
-		s.setHarnessAnswer("supersede", "SUPERSEDES")
+		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port is 2222")
 
 		// Dry run: the classifier is asked and nothing is written.
 		dry := s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1")
