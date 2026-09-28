@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 17
+const schemaVersion = 18
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -60,6 +60,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV15,
 	migrateV16,
 	migrateV17,
+	migrateV18,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -139,11 +140,19 @@ func migrate(db *sql.DB, from int) error {
 // not abort the migration (which would brick every newer binary). It is deleted
 // with a loud warning instead. Anything NOT in this list is treated as
 // user-content and never auto-deleted.
+//
+// memory_provenance is in the list on this table's own definition rather than on
+// convenience: its rows are claims ABOUT a memory, its foreign key cascades, and a
+// live store therefore cannot hold one whose memory is gone. An orphan here is
+// debris a correct delete would already have removed, and treating it as user
+// content would mean every later migration aborts on it — bricking every build
+// newer than the delete that left it, over rows that mean nothing.
 var cacheFKWhitelist = map[string]bool{
 	"memory_embeddings": true,
 	"link_scans":        true,
 	"supersede_checked": true,
 	"memory_links":      true,
+	"memory_provenance": true,
 }
 
 // repairPreExistingFKOrphans deletes derived-cache rows whose parent row is
@@ -862,13 +871,27 @@ var phase1aProvenanceColumns = []struct {
 	{"confidence", "REAL"},
 }
 
+// tableInspector is the read surface a schema precondition can be checked
+// against, satisfied by a migration's *sql.Tx and by the *sql.DB OpenDB holds
+// before it migrates. It exists so ONE check can live in the step that owns the
+// precondition and also run on the open path, where running it early is what
+// makes the refusal cheap and legible — see refuseForeignProvenanceTable.
+type tableInspector interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // columnExists reports whether table has a column named column, matching
 // case-insensitively — SQLite itself treats column identifiers as
 // case-insensitive, so a hand-migrated RESOLVED_AT column must be recognized
 // as the same column resolved_at names, not trigger a duplicate ALTER that
 // SQLite would then reject.
-func columnExists(tx *sql.Tx, table, column string) (bool, error) {
-	rows, err := tx.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+//
+// The handle is a tableInspector rather than a *sql.Tx so the same check serves
+// the open path; every existing caller passes a transaction and is unaffected.
+func columnExists(tx tableInspector, table, column string) (bool, error) {
+	ctx := context.Background()
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
 		return false, fmt.Errorf("read %s columns: %w", table, err)
 	}
@@ -1077,6 +1100,188 @@ func migrateV17(tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+// migrateV18 adds memory_provenance, the append-only EVIDENCE table (schema v18,
+// issue #673). The step creates the table under the name that was reserved for
+// exactly this concept: several rows per memory, one per observation, answering
+// "who or what supports this memory" — which memory_history, the change log v17
+// added, does not answer at all.
+//
+// The seed is one INSERT ... SELECT over memories, and it is deliberately
+// conditional. A memory that recorded none of agent, session_id, source_ref or
+// confidence gets NO row: an evidence row with nothing in it still says "this
+// was observed", and for a memory nobody ever attributed there was no
+// observation to record. Backfilling a row for it would make every memory in a
+// store report one observation, which is the same fabrication as inventing a
+// session id — a count that means nothing, made to look like support.
+//
+// verified_at comes across when the memory holds one, because a memory a human
+// verified by hand is corroborated and dropping the stamp would understate what
+// the store already knows. It does not on its own justify a row: the stamp is
+// still on the memory, and the row exists to carry a provenance claim.
+//
+// observed_at is left NULL by the seed and is nullable for the same reason
+// memories' own provenance columns are (migrateV10): the migration can say what
+// the columns hold now, and cannot say when the fact was first observed. Stamping
+// the migration's own clock would be a claim about the past that nobody made.
+//
+// The seed is idempotent through NOT EXISTS, so a database an operator has
+// already created and partly populated the table in is stamped without doubling
+// its rows. Like every step it runs with foreign_keys=OFF, so the seed does not
+// depend on the pragma for its own consistency — and the cascade it installs is
+// the store's, not the migration's.
+func migrateV18(tx *sql.Tx) error {
+	// A memory_provenance table can already exist under this name, from a build
+	// between two commits that used the name for the CHANGE LOG (#664's pre-rename
+	// shape). initSQL's CREATE INDEX is a no-op against it — the change log's
+	// memory_id is there too — so this check is what stands between that table and
+	// an INSERT ... SELECT that fails with SQLite's "no such column: kind", which
+	// rolls the step back and leaves the operator with a store that will not open
+	// and an error that does not name the way out.
+	//
+	// It REFUSES rather than adapts. The rows in such a table are a dev build's
+	// change log under the wrong name; there is no shape to convert them into, no
+	// release ever wrote one, and the pre-migration backup OpenDB has already taken
+	// is the safety net a conversion would be guessing past. The remedy is the one
+	// line this build has always documented, and it is stated rather than logged:
+	// a store that cannot be opened is the operator's to fix, and a warning they
+	// may not see would leave every writer failing on the same missing column.
+	//
+	// What it checks is IDENTITY, not version -- see evidenceTableIdentity -- so an
+	// older shape of the real table is left alone with its evidence intact, and the
+	// column it lacks is reported at the statement that reads it: a repairable
+	// message about one column, rather than a DROP of a table full of records.
+	if err := refuseForeignProvenanceTable(tx); err != nil {
+		return err
+	}
+
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memory_provenance (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL
+                CHECK (kind IN ('observed', 'imported', 'verified', 'legacy')),
+    agent       TEXT,
+    session_id  TEXT,
+    source_ref  TEXT,
+    confidence  REAL,
+    observed_at TEXT,
+    verified_at TEXT,
+    carried_from TEXT
+)`,
+		// One index, for the reason initSQL's says: the reads filter on
+		// memory_id, and a carried_from index would be a b-tree insert on every
+		// consolidation carry that no query asks for.
+		`CREATE INDEX IF NOT EXISTS idx_provenance_memory ON memory_provenance(memory_id)`,
+		`CREATE TABLE IF NOT EXISTS memory_snapshot_evidence (
+    snapshot_id  TEXT NOT NULL,
+    memory_id    TEXT NOT NULL,
+    kind         TEXT NOT NULL
+                 CHECK (kind IN ('observed', 'imported', 'verified', 'legacy')),
+    agent        TEXT,
+    session_id   TEXT,
+    source_ref   TEXT,
+    confidence   REAL,
+    observed_at  TEXT,
+    verified_at  TEXT
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_snapshot_evidence ON memory_snapshot_evidence(snapshot_id, memory_id)`,
+		`INSERT INTO memory_provenance (memory_id, kind, agent, session_id, source_ref, confidence, verified_at)
+SELECT id, 'legacy', agent, session_id, source_ref, confidence, verified_at
+FROM memories
+WHERE (agent IS NOT NULL OR session_id IS NOT NULL OR source_ref IS NOT NULL OR confidence IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM memory_provenance p WHERE p.memory_id = memories.id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%q: %w", stmt[:min(40, len(stmt))], err)
+		}
+	}
+	return nil
+}
+
+// refuseForeignProvenanceTable returns an error naming the remedy when the
+// database already holds a `memory_provenance` table that is NOT Ghost's evidence
+// table: a development build between two commits used the reserved name for the
+// change log (#664's pre-rename shape), and its table has a `memory_id` like the
+// evidence table does — so `initSQL`'s `CREATE INDEX` succeeds against the wrong
+// table and nothing before the seed catches it. Left alone, the seed fails with
+// SQLite's "no such column: kind": a rolled-back step and a store that will not
+// open.
+//
+// It is called from TWO places, and the second is the point:
+//
+//   - from `migrateV18`, so the step that owns the precondition is safe on its
+//     own and does not depend on its caller having checked;
+//   - from `OpenDB`, BEFORE `backupBeforeMigrate`. A refusal that arrives after a
+//     full `VACUUM INTO` copy is a refusal that costs a copy every time, because
+//     the condition is permanent (nothing converts that table; the operator drops
+//     it) and leaves `user_version` behind, so every later open re-enters the
+//     backup path — and two opens in the same wall-clock second collide on the
+//     copy's name, so the retry an operator is guaranteed to make (the hook and
+//     the MCP server both open on session start) reports "refusing to overwrite an
+//     existing file" and names neither the table nor the remedy. That is the
+//     diagnosability this check exists to provide, defeated on the most likely
+//     retry.
+//
+// It refuses rather than adapts. The rows in such a table are a dev build's
+// change log under the wrong name, there is no shape to convert them into, no
+// release ever wrote one, and the pre-migration copy is the net a conversion would
+// be guessing past.
+//
+// It checks IDENTITY rather than version, so an older shape of the real table is
+// left alone with its evidence intact — see evidenceTableIdentity for why the
+// column list is deliberately not the whole set.
+func refuseForeignProvenanceTable(run tableInspector) error {
+	present, err := tableExists(run, "memory_provenance")
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	for _, c := range evidenceTableIdentity {
+		has, err := columnExists(run, "memory_provenance", c)
+		if err != nil {
+			return err
+		}
+		if !has {
+			return fmt.Errorf(
+				"this database already holds a memory_provenance table without a %q column, so it is not Ghost's evidence table "+
+					"— it is a development build that used the reserved name for something else, and no release ever wrote one. "+
+					"Drop it and reopen: sqlite3 <db> 'DROP TABLE memory_provenance'",
+				c)
+		}
+	}
+	return nil
+}
+
+// evidenceTableIdentity is the smallest column set that says "this is Ghost's
+// evidence table", and it is all refuseForeignProvenanceTable checks.
+//
+// `kind` alone settles it: no shape of the change log has a kind column, and that
+// is the only other thing this name has ever been used for. The list is
+// deliberately NOT the full column set, because a probe that compared the full set
+// would be a VERSION check wearing an identity check's clothes — the next schema
+// change that adds a column to this table would then refuse every store already
+// at that version, and the remedy that refusal names is `DROP TABLE
+// memory_provenance`, a command that destroys real evidence records. A build must
+// never answer "that is the wrong table" about a table it merely knows an older
+// shape of; a column it lacks is its own error, reported by the statement that
+// reads it, which is a repairable message about one column.
+var evidenceTableIdentity = []string{"id", "memory_id", "kind"}
+
+// tableExists reports whether a table of that name is in the schema.
+func tableExists(run tableInspector, table string) (bool, error) {
+	var n int
+	err := run.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("look up table %s: %w", table, err)
+	}
+	return n > 0, nil
 }
 
 // migrateV14 adds memory_snapshots.scope and its scope_captured marker. v13

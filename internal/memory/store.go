@@ -2483,6 +2483,12 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, provenanceFromMemory(m)); err != nil {
 		return "", err
 	}
+	// The evidence record shares this transaction for the same reason, and its
+	// kind is observed because that is what a save is: something reported this
+	// fact and the store kept what it reported about itself.
+	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, provenanceFromMemory(m), false); err != nil {
+		return "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit create: %w", err)
 	}
@@ -3310,6 +3316,18 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			} else if err := appendHistoryTx(ctx, tx, existingID, phaseMerge, opts.Provenance); err != nil {
 				return "", "", 0, err
 			}
+			// A second REPORT of the same fact, which is not the same thing as a
+			// second memory: the survivor is the row the corpus keeps, so the
+			// evidence the fold was about has to land on it. Before this the folding
+			// agent and session went with the incoming wording, and the store could
+			// say who wrote a memory first but never that a second agent later
+			// agreed with it.
+			//
+			// Appended for FoldOnly too, and that path needs it more: it stores no
+			// row of its own, so without this the report would leave no trace.
+			if err := appendEvidenceTx(ctx, tx, existingID, evidenceObserved, opts.Provenance, false); err != nil {
+				return "", "", 0, err
+			}
 		}
 
 		if opts.FoldOnly && existingID != "" {
@@ -3347,6 +3365,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
 		}
 		if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
+			return "", "", 0, err
+		}
+		// Evidence for the row just inserted, in the same transaction. The stored
+		// copy carries its own observation even on a fold, because it is a row of
+		// its own with its own text; the fold's SECOND report is the one that goes on
+		// the survivor above.
+		if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, false); err != nil {
 			return "", "", 0, err
 		}
 
@@ -3407,6 +3432,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
+		return "", "", 0, err
+	}
+	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, false); err != nil {
 		return "", "", 0, err
 	}
 	if err = commit(); err != nil {
@@ -4524,6 +4552,27 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	if err != nil {
 		return nil, fmt.Errorf("snapshot memories: %w", err)
 	}
+	// The evidence those memories carry, in the second read rather than a column on
+	// the snapshot row: a memory can have several records, and this is the only
+	// copy that will exist by the time the rows are gone.
+	//
+	// It is here for the restore. A consolidation that rewrites a memory deletes
+	// the row, and the foreign key takes its evidence with it, so a restore that
+	// brought back only the text would return a memory that reads as never observed
+	// — in a database that still had the evidence to return. Joining through the
+	// snapshot's own rows bounds the read to the memories this snapshot covers, so
+	// nothing outside the replaced corpus is copied.
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO memory_snapshot_evidence
+			(snapshot_id, memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
+		SELECT ?, s.memory_id, p.kind, p.agent, p.session_id, p.source_ref, p.confidence,
+		       p.observed_at, p.verified_at
+		FROM memory_snapshots s
+		JOIN memory_provenance p ON p.memory_id = s.memory_id
+		WHERE s.snapshot_id = ? AND s.memory_id IS NOT NULL
+	`, snapshotID, snapshotID); err != nil {
+		return nil, fmt.Errorf("snapshot memory evidence: %w", err)
+	}
 
 	// Identify which existing rows this replace may delete, and which emitted
 	// memory can reuse one. A row whose content the consolidator re-emits
@@ -4629,34 +4678,25 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			deleteIDs = append(deleteIDs, c.id)
 		}
 	}
-	if len(deleteIDs) > 0 {
-		// Recorded before the rows go, and in the same transaction, so the
-		// consolidation's dropped memories keep the text that explains why
-		// they are missing. This is the writer that makes an unbounded history
-		// a real concern rather than a theoretical one: one applied reflect can
-		// drop and rewrite the whole non-manual corpus at once.
-		if err := appendHistoryForIDsTx(ctx, tx, deleteIDs, phaseDelete, Provenance{}); err != nil {
-			return nil, err
-		}
-		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
-		if err != nil {
-			return nil, fmt.Errorf("prepare delete replaced memory: %w", err)
-		}
-		for _, id := range deleteIDs {
-			if _, err := stmt.ExecContext(ctx, id); err != nil {
-				stmt.Close() //nolint:errcheck
-				return nil, fmt.Errorf("delete replaced memory: %w", err)
-			}
-		}
-		stmt.Close() //nolint:errcheck
-	}
-
-	reused := 0
-	// Every row this pass wrote, collected so the history appends happen in one
-	// place at the end: the ids of the fresh inserts are only known as they are
-	// made, and interleaving the two statements per row would triple the
-	// statement count for no gain.
+	// The emissions run BEFORE the delete below, which is a reordering with a
+	// reason: a rewrite or a merge carries its sources' evidence onto the row it
+	// becomes, and that copy has to READ those rows. The foreign key takes them
+	// the moment the source memory is deleted, and there is no second copy — the
+	// snapshot holds the pre-replace corpus, not the post-rewrite one. So the carry
+	// is the constraint, and the delete waits for it.
+	//
+	// Nothing else in the two blocks depends on the order. The delete set was
+	// decided above, from the candidates takeReusableRow did NOT claim, so a row
+	// this loop updates in place is never one the delete removes; the fresh inserts
+	// mint their own ids and collide with nothing; and every statement here runs
+	// inside one transaction that already holds the write lock, so no other writer
+	// can see the interval.
+	// reflected is every row this pass wrote, collected so the history appends
+	// happen in one place at the end: the ids of the fresh inserts are only known
+	// as they are made, and interleaving the two statements per row would triple
+	// the statement count for no gain.
 	var reflected []string
+	reused := 0
 	// successorOf maps the ids this pass consumed to the row that now holds
 	// their content, so the consumed rows' delete history can say where their
 	// knowledge went. Only ids the caller declared (Memory.ReplacesIDs, which the
@@ -4721,11 +4761,48 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope)).Scan(&newID); err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
+		// The support this emission was consolidated FROM, carried onto the row that
+		// now holds the text. Without it a rewrite or a merge mints an id whose
+		// evidence the foreign key has just deleted, and every consolidated memory
+		// reads "no recorded evidence" from then on — the one write path that runs
+		// unattended over the whole corpus, silently forgetting the whole corpus's
+		// support.
+		//
+		// The reuse branch above needs none of this: it updates a row in place, so
+		// that row's evidence never left it. And an emission with no ReplacesIDs
+		// carries nothing, because a brand-new memory has no inherited support and
+		// "none" is the answer.
+		if err := carryEvidenceTx(ctx, tx, newID, m.ReplacesIDs); err != nil {
+			return nil, err
+		}
 		reflected = append(reflected, newID)
 		for _, replaced := range m.ReplacesIDs {
 			successorOf[replaced] = newID
 		}
 	}
+
+	if len(deleteIDs) > 0 {
+		// Recorded before the rows go, and in the same transaction, so the
+		// consolidation's dropped memories keep the text that explains why
+		// they are missing. This is the writer that makes an unbounded history
+		// a real concern rather than a theoretical one: one applied reflect can
+		// drop and rewrite the whole non-manual corpus at once.
+		if err := appendHistoryForIDsTx(ctx, tx, deleteIDs, phaseDelete, Provenance{}); err != nil {
+			return nil, err
+		}
+		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
+		if err != nil {
+			return nil, fmt.Errorf("prepare delete replaced memory: %w", err)
+		}
+		for _, id := range deleteIDs {
+			if _, err := stmt.ExecContext(ctx, id); err != nil {
+				stmt.Close() //nolint:errcheck
+				return nil, fmt.Errorf("delete replaced memory: %w", err)
+			}
+		}
+		stmt.Close() //nolint:errcheck
+	}
+
 	// One append for every row this pass wrote, reused and fresh alike: from
 	// outside, a reflection rewrite and the row it rewrote are the same event,
 	// and phaseReflect is what answers "which consolidation run touched this".
@@ -4766,6 +4843,17 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	`, projectID, projectID)
 	if err != nil {
 		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
+	}
+	// The evidence goes with the snapshot it belongs to, and the same statement
+	// shape: memory_snapshot_evidence has no foreign key to cascade from (the
+	// snapshots it describes are addressed by (snapshot_id, memory_id), which is
+	// not a key), so a pruned snapshot's evidence would otherwise accumulate
+	// forever — the only unbounded growth this table would have had.
+	if _, err = tx.ExecContext(ctx, `
+		DELETE FROM memory_snapshot_evidence
+		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
+	`); err != nil {
+		s.logger.Warn("prune old snapshot evidence", "error", err, "project_id", projectID)
 	}
 
 	if s.logger != nil {
@@ -4985,6 +5073,27 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	}
 	insertedRows.Close() //nolint:errcheck
 	insertedN := int64(len(reinserted))
+
+	// The evidence of the rows that were genuinely GONE, from the snapshot that
+	// carried it. Only the reinserted half needs it: a row restored IN PLACE was
+	// never deleted, so its evidence was never in danger, and copying it would
+	// double its records on every repeated restore.
+	//
+	// The copy replaces rather than appends, and it is scoped to the ids the
+	// INSERT above just created — so it cannot touch a row that came back earlier
+	// or one this restore left alone. The records come back verbatim, with
+	// carried_from empty: a restore puts a row back where it was, under its own id,
+	// so its evidence is its own again rather than a successor's.
+	//
+	// A pre-v13 snapshot recorded no memory_id, so it carries no evidence to
+	// restore and the row comes back with none. That is the truth — this database
+	// never recorded the support of a row it could not name — and the alternative
+	// would be inventing it.
+	if len(reinserted) > 0 {
+		if err := restoreSnapshotEvidenceTx(ctx, tx, snapshotID, reinserted); err != nil {
+			return 0, err
+		}
+	}
 
 	// One history row per row this restore actually changed, in the same
 	// transaction: without them the corpus reads as though the replace never

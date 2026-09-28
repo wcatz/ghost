@@ -34,12 +34,25 @@ import (
 // record changes shape, and never for an added optional field, so an artifact
 // from a slightly older build still imports.
 //
-// Import refuses any version it does not know in either direction. A newer
-// version is a file whose fields this build cannot interpret, and reading it
-// would insert records that mean whatever this build guesses; an older one is a
-// file whose records were written under rules that no longer hold. Neither is
-// something to guess at, so both are refused and the version is named.
-const SchemaVersion = 1
+// v2 is the memory record's nested `evidence` list (#673). A list is a change of
+// SHAPE rather than one more optional field, so it took a version — and the
+// version alone would have made every v1 artifact unreadable, which is why the
+// readable range below is explicit rather than "this version only".
+//
+// Import refuses any version outside the range it reads. A newer one is a file
+// whose fields this build cannot interpret, and reading it would insert records
+// that mean whatever this build guesses. An older one would normally be a file
+// written under rules that no longer hold — so the range is not "everything
+// below", it is a list of the versions whose rules still hold. v1 is on it
+// because nothing about a v1 record CHANGED: the only difference is a list v1
+// files do not carry, and an absent optional field is the documented no-change
+// case. A future shape change removes v1 from the range rather than widening it,
+// and the test that pins the range is the one that has to be edited to do it.
+const SchemaVersion = 2
+
+// minReadableSchemaVersion is the oldest artifact this build reads. See
+// SchemaVersion for why it is a range and not everything below.
+const minReadableSchemaVersion = 1
 
 // Record type discriminators. Each line carries exactly one, and an import
 // refuses a type it does not know: silently skipping records would produce a

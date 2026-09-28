@@ -162,6 +162,32 @@ func rejectSecretList(field string, values []string) error {
 //     session_id as the harness states them are the real gap and it is
 //     structural: a harness is chosen by Ghost, not by the caller, so guarding
 //     it is the wrong layer — see above.
+//
+//     A SECOND COPY is the other way a field is unguarded while its writer is
+//     guarded, and it is the one #673 opened: since memory_provenance exists, a
+//     provenance value lands TWICE — once on memories, once on an append-only
+//     evidence row — and the table is the worse of the two, because it is never
+//     overwritten, the next `ghost export` re-emits it, and only the purge's
+//     explicit DELETE reaches it. So guarding a writer's memories column says
+//     nothing about the evidence rows the same write creates, and the rule is
+//     the import's, already stated there: guard a field at EVERY copy the write
+//     creates, or one of them leaks.
+//
+//     Both routes are covered, for different reasons and each with a witness.
+//     ImportMemory checks the memory's three provenance fields AND each carried
+//     record's own agent, session_id and source_ref, because there the copy is
+//     the FILE's content and the memory-level guard cannot see it at all — see
+//     TestImportedEvidenceIsGuardedLikeTheMemoryRow. The harness path cannot put
+//     a credential in an evidence row that its guard did not already refuse,
+//     because every appendEvidenceTx there writes the SAME Provenance value, in
+//     the SAME transaction, after the same rejectSecret: insertMemory behind
+//     Create's check, and all three of UpsertWithOptions' appends — the
+//     fold-into-existing one above the two fresh-insert ones — behind the single
+//     check at the top of that function. That is coverage BY CONSTRUCTION rather
+//     than by a second call, so it needs a witness instead of a redundant guard:
+//     TestObservedEvidenceCarriesNoUnguardedProvenance is that witness, and it is
+//     the assertion that fails the day a writer appends evidence from a Provenance
+//     its guard never saw.
 //   - Content already in the database. This guard reads what a caller is
 //     trying to write; it does not sweep rows a previous version stored. Doing
 //     that is a separate, report-first job — a detection pass over existing

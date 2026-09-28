@@ -249,19 +249,19 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 // the wrong file.
 var errNoHeader = errors.New("not a ghost artifact (no schema-version header)")
 
-// checkSchemaVersion refuses any version this build does not read, in either
-// direction. A newer artifact's fields mean whatever this build guesses; an
-// older one was written under rules that no longer hold, and reading it would
-// import records whose meaning has since changed. Both are named in the error so
-// the user knows whether to upgrade ghost or re-export.
+// checkSchemaVersion refuses any version outside the range this build reads. A
+// newer artifact's fields mean whatever this build guesses; an older one is
+// refused unless its rules still hold, which is why the range is named on both
+// sides rather than being "everything below SchemaVersion". Both are named in
+// the error so the user knows whether to upgrade ghost or re-export.
 func checkSchemaVersion(version int) error {
-	if version == SchemaVersion {
+	if version >= minReadableSchemaVersion && version <= SchemaVersion {
 		return nil
 	}
 	if version > SchemaVersion {
 		return fmt.Errorf("schema version %d is newer than this ghost build reads (v%d) — upgrade ghost, or re-export with the version that wrote it", version, SchemaVersion)
 	}
-	return fmt.Errorf("schema version %d is older than this ghost build writes (v%d) — re-export the artifact with this build", version, SchemaVersion)
+	return fmt.Errorf("schema version %d is older than this ghost build reads (v%d and later) — re-export the artifact with this build", version, minReadableSchemaVersion)
 }
 
 // parsedRecord is one record plus the artifact line it came from.

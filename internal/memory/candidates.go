@@ -122,6 +122,16 @@ type Candidate struct {
 	// reordering, not a score, so it is expressed by the returned order.
 	Base, Decay, Score float64
 	AgeDays            float64
+	// Evidence counts the records supporting this memory, read in the SAME
+	// snapshot as the rows. It rides here because the assembler may reach the
+	// store through this one read and no other, so a fact only this read can
+	// supply has to travel with the row.
+	//
+	// Nothing ranks on it: stage 4's multiplier stays 1.0 until a measured change
+	// justifies one (#673), and a row with no evidence is not demoted for that. It
+	// is carried so the trace can report what supports a memory, which is a
+	// question a reader of a search result has and no other field answers.
+	Evidence EvidenceCounts
 }
 
 // LinkEdge is one edge between two candidates. Stages 5 and 6 read it to
@@ -325,8 +335,29 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	set.Rows = rows
 	set.Widened = len(rows) > req.Fetch.Limit
 
-	edges, status := cand.loadCandidateEdges(ctx, edgeScopeIDs(rows, req.Fetch.Limit))
+	// One id scope for the two reads that need one: the edge load and the evidence
+	// counts ask about the same rows, and edgeScopeIDs is the statement of which
+	// rows those are (the returned set, bounded by twice the window).
+	scope := edgeScopeIDs(rows, req.Fetch.Limit)
+	edges, status := cand.loadCandidateEdges(ctx, scope)
 	set.Edges, set.EdgesStatus = edges, status
+
+	// The evidence counts, read on the same snapshot as everything above it: a
+	// count taken after the transaction closed could describe a save the rows in
+	// this set predate, and the trace would then report support for a state of
+	// the corpus it did not retrieve.
+	//
+	// A failure here is returned rather than degraded into zeroes. The counts are
+	// inert for ranking, so a caller would not notice a silent zero — but a trace
+	// that says "no recorded evidence" because the read failed is a false claim
+	// about a memory, which is the one thing this read must never produce.
+	counts, err := evidenceCountsFor(ctx, cand.queryDB(), scope)
+	if err != nil {
+		return nil, fmt.Errorf("candidates: evidence counts: %w", err)
+	}
+	for i := range rows {
+		rows[i].Evidence = counts[rows[i].ID]
+	}
 	return set, nil
 }
 

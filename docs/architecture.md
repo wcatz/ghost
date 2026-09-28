@@ -329,7 +329,9 @@ The main schema tables are:
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
 | `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
-| `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — the name `memory_provenance` is reserved for evidence records, which are a different concept: one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`) |
+| `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`). Its `memory_id` deliberately has no foreign key |
+| `memory_provenance` | Append-only per-memory EVIDENCE records (schema v18, [#673](https://github.com/wcatz/ghost/issues/673)) — SEVERAL rows per memory, one per observation, each naming the agent, session, reference and confidence that supported it, with `observed_at`/`verified_at`, and `carried_from` when a consolidation carried the record off the memory it was consolidated from. A different question from the change log, and the name `memory_history` deliberately did not take. Its `memory_id` cascades, and the table is in the migration's derived-row whitelist so an orphan cannot brick a newer build |
+| `memory_snapshot_evidence` | The evidence a reflection snapshot carries, so a restore brings the support back with the row (schema v18). Pruned with the snapshots themselves |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
@@ -360,18 +362,41 @@ The redaction is whole-content, not a span, and the reason is worth stating beca
 
 The filter runs on **every** appended row whether or not anything is redacted, because the only sound way to know is to look, and that cost is on the write path's critical section: measured at **~1.1 ms per 2 KB row and ~3.6 ms at the 8 KB content cap**, inside the transaction, so a batched append pays it once per id. Skipping the detector on rows that look clean is not available — a prefilter with a false negative is a silent leak, which is the same lesson `internal/secret` already teaches once in its own comments.
 
-**The name is a reservation, not a description.** This is a change log — one
+**The name is a distinction, not a description.** This is a change log — one
 row per write, holding the state the memory had once that write landed. Evidence
-provenance is a separate concept and is not this table: that is a future
-`memory_provenance` holding SEVERAL evidence records per memory (kind, agent,
-`session_id`, `source_ref`, confidence, `observed_at`, `verified_at`), answering
-"who or what supports this memory" rather than "how did this row change". The two
-are easy to confuse in prose and unrelated in fact, and a schema name is
-permanent once released, so this table is named for what it is.
+provenance is a separate concept and is not this table: that is
+`memory_provenance`, created by `migrateV18` ([#673](https://github.com/wcatz/ghost/issues/673)),
+holding SEVERAL evidence records per memory (kind, agent, `session_id`,
+`source_ref`, confidence, `observed_at`, `verified_at`), answering "who or what
+supports this memory" rather than "how did this row change". The two are easy to
+confuse in prose and unrelated in fact, and a schema name is permanent once
+released, so this table is named for what it is.
 A development store built from a pre-rename commit of #664 can hold a
-`memory_provenance` table from that build, which Ghost neither reads nor purges.
-No release ever created it, and Ghost does not drop it because the name is
-reserved: remove it by hand with `sqlite3 <db> 'DROP TABLE memory_provenance'`.
+`memory_provenance` table from that build, holding the CHANGE LOG's shape under
+the reserved name. `initSQL` cannot stop that — the change log has a `memory_id`
+too, so its `CREATE INDEX` succeeds against the wrong table — so the check runs
+twice: in `migrateV18`, which owns the precondition, and in `OpenDB` *before*
+`backupBeforeMigrate` (a refusal that costs a full `VACUUM INTO` copy on every
+open of a store that cannot be opened, and whose same-second retry reports a
+backup collision naming neither the table nor the remedy). It **refuses** a
+mismatch, naming the command rather than warning: a store that will not open is
+the operator's to fix, and a warning nobody may see leaves every writer failing
+on the same missing column. Nothing is converted, and nothing is dropped
+automatically — the rows in that table are a dev build's change log under the
+wrong name, there is no shape to convert them into, no release ever wrote one,
+and the pre-migration copy `OpenDB` has already taken is the net a conversion
+would be guessing past.
+
+The check is about **identity, not version**: it tests for `id`, `memory_id` and
+`kind` and nothing else. `kind` alone settles it, since no shape of the change log
+has one, and a probe that compared the *full* column set would be a version check
+wearing an identity check's clothes — the next schema change to add a column here
+would then refuse every store already at that version, with a remedy that drops a
+table full of evidence records. An older shape of the real table is therefore left
+alone with its rows intact, and the column it lacks is reported by the statement
+that reads it: a repairable message about one column. A table of the current shape
+is likewise left exactly as it is — the seed adds a `legacy` row only where a
+memory has none, so re-running the step cannot double them.
 
 | Phase | Appended by | What the row records |
 |---|---|---|
@@ -480,7 +505,15 @@ prints it. Three things follow:
   was, because "erase the history of this memory" and "delete this memory" are
   different requests. The entry points do not have that choice — they are a
   delete, and the live row goes with its history.
-- **A purge reaches every copy this database holds**, not just the history table.
+- **A purge reaches every copy this database holds**, not just the history table,
+  and that includes the *evidence* copies added later — `memory_provenance` and
+  `memory_snapshot_evidence` both name the agents, sessions and references that
+  reported a memory, so a redaction that left either behind would have erased the
+  text and kept the story of who said it. The snapshot table is the one an earlier
+  version of this list would have missed: a snapshot is the rollback point for a
+  whole *project*, so its evidence rows are keyed on the memory alone and would
+  otherwise outlive the purge by however many reflects it takes to prune that
+  snapshot — or forever if none runs.
   `memory_snapshots` is the one that matters: every applied reflection copies each
   non-manual memory's full content into a snapshot, the column has no foreign key,
   and `ghost reflect --restore` re-inserts the row from it under the memory's
@@ -599,6 +632,160 @@ produces becomes a `related` edge or a `supersedes` candidate. The derived store
 ranking the search did not produce. A retired vector never hides its memory: the
 text stays in the keyword leg until the row is rewritten.
 
+### Evidence provenance
+
+`memory_provenance` is the table whose name v17 reserved, and it answers the
+question the change log cannot ([#673](https://github.com/wcatz/ghost/issues/673)):
+**what supports this memory**, as opposed to how it changed. `memories` holds one
+set of mutable provenance columns, so a fact claude-code reported in one session,
+codex reported in another, and a human verified kept only the last of the three.
+Here they are three rows, and none of them is overwritten.
+
+Three concepts stay distinct, and prose that blurs them is a bug in the prose:
+
+| Concept | Where it lives | Question |
+|---|---|---|
+| **Source** | `memories.source` (`mcp`, `reflection`, `onboarding`, `manual`, …) | How did Ghost *receive* this? |
+| **Agent** | `agent` on a row, and on the memory | Which agent produced or observed it? |
+| **Provenance** | this table | Which *observations* support it, and when? |
+
+A row is one observation: `observed` (a write path recorded what the host
+reported), `imported` (the fact arrived through a portable artifact), `verified`
+(reserved for the validity writers, [#575](https://github.com/wcatz/ghost/issues/575),
+which own that write) and `legacy` (the migration's seed). A CHECK, not a
+convention: a kind no reader knows is a kind no reader can filter.
+
+| Writer | Appends | To which memory |
+|---|---|---|
+| `Create`, `Upsert` insert | `observed` | the new row |
+| `Upsert` fold, including `FoldOnly` | `observed` | the **surviving** memory — see below |
+| `RecordDecision` | `observed` | the companion memory, empty of provenance (the tool reports none) |
+| `ReplaceNonManual`, fresh insert | a **carry** of its sources' records | the row the rewrite or merge becomes — see below |
+| `ImportMemory` | the artifact's own records, then `imported` | the imported row |
+| `RestoreSnapshot` | the snapshot's records, verbatim | a re-created row — see below |
+| `migrateV18` | `legacy` | a memory that already recorded a provenance value |
+
+Two writers deliberately append nothing, and both are cases where a record would be
+a claim nobody made. `ReplaceNonManual`'s **reuse** branch updates a row in place, so
+that row's evidence never left it. And the *carried* records keep the kind they
+were: the observation really was made, by that agent, about that content, at that
+time; what it was not made about is the wording now on the row.
+
+**A fold is the case the table exists for.** A near-duplicate save used to be a
+discard: the incoming wording became a linked copy and the agent, session and
+reference that reported it went with it. The fold now appends the second report
+to the row the corpus actually kept. `FoldOnly` — the promotion path, which stores
+no row of its own — needs this more, not less: without it the report would leave
+no trace at all.
+
+**A consolidation carries, because the foreign key would otherwise forget.** A
+rewrite or a merge mints a new id, and the evidence of the row it replaces dies with
+it — so every consolidated memory would read "no recorded evidence" from then on,
+on the one write path that runs unattended over the whole corpus. The new row
+therefore gets a verbatim copy of each source's records, with `carried_from` naming
+the memory each came from. A merge names every one of its sources, so two agents
+agreeing on one fact survives the merge as two records rather than one.
+
+`carried_from` is the honest half. The copy keeps the kind, the agent, the session,
+the reference, the confidence and both stamps — a consolidation is not an
+observation and gets to invent none of them — and the pointer says what it is: an
+agent reported *something this was consolidated from*, not this wording. It is also
+the way back, because the id it names is gone while the change log kept that id's
+whole past.
+
+The carry is **one statement for the whole set** (an engine-dependent row order
+would put a diff between two exports of an unchanged corpus on the card, so it
+carries an `ORDER BY memory_id, rowid`), and it runs *before* the delete that
+removes the sources — that is the ordering constraint the whole feature rests on,
+and `TestConsolidationCarriesEvidenceToTheRowThatSurvives` fails if the two blocks
+swap.
+
+**A restore brings the support back, because the snapshot carries it.** The same
+cascade that takes a rewritten row's evidence takes it on restore, and a restore
+that returned the text alone would hand back a memory that reads as never observed
+in a database that still had the evidence to return. `memory_snapshot_evidence`
+holds it beside the snapshot row — a table rather than a column, because a memory
+has several records — and is pruned with the snapshots it belongs to, so it cannot
+outlive what it describes.
+
+Only the **re-created** rows are restored. A row the replace never deleted is
+updated in place, and the snapshot holds an *older* copy of its evidence: restoring
+that too would replace a row's own support with what it held at snapshot time, and
+silently drop every corroboration recorded since. A pre-v18 snapshot carries no
+evidence, and a pre-v13 one recorded no `memory_id` to attribute it to, so a row
+restored from either comes back with none — which is the truth.
+
+**Nothing is invented.** Every column except `kind` is NULL when the host did not
+report it, and `nullIfEmpty` is what keeps "" from being stored in place of an
+absence. A guessed agent or session is a provenance claim nobody made, which is
+the same rule the memory columns follow ([v10](#retrieval)) and the reason
+`Upsert` with no `Provenance` records a row with every field NULL rather than
+skipping the append: the save *did* happen, and "observed by nobody in particular"
+is a true statement. `observed_at` is NULL only for the migration's seed, which can
+say what the columns hold now and cannot say when the fact was first observed.
+
+**The foreign key cascades, and that is the difference from the change log.**
+`memory_history.memory_id` has no foreign key on purpose — the audit of a deletion
+must outlive the row, and the `delete` tombstone is the whole point of it. Evidence
+has the opposite requirement: "supported by 3 observations" is a claim *about a
+memory*, and once the memory is gone the claim is about nothing. So a hard `DELETE`
+takes the records with it. A purge also deletes them **explicitly**
+(`purgeHistoryTx`), because `Store.PurgeMemoryHistory` leaves the memory in place
+and no cascade fires for a row that stays — a purge whose completeness depended
+on a connection's `foreign_keys` pragma would be a purge that can report success
+over rows still in the table.
+
+**No growth prune, on purpose.** The append is one statement inside the caller's
+write transaction, and that is the whole budget: the change log's growth policy is
+three statements, and it is what took `TestConcurrentProcessesMixedReadWrite` to
+`SQLITE_BUSY` at `BEGIN IMMEDIATE` (see the growth policy above). A second
+statement per save to bound a table the cascade already keeps in step with the
+corpus is the wrong trade. The growth that remains is bounded in practice: records
+die with their memory, so the table holds at most one observation per save for
+every *live* memory, and a store folding the same fact ten thousand times has a
+change log at its cap first.
+
+**The seed is conditional.** `migrateV18` writes one `legacy` row per memory that
+recorded at least one of `agent`, `session_id`, `source_ref` or `confidence`, and
+**none** for a memory that recorded nothing. A row with every field NULL would
+still say "this was observed", and seeding one per memory would make a store
+report "supported by 1 observation" about rows nobody ever attributed — the same
+fabrication as inventing a session id, just spread over the corpus.
+`verified_at` comes across when the memory holds one (a hand verification is
+corroboration, and dropping it would understate the support already recorded) but
+does not on its own justify a row.
+
+**Readers.** `Store.MemoryProvenance(id)` returns the records oldest first (by
+`rowid`, because `observed_at` is second-precision and several observations in one
+session share a timestamp). `Store.MemoryEvidenceCounts(id)` returns
+`EvidenceCounts{Observations, Verified}`, whose `Label()` renders the compact form
+a trace shows: `supported by 2 observations, 1 verified`. The verified clause is
+absent when it is zero, and a memory with no records reads `no recorded evidence`
+rather than `supported by 0 observations` — the first says Ghost holds nothing, the
+second reads as a measurement of zero support.
+
+**Nothing ranks on this yet.** The counts ride on `memory.Candidate` because
+`Candidates` is the assembler's *only* route to the store, and stage 4 records
+them in `Signals.Evidence` while its multiplier stays pinned at `1.0`. A memory
+with three observations and one with none keep the retriever's order. That is the
+deliberate half of [#673](https://github.com/wcatz/ghost/issues/673): ship the
+model and the reading, and let a measured change justify the weighting later.
+
+**The portable artifact carries them; the Obsidian mirror does not.** The artifact
+is v2, and a v1 file still imports — the change is a nested list, which is a shape
+change worth a version bump, and the readable range is an explicit list of the
+versions whose rules still hold rather than "everything below". The records nest
+under the memory they support, because a bare evidence line cannot be attributed.
+An import is deliberately **not** a fixed point: it keeps the records the artifact
+carried and adds one of its own for the arrival, because a destination that
+adopted the source's records verbatim would say nothing about how the fact reached
+*it*. One field is deliberately NOT carried: `carried_from`, which names a memory
+that was deleted — the reason the record was carried — so it resolves against
+nothing on the far side and the change log that could explain it is not in the
+artifact either. The destination holds those records as its own direct support,
+which is what they are. The Obsidian vault is a human-readable mirror, not a
+transfer format, and its front matter is about the memory.
+
 ### Memory lifecycle
 
 `reflect` replaces non-manual/non-builtin memories through a tiered consolidator. It snapshots before replacement, rejects empty results, preserves manual and Ghost-shipped builtin memories, and can restore the latest snapshot.
@@ -676,7 +863,7 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 | **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — `memory_history` now records every state change and who made it, but nothing reads it during retrieval; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
 | **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memory_search` is the only surface that runs the pipeline, so it is the only one that filters a closed window out — the browsing surfaces still show it, marked `expired`, and the session-start block shows it with no marker at all because it renders its own rows (see the assembler section below). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way. A bare date is a whole day, and a `valid_until` is the END of it (see the assembler section) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate) |
-| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write | Inert for ranking, visible to the reader — the three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four, but stage 4's multiplier stays pinned at `1.0` and nothing scores on them. The history has no reader yet: `ghost history <memory-id>` and `Store.MemoryHistory` are the only two, and no retrieval path consults them |
+| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write; `memory_provenance` records every observation ([#673](https://github.com/wcatz/ghost/issues/673)) | Inert for ranking, visible to the reader. The three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four. Nothing scores on any of them: stage 4's multiplier stays pinned at `1.0`, and the evidence counts are recorded in the assembler's trace and weigh nothing. `memory_history` has no reader but two — `ghost history <memory-id>` and `Store.MemoryHistory` — and no retrieval path consults them. `memory_provenance` has four: `Store.MemoryProvenance`, `Store.MemoryEvidenceCounts`, the portable artifact, and `Signals.Evidence` in the trace |
 
 Axis interaction rules:
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
@@ -684,7 +871,7 @@ Axis interaction rules:
 - **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Not yet enforced: stage 5 of the assembler *records* a co-occurring `contradicts` pair and leaves both rows in place, because the existing contract requires a contradicted row to survive while a duplicate restatement sinks. Separating the pair needs its own contract change ([#581](https://github.com/wcatz/ghost/issues/581)).
 - **A scope conflict blocks the relation, and is not repaired by deleting it.** Two memories naming `environment=production` and `environment=development` are two claims about two places, so no relation may be proposed or created between them — not `duplicate` (at save time), not `related` (at link time), not `supersedes` (at supersede time), because each of those writers is the only one that can see both scopes at the moment it decides. An edge that already exists stays in the graph and is exempt at read time instead: every reader ignores it, and none deletes a row to reach that verdict. The exemption is stated where the decision is made, and every writer that chooses between candidates states it *inside* the query, because the same `LIMIT` chooses them: a conflict decided after the cut spends the budget on rows the caller may not use and misses a compatible candidate ranked just below ([#665](https://github.com/wcatz/ghost/issues/665)). The two cosine writers narrow before their window (`SearchVectorScoped`, in Go over the scan rather than inside a statement, so its top-k is the limit and there is no statement to fold the rule into), so a neighbour budget counts only rows a memory may relate to. `Upsert`'s two dedup probes and `foldTargetStillLive` each carry a second, SQL statement of the rule (`scopesConflictSQL`, held to the Go one by a test that runs both over the same table), for two different reasons: the probes because their own `LIMIT 15` chooses the candidates — so a save whose fifteen best FTS matches all name another environment still finds the compatible duplicate at rank 16 — and `foldTargetStillLive` because it has no window to protect, names one row by id, and carries the rule to keep a scope-conflicting `supersedes` edge from being read as a verdict on it.
 - **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes. The rule is decided where the rows are read, in whichever form that read allows. Search applies it in Go over the widened pool `Store.Candidates` returns — both legs have already run by then, and fusion narrows the fused pool, so a SQL form there would narrow nothing it still had to decide about — and the assembler keeps it in Go over the same set. A reader whose candidate set *is* a statement's own `LIMIT` has no rows left to decide over once the cut is taken, and no corpus scan to decide them with, so it carries a SQL statement instead: `memory.ScopeMatchesSQL`, in the two session-start loaders. A test runs that form and the Go one over the same rows, and a second test pins the single divergence between them — a stored scope value that is not a string. The cosine writers in the bullet above are that difference made concrete: a brute-force pass over the corpus can decide before its own top-k, in Go, and backfill to fill it.
-- **Who wrote it is not how much to trust it.** `agent`/`session_id`/`source_ref` describe who wrote a row, and `memory_history` ([#578](https://github.com/wcatz/ghost/issues/578)) records who performed each write since — but neither is a ranking input, and a confidence value is not a verdict anything computes. (Write-time authorship and evidence provenance are different things; see [Memory history](#memory-history).)
+- **Who wrote it is not how much to trust it.** `agent`/`session_id`/`source_ref` describe who wrote a row, and `memory_history` ([#578](https://github.com/wcatz/ghost/issues/578)) records who performed each write since — but none of them is a ranking input, and a confidence value is not a verdict anything computes. `memory_provenance` ([#673](https://github.com/wcatz/ghost/issues/673)) now keeps every observation rather than the last, and the assembler reports the count; it still does not rank on it. (Write-time authorship, the change log and the evidence records are three different things; see [Memory history](#memory-history) and [Evidence provenance](#evidence-provenance).)
 
 ## Context assembly (target design)
 
@@ -900,7 +1087,7 @@ The copy is created at 0600 *before* the vacuum rather than chmod'ed after it, a
 
 `BackupResult.Counts` is counted by opening the *written* file read-only, never the live one. The counts a restore is checked against have to describe the file that was written: a writer that committed after the vacuum would otherwise make the printed numbers and the snapshot's contents disagree, and the reader has no way to tell which is right.
 
-**An export is an inspectable artifact.** `internal/portable` writes the store as JSON Lines — one self-describing object per line behind a schema-version header — and reads one back. It is a wire format with its own version, independent of `schemaVersion`: an artifact is a file that outlives the ghost that wrote it, so its meaning is the shape of the records, not the tables behind them. Ordering is fixed (projects, then memories, tasks and decisions, each by id) and the header carries no timestamp, so two exports of an unchanged store are byte-identical and a diff of two artifacts shows only what changed in the store. The line-oriented shape is also why a damaged file is survivable: a line that is not JSON is rejected on its own, by line number, and the records around it still import — which is what the reader gets from a truncated or hand-mangled artifact. Whole-file refusals are reserved for the problems that are not one line's: a missing or unreadable schema version, a second header, an unknown record type. Those mean the file is not this format, or not one this build can interpret, and applying part of it would be importing data whose meaning is a guess.
+**An export is an inspectable artifact.** `internal/portable` writes the store as JSON Lines — one self-describing object per line behind a schema-version header — and reads one back. It is a wire format with its own version (currently 2, which added the evidence records nested under each memory; a v1 file still imports, because the readable range is an explicit list of the versions whose rules still hold), independent of `schemaVersion`: an artifact is a file that outlives the ghost that wrote it, so its meaning is the shape of the records, not the tables behind them. Ordering is fixed (projects, then memories, tasks and decisions, each by id) and the header carries no timestamp, so two exports of an unchanged store are byte-identical and a diff of two artifacts shows only what changed in the store. The line-oriented shape is also why a damaged file is survivable: a line that is not JSON is rejected on its own, by line number, and the records around it still import — which is what the reader gets from a truncated or hand-mangled artifact. Whole-file refusals are reserved for the problems that are not one line's: a missing or unreadable schema version, a second header, an unknown record type. Those mean the file is not this format, or not one this build can interpret, and applying part of it would be importing data whose meaning is a guess.
 
 The reads and writes are separate store methods rather than reuse, and each for a stated reason. `PortableProjects` exists because `ListProjects` has no `repo_remote` column — the field that makes two checkouts of one repository one project, and that another machine needs to resolve a project from its own directory. `PortableMemories` exists because the ordinary list readers drop the validity triple, and restoring a memory with a fresh `created_at` would age it out of injection immediately. The `Import*` methods exist because no existing writer can preserve an imported id, an imported `created_at` or an imported pin: `Create` generates its own id and `Upsert` is deliberately a dedup probe, which is the wrong operation for a restore. Each takes an `apply` flag, so a dry run runs the same validation as the run it previews rather than a second code path that can disagree with it.
 

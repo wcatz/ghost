@@ -503,6 +503,45 @@ func TestProvenanceMultiplierIsInert(t *testing.T) {
 	}
 }
 
+// TestProvenanceStageRecordsWhatSupportsAMemoryAndRanksNothing: stage 4 can
+// already report the support a memory has, because the retriever carries the
+// evidence counts in the same snapshot as the rows. It reports them without
+// acting on them: the weight stays 1.0, so a memory with three observations and
+// one with none keep the retriever's order. A stage that recorded the counts and
+// quietly used them would be the failure -- the counts exist so a reader can ask
+// what a memory rests on, and #673 is explicit that nothing ranks on them yet.
+func TestProvenanceStageRecordsWhatSupportsAMemoryAndRanksNothing(t *testing.T) {
+	// The unevidenced row is retrieved FIRST and outranks the corroborated one.
+	// That is the whole assertion: if stage 4 weighed the counts, the row with
+	// three observations would move ahead of it.
+	bare := candidate("A2", "proj", "fact", "unattributed", 0.9)
+	corroborated := candidate("A1", "proj", "fact", "corroborated", 0.4)
+	corroborated.Evidence = memory.EvidenceCounts{Observations: 3, Verified: 1}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+
+	res := run(t, &fakeRetriever{set: setOf(bare, corroborated)}, req)
+
+	if !eq(itemIDs(res.Items), []string{"A2", "A1"}) {
+		t.Fatalf("items = %v, want the retriever's order -- stage 4 must not rank on the evidence counts", itemIDs(res.Items))
+	}
+	got := res.Trace.Signals["A1"]
+	if got.Evidence.Observations != 3 || got.Evidence.Verified != 1 {
+		t.Errorf("A1 evidence = %+v, want 3 observations and 1 verified", got.Evidence)
+	}
+	if want := "supported by 3 observations, 1 verified"; got.Evidence.Label() != want {
+		t.Errorf("A1 evidence label = %q, want %q", got.Evidence.Label(), want)
+	}
+	if got.ProvenanceWeight != "1.0" || got.ProvenanceContribution != 0 {
+		t.Errorf("A1 weight %q with contribution %v, want 1.0 and zero", got.ProvenanceWeight, got.ProvenanceContribution)
+	}
+	if bareSig := res.Trace.Signals["A2"]; bareSig.Evidence.Observations != 0 {
+		t.Errorf("A2 evidence = %+v, want none", bareSig.Evidence)
+	} else if want := "no recorded evidence"; bareSig.Evidence.Label() != want {
+		t.Errorf("A2 evidence label = %q, want %q", bareSig.Evidence.Label(), want)
+	}
+}
+
 // TestTraceRecordsEveryStage: the trace is recorded unconditionally and names
 // the stages the request ran, with the rows each one saw and dropped.
 func TestTraceRecordsEveryStage(t *testing.T) {

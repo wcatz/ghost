@@ -99,6 +99,19 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	if err := appendHistoryTx(ctx, tx, memoryID, phaseSave, Provenance{}); err != nil {
 		return "", "", false, fmt.Errorf("record decision memory history: %w", err)
 	}
+	// And its evidence, in the same transaction for the same reason. The companion
+	// is an ordinary memory: search returns it, the next reflect prompt quotes it,
+	// and a later save folds against it — so an observation of it is what it is,
+	// and leaving it out made the corpus report "no recorded evidence" about a row
+	// Ghost itself wrote in the transaction that recorded its origin.
+	//
+	// The provenance is empty because the decision tool reports none: its arguments
+	// carry no agent, session or reference, and inventing one here is the thing
+	// these columns exist to prevent. The record is still appended, because the
+	// write DID happen.
+	if err := appendEvidenceTx(ctx, tx, memoryID, evidenceObserved, Provenance{}, false); err != nil {
+		return "", "", false, fmt.Errorf("record decision memory evidence: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return "", "", false, fmt.Errorf("record decision: commit: %w", err)
