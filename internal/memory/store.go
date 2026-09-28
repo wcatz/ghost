@@ -2484,7 +2484,9 @@ func checkMemoryWrite(m Memory) error {
 // reproducibility is the only reason to be here.
 //
 // Not on provider.MemoryStore and not in the MCP surface: nothing a session can
-// reach names its own id.
+// reach names its own id. A row whose verified_at is a THIRD-PARTY DATASET's claim
+// rather than a check made through this store is not this function's business —
+// see CreateWithIDFromCorpus, which is the same write with that one bit off.
 func (s *Store) CreateWithID(ctx context.Context, projectID, id string, m Memory) (string, error) {
 	if id == "" {
 		return "", errors.New("create memory: no id given; CreateWithID stores the row under the id it is given, and an empty one would be a row the caller cannot find again")
@@ -2493,6 +2495,39 @@ func (s *Store) CreateWithID(ctx context.Context, projectID, id string, m Memory
 		return "", err
 	}
 	return s.insertMemory(ctx, projectID, m, insertOptions{id: id, recordVerification: true})
+}
+
+// CreateWithIDFromCorpus is CreateWithID with the corpus opt-out: the caller's id,
+// the credential guard and the whole write are CreateWithID's, and the one bit that
+// differs is recordVerification — so a verified_at the DATASET states is stored
+// verbatim as the column's value and no `verified` record is appended for it.
+//
+// It exists because those are two different claims and only one of them is an
+// event. `insertOptions.recordVerification`'s comment carries the argument in full
+// — a record's stamp is the store's clock by design, so appending one for a
+// dataset's own claim says "this was checked now" about a check the dataset may
+// date to years ago, which is the inversion the store-clock rule exists to
+// prevent. CreateFromCorpus has always been the route that declines it; this is
+// that same decline for a caller which also has to name the row.
+//
+// The credential guard is the deliberate difference from CreateFromCorpus, and it
+// is the safer direction to be surprised in: THIS function still refuses a body
+// carrying a credential, and only the id and the record bit are the corpus route's.
+// The corpora that need the wider carve-out are the downloaded public eval sets
+// under bench/, and they keep calling CreateFromCorpus. The benchmark's own corpora
+// are committed fixtures a review has read, seeded into a scratch store that dies
+// with the run — so it can have the rule without giving up the guard.
+//
+// Not on provider.MemoryStore and not in the MCP surface, for the same reason
+// CreateWithID is not: a corpus row is not something a session saves.
+func (s *Store) CreateWithIDFromCorpus(ctx context.Context, projectID, id string, m Memory) (string, error) {
+	if id == "" {
+		return "", errors.New("create memory: no id given; CreateWithIDFromCorpus stores the row under the id it is given, and an empty one would be a row the caller cannot find again")
+	}
+	if err := checkMemoryWrite(m); err != nil {
+		return "", err
+	}
+	return s.insertMemory(ctx, projectID, m, insertOptions{id: id})
 }
 
 // insertOptions is the one bit insertMemory cannot infer from the Memory it is

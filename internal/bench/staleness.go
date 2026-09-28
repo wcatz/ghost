@@ -141,7 +141,7 @@ func RunStaleness(ctx context.Context, scenarios []StalenessScenario, p memory.S
 			// The scenarios are updated deployment facts (dependency versions);
 			// seed them in a decaying category. Under "fact" (never-decay) the
 			// time-decay feature would be unobservable to this suite.
-			id, err := store.CreateWithID(ctx, project, corpusID(project, fmt.Sprintf("%s-v%d", sc.Name, j)), memory.Memory{
+			id, err := store.CreateWithIDFromCorpus(ctx, project, corpusID(project, fmt.Sprintf("%s-v%d", sc.Name, j)), memory.Memory{
 				Category: "dependency", Content: v.Content, Importance: 0.7, Source: "mcp",
 			})
 			if err != nil {

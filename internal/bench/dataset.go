@@ -224,6 +224,16 @@ func loadFile[T any](path string, parse func(io.Reader) (T, error)) (T, error) {
 // corpus that named and stamped its rows at random re-drew both of them on every
 // run. See corpusID and corpusStamp, and #708.
 //
+// The route is CreateWithIDFromCorpus rather than CreateWithID because these rows
+// are a DATASET's, not a live save's, and the corpus route keeps the dataset's own
+// verified_at as the column's value WITHOUT manufacturing a `verified` record for
+// it. This corpus carries one — `validity_current_wallet_policy` claims a check
+// dated 2026-01-01 — and a record stamped with the store's clock would assert that
+// check happened now, which is the inversion insertOptions.recordVerification
+// exists to prevent. The credential guard is the one thing this corpus route keeps
+// that CreateFromCorpus waives, and the committed fixtures give no reason to have
+// it waived. See internal/memory.CreateWithIDFromCorpus.
+//
 // db is the same connection store was built on, and it is used for exactly one
 // thing a store cannot be asked to do through its API: writing created_at,
 // because Create always stamps now. The supersedes edges go through
@@ -264,7 +274,7 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 		if err := checkDim("memory "+m.Key, vec); err != nil {
 			return nil, err
 		}
-		id, err := store.CreateWithID(ctx, ds.Project, corpusID(ds.Project, m.Key), memory.Memory{
+		id, err := store.CreateWithIDFromCorpus(ctx, ds.Project, corpusID(ds.Project, m.Key), memory.Memory{
 			Category: m.Category, Content: m.Content, Importance: m.Importance,
 			Tags: m.Tags, Source: "mcp",
 			ValidFrom: m.ValidFrom, ValidUntil: m.ValidUntil, VerifiedAt: m.VerifiedAt,

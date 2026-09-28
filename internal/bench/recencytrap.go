@@ -191,7 +191,7 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 			return nil, err
 		}
 		scenarioProject[i] = project
-		cid, err := store.CreateWithID(ctx, project, corpusID(project, sc.Name+"-correct"), memory.Memory{
+		cid, err := store.CreateWithIDFromCorpus(ctx, project, corpusID(project, sc.Name+"-correct"), memory.Memory{
 			Category: category, Content: sc.Correct.Content, Importance: 0.7, Source: "mcp",
 		})
 		if err != nil {
@@ -211,7 +211,7 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 		}
 		var tids []string
 		for j, tv := range sc.Traps {
-			tid, err := store.CreateWithID(ctx, project, corpusID(project, fmt.Sprintf("%s-trap%d", sc.Name, j)), memory.Memory{
+			tid, err := store.CreateWithIDFromCorpus(ctx, project, corpusID(project, fmt.Sprintf("%s-trap%d", sc.Name, j)), memory.Memory{
 				Category: category, Content: tv.Content, Importance: 0.7, Source: "mcp",
 			})
 			if err != nil {

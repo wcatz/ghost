@@ -14,6 +14,13 @@ import (
 // They live together because the invariant is one sentence — the store a
 // benchmark measures is a function of the corpus it seeded — and because a
 // seeder that fixed one of them and not the other would be half a fix.
+//
+// The rows go in through memory.CreateWithIDFromCorpus, not store.Create: an id
+// the caller computed, and the corpus rule on verified_at. Those are two separate
+// things and the second is not a detail of the first — a dataset's verified_at is
+// the dataset's claim, and a `verified` record stamped with the store's clock
+// would say the check happened now. The graded corpus carries such a claim
+// (testdata/memories.jsonl), so this is not hypothetical.
 
 // corpusID is the store id a seeded corpus row is written under: a pure function
 // of the project it belongs to and the key the fixture names it by, and nothing

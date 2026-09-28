@@ -309,7 +309,7 @@ func seedMaintenance(ctx context.Context, store *memory.Store, db *sql.DB, mems 
 		if err := checkDim("memory "+m.Key, vec); err != nil {
 			return nil, err
 		}
-		id, err := store.CreateWithID(ctx, project, corpusID(project, m.Key), memory.Memory{
+		id, err := store.CreateWithIDFromCorpus(ctx, project, corpusID(project, m.Key), memory.Memory{
 			Category: m.Category, Content: m.Content, Importance: m.Importance, Source: "mcp",
 		})
 		if err != nil {

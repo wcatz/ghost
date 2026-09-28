@@ -232,21 +232,25 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 //
 // The callers of THIS function are the live ones, and they are the ones whose
 // stamp is the store's clock — because Ghost is the party recording the check.
-// That covers insertMemory (behind Create AND CreateWithID, and gated by
-// insertOptions so the corpus route below can decline) and all three of
+// That covers insertMemory (behind Create, CreateWithID, and the two corpus
+// routes, which decline it through insertOptions) and all three of
 // UpsertWithOptions' branches and UpdateMemoryWithOptions.
 //
-// CreateWithID is named apart from Create because it is a writer of its own
-// rather than a synonym, and the reason it needs saying here is that it arrived
-// after this paragraph and TestEveryVerifiedAtWriterIsEnumerated were written:
-// a fourth writer of memories.verified_at that the enumeration did not name
-// left every test in this file green, which is the same drift this comment has
-// already been wrong about twice. It is Create's write with a caller-chosen
-// primary key and nothing else, and a benchmark's corpus row is a LIVE write, so
-// a verified_at stated on one is a check Ghost observed and takes the store's
-// clock exactly as Create's does. That test's CreateWithID row is what holds
-// this sentence now, and dropping the flag that records the verification is what
-// makes the row fail.
+// The two named-id writers arrived with the benchmark (#708) and both had to be
+// placed here, because a writer this paragraph does not mention is a writer
+// nobody decided anything about: the first one added left every test in this file
+// green, which is the drift this comment has already been wrong about twice. What
+// decided their placement is NOT that a benchmark's row is a live write — it is
+// not, and claiming it is what got the first version of this paragraph wrong.
+// A corpus row's verified_at is the DATASET's claim whoever stores it, so the
+// benchmark's seeder belongs with CreateFromCorpus on the record bit and differs
+// from it only in the credential guard, which the committed fixtures have no
+// reason to have waived. Hence CreateWithIDFromCorpus, and hence bench.Seed
+// calling it rather than CreateWithID: the graded corpus does carry a
+// verified_at (testdata/memories.jsonl, `validity_current_wallet_policy`), and a
+// record stamped with today's clock would assert a check the dataset dated to a
+// year earlier. CreateWithID is the same write with that one bit on, for a
+// caller whose verified_at IS a check made through this store.
 //
 // Two more writers store a verified_at and are deliberately NOT callers.
 //

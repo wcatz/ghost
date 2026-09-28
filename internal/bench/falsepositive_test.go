@@ -236,7 +236,7 @@ func seedVectorStore(t *testing.T, project string, mems []vectorMemory) (*memory
 		if m.global {
 			projectID = globalProject
 		}
-		id, err := store.CreateWithID(ctx, projectID, corpusID(projectID, m.key), memory.Memory{
+		id, err := store.CreateWithIDFromCorpus(ctx, projectID, corpusID(projectID, m.key), memory.Memory{
 			Category: m.category, Content: m.content, Importance: 0.7, Source: "mcp",
 		})
 		if err != nil {

@@ -296,6 +296,26 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 			why:               "a live write on the harness's behalf, so the store's clock is the honest stamp — it is Create's write with a named row, and a check stated on it is a check Ghost observed",
 		},
 		{
+			name: "CreateWithIDFromCorpus",
+			write: func(t *testing.T, s *Store) string {
+				const id = "enumcorpusid000000000000AA"
+				got, err := s.CreateWithIDFromCorpus(context.Background(), testProject, id, Memory{
+					Category: "fact", Content: "a named dataset row carrying a verified_at value",
+					Source: "mcp", VerifiedAt: verifiedStamp(claimed),
+				})
+				if err != nil {
+					t.Fatalf("CreateWithIDFromCorpus: %v", err)
+				}
+				if got != id {
+					t.Fatalf("CreateWithIDFromCorpus stored the row as %q, want the caller's id %q — this row is not the one the assertions below read", got, id)
+				}
+				return id
+			},
+			wantVerifiedKinds: nil,
+			wantVerified:      0,
+			why:               "the corpus route under a caller-chosen id, so the same value-with-nothing-observed-behind-it as CreateFromCorpus: naming the row changes nothing about whose claim the stamp would be",
+		},
+		{
 			name: "CreateFromCorpus",
 			write: func(t *testing.T, s *Store) string {
 				id, err := s.CreateFromCorpus(context.Background(), testProject, Memory{
