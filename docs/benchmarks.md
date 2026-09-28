@@ -217,7 +217,7 @@ recency   staleness-fresh   trap-correct   min(both)
 0.25+     1.000             0.000          0.000
 ```
 
-At *every* weight that meaningfully helps staleness, the trap collapses. The best achievable `min(both)` is 0.214 — i.e. there is no global recency weight where both old-but-correct and newer-supersedes retrieval are acceptable, because the only signal (age) is exactly the thing that conflates the two cases. **Verdict: the blanket age-only recency prior is not defaultable and was removed.** Category-aware decay resolves the cliff because the trap suite's memories are `fact` category, which never decays — under `TestDecayFrontier` the frontier collapses to two points `decay-off 0.083/0.929 → decay-on 1.000/0.929`, so staleness flips while the trap stays flat. That never-decay exemption is what lets `DecayEnabled` ship on by default.
+At *every* weight that meaningfully helps staleness, the trap collapses. The best achievable `min(both)` is 0.214 — i.e. there is no global recency weight where both old-but-correct and newer-supersedes retrieval are acceptable, because the only signal (age) is exactly the thing that conflates the two cases. **Verdict: the blanket age-only recency prior is not defaultable and was removed.** Category-aware decay resolves the cliff because the **never-decay half** of the trap suite's memories is `fact` category, which never decays — under `TestDecayFrontier`, which is scoped to that half, the frontier collapses to two points `decay-off 0.083/0.929 → decay-on 1.000/0.929`, so staleness flips while the trap stays flat. The suite as a whole is no longer all `fact` — the scenarios added for this issue are `decision`, `gotcha`, `dependency`, `architecture` and `pattern`, and they do decay, which is the 0.833 → 0.417 cost in the table below. The exemption is a property of the `fact` category and not of the suite, which is why `TestDecayFrontier` is scoped to the never-decay half rather than run over all of it, and it is that exemption which lets `DecayEnabled` ship on by default.
 
 **And the never-decay exemption is also the limit of that claim, which is why the trap fixture now spans both classes (#561).** Every scenario in the suite used to be `fact`, so 0.929 was a property of a category decay never touches and said nothing about the categories it reorders. Scenarios now carry a category (defaulting to `fact`, so the original fourteen are unchanged) and the score is reported per category, with decay off and on:
 
@@ -241,10 +241,10 @@ Two guarantees about those rows are asserted because production makes them. The 
 **The real fix is targeted, and it clears the frontier.** `SearchParams.SupersedeDemote` (default true, alongside `DecayEnabled`) consumes directed `supersedes` links: within the result window it demotes a memory below every present memory that supersedes it (penalty = count of present superseders, stable-sorted — so update chains order correctly given star links, and it is a hard no-op when no supersedes edge joins two results). Because it only ever acts on genuine replacement pairs, it does what no blanket age-only prior could (`TestSupersedeDemoteClearsFrontier`):
 
 ```text
-                        staleness fresh-wins   recency-trap correct-wins
+                        staleness fresh-wins   recency-trap correct-wins (never-decay half)
 both off                0.083                  0.929
-decay on (DefaultSearchParams)          1.000                  0.929   ← decay alone flips staleness, trap untouched (fact never decays)
-supersede demote on     1.000                  0.929   ← likewise, trap untouched (no supersession edge)
+decay on (DefaultSearchParams)          1.000                  0.929   ← decay alone flips staleness, trap untouched (never-decay half: fact never decays)
+supersede demote on     1.000                  0.929   ← likewise, trap untouched (never-decay half: no supersession edge)
 both on (shipped default)              1.000                  0.929
 ```
 
