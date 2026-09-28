@@ -396,6 +396,43 @@ func TestStreamJSONL_LineCeiling(t *testing.T) {
 	}
 }
 
+// TestStreamJSONL_CeilingChargesTheContentNotTheNewline: the ceiling bounds the
+// memory one line's CONTENT may take, and a line whose payload is exactly
+// maxTranscriptLine is inside it. The reader charges the trailing "\n" — and
+// "\r" before it — against the budget as well, so a line of exactly the ceiling
+// was refused by one byte over. Nothing was wrong with that line, and a
+// transcript that reaches the ceiling is already the pathological case the
+// ceiling exists for, so being one byte short of it is the worst place to be
+// strict.
+func TestStreamJSONL_CeilingChargesTheContentNotTheNewline(t *testing.T) {
+	old := maxTranscriptLine
+	maxTranscriptLine = 1 << 10
+	t.Cleanup(func() { maxTranscriptLine = old })
+
+	// Both spellings of the terminator, because CRLF is what a Windows host
+	// writes and it costs two bytes over one.
+	for _, eol := range []string{"\n", "\r\n"} {
+		var visited []string
+		line := strings.Repeat("x", 1<<10)
+		if err := streamJSONL(strings.NewReader(line+eol), func(l []byte) { visited = append(visited, string(l)) }); err != nil {
+			t.Errorf("a line of exactly the ceiling with %q ending: %v", eol, err)
+		}
+		if len(visited) != 1 || visited[0] != line {
+			t.Errorf("with %q ending the line was not visited whole: %q", eol, visited)
+		}
+	}
+	// One byte of content over is still over, so the ceiling did not simply
+	// stop applying.
+	var visited int
+	err := streamJSONL(strings.NewReader(strings.Repeat("x", (1<<10)+1)+"\n"), func([]byte) { visited++ })
+	if err == nil {
+		t.Error("a line one byte over the ceiling was accepted, so the ceiling no longer bounds anything")
+	}
+	if visited != 0 {
+		t.Errorf("visited %d lines past the ceiling, want none", visited)
+	}
+}
+
 // TestStreamJSONL_LineEndings: CRLF and a final line with no newline behave as
 // bufio.ScanLines did.
 func TestStreamJSONL_LineEndings(t *testing.T) {
