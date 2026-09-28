@@ -163,13 +163,14 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		// un-hides it. Without the second, an agent reads a finished repair where
 		// half of one happened: the resolved_at the edge caused is still there.
 		mustContain(t, "withdraw (target)", out, "about forty minutes")
-		mustContain(t, "withdraw (follow-up)", out, "ghost_resolve")
+		// The repair is a CLI COMMAND, SCOPED to the ids this call withdrew, and
+		// named as a command: there is no MCP tool for it. `ghost_resolve` is the
+		// forward pass — it stamps resolved_at on confirmed evidence — so an agent
+		// pointed at it would bury MORE memories and pay a harness call.
+		mustContain(t, "withdraw (follow-up)", out, "ghost resolve e2e-proj --reassess --only")
 		mustContain(t, "withdraw (follow-up) scope", out, "SCOPED")
 		mustContain(t, "withdraw (follow-up) target", out, older)
-		// A tool call, not a shell command line: the caller passes JSON, and a
-		// rendered `ghost resolve <name>` is wrong for a project name holding a
-		// space or a metacharacter.
-		mustNotContain(t, "withdraw (follow-up) shell form", out, "ghost resolve")
+		mustContain(t, "withdraw (follow-up) not a tool", out, "no MCP tool for that repair")
 		// Scoped to this pair: the stub answer above confirmed every candidate the
 		// scan proposed, so the project holds other live edges this call was not
 		// asked about and must not have touched.

@@ -20,6 +20,7 @@ import (
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 	"github.com/wcatz/ghost/internal/repo"
@@ -790,45 +791,37 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	}
 	targets := withdrawnTargets(res.Links)
 	if len(targets) == 0 {
-		// A concurrent pass took the edge between this call's read and its write,
-		// so nothing was orphaned by it and there is no repair to point at. Saying
-		// so is the whole answer: the requested state already holds.
-		// A request that resolved an edge and moved it not is the n==0 InvalidateLink
-		// case and nothing else: a pair with no live edge is a refusal that never
-		// reaches here, so this is a concurrent pass that took the edge between the
-		// read and the write. Nothing was orphaned by this call, so there is no
-		// repair to point at — and the target may still be stamped resolved, which
-		// is worth saying rather than leaving the caller to assume either way.
-		sb.WriteString("\nThe edge was no longer live when this call wrote it: a concurrent pass withdrew it first. " +
-			"Nothing was orphaned by this call, so there is no repair to run. Its target may still be stamped " +
-			"resolved — if so, a `ghost_resolve` repair scoped to that one id clears it.")
+		// Every row was one this call never wrote and never reached, so every
+		// edge is still live and resolve's floor still defends every target: there
+		// is nothing repairable to name. (A row a CONCURRENT pass took is not this
+		// case — its target is repairable, which is why withdrawnTargets keeps it.)
+		sb.WriteString("\nNothing was orphaned by this call: the edges it named are still live, so no target is " +
+			"repairable yet. A target stamped resolved while an edge still points at it is held down deliberately, " +
+			"and clearing it is what withdrawing that edge is for.")
 		return sb.String(), nil
 	}
-	// The follow-up as a TOOL CALL, not as a shell command line. A project name is
-	// free text, so a rendered `ghost resolve <project> …` string is either wrong
-	// for a name holding a space (two positionals, which parseResolveArgs refuses)
-	// or a second command for an agent to execute when the name holds a
-	// metacharacter — and cmd/ghost/followup.go's renderer exists for exactly that
-	// reason. Here the caller passes JSON, so naming the tool and its arguments is
-	// both correct and copyable: no shell, nothing to quote.
+	// The repair as a CLI COMMAND, rendered by the same helper the CLI uses, and
+	// named as a command rather than as a tool call: there is no MCP surface for
+	// this repair. `ghost_resolve` is the FORWARD pass — it stamps resolved_at on
+	// confirmed evidence — and it takes no id selector, so an agent told to call it
+	// here would bury MORE memories and pay a harness call for it. The repair lives
+	// at `ghost resolve --reassess --only … --apply`, and the project name goes
+	// through the renderer's quoting, which is what makes the command run at all.
 	//
 	// Scoped, and named as such: an unscoped repair re-judges every resolved memory
 	// in the project, and #702 measured that proposing to un-hide 143 rows on a
-	// real store, about 35% of them stale. An agent handed the unscoped form runs
-	// the command that rewrites the most.
+	// real store, about 35% of them stale.
 	//
 	// It ends at the instruction, with nothing about how to word it to the user:
 	// this string is the tool's whole answer, and a clause addressed to the
 	// implementer inside it reads as an instruction to the agent reading it. That
 	// guidance lives in this function's doc comment instead.
 	fmt.Fprintf(&sb, "\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of\n"+
-		"ranked injection until a SCOPED repair clears it — call ghost_resolve with project %q, apply true,\n"+
-		"and only these ids (a repair with no `only` re-judges every resolved memory in the project):\n",
-		projectID)
-	for _, id := range targets {
-		fmt.Fprintf(&sb, "  %s\n", id)
-	}
-	sb.WriteString("That pass honours a live edge as a floor, which is why the edge had to go first.")
+		"ranked injection until a SCOPED repair clears it. There is no MCP tool for that repair, so it is a CLI\n"+
+		"command — an agent with no shell cannot run it, and should say so rather than reach for ghost_resolve,\n"+
+		"which is the forward pass and would stamp more memories resolved:\n  %s\n",
+		followup.ResolveCommand(projectID, targets))
+	sb.WriteString("That pass honours a live edge as a floor, which is why the edge has to go first.")
 	return sb.String(), nil
 }
 
@@ -845,7 +838,15 @@ func withdrawnTargets(links []supersede.WithdrawnLink) []string {
 	var out []string
 	seen := make(map[string]bool, len(links))
 	for _, l := range links {
-		if l.TargetID == "" || seen[l.TargetID] || !l.Withdrawn {
+		// A row this call never WROTE still counts when its edge is gone, because
+		// a concurrent pass that took it first left the same state behind: no live
+		// edge, and a resolved_at nothing defends any more. Dropping it would leave
+		// a memory that is just as repairable out of the list the caller is about to
+		// run. A row never reached, or one whose write failed, is the opposite case:
+		// its edge is STILL live, so the target is still held down on purpose and
+		// naming it would send the repair after a row its own floor reports as
+		// still asserted.
+		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
 			continue
 		}
 		seen[l.TargetID] = true
@@ -1750,7 +1751,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_link_withdraw",
 		Title:       "Withdraw a supersedes link",
-		Description: "Withdraw ONE wrong 'supersedes' link, naming the newer memory it points from and the older memory it points at. Use it when a supersession is wrong for a reason no classifier can see — the newer note is not a replacement of the older one at all, or the 'newer' note is the stale one. The link is not informational: ranking demotes its target and resolve's supersedes piggyback stamps resolved_at on it, so a wrong edge takes a live memory out of every later session, and a repair path is the only way to undo it — the `ghost supersede --reassess` CLI pass withdraws only what the current rules reject, so an edge they still accept needs this. a ref may be a full memory id or an unambiguous 8-or-more-character prefix of one, as every Ghost report abbreviates them. A pair with no live link is an error and nothing is written; an ambiguous prefix is refused with the matches listed rather than guessed at. The withdrawal writes the 'unsupersede' history row, so the audit shows the claim and the withdrawal, and it is soft — a later pass that still judges the pair a supersession re-creates the edge. It does NOT un-bury the target by itself: the resolved_at the edge caused stays until a SCOPED `ghost resolve <project> --reassess --only <those ids> --apply` clears it, and the result says so — scoped, because an unscoped repair re-judges every resolved memory in the project. Do not use this to retire a memory — the target stays searchable and editable, which is the point.",
+		Description: "Withdraw ONE wrong 'supersedes' link, naming the newer memory it points from and the older memory it points at. Use it when a supersession is wrong for a reason no classifier can see — the newer note is not a replacement of the older one at all, or the 'newer' note is the stale one. The link is not informational: ranking demotes its target and resolve's supersedes piggyback stamps resolved_at on it, so a wrong edge takes a live memory out of every later session, and a repair path is the only way to undo it — the `ghost supersede --reassess` CLI pass withdraws only what the current rules reject, so an edge they still accept needs this. a ref may be a full memory id or an unambiguous 8-or-more-character prefix of one, as every Ghost report abbreviates them. A pair with no live link is an error and nothing is written; an ambiguous prefix is refused with the matches listed rather than guessed at. The withdrawal writes the 'unsupersede' history row, so the audit shows the claim and the withdrawal, and it is soft — a later pass that still judges the pair a supersession re-creates the edge. It does NOT un-bury the target by itself: the resolved_at the edge caused stays until a SCOPED `ghost resolve <project> --reassess --only <those ids> --apply` clears it, and the result prints that command — scoped, because an unscoped repair re-judges every resolved memory in the project. That repair is a CLI command, not a tool: ghost_resolve is the FORWARD pass and would stamp MORE memories resolved. Do not use this to retire a memory — the target stays searchable and editable, which is the point.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			IdempotentHint:  false,

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/scratch"
 	"github.com/wcatz/ghost/internal/supersede"
 )
@@ -71,12 +72,11 @@ func withdrawnTargets(withdrawn []supersede.WithdrawnEdge) []string {
 // flag"). Rendering a bare `ghost resolve my proj …` would be two positionals
 // and a failed repair; rendering a name holding a shell metacharacter bare would
 // execute it.
+// The renderer is internal/followup's, because the MCP tool answers the same
+// question and the quoting here is what decides whether the command RUNS: one
+// implementation, two surfaces, no way for them to drift on the part that matters.
 func resolveFollowupCommand(projectName string, ids []string) string {
-	project := projectName
-	if !bareShellWord.MatchString(projectName) {
-		project = "--project " + shellQuote(projectName)
-	}
-	return fmt.Sprintf("ghost resolve %s --reassess --only %s --apply", project, strings.Join(ids, ","))
+	return followup.ResolveCommand(projectName, ids)
 }
 
 // bareShellWord matches a token that can be pasted into a shell unquoted and

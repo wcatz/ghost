@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 )
@@ -80,21 +81,22 @@ func TestLinkWithdrawRemovesTheNamedEdge(t *testing.T) {
 	// stamped resolved until the resolve repair pass runs, and the result says so
 	// rather than leaving the agent to believe the memory is back in context.
 	//
-	// SCOPED, and naming the id it withdrew. An unscoped repair re-judges every
-	// resolved memory in the project (#702 measured 143 rows proposed, ~35% of
-	// them stale), so a result handing the agent the unscoped form is handing it
-	// the call that rewrites the most.
-	if !strings.Contains(msg, "ghost_resolve") || !strings.Contains(msg, "SCOPED") {
-		t.Errorf("the result does not point at a SCOPED repair: %q", msg)
+	// The repair is a CLI COMMAND, SCOPED to the ids this call withdrew, and it is
+	// named as a command: there is no MCP surface for the repair at all.
+	// `ghost_resolve` is the FORWARD pass — it stamps resolved_at on confirmed
+	// evidence — and takes no id selector, so an agent pointed at it would bury MORE
+	// memories and pay a harness call for it.
+	want := followup.ResolveCommand("test-project", []string{older})
+	if !strings.Contains(msg, want) {
+		t.Errorf("the result does not carry the scoped repair command %q: %q", want, msg)
 	}
-	if !strings.Contains(msg, older) {
-		t.Errorf("the result does not name the target it orphaned (%s): %q", older, msg)
+	if !strings.Contains(msg, "SCOPED") {
+		t.Errorf("the result does not say the repair must be scoped: %q", msg)
 	}
-	// And it is a TOOL CALL, not a shell command line: a project name is free
-	// text, so a rendered `ghost resolve <name> …` is either wrong for a name with
-	// a space or a second command for an agent to run.
-	if strings.Contains(msg, "ghost resolve") {
-		t.Errorf("the result renders a shell command line the caller has to quote: %q", msg)
+	// And it says the command is not a tool call, so an agent does not reach for
+	// ghost_resolve instead.
+	if !strings.Contains(msg, "no MCP tool for that repair") {
+		t.Errorf("the result does not say the repair is not available on this surface: %q", msg)
 	}
 	if got := liveInto(t, store, "abc123", older); got != 0 {
 		t.Errorf("live edges into the target = %d, want 0", got)
@@ -215,15 +217,18 @@ func TestLinkWithdrawSaysSoWhenAConcurrentPassTookTheEdge(t *testing.T) {
 	if !strings.Contains(msg, "already gone") {
 		t.Errorf("the row does not say the edge was already gone: %q", msg)
 	}
-	// No repair block. A selector list with nothing in it is a call that cannot
-	// run, and naming a target nothing orphaned sends the caller after a resolution
-	// no longer standing. The marker is the block's own text, not the tool's name:
-	// the message may still say under what condition a repair would be right.
-	if strings.Contains(msg, "only these ids") {
-		t.Errorf("a request that orphaned nothing printed a repair to run: %q", msg)
+	// The target IS repairable even though this call moved nothing: a concurrent
+	// pass that took the edge left no live edge and a resolved_at nothing defends,
+	// which is exactly the state the repair clears. So the command must be here,
+	// naming that one id — and the row must say why nothing moved.
+	if !strings.Contains(msg, "already gone") {
+		t.Errorf("the row does not say the edge was already gone: %q", msg)
 	}
-	if !strings.Contains(msg, "no longer live") {
-		t.Errorf("the result does not say why nothing moved: %q", msg)
+	if !strings.Contains(msg, older) {
+		t.Errorf("the repair command does not name the target (%s): %q", older, msg)
+	}
+	if !strings.Contains(msg, "ghost resolve test-project --reassess --only "+older+" --apply") {
+		t.Errorf("the result does not carry the scoped repair for the taken edge: %q", msg)
 	}
 	if !strings.Contains(msg, older[:8]) {
 		t.Errorf("the result does not name the edge it was asked about (%s): %q", older, msg)

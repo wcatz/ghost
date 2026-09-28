@@ -92,6 +92,8 @@ internal/scratch/                   Ghost-owned scratch root cleanup
 internal/secret/                    Credential-shape detector for stored text
 internal/selfupdate/                Checksum-verified GitHub release updater
 internal/supersede/                 Directed supersession relation classifier
+
+internal/followup/                  The command that completes a supersede repair
 ```
 
 The database schema is an embedded Go string constant in `internal/memory/schema.go`; it is the single source of truth for the store schema. `OpenDB` reads `PRAGMA user_version` and refuses a store from a newer Ghost **before** it runs any DDL against it, not after: `initSQL` is `CREATE … IF NOT EXISTS`, so on a store that merely has more than this build knows it is nearly a no-op — which is exactly what hid the ordering — but any object the newer build renamed, replaced or dropped is recreated here, in a store the same call then declares unreadable. A refusal that has already written is not a refusal. A fresh store has no stamp to read and is initialized and stamped instead; a store behind is backed up, then migrated.

@@ -1832,13 +1832,17 @@ func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog
 // structs that differ in one field name, and a wrong answer here clears the
 // wrong memories.
 //
-// A row the run never reached is not in it: its edge is still live, so nothing
-// was orphaned by it and the scoped repair would report it as still asserted.
+// Every row counts except the two whose edge is STILL LIVE. A row a concurrent
+// pass took first is in the list, on withdrawnTargets' reasoning above: that pass
+// left the same state behind — no live edge, a resolved_at nothing defends — so
+// the target is just as repairable as one this process withdrew. A row never
+// reached, or one whose write failed, is out: its edge still points at the
+// target, so the repair would report it as still asserted and clear nothing.
 func withdrawnLinkTargets(links []supersede.WithdrawnLink) []string {
 	var out []string
 	seen := make(map[string]bool, len(links))
 	for _, l := range links {
-		if l.TargetID == "" || seen[l.TargetID] || !l.Withdrawn {
+		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
 			continue
 		}
 		seen[l.TargetID] = true
