@@ -17,17 +17,22 @@ import (
 // memory_history.phase. The CHECK in initSQL (mirrored by migrateV17) is the
 // authority; these constants exist so a writer cannot spell one wrong.
 //
-// They are deliberately about WHICH WRITE PATH touched a row, not about what
-// the row now says. `reflect` covers a consolidation rewrite, a reuse and a
-// fresh insert alike, because "which reflection run changed this" is the
-// question the history exists to answer and the row's own source column already
-// records the outcome.
+// They are deliberately about WHICH WRITE PATH CHANGED a row, not about what
+// the row now says. `reflect` covers a consolidation rewrite, a reuse that
+// restated a field and a fresh insert alike, because "which reflection run
+// changed this" is the question the history exists to answer and the row's own
+// source column already records the outcome. A re-emission that changed nothing
+// writes no row at all (#727), so the question it cannot answer — which run last
+// merely LOOKED at this memory — is deliberately not asked.
 const (
 	// phaseSave: a new memories row was inserted.
 	phaseSave = "save"
 	// phaseUpdate: an existing row was edited (UpdateMemory).
 	phaseUpdate = "update"
-	// phaseReflect: a consolidation wrote the row — rewrite, reuse or insert.
+	// phaseReflect: a consolidation CHANGED the row — a rewrite, a reuse that
+	// restated at least one field, or a fresh insert. A verbatim re-emission
+	// appends nothing (#727): it wrote nothing, and a version row records the
+	// state a write left behind.
 	phaseReflect = "reflect"
 	// phaseMerge: a near-duplicate fold strengthened an existing row.
 	phaseMerge = "merge"

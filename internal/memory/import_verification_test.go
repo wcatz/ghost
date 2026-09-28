@@ -611,15 +611,23 @@ func TestReplaceNonManualDoesNotWriteAnUnreadableVerifiedAtOntoTheSuccessor(t *t
 	}
 }
 
-// "Readable" has to mean readable by the READER the rule exists to satisfy.
+// The zero instant is not a STATED WINDOW, even though it parses cleanly.
 //
-// ParseStamp accepts the zero instant — time.Parse("0001-01-01 00:00:00") succeeds
-// and yields the zero time — but the reader that consumes the column disagrees on
-// exactly that value: assemble.parseStampPtr maps t.IsZero() to nil, so readValidity
-// records it in `unparseable` and stage 2 emits validity_unparseable for a row the
-// store believes carries a readable claim. Narrow in reach (a hand-edited artifact
-// or a restored snapshot), but a value the reader cannot read is not a stated claim
-// however cleanly it parses.
+// ParseStamp accepts it — time.Parse("2006-01-02 15:04:05") succeeds on
+// "0001-01-01 00:00:00" and yields the zero time — and since #583 every READER of
+// a validity column agrees: readValidity, ValidityStateOf and ValidityLabel all
+// treat it as a real boundary, so a row carrying one is read as a complete window
+// and a zero-instant valid_until expires the row. This test is about the one
+// reader that deliberately does not: readableStampPtr, which composes the
+// SUCCESSOR's window out of a source's, and which treats the zero instant as no
+// lower bound stated. Inheriting it would date the successor to a moment before it
+// existed.
+//
+// So the two answers are deliberate and now documented on both sides, rather than
+// one of them citing a disagreement that no longer exists. Narrow in reach — a
+// hand-edited artifact or a restored snapshot — but the divergence has a name:
+// "is this row retired?" and "which bounds does its replacement inherit?" are
+// different questions, and the zero instant answers them differently.
 func TestReplaceNonManualDoesNotTreatTheZeroInstantAsAStatedWindow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

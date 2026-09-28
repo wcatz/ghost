@@ -305,6 +305,92 @@ could be padding), and explain mode reports the factor per row
 as `status_factor`, computed by the same `statusDemotionFactor` the ranking
 used.
 
+## Explain is a record of the ranking, not a second one
+
+`ghost_memory_search` with `explain:true` answers "why did I get this memory"
+by reporting what the ranking path did to each candidate. Every number in the
+payload is read from a trace the ranking stages write as they run
+(`internal/memory/ranktrace.go`), carried on `SearchParams.trace` — an
+unexported pointer that is nil in every production call, so a normal search pays
+a nil check per stage and allocates nothing.
+
+This is the whole design. Before it, explain rebuilt the fused score by summing
+the leg weights itself, rebuilt the status factor from the hydrated row, rebuilt
+the scope verdict with a second `ScopeMatches` call, and rebuilt both
+window-scoped penalties with a second copy of both queries. Each of those is a
+parallel re-derivation: it agrees with the ranking only until somebody edits the
+ranking, and then an agent debugging a bad result is handed a diagnosis of a
+search that did not happen. The trace is a byproduct, not a decision path —
+nothing reads it to decide anything.
+
+Which stage records what:
+
+| Stage | Records |
+|---|---|
+| `fuseCandidatePool` | each leg's 0-based rank, and the vector cosine |
+| `demoteStatus` | the fused base and the status factor — the two sides of the one multiplication, so a reader can perform it |
+| `scopeEligiblePool` | the scope verdict, for the dropped candidates as well as the survivors |
+| `selectWindow` | the keyword reservation, naming both the promoted row and the row whose slot it took |
+| `decayRank` | the decay factor, the age, and the clock it was measured against |
+| `searchHybridLegs` | the vector floor's verdict: per-candidate, which vector contribution it cut, plus the leg-level fact that the floor let no match through at all |
+| `supersedeVerdicts` / `nearDuplicateVerdicts` | the penalty count and the id of the memory that decided it |
+
+Recording the scope verdict inside `scopeEligiblePool` — for the rows it drops as
+well as the rows it keeps — is the structural fix for [#571](https://github.com/wcatz/ghost/issues/571),
+where explain reported rows the tool would exclude because the filter ran after
+the ranking had already described them. There is no longer a second place that
+decides whether a row is in scope.
+
+The two penalty functions each return the count and the counterpart ids from ONE
+edge read, so the id explain attributes a demotion to is the id the demotion
+actually chose; deciding the loser twice is how an explanation ends up
+contradicting the order it is explaining.
+
+### Signals the ranking does not apply
+
+Four fields report a contribution the search ranking does not act on:
+`confidence_contribution`, `provenance_contribution` and `validity_penalty` are
+`0`, and `provenance_weight` is `"off"` — a multiplier that does not exist
+reported as `1.0` would read as "weighed and found neutral". Beside them,
+`confidence`, `provenance` and `validity_state` report the row's own stored
+values, which is a different thing: those are readable, not applied. One note per
+payload says which is which.
+
+That is a deliberate choice, not a gap. A multiplier that does not exist reported
+as `1.0` reads as "provenance was weighed and found neutral", and a contribution
+invented to fill a field is a ranking factor nobody measured. Validity is the
+clearest case: the search ranking does not read validity at all, so an expired
+row is returned like any other and the state is the useful thing to report; the
+context assembler is what drops such a row, and it DROPS it rather than ranking
+it lower, which is why `validity_penalty` is 0 rather than a fraction. A
+multiplier here needs a measured threshold first, the same bar the evidence
+weight cleared before it shipped.
+
+The validity state itself is read through `memory.ValidityState`, the one rule in
+the tree. `internal/assemble` delegates to it rather than keeping its own copy:
+a row that is `valid` in an explanation and `expired` in an assembled block is
+the #571 class of bug one layer up.
+
+### Size budget
+
+An explanation is bounded at 150 CANDIDATE rows (`explainMaxRows`) — the answer is
+not part of the budget, because a caller that asked for a window needs it back. The
+candidate set is the
+union of both legs' results, so it grows with the caller's limit rather than with
+the corpus — each leg fetches `limit*2` — while the window itself is capped at 100
+by the tool, which is what makes a fixed row budget possible at all.
+
+The cut spends itself on **candidates and never on the answer**: every row the
+search returned is kept wherever it falls in the list, and only excluded
+candidates are dropped, from the far end. Positional order is not a safe proxy
+for that, because the list runs leg by leg and a vector-leg rank-0 row sits after
+every keyword-leg row however it ranked.
+
+A payload that hit the budget carries a `truncation` object — `rows_omitted`,
+`max_rows` and a sentence — rather than only a note, because a note list is
+bounded from the end and a short candidate list that LOOKS complete is the exact
+failure the marker prevents.
+
 Window selection reserves real estate for the keyword leg. A plain cut on the
 fused score could not admit a keyword-only hit at all: the keyword leg's rank-1
 row scores 0.3/61 ≈ 0.0049, while the vector leg's 20th row — still well
@@ -448,7 +534,7 @@ memory has none, so re-running the step cannot double them.
 | `save` | `Create`, `Upsert` (new row or linked copy), the decision companion memory, the shipped seeds | the row as inserted |
 | `merge` | `Upsert`'s near-duplicate fold | the target after its importance and access count were raised |
 | `update` | `UpdateMemory` | the edited row (a content change may also clear `resolved_at`) |
-| `reflect` | `ReplaceNonManual` — reuse, rewrite and fresh insert alike, including a verbatim re-emission that leaves every recorded column identical (see below) | the row as the consolidation left it |
+| `reflect` | `ReplaceNonManual` — a rewrite, a reuse that restated a field, or a fresh insert | the row as the consolidation left it |
 | `resolve` / `unresolve` | `SetResolved` / `ClearResolved` | the row with the new `resolved_at`, or without it |
 | `supersede` | `CreateLink` with a `supersedes` edge, when the edge becomes active | the **target**'s state, `related_id` naming the superseding memory |
 | `unsupersede` | `InvalidateLink` on a `supersedes` edge, when a live edge is withdrawn — by the repair pass or by `--withdraw` / `ghost_link_withdraw` | the target's state again — a withdrawal is a change, and a history that shows a claim and no withdrawal reads as though it is still live |
@@ -494,21 +580,79 @@ repeating the previous state would record that nothing happened, at the cost of 
 row per recall. `Touch` (`access_count`, `last_accessed`), `TogglePin` and the
 resolve KEEP cache are in that class.
 
-Two writers deliberately break that rule, for the same reason: the row is not a
-state change but a record that a *pass* ran over this memory, or that a *claim*
-now stands against it, and neither is visible in the row's own columns. A
-consolidation that re-emits a memory verbatim — retention rather than
-consolidation, see `reusePreservesAge` — appends a `reflect` row byte-identical
-to the previous version, because "which reflection run touched this" is the
-question the table exists to answer, and a memory no reflection has confirmed is
-indistinguishable from one that has. A `supersedes` edge moves none of the
-target's columns but does change its standing — "this is no longer current" —
-and an audit blind to that is blind to the corpus's main staleness signal. Both
-cost a slot under the cap below, which is what bounds them; neither is a licence
-to repeat. The `supersede` row in particular is written when the edge *becomes*
-active and not on every re-link, because `ghost supersede` re-writes a pair on
-every pass whose endpoint moved, and a re-write of a live edge records no run and
-asserts no new claim.
+One writer deliberately breaks that rule, because the row is not a state change
+but a record that a *claim* now stands against a memory, which is not visible in
+the row's own columns. A `supersedes` edge moves none of the target's columns but
+does change its standing — "this is no longer current" — and an audit blind to
+that is blind to the corpus's main staleness signal. It costs a slot under the
+cap below, which is what bounds it; it is not a licence to repeat. The
+`supersede` row in particular is written when the edge *becomes* active and not
+on every re-link, because `ghost supersede` re-writes a pair on every pass whose
+endpoint moved, and a re-write of a live edge records no run and asserts no new
+claim.
+
+**A consolidation that re-emits a memory verbatim no longer breaks it
+([#727](https://github.com/wcatz/ghost/issues/727)), which reverses a rule this
+section previously stated.** It used to append a `reflect` row byte-identical to
+the previous version, on the reasoning that "which reflection run touched this"
+is the question the table exists to answer. The measurement said otherwise.
+About fifteen hours after the v17 upgrade, a real store held 3,340 history rows
+of which **2,669 (80%) were `reflect` re-emissions**; one memory already had 17
+versions of itself, and each run wrote 140 rows inside a single second. At that
+rate the per-memory cap of 50 began evicting real events — saves, updates,
+supersede and unsupersede, resolve — within about two days, and the 20,000-row
+store cap within about four, so `as_of` and `ghost history` lost exactly the
+events they exist for. The same write also set `updated_at = datetime('now')` on
+rows it did not change, and that timestamp is not only a freshness hint:
+
+- **`ghost supersede` orients each candidate pair by `updated_at`.** Once every
+  row reflect had merely looked at shared one timestamp, the newer-versus-older
+  direction came from the id tie-break instead of from either memory's age. A
+  `REVERSED` verdict is *refused* rather than flipped, so a pair oriented the
+  wrong way costs a classify call on every pass and is never written: a dry run
+  on the measured store logged dozens of refusals on pairs whose `created_at`
+  order was never in doubt.
+- **`--skip-unchanged` fingerprints the consolidatable set by `updated_at`**
+  (`reflection.InputSignature`, which carries it as a change proxy). An
+  all-keep apply therefore moved a field the gate reads, so the fingerprint
+  stops describing the corpus and starts describing when reflect last ran. On
+  a corpus nothing else touches this is self-cancelling rather than visible:
+  `runReflect` records the fingerprint *after* the apply, so the stamps it
+  wrote are already in the stored value and the next round matches and skips
+  (measured — `TestRunReflectSkipUnchangedSkipsAfterAnAllKeepApply` records
+  both halves). It matters when anything else moves the corpus in between, and
+  a pin or a `PromoteToGlobal` does exactly that: the gate is then invalidated
+  by reflect having done nothing, and the next round pays for a full-corpus
+  consolidation. Fixing it at the source is what makes the fingerprint mean
+  "the corpus", which is the only thing a fingerprint can mean.
+
+The rule now is that a re-emission that leaves **content, category, importance,
+tags and scope** unchanged is a no-op: no `UPDATE`, so `updated_at` stays where
+the memory last really changed, and no history row, because there is no new state
+to record. `reuseChangesNothing` decides it, comparing every field the reuse
+`UPDATE` would write. A change to **any** of them is a real update and is recorded
+as before. The comparison is by value rather than by the bytes `json.Marshal`
+produced for each side — a row saved untagged holds `"null"` where a keep that
+normalises nil to an empty list holds `"[]"`, and both read back as the same empty
+list, so comparing the column text would report a difference on every run of an
+untagged corpus. A stored value that cannot be read counts as *changed*, never as
+unchanged, so a broken `tags` column is repaired loudly rather than skipped
+quietly.
+
+"Which run last looked at this memory" is no longer a question the change log
+answers, deliberately: it is not state, and the run itself is already in
+`lifecycle.log`. One consequence is worth stating because it is a narrowing
+rather than a fix — a memory written before v17 and thereafter only ever carried
+through keeps no version at all, so an `as_of` read reports it in `Unknown` for as
+long as nothing changes it. That is the honest answer (the store cannot say what
+it said at T because nothing ever wrote a version of it) and `Unknown`'s
+disclosure is designed for exactly this, but before this change such a memory
+acquired a version merely by being looked at.
+
+The already-flooded stores are not repaired by this: the byte-identical
+consecutive `reflect` rows on disk are still there. A one-time cleanup that drops
+a version equal to the one before it is a **separate follow-up**, and it should be
+a reported, dry-run-first command rather than an automatic migration.
 
 Two more writers can produce a row byte-identical to the previous version
 without meaning to, and neither earns a special case: `UpdateMemory` called with
@@ -1006,7 +1150,13 @@ The detector works on the *shape* of a value, never on the words around it. That
 
 Reflection output is filtered at the write boundary, and both halves of that position are load-bearing. `cmd/ghost`'s `applyReflection` is the single seam every proposal passes through on its way to `ApplyReflection`, and it runs *after* the drop guard's audit. `dropCredentialProposals` returns fresh slices rather than filtering in place, and `applyReflection` returns those **post-drop** slices to its caller: the `Applied: N memories consolidated` line counts them, so returning only a count left it counting the caller's pre-drop lists, and a partial drop reported 2 written when 1 was. It is a drop rather than a refusal because `ApplyReflection` replaces a project's corpus in one transaction, so a refusal would roll back an entire consolidation over one hallucinated value. It is after the audit because the audit asks which **inputs** the output failed to account for, and `executeOps` emits every unclaimed input verbatim — so a memory the tier carried forward is byte-identical to the output that carried it. Filtering before the audit makes that input look unaccounted for, and both outcomes are wrong: `RetainGuardedDrops` re-adds it verbatim and the credential is written back, making the drop a no-op *after* the audit has printed its content to stderr; or some other output happens to cover 45% of its tokens, the audit stays quiet, and `ReplaceNonManual` deletes the stored row with no `--allow-drops` — the one deletion path the drop guard exists to close. At the boundary the memory is still accounted for, so `RetainGuardedDrops` does not re-add it and the drop is not a no-op. It is, however, **deleted from the store**: `ReplaceNonManual` removes every replaceable row the emitted set does not account for, and this one no longer is. That is the correct outcome — the stored row IS the value, and leaving it is the leak — but it is a deletion, so the report describes the mechanism rather than counting anything — `dropped` counts *proposals*, and the rows the replace removed is a different number in both directions, since a fresh merge carried nothing and a `manual`/`builtin`/pinned/resolved row is not in the replace's candidate set — and it fires only when a project replace actually ran. A round the drop empties writes nothing, is reported as `Applied: nothing` with the surviving row named, and **records no skip fingerprint**: the corpus is byte-identical, and a fingerprint over it is what makes `--skip-unchanged` skip the project forever, so a stored credential would never be revisited. `applyReflection` returns an `applied` flag for exactly this, and it is false whenever nothing was written; a removal claim printed before anyone knows whether a replace runs closes the incident in the operator's head while the value sits in the database. `--allow-drops` does not gate it, because that flag is the operator authorising what the **model** chose to drop. Clearing a credential out of a database is therefore not only a report-first scan: an unattended `ghost reflect --apply` removes the rows it finds, and says so.
 
-The per-drop report carries format, category, scope and length, never content — and that guarantee is enforced at every print site in `ghost reflect` (all three of them), not only at the write boundary. The scope is named because a grep for `.Content` in `cmd/ghost` finds three more sites in two other commands: `runResolve`'s listing uses `firstLine` at 70 characters, and its input is the stored corpus the write-boundary guard already refuses — a narrower claim than "resolve cannot print a credential", since a pre-guard database could still hold one; and `printHistoryEntry` prints history content raw, which is deliberate, because history is the one surface where a credential outlives the row it was removed from and the substitution belongs at write time (`ghost_history_content`) rather than at a print site. The consequence is that `ghost history` renders whatever is stored, so its guarantee is the filter's. `displayProposal` substitutes `<withheld: format, category, bytes>` for the content wherever `ghost reflect` echoes a proposal or a guarded drop, because the proposal listing and the drop-guard warning both printed 120 truncated characters and that stdout is the append-only `lifecycle.log` in the autonomous path. `previewContent` in `internal/reflection` does the same for the three log lines the tier writes — the fabrication, contamination and grounding rejections — because a 160-rune prefix is a copy of the content into an append-only log, and all three run *inside* the tier, before `cmd/ghost` sees anything and therefore before the boundary drop. A guard that has to be remembered at three call sites is one refactor away from not existing, so the check is in the one function they share. A boundary-only guarantee is not a guarantee about the command's report.
+The per-drop report carries format, category, scope and length, never content — and that guarantee is enforced at **every `cmd/ghost` print site that renders stored memory text in a report** (the lifecycle listings and `ghost history`), not only at the write boundary. `displayProposal` substitutes `<withheld: format, category, bytes>` for the content wherever `ghost reflect` echoes a proposal or a guarded drop, because the proposal listing and the drop-guard warning both printed 120 truncated characters and that stdout is the append-only `lifecycle.log` in the autonomous path. The other renderers are that same substitution over a different cut: `displayClaim` for text a result records without a category (a rewrite's replacement, a disposal claim's witness, a fold's discarded wording), `displayStored` for a stored memory in a one-line listing — it keeps `firstLine` at 70 characters and withholds the row whole instead — and `displayProposal`/`displayClaim` with no limit for `ghost history`, which prints the text in full because a history whose text is elided cannot answer the question it exists for. The marker is built in one place (`withheld`), so a new site cannot invent a second spelling, and it names the format, the category and the byte count because a report that says only "redacted" is indistinguishable from a report that lost the row.
+
+**The class is a report, and the path outside it is deliberate.** `ghost context` and the SessionStart hook's digest print the same stored rows — `internal/mcpinit`'s `quoteData` wraps a memory, task, decision and learned context in `«»` and nothing else — and they are outside the substitution on purpose. They are a data feed rather than a report a person reads: a memory withheld from the injected context is silently out of every later session, which is a worse failure than printing one, and the same text is already reachable through `ghost_memory_search`, whose contract is to return what is stored. The control on that path is the write boundary plus a store scan, which is the same answer the search tool has.
+
+**Four listings were the sites left out**, and the argument for them was that the write-boundary guard already refuses their input. That argument is about the databases this build writes, and it says nothing about a database written before the guard existed: `rejectSecret` is not retroactive, a pre-guard row can still hold a value, and 70 characters is more than a GitHub PAT needs. They are `ghost resolve`'s confirmed listing, `ghost resolve --reassess`'s kept listing (one shared renderer, `memoryLines`), `resolve --mark`'s per-row listing and `supersede --withdraw`'s target text — the last two exist so an operator can confirm from the output that they acted on the note they meant, which is exactly the reader who is holding a stale, pre-guard store. `memoryLines` is a named function because both resolve listings were inline loops inside `runResolve`, which cannot be called from a test: it opens a store, builds a harness provider and calls `os.Exit`.
+
+**`ghost history` carries both layers, and the print site is the second rather than the only one.** History content is redacted at **write** time by the `ghost_history_content` filter in `internal/memory`, and that is the right layer for it: it is the only one that also covers the reads Ghost performs itself — an `as_of` search answers from a recorded version and feeds session injection — and every future reader of that table, none of which would have to remember a print site. It is also the layer that erases rather than hides, which is why `ghost history purge` remains the redaction path for what is on disk. But a filter installed today cannot reach the rows already there, and it does not cover `merged_content` at all: that column is a plain `?` beside the filtered one, holding the wording a `FoldOnly` fold dropped, so on a pre-guard store it is the one text field `ghost history` prints that the write-time filter never saw. `printHistoryEntry` and `printHistoryJSON` therefore substitute as well — the `--json` form too, because a piped stream lands in a file as surely as a terminal scrolls away, and two forms of one command disagreeing about the same row is wrong either way, while only the *values* change: a clean entry still decodes to exactly what the store returned. A row written before the filter existed renders as `<withheld: …>`, and the write-time redaction's own notice still renders as itself, because the two are not the same statement and only the notice says the text was removed on the way in and that purging erases the rest. What none of this reaches is a read Ghost performs over stored text as data: `ghost_memory_search` returns a pre-guard row's text like any other, and `ghost context` injects it into a session's instructions the same way. Those are the report-first job a store scan and `ghost history purge` belong to, and the write-boundary guard has never claimed to do them.
 
 
 **The Cardano rules are discriminated on the CBOR header**, because the negative corpus for them is not prose — it is the key file formats themselves, and they collide by construction. A signing key and a *verification* key are the same 32 bytes, so both carry `5820`; an *extended* key is a 32-byte key plus a 32-byte chain code, so its private half and its **published** half both carry `5840`; the KES signing key carries a two-byte length (`5902 60`) that a Plutus script also carries. Only three things separate them: the CBOR length byte, the `"type"` envelope, and the surrounding line.

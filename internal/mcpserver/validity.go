@@ -59,9 +59,10 @@ var acceptedStampForms = []string{time.RFC3339, memory.DateStampLayout}
 // start, because the two mean different instants and only one of them is the
 // plain reading. A date as a window's START is midnight and needs no adjustment:
 // a claim that begins on the 1st begins then. As an END it does, because
-// assemble.ExpiredAt is a strict "before now" — midnight would retire the row
-// from the first instant of the day the caller said it was true through, and
-// "valid until 2026-12-31" plainly means the whole of the 31st. The stored value
+// memory.ValidityState's expiry test is a strict "before now" — midnight would
+// retire the row from the first instant of the day the caller said it was true
+// through, and "valid until 2026-12-31" plainly means the whole of the 31st. The
+// stored value
 // is therefore the last second of that day, which is the finest a
 // second-resolution text column can express: the claim stops one second before
 // the day is over rather than a day before it began. A full RFC 3339 stamp is
