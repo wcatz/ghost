@@ -5223,9 +5223,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				// row-per-run this replaced was 80% of memory_history and put
 				// both caps days from evicting real events; updated_at became
 				// "the last reflect that saw this row", which is what supersede
-				// orients a candidate pair by and what --skip-unchanged
-				// fingerprints a project with. Which run touched it is not
-				// state, and the run is already in lifecycle.log.
+				// orients a candidate pair by and what --skip-unchanged's
+				// fingerprint carries. Which run touched it is not state, and
+				// the run is already in lifecycle.log.
 			case reusePreservesAge(stored, m):
 				// Unchanged re-emission, not a rewrite: the row keeps its
 				// created_at and its source, and only the fields reflection

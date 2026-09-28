@@ -527,9 +527,18 @@ rows it did not change, and that timestamp is not only a freshness hint:
   on the measured store logged dozens of refusals on pairs whose `created_at`
   order was never in doubt.
 - **`--skip-unchanged` fingerprints the consolidatable set by `updated_at`**
-  (`reflection.InputSignature`, which carries it as a change proxy). A project
-  that reflect had just touched therefore read as changed to the very gate
-  reflect had just satisfied.
+  (`reflection.InputSignature`, which carries it as a change proxy). An
+  all-keep apply therefore moved a field the gate reads, so the fingerprint
+  stops describing the corpus and starts describing when reflect last ran. On
+  a corpus nothing else touches this is self-cancelling rather than visible:
+  `runReflect` records the fingerprint *after* the apply, so the stamps it
+  wrote are already in the stored value and the next round matches and skips
+  (measured — `TestRunReflectSkipUnchangedSkipsAfterAnAllKeepApply` records
+  both halves). It matters when anything else moves the corpus in between, and
+  a pin or a `PromoteToGlobal` does exactly that: the gate is then invalidated
+  by reflect having done nothing, and the next round pays for a full-corpus
+  consolidation. Fixing it at the source is what makes the fingerprint mean
+  "the corpus", which is the only thing a fingerprint can mean.
 
 The rule now is that a re-emission that leaves **content, category, importance,
 tags and scope** unchanged is a no-op: no `UPDATE`, so `updated_at` stays where
