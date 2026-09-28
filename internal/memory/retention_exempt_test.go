@@ -379,3 +379,82 @@ func TestTheSessionDecayMatchesTheSQLItRanks(t *testing.T) {
 		}
 	}
 }
+
+// TestTheInjectionReadDoesNotSinkAPersistentRow: DemotionPenalties' map is a
+// PROTECTION map, and every caller has to build it that way — the function cannot
+// read the column itself, because it is handed ids rather than rows. This is the
+// caller that matters most, because `GetTopMemories` is the session-start
+// injection read: a keep-forever memory that is the lower-ranked member of a
+// near-duplicate pair would be cut out of the very block the tier exists to keep
+// it in, after every other pass had carefully spared it.
+func TestTheInjectionReadDoesNotSinkAPersistentRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A linked near-duplicate pair in which the KEEP-FOREVER row is the lower
+	// ranked one, which is the only shape in which the demotion decides anything:
+	// a protected row that already ranks first is never the loser, so a pin-only
+	// map would pass a test written the other way round.
+	keep := retentionTierFixture(t, s, "the port forwarder listens on 2222, the first note", RetentionPersistent)
+	other := retentionTierFixture(t, s, "the port forwarder listens on 2222, restated later", RetentionProject)
+	if err := s.CreateLink(ctx, other, keep, "duplicate", 0.99, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET importance = 0.3 WHERE id = ?`, keep); err != nil {
+		t.Fatalf("make the keep-forever row the lower-ranked member of the pair: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET importance = 0.9 WHERE id = ?`, other); err != nil {
+		t.Fatalf("raise the ordinary row: %v", err)
+	}
+
+	// A limit of one, so the pair competes for a single slot and the demotion
+	// decides which one is dropped.
+	got, err := s.GetTopMemories(ctx, testProject, 1)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("GetTopMemories returned %d rows, want 1", len(got))
+	}
+	if got[0].ID != keep {
+		t.Errorf("the injected row is %s, want the keep-forever one %s: the near-duplicate demotion cut it", got[0].ID, keep)
+	}
+}
+
+// TestCreateRefusesToPutAnExpiryOnADurableRow: the "one source" rule is in the
+// schema comment, in CLAUDE.md and in docs/architecture.md, and a rule three
+// documents state is only worth stating if the code holds it. `Memory.ExpiresAt`
+// is settable by any Create caller, so the gate is here.
+func TestCreateRefusesToPutAnExpiryOnADurableRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	stated := "2027-01-01 00:00:00"
+
+	for _, tier := range []string{RetentionProject, RetentionPersistent} {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "a " + tier + " row that tries to state an expiry", Source: "manual",
+			Retention: tier, ExpiresAt: &stated,
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", tier, err)
+		}
+		if got := getOne(t, s, id); got.ExpiresAt != nil {
+			t.Errorf("a %s row carries expires_at = %q: prune would ignore it, so the column lies", tier, *got.ExpiresAt)
+		}
+	}
+
+	// A session row MAY state one, because a corpus seeder replaying a row it
+	// already holds is the caller that exists, and the derivation is not the only
+	// honest source of an expiry — an un-derived one still only affects a tier
+	// whose whole purpose is to be swept up.
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "a session row that states its own expiry", Source: "manual",
+		Retention: RetentionSession, ExpiresAt: &stated,
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	if got := getOne(t, s, id); got.ExpiresAt == nil || *got.ExpiresAt != stated {
+		t.Errorf("a session row's stated expiry was overwritten: %v", got.ExpiresAt)
+	}
+}

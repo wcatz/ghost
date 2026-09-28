@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"testing"
@@ -152,5 +153,53 @@ func TestDecayRankingSQLWithTierKeepsTheCategoryHalf(t *testing.T) {
 	}
 	if strings.Contains(withoutTier, "retention") {
 		t.Errorf("the fallback form still names the column a pre-v19 store does not have:\n%s", withoutTier)
+	}
+}
+
+// TestTheSessionBlockKeepsAKeepForeverNearDuplicate: the two session-start
+// loaders are where a protection map matters most, and the globals path is the
+// sharper of the two — it does not merely reorder the near-duplicate loser, it
+// FILTERS it out of the block, so a pin-only map there would drop a memory the
+// user declared untouchable out of every later session while every other pass
+// spared it.
+func TestTheSessionBlockKeepsAKeepForeverNearDuplicate(t *testing.T) {
+	projectPath, dbPath := scopeSession(t, []scopeRow{
+		// The pair, with the keep-forever row the LOWER-ranked member, which is the
+		// only shape in which the demotion decides anything.
+		{id: "protkeep1", category: "convention", content: "the tunnel mtu is 1400 in staging", importance: 0.9},
+		{id: "protkeep2", category: "convention", content: "the tunnel mtu is 1400 while we debug", importance: 0.3},
+	}, []scopeRow{
+		{id: "protglob1", category: "convention", content: "the shared rule about running migrations", importance: 0.9},
+		{id: "protglob2", category: "convention", content: "the shared rule about running migrations restated", importance: 0.3},
+	})
+
+	// One read-write open for both writes. memory.OpenDB would migrate a store it
+	// found behind, and this one is current, so it only adds the row the link needs.
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	ctx := context.Background()
+	for _, id := range []string{"protkeep2", "protglob2"} {
+		if _, err := db.ExecContext(ctx, `UPDATE memories SET retention = 'persistent' WHERE id = ?`, id); err != nil {
+			t.Fatalf("mark %s keep-forever: %v", id, err)
+		}
+	}
+	store := memory.NewStore(db, nil)
+	for _, pair := range [][2]string{{"protkeep1", "protkeep2"}, {"protglob1", "protglob2"}} {
+		if err := store.CreateLink(ctx, pair[0], pair[1], "duplicate", 0.99, "auto"); err != nil {
+			t.Fatalf("CreateLink(%s,%s): %v", pair[0], pair[1], err)
+		}
+	}
+
+	got := renderSessionStart(t, projectPath)
+	for _, want := range []string{
+		"the tunnel mtu is 1400 while we debug",
+		"the shared rule about running migrations restated",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the session block dropped a keep-forever memory: %q missing from:\n%s", want, got)
+		}
 	}
 }

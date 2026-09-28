@@ -630,6 +630,18 @@ func retentionColumnExpr(db *sql.DB) (expr string, hasTier bool) {
 	return "retention", true
 }
 
+// tierOrProject resolves a scanned retention value, so the loaders share the one
+// reading of an absent tier. Every row in a store below retentionColumnFloor has
+// no tier column and is therefore a `project` row by definition — which is also
+// what the column's DEFAULT says for every row above it, and what a pre-v19 store
+// becomes the moment anything migrates it.
+func tierOrProject(scanned string) string {
+	if scanned == "" {
+		return memory.RetentionProject
+	}
+	return scanned
+}
+
 // scopeColumnExpr is the memories.scope column for a store at or past
 // scopeColumnFloor, and a NULL literal for one below it. The second result says
 // which of the two it is, because a caller that filters on the column cannot name
@@ -736,8 +748,14 @@ func loadGlobalMemories(dbPath string, sessionScope map[string]string) (globals 
 	if hasScope && len(sessionScope) > 0 {
 		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", sessionScope)
 	}
+	// retention is selected for the same reason the project query selects it: the
+	// protection map the near-duplicate demotion below is built from reads it. This
+	// query does not order by the decay, so it needs no expression fallback — the
+	// NULL literal alone does the job, and it comes from the same probe so the two
+	// loaders cannot disagree about whether the store has the column.
+	retentionColumn, _ := retentionColumnExpr(db)
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned, source, project_id, `+scopeColumn+` FROM memories
+		SELECT id, category, content, pinned, source, project_id, `+retentionColumn+`, `+scopeColumn+` FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT ?
@@ -751,7 +769,11 @@ func loadGlobalMemories(dbPath string, sessionScope map[string]string) (globals 
 		var id, cat, content, source, projectID string
 		var pinnedInt int
 		var rawScope []byte
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source, &projectID, &rawScope); err != nil {
+		// Nullable for the same reason the project loader's is: a pre-v19 store
+		// selects a NULL literal here, and a NULL into a string fails every row of
+		// a loop whose answer to a scan failure is `continue`.
+		var retention sql.NullString
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source, &projectID, &retention, &rawScope); err != nil {
 			continue
 		}
 		// 300 bytes here vs. 200 for project memories below is deliberate,
@@ -767,6 +789,7 @@ func loadGlobalMemories(dbPath string, sessionScope map[string]string) (globals 
 		// the row.
 		globals = append(globals, sessionMemory{
 			ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
+			Retention: tierOrProject(retention.String),
 			ProjectID: projectID, Source: source,
 			Scope: memory.ParseScopeJSON(rawScope),
 		})
@@ -779,12 +802,17 @@ func loadGlobalMemories(dbPath string, sessionScope map[string]string) (globals 
 	// out outright here, independent of whether the cap below ever engages.
 	if len(globals) > 1 {
 		ids := make([]string, len(globals))
-		pinned := make(map[string]bool, len(globals))
+		// A protection map, not a pin list: a keep-forever global is not the loser
+		// of a near-duplicate pair, and this path does not merely reorder — it
+		// FILTERS the loser out of the session-start block entirely, so a
+		// pin-only map here would drop a memory the user declared untouchable out
+		// of every later session.
+		protected := make(map[string]bool, len(globals))
 		for i, m := range globals {
 			ids[i] = m.ID
-			pinned[m.ID] = m.Pinned
+			protected[m.ID] = m.Pinned || m.Retention == memory.RetentionPersistent
 		}
-		penalty, penaltyErr := memory.DemotionPenalties(context.Background(), db, ids, pinned, globalsDemotionThreshold)
+		penalty, penaltyErr := memory.DemotionPenalties(context.Background(), db, ids, protected, globalsDemotionThreshold)
 		if penaltyErr != nil {
 			fmt.Fprintln(os.Stderr, "ghost: global memory demotion lookup failed:", penaltyErr)
 		} else if len(penalty) > 0 {
@@ -975,14 +1003,10 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 			// (which would inflate age and wrongly floor its decay).
 			t = now
 		}
-		tier := retention.String
-		if tier == "" {
-			// The NULL a pre-v19 store selects, resolved to the tier every row in
-			// such a store has by definition — the same normalisation scanMemories
-			// applies, and the value the ORDER BY above was built without a tier
-			// factor, so the two agree.
-			tier = memory.RetentionProject
-		}
+		// The NULL a pre-v19 store selects, resolved to the tier every row in such a
+		// store has by definition — which is also the value the ORDER BY above was
+		// built without a tier factor, so the two agree.
+		tier := tierOrProject(retention.String)
 		cands = append(cands, candidate{
 			mem: sessionMemory{
 				ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
@@ -1109,12 +1133,16 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	if len(memories) > sessionMemoriesCap {
 		demotionThreshold := cfg.Linking.DemotionThreshold
 		ids := make([]string, len(memories))
-		pinned := make(map[string]bool, len(memories))
+		// A protection map, not a pin list — see DemotionPenalties. Here the loser is
+		// only reordered, so a keep-forever memory would still reach the block on
+		// its own; the reason to protect it is that every other pass already spares
+		// it and this is the one that would still sink it.
+		protected := make(map[string]bool, len(memories))
 		for i, m := range memories {
 			ids[i] = m.ID
-			pinned[m.ID] = m.Pinned
+			protected[m.ID] = m.Pinned || m.Retention == memory.RetentionPersistent
 		}
-		penalty, penaltyErr := memory.DemotionPenalties(context.Background(), db, ids, pinned, demotionThreshold)
+		penalty, penaltyErr := memory.DemotionPenalties(context.Background(), db, ids, protected, demotionThreshold)
 		if penaltyErr != nil {
 			fmt.Fprintln(os.Stderr, "ghost: session injection demotion lookup failed:", penaltyErr)
 		} else {

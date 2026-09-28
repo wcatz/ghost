@@ -554,6 +554,24 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			}
 			continue
 		}
+		// The persistent refusal, here for the reason the scope one above is: this
+		// is the point every pair passes through, so it covers the reclassify path
+		// as well as the fresh one. An edge written before a memory was declared
+		// keep-forever is re-proposed on the first pass after either endpoint is
+		// edited, and re-affirming it is exactly the outcome the exemption exists
+		// to prevent -- a billed call for a verdict that can only re-create a claim
+		// about a memory nothing automatic may make.
+		//
+		// The edge is left alone rather than withdrawn: that is a different command
+		// (`--reassess`, `ghost_link_withdraw`), and this pass is not where graph
+		// history is deleted. What it stops is spending a call to keep it alive.
+		if memory.RetentionExempt(newerMem) || memory.RetentionExempt(olderMem) {
+			if logger != nil {
+				logger.Info("supersede: dropping pair with a persistent endpoint",
+					"newer", c.NewerID, "older", c.OlderID)
+			}
+			continue
+		}
 		live = append(live, c)
 	}
 	all = live

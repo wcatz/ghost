@@ -2608,10 +2608,19 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 		return "", err
 	}
 	expires := sessionExpiry(retention, time.Now())
-	if m.ExpiresAt != nil {
-		// A caller that states its own expiry is CreateFromCorpus or a restore
-		// replaying a row it read; both are storing bytes they already held, so
-		// the stated value is the row's own rather than a fresh derivation.
+	if retention == RetentionSession && m.ExpiresAt != nil {
+		// A session row's expiry may be stated rather than derived, and ONLY a
+		// session row's: the gate is the point. Without it this would put an expiry
+		// on a durable row, which is a claim about when the user stops wanting a
+		// memory that no caller ever made -- and one that prune would then ignore,
+		// so the column would lie and the prune would not even be able to say so.
+		// A durable row's NULL is the unprunable direction, and it stays.
+		//
+		// The callers that exist are the corpus seeders, which replay a row they
+		// already hold, and a test restoring a shape. `Store.RestoreSnapshot` is
+		// NOT one of them: it writes through its own INSERT ... SELECT, which does
+		// not name the column, so a restored row takes the DEFAULT — the same
+		// "the change log holds no tier" answer as everything else in that path.
 		expires = *m.ExpiresAt
 	}
 
@@ -3927,12 +3936,16 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	}
 	if len(results) > limit {
 		ids := make([]string, len(results))
-		pinned := make(map[string]bool, len(results))
+		// A protection map, not a pin list (see DemotionPenalties): this is the
+		// session-start injection read, so a keep-forever memory that is the
+		// lower-ranked member of a near-duplicate pair would be cut out of the
+		// very block the tier exists to keep it in.
+		protected := make(map[string]bool, len(results))
 		for i, m := range results {
 			ids[i] = m.ID
-			pinned[m.ID] = m.Pinned
+			protected[m.ID] = m.Pinned || RetentionExempt(m)
 		}
-		penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, pinned, s.demotionThreshold)
+		penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
 		if err != nil {
 			s.logger.Debug("get top memories: demotion lookup failed", "error", err)
 		} else {
