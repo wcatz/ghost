@@ -272,6 +272,59 @@ func TestChmodTightenNeverWidens(t *testing.T) {
 	}
 }
 
+// TestFchmodNoFollowNeverChmodsThroughASymlink is the #608 race. The caller's
+// Lstat and the chmod are two resolutions of the same name, so anything that
+// swaps a regular file for a symlink between them had its chmod applied to the
+// link's target instead — a file Ghost has no business touching, and one it
+// would then have made UNREADABLE to its owner, which is how a pass whose whole
+// promise is "subtractive or nothing" becomes destructive.
+//
+// Staged as a symlink already at the name rather than as a live swap: a test
+// cannot interleave with the production sequence, but the two cases have the
+// same consequence and the same test, and the one a test CAN stage is the one
+// that decides whether the implementation goes through the name or through a
+// descriptor.
+func TestFchmodNoFollowNeverChmodsThroughASymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "not-ghost's.txt")
+	if err := os.WriteFile(target, []byte("someone else's file"), 0o600); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	setPerm(t, target, 0o644)
+	link := filepath.Join(dir, "ghost.db")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := fchmodNoFollow(link, 0o600); err == nil {
+		t.Error("fchmodNoFollow reported success on a symlink, so the mode landed on the link's target")
+	}
+	if got := permOf(t, target); got != 0o644 {
+		t.Errorf("the link's target is %#o, want it untouched at 0644", got)
+	}
+	// The link itself is still a link: a fix that unlinked and re-created would
+	// have tightened the file it made and left the name pointing elsewhere.
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink was replaced rather than refused: info=%v err=%v", fi, err)
+	}
+}
+
+// TestFchmodNoFollowTightensTheRealFile is the other half, so the refusal above
+// cannot be satisfied by refusing everything: a regular file has to reach the
+// tightened mode, through the descriptor rather than the name.
+func TestFchmodNoFollowTightensTheRealFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ghost.db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := fchmodNoFollow(path, 0o600); err != nil {
+		t.Fatalf("fchmodNoFollow on a regular file: %v", err)
+	}
+	if got := permOf(t, path); got != 0o600 {
+		t.Errorf("mode = %#o, want 0600", got)
+	}
+}
+
 // TestOpenDBDoesNotChmodAForeignDirectory: eval, cycle and bench harnesses open
 // databases in scratch trees, and a user can point GHOST_SCRATCH_DIR anywhere.
 // Only the configured DataDir is Ghost's own directory to tighten; the parent
