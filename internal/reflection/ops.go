@@ -86,9 +86,10 @@ type memOp struct {
 // that report a proposal go through previewContent instead of printing it.
 //
 // The reason and the ids stay in both, because they are the diagnostic and an id
-// is not content — but "the reason" is not automatically safe, since two of them
-// quote a model-supplied fragment: the free-form drop tail and an unknown verb
-// (parseOpLine) and a hallucinated id (executeOps). Those go through
+// is not content — but "the reason" is not automatically safe, since three
+// reasons quote a model-supplied fragment at two call sites: parseOpLine's
+// unreadable drop tail and unknown verb, and executeOps' hallucinated id. Those
+// go through
 // clipOpText, which runs the same value-shape gate previewContent applies, so a
 // `drop <id> reason: <a credential>` refusal withholds the credential in the log
 // rendering too. What reaches a log is therefore the reason MINUS any fragment
@@ -180,14 +181,16 @@ func safeTierError(err error) string {
 // legitimate one.
 //
 // It also runs the value-shape gate, because bounding the fragment is not the
-// same as making it safe to print: 60 runes of a hallucinated id or a free-form
-// drop tail is room for a whole credential, and a `drop <id> reason: <token>` is
-// refused PRECISELY because the tail is free-form, so the refused text is the
-// model's own. This is the same gate previewContent applies to the three other
-// in-tier log lines, and it belongs in the one function every fragment goes
-// through rather than at each call site — see previewContent for why. The
-// detection runs BEFORE the clip, so a value that straddles the boundary is
-// judged whole.
+// same as making it safe to print. 60 runes holds a whole short-format token
+// (gh[pousr]_ + 20, AKIA… + 16, npm_/hf_ + 30) and a large part of a long one —
+// an ed25519 cborHex, a PEM body, a mnemonic, a JWT all run past the clip, so
+// without the gate a fragment of the key would sit in the log rather than
+// nothing. And a `drop <id> reason: <token>` is refused PRECISELY because the
+// tail is free-form, so the refused text is the model's own. This is the same
+// gate previewContent applies to the three other in-tier log lines, and it
+// belongs in the one function every fragment goes through rather than at each
+// call site — see previewContent for why. The detection runs BEFORE the clip, so
+// a value that straddles the boundary is judged whole.
 func clipOpText(s string) string {
 	if finding, ok := secret.Detect(s); ok {
 		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(s))

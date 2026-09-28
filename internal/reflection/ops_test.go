@@ -704,7 +704,7 @@ func (f *fakeReflector) Reflect(_ context.Context, _ string) (string, ai.TokenUs
 }
 
 // TestReaderComplaintWithholdsAValueFromTheReasonToo: withholding the operation
-// LINE is not enough, because two of the reasons quote a model-supplied fragment
+// LINE is not enough, because three reasons quote a model-supplied fragment
 // and a refusal is often triggered BY that fragment being free-form. A
 // `drop <id> reason: <a credential>` is refused precisely because the tail is
 // neither "obsolete" nor "superseded by <id>", so the refused text is the
