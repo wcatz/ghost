@@ -64,6 +64,8 @@ type ReassessResult struct {
 	StillResolved int // came back RESOLVED with a closed-by reason; stays resolved
 	Unknown       int // unparseable verdict; left resolved and re-offered next pass
 	Cleared       int // rows actually cleared (0 in dry-run)
+	Pool          int // the project's already-resolved pool before any scope narrowed it
+	Misses        []ScopeMiss
 }
 
 // Reassess re-runs the vetoes and the classifier over the memories resolve has
@@ -78,12 +80,18 @@ type ReassessResult struct {
 // is fatal for the same reason — a repair that did not happen must not be
 // reported as one. A failed cache write only warns, because the repair itself
 // has already landed and losing derived state costs one re-ask next pass.
-func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectID string, apply bool, logger *slog.Logger) (ReassessResult, []memory.Memory, error) {
+func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectID string, apply bool, scope Scope, logger *slog.Logger) (ReassessResult, []memory.Memory, error) {
 	var res ReassessResult
-	loaded, err := store.ResolvedCandidates(ctx, projectID)
+	pool, err := store.ResolvedCandidates(ctx, projectID)
 	if err != nil {
 		return res, nil, fmt.Errorf("load resolved candidates: %w", err)
 	}
+	res.Pool = len(pool)
+	loaded, misses, err := scope.Select(pool)
+	if err != nil {
+		return res, nil, err
+	}
+	res.Misses = misses
 	res.Loaded = len(loaded)
 
 	keptHashes, err := store.ResolveKeptHashes(ctx, projectID)

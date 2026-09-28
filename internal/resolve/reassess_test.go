@@ -29,7 +29,7 @@ func TestReassessRepairsWrongResolutions(t *testing.T) {
 	// The harness KEEPs the still-true rule and RESOLVES the cost estimate.
 	cls := &fakeClassifier{drop: map[string]bool{stillResolved.Content: true}}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", false, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", false, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess dry: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestReassessRepairsWrongResolutions(t *testing.T) {
 
 	// Apply: the two KEEP notes return to ranked injection and the harness
 	// KEEP is cached so the ordinary pass does not re-ask it.
-	res, _, err = Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, _, err = Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess apply: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestReassessIgnoresKeywordPrefilter(t *testing.T) {
 	store := &fakeStore{alreadyResolved: []memory.Memory{rule}}
 	cls := &fakeClassifier{drop: map[string]bool{}}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", false, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", false, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestReassessSkipsCachedKeepVerdicts(t *testing.T) {
 	}
 	cls := &fakeClassifier{drop: map[string]bool{}}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestReassessLeavesUnknownAlone(t *testing.T) {
 	store := &fakeStore{alreadyResolved: []memory.Memory{{ID: "m", Content: content}}}
 	cls := &fakeClassifier{unknown: map[string]bool{content: true}}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestReassessLeavesUnknownAlone(t *testing.T) {
 		t.Errorf("an UNKNOWN verdict must not be KEEP-cached: %v", store.markedKept)
 	}
 
-	res, _, err = Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, _, err = Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess second: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestReassessClearErrorIsFatal(t *testing.T) {
 	}
 	cls := &fakeClassifier{drop: map[string]bool{}}
 
-	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, nil); err == nil {
+	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err == nil {
 		t.Fatal("Reassess: want the clear error propagated, got nil")
 	}
 	if len(store.markedKept) != 0 {
@@ -181,7 +181,7 @@ func TestReassessMarkResolveKeptErrorWarns(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
-	res, _, err := Reassess(context.Background(), store, cls, "proj", true, logger)
+	res, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, logger)
 	if err != nil {
 		t.Fatalf("Reassess must not fail on a cache-write error: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestReassessClassifierErrorIsFatal(t *testing.T) {
 	store := &fakeStore{alreadyResolved: []memory.Memory{{ID: "m", Content: content}}}
 	cls := &fakeClassifier{err: errors.New("boom")}
 
-	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, nil); err == nil {
+	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err == nil {
 		t.Fatal("Reassess: want the classifier error propagated, got nil")
 	}
 	if len(store.cleared) != 0 {
@@ -238,7 +238,7 @@ func TestReassessSkipsDeterministicallyAssertedRows(t *testing.T) {
 	// The classifier would KEEP both asserted rows; the pass must not ask.
 	cls := &fakeClassifier{drop: map[string]bool{}}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestReassessCorrectionMustBeUnresolved(t *testing.T) {
 	store := &fakeStore{alreadyResolved: []memory.Memory{paired, correction}}
 	cls := &fakeClassifier{drop: map[string]bool{correction.Content: true}}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestReassessHoldsBackRowWhoseCorrectionIsRepaired(t *testing.T) {
 	// the cost estimate, which no correction touches.
 	cls := &fakeClassifier{drop: map[string]bool{}}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestReassessHoldsBackOnlyPrefilterPassingRows(t *testing.T) {
 	// correction is not.
 	cls := &fakeClassifier{}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestReassessEmptyPool(t *testing.T) {
 	store := &fakeStore{}
 	cls := &fakeClassifier{}
 
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
