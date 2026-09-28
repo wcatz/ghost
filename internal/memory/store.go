@@ -4039,6 +4039,7 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 		  AND resolved_at IS NULL
 		  AND pinned = 0
 		  AND category NOT IN ('convention', 'preference')
+		  AND `+retentionExemptSQL+`
 		ORDER BY created_at DESC
 	`, projectID)
 	if err != nil {
@@ -4067,6 +4068,7 @@ func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Mem
 		  AND resolved_at IS NOT NULL
 		  AND pinned = 0
 		  AND category NOT IN ('convention', 'preference')
+		  AND `+retentionExemptSQL+`
 		ORDER BY created_at DESC
 	`, projectID)
 	if err != nil {
@@ -4190,10 +4192,16 @@ const (
 		  AND (? = '' OR project_id = ?)
 		  AND resolved_at IS NULL
 		  AND pinned = 0
-		  AND category NOT IN ('convention', 'preference')`
+		  AND category NOT IN ('convention', 'preference')
+		  AND ` + retentionExemptSQL
 	// setResolvedUpdateSQL stamps the row and drops its KEEP cache in ONE
 	// statement, so no reader can observe a resolved row still holding a
 	// verdict the next pass would honour.
+	//
+	// Both carry retentionExemptSQL, so a `persistent` row is not stamped by
+	// either half of the one transaction that would stamp it — the SELECT is what
+	// decides the row is eligible and the UPDATE re-checks it at write time, and a
+	// protection asked at only one of them is lost the moment the two disagree.
 	setResolvedUpdateSQL = `
 		UPDATE memories SET resolved_at = datetime('now'), resolve_kept_hash = ''
 		WHERE id IN (%s)
@@ -4201,7 +4209,8 @@ const (
 		  AND (? = '' OR project_id = ?)
 		  AND resolved_at IS NULL
 		  AND pinned = 0
-		  AND category NOT IN ('convention', 'preference')`
+		  AND category NOT IN ('convention', 'preference')
+		  AND ` + retentionExemptSQL
 )
 
 // setResolvedStampTx is the shared body of the two resolve writers: one
@@ -5305,6 +5314,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		       agent, session_id, source_ref, confidence,
 		       valid_from, valid_until, verified_at, scope, 1
 		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		      AND `+retentionExemptSQL+`
 	`, snapshotID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot memories: %w", err)
@@ -5349,6 +5359,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, content, category, importance, tags, scope FROM memories
 		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		  AND `+retentionExemptSQL+`
 		ORDER BY created_at, id
 	`, projectID)
 	if err != nil {
@@ -5379,6 +5390,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		crows, err := tx.QueryContext(ctx, `
 			SELECT id FROM memories
 			WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
+			  AND `+retentionExemptSQL+`
 		`, projectID, consolidatedSince)
 		if err != nil {
 			return nil, fmt.Errorf("find concurrent memories: %w", err)
@@ -5729,6 +5741,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	removedIDs, err := selectIDs(ctx, tx, `
 		SELECT id FROM memories
 		WHERE project_id = ? AND source = 'reflection' AND pinned = 0 AND resolved_at IS NULL
+		  AND `+retentionExemptSQL+`
 		  AND NOT EXISTS (
 		      SELECT 1 FROM memory_snapshots s
 		      WHERE s.snapshot_id = ?
@@ -5745,6 +5758,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	del, err := tx.ExecContext(ctx, `
 		DELETE FROM memories
 		WHERE project_id = ? AND source = 'reflection' AND pinned = 0 AND resolved_at IS NULL
+		  AND `+retentionExemptSQL+`
 		  AND NOT EXISTS (
 		      SELECT 1 FROM memory_snapshots s
 		      WHERE s.snapshot_id = ?
@@ -5788,6 +5802,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		JOIN memories m ON m.id = s.memory_id
 		WHERE s.snapshot_id = ? AND s.memory_id = m.id
 		  AND m.pinned = 0 AND m.resolved_at IS NULL
+		  AND m.`+retentionExemptSQL+`
 		  AND (s.content != m.content OR s.category != m.category
 		       OR s.importance != m.importance OR s.source != m.source)`, snapshotID)
 	if err != nil {
@@ -5815,6 +5830,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		FROM memory_snapshots s
 		WHERE s.snapshot_id = ? AND s.memory_id = memories.id
 		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
+		  AND memories.`+retentionExemptSQL+`
 	`, snapshotID)
 	if err != nil {
 		return 0, fmt.Errorf("restore existing rows: %w", err)

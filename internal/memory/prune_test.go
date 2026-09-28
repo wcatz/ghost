@@ -1,286 +1,432 @@
 package memory
 
 import (
-	"fmt"
-	"os"
+	"context"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
 
-// preMigrateName builds the only shape prune is allowed to consider: the
-// database's base name, the exact ".pre-migrate-" infix, and nothing but
-// digits after it.
-func preMigrateName(dbPath, suffix string) string {
-	return filepath.Base(dbPath) + ".pre-migrate-" + suffix
+// pruneFixture writes one row of the given tier and ages it: an expiry and a
+// recorded last access in the past, which is the shape prune prefers to see.
+//
+// lastAccessed may be empty, which leaves last_accessed NULL — a row nothing has
+// recorded a read for. The grace then falls back to the row's last WRITE, so a
+// fixture that wants such a row to be prunable has to age updated_at too
+// (backdateWrite); leaving the write at the save instant is the ordinary case
+// and the row is inside the grace.
+func pruneFixture(t *testing.T, s *Store, content, tier, expires, lastAccessed string) string {
+	t.Helper()
+	ctx := context.Background()
+	id, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", content, "mcp", 0.6, nil, UpsertOptions{Retention: tier})
+	if err != nil {
+		t.Fatalf("UpsertWithOptions(%s): %v", tier, err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE memories SET expires_at = ?, last_accessed = ? WHERE id = ?`,
+		nullIfEmpty(expires), nullIfEmpty(lastAccessed), id); err != nil {
+		t.Fatalf("age %s: %v", id, err)
+	}
+	return id
 }
 
-// TestPrunePreMigrateBackupsKeepsNewestThree: a data directory that has seen a
-// dozen schema upgrades must not keep every copy forever. After the newest
-// backup exists, only the newest three (by the numeric suffix, which is a unix
-// timestamp — "1003" is newer than "999", and sorting those as strings gets it
-// backwards) stay on disk.
-func TestPrunePreMigrateBackupsKeepsNewestThree(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "ghost.db")
-
-	// Chosen so lexicographic order disagrees with numeric order: a string
-	// sort descending would keep 999, 1003, 1002 and throw away 1001.
-	for _, s := range []string{"999", "1000", "1001", "1002", "1003"} {
-		if err := os.WriteFile(filepath.Join(dir, preMigrateName(dbPath, s)), []byte("old"), 0o600); err != nil {
-			t.Fatalf("seed backup %s: %v", s, err)
-		}
-	}
-
-	prunePreMigrateBackups(dbPath, "")
-
-	for _, s := range []string{"1001", "1002", "1003"} {
-		if _, err := os.Lstat(filepath.Join(dir, preMigrateName(dbPath, s))); err != nil {
-			t.Errorf("backup %s must be kept (it is one of the newest %d): %v", s, preMigrateBackupKeep, err)
-		}
-	}
-	for _, s := range []string{"999", "1000"} {
-		if _, err := os.Lstat(filepath.Join(dir, preMigrateName(dbPath, s))); !os.IsNotExist(err) {
-			t.Errorf("backup %s must be pruned, Lstat err = %v", s, err)
-		}
+// backdateWrite ages a row's last write, which is what the grace falls back to
+// when no read has ever been recorded for it.
+func backdateWrite(t *testing.T, s *Store, id, when string) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(),
+		`UPDATE memories SET updated_at = ?, created_at = ? WHERE id = ?`, when, when, id); err != nil {
+		t.Fatalf("backdate the write on %s: %v", id, err)
 	}
 }
 
-// TestPrunePreMigrateBackupsIgnoresEverythingElse: the glob is deliberately
-// narrow. Backups taken by hand, files that merely start with the infix, and
-// anything that is not a plain file are none of this function's business —
-// deleting a symlink would remove the link the user placed, and following one
-// would delete its target.
-func TestPrunePreMigrateBackupsIgnoresEverythingElse(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "ghost.db")
+// stamp renders a time the way every timestamp column here stores one.
+func stamp(offset time.Duration) string {
+	return time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
+}
 
-	untouched := []string{
-		"ghost.db",
-		"ghost.db-wal",
-		"ghost.db.backup-1700000000",
-		"ghost.db.pre-0.33.0-1700000000",
-		preMigrateName(dbPath, "abc"),      // suffix is not a number
-		preMigrateName(dbPath, "1003.bak"), // trailing junk after the number
-		preMigrateName(dbPath, ""),         // no suffix at all
+func liveCount(t *testing.T, s *Store, projectID string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM memories WHERE project_id = ?`, projectID).Scan(&n); err != nil {
+		t.Fatalf("count memories: %v", err)
 	}
-	for _, name := range untouched {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("keep"), 0o600); err != nil {
-			t.Fatalf("seed %s: %v", name, err)
-		}
-	}
-	// A directory wearing the name: Lstat reports a dir, not a regular file.
-	dirName := preMigrateName(dbPath, "8888")
-	if err := os.Mkdir(filepath.Join(dir, dirName), 0o700); err != nil {
-		t.Fatalf("seed directory %s: %v", dirName, err)
-	}
-	// A symlink wearing the name, pointing at a real file that must survive.
-	// Its stamp is deliberately the OLDEST shape: an implementation that
-	// follows the link with Stat instead of reading it with Lstat counts it
-	// as the newest-looking candidate pool's tail and deletes the link.
-	target := filepath.Join(dir, "target.txt")
-	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
-		t.Fatalf("seed target: %v", err)
-	}
-	linkName := preMigrateName(dbPath, "1")
-	if err := os.Symlink(target, filepath.Join(dir, linkName)); err != nil {
-		t.Fatalf("seed symlink: %v", err)
-	}
-	// And one whose stamp would make it the NEWEST entry, so the other
-	// direction — keeping the link and deleting a real backup it displaced —
-	// is covered too.
-	newestLink := preMigrateName(dbPath, "9999")
-	if err := os.Symlink(target, filepath.Join(dir, newestLink)); err != nil {
-		t.Fatalf("seed newest symlink: %v", err)
-	}
-	// Enough numeric backups that the prune actually reaches for older files.
-	for _, s := range []string{"1000", "1001", "1002", "1003"} {
-		if err := os.WriteFile(filepath.Join(dir, preMigrateName(dbPath, s)), []byte("old"), 0o600); err != nil {
-			t.Fatalf("seed backup %s: %v", s, err)
-		}
-	}
+	return n
+}
 
-	prunePreMigrateBackups(dbPath, "")
+func historyPhases(t *testing.T, s *Store, id string) []string {
+	t.Helper()
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT phase FROM memory_history WHERE memory_id = ? ORDER BY rowid`, id)
+	if err != nil {
+		t.Fatalf("read history for %s: %v", id, err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []string
+	for rows.Next() {
+		var phase string
+		if err := rows.Scan(&phase); err != nil {
+			t.Fatalf("scan history: %v", err)
+		}
+		out = append(out, phase)
+	}
+	return out
+}
 
-	for _, name := range append(untouched, dirName, linkName, newestLink) {
-		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
-			t.Errorf("%s must be left alone: %v", name, err)
+// TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace: the predicate is the whole
+// safety argument, and it has four parts that each have to hold. A durable row is
+// never removed however old it is. A session row is not removed before its
+// expiry. A session row whose last activity is inside the grace period is not
+// removed even after it expires. And a recorded last access is preferred over the
+// row's last write, because a memory somebody is still reading is not garbage.
+func TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	longExpired := pruneFixture(t, s, "a session note expired long ago and untouched since", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	notExpired := pruneFixture(t, s, "a session note that has not reached its expiry", RetentionSession,
+		stamp(time.Hour), stamp(-29*24*time.Hour))
+	insideGrace := pruneFixture(t, s, "a session note expired but read yesterday", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-24*time.Hour))
+	// No recorded access: the grace falls back to the row's last write, so this
+	// row has to be old in both columns to be a candidate.
+	neverAccessed := pruneFixture(t, s, "a session note expired and never read", RetentionSession,
+		stamp(-30*24*time.Hour), "")
+	backdateWrite(t, s, neverAccessed, stamp(-30*24*time.Hour))
+	// And the row that is expired, never read, and last written a minute ago:
+	// inside the grace, so kept. This is the default shape of a real session
+	// memory, and it is the case a prune that measured only the expiry would
+	// delete.
+	freshWrite := pruneFixture(t, s, "a session note expired seconds after it was saved", RetentionSession,
+		stamp(-time.Hour), "")
+	durable := pruneFixture(t, s, "a durable fact that is just as old", RetentionProject,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	keepForever := pruneFixture(t, s, "a keep-forever fact with a stale expiry", RetentionPersistent,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	if report.Removed != 2 {
+		t.Errorf("removed %d rows, want 2: the expired, untouched session rows", report.Removed)
+	}
+	gone := map[string]bool{}
+	for _, id := range report.RemovedIDs {
+		gone[id] = true
+	}
+	if !gone[longExpired] {
+		t.Error("the expired, untouched session row survived")
+	}
+	if !gone[neverAccessed] {
+		t.Error("the expired session row nobody ever read survived")
+	}
+	if gone[freshWrite] {
+		t.Error("prune removed a row written moments ago: the grace was not measured from anything")
+	}
+	for _, tc := range []struct{ id, why string }{
+		{notExpired, "it has not reached its expiry"},
+		{insideGrace, "it was read inside the grace period"},
+		{durable, "a project row is not a prune candidate however old it is"},
+		{keepForever, "a persistent row is exempt from pruning"},
+	} {
+		if _, err := s.GetByIDs(ctx, []string{tc.id}); err != nil {
+			t.Fatalf("read %s: %v", tc.id, err)
+		} else if gone[tc.id] {
+			t.Errorf("prune removed %s, but %s", tc.id, tc.why)
 		}
-	}
-	// A link that counted as a candidate would have displaced one of these:
-	// the three newest REAL backups are what the cap is protecting.
-	for _, s := range []string{"1001", "1002", "1003"} {
-		if _, err := os.Lstat(filepath.Join(dir, preMigrateName(dbPath, s))); err != nil {
-			t.Errorf("backup %s must be kept: %v", s, err)
-		}
-	}
-	if b, err := os.ReadFile(target); err != nil || string(b) != "target" {
-		t.Errorf("the symlink's target must survive, read %q, err = %v", b, err)
-	}
-	if fi, err := os.Lstat(filepath.Join(dir, linkName)); err != nil {
-		t.Errorf("symlink must still exist: %v", err)
-	} else if fi.Mode()&os.ModeSymlink == 0 {
-		t.Errorf("symlink was replaced by a regular file (mode %v) — it was followed, not skipped", fi.Mode())
 	}
 }
 
-// TestPrunePreMigrateBackupsOnlyRunsAfterABackup: pruning hangs off the
-// migration backup, so an ordinary open leaves a directory full of old copies
-// exactly as it found them — the files are only culled once this same open has
-// written a fresh safety net of its own.
-func TestPrunePreMigrateBackupsOnlyRunsAfterABackup(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "ghost.db")
+// TestPrunePinsTheGraceBoundaryFromBothSides: "past the grace period" is a
+// threshold, and a threshold nobody can test from both sides is a threshold that
+// is either off by a rounding error or off by a factor of grace. The two rows
+// here differ by a minute and by nothing else.
+func TestPrunePinsTheGraceBoundaryFromBothSides(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const grace = 24 * time.Hour
+
+	// Both expired a month ago, so only the grace decides.
+	justOutside := pruneFixture(t, s, "a session note last touched a minute past the grace", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-grace-time.Minute))
+	justInside := pruneFixture(t, s, "a session note last touched a minute inside the grace", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-grace+time.Minute))
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: grace})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	if len(report.RemovedIDs) != 1 || report.RemovedIDs[0] != justOutside {
+		t.Fatalf("removed %v, want exactly [%s] (the row just outside the grace)", report.RemovedIDs, justOutside)
+	}
+	if _, err := s.GetByIDs(ctx, []string{justInside}); err != nil || liveCount(t, s, testProject) != 1 {
+		t.Errorf("the row just inside the grace was removed")
+	}
+}
+
+// TestPrunePinsTheExpiryBoundaryToo: the grace is the outer gate, but the tier's
+// own expiry is the inner one, and a prune that only implemented the outer gate
+// would delete a session note the user saved a moment ago.
+func TestPrunePinsTheExpiryBoundaryToo(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	expired := pruneFixture(t, s, "a session note one minute past its expiry", RetentionSession,
+		stamp(-time.Minute), stamp(-30*24*time.Hour))
+	live := pruneFixture(t, s, "a session note one minute short of its expiry", RetentionSession,
+		stamp(time.Minute), stamp(-30*24*time.Hour))
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: 0})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	if len(report.RemovedIDs) != 1 || report.RemovedIDs[0] != expired {
+		t.Fatalf("removed %v, want exactly [%s]", report.RemovedIDs, expired)
+	}
+	if liveCount(t, s, testProject) != 1 {
+		t.Errorf("%d rows left, want the unexpired session note", liveCount(t, s, testProject))
+	}
+	_ = live
+}
+
+// TestPruneDefaultsToADryRunThatWritesNothing: the default is a report, and the
+// reason it has to be a report is that a prune deletes. Nothing may be written on
+// the preview path — not the row, and not the history row the apply appends —
+// because a preview that left a tombstone behind would make the store's own audit
+// claim a removal that did not happen.
+func TestPruneDefaultsToADryRunThatWritesNothing(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id := pruneFixture(t, s, "a session note an operator is only looking at", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+
+	before := liveCount(t, s, testProject)
+	beforeHistory := len(historyPhases(t, s, id))
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	if report.Applied {
+		t.Error("the report claims it applied the prune")
+	}
+	if report.Removed != 0 {
+		t.Errorf("a dry run reported %d removed, want 0 — it removed nothing", report.Removed)
+	}
+	if len(report.Candidates) != 1 || report.Candidates[0].ID != id {
+		t.Fatalf("a dry run must still NAME what it would remove: %+v", report.Candidates)
+	}
+	if report.Candidates[0].Content != "a session note an operator is only looking at" {
+		t.Errorf("the candidate does not carry the text: %+v", report.Candidates[0])
+	}
+	if report.Candidates[0].Retention != RetentionSession {
+		t.Errorf("candidate retention = %q, want %q", report.Candidates[0].Retention, RetentionSession)
+	}
+	if got := liveCount(t, s, testProject); got != before {
+		t.Errorf("a dry run changed the row count from %d to %d", before, got)
+	}
+	if got := len(historyPhases(t, s, id)); got != beforeHistory {
+		t.Errorf("a dry run appended %d history row(s)", got-beforeHistory)
+	}
+
+	// And the same run with Apply does remove it, so the dry run was a preview of
+	// this pass rather than of nothing at all.
+	applied, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories(apply): %v", err)
+	}
+	if applied.Removed != 1 {
+		t.Fatalf("the apply removed %d rows, want 1", applied.Removed)
+	}
+}
+
+// TestPruneLeavesADeleteTombstonePerRemoval: memory_history.memory_id has no
+// foreign key precisely so a hard delete leaves a record of the row — and that
+// record is the only thing that will still know the text of a memory that a
+// prune removed. A prune that deleted without appending would make every
+// removal invisible to `ghost history`, which is the one command that can say
+// what was lost.
+func TestPruneLeavesADeleteTombstonePerRemoval(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	first := pruneFixture(t, s, "the first session note a prune will remove", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	second := pruneFixture(t, s, "the second session note a prune will remove", RetentionSession,
+		stamp(-31*24*time.Hour), stamp(-30*24*time.Hour))
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	if report.Removed != 2 {
+		t.Fatalf("removed %d, want 2", report.Removed)
+	}
+
+	for _, id := range []string{first, second} {
+		phases := historyPhases(t, s, id)
+		if len(phases) == 0 {
+			t.Fatalf("%s left no history at all: a prune that erases the record of a removal is undebuggable", id)
+		}
+		if last := phases[len(phases)-1]; last != phaseDelete {
+			t.Errorf("%s last history phase = %q, want %q", id, last, phaseDelete)
+		}
+		// The tombstone carries the text, which is the point of it surviving the
+		// row.
+		entries, err := s.MemoryHistory(ctx, id, 10)
+		if err != nil {
+			t.Fatalf("MemoryHistory(%s): %v", id, err)
+		}
+		if len(entries) == 0 || entries[len(entries)-1].Content == "" {
+			t.Errorf("%s tombstone carries no text: %+v", id, entries)
+		}
+		if _, err := s.GetByIDs(ctx, []string{id}); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+	}
+}
+
+// TestPruneIsOneTransaction: a prune that appended its tombstones and then failed
+// before the DELETE would leave the store claiming two removals that did not
+// happen — and the failure that matters is the ordinary one, a busy database or a
+// full disk, not a crash between two statements nobody would notice. The seam
+// below is the only way to make that happen on purpose.
+func TestPruneIsOneTransaction(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id := pruneFixture(t, s, "a session note whose removal fails halfway", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	before := len(historyPhases(t, s, id))
+
+	restore := setPruneBeforeDelete(func() error { return errPruneInterrupted })
+	defer restore()
+
+	if _, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true}); err == nil {
+		t.Fatal("a prune whose delete failed reported success")
+	}
+	if liveCount(t, s, testProject) != 1 {
+		t.Errorf("the row is gone after a failed prune: the DELETE was not rolled back with the tombstones")
+	}
+	if got := len(historyPhases(t, s, id)); got != before {
+		t.Errorf("a failed prune left %d history row(s) behind; the append was not rolled back", got-before)
+	}
+}
+
+// TestPruneScopesToOneProjectWhenAsked: `ghost prune --project` is how an
+// operator looks at one repository's session notes, and a filter that was ignored
+// would report a store-wide number next to a project name.
+func TestPruneScopesToOneProjectWhenAsked(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "other-project", "/tmp/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	mine := pruneFixture(t, s, "a session note in the project being pruned", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	theirs := pruneFixture(t, s, "a session note in another project", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET project_id = 'other-project' WHERE id = ?`, theirs); err != nil {
+		t.Fatalf("move the second row: %v", err)
+	}
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, ProjectID: testProject})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	if len(report.RemovedIDs) != 1 || report.RemovedIDs[0] != mine {
+		t.Fatalf("removed %v, want only [%s]", report.RemovedIDs, mine)
+	}
+	if liveCount(t, s, "other-project") != 1 {
+		t.Error("a project-scoped prune reached into another project")
+	}
+}
+
+// TestPruneIgnoresAnUnknownGrace: a caller that passes a negative grace is asking
+// for "expired, regardless of when it was last touched", which is not a thing a
+// grace period can mean. It is refused rather than clamped, because a clamp to
+// zero would silently do exactly that.
+func TestPruneIgnoresAnUnknownGrace(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.PruneSessionMemories(context.Background(), PruneOptions{Grace: -time.Hour}); err == nil {
+		t.Error("a negative grace was accepted")
+	}
+}
+
+// TestABackupTakenAfterAPruneStillVerifies: the prune appends a history row per
+// removal, so a store that has been pruned holds rows a backup of the pre-prune
+// store did not. The manifest counts the memories (and not the change log), and
+// what has to hold is that a backup taken AFTER a prune describes that store
+// exactly — the counts move with the data rather than lagging it, which is the
+// failure a reader restoring from the manifest would otherwise discover by hand.
+func TestABackupTakenAfterAPruneStillVerifies(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
 	db, err := OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	defer db.Close() //nolint:errcheck
+	s := NewStore(db, nil)
+	if err := s.EnsureProject(ctx, testProject, "/tmp/prune-backup", testProject); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
 	}
-
-	for _, s := range []string{"1000", "1001", "1002", "1003", "1004"} {
-		if err := os.WriteFile(filepath.Join(dir, preMigrateName(dbPath, s)), []byte("old"), 0o600); err != nil {
-			t.Fatalf("seed backup %s: %v", s, err)
+	for i, tier := range RetentionValues() {
+		if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
+			"a fact to survive the backup, number "+string(rune('1'+i)), "mcp", 0.6, nil,
+			UpsertOptions{Retention: tier}); err != nil {
+			t.Fatalf("UpsertWithOptions: %v", err)
 		}
 	}
+	pruneFixture(t, s, "a session note that the prune removes before the backup", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 
-	// No migration to run: the backups predate this open and this open writes
-	// none, so nothing is old enough to be somebody's only copy.
-	again, err := OpenDB(dbPath)
+	before, err := s.Backup(ctx, filepath.Join(t.TempDir(), "before.db"))
 	if err != nil {
-		t.Fatalf("reopen: %v", err)
+		t.Fatalf("Backup: %v", err)
 	}
-	defer func() { _ = again.Close() }()
-
-	for _, s := range []string{"1000", "1001", "1002", "1003", "1004"} {
-		if _, err := os.Lstat(filepath.Join(dir, preMigrateName(dbPath, s))); err != nil {
-			t.Errorf("backup %s survived no migration but is gone after this open: %v", s, err)
-		}
+	if before.Counts.Memories != 4 {
+		t.Fatalf("pre-prune backup holds %d memories, want 4", before.Counts.Memories)
 	}
-}
-
-// TestOpenDBMigrationPrunesOldBackups: the end-to-end shape of the rule. An
-// upgrade writes the fresh backup, and from then on at most
-// preMigrateBackupKeep copies of the database sit in the data directory —
-// the new one plus the two most recent it superseded.
-func TestOpenDBMigrationPrunesOldBackups(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "ghost.db")
-
-	db, err := OpenDB(dbPath)
+	preReport, err := VerifyBackup(ctx, before.Path)
 	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
+		t.Fatalf("VerifyBackup(pre-prune): %v", err)
 	}
-	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1)); err != nil {
-		t.Fatalf("stamp user_version: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	if len(preReport.Problems) != 0 {
+		t.Errorf("a fresh backup reported problems: %v", preReport.Problems)
 	}
 
-	for _, s := range []string{"1000", "1001", "1002", "1003"} {
-		if err := os.WriteFile(filepath.Join(dir, preMigrateName(dbPath, s)), []byte("old"), 0o600); err != nil {
-			t.Fatalf("seed backup %s: %v", s, err)
-		}
-	}
-	// Hand-made backups in the same directory are not pre-migration copies.
-	manual := filepath.Join(dir, "ghost.db.backup-manual")
-	if err := os.WriteFile(manual, []byte("mine"), 0o600); err != nil {
-		t.Fatalf("seed manual backup: %v", err)
+	if report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true}); err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	} else if report.Removed != 1 {
+		t.Fatalf("prune removed %d, want 1", report.Removed)
 	}
 
-	migrated, err := OpenDB(dbPath)
+	after, err := s.Backup(ctx, filepath.Join(t.TempDir(), "after.db"))
 	if err != nil {
-		t.Fatalf("OpenDB (migrating): %v", err)
+		t.Fatalf("Backup after prune: %v", err)
 	}
-	defer func() { _ = migrated.Close() }()
-
-	kept := 0
-	for _, s := range []string{"1000", "1001", "1002", "1003"} {
-		if _, err := os.Lstat(filepath.Join(dir, preMigrateName(dbPath, s))); err == nil {
-			kept++
-		}
+	if after.Counts.Memories != 3 {
+		t.Errorf("post-prune backup holds %d memories, want 3: the manifest counted a store the prune had already changed", after.Counts.Memories)
 	}
-	backups, err := filepath.Glob(dbPath + ".pre-migrate-*")
+	postReport, err := VerifyBackup(ctx, after.Path)
 	if err != nil {
-		t.Fatalf("glob backups: %v", err)
+		t.Fatalf("VerifyBackup(post-prune): %v", err)
 	}
-	// 4 seeded + the one this migration wrote = 5, trimmed to 3: the newest
-	// two survivors plus the fresh copy.
-	if want := preMigrateBackupKeep; len(backups) != want {
-		t.Errorf("after a migration the directory holds %d pre-migration backups (%v), want %d", len(backups), backups, want)
+	if len(postReport.Problems) != 0 {
+		t.Errorf("a backup taken after a prune did not verify: %v", postReport.Problems)
 	}
-	if kept != wantKeptSeeded(preMigrateBackupKeep) {
-		t.Errorf("%d of the 4 seeded backups survived, want %d — the fresh copy must not be what gets pruned", kept, wantKeptSeeded(preMigrateBackupKeep))
+	if !postReport.CountsRead || postReport.Counts.Memories != 3 {
+		t.Errorf("verify reported %+v, want a read count of 3 memories", postReport.Counts)
 	}
-	if _, err := os.Lstat(manual); err != nil {
-		t.Errorf("a hand-made ghost.db.backup-* must never be pruned: %v", err)
-	}
-}
-
-// wantKeptSeeded: one of the preMigrateBackupKeep slots belongs to the backup
-// this migration just wrote, so preMigrateBackupKeep-1 of the seeded copies
-// remain.
-func wantKeptSeeded(keep int) int { return keep - 1 }
-
-// TestOpenDBMigrationKeepsTheFreshBackupWhenOthersAreFutureStamped: the
-// ordering is by stamp, so a stamp that is AHEAD of this machine's clock — a
-// data directory restored from a machine whose clock ran ahead, a corrected
-// clock, a file somebody renamed — would rank every seeded file above the copy
-// this migration is about to write. An implementation that decides "the newest
-// is the one to keep" from the timestamp alone prunes the fresh backup: the
-// only file with a way back from a destructive migration step, removed before
-// the migration runs.
-func TestOpenDBMigrationKeepsTheFreshBackupWhenOthersAreFutureStamped(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "ghost.db")
-
-	db, err := OpenDB(dbPath)
+	// And the pre-prune copy is still restorable and still describes itself: the
+	// prune did not reach back into a file that had already been written.
+	preAgain, err := VerifyBackup(ctx, before.Path)
 	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
+		t.Fatalf("VerifyBackup(pre-prune, again): %v", err)
 	}
-	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1)); err != nil {
-		t.Fatalf("stamp user_version: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	future := time.Now().Unix() + 1000
-	seeded := make(map[string]bool, 3)
-	for i := int64(0); i < 3; i++ {
-		s := strconv.FormatInt(future+i, 10)
-		seeded[s] = true
-		if err := os.WriteFile(filepath.Join(dir, preMigrateName(dbPath, s)), []byte("from the future"), 0o600); err != nil {
-			t.Fatalf("seed backup %s: %v", s, err)
-		}
-	}
-
-	migrated, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB (migrating): %v", err)
-	}
-	defer func() { _ = migrated.Close() }()
-
-	backups, err := filepath.Glob(dbPath + ".pre-migrate-*")
-	if err != nil {
-		t.Fatalf("glob backups: %v", err)
-	}
-	if len(backups) != preMigrateBackupKeep {
-		t.Errorf("the directory holds %d pre-migration backups (%v), want %d", len(backups), backups, preMigrateBackupKeep)
-	}
-
-	prefix := filepath.Base(dbPath) + ".pre-migrate-"
-	freshSeen := false
-	for _, b := range backups {
-		if !seeded[strings.TrimPrefix(filepath.Base(b), prefix)] {
-			freshSeen = true
-		}
-	}
-	if !freshSeen {
-		t.Error("the backup this migration just wrote was pruned: the three future-stamped files outranked it, and a failed migration now has no way back")
+	if len(preAgain.Problems) != 0 {
+		t.Errorf("the pre-prune backup stopped verifying after the prune: %v", preAgain.Problems)
 	}
 }

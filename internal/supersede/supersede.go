@@ -183,6 +183,14 @@ type Selection struct {
 // different places — the same exemption the linker's 'related' edge and
 // Upsert's 'duplicate' fold already apply (memory.ScopesConflict).
 //
+// A pair with a `persistent` endpoint is never emitted either, and for a
+// stronger reason: this is the pass that makes claims ABOUT a memory, and every
+// consequence of the edge it writes lands on the target — the ranking demotion
+// and resolve's piggyback both. A keep-forever row is a user statement that this
+// must not happen to it, and it is asked before the classify call rather than
+// after, because a verdict the pass cannot act on is a bill for a decision it
+// never needed to make.
+//
 // The refusal is made twice, on purpose. The scope reaches the store so the
 // neighbour budget counts only rows this source may link to — filtering after
 // the cut spends the whole budget on rows that can never be linked, and a
@@ -234,6 +242,21 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			other, ok := byID[n.MemoryID]
 			if !ok {
 				continue // e.g. a _global neighbor not in this project's set
+			}
+			// The persistent-tier refusal, asked here and not after the
+			// classification: a pair with a keep-forever endpoint is not a pair
+			// the model is asked about. The edge this pass writes demotes its
+			// target in every later ranking and lets resolve's piggyback stamp
+			// resolved_at on it, so the exemption has to be here — a classify call
+			// spent on a pair whose only possible outcome is the edge we are
+			// refusing is money for a decision we have already made.
+			//
+			// Both endpoints, because the claim runs newer -> older and either one
+			// being untouchable means the claim must not be made: a keep-forever
+			// SOURCE would be writing an edge about a memory it may not assert
+			// anything about either.
+			if memory.RetentionExempt(m) || memory.RetentionExempt(other) {
+				continue
 			}
 			if memory.ScopesConflict(m.Scope, n.Scope) {
 				continue
