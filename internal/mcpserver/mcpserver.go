@@ -776,30 +776,72 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Withdrew %d of %d named supersedes link(s).\n", res.Withdrawn, res.Resolved)
 	for _, l := range res.Links {
-		fmt.Fprintf(&sb, "  %s -> %s  [%s]  %s\n", shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, firstLine(l.TargetText, 70))
+		marker := "withdrew"
+		switch {
+		case l.Withdrawn:
+		case l.NotAttempted:
+			marker = "not reached"
+		case l.WithdrawalFailed:
+			marker = "FAILED"
+		default:
+			marker = "already gone"
+		}
+		fmt.Fprintf(&sb, "  %s  %s -> %s  [%s]  %s\n", marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, firstLine(l.TargetText, 70))
 	}
-	// Ends at the instruction, with nothing about how to word it to the user:
+	targets := withdrawnTargets(res.Links)
+	if len(targets) == 0 {
+		// A concurrent pass took the edge between this call's read and its write,
+		// so nothing was orphaned by it and there is no repair to point at. Saying
+		// so is the whole answer: the requested state already holds.
+		// A request that resolved an edge and moved it not is the n==0 InvalidateLink
+		// case and nothing else: a pair with no live edge is a refusal that never
+		// reaches here, so this is a concurrent pass that took the edge between the
+		// read and the write. Nothing was orphaned by this call, so there is no
+		// repair to point at — and the target may still be stamped resolved, which
+		// is worth saying rather than leaving the caller to assume either way.
+		sb.WriteString("\nThe edge was no longer live when this call wrote it: a concurrent pass withdrew it first. " +
+			"Nothing was orphaned by this call, so there is no repair to run. Its target may still be stamped " +
+			"resolved — if so, a `ghost_resolve` repair scoped to that one id clears it.")
+		return sb.String(), nil
+	}
+	// The follow-up as a TOOL CALL, not as a shell command line. A project name is
+	// free text, so a rendered `ghost resolve <project> …` string is either wrong
+	// for a name holding a space (two positionals, which parseResolveArgs refuses)
+	// or a second command for an agent to execute when the name holds a
+	// metacharacter — and cmd/ghost/followup.go's renderer exists for exactly that
+	// reason. Here the caller passes JSON, so naming the tool and its arguments is
+	// both correct and copyable: no shell, nothing to quote.
+	//
+	// Scoped, and named as such: an unscoped repair re-judges every resolved memory
+	// in the project, and #702 measured that proposing to un-hide 143 rows on a
+	// real store, about 35% of them stale. An agent handed the unscoped form runs
+	// the command that rewrites the most.
+	//
+	// It ends at the instruction, with nothing about how to word it to the user:
 	// this string is the tool's whole answer, and a clause addressed to the
-	// implementer inside it reads as an instruction to the agent reading it.
-	// That guidance lives in this function's doc comment instead.
-	// Scoped, and named as such, for the reason the CLI prints the same command:
-	// an unscoped repair re-judges every resolved memory in the project, and
-	// #702 measured that proposing to un-hide 143 rows on a real store, about 35%
-	// of them stale. An agent handed the unscoped form has to be told which one to
-	// run, or it will run the one that rewrites the most.
-	sb.WriteString("\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of " +
-		"ranked injection until `ghost resolve " + projectID + " --reassess --only " +
-		strings.Join(shortIDs(res.Links), ",") + " --apply` clears it (scoped, because an unscoped repair " +
-		"re-judges every resolved memory in the project; that pass honours a live edge as a floor, which is why " +
-		"the edge has to go first).")
+	// implementer inside it reads as an instruction to the agent reading it. That
+	// guidance lives in this function's doc comment instead.
+	fmt.Fprintf(&sb, "\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of\n"+
+		"ranked injection until a SCOPED repair clears it — call ghost_resolve with project %q, apply true,\n"+
+		"and only these ids (a repair with no `only` re-judges every resolved memory in the project):\n",
+		projectID)
+	for _, id := range targets {
+		fmt.Fprintf(&sb, "  %s\n", id)
+	}
+	sb.WriteString("That pass honours a live edge as a floor, which is why the edge had to go first.")
 	return sb.String(), nil
 }
 
-// shortIDs is the follow-up's selector list: the targets this call withdrew, in
-// full. Full ids and not the eight-character abbreviations the reports use —
-// `--only` is a command about to be run, and a prefix that is unambiguous now may
-// not be after the operator's next save.
-func shortIDs(links []supersede.WithdrawnLink) []string {
+// withdrawnTargets is the follow-up's selector list: the targets this call
+// withdrew, deduplicated, in full. Full ids and not the eight-character
+// abbreviations the reports use — a selector is a repair about to be run, and a
+// prefix that is unambiguous now may not be after the caller's next save.
+//
+// Only rows that were actually withdrawn are in it. A row a concurrent pass took
+// first orphaned nothing, so naming it would point a repair at a target that has
+// no live edge to clear; a row a failed write or an unreached row is in no state
+// to have orphaned anything either.
+func withdrawnTargets(links []supersede.WithdrawnLink) []string {
 	var out []string
 	seen := make(map[string]bool, len(links))
 	for _, l := range links {

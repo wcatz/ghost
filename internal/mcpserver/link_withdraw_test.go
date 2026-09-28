@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/provider"
 )
 
 // linkWithdrawServer is testServer with the concrete store kept, because this
@@ -82,12 +83,18 @@ func TestLinkWithdrawRemovesTheNamedEdge(t *testing.T) {
 	// SCOPED, and naming the id it withdrew. An unscoped repair re-judges every
 	// resolved memory in the project (#702 measured 143 rows proposed, ~35% of
 	// them stale), so a result handing the agent the unscoped form is handing it
-	// the command that rewrites the most.
-	if !strings.Contains(msg, "--reassess --only") {
-		t.Errorf("the result does not name a SCOPED repair: %q", msg)
+	// the call that rewrites the most.
+	if !strings.Contains(msg, "ghost_resolve") || !strings.Contains(msg, "SCOPED") {
+		t.Errorf("the result does not point at a SCOPED repair: %q", msg)
 	}
 	if !strings.Contains(msg, older) {
 		t.Errorf("the result does not name the target it orphaned (%s): %q", older, msg)
+	}
+	// And it is a TOOL CALL, not a shell command line: a project name is free
+	// text, so a rendered `ghost resolve <name> …` is either wrong for a name with
+	// a space or a second command for an agent to run.
+	if strings.Contains(msg, "ghost resolve") {
+		t.Errorf("the result renders a shell command line the caller has to quote: %q", msg)
 	}
 	if got := liveInto(t, store, "abc123", older); got != 0 {
 		t.Errorf("live edges into the target = %d, want 0", got)
@@ -151,6 +158,75 @@ func TestLinkWithdrawRefusesWhatItCannotDo(t *testing.T) {
 	// one-way door for the correct request.
 	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, older); err != nil {
 		t.Errorf("the correct request failed after refusals: %v", err)
+	}
+}
+
+// raceStore is the one race this tool cannot be handed by the real store alone:
+// a concurrent pass taking the edge between this call's read and its write, which
+// is InvalidateLink returning 0 with no error. The edge is still live when the
+// read happens, so the request is valid and the write moves nothing — a state no
+// pre-invalidation can produce, because that fails the read instead.
+type raceStore struct {
+	// The interface for everything else the tool calls (ResolveProject, and so
+	// on), and the concrete store for the three link methods, which
+	// provider.MemoryStore does not carry. The link methods are declared here
+	// rather than promoted from a second embedded type, because two embeds would
+	// both supply GetByIDs and an ambiguous selector is not a satisfied interface.
+	provider.MemoryStore
+	inner *memory.Store
+}
+
+func (r raceStore) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix string) ([]string, error) {
+	return r.inner.MemoryIDsByIDPrefix(ctx, projectID, prefix)
+}
+
+func (r raceStore) SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]memory.Link, error) {
+	return r.inner.SupersedesLinksInto(ctx, projectID, memoryID)
+}
+
+// InvalidateLink reports that a concurrent pass took the edge first: the write
+// moved nothing and reported no error, which is the one state a pre-invalidation
+// cannot produce.
+func (r raceStore) InvalidateLink(ctx context.Context, sourceID, targetID, relation string) (int64, error) {
+	return 0, nil
+}
+
+func (s *Server) linkRaceStore(inner *memory.Store) *Server {
+	return New(raceStore{MemoryStore: inner, inner: inner}, s.logger, "test")
+}
+
+// TestLinkWithdrawSaysSoWhenAConcurrentPassTookTheEdge: nothing failed, so this is
+// not an error — but nothing was orphaned either, and the tool must not hand the
+// caller a scoped repair pointing at a target no live edge accounts for. The
+// per-row marker says which state the edge was in, because "withdrew" and "already
+// gone" are the same sentence to a reader and only one of them happened.
+func TestLinkWithdrawSaysSoWhenAConcurrentPassTookTheEdge(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	newer, older := seedLinkWithdrawal(t, store, "abc123")
+	raced := srv.linkRaceStore(store)
+
+	msg, err := raced.withdrawSupersedesLink(context.Background(), "test-project", newer, older)
+	if err != nil {
+		t.Fatalf("a concurrent withdrawal is not a failure: %v", err)
+	}
+	if !strings.Contains(msg, "Withdrew 0 of 1") {
+		t.Errorf("the result does not report that nothing moved: %q", msg)
+	}
+	if !strings.Contains(msg, "already gone") {
+		t.Errorf("the row does not say the edge was already gone: %q", msg)
+	}
+	// No repair block. A selector list with nothing in it is a call that cannot
+	// run, and naming a target nothing orphaned sends the caller after a resolution
+	// no longer standing. The marker is the block's own text, not the tool's name:
+	// the message may still say under what condition a repair would be right.
+	if strings.Contains(msg, "only these ids") {
+		t.Errorf("a request that orphaned nothing printed a repair to run: %q", msg)
+	}
+	if !strings.Contains(msg, "no longer live") {
+		t.Errorf("the result does not say why nothing moved: %q", msg)
+	}
+	if !strings.Contains(msg, older[:8]) {
+		t.Errorf("the result does not name the edge it was asked about (%s): %q", older, msg)
 	}
 }
 
