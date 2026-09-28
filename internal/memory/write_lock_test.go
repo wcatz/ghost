@@ -24,6 +24,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -299,6 +301,57 @@ func TestUpdateMemoryRetriesBeginOnceWhenTheLockOutlastsTheFirstBudget(t *testin
 	}
 }
 
+// TestRecordDecisionRetriesBeginOnceWhenTheLockOutlastsTheFirstBudget covers the
+// fourth knowledge write, and the review of this PR is what named it: the scope
+// sentence claimed the excluded `BeginTx` sites wrote projects, links, history
+// and imports, and `RecordDecision` writes none of those — it writes a decision
+// row and a COMPANION MEMORY, through the live `ghost_decision_record` tool. A
+// lost decision is a lost memory, so it retries; and the test is here because
+// nothing else reaches this path under contention, the fleet having no decision
+// writer of its own.
+func TestRecordDecisionRetriesBeginOnceWhenTheLockOutlastsTheFirstBudget(t *testing.T) {
+	const busyMS = 150
+	dbPath := t.TempDir() + "/decision.sqlite"
+	upsertLockTestStore(t, dbPath)
+	store := shortTimeoutStore(t, dbPath, busyMS)
+	newBlocker(t, dbPath).releaseAfter(contentionHoldFor(busyMS))
+	obs := &recordingObserver{}
+	obs.install(t)
+
+	decisionID, memoryID, _, err := store.RecordDecision(context.Background(), testProject,
+		"the write lock outlasting one busy budget",
+		"a decision record is a memory and retries BEGIN like one",
+		"a decision whose companion row was lost is a memory nobody wrote", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision lost to lock contention: %v — one bounded retry should have taken the lock", err)
+	}
+
+	samples := obs.all()
+	if len(samples) != 1 {
+		t.Fatalf("the store reported %d committed write transactions, want 1: %+v", len(samples), samples)
+	}
+	got := samples[0]
+	if got.Op != "decision-record" {
+		t.Errorf("the measured transaction is %q, want decision-record", got.Op)
+	}
+	if !got.Retried {
+		t.Errorf("the decision is reported as a first-attempt success, so it never needed the retry: %+v", got)
+	}
+	// Both rows, because that is what "one transaction" means here: a decision
+	// whose companion memory did not land reports success and is a memory
+	// nobody wrote.
+	var rows int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT (SELECT count(*) FROM decisions WHERE id = ?) + (SELECT count(*) FROM memories WHERE id = ?)`,
+		decisionID, memoryID).Scan(&rows); err != nil {
+		t.Fatalf("read back the decision and its companion: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("the decision reported success and %d of its 2 rows are present (decision %s, memory %s)",
+			rows, decisionID, memoryID)
+	}
+}
+
 // TestApplyReflectionRetriesBeginOnceWhenTheLockOutlastsTheFirstBudget is the
 // same property for the other transaction #671's failure queued behind. A
 // lifecycle apply that cannot get in is not a retried save: it is a whole
@@ -353,6 +406,85 @@ func TestApplyReflectionRetriesBeginOnceWhenTheLockOutlastsTheFirstBudget(t *tes
 	}
 	if consolidated != 1 {
 		t.Errorf("the apply reported success and %d rows carry the consolidated wording, want 1", consolidated)
+	}
+}
+
+// writeLockHoldCeiling is the longest a single memory write may hold SQLite's
+// write lock. A quarter of the busy timeout the contract gives a writer would be
+// 1250 ms, and it is deliberately not that: at 1250 ms the ceiling is 900 times
+// the hold this measures, so it would only ever catch a catastrophe and would
+// say nothing about a transaction that merely grew. 250 ms is the number that
+// does both jobs. It is above the worst hold the multi-process fleet produced
+// under deliberate three-way oversubscription on one core (~200 ms), so this
+// test cannot fail for a reason the fleet's own measurement says is reachable,
+// and it is a twelfth of the quarter-of-budget line at which ONE save starts
+// deciding whether four other writers get in at all.
+//
+// Measured on this laptop: a save's hold p50 0.9 ms, max 1.4 ms over 20
+// transactions against a 60-row project — a 180x margin.
+const writeLockHoldCeiling = 250 * time.Millisecond
+
+// TestWriteLockHoldLeavesRoomInsideTheBusyTimeout is the ceiling that guards a
+// long write transaction, measured where the machine is quiet so the number it
+// compares against is stable: the probes, the strengthen, the history append and
+// the evidence append of one save, over a project big enough that the dedup probe
+// has candidates to score.
+//
+// It is here and not in the multi-process test, and that placement is the point.
+// A hold is wall-clock time for a transaction that does real work, so it scales
+// with how loaded the machine is: the same fleet measured a save's median hold at
+// 1.3 ms on an idle laptop and 82 ms with three copies of itself on one core, and
+// the 60-row batch at 21-600 ms against 0.5-2.0 s. A gate over those numbers would
+// be a verdict that depends on the runner — the dependence issue #671 asked to
+// remove from that test — so the fleet reports its distributions and this
+// asserts.
+//
+// Twenty saves, so the assertion is over a set rather than a single reading.
+func TestWriteLockHoldLeavesRoomInsideTheBusyTimeout(t *testing.T) {
+	dbPath := t.TempDir() + "/hold.sqlite"
+	upsertLockTestStore(t, dbPath)
+	store := shortTimeoutStore(t, dbPath, 5000)
+	obs := &recordingObserver{}
+	obs.install(t)
+
+	// A corpus for the probe to work against. These are near-duplicates of one
+	// another by construction, which is the expensive case: the probe scores
+	// every candidate the FTS match returns.
+	for i := 0; i < 60; i++ {
+		if _, _, _, err := store.Upsert(context.Background(), testProject, "fact",
+			fmt.Sprintf("near-duplicate corpus row %03d about sqlite wal checkpointing and busy timeouts", i),
+			"mcp", 0.5, nil); err != nil {
+			t.Fatalf("seed Upsert %d: %v", i, err)
+		}
+	}
+	before := len(obs.all())
+
+	for i := 0; i < 20; i++ {
+		if _, _, _, err := store.Upsert(context.Background(), testProject, "fact",
+			fmt.Sprintf("measured save %03d about sqlite wal checkpointing and busy timeouts", i),
+			"mcp", 0.5, nil); err != nil {
+			t.Fatalf("measured Upsert %d: %v", i, err)
+		}
+	}
+
+	var holds []time.Duration
+	for _, s := range obs.all()[before:] {
+		holds = append(holds, s.Hold)
+	}
+	if len(holds) != 20 {
+		t.Fatalf("measured %d of the 20 saves, so the ceiling is asserted over the wrong set: %+v",
+			len(holds), obs.all()[before:])
+	}
+	sorted := append([]time.Duration(nil), holds...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	t.Logf("save write-lock hold over %d rows: p50=%s p99=%s max=%s (ceiling %s)",
+		60, sorted[len(sorted)/2], sorted[len(sorted)-1], sorted[len(sorted)-1], writeLockHoldCeiling)
+	for i, hold := range sorted {
+		if hold > writeLockHoldCeiling {
+			t.Errorf("the %dth of %d saves held the write lock for %s, over the %s ceiling: a write transaction "+
+				"that long is what turns a queue into a lost memory",
+				i+1, len(sorted), hold, writeLockHoldCeiling)
+		}
 	}
 }
 

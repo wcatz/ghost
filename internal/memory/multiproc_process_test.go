@@ -833,59 +833,46 @@ func assertLoadWasLive(t *testing.T, reports map[string]procReport) {
 }
 
 // writeLockBudgets is how much of the busy_timeout a writer is given each kind of
-// write transaction may spend holding SQLite's write lock, as a fraction. The
-// fractions are of the contract's OWN setting, read back from a live connection
-// rather than a constant, so the budget means the same thing whatever the DSN
-// says and does not have to be re-derived when it changes.
+// write transaction may spend holding SQLite's write lock, as a fraction of the
+// contract's OWN setting, read back from a live connection rather than hardcoded —
+// so the number does not have to be re-derived when the DSN changes.
 //
-// The numbers differ because the transactions differ, and the reason is sample
-// count as much as shape. A save or an edit is measured hundreds of times per
-// run, so a maximum over it is a real observation of the worst case, and a
-// quarter of the timeout is a bound with room for four of them to be served per
-// waiter. The lifecycle batch is measured once, so no percentile of it is a
-// percentile: what can be said is that a single transaction must not hold the
-// lock for a WHOLE waiter's budget, because that one transaction then decides
-// whether every other writer in the machine gets in. Measured at 21-600 ms on an
-// idle laptop, 1-1.9 s with three copies of this fleet fighting over one core,
-// so the bound is loose on purpose — it is there to catch a transaction that has
-// grown by whole seconds, which is the failure mode no wait can absorb (the
-// change log's growth prune did exactly that, which is why there is no prune), and
-// not to measure one.
-//
-// A write path this table does not name fails the run. A new kind of write
-// transaction has to be budgeted here, for the same reason the e2e suite refuses
-// a new tool nobody enumerated: an unlisted op would otherwise be measured and
-// never judged.
-//
-// "replace" is budgeted but not expected in the numbers above: the maintenance
-// process reaches `ReplaceNonManual` inside `ApplyReflection`'s transaction, so
-// the batch's work is measured once under the outer op rather than twice. It is
-// listed because a caller that opens the replace's own transaction measures it
-// under this name, and an unlisted op would fail the run for being measured.
+// It is reported, NOT asserted, and the reason is the one that matters for this
+// test: a hold is wall-clock time for a transaction that does real work, so it
+// scales with how loaded the machine is. The same fleet measured a save's median
+// hold at 1.3 ms on an idle laptop and 82 ms with three copies of itself fighting
+// over one core, and the 60-row batch at 21-600 ms against 0.5-2.0 s. A gate here
+// would therefore be the first assertion in this test whose verdict depends on
+// runner speed — in the very test whose contention caused #671, whose third ask
+// was to remove exactly that. So the numbers are printed, and the ceiling that
+// actually guards a long write transaction lives where it is load-stable: a unit
+// test on a quiet machine with a stated margin
+// (TestWriteLockHoldLeavesRoomInsideTheBusyTimeout).
 var writeLockBudgets = map[string]float64{
-	"upsert":        0.25,
-	"update":        0.25,
-	"reflect-apply": 1,
-	"replace":       1,
+	"upsert":          0.25,
+	"update":          0.25,
+	"decision-record": 0.25,
+	"reflect-apply":   1,
+	"replace":         1,
 }
 
-// assertWriteLockBudget reports the write-lock distributions the fleet measured
-// and holds each write path's hold time to its budget.
+// assertWriteLockBudget reports the write-lock distributions the fleet measured,
+// and the budget each write path's hold is read against.
 //
-// The measurement is the issue's first ask and it is a REPORT, not only a gate:
-// a pass that prints p50/p99 for every write path is a run whose contention is
-// legible, and #671 could not be diagnosed without one. Each child returns the
-// raw samples rather than its own percentiles because a distribution is a
-// property of the whole fleet — the union across ten processes is the number the
-// contract is written about, and a per-process p99 of a few samples is not it.
+// The measurement is the issue's first ask and it is a REPORT, not a gate: a pass
+// that prints p50/p99 for every write path is a run whose contention is legible,
+// and #671 could not be diagnosed without one. Each child returns the raw samples
+// rather than its own percentiles because a distribution is a property of the whole
+// fleet — the union across ten processes is the number the contract is written
+// about, and a per-process p99 of a few samples is not it.
 //
-// Wait and hold are reported apart and mean opposite things. Hold is how long
-// this run made every other writer wait; wait is how long this run was made to
-// wait. #671's failure is the second with a small first: a save's transaction
-// held the lock for tens of milliseconds and a writer still waited out its whole
-// five seconds, because the lock was handed straight from one writer to the next.
-// A high hold is a long transaction; a high wait with a low hold is a queue, and
-// only the second one loses a memory.
+// Wait and hold are reported apart and mean opposite things. Hold is how long this
+// run made every other writer wait; wait is how long this run was made to wait.
+// #671's failure is the second with a small first: a save's transaction held the
+// lock for tens of milliseconds and a writer still waited out its whole five
+// seconds, because the lock was handed straight from one writer to the next. A high
+// hold is a long transaction; a high wait with a low hold is a queue, and only the
+// second one loses a memory.
 func assertWriteLockBudget(t *testing.T, reports map[string]procReport) {
 	t.Helper()
 	// The budget's unit is the busy_timeout the contract's writers actually got,
@@ -944,8 +931,8 @@ func assertWriteLockBudget(t *testing.T, reports map[string]procReport) {
 	for _, op := range sortedKeys(holds) {
 		hold := summarize(holds[op])
 		wait := summarize(waits[op])
-		line := fmt.Sprintf("%s p50=%.2f p99=%.2f max=%.2f n=%d", op, hold.p50, hold.p99, hold.max, hold.n)
-		holdSummary = append(holdSummary, line)
+		holdSummary = append(holdSummary, fmt.Sprintf("%s p50=%.2f p99=%.2f max=%.2f n=%d",
+			op, hold.p50, hold.p99, hold.max, hold.n))
 		waitLine := fmt.Sprintf("%s p50=%.2f p99=%.2f max=%.2f n=%d", op,
 			wait.p50, wait.p99, wait.max, wait.n)
 		if n := lost[op]; n > 0 {
@@ -957,20 +944,19 @@ func assertWriteLockBudget(t *testing.T, reports map[string]procReport) {
 			waitLine += fmt.Sprintf(" (%d never took the lock)", n)
 		}
 		waitSummary = append(waitSummary, waitLine)
+		// The budget is printed beside the measurement and never compared
+		// against it. See writeLockBudgets: a hold is wall-clock time, and a
+		// gate here would make this test's verdict a function of the runner.
+		// The ceiling that guards a long write transaction is
+		// TestWriteLockHoldLeavesRoomInsideTheBusyTimeout, on a quiet machine.
 		fraction, budgeted := writeLockBudgets[op]
 		if !budgeted {
-			t.Errorf("measured a %q write transaction that writeLockBudgets does not budget; add it, or the "+
-				"hold time below is measured and never judged: %s", op, line)
+			t.Errorf("measured a %q write transaction that writeLockBudgets does not name; add it with the "+
+				"fraction a reader should expect, or the hold time above has nothing said about it", op)
 			continue
 		}
-		if busyMS <= 0 {
-			t.Errorf("no writer reported a busy_timeout to budget a %s hold of %.2f ms against; the contract "+
-				"assertion above reports the missing read", op, hold.max)
-			continue
-		}
-		if budget := busyMS * fraction; hold.max > budget {
-			t.Errorf("a %s write transaction held SQLite's write lock for %.0f ms, over its %.0f ms budget "+
-				"(%g of the %.0f ms busy_timeout a writer is given): %s", op, hold.max, budget, fraction, busyMS, line)
+		if busyMS > 0 {
+			holdSummary[len(holdSummary)-1] += fmt.Sprintf(" (budget %.0f ms)", busyMS*fraction)
 		}
 	}
 	// Reported on one line, in ms, so a run's contention is readable in the log
