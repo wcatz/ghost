@@ -124,42 +124,6 @@ func resultCosines(ctx context.Context, store *memory.Store, queryVec []float32,
 	return cosines, nil
 }
 
-// scoredWindow runs the production search for one query and scores every row it
-// returns with that row's true cosine, together with the best of them.
-//
-// Scoring the returned window rather than the vector leg's own top-k is what
-// makes the two halves of the report comparable: "the score of the best thing
-// this query would show you" is one definition, and both the no-answer set and
-// the answerable contrast have to measure it the same way or the gap between
-// them means nothing. The two can genuinely differ — the keyword reservation
-// admits a row the vector leg ranked far down, and that row is what the caller is
-// shown.
-//
-// Only the answerable contrast still needs it: the no-answer side of the report
-// is measured by the runner (measureNoAnswer), which scores the same way and
-// hands the numbers over rather than searching twice.
-func scoredWindow(ctx context.Context, store *memory.Store, q Query) ([]memory.Memory, map[string]float32, float32, error) {
-	results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	ids := make([]string, len(results))
-	for i, m := range results {
-		ids[i] = m.ID
-	}
-	cosines, err := resultCosines(ctx, store, q.Vector, ids)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	var top float32
-	for _, c := range cosines {
-		if c > top {
-			top = c
-		}
-	}
-	return results, cosines, top, nil
-}
-
 // FloorCount is what one candidate floor would mean for the no-answer set.
 type FloorCount struct {
 	Floor float32
@@ -329,6 +293,20 @@ func NoAnswerFor(results []Result, condition string) []NoAnswerQuery {
 	return nil
 }
 
+// PerQueryFor returns one condition's per-query scores from a completed run, or
+// nil when that condition scored nothing. It is the answerable half of the same
+// seam NoAnswerFor is the no-answer half of: the abstention report's answerable
+// contrast reads the shipped path's best returned cosine out of here rather than
+// searching for it a second time.
+func PerQueryFor(results []Result, condition string) []QueryScore {
+	for _, r := range results {
+		if r.Condition == condition {
+			return r.PerQuery
+		}
+	}
+	return nil
+}
+
 // FlavorStat is one flavor of no-answer query, kept apart because the two are
 // not interchangeable: the off-domain set is the floor, and the near-miss set is
 // the case an abstain rule actually has to survive. Reporting only their pooled
@@ -378,20 +356,25 @@ type FalsePositiveReport struct {
 // a row that reached the window on the keyword leg alone is measured rather than
 // assumed to be a non-match.
 //
+// answerable must be the per-query record of a run over GRADED queries
+// (Result.PerQuery via PerQueryFor): the runner only records a query it scored,
+// and a query with an empty relevance map is a no-answer measurement instead. The
+// committed corpus's answerable set is graded, so the two arguments come from one
+// Run.
+//
 // One caveat worth stating, because it is the difference between this report and
 // the shipped flag: production applies a configured floor to the vector leg
 // *before* fusion, so a keyword-only result is exempt from it entirely. The
 // "results above a floor" rows here score every returned row against the floor
 // anyway, which is a stricter diagnostic reading — it answers "how strong are the
 // results a caller actually receives", not "what would the flag do".
-func FalsePositives(ctx context.Context, store *memory.Store, noAnswer []NoAnswerQuery, answerable []Query) (FalsePositiveReport, error) {
+func FalsePositives(noAnswer []NoAnswerQuery, answerable []QueryScore) (FalsePositiveReport, error) {
 	rep := FalsePositiveReport{Queries: len(noAnswer), Answerable: len(answerable)}
 	if len(noAnswer) == 0 {
 		return rep, nil
 	}
 
 	var sumResults, sumTop float64
-	answerableTops := make([]float64, 0, len(answerable))
 	byFlavor := map[string]*FlavorStat{}
 	for _, q := range noAnswer {
 		sumResults += float64(q.Results)
@@ -430,14 +413,14 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer []NoAnswe
 
 	// The answerable contrast measures the same thing the no-answer set does —
 	// the best cosine among the rows production would return — so the two
-	// distributions differ only in whether the corpus has an answer.
+	// distributions differ only in whether the corpus has an answer. It is read
+	// off the runner's own per-query scores (QueryScore.TopCosine, taken from the
+	// shipped hybrid condition) rather than searched for a second time: same
+	// search, same definition, and one fewer full pass over the corpus.
+	answerableTops := make([]float64, 0, len(answerable))
 	for _, q := range answerable {
-		_, _, top, err := scoredWindow(ctx, store, q)
-		if err != nil {
-			return FalsePositiveReport{}, fmt.Errorf("answerable query %q: %w", q.Name, err)
-		}
-		answerableTops = append(answerableTops, float64(top))
-		rep.AnswerableTop += float64(top)
+		answerableTops = append(answerableTops, q.TopCosine)
+		rep.AnswerableTop += q.TopCosine
 	}
 	if len(answerable) > 0 {
 		rep.AnswerableTop /= float64(len(answerable))

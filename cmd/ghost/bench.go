@@ -92,11 +92,12 @@ func runBench() {
 	}
 	fmt.Print(bench.FormatResults(results))
 
-	// The deeper half of the same measurement: the answerable contrast, the
-	// per-flavor split, and the floor that would have to be set to refuse
-	// every no-answer query — and what that floor costs. Report-only, the
-	// baseline the abstention work needs rather than a gate.
-	fp, err := bench.FalsePositives(ctx, store, bench.NoAnswerFor(results, bench.CondHybrid), queries)
+	// The deeper half of the same measurement, read off the run above rather than
+	// searched again: the answerable contrast, the per-flavor split, and the floor
+	// that would have to be set to refuse every no-answer query — and what that
+	// floor costs. Report-only, the baseline the abstention work needs rather than
+	// a gate.
+	fp, err := bench.FalsePositives(bench.NoAnswerFor(results, bench.CondHybrid), bench.PerQueryFor(results, bench.CondHybrid))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

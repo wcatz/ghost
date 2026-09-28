@@ -3,6 +3,7 @@ package bench
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -35,6 +36,12 @@ type QueryScore struct {
 	Name string
 	NDCG float64
 	MRR  float64
+	// TopCosine is the best cosine among the rows this condition returned for
+	// the query, scored from each row's own stored vector (see resultCosines).
+	// It is carried here rather than searched for again by the no-answer
+	// report's answerable contrast, which is the same hybrid search this one
+	// already made.
+	TopCosine float64
 }
 
 // Result holds aggregate metrics for one search condition over a query set.
@@ -153,7 +160,15 @@ func runCondition(ctx context.Context, store *memory.Store, name string, queries
 		sumR10 += RecallAtK(ranked, q.Rel, 10)
 		sumMRR += mrr
 		sumNDCG += ndcg
-		res.PerQuery = append(res.PerQuery, QueryScore{Name: q.Name, NDCG: ndcg, MRR: mrr})
+		cosines, err := resultCosines(ctx, store, q.Vector, ranked)
+		if err != nil {
+			return Result{}, fmt.Errorf("%s: query %q: %w", name, q.Name, err)
+		}
+		var top float64
+		for _, c := range cosines {
+			top = math.Max(top, float64(c))
+		}
+		res.PerQuery = append(res.PerQuery, QueryScore{Name: q.Name, NDCG: ndcg, MRR: mrr, TopCosine: top})
 	}
 	if res.Queries > 0 {
 		n := float64(res.Queries)

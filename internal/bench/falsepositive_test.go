@@ -64,7 +64,7 @@ func TestFalsePositiveReport(t *testing.T) {
 	if len(measured) != len(noAnswer) {
 		t.Fatalf("runner measured %d no-answer queries, fixture has %d", len(measured), len(noAnswer))
 	}
-	rep, err := FalsePositives(ctx, store, measured, graded)
+	rep, err := FalsePositives(measured, PerQueryFor(results, CondHybrid))
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
@@ -169,6 +169,33 @@ func measureNoAnswers(t *testing.T, store *memory.Store, noAnswer []Query) []NoA
 	return out
 }
 
+// answerableScores returns the runner's per-query scores for the shipped hybrid
+// path over a small query set, which is what FalsePositives reads for its
+// answerable contrast. It runs the same condition Run does, so the contrast and
+// the graded table come off one search.
+func answerableScores(t *testing.T, store *memory.Store, answerable []Query) []QueryScore {
+	t.Helper()
+	if len(answerable) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	res, err := runCondition(ctx, store, CondHybrid, answerable, func(q Query) ([]string, error) {
+		results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(results))
+		for i, m := range results {
+			ids[i] = m.ID
+		}
+		return ids, nil
+	})
+	if err != nil {
+		t.Fatalf("answerable scores: %v", err)
+	}
+	return res.PerQuery
+}
+
 // vectorMemory is one row of a store built to order search deliberately: the
 // vector is stored verbatim, so a test controls the exact cosine; ageDays
 // backdates created_at, because the decay factor reorders the fused window and
@@ -246,7 +273,7 @@ func TestFalsePositivesScoresKeywordOnlyResults(t *testing.T) {
 	// Every row in this fixture sits at or above the lowest floor, so every
 	// returned result has to clear it. Counting fewer means one of them was
 	// scored as a non-match.
-	rep, err := FalsePositives(ctx, store, measureNoAnswers(t, store, []Query{q}), nil)
+	rep, err := FalsePositives(measureNoAnswers(t, store, []Query{q}), answerableScores(t, store, nil))
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
@@ -344,9 +371,21 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	ctx := context.Background()
 	q := Query{Name: "n1", ProjectID: project, Text: "fleet scheduler", Vector: unitVector(1)}
 
-	results, cosines, top, err := scoredWindow(ctx, store, q)
+	results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
 	if err != nil {
-		t.Fatalf("scoredWindow: %v", err)
+		t.Fatalf("hybrid: %v", err)
+	}
+	ranked := make([]string, len(results))
+	for i, m := range results {
+		ranked[i] = m.ID
+	}
+	cosines, err := resultCosines(ctx, store, q.Vector, ranked)
+	if err != nil {
+		t.Fatalf("resultCosines: %v", err)
+	}
+	var top float64
+	for _, c := range cosines {
+		top = math.Max(top, float64(c))
 	}
 	for _, m := range results {
 		if m.ID == ids["globalbest"] {
@@ -357,10 +396,10 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("vector leg: %v", err)
 	}
-	if len(legBest) == 0 || legBest[0].Score <= top {
+	if len(legBest) == 0 || float64(legBest[0].Score) <= top {
 		t.Fatalf("fixture no longer separates the readings: leg best %.4f, window top %.4f", legBest[0].Score, top)
 	}
-	if want := float32(0.90 - 0*0.001); top != want {
+	if want := 0.90 - 0*0.001; math.Abs(top-want) > 1e-6 {
 		t.Errorf("top = %.4f, want %.4f — the best cosine among the returned rows, not the leg's best hit (%.4f), which is not in the window",
 			top, want, legBest[0].Score)
 	}
@@ -373,13 +412,20 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	// definitions rather than between two kinds of query. Reading this store's
 	// answerable side off the leg's ranking instead of the window would report
 	// 0.99 against the no-answer set's own window reading.
-	answerable := Query{Name: "a1", ProjectID: project, Text: "fleet scheduler", Vector: unitVector(1)}
+	// Graded, because the answerable scores the report reads are the runner's
+	// per-query record and the runner only records a query it scored — a query
+	// with an empty rel is measured as a no-answer query instead. The committed
+	// corpus's answerable set is graded, so this is the faithful shape.
+	answerable := Query{
+		Name: "a1", ProjectID: project, Text: "fleet scheduler", Vector: unitVector(1),
+		Rel: Relevance{ids["live00"]: 1},
+	}
 	noAnswer := []Query{{Name: "n1", ProjectID: project, Text: "nothing matches this", Vector: unitVector(1)}}
-	rep, err := FalsePositives(ctx, store, measureNoAnswers(t, store, noAnswer), []Query{answerable})
+	rep, err := FalsePositives(measureNoAnswers(t, store, noAnswer), answerableScores(t, store, []Query{answerable}))
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
-	if rep.AnswerableTop != float64(top) {
+	if math.Abs(rep.AnswerableTop-top) > 1e-6 {
 		t.Errorf("AnswerableTop = %.4f, want %.4f — the answerable contrast must be scored over the returned window like the no-answer set, not over the vector leg's ranking (%.4f)",
 			rep.AnswerableTop, top, legBest[0].Score)
 	}
@@ -423,8 +469,8 @@ func TestFalsePositivesUnseparableCountsExactTies(t *testing.T) {
 	}})
 	q := unitVector(1)
 	noAnswer := []Query{{Name: "n1", ProjectID: project, Text: "anything", Vector: q}}
-	rep, err := FalsePositives(context.Background(), store, measureNoAnswers(t, store, noAnswer),
-		[]Query{{Name: "a1", ProjectID: project, Text: "only memory", Vector: q, Rel: Relevance{"x": 1}}})
+	rep, err := FalsePositives(measureNoAnswers(t, store, noAnswer),
+		answerableScores(t, store, []Query{{Name: "a1", ProjectID: project, Text: "only memory", Vector: q, Rel: Relevance{"x": 1}}}))
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
