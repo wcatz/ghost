@@ -2619,6 +2619,61 @@ func reassessMissLines(res resolve.ReassessResult) string {
 	return b.String()
 }
 
+// reassessHeldLines renders one line per already-resolved row the repair leaves
+// resolved, naming what holds it. The summary counts those rows; this is what an
+// operator acts on, and the two reasons a row stays resolved need different
+// remedies — a live 'supersedes' edge is undone by `ghost supersede --withdraw`,
+// a correction pairing is undone by nothing and can only be READ, which is why
+// the report has to name the correction rather than say "a correction".
+//
+// The ids print WHOLE, unlike every other id on a Ghost report, and unlike
+// shortID beside them on this one. These are operands rather than references:
+// the supersedes source is what --withdraw takes, the held row's own id is what a
+// scoped repair names, and the correction's id is a note somebody has to go and
+// read. An eight-character abbreviation of any of them turns a repair that was
+// already in hand into a second lookup.
+//
+// The row's own text is rendered through displayStored, like every other stored
+// line here, so a held row holding a credential has it withheld whole: the
+// report is text an operator pastes into a shell, and the write-boundary guard
+// is not retroactive.
+func reassessHeldLines(held []resolve.HeldMemory) string {
+	var b strings.Builder
+	for _, h := range held {
+		reason := h.Reason()
+		if reason == "" {
+			// Unreachable from Reassess, which only lists rows it has a hold
+			// for. Defaulted rather than skipped, so a future caller that
+			// reaches it prints the row and an operator can see it, instead of a
+			// count with a silently shorter list under it.
+			reason = "held by an unnamed assertion"
+		}
+		fmt.Fprintf(&b, "  %s  [%s]  %s  %s\n", h.Memory.ID, h.Memory.Category, reason,
+			displayStored(h.Memory.Content, h.Memory.Category, 70))
+	}
+	return b.String()
+}
+
+// reassessRoundsLine reports the hold-back re-check's own cost, and only when it
+// cost something: a run whose first re-check settled everything has no fixed
+// point to announce, and a line an operator learns to skip is a line that stops
+// being read when it matters. A run that iterated says so, because a repair
+// settled over three rounds is not the answer a single re-check would have given
+// and an operator reading the list is entitled to know that.
+//
+// A bound reached with a row still changing is a different sentence, and not a
+// variant of the first: the repair is short of its fixed point, so a further pass
+// may clear more, and saying only "N rounds" would read as a completed re-check.
+func reassessRoundsLine(res resolve.ReassessResult) string {
+	switch {
+	case res.BoundHit:
+		return fmt.Sprintf("  hold-back re-checked %d round(s) and stopped at its bound: a further pass may clear more\n", res.Rounds)
+	case res.Rounds > 1:
+		return fmt.Sprintf("  hold-back re-checked %d round(s) to reach its fixed point\n", res.Rounds)
+	}
+	return ""
+}
+
 // runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence
 // memories (concluded work: findings, changelog notes, PR locators) so they
 // drop out of session-start injection while staying searchable. Cheap local
@@ -2697,7 +2752,9 @@ func runResolve() {
 			os.Exit(1)
 		}
 		fmt.Print(reassessSummaryLine(projectName, res, apply, len(reKept), cls.Calls()))
+		fmt.Print(reassessRoundsLine(res))
 		fmt.Print(reassessMissLines(res))
+		fmt.Print(reassessHeldLines(res.Held))
 		fmt.Print(memoryLines(reKept))
 		if !apply && len(reKept) > 0 {
 			fmt.Println("\nRe-run with --apply to return these to session injection.")
