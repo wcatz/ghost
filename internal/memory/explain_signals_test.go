@@ -704,9 +704,12 @@ func TestExplainDecayFactorIsTheRankingPathOwn(t *testing.T) {
 	// The public half: the number is this row's own decaying factor, and the two
 	// halves of the report agree with each other — age_days feeds decay_factor, so
 	// a reader can check one against the other rather than take either on trust.
-	want := DecayFactor("gotcha", false, row.AgeDays)
+	// The durable tier, because the fixture's rows are durable ones: the tier half
+	// of the factor is 1.0 there, so this stays a check that age_days explains
+	// decay_factor rather than one that also pins the session decay.
+	want := DecayFactor("gotcha", RetentionProject, false, row.AgeDays)
 	if row.DecayFactor != want {
-		t.Errorf("decay_factor = %v, want DecayFactor(\"gotcha\", false, age_days=%v) = %v: the two must be "+
+		t.Errorf("decay_factor = %v, want DecayFactor(\"gotcha\", project, false, age_days=%v) = %v: the two must be "+
 			"one number and its input, or neither is checkable", row.DecayFactor, row.AgeDays, want)
 	}
 	if row.DecayFactor >= 1.0 {

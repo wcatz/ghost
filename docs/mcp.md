@@ -6,10 +6,10 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 
 | Group | Tool | Purpose |
 |---|---|---|
-| Memory | `ghost_memory_save` | Save a project memory; likely duplicates are linked and the existing row is strengthened. `pin: true` exempts it from consolidation in the same call |
-| Memory | `ghost_memory_search` | Search project memories with FTS5 and optional vectors |
+| Memory | `ghost_memory_save` | Save a project memory; likely duplicates are linked and the existing row is strengthened. `pin: true` exempts it from consolidation in the same call, and `retention` sets its tier |
+| Memory | `ghost_memory_search` | Search project memories with FTS5 and optional vectors; filterable by category and retention tier |
 | Memory | `ghost_search_all` | Search across all projects |
-| Memory | `ghost_memories_list` | Browse memories, optionally by category |
+| Memory | `ghost_memories_list` | Browse memories, optionally by category and retention tier |
 | Memory | `ghost_memory_update` | Update memory content or metadata |
 | Memory | `ghost_memory_delete` | Delete one memory by ID |
 | Memory | `ghost_memory_pin` | Pin or unpin a memory |
@@ -36,6 +36,20 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 `ghost_link_withdraw` is the one repair that is NOT dry-run: an agent calls a tool to make a change, so it withdraws the named `supersedes` edge and writes the `unsupersede` history row. It is the repair for an edge the classifier still accepts — a pair that is wrong for a reason no rubric can see — which neither `ghost supersede --reassess` (CLI-only, and only withdraws what the current rules reject) nor anything else on this surface can reach. A ref is a full memory id or an unambiguous 8-or-more-character prefix of one; an ambiguous ref is refused with the matches listed, and a pair with no live edge is an error that writes nothing. Withdrawing the edge does not un-bury its target on its own: the `resolved_at` the edge caused stays until a **scoped** `ghost resolve <project> --reassess --only <ids> --apply` clears it, and the result prints that command, rendered by the same helper the CLI uses so a project name holding a space or a metacharacter is quoted. It is a CLI command and the result says so: there is no MCP tool for the repair, because `ghost_resolve` is the *forward* pass — it stamps `resolved_at` on confirmed evidence — so pointing an agent at it would bury more memories. The repair is scoped because an unscoped one re-judges every resolved memory in the project. `ghost_link_withdraw` is in the Claude Code permission allowlist like every other tool.
 
 Nothing an agent writes is excluded from `ghost reflect` by its `source`: seeds are `builtin`, agent saves are `mcp`, and reflection writes are `reflection`. `ghost_memory_save` therefore takes an optional `pin` so a memory can opt out of consolidation in the call that stores it, rather than in a second `ghost_memory_pin` call that a session might never make. On a near-duplicate save both rows are pinned — the copy just stored and the existing row the text folded into, which is the one a later consolidation is most likely to absorb — and the result message says so.
+
+## Retention tiers
+
+`ghost_memory_save` takes an optional `retention`:
+
+| Tier | Use it for | What it costs |
+|---|---|---|
+| `session` | A fact true of this conversation only — what the build printed, what the test just showed. | A bounded ranking decay (never above 1.0, never below 0.5 — `explain` names it as `retention_factor`), and an expiry derived on save, 24 hours out. |
+| `project` (default) | Durable knowledge. Omit the argument. | Nothing. Every memory that predates the tier reads as this. |
+| `persistent` | A decision, a constraint, a preference the user would be annoyed to lose. | Nothing for retrieval; exempt from consolidation, supersede, resolve and pruning, and from the ranking demotions those passes cause. |
+
+An unknown value is refused in the caller's own words, naming all three, and nothing is written. On a near-duplicate save the tier **raises** the existing row and never lowers it, so a `persistent` save protects the row a later consolidation would absorb rather than only the copy it stored; the result message says which row carries it. Nothing removes a `session` memory on a timer — `ghost prune` is the only command that does, it is a dry run until `--apply`, and no lifecycle pass, hook or scheduler calls it. See [Retention tiers](cli.md#retention-tiers) for the full rules, including the `expires_at` and grace semantics.
+
+`ghost_memory_search` and `ghost_memories_list` take the same three values as a `retention` filter, and both refuse an unknown one rather than ignoring it. The search filter is applied before the result window closes, so a matching row ranked below the window still takes a slot; an answer that found rows and withheld them all reports `reason=all_out_of_retention`.
 
 ## Resources
 

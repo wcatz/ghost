@@ -60,11 +60,20 @@ type ExplainRow struct {
 	// is a shared one is carried by row_project beside it, and floor_dropped is
 	// the field that says nothing was applied.
 	StatusFactor         float64 `json:"status_factor"`
-	DecayFactor          float64 `json:"decay_factor"`           // category/age multiplier the ranking applied to the base; for a candidate the window cut before decayRank ordered it, the one it WOULD have applied, measured against the ranking's own clock
+	DecayFactor          float64 `json:"decay_factor"`           // category/age AND TIER multiplier the ranking applied to the base (a `session` row carries both halves — see RetentionFactor); for a candidate the window cut before decayRank ordered it, the one it WOULD have applied, measured against the ranking's own clock
 	AgeDays              float64 `json:"age_days"`               // as at that same clock, for the same reason
 	SupersedePenalty     int     `json:"supersede_penalty"`      // window-scoped as demoteResults applies it; 0 for rows outside the window
 	NearDuplicatePenalty int     `json:"near_duplicate_penalty"` // window-scoped and order-sensitive, exactly as DemotionPenalties assigns it
-	Reason               string  `json:"reason,omitempty"`       // why it is absent from the results
+	// Retention is the row's own tier (session, project, persistent) and
+	// RetentionFactor is the part of decay_factor it contributed: 1.0 for every
+	// tier but session, which is what makes a durable memory's score exactly what
+	// it was before tiers existed. Reported as a separate field rather than folded
+	// into decay_factor because it is a different question — "how old is this"
+	// against "how long do we want this" — and a reader asking why a
+	// conversation-scoped row sits low is asking the second one.
+	Retention       string  `json:"retention"`
+	RetentionFactor float64 `json:"retention_factor"` // bounded tier decay: tau 7d, floor 0.5
+	Reason          string  `json:"reason,omitempty"` // why it is absent from the results
 
 	// --- the eligibility axes, as the ranking path decided them ---
 
@@ -379,6 +388,21 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	if p.trace.keywordOnlyBase {
 		ex.Notes = append(ex.Notes, "no vector matches survived — ranking used the unweighted FTS base score, so rrf_score reports that base rather than a weighted sum")
 	}
+	// The tier's decay is named when some candidate carries one, and only then: a
+	// corpus with no session row has no tier decay, and a diagnosis that
+	// describes a signal nothing ranked is one more thing to read past. The bound
+	// is in the sentence because the number alone does not say which end of it a
+	// row is at.
+	tierDecay := false
+	for _, id := range ids {
+		if m, ok := byID[id]; ok && RetentionDecayFactor(m.Retention, ageDays(m.CreatedAt, time.Now().UTC())) != 1.0 {
+			tierDecay = true
+			break
+		}
+	}
+	if tierDecay {
+		ex.Notes = append(ex.Notes, "session-tier rows carry a bounded retention decay inside decay_factor, reported per row as retention_factor: a factor above 1.0 never happens, and it falls no lower than 0.5 however old the row is, so a session memory is findable and can never outrank a durable one on recency alone")
+	}
 
 	// The request's scope key set is the same on every row, so it is clamped once
 	// here rather than per row — the copy is what keeps the rows from sharing a
@@ -455,6 +479,8 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			row.ProjectMatch = p.ProjectID == "" || m.ProjectID == p.ProjectID
 			row.ScopeMatched = true
 		}
+		row.Retention = m.Retention
+		row.RetentionFactor = RetentionDecayFactor(m.Retention, row.AgeDays)
 		statusDemoted = statusDemoted || row.StatusFactor != 1.0
 
 		// Validity is reported, never applied: the search ranking does not read

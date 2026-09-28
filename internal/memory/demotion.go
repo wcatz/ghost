@@ -77,7 +77,8 @@ func nearDuplicateVerdicts(ctx context.Context, db Queryer, ids []string, protec
 // cannot come from two different reads: a re-derived attribution could name a
 // different loser than the demotion chose, and the explanation would then
 // contradict the order it is explaining.
-func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, protected map[string]bool, threshold float64) ([]demotionPairs, error) {	if len(ids) < 2 {
+func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, protected map[string]bool, threshold float64) ([]demotionPairs, error) {
+	if len(ids) < 2 {
 		return nil, nil
 	}
 
