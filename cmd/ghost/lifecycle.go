@@ -1337,10 +1337,18 @@ type supersedePair struct{ source, target string }
 // parser does not claim, and the reason the pair is read inside the flag's own
 // clause instead of being collected as positionals. Neither operand may look
 // like a flag, so `--withdraw <id> --apply` is a missing operand rather than a
-// pair whose target is the string "--apply": a ref is a memory id or a prefix of
-// one, and neither form begins with a dash, so the dash test is what separates
-// an operand from a flag here — the resolution half decides nothing about the
-// spelling, because an imported id is nameable too (internal/supersede/resolveRef).
+// pair whose target is the string "--apply": the ids Ghost mints are
+// hex(randomblob(16)), so neither a full one nor a prefix of one begins with a
+// dash, and that is what makes the leading character usable as the test here.
+//
+// It is a CLI-ONLY limit, and the resolution half is deliberately wider: an
+// imported id is whatever its artifact said (ghost import writes ids verbatim),
+// so one beginning with a dash is nameable through `ghost_link_withdraw`, which
+// parses no flags, and not from here. That asymmetry is the cost of reading a
+// dash as a flag at all, it is loud — the pair is reported as a missing operand
+// rather than resolved to the wrong memory — and it is the reason the flag form
+// is documented as ids and prefixes of them rather than as "any id".
+//
 // And a command that re-judged every edge AND removed named ones would have two
 // dry-run answers, so the reader is told which of the two repairs they asked for
 // twice.
