@@ -213,9 +213,11 @@ func TestPromptTellsTheModelARewriteMayComeBack(t *testing.T) {
 	}
 
 	// The RULES-section "- Drop stale situational memories" line is the SECOND of
-	// the two sites that splice the mode-dependent staleTail, and it is pinned in
-	// the retention direction here for one narrow reason, which is worth stating
-	// precisely because most mutations here are already caught elsewhere.
+	// the three sites that splice the mode-dependent staleTail (the obsolete
+	// bullet above, this one, and #674's "- Repository facts" rule), and it is
+	// pinned in the retention direction here for one narrow reason, which is
+	// worth stating precisely because most mutations here are already caught
+	// elsewhere.
 	//
 	// What is ALREADY covered without these two assertions, each verified by
 	// mutation: rewording staleTail's retention value (the sentence-boundary
