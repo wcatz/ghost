@@ -1225,10 +1225,16 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	//
 	// O_EXCL and never rolled forward, for the reason writeBackupOnce gives: a
 	// later run would otherwise overwrite the only pristine copy with Ghost's own
-	// output. A file that did not exist before this run has nothing to copy, and
-	// the code above returned before reaching here.
-	if err := writeBackupOnce(path+".bak", existing); err != nil {
-		return false, err
+	// output. Which is also why an EMPTY file is skipped rather than copied: a
+	// 0-byte config.toml is a file with no keys to lose, and since the backup is
+	// never rolled forward, a 0-byte .bak would stand forever and suppress the
+	// real copy a later repair of a file the user has since filled in would
+	// otherwise take — a "way back" that would wipe those keys. A file that did
+	// not exist before this run returned above and never reaches here.
+	if len(existing) > 0 {
+		if err := writeBackupOnce(path+".bak", existing); err != nil {
+			return false, err
+		}
 	}
 
 	if err := writeFileAtomic(path, []byte(strings.Join(out, eol)), 0644); err != nil {

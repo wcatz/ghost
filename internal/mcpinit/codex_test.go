@@ -1148,17 +1148,18 @@ func TestRunCodex_TOMLAppendBacksUpThePreGhostFile(t *testing.T) {
 	if err := RunCodex(&out, false); err != nil {
 		t.Fatalf("RunCodex: %v", err)
 	}
-	// The table really was appended, so this is the append path and not the
-	// repair one.
+	// The whole file, exactly: the seed with the managed block appended after a
+	// blank line. That is what establishes the append path — the block is in the
+	// output and nothing else was — and it is asserted as bytes because a looser
+	// check would also pass on the repair path, which is the path this test is
+	// not about. The .bak assertion below is the load-bearing half; this one
+	// proves which path it ran on.
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(got), "[mcp_servers.ghost]") {
-		t.Fatalf("the table was not appended, so this is not the append path:\n%s", got)
-	}
-	if strings.Contains(string(got), "[mcp_servers.ghost]\n"+codexMCPServerComment) {
-		t.Fatalf("the file already carried the table, so this is not the append path:\n%s", got)
+	if want := seed + "\n" + renderCodexMCPServerBlock(ghostBin); string(got) != want {
+		t.Fatalf("appended config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
 	}
 
 	bak, err := os.ReadFile(path + ".bak")
@@ -1171,7 +1172,34 @@ func TestRunCodex_TOMLAppendBacksUpThePreGhostFile(t *testing.T) {
 	if strings.Contains(string(bak), "mcp_servers") {
 		t.Error(".bak already mentions the ghost server, so it is not the pre-ghost file")
 	}
-	_ = ghostBin
+}
+
+// TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig: a 0-byte config.toml has no keys
+// to lose, and copying it would leave a 0-byte .bak that — the backup being
+// written O_EXCL and never rolled forward — would stand forever and suppress the
+// real copy a later repair of a file the user has since filled in would
+// otherwise take. Restoring that .bak would wipe the keys, which is strictly
+// worse than never having written it.
+func TestRunCodex_TOMLDoesNotBackUpAnEmptyConfig(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexConfigToml(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("an empty config.toml produced a .bak (Lstat err = %v), which would block every later backup", err)
+	}
+	if b, err := os.ReadFile(path); err != nil || !strings.Contains(string(b), "[mcp_servers.ghost]") {
+		t.Errorf("the registration did not happen (err %v):\n%q", err, b)
+	}
 }
 
 // TestRunCodex_TOMLRepairBacksUpOnce pins that a repair of a user's
