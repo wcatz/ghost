@@ -219,9 +219,9 @@ func (t *TieredConsolidator) Consolidate(ctx context.Context, input ReflectionIn
 			// and is not value-free either; see safeTierError for why, and for why
 			// that is a separate change.
 			//
-			// This is not the last refusal sink, whatever the docs say about it:
-			// runReflect prints the same refusal on its own `consolidation failed`
-			// line, and that one reaches the log too.
+			// Not the last refusal sink, though: runReflect prints the same refusal
+			// on its own `consolidation failed` line, and that one reaches the log
+			// too. See docs/architecture.md for why it is left that way.
 			t.logger.Warn("consolidator failed, trying next tier", "tier", tier.Name(), "error", safeTierError(err))
 			withRepairs(result)
 			lastErr = err
