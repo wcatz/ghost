@@ -748,15 +748,16 @@ func TestExplainDecayFactorIsTheRankingPathOwn(t *testing.T) {
 		t.Error("the ranking path left tracedCandidate.Decay at zero: explain falls back to computing the factor " +
 			"itself, which agrees today and silently stops agreeing the moment anything moves either clock")
 	}
-	// The two searches above ran a fraction of a millisecond apart, so each
-	// measured the row's age against its own `now`. The comparison is therefore
-	// RELATIVE to the magnitude: 1e-9 of 100 days is 100 microseconds, ten
-	// thousand times the observed clock skew, while a clock an hour off would move
-	// a 100-day age by 0.027 — eleven orders of magnitude. The two are not
-	// confusable, which is the property that lets this be a real assertion rather
-	// than a tolerance wide enough to hide anything.
-	const relTol = 1e-9
-	if d := math.Abs(tc.Decay-row.DecayFactor) / math.Max(math.Abs(row.DecayFactor), 1); d > relTol {
+	// The two searches above ran some gap apart, so each measured the row's age
+	// against its own `now`. The bound is therefore a CLOCK-GAP bound, not a
+	// precision claim: 1e-3 days is 86 seconds, which two back-to-back searches
+	// cannot plausibly be even on a loaded runner (the first CI attempt at this
+	// test failed at 12ms), while a deliberately different clock is 0.027 days on
+	// a 100-day row — 27x the bound. The mutation this guards needs no tolerance
+	// at all: it leaves the recorded factor and clock at zero, which is checked
+	// first and exactly.
+	const dayGap = 1e-3
+	if d := math.Abs(tc.Decay - row.DecayFactor); d > dayGap*(1.0/30.0) {
 		t.Errorf("the factor the ranking recorded (%v) is not the one explain reported (%v): the payload must "+
 			"carry the ranking's number, not one that happens to match it", tc.Decay, row.DecayFactor)
 	}
@@ -764,9 +765,10 @@ func TestExplainDecayFactorIsTheRankingPathOwn(t *testing.T) {
 		t.Error("searchTrace.now was never set: without it explain measures every row's age against its own " +
 			"wall clock, and the factor it reports for an old row is then not the one that ranked anything")
 	}
-	if d := math.Abs(tc.AgeDays-row.AgeDays) / math.Max(math.Abs(row.AgeDays), 1); d > relTol {
+	if d := math.Abs(tc.AgeDays - row.AgeDays); d > dayGap {
 		t.Errorf("the age the ranking recorded (%v) is not the one explain reported (%v): the clock is the "+
-			"whole point, so the two must be the same measurement", tc.AgeDays, row.AgeDays)
+			"whole point, so the two must be the same measurement to within the gap between two searches",
+			tc.AgeDays, row.AgeDays)
 	}
 }
 
@@ -824,6 +826,7 @@ func TestExplainNamesBothSidesOfTheKeywordReservation(t *testing.T) {
 		t.Fatalf("ExplainSearch: %v", err)
 	}
 	rows := explainRowByID(ex)
+
 	res, ok := rows[reserved]
 	if !ok {
 		t.Fatalf("the keyword-only row is missing from the explanation, so this fixture is not reaching the "+
@@ -848,6 +851,53 @@ func TestExplainNamesBothSidesOfTheKeywordReservation(t *testing.T) {
 	// exists: nothing in the number explains its presence.
 	if res.Rank == 0 {
 		t.Errorf("a reserved row reports rank 0: it is in the answer, so it must carry a 1-based rank: %+v", res)
+	}
+
+	// Exactly ONE exchange happened, and all three sides of that are checked
+	// rather than assumed: the window is still the 10 rows the caller asked for,
+	// exactly one of them is the reserved keyword-only row, the other nine are
+	// dual-leg rows, and the dual row the reservation named is in neither set. Too
+	// few dual rows and the pool is never wider than the window, the reservation
+	// cannot fire, and the KeywordReserved guard above is then the only thing that
+	// would have said so.
+	included, dualIn, nonDualIn := 0, 0, 0
+	dualSet := make(map[string]bool, len(dual))
+	for _, id := range dual {
+		dualSet[id] = true
+	}
+	for _, r := range ex.Rows {
+		if !r.Included {
+			continue
+		}
+		included++
+		if dualSet[r.ID] {
+			dualIn++
+		} else {
+			nonDualIn++
+		}
+	}
+	if included != 10 {
+		t.Errorf("the window holds %d rows, want the 10 the caller asked for: the reservation moves a row in, "+
+			"so a window that is not full means the pool was never wider than the window", included)
+	}
+	if nonDualIn != 1 {
+		t.Errorf("%d of the 10 rows in the window are not dual-leg rows, want 1 (the reserved keyword-only row): "+
+			"the reservation promotes one candidate, so more than one means a different number of exchanges", nonDualIn)
+	}
+	if dualIn != 9 {
+		t.Errorf("%d dual-leg rows are in the window, want 9: %d of them were in it before the reservation and "+
+			"exactly one lost its slot, so %d is a different number of exchanges", dualIn, 10, 10)
+	}
+	// The displaced row is one of the dual-leg rows and is genuinely out of the
+	// window, which is what "it lost its slot" means. It is the row the eviction
+	// chose, so the counts above already exclude it from the nine.
+	if !dualSet[res.TookSlotFrom] {
+		t.Errorf("took_slot_from names %s, which is not one of the %d dual-leg rows: the eviction target is "+
+			"always an admitted row, so an id outside that set points at nothing this payload can explain",
+			res.TookSlotFrom, len(dual))
+	}
+	if rows[res.TookSlotFrom].Included {
+		t.Errorf("took_slot_from names %s, which is still in the window, so nothing was displaced", res.TookSlotFrom)
 	}
 
 	// The other side. A displaced row is not in the answer and says who took its
