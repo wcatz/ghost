@@ -238,9 +238,11 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	// the grader a consolidation is cheaper than it is.
 	replaceTail := "Your replacement has to CARRY the old memory's substance — the same specifics, restated. If nothing in the result accounts for the old row, the apply puts that row back verbatim beside your replacement, and the two sit there until a later pass demotes the stale one."
 	// obsoleteTail adds only what staleTail does not already say: the guidance to
-	// prefer a fold. Restating the re-add here would repeat staleTail in the same
-	// clause.
-	obsoleteTail := "State an obsolete drop only when a surviving memory really does replace it."
+	// prefer a fold, and the second ground on which an obsolete drop may be
+	// stated at all (#674) — a note that only records what the code already
+	// holds, which nothing in the corpus replaces and which reading the file
+	// would. Restating the re-add here would repeat staleTail in the same clause.
+	obsoleteTail := "State an obsolete drop only when a surviving memory really does replace it, or when the note records nothing the code does not already say."
 	countTail := "A count you reach by dropping is undone by that re-add."
 	omissionCost := "carried through unchanged, so forgetting one costs you the consolidation you had in mind for it and nothing else"
 	if input.AllowDrops {
@@ -293,13 +295,14 @@ Produce a JSON object with two fields:
    - "keep <id>" — this memory is already right and complete. Use it for the memory as it stands and do NOT retype it: a kept memory keeps its id, its age, its links and its embedding, which no rewrite can. Restating a memory you had nothing to change is what made consolidation churn identities.
    - "merge <id>,<id>,<id> -> <text>" — two or more of these memories state one fact. A merge must carry the inputs' substance into the survivor — restate the specifics, do not summarize them away: ` + mergeTail + `. Category, importance and tags are taken from the ids you name, so a merge never silently recategorizes a memory or strips its labels.
    - "rewrite <id> -> <text>" — replace ONE memory whose CLAIM is wrong: it names the wrong service, the wrong owner, or the wrong state of the world. Never for a paraphrase, and never to put a memory into new words. The replacement must not change a specific: see the identifier rule below, so a rewrite cannot correct a wrong number, host, path or version — "keep" a memory whose specifics you cannot verify, or "drop" it if nothing else in the corpus says it. ` + replaceTail + `
-   - "drop <id> reason: obsolete" — the memory is wrong or no longer true and nothing else in the corpus replaces it. Prefer folding it into a survivor, ` + staleTail + ` ` + obsoleteTail + `
+   - "drop <id> reason: obsolete" — the memory is wrong, no longer true, or says only what the repository already holds, and nothing else in the corpus replaces it. Prefer folding it into a survivor, ` + staleTail + ` ` + obsoleteTail + `
    - "drop <id> reason: superseded by <id>" — another id in this same list already says it better, and you carry that one forward. The target must be an id you keep, merge or rewrite in this response: a supersession pointing at a target you also drop leaves the corpus with nothing. ` + replaceTail + `
    Rules:
    - Every id listed above needs an operation. An id you never mention is ` + omissionCost + `
    - An identifier in merge or rewrite text — a path, hash, version, hostname, port or any number — must appear in one of the ids you are merging or rewriting, copied exactly. A merge or rewrite that introduces an identifier absent from its sources is rejected and the original memories are kept, so a typo is never stored as fact. This is why a rewrite cannot fix a wrong number: the corrected value would be an identifier the source does not contain. When you cannot reproduce the specifics exactly, "keep" instead.
    - Keep identity facts (architecture, conventions) — never drop these
    - Drop stale situational memories (old gotchas that were fixed) into the memory that replaces them, ` + staleTail + `
+   - Repository facts: a memory that records only what the repository already holds — "foo.go contains HandleFoo()", a symbol's location, a path that exists — is an obsolete-drop candidate when the note is a location or a definition and reading the file settles it, ` + staleTail + ` Durable knowledge is a rule, a constraint, a reason or a consequence the code does not state, and it is never an obsolete-drop candidate: "Production schema changes require explicit approval." stays whatever files or paths it mentions.
    - Every category is a candidate: architecture, decision, pattern, convention, gotcha, dependency, preference, fact. Aim for a corpus of high-quality memories, not a short one — and get there by FOLDING inputs into survivors, never by omitting them. ` + countTail + `
    - Anti-fabrication: the input above is the ONLY source of truth. Never invent specifics that do not appear in it — commit SHAs, version numbers, file paths, package names, feature names, ports, hosts, or model names. If you cannot verify an identifier in the input, keep that memory as it is rather than emitting a "corrected" version. A plausible-looking but unverified SHA, feature, or version is a hallucination.
    - Project-scoping: every operation must be about the project named under "Project" above. Do not import facts about other projects, repositories, or tools from your own knowledge — the corpus only contains this project plus explicit "global" user preferences that were already present in the input. If a memory is not traceable to the input data, drop it rather than keep it.

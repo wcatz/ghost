@@ -88,6 +88,14 @@ type Classifier interface {
 //     the note, and a note carrying an imperative or an open marker is KEEP
 //     before the call (issue #640). Every v2 entry was judged without those
 //     rules, so all of them are deliberately re-asked.
+//
+// Issue #674 added a rubric rule — a note that only restates the repository is
+// RESOLVED evidence — and deliberately did NOT bump this prefix. The rule reads
+// the fresh-session question the v3 rules already read, so a cached KEEP and a
+// re-ask usually agree; where they do not, the stale entry leaves the note
+// INJECTABLE rather than buried, which is the direction this pass errs in
+// everywhere else. Bumping would re-ask every cached KEEP in every project for
+// that, which is the far larger cost.
 const keepCacheHashVersion = "v3"
 
 // ContentHash is the KEEP-cache key: resolve's question is content-only, so a

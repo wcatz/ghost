@@ -55,6 +55,9 @@ Clients that support MCP resource subscriptions can pin these resources to survi
 The server embeds instructions that encourage agents to:
 
 - Save durable discoveries immediately instead of batching them.
+- Save durable knowledge — a rule, a constraint, a decision, or a reason the code
+  does not state — rather than a fact the repository already holds, such as
+  `foo.go contains HandleFoo()`.
 - Use categories consistently.
 - Search project memory before making changes.
 - Use `ghost_search_all` for cross-project knowledge.

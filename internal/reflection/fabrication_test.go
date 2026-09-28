@@ -288,9 +288,10 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"EVERY category is protected",
 		"undone by that re-add",
 		"puts that row back verbatim",
-		// The mode-dependent tail spliced into the obsolete bullet and into the
-		// "drop stale situational memories" rule is staleTail, so this is the
-		// wording a leaked DEFAULT tail would carry. obsoleteTail's own text
+		// The mode-dependent tail spliced into the obsolete bullet, into the
+		// "drop stale situational memories" rule and into #674's "Repository
+		// facts" rule is staleTail, so this is the wording a leaked DEFAULT
+		// tail would carry. obsoleteTail's own text
 		// cannot do this job in either direction: it is byte-identical in both
 		// modes, so it is present whether or not a tail leaked — its presence
 		// detects nothing, and its absence would say nothing about the mode
