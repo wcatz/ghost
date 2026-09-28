@@ -108,6 +108,24 @@ func RankedStateConfigs() []RankedStateConfig {
 	}
 }
 
+// RankedStateAnswer is one probe's answer rank under one configuration. It is
+// carried per probe rather than only as R@1 because the configuration table's
+// interesting column is not "how many" but "which": the shipped pair does not
+// lose a uniformly distributed set of probes, it loses the ones whose answer is
+// old, and a reader deciding whether that matters to them needs to see which.
+type RankedStateAnswer struct {
+	Probe string
+	Rank  int // 1-based; 0 means the answer was not in the window at all
+}
+
+// RankedStateRun is one configuration's measurement: the aggregate Result and
+// the per-probe ranks behind it.
+type RankedStateRun struct {
+	Config  RankedStateConfig
+	Result  []Result
+	Answers []RankedStateAnswer
+}
+
 // RunRankedState evaluates the suite under explicit SearchParams, per condition.
 // The fused leg goes through SearchHybridParams so a configuration can be asked
 // for; the two single legs take no params and are reported as the reference.
@@ -133,31 +151,116 @@ func RunRankedState(ctx context.Context, store *memory.Store, queries []Query, p
 	return []Result{fts, vec, hybrid}, nil
 }
 
+// AnswerRanks returns each probe's answer rank under one configuration, read off
+// the fused leg's own per-query scores is not possible (a score is not a rank), so
+// the search is repeated per probe. It is 14 searches and the point is the
+// per-probe breakdown the aggregate table cannot show.
+func AnswerRanks(ctx context.Context, store *memory.Store, queries []Query, p memory.SearchParams) ([]RankedStateAnswer, error) {
+	out := make([]RankedStateAnswer, 0, len(queries))
+	for _, q := range queries {
+		var answerID string
+		for id, gain := range q.Rel {
+			if gain > 0 {
+				answerID = id
+			}
+		}
+		if answerID == "" {
+			return nil, fmt.Errorf("probe %q has no relevant memory, so it has no answer to rank", q.Name)
+		}
+		results, err := store.SearchHybridParams(ctx, q.ProjectID, q.Text, q.Vector, scoreK, p)
+		if err != nil {
+			return nil, fmt.Errorf("probe %q: %w", q.Name, err)
+		}
+		rank := 0
+		for i, m := range results {
+			if m.ID == answerID {
+				rank = i + 1
+				break
+			}
+		}
+		out = append(out, RankedStateAnswer{Probe: q.Name, Rank: rank})
+	}
+	return out, nil
+}
+
 // FormatRankedState renders the suite as one row per configuration, with the
-// single legs printed once as the reference they do not depend on.
-func FormatRankedState(configs []RankedStateConfig, results [][]Result) string {
+// single legs printed once as the reference they do not depend on. A
+// configuration with fewer than three conditions is skipped rather than indexed
+// into: RunRankedState always returns three, and a formatter that panics on
+// anything else is a formatter the next caller cannot use.
+func FormatRankedState(runs []RankedStateRun) string {
 	var b bytes.Buffer
 	b.WriteString("ranking-state suite (graded, same vector space as the headline table)\n")
 	b.WriteString("  the corpus carries distinct created_at and supersedes edges, so decay and the\n")
 	b.WriteString("  supersede demote are both live here; on the headline table both are inert.\n\n")
 	fmt.Fprintf(&b, "%-20s %-12s %7s %7s %8s %8s\n", "configuration", "condition", "R@1", "R@5", "MRR@10", "NDCG@10")
-	for i, cfg := range configs {
-		if i >= len(results) {
-			break
+	printed := 0
+	for _, run := range runs {
+		if len(run.Result) < 3 {
+			continue
 		}
-		if i == 0 {
-			for _, ref := range results[i][:2] {
+		if printed == 0 {
+			for _, ref := range run.Result[:2] {
 				fmt.Fprintf(&b, "%-20s %-12s %7.3f %7.3f %8.3f %8.3f\n",
 					"reference (no params)", ref.Condition, ref.Recall1, ref.Recall5, ref.MRR10, ref.NDCG10)
 			}
 		}
-		h := results[i][2]
+		printed++
+		h := run.Result[2]
 		fmt.Fprintf(&b, "%-20s %-12s %7.3f %7.3f %8.3f %8.3f\n",
-			cfg.Label, CondHybrid, h.Recall1, h.Recall5, h.MRR10, h.NDCG10)
+			run.Config.Label, CondHybrid, h.Recall1, h.Recall5, h.MRR10, h.NDCG10)
 	}
-	if len(results) > 0 {
-		fmt.Fprintf(&b, "\n%d graded queries. The two single legs take no SearchParams, so they are the\n", results[0][0].Queries)
-		b.WriteString("same in every configuration and are printed once.\n")
+	if printed == 0 {
+		return b.String() + "  (no complete configuration to report)\n"
 	}
+
+	// The per-probe grid, which is the part the aggregate table cannot show: one
+	// column per configuration, one row per probe, so "which probes does the
+	// shipped default lose" is a thing a reader can answer.
+	names := make([]string, 0, len(runs))
+	for _, run := range runs {
+		names = append(names, run.Config.Label)
+	}
+	fmt.Fprintf(&b, "\n%-24s", "answer rank by probe")
+	for _, n := range names {
+		fmt.Fprintf(&b, " %12s", n)
+	}
+	b.WriteString("\n")
+	probes := map[string]struct{}{}
+	order := []string{}
+	for _, run := range runs {
+		for _, a := range run.Answers {
+			if _, seen := probes[a.Probe]; !seen {
+				probes[a.Probe] = struct{}{}
+				order = append(order, a.Probe)
+			}
+		}
+	}
+	byProbe := map[string]map[string]int{}
+	for _, run := range runs {
+		for _, a := range run.Answers {
+			if byProbe[a.Probe] == nil {
+				byProbe[a.Probe] = map[string]int{}
+			}
+			byProbe[a.Probe][run.Config.Label] = a.Rank
+		}
+	}
+	for _, probe := range order {
+		fmt.Fprintf(&b, "%-24s", probe)
+		for _, n := range names {
+			rank, ok := byProbe[probe][n]
+			cell := "-"
+			if ok {
+				cell = fmt.Sprintf("%d", rank)
+				if rank == 0 {
+					cell = "absent"
+				}
+			}
+			fmt.Fprintf(&b, " %12s", cell)
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "\n%d graded queries. The two single legs take no SearchParams, so they are the\n", runs[0].Result[0].Queries)
+	b.WriteString("same in every configuration and are printed once. Answer rank 1 is the top result.\n")
 	return b.String()
 }

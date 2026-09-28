@@ -87,9 +87,6 @@ var trapMustWinScenarios = []string{
 	"sqlite_driver",
 }
 
-// rate renders a 0/1 verdict count as the fraction callers see it as.
-func rate(v float64) float64 { return v }
-
 // trapWinsByScenario keys each scenario's correct-wins fraction by name, which
 // is 0 or 1 today (one probe per scenario) but is read as a fraction so a
 // multi-probe scenario does not change the comparison's meaning.

@@ -188,8 +188,10 @@ type NoAnswerSummary struct {
 	// rate alone says only that Ghost never abstains, and the mean says how
 	// confident the answers it returned anyway were.
 	MeanTop float64
-	// MaxTop is the highest cosine any no-answer query produced, so it is the
-	// floor that would refuse every one of them.
+	// MaxTop is the highest cosine any no-answer query produced, so it is the floor
+	// that would refuse every one of them. Printed per condition because the legs do
+	// not agree on it, and it is the only per-condition number that can be read as an
+	// abstention threshold rather than as a distribution.
 	MaxTop float64
 	// Floors is one row per configured floor, in FalsePositiveFloors order.
 	Floors []FloorCount
@@ -272,29 +274,39 @@ func countHitsAboveFloor(cosines map[string]float32, floor float32) int {
 }
 
 // FormatNoAnswer renders the per-condition false-positive table, printed
-// directly under the graded table. The rate columns are per floor because with
-// search.min_similarity shipping 0 the "returned anything" rate is 1.000 on
-// every condition and says only that Ghost never abstains; the graded columns
-// say how wrong those answers were.
+// directly under the graded table. The rate columns are per FLOOR, not per
+// shipped setting: `search.min_similarity` ships 0, which refuses nothing, so a
+// single "rate at the shipped floor" column would read 1.000 everywhere and say
+// only that Ghost never abstains. The floors are what make the column graded —
+// they are the band a floor would have to live in — and the mean top cosine is
+// what says how wrong the rows actually were.
 func FormatNoAnswer(summaries []NoAnswerSummary) string {
-	if len(summaries) == 0 || summaries[0].Queries == 0 {
+	measured := make([]NoAnswerSummary, 0, len(summaries))
+	for _, s := range summaries {
+		if s.Queries > 0 {
+			measured = append(measured, s)
+		}
+	}
+	if len(measured) == 0 {
 		return ""
 	}
+
 	var b bytes.Buffer
-	n := summaries[0].Queries
-	fmt.Fprintf(&b, "\nno-answer queries (n=%d, nothing in the corpus answers these; report-only, no gate)\n", n)
-	fmt.Fprintf(&b, "  A FALSE POSITIVE is a result returned for a query with no answer. The false-positive rate is the\n")
-	fmt.Fprintf(&b, "  share of queries with at least one returned row above that cosine floor; production keeps a row\n")
-	fmt.Fprintf(&b, "  only when score > floor, and search.min_similarity ships 0, so at the shipped setting every column\n")
-	fmt.Fprintf(&b, "  reads 1.000 and the mean top cosine is the only graded part of this table.\n\n")
-	floors := summaries[0].Floors
-	fmt.Fprintf(&b, "  %-14s %8s %11s", "condition", "results", "mean top")
-	for _, f := range floors {
+	fmt.Fprintf(&b, "\nno-answer queries (n=%d, nothing in the corpus answers these; report-only, no gate)\n", measured[0].Queries)
+	b.WriteString("  A FALSE POSITIVE is a result returned for a query with no answer, and the false-positive rate is\n")
+	b.WriteString("  the share of queries with at least one returned row above that cosine floor. search.min_similarity\n")
+	b.WriteString("  ships 0, which refuses nothing, so at the shipped setting the rate is 1.000 in every condition;\n")
+	b.WriteString("  the floors below are the graded reading, and they are the band an abstention rule would live in.\n\n")
+	fmt.Fprintf(&b, "  %-14s %8s %11s %8s", "condition", "results", "mean top", "max top")
+	for _, f := range measured[0].Floors {
 		fmt.Fprintf(&b, " %11s", fmt.Sprintf("rate @%.2f", f.Floor))
 	}
 	b.WriteString("\n")
-	for _, s := range summaries {
-		fmt.Fprintf(&b, "  %-14s %8.1f %11.3f", s.Condition, s.MeanResults, s.MeanTop)
+	for _, s := range measured {
+		// Each row prints its OWN floor set and its own query count, so a
+		// condition that measured a different number of queries cannot inherit
+		// the first row's column headers.
+		fmt.Fprintf(&b, "  %-14s %8.1f %11.3f %8.3f", s.Condition, s.MeanResults, s.MeanTop, s.MaxTop)
 		for _, f := range s.Floors {
 			fmt.Fprintf(&b, " %11.3f", f.Rate)
 		}
@@ -472,7 +484,15 @@ func floorRow(rows *[]FloorCount, floor float32) *FloorCount {
 // header names the condition because the per-condition false-positive table above
 // it reports all three, and a reader must not take the numbers here for a
 // property of the legs as well as of the shipped path.
+//
+// A report with nothing measured returns nothing rather than a table of zeros: a
+// caller whose no-answer set came back empty (a run with no negatives in it) would
+// otherwise get "mean top cosine 0.000 vs 0.740" and "costs 0/220", which reads as
+// a perfect abstention result rather than as a missing measurement.
 func FormatFalsePositives(rep FalsePositiveReport, condition string) string {
+	if rep.Queries == 0 {
+		return fmt.Sprintf("\nabstention baseline (%s path): not measured, no no-answer queries in this run\n", condition)
+	}
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "\nabstention baseline (%s path, the shipped ranking)\n", condition)
 	fmt.Fprintf(&b, "  results returned per query   %.1f (window %d, no similarity floor configured)\n", rep.MeanResults, scoreK)

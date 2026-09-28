@@ -50,19 +50,38 @@ func TestConfigurationDocsListEveryEnvOverride(t *testing.T) {
 }
 
 // envOverrideRowRE matches one row of the shortcut table: a GHOST_* name in the
-// first column and its config key in the second. Anchored on the backticked name
-// so a mention of a variable in the surrounding prose (there are several, and
-// they are correct) is not read as a table row.
+// first column and its config key in the second. Scoped to the table by
+// documentedEnvOverrides rather than by the pattern, because the same row shape
+// appears elsewhere in the file (the tracing and harness tables) and a match set
+// spanning two tables would make the row-count floor a floor on the wrong thing
+// and the reverse-direction check complain about a table this test does not own.
 var envOverrideRowRE = regexp.MustCompile("(?m)^\\| `([A-Z0-9_]+)` \\| `([^`]+)` \\|$")
 
-// documentedEnvOverrides returns the variable names the shortcut table lists. The
-// key is read and discarded on purpose: the table's second column is checked by
-// the test above against envOverrides' own keys, and a key typed into the
-// documentation wrong is a different failure from a row missing, so this returns
-// names only and lets the two directions be read separately.
+// documentedEnvOverrides returns the variable names the SHORTCUT TABLE lists: the
+// matches between the sentence that introduces it and the heading that ends it.
+// The key column is read and discarded on purpose — the table's second column is
+// the thing the test above checks against envOverrides' own keys, and a key typed
+// into the documentation wrong is a different failure from a row missing.
 func documentedEnvOverrides(doc string) map[string]bool {
+	start := strings.Index(doc, "The generic transformer replaces underscores with dots")
+	if start < 0 {
+		return nil
+	}
+	rest := doc[start:]
+	// From the first table row to the first blank line after it: the sentence
+	// introducing the table is followed by a blank line, so starting at the "|"
+	// is what keeps the header and the separator inside the slice.
+	begin := strings.Index(rest, "|")
+	if begin < 0 {
+		return nil
+	}
+	rest = rest[begin:]
+	table := rest
+	if end := strings.Index(rest, "\n\n"); end >= 0 {
+		table = rest[:end]
+	}
 	out := map[string]bool{}
-	for _, m := range envOverrideRowRE.FindAllStringSubmatch(doc, -1) {
+	for _, m := range envOverrideRowRE.FindAllStringSubmatch(table, -1) {
 		out[m[1]] = true
 	}
 	return out
@@ -77,7 +96,7 @@ func TestConfigurationDocsShortcutTableIsPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docs/configuration.md: %v", err)
 	}
-	rows := envOverrideRowRE.FindAllStringSubmatch(string(raw), -1)
+	rows := documentedEnvOverrides(string(raw))
 	if len(rows) < len(envOverrides) {
 		t.Errorf("found %d shortcut rows in docs/configuration.md, want at least %d — the table may have been reformatted",
 			len(rows), len(envOverrides))

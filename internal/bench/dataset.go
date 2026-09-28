@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -106,6 +107,60 @@ func LoadVectors(r io.Reader) (Vectors, error) {
 	return v, nil
 }
 
+// supersedesCycle returns a readable cycle in the corpus's supersedes graph, or
+// "" when it is acyclic — a three-colour depth-first walk, so the graph's own
+// size is what bounds it rather than the corpus being small by convention.
+//
+// Star links are acyclic and must stay legal: `k8s_ver_v3` supersedes both
+// `k8s_ver_v2` and `k8s_ver_v1`, and `k8s_ver_v2` supersedes `k8s_ver_v1`. Only a
+// path that comes back to a key still on the stack is a cycle.
+func supersedesCycle(mems []MemorySpec) string {
+	edges := make(map[string][]string, len(mems))
+	for _, m := range mems {
+		edges[m.Key] = append(edges[m.Key], m.Supersedes...)
+	}
+	const (
+		white = 0 // unvisited
+		grey  = 1 // on the current path
+		black = 2 // finished
+	)
+	colour := make(map[string]int, len(mems))
+	var path []string
+	var walk func(string) string
+	walk = func(key string) string {
+		switch colour[key] {
+		case grey:
+			for i := len(path) - 1; i >= 0; i-- {
+				if path[i] == key {
+					return strings.Join(append(append([]string{}, path[i:]...), key), " -> ")
+				}
+			}
+			return key
+		case black:
+			return ""
+		}
+		colour[key] = grey
+		path = append(path, key)
+		for _, next := range edges[key] {
+			if next == key {
+				continue // a self-edge is its own error, with a better message
+			}
+			if cycle := walk(next); cycle != "" {
+				return cycle
+			}
+		}
+		path = path[:len(path)-1]
+		colour[key] = black
+		return ""
+	}
+	for _, m := range mems {
+		if cycle := walk(m.Key); cycle != "" {
+			return cycle
+		}
+	}
+	return ""
+}
+
 // decodeJSONL invokes fn once per non-blank line, decoded as raw JSON.
 func decodeJSONL(r io.Reader, fn func(json.RawMessage) error) error {
 	sc := bufio.NewScanner(r)
@@ -159,11 +214,11 @@ func loadFile[T any](path string, parse func(io.Reader) (T, error)) (T, error) {
 // known memory keys, so a malformed dataset fails loudly rather than scoring
 // silently wrong.
 //
-// db is the same connection store was built on, and it is used for the two
-// things a store cannot be asked to do through its API: backdating created_at
-// (Create always stamps now) and nothing else — the supersedes edges go through
-// store.CreateLink, the production writer, so a fixture describes a state a store
-// could actually hold rather than one only raw SQL can produce.
+// db is the same connection store was built on, and it is used for exactly one
+// thing a store cannot be asked to do through its API: backdating created_at,
+// because Create always stamps now. The supersedes edges go through
+// store.CreateLink, the production writer, so a fixture describes a state a
+// store could actually hold rather than one only raw SQL can produce.
 func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs Vectors) ([]Query, error) {
 	if err := store.EnsureProject(ctx, ds.Project, "/bench/"+ds.Project, ds.Project); err != nil {
 		return nil, fmt.Errorf("ensure project: %w", err)
@@ -214,12 +269,26 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 
 	// After every row exists, so a supersedes edge can only name a key this
 	// dataset really holds: a typo is a load error, not a demote that silently
-	// does nothing.
+	// does nothing. A self-edge and a cycle are refused here for the same reason
+	// — a store `ghost supersede --apply` builds can hold neither, and the demote
+	// cannot order a cycle: both of its rows would be penalised by the other and
+	// neither would sink.
+	//
+	// The check is an acyclicity test over the whole key graph, NOT "one
+	// superseder per target": a star update chain (v3 supersedes v2 and v1, v2
+	// supersedes v1) is exactly the shape the demote is built for and has two
+	// superseders on v1.
+	if cycle := supersedesCycle(ds.Memories); cycle != "" {
+		return nil, fmt.Errorf("supersedes cycle in the dataset: %s", cycle)
+	}
 	for _, m := range ds.Memories {
 		for _, older := range m.Supersedes {
 			target, ok := keyToID[older]
 			if !ok {
 				return nil, fmt.Errorf("memory %q supersedes unknown key %q", m.Key, older)
+			}
+			if older == m.Key {
+				return nil, fmt.Errorf("memory %q supersedes itself", m.Key)
 			}
 			if err := store.CreateLink(ctx, keyToID[m.Key], target, "supersedes", 1.0, "llm"); err != nil {
 				return nil, fmt.Errorf("link %q supersedes %q: %w", m.Key, older, err)

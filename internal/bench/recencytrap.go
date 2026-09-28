@@ -93,7 +93,11 @@ func categoryDecays(category string) bool {
 	return memory.DecayFactor(category, false, decayProbeAgeDays) < 1.0
 }
 
-// LoadTrapScenarios reads trap scenarios, one JSON per line.
+// LoadTrapScenarios reads trap scenarios, one JSON per line. A scenario whose
+// category is one of the report's own row labels is a hard error: those labels
+// are how the aggregation marks a pooled row, and a category that collides with
+// one would be counted into the pool and rendered under the pool's heading, which
+// is a wrong number rather than a visibly broken one.
 func LoadTrapScenarios(r io.Reader) ([]TrapScenario, error) {
 	var out []TrapScenario
 	if err := decodeJSONL(r, func(raw json.RawMessage) error {
@@ -103,6 +107,9 @@ func LoadTrapScenarios(r io.Reader) ([]TrapScenario, error) {
 		}
 		if len(s.Traps) == 0 {
 			return fmt.Errorf("trap scenario %q needs at least one trap", s.Name)
+		}
+		if s.Category == trapDecayingLabel || s.Category == trapNeverDecayLabel || s.Category == trapAllLabel {
+			return fmt.Errorf("trap scenario %q uses %q as its category, which is a report row label", s.Name, s.Category)
 		}
 		out = append(out, s)
 		return nil
@@ -114,12 +121,13 @@ func LoadTrapScenarios(r io.Reader) ([]TrapScenario, error) {
 
 // TrapOutcome is the judgment for one probe.
 type TrapOutcome struct {
-	Scenario     string
-	Category     string // the scenario's effective category
-	Decays       bool   // whether the shipped decay factor can reorder this class
-	CorrectFound bool   // the correct (old) memory was retrieved at all
-	CorrectWins  bool   // correct outranks every trap present in the results
-	CorrectTop1  bool   // correct is the overall top result
+	Scenario      string
+	Category      string // the scenario's effective category
+	Decays        bool   // whether the shipped decay factor can reorder this class
+	CorrectPinned bool   // the correct (old) memory is pinned, so decay cannot touch it
+	CorrectFound  bool   // the correct (old) memory was retrieved at all
+	CorrectWins   bool   // correct outranks every trap present in the results
+	CorrectTop1   bool   // correct is the overall top result
 }
 
 // RunRecencyTrap seeds every scenario (correct + traps) with backdated
@@ -225,7 +233,7 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 			found, wins, top1 := judgeProbe(ranked, seed[i].correctID, seed[i].trapIDs)
 			outcomes = append(outcomes, TrapOutcome{
 				Scenario: sc.Name, Category: category, Decays: categoryDecays(category),
-				CorrectFound: found, CorrectWins: wins, CorrectTop1: top1,
+				CorrectPinned: sc.Pinned, CorrectFound: found, CorrectWins: wins, CorrectTop1: top1,
 			})
 		}
 	}
@@ -248,27 +256,35 @@ func TrapCorrectWins(outcomes []TrapOutcome) float64 {
 	return float64(wins) / float64(len(outcomes))
 }
 
-// TrapSummary is one row of the trap report: a category, or one of the two
-// pooled classes. The two class rows are what the report is read for, and they
-// are deliberately kept apart — a pooled score lets the never-decay half carry
-// the decaying half, which is the mistake #561 found.
-type TrapSummary struct {
-	Category    string
-	Decays      bool
-	Probes      int
-	Found       int
-	CorrectWins float64
-	CorrectTop1 float64
-}
-
-// Pooled row labels. They are rows in the report rather than categories, so
-// they cannot collide with one: a scenario's category is validated as one on
-// the way in, and these are the labels the aggregation appends itself.
+// Pooled row labels. They are rows in the report rather than categories, so a
+// scenario may not use one: LoadTrapScenarios refuses, because a category
+// colliding with a label would be counted into the pool it names and rendered
+// under the pool's heading.
 const (
 	trapDecayingLabel   = "decaying (pooled)"
 	trapNeverDecayLabel = "never-decay (pooled)"
 	trapAllLabel        = "all probes"
 )
+
+// TrapSummary is one row of the trap report: a category, or one of the two
+// pooled classes. The two class rows are what the report is read for, and they
+// are deliberately kept apart — a pooled score lets the never-decay half carry
+// the decaying half, which is the mistake #561 found.
+//
+// Pinned counts the probes whose CORRECT memory is pinned, and PinnedWins is the
+// share of THOSE that the correct memory won. It is a column of its own because
+// pinning is the actionable half of the decay cost: without it a reader sees
+// only that decay loses, not that the user's one control over it wins.
+type TrapSummary struct {
+	Category    string
+	Decays      bool
+	Probes      int
+	Pinned      int
+	PinnedWins  float64
+	Found       int
+	CorrectWins float64
+	CorrectTop1 float64
+}
 
 // SummarizeTrap aggregates outcomes by category, then appends the two pooled
 // class rows and an all-probes row. Order is fixture-independent — decaying
@@ -283,6 +299,12 @@ func SummarizeTrap(outcomes []TrapOutcome) []TrapSummary {
 			byCategory[o.Category] = s
 		}
 		s.Probes++
+		if o.CorrectPinned {
+			s.Pinned++
+		}
+		if o.CorrectPinned && o.CorrectWins {
+			s.PinnedWins++
+		}
 		if o.CorrectFound {
 			s.Found++
 		}
@@ -339,6 +361,8 @@ func poolTrap(match poolTrapMatch, byCategory map[string]*TrapSummary) TrapSumma
 			}
 		}
 		pool.Probes += s.Probes
+		pool.Pinned += s.Pinned
+		pool.PinnedWins += s.PinnedWins
 		pool.Found += s.Found
 		pool.CorrectWins += s.CorrectWins
 		pool.CorrectTop1 += s.CorrectTop1
@@ -346,6 +370,12 @@ func poolTrap(match poolTrapMatch, byCategory map[string]*TrapSummary) TrapSumma
 	if pool.Probes > 0 {
 		pool.CorrectWins /= float64(pool.Probes)
 		pool.CorrectTop1 /= float64(pool.Probes)
+	}
+	// PinnedWins is a ratio over the PINNED probes, not over all of them: a row
+	// with one pinned probe out of twenty would read 0.05 as a mean-of-ratios
+	// and 1.000 as the share of the probes it is a claim about.
+	if pool.Pinned > 0 {
+		pool.PinnedWins /= float64(pool.Pinned)
 	}
 	return pool
 }
@@ -369,6 +399,10 @@ func sortedCategories(byCategory map[string]*TrapSummary, decays bool) []string 
 // delta — is measured rather than assumed, and so a suite in which decay is
 // inert (every scenario in a never-decay category) reads as a column of zeros
 // instead of looking like a healthy invariance.
+//
+// The pinned column is a ratio over the pinned probes in that row, printed as a
+// count beside it, because a row with no pinned probe has no claim to make and
+// printing 0.000 for it would read as "pinning does not work here".
 func FormatTrap(off, on []TrapOutcome) string {
 	offRows := SummarizeTrap(off)
 	onByCategory := map[string]TrapSummary{}
@@ -378,14 +412,19 @@ func FormatTrap(off, on []TrapOutcome) string {
 
 	var b bytes.Buffer
 	b.WriteString("recency trap: the OLD memory is the correct answer, the NEWER ones are distractors.\n")
-	b.WriteString("wins = the old correct memory outranks every distractor in the window; @1 = it is the top result.\n\n")
-	fmt.Fprintf(&b, "%-22s %-7s %4s %10s %10s %9s %10s\n",
-		"category", "decays", "n", "wins(off)", "wins(on)", "delta", "@1(on)")
+	b.WriteString("wins = the old correct memory outranks every distractor in the window; @1 = it is the top result;\n")
+	b.WriteString("pinned = over the probes whose correct memory is PINNED, which is the one control a user has.\n\n")
+	fmt.Fprintf(&b, "%-22s %-7s %4s %10s %10s %9s %10s %14s\n",
+		"category", "decays", "n", "wins(off)", "wins(on)", "delta", "@1(on)", "pinned(on)")
 	for _, r := range offRows {
 		other := onByCategory[r.Category]
-		fmt.Fprintf(&b, "%-22s %-7s %4d %10.3f %10.3f %+9.3f %10.3f\n",
+		pinned := "-"
+		if other.Pinned > 0 {
+			pinned = fmt.Sprintf("%.3f (%d)", other.PinnedWins, other.Pinned)
+		}
+		fmt.Fprintf(&b, "%-22s %-7s %4d %10.3f %10.3f %+9.3f %10.3f %14s\n",
 			r.Category, trapDecaysLabel(r), r.Probes, r.CorrectWins, other.CorrectWins,
-			other.CorrectWins-r.CorrectWins, other.CorrectTop1)
+			other.CorrectWins-r.CorrectWins, other.CorrectTop1, pinned)
 	}
 	total := 0
 	if all, ok := onByCategory[trapAllLabel]; ok {

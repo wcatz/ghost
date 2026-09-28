@@ -2,7 +2,9 @@ package bench
 
 import (
 	"context"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -127,9 +129,55 @@ func TestStalenessReportNamesFreshAt1(t *testing.T) {
 	if all.FreshWins <= 0 {
 		t.Errorf("fresh-wins is %d of %d, so the fixture is not measuring what the report claims", all.FreshWins, all.Probes)
 	}
-	if !strings.Contains(report, "all") {
-		t.Errorf("report has no all-probes row:\n%s", report)
+	// The all-probes row has to be RENDERED, and "all" appears in plenty of other
+	// places in this report (a scenario name, a failing-probe line), so the check
+	// is on the row itself. Its numbers are compared against the aggregate rather
+	// than merely searched for: a report that prints one thing and tests another
+	// is the drift this whole change is about.
+	row, ok := stalenessRow(report, "all")
+	if !ok {
+		t.Fatalf("report has no all-probes row:\n%s", report)
 	}
+	n := float64(all.Probes)
+	for _, c := range []struct {
+		col     string
+		wantSum int
+	}{
+		{"fresh-found", all.FreshFound},
+		{"fresh-wins", all.FreshWins},
+		{"fresh@1", all.FreshTop1},
+	} {
+		if want := float64(c.wantSum) / n; math.Abs(row[c.col]-want) > 0.0005 {
+			t.Errorf("all row's %s is %.3f, want %.3f (%d of %d probes)",
+				c.col, row[c.col], want, c.wantSum, all.Probes)
+		}
+	}
+	if int(row["n"]) != all.Probes {
+		t.Errorf("all row's n is %d, want %d", int(row["n"]), all.Probes)
+	}
+}
+
+// stalenessRow parses one row of the staleness table by its leading label and
+// returns its numeric columns. It parses rather than searches for a substring
+// because a table is a table: the test that guards it should not pass on a
+// scenario name that happens to contain the label.
+func stalenessRow(report, label string) (map[string]float64, bool) {
+	for _, line := range strings.Split(report, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 5 || fields[0] != label {
+			continue
+		}
+		out := map[string]float64{}
+		for i, col := range []string{"n", "fresh-found", "fresh-wins", "fresh@1"} {
+			v, err := strconv.ParseFloat(fields[i+1], 64)
+			if err != nil {
+				return nil, false
+			}
+			out[col] = v
+		}
+		return out, true
+	}
+	return nil, false
 }
 
 // freshWins reports the fraction of probes where the fresh version outranked

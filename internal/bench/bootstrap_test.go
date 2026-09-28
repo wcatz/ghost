@@ -109,6 +109,39 @@ func TestPairedNDCGRefusesToPairDifferentQuerySets(t *testing.T) {
 	}
 }
 
+// TestBootstrapMeanCIRefusesToInventAnInterval: the resample count is a
+// parameter so a caller can vary it, and a count of zero used to index an empty
+// slice. There is no interval to report from zero resamples, and the only
+// defensible answer is the sample itself rather than the extremes of a
+// distribution that was never drawn.
+func TestBootstrapMeanCIRefusesToInventAnInterval(t *testing.T) {
+	diffs := []float64{0.1, -0.2, 0.3, 0.0, 0.05, -0.1, 0.2, 0.4, -0.3, 0.15}
+	want := func() float64 {
+		var sum float64
+		for _, d := range diffs {
+			sum += d
+		}
+		return sum / float64(len(diffs))
+	}()
+	for _, resamples := range []int{0, -1} {
+		lo, hi, mean := bootstrapMeanCI(diffs, resamples, 1)
+		if lo != mean || hi != mean || mean != want {
+			t.Errorf("resamples=%d gave (%.6f, %.6f, %.6f), want the observed mean %.6f three times",
+				resamples, lo, hi, mean, want)
+		}
+	}
+	// One resample is not degenerate in the same way — it is a distribution of
+	// one, so the interval is that resample and both edges are it. Asserted only
+	// so the shape is stated rather than left to be discovered.
+	if lo, hi, _ := bootstrapMeanCI(diffs, 1, 1); lo != hi {
+		t.Errorf("resamples=1 gave a two-edged interval (%.6f, %.6f)", lo, hi)
+	}
+	// An empty sample is the other degenerate input, and it is not a panic either.
+	if lo, hi, mean := bootstrapMeanCI(nil, 100, 1); lo != 0 || hi != 0 || mean != 0 {
+		t.Errorf("empty sample gave (%.3f, %.3f, %.3f), want zeros", lo, hi, mean)
+	}
+}
+
 // TestFusionGateDecision pins the rule the regression gate applies, on intervals
 // the committed dataset does not produce. The two that matter are the first pair:
 // the old gate was a comparison of point estimates, so it rejected an interval

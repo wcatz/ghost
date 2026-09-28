@@ -87,8 +87,11 @@ func TestRankedStateFixtureCarriesState(t *testing.T) {
 	if edges < 6 {
 		t.Errorf("%d supersedes edges in the corpus, want >= 6", edges)
 	}
-	if depth == 0 {
-		t.Error("no memory supersedes more than one row: an update chain is what the star-link ordering depends on")
+	// Pinned rather than "at least one": the report claims a three-deep chain,
+	// and a count that is only checked for non-emptiness lets a fixture edit
+	// quietly take the claim away.
+	if depth != 1 {
+		t.Errorf("%d memories supersede more than one row, want exactly 1 (the three-deep chain the report describes)", depth)
 	}
 
 	// Both classes of chain have to be present, or the report cannot separate
@@ -130,10 +133,11 @@ const wideAgeGapDays = 30
 // TestRankedStateSuiteIsNotInert is the measurement #561 asked for: the ranking
 // paths production uses, exercised on a corpus that has the state they read.
 // Decay reorders by base × decayFactor and the demote moves a row below its
-// superseder, so both can only move a RANK here — NDCG@10 over a single
-// relevant row is 1.0 for anything in the window, and membership is relevance's
-// to decide (DecayReselect ships false). R@1 and MRR@10 are therefore the
-// sensitive columns and the ones the assertions read.
+// superseder, so both act on RANK rather than on membership (DecayReselect ships
+// false, so relevance owns the window cut). Every ranking metric here is
+// therefore sensitive — NDCG@10 included, since it discounts by position — and
+// the report reads all of them. R@1 and MRR@10 are the columns the assertions
+// use because they are the least discounted and so the first to move.
 //
 // The headline table is reported beside it and must read the same in all four
 // configurations: it is seeded from a file with no ages and no edges, so the two
@@ -143,9 +147,8 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 	ctx := context.Background()
 	queries, ds, store := seedRankedStateFixture(t)
 
-	configs := RankedStateConfigs()
-	results := make([][]Result, 0, len(configs))
-	for _, cfg := range configs {
+	runs := make([]RankedStateRun, 0, len(RankedStateConfigs()))
+	for _, cfg := range RankedStateConfigs() {
 		res, err := RunRankedState(ctx, store, queries, cfg.Params)
 		if err != nil {
 			t.Fatalf("%s: %v", cfg.Label, err)
@@ -153,28 +156,31 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 		if res[0].Queries != len(ds.Queries) {
 			t.Fatalf("%s: scored %d queries, want all %d (every probe is graded here)", cfg.Label, res[0].Queries, len(ds.Queries))
 		}
-		results = append(results, res)
+		answers, err := AnswerRanks(ctx, store, queries, cfg.Params)
+		if err != nil {
+			t.Fatalf("%s answer ranks: %v", cfg.Label, err)
+		}
+		runs = append(runs, RankedStateRun{Config: cfg, Result: res, Answers: answers})
 	}
-	t.Logf("ranking-state suite (report-only):\n%s", FormatRankedState(configs, results))
+	t.Logf("ranking-state suite (report-only):\n%s", FormatRankedState(runs))
 
-	hybrid := func(i int) Result { return results[i][2] }
-	off, decay, demote, both := hybrid(0), hybrid(1), hybrid(2), hybrid(3)
+	hybrid := func(i int) Result { return runs[i].Result[2] }
+	off, decay, demote := hybrid(0), hybrid(1), hybrid(2)
 
 	// The single legs take no SearchParams, so they are the control: if they
 	// moved between configurations, something other than the two ranking paths
 	// is changing the corpus between runs.
-	last := results[len(results)-1]
-	if results[0][0].Recall10 != last[0].Recall10 || results[0][1].Recall10 != last[1].Recall10 ||
-		results[0][0].MRR10 != last[0].MRR10 || results[0][1].MRR10 != last[1].MRR10 {
+	last := runs[len(runs)-1].Result
+	if runs[0].Result[0].Recall10 != last[0].Recall10 || runs[0].Result[1].Recall10 != last[1].Recall10 ||
+		runs[0].Result[0].MRR10 != last[0].MRR10 || runs[0].Result[1].MRR10 != last[1].MRR10 {
 		t.Errorf("a single-leg condition changed between configurations, so the corpus is not stable across runs: "+
 			"fts R@10 %.3f->%.3f MRR %.3f->%.3f, vector R@10 %.3f->%.3f MRR %.3f->%.3f",
-			results[0][0].Recall10, last[0].Recall10, results[0][0].MRR10, last[0].MRR10,
-			results[0][1].Recall10, last[1].Recall10, results[0][1].MRR10, last[1].MRR10)
+			runs[0].Result[0].Recall10, last[0].Recall10, runs[0].Result[0].MRR10, last[0].MRR10,
+			runs[0].Result[1].Recall10, last[1].Recall10, runs[0].Result[1].MRR10, last[1].MRR10)
 	}
 
 	// Decay is non-inert: with the demote off, turning decay on has to move a
-	// rank. R@1 and MRR@10 are the columns that can move, and both are checked
-	// because a change in only one of them is a real (if small) effect.
+	// rank.
 	if !rankMoved(off, decay) {
 		t.Errorf("decay is inert on this suite: R@1 %.3f->%.3f, MRR@10 %.3f->%.3f (demote off in both)",
 			off.Recall1, decay.Recall1, off.MRR10, decay.MRR10)
@@ -188,24 +194,40 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 	// Findability: decay is ordering-only, so no probe may lose its answer
 	// between the configurations. R@10 is the membership column and it must be
 	// identical in all four.
-	for i, cfg := range configs {
-		if results[i][2].Recall10 != off.Recall10 {
+	for _, run := range runs {
+		if run.Result[2].Recall10 != off.Recall10 {
 			t.Errorf("%s: recall@10 = %.3f, want %.3f — a ranking change dropped an answer out of the window",
-				cfg.Label, results[i][2].Recall10, off.Recall10)
+				run.Config.Label, run.Result[2].Recall10, off.Recall10)
 		}
 	}
 
-	// The shipped default is the pair, and it is not the sum of the halves: two
-	// reordering passes can undo each other on the same row. Asserting that they
-	// are not identical is what stops this suite from being read as "each path
-	// helps, so both help".
-	t.Logf("shipped vs both-off: R@1 %+.3f, MRR@10 %+.3f, NDCG@10 %+.3f",
-		both.Recall1-off.Recall1, both.MRR10-off.MRR10, both.NDCG10-off.NDCG10)
+	// The interaction the aggregate table cannot express: the shipped pair is
+	// not the sum of the halves, and it is worth naming the counts rather than
+	// only the ratio, because the answer is "the ones whose answer is old" and a
+	// reader can only act on that form of the finding.
+	shipped := ranksByProbe(runs[3])
+	lostByDecay := probesDemoted(runs[0], runs[1])
+	lostByDemoteAlone := probesDemoted(runs[0], runs[2])
+	lostByPair := probesDemoted(runs[2], runs[3])
+	t.Logf("probes whose answer lost the top slot: decay alone (vs both off) %d, demote alone (vs both off) %d, "+
+		"shipped pair (vs demote alone) %d — the rows decay pushes down are the rows the demote promotes, so it recovers none of them",
+		len(lostByDecay), len(lostByDemoteAlone), len(lostByPair))
+	if len(shipped) != len(ds.Queries) {
+		t.Errorf("answer ranks cover %d probes, the suite has %d", len(shipped), len(ds.Queries))
+	}
+	if len(lostByDecay) == 0 {
+		t.Error("decay alone demoted no probe relative to both off, so the four configurations are indistinguishable")
+	}
+	if len(lostByPair) == 0 {
+		t.Error("the shipped configuration lost no probe relative to the demote alone, so decay and the demote do not interact on this corpus")
+	}
 
-	// The headline table, same four configurations, one number. Asserted rather
-	// than reported so the comparison cannot rot: if a future change makes the
-	// headline corpus carry state, the two suites stop being comparable and this
-	// is where it says so.
+	// The headline table, same four configurations, one number. The assertion is
+	// that the four are EQUAL — that the headline corpus is still the inert
+	// reference this suite is compared against. It is deliberately not an
+	// assertion that they equal 0.818: pinning the value here would duplicate
+	// TestBenchRegressionFloors' floors, and the claim this suite needs is the
+	// invariance, not the level.
 	headline, hvecs := loadTestdataDataset(t)
 	hstore, hdb := newSeedingStore(t)
 	t.Cleanup(func() { _ = hstore.Close() })
@@ -214,27 +236,50 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 		t.Fatalf("seed headline: %v", err)
 	}
 	var headlineNDCG []float64
-	for _, cfg := range configs {
-		res, err := RunRankedState(ctx, hstore, hqueries, cfg.Params)
+	for _, run := range runs {
+		res, err := RunRankedState(ctx, hstore, hqueries, run.Config.Params)
 		if err != nil {
-			t.Fatalf("headline %s: %v", cfg.Label, err)
+			t.Fatalf("headline %s: %v", run.Config.Label, err)
 		}
 		headlineNDCG = append(headlineNDCG, res[2].NDCG10)
 	}
 	for i := 1; i < len(headlineNDCG); i++ {
 		if headlineNDCG[i] != headlineNDCG[0] {
 			t.Errorf("headline hybrid NDCG@10 moved under %s (%.4f vs %.4f): the headline corpus now carries state, "+
-				"so it is no longer the inert reference this suite is compared against", configs[i].Label, headlineNDCG[i], headlineNDCG[0])
+				"so it is no longer the inert reference this suite is compared against", runs[i].Config.Label, headlineNDCG[i], headlineNDCG[0])
 		}
 	}
 	t.Logf("headline hybrid NDCG@10, all four configurations: %.4f (inert, as intended)", headlineNDCG[0])
 }
 
-// rankMoved reports whether a configuration changed either of the two columns a
-// reordering pass can move: the head of the ranking (R@1) and the mean position
-// of the answer (MRR@10). NDCG@10 is deliberately not read here — over a
-// single-relevant-row probe it is 1.0 for anything in the window, so it can only
-// report a membership change, which the findability check above covers.
+// rankMoved reports whether a configuration changed either of the two columns the
+// suite's assertions read: the head of the ranking (R@1) and the mean position of
+// the answer (MRR@10). Both are discounted by position; R@1 is the least
+// discounted and moves first, which is why these two rather than NDCG@10, whose
+// change is a consequence of the same reorder seen at a different rate.
 func rankMoved(a, b Result) bool {
 	return a.Recall1 != b.Recall1 || a.MRR10 != b.MRR10
+}
+
+// ranksByProbe indexes one configuration's per-probe answer ranks.
+func ranksByProbe(run RankedStateRun) map[string]int {
+	out := make(map[string]int, len(run.Answers))
+	for _, a := range run.Answers {
+		out[a.Probe] = a.Rank
+	}
+	return out
+}
+
+// probesDemoted names the probes whose answer rank got WORSE going from one
+// configuration to the next. An answer that was first and is no longer first is
+// the shape the decay cost takes here, so that is the comparison.
+func probesDemoted(from, to RankedStateRun) map[string]bool {
+	before := ranksByProbe(from)
+	out := map[string]bool{}
+	for _, a := range to.Answers {
+		if a.Rank > before[a.Probe] {
+			out[a.Probe] = true
+		}
+	}
+	return out
 }

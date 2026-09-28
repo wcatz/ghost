@@ -59,11 +59,13 @@ func TestClaudeMDListsEverySubcommand(t *testing.T) {
 	}
 }
 
-// subcommandListBody finds the CLAUDE.md line that inventories the commands and
-// returns just the names. Matching on the prose that introduces it is deliberate:
-// it is the sentence a reader uses to find the list, so a reworded list is the
-// thing that should stop this test rather than a silent miss.
-var subcommandListRE = regexp.MustCompile(`subcommands: ([^.]+)\.`)
+// subcommandListBody finds the CLAUDE.md bullet that inventories the commands
+// and returns just the names. Anchored on the `cmd/ghost/main.go` reference
+// rather than on the word "subcommands" alone, because a sentence containing
+// that word anywhere above the bullet would otherwise redirect the test at the
+// wrong line — and a test that silently checks the wrong sentence is worse than
+// one that fails.
+var subcommandListRE = regexp.MustCompile("(?m)^- `cmd/ghost/main\\.go`[^\\n]*subcommands: ([^.]+)\\.")
 
 func subcommandListBody(doc string) (string, bool) {
 	m := subcommandListRE.FindStringSubmatch(doc)
