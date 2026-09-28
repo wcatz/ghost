@@ -2644,7 +2644,7 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID),
 		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope),
 		nullIfEmptyPtr(m.ValidFrom), nullIfEmptyPtr(m.ValidUntil),
-		nullIfEmptyPtr(m.VerifiedAt)).Scan(&id, retention, expires)
+		nullIfEmptyPtr(m.VerifiedAt), retention, expires).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create memory: %w", err)
 	}
@@ -3730,7 +3730,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
 			scopeJSON(opts.Scope), boolToInt(opts.Pin),
 			nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
-			nullIfEmptyPtr(opts.Validity.VerifiedAt)).Scan(&id, retention, expires); err != nil {
+			nullIfEmptyPtr(opts.Validity.VerifiedAt), retention, expires).Scan(&id); err != nil {
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
 		}
 		if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
@@ -3813,7 +3813,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
 		scopeJSON(opts.Scope), boolToInt(opts.Pin),
 		nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
-		nullIfEmptyPtr(opts.Validity.VerifiedAt)).Scan(&id, retention, expires); err != nil {
+		nullIfEmptyPtr(opts.Validity.VerifiedAt), retention, expires).Scan(&id); err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {

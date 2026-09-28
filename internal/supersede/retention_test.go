@@ -40,12 +40,12 @@ func TestSelectCandidatesSkipsAPersistentEndpoint(t *testing.T) {
 
 			markPersistent(t, db, map[string]bool{newer: tc.keepNewer, older: tc.keepOlder})
 
-			cands, err := SelectCandidates(ctx, store, "p", 0.9)
+			sel, err := SelectCandidates(ctx, store, "p", 0.9)
 			if err != nil {
 				t.Fatalf("SelectCandidates: %v", err)
 			}
-			if len(cands) != 0 {
-				t.Fatalf("got %d candidate(s) for a pair with a persistent endpoint: %+v", len(cands), cands)
+			if len(sel.Candidates) != 0 {
+				t.Fatalf("got %d candidate(s) for a pair with a persistent endpoint: %+v", len(sel.Candidates), sel.Candidates)
 			}
 		})
 	}
@@ -62,15 +62,15 @@ func TestSelectCandidatesStillProposesAnOrdinaryPair(t *testing.T) {
 	older := add(t, store, db, "postgres runs version 14", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
 	_ = add(t, store, db, "grafana listens on port 80", []float32{0, 0, 1}, "2026-06-01 00:00:00")
 
-	cands, err := SelectCandidates(ctx, store, "p", 0.9)
+	sel, err := SelectCandidates(ctx, store, "p", 0.9)
 	if err != nil {
 		t.Fatalf("SelectCandidates: %v", err)
 	}
-	if len(cands) != 1 {
-		t.Fatalf("got %d candidates, want the one postgres pair", len(cands))
+	if len(sel.Candidates) != 1 {
+		t.Fatalf("got %d candidates, want the one postgres pair", len(sel.Candidates))
 	}
-	if cands[0].NewerID != newer || cands[0].OlderID != older {
-		t.Errorf("pair = (%s,%s), want (%s,%s)", cands[0].NewerID, cands[0].OlderID, newer, older)
+	if sel.Candidates[0].NewerID != newer || sel.Candidates[0].OlderID != older {
+		t.Errorf("pair = (%s,%s), want (%s,%s)", sel.Candidates[0].NewerID, sel.Candidates[0].OlderID, newer, older)
 	}
 }
 
