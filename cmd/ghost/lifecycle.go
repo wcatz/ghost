@@ -15,6 +15,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
@@ -1651,6 +1652,67 @@ func retryNote(retries int) string {
 	return fmt.Sprintf(", %d retried after a failed call", retries)
 }
 
+// supersedeEmbedBound is how many memories one `ghost supersede` pass will embed
+// for itself. It is the embedding worker's own project batch today, and stays a
+// separate number on purpose: a daemon's backfill and an operator's wait are
+// different problems, and a pass that had to embed a whole corpus would be doing
+// the first one inside a command the second is blocked on. The rows past the
+// bound are the sweep's — this is a pass making the corpus it is about to read
+// searchable, not a backfill.
+const supersedeEmbedBound = 50
+
+// embedSupersedeCorpus embeds the memories of projectID that have no vector yet,
+// and returns how many it wrote. It runs before the candidate scan, and only when
+// embedding is enabled: with embedding off there is no vector index to fill.
+//
+// WHY a pass does this at all: `supersede` is the one lifecycle phase whose
+// candidate mechanism IS the vector index — the pair is proposed by cosine — so a
+// memory it has no vector for is not a candidate for anything
+// (supersede.SelectCandidates skips it). Those vectors are written by the
+// embedding worker, which lives in `ghost mcp`: another process, on its own
+// schedule, running only if a server is up. A user who saves two notes and runs
+// the pass in the same breath therefore gets "0 candidate pairs" — a clean report
+// for a pair that was in front of them, with nothing anywhere saying the index
+// had not caught up. That window is short, and it is also exactly when a
+// supersession is most likely to be wanted, so the pass closes it itself instead
+// of leaving the answer to a daemon's timing (#716).
+//
+// It is the worker's own code (embedding.Worker.EmbedPending) rather than a
+// second implementation, so the two cannot drift on what "unembedded" means, on
+// the identity a vector is stamped with, or on what happens when the endpoint is
+// down. The worker is built with no data dir: the Ollama-down marker is the
+// daemon's outage bookkeeping, and a one-shot pass has no outage to keep time.
+//
+// It runs in a dry run too, and the vectors it writes are derived index state
+// rather than graph state: the same rows the embedding worker was going to write
+// for these memories anyway, over their own unchanged text, keyed by content
+// rather than by any decision this pass made. What a dry run promises is that
+// the GRAPH is untouched — no link, no invalidation, no cache row — and it still
+// is.
+func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory.Store, projectID string, logger *slog.Logger) int {
+	if !cfg.Embedding.Enabled {
+		return 0
+	}
+	client := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
+	return embedding.NewWorker(client, store, logger, 0, "").EmbedPending(ctx, projectID, supersedeEmbedBound)
+}
+
+// supersedeEmbedNote reports the vectors a pass had to produce before it could
+// read the corpus, and nothing at all when there were none to produce: it is a
+// statement about work THIS run did, and on an ordinary pass — the index already
+// current — the answer to the operator's question is that there was nothing to
+// do, which an unconditional "embedded 0" line would bury.
+func supersedeEmbedNote(embedded int) string {
+	switch embedded {
+	case 0:
+		return ""
+	case 1:
+		return "  1 memory embedded for this pass — it had no vector yet, and a note with no vector is not a candidate for anything\n"
+	default:
+		return fmt.Sprintf("  %d memories embedded for this pass — they had no vector yet, and a note with no vector is not a candidate for anything\n", embedded)
+	}
+}
+
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
 // half of staleness-aware ranking. It proposes newer→older 'supersedes' links
 // over the project's live memories (cosine-similar candidates, a deterministic
@@ -1732,6 +1794,14 @@ func runSupersede() {
 		return
 	}
 
+	// The corpus the scan is about to read, made readable first: the vectors it
+	// needs are normally written by the embedding worker inside `ghost mcp`, and
+	// this pass cannot wait on another process to notice a save (see
+	// embedSupersedeCorpus). It is the only phase here that has to do this, and
+	// it happens after the two repair modes have returned, because neither of them
+	// reads the vector index at all.
+	embedded := embedSupersedeCorpus(ctx, cfg, store, projectID, logger)
+
 	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -1743,6 +1813,7 @@ func runSupersede() {
 		verb = "linked"
 	}
 	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls(), cls.Retries()))
+	fmt.Print(supersedeEmbedNote(embedded))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}
