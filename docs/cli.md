@@ -618,25 +618,30 @@ ghost context --cwd /path/to/project
 
 This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response.
 
-### `ghost history <memory-id>` / `ghost history purge <memory-id>`
+### `ghost history <memory-ref>` / `ghost history purge <memory-id>`
 
 Prints one memory's append-only history: every insert, edit, reflection rewrite,
 duplicate fold, resolve, supersession, restore, import and deletion, oldest
 first.
 
 ```bash
-ghost history <memory-id>                    # human-readable changelog
-ghost history <memory-id> --limit 5          # the newest 5 entries
-ghost history <memory-id> --json | jq .phase # one JSON object per entry
+ghost history <memory-ref>                   # human-readable changelog
+ghost history <memory-ref> --limit 5         # the newest 5 entries
+ghost history <memory-ref> --json | jq .phase # one JSON object per entry
 
 ghost history purge <memory-id>              # erase the row AND its history
 ```
 
-```bash
-ghost history <memory-id>                    # human-readable changelog
-ghost history <memory-id> --limit 5          # the newest 5 entries
-ghost history <memory-id> --json | jq .phase # one JSON object per entry
-```
+`<memory-ref>` is a full memory id **or** 8 or more characters of one — the same
+eight characters every Ghost report prints, so an id copied out of one can be
+pasted straight in. A prefix naming more than one memory is refused and says which,
+rather than picking one, and a short argument that matches nothing is told it is a
+prefix no id starts with rather than that a memory was never written. The id is
+resolved across the whole store, so a ref reaches a memory in any project, and it
+reaches **deleted** ones too: the tombstone is in `memory_history` and it is the
+reason to read a history. It also reaches a live memory that predates the history
+table, which has no history rows of its own. A full id the store does not hold
+keeps its own answer — that it was never written, or its history has been pruned.
 
 Each entry names when it happened, which write path made it (`save`, `update`,
 `reflect`, `merge`, `resolve`, `unresolve`, `supersede`, `unsupersede`, `restore`,
@@ -681,6 +686,16 @@ row back, with its text and no history:
   feature, so "erase that secret" asked an hour after the memory was deleted would
   otherwise report the memory as not found and leave the text where it is. The
   memory is not brought back — only the text goes.
+
+`purge` takes the **whole id** and refuses a prefix, which is the one difference
+from the read above. It erases recorded text for good, so a mistyped argument is
+not a message but an unprintable memory, and echoing the resolved id would not make
+it safe — the announcement and the transaction are one breath apart, and one wrong
+character in a pasted prefix is still a unique match. The refusal prints the full id
+the prefix names, so the way through is `ghost history <prefix>` and then
+`ghost history purge <that id>`. A whole id the store does not hold is reported as a
+miss ("nothing to purge"), not as a prefix — which is also what re-running a purge
+that already succeeded looks like.
 
 The MCP equivalent is `ghost_memory_delete` with `purge_history: true`, in both
 directions — including for a memory that is already deleted, where it purges the

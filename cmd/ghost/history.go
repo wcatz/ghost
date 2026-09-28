@@ -10,14 +10,19 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/memref"
 )
 
 // historyOptions is `ghost history`'s parsed arguments.
 type historyOptions struct {
-	// MemoryID is the memory whose history to read, or to purge with `purge`.
-	// Required: with no id there is nothing to print, and guessing one (say, the
+	// MemoryID is the memory whose history to read, or to purge with `purge`. It
+	// is a REF: a full id, or a prefix of 8 or more characters that names exactly
+	// one memory, resolved through internal/memref once the store is open (see
+	// resolveHistoryRef) — except under `purge`, which takes a whole id only.
+	// Required: with no ref there is nothing to print, and guessing one (say, the
 	// most recent write) would answer a different question than the one asked.
 	MemoryID string
 	// Limit caps how many entries are printed, newest kept. Zero means the
@@ -28,14 +33,16 @@ type historyOptions struct {
 	// human-readable block.
 	JSON bool
 	// Purge erases the memory and every recorded version of it, instead of
-	// printing its history. See runHistoryPurge.
+	// printing its history. See purgeHistoryMemory, which also owns the rule that
+	// this one takes a whole id rather than a ref.
 	Purge bool
 }
 
-// parseHistoryArgs parses `ghost history <memory-id> [--limit N] [--json]` and
+// parseHistoryArgs parses `ghost history <memory-ref> [--limit N] [--json]` and
 // `ghost history purge <memory-id>`. Only --limit and --json are recognized;
 // anything else is an error rather than being ignored, because a silently
-// misparsed flag here would print a confident and wrong history.
+// misparsed flag here would print a confident and wrong history. The ref is NOT
+// resolved here: that needs the store, and this stays a pure function of argv.
 func parseHistoryArgs(args []string) (historyOptions, error) {
 	var opts historyOptions
 	for i := 0; i < len(args); i++ {
@@ -97,13 +104,20 @@ func parseHistoryLimit(value string) (int, error) {
 // historyUsage is the help for `ghost history`: stdout for -h/--help (see
 // handleHelp), and the same text on stderr after a usage error. One text for
 // both, so the two cannot drift.
-const historyUsage = `Usage: ghost history <memory-id> [--limit N] [--json]
+const historyUsage = `Usage: ghost history <memory-ref> [--limit N] [--json]
        ghost history purge <memory-id>
 
 Prints one memory's append-only history: every insert, edit, reflection
 rewrite, duplicate fold, resolve, supersession, restore, import and deletion,
 oldest first, each with the content, category, importance, resolved_at and
 source the memory held once that write landed.
+
+  <memory-ref>  A full memory id, or 8 or more characters of one — the same
+              eight characters every Ghost report prints, so an id copied out
+              of one can be pasted here. A prefix naming more than one memory is
+              refused and says which, rather than picking one. Resolution
+              reaches DELETED memories too, since their history is what is left
+              of them.
 
   --limit N   Print only the newest N entries (default: all the store keeps)
   --json      One JSON object per entry, for scripting
@@ -121,7 +135,10 @@ source the memory held once that write landed.
               snapshots go in one transaction, so none can survive the others. A
               memory that is ALREADY deleted is handled here too: its recorded
               text is erased on its own, because the tombstone is the feature
-              and a delete cannot reach it.
+              and a delete cannot reach it. Purge takes the WHOLE id and refuses
+              a prefix: it erases recorded text for good, where a mistyped
+              argument is not a message but an unprintable memory. Run
+              'ghost history <prefix>' to see the full id a prefix names.
 
 The history outlives the memory: a deleted memory's last state is still
 readable here unless it was purged.
@@ -346,10 +363,28 @@ func runHistory() {
 	ctx := context.Background()
 	s := memory.NewStore(db, nil)
 	if opts.Purge {
-		runHistoryPurge(ctx, s, opts.MemoryID)
+		// The purge path deliberately does NOT take a prefix (#720). It erases a
+		// memory's text for good, and the argument naming which memory is the only
+		// thing standing between an operator and a mistake nothing undoes — so it
+		// takes a WHOLE id, and says so when given a prefix one. The read path
+		// prints the full id a prefix resolves to, which is the way through.
+		if err := purgeHistoryMemory(ctx, s, opts.MemoryID); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
-	view, err := readHistoryView(ctx, s, opts.MemoryID, opts.Limit)
+	// Resolution happens after the store is open, so the id set it decides over
+	// is the one this store holds, and before the read, so a refused ref is never
+	// reported as a memory with no history.
+	memoryID, err := resolveHistoryRef(ctx, s, opts.MemoryID)
+	if err != nil {
+		if werr := reportHistoryRefusal(os.Stdout, os.Stderr, opts.JSON, err.Error()); werr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", werr)
+		}
+		os.Exit(1)
+	}
+	view, err := readHistoryView(ctx, s, memoryID, opts.Limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -364,8 +399,8 @@ func runHistory() {
 	}
 }
 
-// runHistoryPurge erases a memory's recorded text, and the memory itself when it
-// is still there.
+// purgeHistoryMemory erases a memory's recorded text, and the memory itself when
+// it is still there, or explains why it will not.
 //
 // Two cases, because a purge asked for at DELETE time cannot cover a memory that
 // is already gone: a live memory is deleted with its history in one transaction,
@@ -378,34 +413,74 @@ func runHistory() {
 // to go rather than being told "done" and left guessing whether the argument was
 // even a live memory. A purge is irreversible by construction — that is what
 // makes it a redaction path — so the count is the only warning there is.
-func runHistoryPurge(ctx context.Context, s *memory.Store, memoryID string) {
+//
+// It returns an error rather than exiting, because the whole decision it makes —
+// which of the two cases applies, and whether the argument is a whole id at all —
+// is the part worth driving without a process, and runHistory's own os.Exit is one
+// line away from the call.
+//
+// A PREFIX is refused, and this is the one place in Ghost that answers "a memory
+// by ref" without taking one. `ghost history` resolves the eight characters a
+// report prints (#720) and `ghost resolve --mark` and `ghost supersede --withdraw`
+// change rows by ref, so a prefix is the form a caller has on screen — and this is
+// the form that erases recorded text for good, where a wrong target is not a
+// mistyped flag but an unprintable memory. An echoed full id would not make that
+// safe: the announcement and the transaction are one breath apart, and a
+// single-character slip in a pasted prefix is still a unique match, so there is no
+// moment in which to notice it was the wrong one. So the argument must BE the whole
+// id, and the repair is the read path: `ghost history <prefix>` prints the full id
+// it resolved, and that goes in here.
+//
+// A prefix is therefore refused with the full id it names, where there is exactly
+// one. Naming it is not a confirmation — nothing is erased either way — it is the
+// next command, and refusing without it would leave the operator to find the id in
+// a report again.
+func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) error {
+	// ONE read of the id set, and both decisions made from it: whether the argument
+	// is a whole id, and — if it is not — what to say about it. Reading it twice
+	// would mean two reads that could disagree, on a path whose whole job is to
+	// erase the right text.
+	ids, err := s.AnyMemoryIDsByIDPrefix(ctx, memoryID)
+	if err != nil {
+		// Propagated, not folded into "not a whole id": a store that cannot be
+		// read has told us nothing about the argument, and a prefix sentence here
+		// would send the operator after a full id they may already have.
+		return fmt.Errorf("check the memory id against this store: %w", err)
+	}
+	stored, ok := wholeMemoryID(ids, memoryID)
+	if !ok {
+		return purgePrefixRefusal(ids, memoryID)
+	}
+	// The STORED spelling, never the caller's. Ids are matched case-insensitively
+	// when a ref is resolved — a report can print a hex id uppercased whatever the
+	// column holds — and every read below compares case-SENSITIVELY, because neither
+	// `memories.id` nor `memory_history.memory_id` carries COLLATE NOCASE. Purging
+	// the caller's spelling of an id stored in another one would find no row and no
+	// history and report "nothing to purge" on the redaction path, while the text
+	// sat in the database.
+	memoryID = stored
 	entries, err := s.MemoryHistory(ctx, memoryID, 0)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	live, err := s.GetByIDs(ctx, []string{memoryID})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 	if len(entries) == 0 && len(live) == 0 {
-		fmt.Fprintf(os.Stderr, "no memory and no history for %s — nothing to purge\n", memoryID)
-		os.Exit(1)
+		return fmt.Errorf("no memory and no history for %s — nothing to purge", memoryID)
 	}
 	switch {
 	case len(live) > 0:
 		fmt.Printf("Purging memory %s and %d recorded version(s) of its text.\n", memoryID, len(entries))
 		if err := s.DeleteWithOptions(ctx, memoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 	default:
 		// Already deleted. The row is not coming back and nothing asked for it to.
 		fmt.Printf("Memory %s is already deleted; purging its %d recorded version(s) of text.\n", memoryID, len(entries))
 		if _, err := s.PurgeMemoryHistory(ctx, memoryID); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return err
 		}
 	}
 	// Accurate about what the transaction covers: the row, its history, and the
@@ -413,6 +488,188 @@ func runHistoryPurge(ctx context.Context, s *memory.Store, memoryID string) {
 	// outside this database — an earlier backup, another machine's store — or a
 	// text quoted into something that was never Ghost's memory.
 	fmt.Println("Purged. This memory's row, its recorded history and any reflection snapshot holding it are gone.")
+	return nil
+}
+
+// wholeMemoryID reports the id in ids that ref names WHOLE, and whether it names
+// one — the test a purge is gated on. It returns the STORED spelling, which is the
+// half that matters: the reads a purge then makes compare case-sensitively, so a
+// boolean would let a case-folded spelling through the gate and then find nothing.
+//
+// It asks `memref.ResolveIn` rather than scanning for a case-insensitive match, and
+// that is the whole design. Whether a ref IS a stored id is a ref rule — the 8-
+// character floor, byte-exact precedence, the ambiguity and third-casing refusals —
+// and a gate that re-derived any of it would be the second implementation this
+// package exists to prevent. Re-deriving it wrongly is not hypothetical: a store can
+// hold two ids differing only in letter case (`ghost import` writes an artifact's
+// ids verbatim and its presence probe is case-sensitive, so it can land both), and a
+// first-match scan over that set picks whichever SQLite's BINARY collation sorts
+// first. `ghost history purge abc…` would then erase `ABC…` — the wrong memory's
+// text, irreversibly, while the one named kept it. `ResolveIn` refuses the set
+// instead, because no single spelling reaches both.
+//
+// So the whole id is whatever `ResolveIn` resolved, checked against the ref with
+// EqualFold: a resolved PREFIX is not a whole id, and a refusal is not one either —
+// including a miss, and including a third casing, which memref refuses because no
+// spelling of the caller's reaches the stored ones.
+//
+// It is a membership test, not a length test: a length test would have to hardcode
+// what a full id looks like, and nothing says an id is 32 hex characters — a store
+// full of imported notes holds ids that are whatever the artifacts held, and an
+// eight-character id there is a whole one.
+func wholeMemoryID(ids []string, ref string) (string, bool) {
+	id, err := memref.ResolveIn(ids, "id", ref)
+	if err != nil {
+		// Every refusal, without distinguishing them. The gate's question is
+		// "is this a whole id", and no refusal means yes; what the refusal SAID
+		// is the refusal's job, one function along.
+		return "", false
+	}
+	if !strings.EqualFold(id, ref) {
+		// Resolved to a longer id this ref begins with: a prefix, which is the
+		// case this command refuses for its own reason.
+		return "", false
+	}
+	return id, true
+}
+
+// purgePrefixRefusal explains that a prefix is not enough here, and names the full
+// id when the prefix picks out exactly one. The ambiguity case is memref's own
+// refusal — reached through the shared rules rather than restated, so the answer to
+// "which memory did you mean" cannot differ between this and the read path.
+//
+// An argument that names NOTHING is not a prefix, and saying it was would be a
+// false claim about a string that is too: after a successful purge the id is in
+// neither table, so a re-run of the same command would be told its own argument was
+// a prefix. The miss is reported as the miss it is — nothing to purge — and that
+// sentence is the answer whether the id was purged already or never existed.
+//
+// The length is what separates the two only in the refusal's wording. It is read
+// here for the same reason memref measures the floor in characters: a byte count
+// would call a four-byte ref a "4-character prefix" of an id whose own characters
+// are not bytes.
+func purgePrefixRefusal(ids []string, ref string) error {
+	if len(ids) == 0 {
+		// The "nothing to purge" answer, not the prefix one. Which is right
+		// depends on nothing this call can see: the id may be a whole id whose
+		// memory and text are both already gone, and there is nothing to say to
+		// an operator who has just watched a purge succeed.
+		return fmt.Errorf("no memory and no history for %s — nothing to purge", ref)
+	}
+	id, err := memref.ResolveIn(ids, "id", ref)
+	if err != nil {
+		// Ambiguous, or below memref's floor. Both are memref's sentences rather
+		// than this command's, wrapped so the reason a prefix was refused at all
+		// is on the same line.
+		return fmt.Errorf("purge needs a whole memory id and %q is not one: %w", ref, err)
+	}
+	return fmt.Errorf("purge needs a whole memory id, not the %d-character prefix %q, because it erases recorded text for good — the memory it names is %s: run 'ghost history purge %s' to purge it",
+		utf8.RuneCountInString(ref), ref, id, id)
+}
+
+// resolveHistoryRef turns the argument `ghost history` was given into the id its
+// read uses (#720).
+//
+// It goes through internal/memref like every other surface that names a memory by
+// ref, so a ref means here exactly what it means to `resolve --mark` and
+// `supersede --withdraw` — the eight characters a report prints, an unambiguous
+// longer prefix, or a full id of any shape. The rules are not restated here, which
+// is the point: two implementations eventually disagree about which id one spelling
+// addresses, and this command is the one place that would be most expensive to get
+// wrong, because it prints a memory's whole recorded text.
+//
+// The id set is the one thing that differs, and it is why this is not `memref.Resolve`
+// with a project. A history lookup is asked about DELETED memories more often than
+// about live ones — the tombstone is the feature — and a deleted memory's id is in
+// memory_history alone. It also reaches ids of LIVE memories that predate the
+// history table, which have no history row at all, because migrateV17 deliberately
+// does not backfill. The set is the whole store, and that is deliberate rather than
+// a missing project predicate: this command has no project operand and a full id
+// has always reached any row in the store, so scoping a PREFIX to a project would
+// make the two forms of one ref disagree about where a memory may be looked for.
+//
+// A full id the store does not hold is NOT a refusal, and it passes through
+// unchanged. The caller has said everything there is to say, and `readHistoryView`
+// has always answered an unknown full id as "never written, or its history has been
+// pruned" — a report about the id, not an error about the operator's argument.
+// Routing it through the prefix rules would report it as a prefix of nothing, which
+// is a claim about a string the caller never shortened.
+//
+// "Not a refusal" is narrower than "not an error", and the difference is
+// `memref.ErrNoMatch`. Only the refusal that says the set holds NOTHING this ref
+// can mean passes through, and only for a ref long enough not to be a truncation;
+// an ambiguity and a third casing are refusals whatever the ref's length, and they
+// reach the operator with the matches named. That distinction is memref's, and it
+// is why the sentinel is.
+func resolveHistoryRef(ctx context.Context, s *memory.Store, ref string) (string, error) {
+	ids, err := s.AnyMemoryIDsByIDPrefix(ctx, ref)
+	if err != nil {
+		return "", fmt.Errorf("resolve the memory id: %w", err)
+	}
+	// memref's rules over the whole-store set, and its refusals name no project
+	// because this set is not confined to one.
+	id, err := memref.ResolveIn(ids, "id", ref)
+	if err == nil {
+		return id, nil
+	}
+	// A MISS on a ref at least as LONG as a whole id passes through to the read,
+	// which reports it as it always has. The reason for the length is that such a ref
+	// cannot be a TRUNCATION of an id — there is nothing left to shorten — so the
+	// answer is about the id rather than about the operator's spelling of it.
+	//
+	// The reason for branching on the REFUSAL and not on the length alone is that a
+	// length cannot tell the refusals apart. `ghost import` writes an artifact's ids
+	// verbatim, so a store can hold two 40-character ids sharing 32 characters, or two
+	// 32-character ids differing only in letter case; a gate on length would let
+	// either through, and the read would then print "no memory and no history
+	// recorded" about a memory the store plainly holds. That is a false claim of
+	// exactly the kind #720 removes, and the reader cannot tell it from the truth.
+	// `ErrNoMatch` is the distinction, and memref is where it belongs: it already
+	// draws it, having separated this refusal from the ambiguity and third-casing
+	// ones, and a caller that re-derived it from the message or the length would be
+	// the second implementation this package exists to prevent.
+	if errors.Is(err, memref.ErrNoMatch) && utf8.RuneCountInString(ref) >= memref.FullIDLen {
+		return ref, nil
+	}
+	return "", err
+}
+
+// reportHistoryRefusal writes a refused ref in the form the caller asked for.
+//
+// A --json run's every line is otherwise an entry, so the refusal is the one
+// `{"error": ...}` object a script can branch on — and it goes to STDOUT, not
+// stderr, because stdout is the stream the script is reading, and a script that
+// merged the two would read the message twice. The human form is a plain
+// diagnostic on stderr, beside the report that never appeared.
+//
+// The write error is returned rather than dropped: the caller exits non-zero on it,
+// and a refusal that failed to print must not read as a run that printed nothing.
+func reportHistoryRefusal(out, errOut io.Writer, asJSON bool, message string) error {
+	if asJSON {
+		// printHistoryJSONError ignores its own error, so the refusal's own
+		// encoding is a direct write rather than that helper's: the shape is the
+		// same object, and here a failed write is an answer the caller needs.
+		if _, err := fmt.Fprintln(out, historyJSONErrorLine(message)); err != nil {
+			return err
+		}
+		return nil
+	}
+	_, err := fmt.Fprintf(errOut, "error: %s\n", message)
+	return err
+}
+
+// historyJSONErrorLine is the one line a --json run prints instead of an entry.
+func historyJSONErrorLine(message string) string {
+	// json.Marshal cannot fail on a struct of one string field, so the error is
+	// not a real path; the fallback keeps the line a valid object rather than
+	// substituting something a script would misparse.
+	b, err := json.Marshal(struct {
+		Error string `json:"error"`
+	}{Error: message})
+	if err != nil {
+		return `{"error":"the refusal could not be encoded"}`
+	}
+	return string(b)
 }
 
 // readHistoryView gathers what the printer needs from an open store: the memory
@@ -458,9 +715,7 @@ func withLiveness(ctx context.Context, s *memory.Store, memoryID string, entries
 // is otherwise an entry, so a consumer can tell them apart by a field it never
 // has to guess about.
 func printHistoryJSONError(w io.Writer, message string) {
-	_ = json.NewEncoder(w).Encode(struct {
-		Error string `json:"error"`
-	}{Error: message})
+	_, _ = io.WriteString(w, historyJSONErrorLine(message)+"\n")
 }
 
 // printHistory chooses the rendering. --json prints only the entries, so the

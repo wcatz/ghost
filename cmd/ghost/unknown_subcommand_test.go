@@ -241,7 +241,10 @@ func TestRunCLI_HelpRequestStillExitsZero(t *testing.T) {
 		{name: "a group", argv: []string{"project", "-h"}, stdout: "ghost project delete"},
 		{name: "a group with an unknown subcommand", argv: []string{"project", "frobnicate", "-h"}, stdout: "ghost project delete"},
 		{name: "a group whose usage is one line", argv: []string{"opencode", "frobnicate", "--help"}, stdout: "ghost opencode cleanup-sessions"},
-		{name: "a leaf", argv: []string{"history", "-h"}, stdout: "ghost history <memory-id>"},
+		// The history read takes a ref and its purge a whole id, so the usage
+		// line names the two forms (#720) — which is also what this asserts: a
+		// help text is pinned by the phrase it prints, not by a copy of it here.
+		{name: "a leaf", argv: []string{"history", "-h"}, stdout: "ghost history <memory-ref>"},
 		{
 			name: "a name that matches no command", argv: []string{"help", "frobnicate"},
 			stderr: `no command "frobnicate"`,

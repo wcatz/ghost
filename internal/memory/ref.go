@@ -69,3 +69,72 @@ func (s *Store) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix strin
 	}
 	return ids, rows.Err()
 }
+
+// AnyMemoryIDsByIDPrefix returns, in ascending order, the ids in the WHOLE store
+// that begin with prefix: every id `memories` still holds, plus every
+// `memory_history.memory_id`, the deleted ones included.
+//
+// It is the id set for a caller that is not about to change what it names, so it
+// differs from MemoryIDsByIDPrefix in both halves and each difference is load-bearing:
+//
+//   - The history table is INCLUDED, and that is the reason this exists. A deleted
+//     memory has no row in `memories` — the `delete` history row IS the tombstone,
+//     it carries the text the memory held, and `ghost history` is the command that
+//     prints it. An id set read from the live rows alone reports a deleted memory as
+//     never written, which is precisely the claim #720 exists to remove.
+//   - The live rows are INCLUDED too, which is the half that is easy to miss. A
+//     memory that predates the history table has NO history row at all: migrateV17
+//     deliberately does not backfill, because a backfilled row would assert "this is
+//     what the memory said when v17 arrived" about rows whose age and authorship
+//     nobody recorded. So a pre-v17 memory is held in `memories` and absent from
+//     `memory_history`, and a history-only set refuses a prefix of an id the store
+//     plainly has. A union, not a concatenation: the same id is in both tables once
+//     a memory has any history at all, and a set listing it twice would make its own
+//     prefix ambiguous — the memory's own history would make it unnameable.
+//
+// The scope is the whole store, with NO project predicate, and that is a decision.
+// MemoryIDsByIDPrefix is project-scoped because its caller is about to change a row
+// and must not reach a neighbour's. This one has no such hazard: it changes
+// nothing, and `ghost history` has no project operand and has always been able to
+// read any id in the store with a full id. Scoping a PREFIX to a project while a
+// full id reached every project would make the two forms of one ref disagree about
+// where a memory may be looked for, which is the failure this whole package exists
+// to prevent. The prefix rules still refuse anything ambiguous, and across the whole
+// store that is one answer to the same question.
+//
+// Everything else is MemoryIDsByIDPrefix's rule, unchanged and for the same reasons:
+// LITERAL text of the caller's own length (so neither SQL wildcard widens the
+// search), case-insensitive, bounded by a RUNE COUNT rather than a byte length, and
+// a miss is an empty slice and no error because what a miss means is the caller's
+// decision. The set is scanned rather than served by the `memories` primary key —
+// the `memory_history` side cannot be, for the same non-ASCII reason — and this is a
+// one-off operator read of a report's id, not a retrieval path, which is the trade
+// the project-scoped read already makes.
+func (s *Store) AnyMemoryIDsByIDPrefix(ctx context.Context, prefix string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM (
+		    SELECT id FROM memories
+		    WHERE lower(substr(id, 1, ?)) = lower(?)
+		    UNION
+		    SELECT memory_id AS id FROM memory_history
+		    WHERE lower(substr(memory_id, 1, ?)) = lower(?)
+		) ORDER BY id
+	`, utf8.RuneCountInString(prefix), prefix, utf8.RuneCountInString(prefix), prefix)
+	if err != nil {
+		return nil, fmt.Errorf("memory ids by prefix (any memory): %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
