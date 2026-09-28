@@ -51,6 +51,7 @@ package supersede
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -92,6 +93,24 @@ type ReassessResult struct {
 	// sentences, and an operator who read "would sweep 1" in the dry run needs
 	// the second one.
 	CausesSweepFailed int
+	// Unjudged names the pairs the classifier produced no verdict for, because
+	// the call failed on both attempts or the reply's verdict count did not
+	// match the pairs asked about (#699). Their edges are LEFT ALIVE: nothing
+	// was decided about them, and the next pass re-asks them, so this is the
+	// list of what a rerun still owes. It is a list rather than a count because
+	// "a project of 87 edges, 6 of them unjudged" is a different thing for an
+	// operator than "6 unjudged" with no way to find them — and one failed call
+	// can be the whole set.
+	Unjudged []UnjudgedPair
+}
+
+// UnjudgedPair is one live edge whose pair the classifier never answered. It
+// carries the ids only, because that is all an operator needs to re-run the
+// pass over it — and all the pass can know: a classify call that failed answers
+// nothing about any pair it carried, not only the one the harness named last.
+type UnjudgedPair struct {
+	NewerID string
+	OlderID string
 }
 
 // WithdrawnEdge is one edge the pass withdrew, or would withdraw under --apply.
@@ -192,16 +211,28 @@ func retriesOf(cls Classifier) int {
 // current rules and returns the edges the pass withdrew, or would withdraw with
 // --apply. A dry run (apply=false) writes nothing.
 //
-// A classifier error on any batch is fatal and withdraws nothing: a partial
-// repair would drop edges on a judgment the harness never made. An unparseable
-// verdict is not fatal and withdraws nothing — the edge stays and the pair is
+// A classifier call that keeps failing is NOT fatal to the rows a deterministic
+// rule already settled (#699). The veto needs no harness, and withdrawing an edge
+// is the safe direction — it only puts the older memory back into ranked
+// injection, and resolve's own repair pass can re-stamp it. Abandoning them over
+// one dead `opencode run` is how a real rehearsal withdrew nothing at all, 76 of
+// 87 edges waiting for a rerun. So the pass applies the settled withdrawals,
+// records the pairs the classifier never answered in ReassessResult.Unjudged
+// with their edges left live, and STILL returns an error: a partial repair is
+// partial, and a zero exit would read as "done". The same treatment covers a
+// reply whose verdict count does not match the pairs asked about — both are the
+// same state here, no verdict for any open pair.
+//
+// An unparseable verdict is not an error at all: the edge stays, and the pair is
 // counted as Unclassified, so a later pass can ask again.
 //
-// A failed invalidation IS fatal, and it is the one case where the pass returns
-// both an error and a result: the writes before it already landed, they cannot
-// be un-landed, and a later pass will not see those edges again. So the caller
-// gets the count, the per-edge list and the log line, and the non-zero exit says
-// the repair is incomplete.
+// A failed invalidation IS fatal, and like the classify failure it is a case
+// where the pass returns an error AND a result: the writes before it already
+// landed, they cannot be un-landed, and a later pass will not see those edges
+// again. So the caller gets the count, the per-edge list and the log line, and
+// the non-zero exit says the repair is incomplete. A classify failure and a write
+// failure can both be real in one run, so they are joined rather than one
+// replacing the other.
 //
 // Scope is honoured as an exemption, not a verdict. A scope-conflicting edge
 // asserts no replacement — the ordinary pass leaves it in the graph and every
@@ -291,31 +322,43 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		open = append(open, cand)
 	}
 
+	// A failure here is recorded, not raised: the settled rows below do not
+	// depend on it, and 87 edges waiting on a rerun because one call died is the
+	// #699 failure. The pairs move to Unjudged with their edges live, and the
+	// error is returned at the end so the exit still says "rerun me".
+	var fail error
 	if len(open) > 0 {
 		verdicts, err := cls.ClassifyBatch(ctx, open)
-		if err != nil {
-			return res, nil, fmt.Errorf("classify %d live supersedes edge(s): %w", len(open), err)
+		if err == nil && len(verdicts) != len(open) {
+			err = fmt.Errorf("classifier returned %d verdict(s) for %d pair(s)", len(verdicts), len(open))
 		}
-		if len(verdicts) != len(open) {
-			return res, nil, fmt.Errorf("classify %d live supersedes edge(s): classifier returned %d verdict(s)", len(open), len(verdicts))
-		}
-		for i, c := range open {
-			switch verdicts[i] {
-			case RelationSupersedes:
-				res.Confirmed++
-			case RelationCauses:
-				res.Causes++
-				settled = append(settled, judged{cand: c, reason: "causes: the older note is still independently true"})
-			case RelationReversed:
-				res.Reversed++
-				settled = append(settled, judged{cand: c, reason: "reversed: the older note is the current one", sweep: true})
-			case RelationNeither:
-				res.Neither++
-				settled = append(settled, judged{cand: c, reason: "neither: both notes are still true", sweep: true})
-			default:
-				// Relation("") and any invalid value are a missing judgment, not a
-				// denial: the edge stays, counted, and the pair is offered again.
-				res.Unclassified++
+		switch {
+		case err != nil:
+			fail = fmt.Errorf("classify %d live supersedes edge(s): %w", len(open), err)
+			res.Unjudged = unjudgedPairs(open)
+			if logger != nil {
+				logger.Warn("supersede reassess: the classifier failed; the edges it would have judged stand",
+					"unjudged", len(res.Unjudged), "settled", len(settled), "error", err)
+			}
+		default:
+			for i, c := range open {
+				switch verdicts[i] {
+				case RelationSupersedes:
+					res.Confirmed++
+				case RelationCauses:
+					res.Causes++
+					settled = append(settled, judged{cand: c, reason: "causes: the older note is still independently true"})
+				case RelationReversed:
+					res.Reversed++
+					settled = append(settled, judged{cand: c, reason: "reversed: the older note is the current one", sweep: true})
+				case RelationNeither:
+					res.Neither++
+					settled = append(settled, judged{cand: c, reason: "neither: both notes are still true", sweep: true})
+				default:
+					// Relation("") and any invalid value are a missing judgment, not a
+					// denial: the edge stays, counted, and the pair is offered again.
+					res.Unclassified++
+				}
 			}
 		}
 	}
@@ -334,7 +377,6 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	}
 
 	withdrawn := make([]WithdrawnEdge, 0, len(settled))
-	var fail error
 	for _, j := range settled {
 		w := WithdrawnEdge{NewerID: j.cand.NewerID, OlderID: j.cand.OlderID, Reason: j.reason, Vetoed: j.vetoed}
 		if j.sweep {
@@ -355,8 +397,11 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 				// live edges only). So the partial list and the count go back
 				// WITH the error and the summary is logged here: a repair whose
 				// whole justification is auditability must not vanish because
-				// its Nth write failed.
-				fail = fmt.Errorf("withdraw supersedes link %s→%s: %w", w.NewerID, w.OlderID, err)
+				// its Nth write failed. Joined, not assigned: a classify
+				// failure from earlier in this run is still true, and the
+				// unjudged edges it left behind are the other half of what the
+				// operator has to fix.
+				fail = errors.Join(fail, fmt.Errorf("withdraw supersedes link %s→%s: %w", w.NewerID, w.OlderID, err))
 				break
 			}
 			if n == 0 {
@@ -392,7 +437,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 				w.SweepFailed = true
 				withdrawn[len(withdrawn)-1] = w
 				res.CausesSweepFailed++
-				fail = fmt.Errorf("withdraw causes link %s→%s: %w", w.OlderID, w.NewerID, err)
+				fail = errors.Join(fail, fmt.Errorf("withdraw causes link %s→%s: %w", w.OlderID, w.NewerID, err))
 				break
 			}
 			// What actually moved, not what the row predicted.
@@ -402,26 +447,42 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		}
 	}
 
-	if logger != nil {
-		logger.Info("supersede reassess",
-			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
-			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
-			"reversed", res.Reversed, "unknown", res.Unclassified, "withdrawn", res.Withdrawn,
-			"causes_withdrawn", res.CausesWithdrawn, "causes_sweep_failed", res.CausesSweepFailed,
-			"retries", retriesOf(cls), "failed", fail != nil)
-	}
-	if fail != nil {
-		return res, withdrawn, fail
-	}
 	if !apply {
 		// Nothing was moved, so the count is the PREDICTION — the same number an
 		// --apply run reports unless a concurrent pass takes one of those edges
 		// first. A dry run whose summary said 0 above rows marked [+1 causes
 		// edge] would be the invisibility the per-row marker exists to remove,
-		// one line up.
+		// one line up. Ahead of the failure return, not after it: a dry run that
+		// also hit a classify failure still reports the rows it is about to
+		// print, because that is the pass the operator is being asked about.
 		for _, w := range withdrawn {
 			res.CausesWithdrawn += w.CausesSwept
 		}
 	}
+	if logger != nil {
+		logger.Info("supersede reassess",
+			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
+			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
+			"reversed", res.Reversed, "unknown", res.Unclassified, "unjudged", len(res.Unjudged),
+			"withdrawn", res.Withdrawn, "causes_withdrawn", res.CausesWithdrawn,
+			"causes_sweep_failed", res.CausesSweepFailed,
+			"retries", retriesOf(cls), "failed", fail != nil)
+	}
+	if fail != nil {
+		return res, withdrawn, fail
+	}
 	return res, withdrawn, nil
+}
+
+// unjudgedPairs projects the open pairs a failed classify call left without a
+// verdict. It is every open pair, not the subset the harness named: a call that
+// failed answers nothing about anything it carried, and the next pass re-asks all
+// of them anyway (nothing is cached for an unanswered edge), so a narrower list
+// would be a claim the pass cannot make.
+func unjudgedPairs(open []Candidate) []UnjudgedPair {
+	out := make([]UnjudgedPair, 0, len(open))
+	for _, c := range open {
+		out = append(out, UnjudgedPair{NewerID: c.NewerID, OlderID: c.OlderID})
+	}
+	return out
 }

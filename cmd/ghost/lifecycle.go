@@ -1408,7 +1408,7 @@ withdrawn edge justified.
 // Printing ReassessResult.Withdrawn in a dry run would put "would withdraw 0"
 // above a list of three edges, because that field counts only invalidations that
 // actually landed.
-func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls int) string {
+func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls, retries int) string {
 	verb := "would withdraw"
 	causesVerb := "would sweep"
 	count := len(withdrawn)
@@ -1422,9 +1422,18 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	if res.CausesSweepFailed > 0 {
 		sweptNote = fmt.Sprintf(", %d causes sweep(s) FAILED (unknown)", res.CausesSweepFailed)
 	}
-	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN, %s %d, %s %d causes edge(s)%s (%d classify call(s))\n",
+	// Pairs the classifier never answered (#699). The count and the list are
+	// both here because the withdrawal lines below can look like the whole
+	// story: a pass that withdrew six vetoed edges and judged nothing else is a
+	// partial repair, and the edges it never reached have to be findable rather
+	// than countable.
+	unjudgedNote := ""
+	if n := len(res.Unjudged); n > 0 {
+		unjudgedNote = fmt.Sprintf(", %d unjudged (their classify call failed; their edges stand)", n)
+	}
+	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN%s, %s %d, %s %d causes edge(s)%s (%d classify call(s)%s)\n",
 		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
-		res.Unclassified, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls)
+		res.Unclassified, unjudgedNote, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls, retryNote(retries))
 	short := func(id string) string {
 		if len(id) > 8 {
 			return id[:8]
@@ -1466,6 +1475,14 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 			swept = fmt.Sprintf("  [+%d causes edge]", w.CausesSwept)
 		}
 		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]%s  %s\n", marker, short(w.NewerID), short(w.OlderID), by, swept, w.Reason)
+	}
+	// One line per unjudged edge, in the same shape as the withdrawn rows so a
+	// reader can tell at a glance which edges moved and which did not. The
+	// reason is the same in every row — no verdict exists — so it is the state,
+	// not a per-edge finding, and the pass exits non-zero for the rerun.
+	for _, u := range res.Unjudged {
+		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed, so the edge stands and the next pass re-asks it]\n",
+			short(u.NewerID), short(u.OlderID))
 	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")
@@ -1546,7 +1563,7 @@ func runSupersede() {
 		// exit stays: each invalidation is its own transaction, so a failure on
 		// the Nth edge leaves N-1 already withdrawn and unreachable by a later
 		// pass. A repair that partly happened has to be visible as such.
-		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls()))
+		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls(), cls.Retries()))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)

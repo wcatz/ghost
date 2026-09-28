@@ -1461,7 +1461,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	dry := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Neither: 1, Unclassified: 1,
 		Withdrawn: 0, CausesWithdrawn: 1, // what the pass predicts for a dry run
-	}, false, edges, 2)
+	}, false, edges, 2, 0)
 	for _, want := range []string{
 		// The per-outcome numbers add up to Loaded, the withdrawal count is the
 		// two edges below it rather than the (dry-run-zero) Withdrawn field, and
@@ -1489,7 +1489,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	apply := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 2, Vetoed: 1, Neither: 1, Withdrawn: 1, CausesWithdrawn: 1,
-	}, true, applied, 1)
+	}, true, applied, 1, 0)
 	if !strings.Contains(apply, "withdrew 1, swept 1 causes edge(s) (1 classify call(s))") {
 		t.Errorf("apply report does not count the withdrawal that landed and the edge swept with it:\n%s", apply)
 	}
@@ -1514,7 +1514,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	failReport := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 1, Neither: 1, Withdrawn: 1, CausesSweepFailed: 1,
-	}, true, failed, 1)
+	}, true, failed, 1, 0)
 	if !strings.Contains(failReport, "[causes sweep FAILED — unknown]") {
 		t.Errorf("a failed sweep must not be reported as a count:\n%s", failReport)
 	}
@@ -1523,6 +1523,29 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	if strings.Contains(failReport, "[+0 causes edge]") {
 		t.Errorf("a failed sweep printed a marker that says nothing was moved:\n%s", failReport)
+	}
+
+	// #699: a classify call that failed leaves its pairs UNJUDGED while the rows
+	// a rule settled still withdraw. The report has to name both, or a partial
+	// repair reads as a complete one — the withdrawal lines look like the whole
+	// story, and the edges that never reached a verdict would be invisible.
+	partial := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 3, Vetoed: 1, Withdrawn: 1,
+		Unjudged: []supersede.UnjudgedPair{
+			{NewerID: "5566778899aabbcc", OlderID: "445566778899aabb"},
+		},
+	}, true, []supersede.WithdrawnEdge{
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true, Written: true},
+	}, 2, 1)
+	for _, want := range []string{
+		"0 UNKNOWN, 1 unjudged (their classify call failed; their edges stand), withdrew 1",
+		"(2 classify call(s), 1 retried after a failed call)",
+		"  withdrew     abcdef01 -> 98765432  [veto, no harness call]",
+		"  unjudged    55667788 -> 44556677  [no verdict: the classify call failed, so the edge stands and the next pass re-asks it]",
+	} {
+		if !strings.Contains(partial, want) {
+			t.Errorf("partial-repair report missing %q:\n%s", want, partial)
+		}
 	}
 }
 

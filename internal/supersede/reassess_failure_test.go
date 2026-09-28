@@ -154,6 +154,161 @@ func TestReassessReportsTheRepairItAlreadyMade(t *testing.T) {
 	}
 }
 
+// TestReassessAppliesVetoedWithdrawalsWhenABatchFails: #699's rehearsal lost
+// every withdrawal to one `opencode run` that exited 1 — including the edges the
+// deterministic veto had already settled, which needed no harness call at all and
+// are not the classifier's to decide. Those apply anyway: a withdrawal only puts
+// the older memory back into injection, which is the safe direction, and the
+// rerun a minute later withdrew 76 of 87. The pair the harness never answered is
+// reported unjudged with its edge left standing, and the pass still exits
+// non-zero so the rerun is asked for.
+func TestReassessAppliesVetoedWithdrawalsWhenABatchFails(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	openNewer, openOlder := seedEdge(t, store, db,
+		"The ingest service now runs Redis 7.2, revision a.",
+		"The ingest service runs Redis 6.2, revision a.")
+
+	fp := &flakyProvider{fails: 2} // the first attempt and its retry both fail
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	var buf strings.Builder
+	res, withdrawn, err := Reassess(ctx, store, cls, "p", true, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err == nil {
+		t.Fatal("a classify call that kept failing must still fail the pass, or a rerun is never asked for")
+	}
+	if !strings.Contains(err.Error(), "classify") {
+		t.Errorf("error %q must name the classify failure", err)
+	}
+	// The veto-settled edge is withdrawn: the veto is deterministic on the two
+	// note bodies, the classifier was never asked about it, and the withdrawal
+	// only puts the older memory back into ranked injection.
+	if res.Vetoed != 1 || res.Withdrawn != 1 {
+		t.Errorf("vetoed=%d withdrawn=%d, want 1 and 1: a failed harness call must not consume the rows a rule settled", res.Vetoed, res.Withdrawn)
+	}
+	if len(withdrawn) != 1 || withdrawn[0].NewerID != vetoNewer || withdrawn[0].OlderID != vetoOlder || !withdrawn[0].Written || !withdrawn[0].Vetoed {
+		t.Errorf("withdrawn = %+v, want the vetoed edge, marked written", withdrawn)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 0 {
+		t.Errorf("the vetoed edge survived: %d pair(s) remain", len(pairs))
+	}
+	assertUnsupersedeHistory(t, store, vetoOlder)
+	// The pair the harness never answered is named, not counted away, and its
+	// edge stands: nothing was decided about it.
+	if len(res.Unjudged) != 1 || res.Unjudged[0].NewerID != openNewer || res.Unjudged[0].OlderID != openOlder {
+		t.Errorf("Unjudged = %+v, want the one pair the classifier never judged", res.Unjudged)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{openNewer, openOlder}); len(pairs) != 1 {
+		t.Errorf("%d pair(s) remain on the unjudged edge, want 1 — an unanswered pair is not a withdrawal", len(pairs))
+	}
+	// Every edge the pass read is still accounted for, including the one it could
+	// not judge: a report whose per-outcome numbers do not sum to what it read is
+	// a report an operator cannot check.
+	total := res.Skipped + res.Vetoed + res.Confirmed + res.Neither + res.Causes +
+		res.Reversed + res.Unclassified + len(res.Unjudged)
+	if total != res.Loaded {
+		t.Errorf("per-outcome counters sum to %d but Loaded is %d (skipped=%d vetoed=%d confirmed=%d neither=%d causes=%d reversed=%d unknown=%d unjudged=%d)",
+			total, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed, res.Unclassified, len(res.Unjudged))
+	}
+	if !strings.Contains(buf.String(), "failed=true") {
+		t.Errorf("the summary must say the pass failed:\n%s", buf.String())
+	}
+}
+
+// TestReassessDryRunWritesNothingWhenABatchFails: a dry run that hits the same
+// failure has the same report and the same non-zero exit, and still writes
+// nothing — the repair pass previews a deletion, so a preview that moved the
+// edge it was about to describe would leave the operator deciding about a
+// withdrawal that already happened.
+func TestReassessDryRunWritesNothingWhenABatchFails(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	openNewer, openOlder := seedEdge(t, store, db,
+		"The ingest service now runs Redis 7.2, revision a.",
+		"The ingest service runs Redis 6.2, revision a.")
+
+	fp := &flakyProvider{fails: 2}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	res, withdrawn, err := Reassess(ctx, store, cls, "p", false, discardLogger())
+	if err == nil {
+		t.Fatal("a classify call that kept failing must fail a dry run too, or a preview reports success over a project it never judged")
+	}
+	if res.Withdrawn != 0 {
+		t.Errorf("Withdrawn = %d, want 0: a dry run writes nothing", res.Withdrawn)
+	}
+	if len(withdrawn) != 1 || withdrawn[0].Written || !withdrawn[0].Vetoed {
+		t.Errorf("withdrawn = %+v, want the vetoed edge listed as a prediction, unwritten", withdrawn)
+	}
+	if len(res.Unjudged) != 1 || res.Unjudged[0].NewerID != openNewer {
+		t.Errorf("Unjudged = %+v, want the unjudged pair named in a dry run too", res.Unjudged)
+	}
+	for _, ids := range [][2]string{{vetoNewer, vetoOlder}, {openNewer, openOlder}} {
+		if pairs, _ := store.SupersedesWithin(ctx, ids[:]); len(pairs) != 1 {
+			t.Errorf("a dry run withdrew %v: %d pair(s) remain, want 1", ids, len(pairs))
+		}
+	}
+	if entries, herr := store.MemoryHistory(ctx, vetoOlder, 0); herr == nil {
+		for _, e := range entries {
+			if e.Phase == "unsupersede" {
+				t.Error("a dry run wrote an unsupersede history row: it withdrew nothing, so it has nothing to audit")
+				break
+			}
+		}
+	}
+}
+
+// TestReassessDryRunWritesNothingWhenARetryAnswers: the other half of "a dry run
+// writes nothing". A retried call that answers must change the verdicts the
+// preview reports and nothing else — the withdrawal is still a prediction, and
+// the pass still made no graph row.
+func TestReassessDryRunWritesNothingWhenARetryAnswers(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	openNewer, openOlder := seedEdge(t, store, db,
+		"The ingest service now runs Redis 7.2, revision a.",
+		"The ingest service runs Redis 6.2, revision a.")
+
+	fp := &flakyProvider{resp: "1: NEITHER", fails: 1} // one open pair, one retry
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	res, withdrawn, err := Reassess(ctx, store, cls, "p", false, discardLogger())
+	if err != nil {
+		t.Fatalf("a first-call failure the retry answers must not fail the pass: %v", err)
+	}
+	if res.Neither != 1 || len(res.Unjudged) != 0 {
+		t.Errorf("neither=%d unjudged=%d, want 1 and 0: the retry's verdict is the pass's verdict", res.Neither, len(res.Unjudged))
+	}
+	if res.Withdrawn != 0 {
+		t.Errorf("Withdrawn = %d, want 0: a dry run writes nothing", res.Withdrawn)
+	}
+	if len(withdrawn) != 2 {
+		t.Fatalf("withdrawn = %+v, want the vetoed and the NEITHER edge both listed as predictions", withdrawn)
+	}
+	for _, w := range withdrawn {
+		if w.Written {
+			t.Errorf("a dry run reported a withdrawal it did not make: %+v", w)
+		}
+	}
+	if len(res.Unjudged) != 0 {
+		t.Errorf("Unjudged = %+v, want none: the retry answered", res.Unjudged)
+	}
+	for _, ids := range [][2]string{{vetoNewer, vetoOlder}, {openNewer, openOlder}} {
+		if pairs, _ := store.SupersedesWithin(ctx, ids[:]); len(pairs) != 1 {
+			t.Errorf("a dry run withdrew %v: %d pair(s) remain, want 1", ids, len(pairs))
+		}
+	}
+}
+
 // TestReassessKeepsTheRowWhoseCausesSweepFailed: the other half of the failure
 // contract. The supersedes withdrawal for this edge landed, and the 'causes'
 // sweep that follows it failed — so the row must still be reported, or the count

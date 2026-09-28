@@ -50,6 +50,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -425,6 +426,25 @@ else
 fi
 printf '%s\n' "$kind" >> "$dir/$name.kinds"
 
+# A test can ask for the next N calls of one kind to FAIL, the way a real harness
+# occasionally exits 1. The counter is a file because every classify call is its
+# own process, and only the first N fail: the calls after them answer normally,
+# which is exactly what a transient failure looks like and what the retry is for.
+n_calls=0
+if [ -f "$dir/$kind.calls" ]; then
+  n_calls=$(cat "$dir/$kind.calls" 2>/dev/null || printf 0)
+fi
+printf '%s\n' "$((n_calls + 1))" > "$dir/$kind.calls"
+if [ -f "$dir/$kind.fails" ]; then
+  n_fails=$(cat "$dir/$kind.fails" 2>/dev/null || printf 0)
+  if [ "$n_calls" -lt "$n_fails" ]; then
+    # On stderr and with no stdout: that is what a real failure looks like, and
+    # the product reads the complaint from there.
+    printf 'fake %s: simulated harness failure on %s call %s\n' "$name" "$kind" "$((n_calls + 1))" >&2
+    exit 1
+  fi
+fi
+
 # --- build the answer ---------------------------------------------------------
 # The batched prompts number their items ("1." on a line of its own); the
 # single-item prompts do not. Count the numbers rather than the items, so a
@@ -548,6 +568,23 @@ func (s *sandbox) setHarnessAnswer(kind, answer string) {
 	path := filepath.Join(s.bin, kind+".answer")
 	if err := os.WriteFile(path, []byte(answer+"\n"), 0o644); err != nil {
 		s.t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// failHarnessCalls makes the next n calls of one kind (resolve, supersede) exit
+// non-zero, the way a real harness occasionally does, and RESETS that kind's
+// call counter. It is how a test says "the first call dies and the retry
+// answers" (n=1) or "the call and its retry both die" (n=2) without the fake
+// having to understand the test. The counter is a file because every classify
+// call is its own process, and the failure is transient by design: calls after
+// the n-th answer normally, which is the whole point of a retry.
+func (s *sandbox) failHarnessCalls(kind string, n int) {
+	s.t.Helper()
+	if err := os.WriteFile(filepath.Join(s.bin, kind+".fails"), []byte(strconv.Itoa(n)+"\n"), 0o644); err != nil {
+		s.t.Fatalf("write %s.fails: %v", kind, err)
+	}
+	if err := os.Remove(filepath.Join(s.bin, kind+".calls")); err != nil && !os.IsNotExist(err) {
+		s.t.Fatalf("reset %s.calls: %v", kind, err)
 	}
 }
 
