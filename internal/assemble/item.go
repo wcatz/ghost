@@ -41,6 +41,12 @@ type Item struct {
 	// it pointless.
 	SourceRef string
 	Score     float64
+	// Tokens is a token ESTIMATE for this item's content: Bytes/4, rounded up,
+	// so a short memory is never reported as free. It is derived from Bytes at
+	// materialisation and again after any presentation clamp, so the two cannot
+	// disagree. Bytes remain the budget unit — there is no tokenizer in this
+	// package — and a caller that budgets in tokens reads this field.
+	Tokens int
 	// Source is the row's stored origin. It travels with the item because the
 	// shared line labels it, and mcpInstructions tells the agent to trust that
 	// label: a renderer that could not see the origin would have to drop the
@@ -197,6 +203,23 @@ func stampText(t *time.Time, isEnd bool) string {
 	return t.Format(memory.StoredStampLayout)
 }
 
+// tokenEstimate converts content bytes into a token ESTIMATE at the conventional
+// four-bytes-per-token ratio, rounded UP: a caller budgeting in tokens pays for
+// the fraction too, and rounding down would report a short memory as free. The
+// value is a ratio applied to bytes, not a tokenizer's output, so every field
+// carrying it is named or documented as an estimate.
+func tokenEstimate(bytes int) int {
+	if bytes <= 0 {
+		return 0
+	}
+	return (bytes + tokenBytesPerToken - 1) / tokenBytesPerToken
+}
+
+// tokenBytesPerToken is the ratio behind Item.Tokens and Result.Tokens. It is a
+// named constant because the estimate is reported to callers: a reader that had
+// to guess the ratio would treat the number as a measurement.
+const tokenBytesPerToken = 4
+
 // ScopeLabel renders a memory's scope for a listing, or "" when unscoped.
 // Keys are sorted: map iteration order is random in Go, so an unsorted rendering
 // would show the same scope in a different order on each read and look like the
@@ -293,6 +316,7 @@ func itemOf(c memory.Candidate) Item {
 		SourceRef:  c.SourceRef,
 		Score:      c.Score,
 		Source:     c.Source,
+		Tokens:     tokenEstimate(len(c.Content)),
 	}
 	if c.ResolvedAt != nil {
 		resolved := parseStamp(*c.ResolvedAt)

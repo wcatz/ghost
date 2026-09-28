@@ -168,24 +168,52 @@ func hasGhostContent(dir string) bool {
 	return found
 }
 
-// keepSet is the set of canonical note basenames this pass wrote — the files
-// that must survive, one per live memory, task and decision.
+// keepSet is the set of note PATHS this pass wrote — the files that must
+// survive, one per live memory, task and decision. A path is relative to the
+// vault root and slash-separated, so it is the same key on every platform; see
+// keepKey.
 //
-// It is a SET OF FILENAMES, not a map from ghost_id to filename, and the reason
-// is that the id cannot be read back out of a note. yamlScalar flattens a tab, a
+// It is a SET OF PATHS, not a map from ghost_id to path, and the reason is that
+// the id cannot be read back out of a note. yamlScalar flattens a tab, a
 // newline and a carriage return to a space so that every front-matter key stays
 // on one line, so the id in a note is not always the id in the store: "tab\tid",
 // "line\nid" and "tab id" all render to the same bytes and read back as one
 // value. Keyed by that value, three distinct notes collided on one key and two of
 // them lost — the note was written and then deleted by the pass that wrote it, on
-// every export, for good. Keyed by the filename, the two questions separate: a
-// basename in the set is one of the notes this pass wrote, and a basename absent
-// from it is stale (a deleted entity, or a content edit that renamed the slug —
-// the old-slug file is stale even though its id is still live).
+// every export, for good.
+//
+// The path, and not the bare basename, is what the set is keyed on. A basename
+// cannot say WHICH note this pass wrote: the same name occurs in two project
+// folders and in two kinds of one (a memory and a task with the same title
+// produce the same slug, and can share an id token), so a basename-keyed set
+// keeps a stale copy alive on the strength of a live note elsewhere and the
+// pass can never reclaim it. Keyed by path, the two questions separate: a path
+// in the set is one of the notes this pass wrote at that exact location, and a
+// path absent from it is stale (a deleted entity, a memory that moved projects,
+// or a content edit that renamed the slug — the old-slug file is stale even
+// though its id is still live).
 type keepSet map[string]struct{}
 
+// keepKey is the key a note is recorded under in a keepSet, and the key prune
+// looks it up by: its path from the vault root, slash-separated so the key does
+// not change with the platform's separator.
+//
+// A path with no relative form (one that is not under root at all) is recorded
+// as its own absolute path, which is a key nothing will ever match. That is the
+// safe direction: an entry that cannot be matched is a note prune will not
+// delete, and a note that cannot be expressed is a note the pass wrote to the
+// wrong place. prune refuses a subtree that escapes root, so the case does not
+// arise for anything it walks.
+func keepKey(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.ToSlash(path)
+	}
+	return filepath.ToSlash(rel)
+}
+
 // prune deletes Ghost-managed .md files under the given vault subtrees whose
-// basename is not one of the canonical names this pass wrote. All three guards
+// path is not one of the canonical paths this pass wrote. All three guards
 // from the spec are enforced. Orphaned *.ghost-tmp files (left by a crashed
 // writeIfChanged) are also reclaimed — but only inside the managed subtrees,
 // behind the marker guard.
@@ -214,10 +242,10 @@ func prune(root string, subtrees []string, keep keepSet, knownFolders []string) 
 			if !strings.HasSuffix(path, ".md") {
 				return nil
 			}
-			// The front matter is what makes the file Ghost's to touch; the name
+			// The front matter is what makes the file Ghost's to touch; the path
 			// is what says whether it is the one this pass wrote.
 			if _, ok := hasGhostID(path); ok {
-				if _, kept := keep[filepath.Base(path)]; !kept {
+				if _, kept := keep[keepKey(root, path)]; !kept {
 					return os.Remove(path)
 				}
 			}

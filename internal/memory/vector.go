@@ -1057,7 +1057,30 @@ func keywordOnlyParams(p SearchParams) SearchParams {
 	return p
 }
 
+// getByIDsChunk bounds the placeholder list in one GetByIDs statement. SQLite
+// caps a statement's variables, and the cap is a property of the build rather
+// than of anything Ghost controls: 32766 on the version this tree links, 999 on
+// older ones. 500 sits inside every cap there is, so one number serves all of
+// them, and a window that needs 32766 ids costs 66 statements on a handle that
+// already serves the whole corpus from memory.
+const getByIDsChunk = 500
+
 // GetByIDs fetches memories by a list of IDs.
+//
+// The ids are asked for in chunks of getByIDsChunk, because one statement's
+// placeholder list is bounded by SQLite's variable limit and a caller that
+// passed more ids than that got an error rather than rows. The callers are the
+// candidate hydration (a window and its backfill pool) and the supersedes-link
+// read, so the width is the caller's fetch limit rather than anything chosen
+// here — and a hydration that errors is a retrieval that returns nothing, which
+// reads to a caller as "this project has no memories" rather than as a failure.
+//
+// One RLock spans the whole set and the rows are appended in chunk order, so
+// the result is a superset of any single chunk and never a subset: a row
+// written between two chunks appears or does not, exactly as it would have
+// between two rows of one unchunked statement, since neither form reads a
+// snapshot. The order is not the order of ids and never was — the query has no
+// ORDER BY — so chunking does not change it into something callers can rely on.
 func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -1065,27 +1088,35 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-
-	query := fmt.Sprintf(`
+	const columns = `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
 		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
 		FROM memories
-		WHERE id IN (%s)
-	`, strings.Join(placeholders, ","))
+		WHERE id IN (%s)`
 
-	rows, err := s.queryDB().QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("get by ids: %w", err)
+	var out []Memory
+	for start := 0; start < len(ids); start += getByIDsChunk {
+		end := min(start+getByIDsChunk, len(ids))
+		chunk := ids[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		rows, err := s.queryDB().QueryContext(ctx, fmt.Sprintf(columns, strings.Join(placeholders, ",")), args...)
+		if err != nil {
+			return nil, fmt.Errorf("get by ids: %w", err)
+		}
+		found, err := scanMemories(rows)
+		rows.Close() //nolint:errcheck
+		if err != nil {
+			return nil, fmt.Errorf("get by ids: %w", err)
+		}
+		out = append(out, found...)
 	}
-	defer rows.Close() //nolint:errcheck
-	return scanMemories(rows)
+	return out, nil
 }
 
 // searchVectorAllLeg is the cross-project vector leg, with its facts, mirroring

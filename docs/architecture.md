@@ -24,6 +24,9 @@ ghost mcp status                  Check client and store health, and list
 ghost hook <event> --source <host> Normalize a host lifecycle event
 ghost reflect <project>           Consolidate memories
 ghost resolve <project>           Mark resolved evidence
+                                   (--reassess re-judges the
+                                   resolutions already made; --only
+                                   narrows that to named ids)
 ghost supersede <project>         Classify replacement relationships
                                    (--reassess re-judges the edges
                                    already in the graph)
@@ -166,6 +169,16 @@ The measurement is a labeled eval, not an assertion: 28 synthetic pairs — 14 t
 Two repair paths exist because the ordinary pass cannot undo either decision. `ghost supersede <project> --reassess [--apply]` re-judges every live `supersedes` edge under these rules and withdraws the ones that come back `neither`, vetoed, `causes` or `reversed`, through `InvalidateLink` — which writes the `unsupersede` history row, so an audit that shows a supersession with no withdrawal cannot read as though the stale claim is still live. It prints each withdrawn edge with the rule that withdrew it and which of the two decided it (`veto, no harness call` for the deterministic half), a dry run says "would withdraw" per edge and reports the count it is about to print, and a failed invalidation still reports the edges that landed before it — each one is its own transaction, and a later pass will not see them again. The withdrawal also sweeps the other relation's edge, as the ordinary pass does on the same self-contradicting verdicts, because a `causes` link pointing into a note the pass just decided is still current asserts the opposite. That is a second graph row per withdrawal, so it is reported too: a `[+1 causes edge]` on the row and a sweep count on the summary line, predicted in a dry run and *observed* under `--apply` — the row carries what the sweep moved, never what it was going to move, so a concurrent pass that took the edge first reports 0 rather than claiming a deletion, and a sweep that *errored* is reported as unknown rather than as a count, because after a failed write the count is not knowable. The prediction is read through each pair's own endpoints, not through a project-scoped query, because the sweep deletes by id: a pair whose older note has been promoted to `_global` or moved by `ghost project merge` is still swept, and a project-scoped read cannot see it. A `causes` verdict is the one withdrawal that sweeps nothing — it affirms that relation instead.
 
 One asymmetry is worth stating, because it is the only place the creation pass's error argument does not carry over. On the ordinary pass a false veto costs recall — a stale note stays ranked, and a later pass can still link it. On the repair pass it costs a correct edge, and since the veto is deterministic on the same two note bodies, the ordinary pass will re-fire it on every later run: the pair stays unlinked until one of the notes changes. That is the trade the operator is being asked to make when they pass `--apply`, and it is why the report marks those rows. Then `ghost resolve <project> --reassess` clears the `resolved_at` those edges caused: that repair pass deliberately honours a live edge as a floor, so the withdrawal has to come first or the memory stays out of injection. Until both run, the safe direction holds — a duplicated stale note beats a memory nobody is reminded of.
+
+### Scoping a repair, and why the unscoped repair is the wrong tool
+
+`ghost resolve --reassess` re-judges every already-resolved memory in a project, and used as the second half of a supersede repair that is a much larger claim than the operator made. On a real store it proposed un-hiding **143** memories, and an independent judge sampling 40 found about **35%** of them stale: completed changelogs, PR and host status snapshots, notes a newer memory in the same project had already superseded, a description of a retired code path ([#698](https://github.com/wcatz/ghost/issues/698)). The repair that was meant to undo a handful of wrong resolutions proposed undoing dozens of right ones.
+
+**Prefer `--only`/`--only-file` for any repair.** `--only <id>[,<id>…]` takes full memory ids or 8+ character hex prefixes of them, and `--only-file <path>` the same one per line with `#` starting a comment; both may be given and the list is the union. Both are refused without `--reassess`, because the ordinary pass has no resolved pool to narrow. Scoping changes *which* rows are judged and nothing else — the supersedes-edge floor, the correction pairing and the KEEP cache all still hold a judged row back — and a scoped report says so (`3 of 143 already resolved judged`) rather than describing a pool it never read. The two ways a selector can fail are not the same kind of failure: one that matches nothing is a mistyped id, another project's row, or one an earlier repair already cleared, and it is **reported and skipped** so the rest of the scope is still judged; one that matches **two** rows is an error, because nothing can be said about which rows were meant and judging either of them is the failure the flag exists to prevent.
+
+The scoping is not a convenience, it is the second half of the chain. `ghost supersede --reassess --apply` therefore prints its own follow-up — the exact `ghost resolve <project> --reassess --only <ids> --apply` over the withdrawn edges' targets, plus the same id list written under the data dir's scratch as a `--only-file` input, for the run that withdrew forty edges and cannot type forty ids. A dry run prints neither: it withdrew nothing, and resolve would refuse the command anyway while the edges are live. The block says a resolution "was held by" those edges rather than "can now be cleared", because the floor is counted per edge: a note two newer notes both supersede is still held after one of them is withdrawn, and that repair reports the row as still asserted and clears nothing.
+
+The second cause of the same 143 was the KEEP veto itself, which protects a phrase rather than a claim: a status note that says "always check X", a changelog entry that says "never Y" and a description of a retired code path that says "must Z" all carry an imperative, and on the **repair** path a vetoed KEEP is an un-hiding. So on that path alone a veto no longer settles a note when the same project holds a **newer unresolved** memory sharing at least **two** of its key identifiers — a backticked span, an `#NNN` reference, a file name, a host name (`resolve.keyIdentifiers`). The note goes to the classifier, which is the only thing that can tell a completed changelog from a standing rule. Two details are load-bearing. The identifiers are deliberately **not** a bare number or a version, because those are exactly what changes when a note goes stale and counting them would make every dated note the same subject as every other one. And the pool read is `ResolveCandidates`, the same pool the correction floor reads, because a memory that is itself resolved is a row the next ordinary pass will not see. `Run`'s own veto is untouched, and the asymmetry is the reason: on the ordinary pass a false veto keeps a note *out* of the resolution, which costs one noisy memory in the ranked surface, while on the repair pass it returns a stale note to injection permanently, in every session. So the repair path pays a classifier call for the ambiguous case and the ordinary pass does not.
 
 ## Persistence and search
 
@@ -1034,14 +1047,14 @@ Axis interaction rules:
 
 > **Partly built.** The seam exists (`internal/assemble`, `assemble.Run`, and
 > `Store.Candidates` behind it), the formatted `ghost_memory_search` path runs on
-> it with both filters applied before the window closes, and the session-start
+> it with both filters applied before the window closes, a derived abstention
+> outcome and a response-fit byte cap
+> ([#580](https://github.com/wcatz/ghost/issues/580)), and the session-start
 > surface renders and applies `memories.scope` from the shared label and the
 > shared rule ([#577](https://github.com/wcatz/ghost/issues/577)). What does not
 > exist yet: the session-start injector still runs its own ad-hoc pipeline rather
 > than `assemble.Run` (passive retrieval is not served by the seam yet), the
-> conflict, dedup, diversity and budget stages are pass-throughs, abstention is
-> not derived
-> ([#580](https://github.com/wcatz/ghost/issues/580)), and `explain: true` still
+> conflict, dedup and diversity stages are pass-throughs, and `explain: true` still
 > calls the store's own diagnosis rather than projecting the assembler's trace
 > ([#583](https://github.com/wcatz/ghost/issues/583), [#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
 > [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
@@ -1141,14 +1154,97 @@ What exists now:
   produced before scope was read. The loaders are callers of the assembler's label
   and rule, not of `Run`: passive retrieval is not served by the seam, so moving
   the digest onto it is its own change.
-- **The trace is recorded unconditionally**, with per-stage counts, dropped ids
-  and per-row decisions. `explain: true` does not read it yet.
+- **The trace is recorded unconditionally**, with per-stage counts, dropped ids,
+  per-row decisions and the exact floors that were evaluated. `explain: true`
+  does not read it yet.
+- **Abstention is derived, and it is an outcome rather than an empty list**
+  ([#580](https://github.com/wcatz/ghost/issues/580)). Every block carries
+  `answerable`, `weak` or `empty` with a reason from a closed vocabulary, and
+  `ghost_memory_search` renders the verdict as a machine line
+  (`[ghost:outcome=… reason=… floor_fts_rank=… abstain_cosine=… candidates=…
+  admitted=… legs=… tokens_est=…]`, with a trailing `retrieval_partial`
+  token whenever a leg ran and failed) plus a human sentence for the two
+  non-answerable cases. `weak` withholds no row — only the response-fit pass may
+  remove one — so a caller can see the weak candidates and judge them; what it
+  gets is the instruction not to. Arm A (a keyword rank of 0-3) is on; **arm B
+  (a vector cosine) ships OFF**, because the bench no-answer report shows the
+  answerable and no-answer cosine distributions overlap, so no constant
+  separates them, and `context.abstain_cosine` is a decision a user makes rather
+  than one Ghost infers. The cosine is range-checked on BOTH sides of the seam —
+  `config` on its environment and file paths, and `validateRequest` on the request
+  itself — because a guard that lives only in the layer above the seam is one the
+  next caller does not inherit, and all four unusable values fail silently rather
+  than loudly: a negative and a NaN read as OFF, and an infinite or above-one one
+  arms a threshold no cosine can clear. An unavailable embedder is never a reason to call a match
+  weak: a result whose rows carry keyword ranks is judged by arm A whether or not the vector leg
+  ran, and the leg's condition is reported on the line instead of in the reason. A leg that
+  *failed* suppresses the floor outright (`retrieval_partial`), because a verdict needs every
+  applicable leg's input. And a result with **no arm able to judge it** is `no_floor_arm`: no arm
+  held a VALUE, which is a different question from which legs ran. A leg that answered can have
+  retrieved nothing — a semantic query sharing no words with the corpus leaves every row at the -1
+  "never retrieved" sentinel, as does an `as_of` read for the vector leg, since an embedding records
+  current content only — and a threshold applied to a sentinel is a comparison nobody made. Reporting
+  `below_floor` there would be a claim against a threshold nobody applied, which is the same error as
+  blaming an embedder outage for a weak keyword hit, in the other direction. The line and the trace both keep "a threshold" and "a
+threshold that ran" apart: it renders `off`, `not_applied` (configured, but the
+  vector leg never ran or ran and failed) or the number, and
+`Floors` carries `VectorArmOn` (what the request configured) beside
+`VectorApplied` (the arm's own state: it was on AND the vector leg executed, so
+a cosine could be compared at all), so a configured floor on a machine with no
+embedder is visible as unused rather than looking like a floor that cleared
+something. Neither field records a comparison against a particular row — an empty
+result reads no cosine, and a result whose first row cleared the keyword arm
+never reaches one — and what did execute is `Trace.Legs`, the map the line's
+`legs=` field renders. (`VectorAvailable` is not it: that means the caller
+supplied a query vector, which reads true for a machine whose embedder answered
+and whose vector leg then failed.)
+- **The empty result says which of three things happened.** An empty block whose
+  rows were found and then withheld — out of date, out of scope, out of
+  category, or cut by a budget — says "no sufficiently trustworthy memory found"
+  and names the cause. A search that never finished says so. Only
+  `no_candidates` may say nothing matched, and only over coverage every
+  applicable leg vouched for: available, error-free, untruncated, and
+  `LegStatus.CoverageComplete`. The vector leg reports that last one as **false**
+  until its expected/indexed/unembedded counts are reconciled, so a hybrid search
+  cannot claim absence today, and `Run` does not work around it — a row with no
+  embedding is invisible to the leg's own scan, so nothing the leg read can speak
+  for the rows it never saw. Where absence is not earned, the answer carries the
+  window note instead, which opens "no match within the searched window" and
+  closes "this is not evidence that nothing exists"; that note is the spec's
+  mechanism for suppressing an absence claim. The reconciliation is still
+  **owed**, and it lands with a change that owns the counts in `internal/memory`:
+  the two `COUNT(*)` scans it costs run on every hybrid search, on the live tool
+  path, so the abstention change reads `CoverageComplete` and obeys it rather than
+  filling it.
+- **`response_fit` is a `Run` post-pass, and it measures the whole response.**
+  While the rendered envelope exceeds `Budget.MaxBytes` it drops the
+  lowest-ranked row, recomputes the outcome, re-derives and re-bounds the notes,
+  and re-renders; notes give way before the verdict line, and if the verdict
+  itself cannot fit, `Run` returns `ErrResponseBudgetExceeded` rather than an
+  outcome. A trim also suppresses the window caveat, which would otherwise blame
+  the window for a shortfall the byte cap caused and advise raising a limit that
+  only makes the response larger. The window note an incomplete-coverage empty
+  result carries names each knob the request actually set and no other: the item
+  limit when one was set, the scope filter when one was set, and the category
+  filter when one was set. An unfiltered hybrid search is the shipped default,
+  and it does set a limit, so the note every such caller gets advises widening
+  that limit and says nothing about a scope filter it never passed. `Budget.MaxBytes` is the RESPONSE's bytes and `Slice.MaxBytes` is item
+  content — one field cannot bound both units. `ghost_memory_search` caps a
+  response at twice `memory.MaxContentLen` (16000 bytes), the same order as the
+  session-start injector's CONTENT (15 project memories at 200 bytes plus 8 globals
+  at 300 is about 5.4 KB of content; the block that wraps it in headings, per-row
+  labels and a tasks and decisions section is larger, which is why the cap is a
+  multiple rather than a match). The content cap is the binding half, not the
+  "same order" argument: at or below 8000 a maximum-length memory plus the
+  truncation marker, the item line's framing and the verdict line is already past
+  the cap, so the pass would drop the only row and the answer would come back
+  `empty`/`all_over_budget` naming a server-side cap no search argument reaches.
+  Tokens are reported as an ESTIMATE (bytes/4, rounded up, `tokens_est=`) for
+  callers that budget in tokens; bytes remain the unit and there is no tokenizer.
 
 What the remaining stages will add, in pipeline order: conflict recording and
-dedup reordering (stage 5-6, where `contradicts` is recorded and not acted on),
-diversity (7, off by default), the budget byte caps and the `response_fit`
-post-pass (8), and abstention as an outcome (Decision 3,
-[#580](https://github.com/wcatz/ghost/issues/580)).
+dedup reordering (stage 5-6, where `contradicts` is recorded and not acted on)
+and diversity (7, off by default).
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
 
@@ -1161,8 +1257,10 @@ query
   5. conflicts      suppress superseded rows; never emit a contradicts pair together
   6. dedup          collapse duplicate/near-duplicate links to one representative
   7. diversity      cap per-source share so one project cannot crowd out the rest
-  8. budget         final ordering, then a hard byte/token trim
+  8. budget         final ordering, then the per-slice hard trim
   9. render         one renderer shared by search output and injected context
+       → outcome    answerable | weak | empty, with a reason from a closed set
+       → response_fit  drop the lowest-ranked row until the whole response fits
        → Trace      per-stage row counts and per-row exclusion reasons
 ```
 
@@ -1181,8 +1279,9 @@ Rules the pipeline must hold:
   session-start block, which shows none of the four; it moves onto `assemble`
   with the rest of the plan.
 - **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
-- **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)).
-- **The budget is a hard boundary.** Stage 8 trims deterministically and is tested at, just under, and just over the limit; injection and search use different budgets but the same code.
+- **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)). An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
+- **The budget is a hard boundary, in the unit it names.** Stage 8's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.
+- **One renderer owns the response.** The assembler renders the search answer whole — listing, verdict sentence, filter caveat, diagnostics and the machine line — because a byte cap enforced against a second rendering is a cap on text the caller never receives.
 - **The pipeline is measurable.** Bench gains context precision, contamination rate, budget adherence, diversity, and token cost ([#582](https://github.com/wcatz/ghost/issues/582)), and contamination classification reuses the production exclusion reasons so the two cannot drift.
 
 ## Concurrency contract
@@ -1277,7 +1376,7 @@ The interesting failures were all silent ones, which is why each of these is a f
 - **A ceiling that discards instead of refusing.** `parseFrontmatter` scanned front-matter lines with `bufio.Scanner` at its 64 KiB default, and a line past the default stops the scan with an error the loop never read — so a memory file with a long description lost its *type*, and with it its category, while the unparsed fences were stored as the body. A line now gets its own bound (`maxFrontmatterLine`), and a block that could not be read whole is not front matter at all: the file imports as body text, which is the same fallback an unterminated block already got. A file past `maxMemoryFileBytes` is skipped, because a memory this import keeps is capped at 8 KB and a file orders of magnitude past that is not one.
 - **A name that decides a path.** A note's filename is `slug(content) + "-" + id fragment + ".md"`, and the id fragment used to be a bare prefix of the record's id. Ghost mints hex ids, so that held for everything the store wrote itself — but `Store.ImportMemory` writes an artifact's ids verbatim, and an id can hold a separator, a NUL or a backslash. A separator put the note outside the `Memories/` subtree prune manages, and the NUL failed the write with `EINVAL`, which failed the *whole* export on every run and every retry, taking every other project's notes with it. `idToken` keeps the prefix when it names a single path component — a dash, a dot or a space is left exactly as it was, so no real note is renamed — and hashes the whole id otherwise, because hashing keeps two different hostile ids apart where replacing the offending bytes would collapse them onto one filename. `folderNames` bounds a project folder for the same reason, since a project name is whatever a caller sent.
 - **A reader that does not agree with its writer.** `fm` writes `ghost_id` through `yamlScalar`, which quotes any value a YAML reader would not take as a plain scalar; `hasGhostID` read the line back raw, so it returned the *quoted* text for every id that needed quoting. Prune then looked that quoted text up in a keep-set keyed by the real id, did not find it, and deleted the note it had just written — on every export, for good. Only the double-quoted form `yamlScalar` emits is now unquoted: this function reports which files are Ghost's to prune, so a single-quoted value in a hand-written note must keep reading as its own text.
-- **A key that has to be recoverable, chosen so it does not have to be.** The same failure has a second and quieter form, and it is why the keep-set is a set of canonical *filenames* (`keepSet`) rather than a map from `ghost_id` to filename. This is only the retention half of prune's decision and the other half is unchanged: the closed front-matter block is what makes a file Ghost's to touch at all, so a note without one is never removed, whatever it is called. What moved is the second question — *which* note this is — from the id parsed out of the note to the name. `yamlScalar` flattens a tab, a newline and a carriage return to a space, which is what keeps every key on one line, and it is lossy: `tab<TAB>id`, `tab<CR><LF>id` and `tab id` are three records and one `ghost_id` line. Keyed on that line the three notes collide on one key, the other two match nothing, and prune deletes them: the export writes three notes and leaves one, silently, every run. Keyed on the filename there is nothing to collide, because the filename is unique per record. The general rule this follows: a renderer and its reader have to agree on an encoding, and a key that decides a *delete* should be one the system holds rather than one it has to parse back out of a file it wrote for someone else to read.
+- **A key that has to be recoverable, chosen so it does not have to be.** The same failure has a second and quieter form, and it is why the keep-set is a set of canonical note PATHS relative to the vault root (`keepSet`, keyed by `keepKey`) rather than a map from `ghost_id` to path, and why it is not keyed on the bare basename either — the same slug occurs in two project folders, and a memory and a task with the same title can share an id fragment, so a basename keyed on the live note in one place would keep a stale copy alive in another. This is only the retention half of prune's decision and the other half is unchanged: the closed front-matter block is what makes a file Ghost's to touch at all, so a note without one is never removed, whatever it is called. What moved is the second question — *which* note this is — from the id parsed out of the note to the path the system wrote it at. `yamlScalar` flattens a tab, a newline and a carriage return to a space, which is what keeps every key on one line, and it is lossy: `tab<TAB>id`, `tab<CR><LF>id` and `tab id` are three records and one `ghost_id` line. Keyed on that line the three notes collide on one key, the other two match nothing, and prune deletes them: the export writes three notes and leaves one, silently, every run. Keyed on the path the system wrote, there is nothing to collide, because that path names one location and one record. The general rule this follows: a renderer and its reader have to agree on an encoding, and a key that decides a *delete* should be one the system holds rather than one it has to parse back out of a file it wrote for someone else to read.
 
 Two properties are the opposite of a filter, and the fixtures say so explicitly. A planted payload must still be **retrievable**: dropping it would hide the tampering from the user, which is worse than returning it as data, and quotation into the data block happens on the way out (`quoteData`, #538) rather than on the way in. And `hostevent` **fails open** on all of it — oversized, deeply nested, invalid UTF-8, a NUL, an unknown event name — because "allow the stop" is the only response the hook contract emits. A ceiling (`maxPayloadBytes`) was the one thing missing there, because nothing on the path bounded the read: the hook read stdin with an unbounded `io.ReadAll` and `Parse` retains the payload twice. The hook now reads through `hostevent.ReadPayload`, which stops one byte past the ceiling, so the ceiling bounds the allocation as well as the parse.
 

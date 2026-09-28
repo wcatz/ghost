@@ -1314,7 +1314,8 @@ func TestParseReflectArgs(t *testing.T) {
 // argument verbatim so dash-leading names parse as names; a second project in
 // any mixture stays the "expected exactly one project" error; valueless
 // --project and unknown flags stay clear errors; --reassess selects the
-// re-evaluation pass over already-resolved memories.
+// re-evaluation pass over already-resolved memories; and --only/--only-file
+// narrow that pass to named memories (#698).
 func TestParseResolveArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -1323,27 +1324,51 @@ func TestParseResolveArgs(t *testing.T) {
 		source   string
 		apply    bool
 		reassess bool
+		only     []string
+		onlyFile string
 	}{
-		{"positional", []string{"myproj"}, "myproj", "", false, false},
-		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, false},
-		{"reassess", []string{"myproj", "--reassess"}, "myproj", "", false, true},
-		{"reassess with apply", []string{"myproj", "--reassess", "--apply"}, "myproj", "", true, true},
-		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true},
-		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false},
-		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false},
-		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false},
-		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false},
-		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false},
-		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false},
+		{"positional", []string{"myproj"}, "myproj", "", false, false, nil, ""},
+		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, false, nil, ""},
+		{"reassess", []string{"myproj", "--reassess"}, "myproj", "", false, true, nil, ""},
+		{"reassess with apply", []string{"myproj", "--reassess", "--apply"}, "myproj", "", true, true, nil, ""},
+		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true, nil, ""},
+		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false, nil, ""},
+		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false, nil, ""},
+		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false, nil, ""},
+		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false, nil, ""},
+		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false, nil, ""},
+		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, nil, ""},
+		// The repair scope. Comma-separated on one flag, repeated across flags,
+		// and either spelling of the value form all reach Scope as one list.
+		{"only separate value", []string{"p", "--reassess", "--only", "abcdef01"}, "p", "", false, true, []string{"abcdef01"}, ""},
+		{"only comma list", []string{"p", "--reassess", "--only", "abcdef01,12345678"}, "p", "", false, true, []string{"abcdef01", "12345678"}, ""},
+		{"only equals form", []string{"p", "--reassess", "--only=abcdef01"}, "p", "", false, true, []string{"abcdef01"}, ""},
+		{"only repeated", []string{"p", "--reassess", "--only", "abcdef01", "--only", "12345678"}, "p", "", false, true, []string{"abcdef01", "12345678"}, ""},
+		{"only with spaces and empties", []string{"p", "--reassess", "--only", " abcdef01 , , 12345678 "}, "p", "", false, true, []string{"abcdef01", "12345678"}, ""},
+		{"only file", []string{"p", "--reassess", "--only-file", "/tmp/ids.txt"}, "p", "", false, true, nil, "/tmp/ids.txt"},
+		{"only file equals form", []string{"p", "--reassess", "--only-file=/tmp/ids.txt"}, "p", "", false, true, nil, "/tmp/ids.txt"},
+		// Both at once is the union, flag selectors first: the supersede repair
+		// prints both forms for one set of ids.
+		{"only and only file together", []string{"p", "--reassess", "--only", "abcdef01", "--only-file", "/tmp/ids.txt"}, "p", "", false, true, []string{"abcdef01"}, "/tmp/ids.txt"},
+		{"only with apply", []string{"p", "--reassess", "--only", "abcdef01", "--apply"}, "p", "", true, true, []string{"abcdef01"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			project, source, apply, reassess, err := parseResolveArgs(tc.args)
+			parsed, err := parseResolveArgs(tc.args)
 			if err != nil {
 				t.Fatalf("parseResolveArgs(%v): %v", tc.args, err)
 			}
-			if project != tc.project || source != tc.source || apply != tc.apply || reassess != tc.reassess {
-				t.Errorf("parseResolveArgs(%v) = (%q, %q, %v, %v), want (%q, %q, %v, %v)",
-					tc.args, project, source, apply, reassess, tc.project, tc.source, tc.apply, tc.reassess)
+			if parsed.project != tc.project || parsed.source != tc.source || parsed.apply != tc.apply ||
+				parsed.reassess != tc.reassess || parsed.onlyFile != tc.onlyFile {
+				t.Errorf("parseResolveArgs(%v) = %+v, want project=%q source=%q apply=%v reassess=%v onlyFile=%q",
+					tc.args, parsed, tc.project, tc.source, tc.apply, tc.reassess, tc.onlyFile)
+			}
+			if len(parsed.only) != len(tc.only) {
+				t.Fatalf("only = %v, want %v", parsed.only, tc.only)
+			}
+			for i := range tc.only {
+				if parsed.only[i] != tc.only[i] {
+					t.Errorf("only = %v, want %v", parsed.only, tc.only)
+				}
 			}
 		})
 	}
@@ -1360,16 +1385,101 @@ func TestParseResolveArgs(t *testing.T) {
 		{"project empty equals value", []string{"--project="}, "--project requires a value"},
 		{"unknown flag", []string{"myproj", "--bogus"}, `unknown flag "--bogus"`},
 		{"source missing value", []string{"myproj", "--source"}, `unknown flag "--source"`},
+		// A repair scope without --reassess has nothing to scope: the ordinary
+		// pass judges unresolved rows, so accepting the flag would be a flag
+		// that parses, changes no decision and says nothing in the report.
+		{"only without reassess", []string{"p", "--only", "abcdef01"}, "use them with --reassess"},
+		{"only file without reassess", []string{"p", "--only-file", "/tmp/ids.txt"}, "use them with --reassess"},
+		{"only missing value", []string{"p", "--reassess", "--only"}, "--only requires at least one memory id or prefix"},
+		{"only empty equals value", []string{"p", "--reassess", "--only="}, "--only requires at least one memory id or prefix"},
+		// An empty or separator-only value is the routine shell mistake
+		// (`--only "$IDS"` with IDS unset), and it used to parse into no
+		// selectors at all — which is an UNSCOPED project-wide repair, the one
+		// outcome that must never happen by accident, reported as an unscoped
+		// run because Pool == Loaded.
+		{"only empty separate value", []string{"p", "--reassess", "--only", ""}, "--only requires at least one memory id or prefix"},
+		{"only whitespace separate value", []string{"p", "--reassess", "--only", "   "}, "--only requires at least one memory id or prefix"},
+		{"only separators only", []string{"p", "--reassess", "--only", ",,"}, "--only requires at least one memory id or prefix"},
+		{"only file empty separate value", []string{"p", "--reassess", "--only-file", ""}, "--only-file requires a path"},
+		{"only file whitespace separate value", []string{"p", "--reassess", "--only-file", "  "}, "--only-file requires a path"},
+		{"only file missing value", []string{"p", "--reassess", "--only-file"}, "--only-file requires a path"},
+		{"only file empty equals value", []string{"p", "--reassess", "--only-file="}, "--only-file requires a path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, _, err := parseResolveArgs(tc.args)
-			if err == nil {
+			if _, err := parseResolveArgs(tc.args); err == nil {
 				t.Fatalf("parseResolveArgs(%v) must fail", tc.args)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
+			} else if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q must contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestReadOnlySelectors pins the --only-file format: one id or prefix per line,
+// '#' starting a comment anywhere on the line, blank lines and CRLF ignored. The
+// comment rule is safe because a selector can never contain a '#' — an id is
+// hex, and so is any prefix of one — and it is what lets a person annotate the
+// file they are about to paste into a repair.
+func TestReadOnlySelectors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ids.txt")
+	body := "# targets withdrawn by supersede --reassess --apply\r\n" +
+		"abcdef0123456789abcdef0123456789   # the changelog note\r\n" +
+		"\r\n" +
+		"  12345678  \n" +
+		"# trailing comment with no ids\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := readOnlySelectors(path)
+	if err != nil {
+		t.Fatalf("readOnlySelectors: %v", err)
+	}
+	want := []string{"abcdef0123456789abcdef0123456789", "12345678"}
+	if len(got) != len(want) {
+		t.Fatalf("readOnlySelectors = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("selector %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestReadOnlySelectorsRefusesAnEmptyList: a file the operator pointed a repair
+// at and that names nothing must fail, never fall through to an unscoped pass
+// that judges every resolved memory in the project.
+func TestReadOnlySelectorsRefusesAnEmptyList(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"empty":            "",
+		"comments only":    "# nothing here\n#  or here\n",
+		"blank lines only": "\n\n   \n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, "ids.txt")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if _, err := readOnlySelectors(path); err == nil {
+				t.Fatal("a --only-file that names no ids must be an error, not an unscoped run")
+			} else if !strings.Contains(err.Error(), "names no memory ids") {
+				t.Errorf("error %q must say the file named nothing", err)
+			}
+		})
+	}
+}
+
+// TestReadOnlySelectorsNamesAMissingFile: the path is in the error, because the
+// operator has to know which of two files in a report they mistyped.
+func TestReadOnlySelectorsNamesAMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "no-such-file.txt")
+	_, err := readOnlySelectors(path)
+	if err == nil {
+		t.Fatal("a missing --only-file must be an error")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q must name the path %q", err, path)
 	}
 }
 
@@ -1411,16 +1521,47 @@ func TestReassessSummaryLine(t *testing.T) {
 	}
 }
 
+// TestReassessSummaryLineScopedSaysHowMuchItJudged: a scoped run that reported
+// "40 already resolved" would be describing a pool it never looked at, and the
+// operator's whole reason for scoping is to know the other rows were left alone
+// (#698).
+func TestReassessSummaryLineScopedSaysHowMuchItJudged(t *testing.T) {
+	res := resolve.ReassessResult{Loaded: 3, Pool: 143, Vetoed: 1, Cached: 0, ReKept: 1, StillResolved: 1, Demoted: 0, Unknown: 0, Cleared: 1}
+	want := "proj: 3 of 143 already resolved judged, 1 KEEP vetoed, 0 KEEP cached, 1 still RESOLVED, 0 still asserted by a link or correction, 0 UNKNOWN, cleared resolved_at for 1 (1 classify call(s))\n"
+	if got := reassessSummaryLine("proj", res, true, 1, 1); got != want {
+		t.Errorf("reassessSummaryLine() scoped = %q, want %q", got, want)
+	}
+}
+
+// TestReassessMissLines: a selector that named nothing is reported on its own
+// line, verbatim, because the alternative is a resolution the operator believed
+// was repaired and was not.
+func TestReassessMissLines(t *testing.T) {
+	if got := reassessMissLines(resolve.ReassessResult{Loaded: 2, Pool: 2}); got != "" {
+		t.Errorf("an unscoped run must print no miss lines, got %q", got)
+	}
+	res := resolve.ReassessResult{
+		Loaded: 1, Pool: 2,
+		Misses: []resolve.ScopeMiss{
+			{Spec: "ffffffff", Reason: "no already-resolved memory in this project has that id or prefix"},
+		},
+	}
+	want := "  ffffffff  not judged: no already-resolved memory in this project has that id or prefix\n"
+	if got := reassessMissLines(res); got != want {
+		t.Errorf("reassessMissLines() = %q, want %q", got, want)
+	}
+}
+
 // TestSupersedeReport: the pass's report carries the deterministic veto's
 // count, and only when the veto settled something. A pass that declined work it
 // did not do and printed the same totals as a pass that found nothing to do
 // reads as "nothing was skipped" (#686).
 func TestSupersedeReport(t *testing.T) {
 	dry := "proj: 4 candidate pairs in 1 classify call(s), 2 cached, 1 supersedes, 0 causes, 0 reclassified, would link\n"
-	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1); got != dry {
+	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1, 0); got != dry {
 		t.Errorf("supersedeReport() with nothing vetoed = %q, want %q", got, dry)
 	}
-	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1)
+	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1, 0)
 	if !strings.HasPrefix(got, dry) {
 		t.Errorf("supersedeReport() = %q, want the summary line first, unchanged", got)
 	}
@@ -1433,9 +1574,17 @@ func TestSupersedeReport(t *testing.T) {
 	// The report is mode-agnostic about the veto: a vetoed pair is never linked,
 	// so there is nothing for --apply to write either. The apply verb is the
 	// only thing that changes.
-	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0)
+	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0, 0)
 	if !strings.HasPrefix(apply, "proj: 1 candidate pairs in 0 classify call(s), 0 cached, 0 supersedes, 0 causes, 0 reclassified, linked\n") {
 		t.Errorf("supersedeReport() apply = %q, want the apply verb and the veto count", apply)
+	}
+	// A pass that had to re-ask a failed call says so (#699). The count is
+	// inside the call tally rather than a second sentence, because the calls and
+	// the retries are one fact: the retry IS a call, and the line that reports
+	// one without the other describes a pass nobody ran.
+	retried := supersedeReport("proj", supersede.Result{Candidates: 4, Confirmed: 1}, "would link", 3, 1)
+	if !strings.Contains(retried, "in 3 classify call(s), 1 retried after a failed call, 0 cached") {
+		t.Errorf("supersedeReport() = %q, want the retried call counted next to the calls it made", retried)
 	}
 }
 
@@ -1453,7 +1602,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	dry := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Neither: 1, Unclassified: 1,
 		Withdrawn: 0, CausesWithdrawn: 1, // what the pass predicts for a dry run
-	}, false, edges, 2)
+	}, false, edges, 2, 0)
 	for _, want := range []string{
 		// The per-outcome numbers add up to Loaded, the withdrawal count is the
 		// two edges below it rather than the (dry-run-zero) Withdrawn field, and
@@ -1481,7 +1630,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	apply := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 2, Vetoed: 1, Neither: 1, Withdrawn: 1, CausesWithdrawn: 1,
-	}, true, applied, 1)
+	}, true, applied, 1, 0)
 	if !strings.Contains(apply, "withdrew 1, swept 1 causes edge(s) (1 classify call(s))") {
 		t.Errorf("apply report does not count the withdrawal that landed and the edge swept with it:\n%s", apply)
 	}
@@ -1506,7 +1655,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	failReport := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 1, Neither: 1, Withdrawn: 1, CausesSweepFailed: 1,
-	}, true, failed, 1)
+	}, true, failed, 1, 0)
 	if !strings.Contains(failReport, "[causes sweep FAILED — unknown]") {
 		t.Errorf("a failed sweep must not be reported as a count:\n%s", failReport)
 	}
@@ -1515,6 +1664,51 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	if strings.Contains(failReport, "[+0 causes edge]") {
 		t.Errorf("a failed sweep printed a marker that says nothing was moved:\n%s", failReport)
+	}
+
+	// A dry-run row whose 'causes' PREDICTION could not be read is a different
+	// state from a failed sweep (no sweep ran) and a third from "there is
+	// nothing else to delete" — the report has to say which, or an operator about
+	// to apply is deciding about a deletion nobody looked for.
+	prediction := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 1, Vetoed: 1, CausesPredictionFailed: 1,
+	}, false, []supersede.WithdrawnEdge{
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true, PredictionUnknown: true},
+	}, 0, 0)
+	if !strings.Contains(prediction, "would withdraw 1") {
+		t.Errorf("a dry run whose prediction read failed reported no withdrawal at all:\n%s", prediction)
+	}
+	if !strings.Contains(prediction, "1 causes prediction(s) unavailable (read failed, unknown)") {
+		t.Errorf("the summary must count the unreadable predictions separately from the failed sweeps:\n%s", prediction)
+	}
+	if !strings.Contains(prediction, "[causes edge — unknown: the prediction read failed]") {
+		t.Errorf("the row must say the count is unknown rather than printing a 0:\n%s", prediction)
+	}
+	if strings.Contains(prediction, "causes sweep(s) FAILED") || strings.Contains(prediction, "withdrew ") {
+		t.Errorf("a dry run printed a marker it did not earn:\n%s", prediction)
+	}
+
+	// #699: a classify call that failed leaves its pairs UNJUDGED while the rows
+	// a rule settled still withdraw. The report has to name both, or a partial
+	// repair reads as a complete one — the withdrawal lines look like the whole
+	// story, and the edges that never reached a verdict would be invisible.
+	partial := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 3, Vetoed: 1, Withdrawn: 1,
+		Unjudged: []supersede.UnjudgedPair{
+			{NewerID: "5566778899aabbcc", OlderID: "445566778899aabb"},
+		},
+	}, true, []supersede.WithdrawnEdge{
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true, Written: true},
+	}, 2, 1)
+	for _, want := range []string{
+		"0 UNKNOWN, 1 unjudged (no verdict: the classify call failed or answered with the wrong number of verdicts; their edges stand), withdrew 1",
+		"(2 classify call(s), 1 retried after a failed call)",
+		"  withdrew     abcdef01 -> 98765432  [veto, no harness call]",
+		"  unjudged    55667788 -> 44556677  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]",
+	} {
+		if !strings.Contains(partial, want) {
+			t.Errorf("partial-repair report missing %q:\n%s", want, partial)
+		}
 	}
 }
 
@@ -1632,14 +1826,17 @@ func TestDashProjectLifecycleRoundTrip(t *testing.T) {
 				t.Errorf("reflect phase flags lost: %+v", p)
 			}
 		case "resolve":
-			project, _, a, reassess, perr := parseResolveArgs(args)
+			p, perr := parseResolveArgs(args)
 			if perr != nil {
 				t.Fatalf("parseResolveArgs(%v): %v", ph.args, perr)
 			}
-			if reassess {
+			if p.reassess {
 				t.Errorf("the resolve phase must never emit --reassess (phase argv: %v)", ph.args)
 			}
-			got, apply = project, a
+			if len(p.only) > 0 || p.onlyFile != "" {
+				t.Errorf("the resolve phase must never emit a repair scope (phase argv: %v)", ph.args)
+			}
+			got, apply = p.project, p.apply
 		case "supersede":
 			project, _, a, reassess, _, perr := parseSupersedeArgs(args)
 			if perr != nil {

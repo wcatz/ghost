@@ -1334,6 +1334,8 @@ func TestLoad_AllKnownKeysDoNotWarn(t *testing.T) {
 		"    environment: development",
 		"search:",
 		"  min_similarity: 0.0",
+		"context:",
+		"  abstain_cosine: 0.0",
 		"obsidian:",
 		`  vault_dir: ""`,
 		`  interval: "30s"`,

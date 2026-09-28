@@ -57,6 +57,10 @@ func runMCP() {
 	// over PATH, and cli.model_resolve is applied constructor-level per spawn
 	// (the server is long-lived, so no env mutation).
 	srv.SetResolveCLI(cfg.CLI)
+	// The assembler's relevance configuration, so a context.abstain_cosine the
+	// user set reaches ghost_memory_search's floor. Its zero value is the
+	// shipped default (arm B off), so this is a no-op until somebody sets one.
+	srv.SetContextConfig(cfg.Context)
 
 	if cfg.Embedding.Enabled {
 		embedClient := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)

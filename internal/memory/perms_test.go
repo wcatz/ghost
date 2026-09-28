@@ -272,6 +272,118 @@ func TestChmodTightenNeverWidens(t *testing.T) {
 	}
 }
 
+// TestFchmodNoFollowNeverChmodsThroughASymlink is the #608 race. The caller's
+// Lstat and the chmod are two resolutions of the same name, so anything that
+// swaps a regular file for a symlink between them had its chmod applied to the
+// link's target instead — a file Ghost has no business touching, and one it
+// would then have made UNREADABLE to its owner, which is how a pass whose whole
+// promise is "subtractive or nothing" becomes destructive.
+//
+// Staged as a symlink already at the name rather than as a live swap: a test
+// cannot interleave with the production sequence, but the two cases have the
+// same consequence and the same test, and the one a test CAN stage is the one
+// that decides whether the implementation goes through the name or through a
+// descriptor.
+func TestFchmodNoFollowNeverChmodsThroughASymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "not-ghost's.txt")
+	if err := os.WriteFile(target, []byte("someone else's file"), 0o600); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	setPerm(t, target, 0o644)
+	link := filepath.Join(dir, "ghost.db")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := fchmodNoFollow(link, 0o600); err == nil {
+		t.Error("fchmodNoFollow reported success on a symlink, so the mode landed on the link's target")
+	}
+	if got := permOf(t, target); got != 0o644 {
+		t.Errorf("the link's target is %#o, want it untouched at 0644", got)
+	}
+	// The link itself is still a link: a fix that unlinked and re-created would
+	// have tightened the file it made and left the name pointing elsewhere.
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink was replaced rather than refused: info=%v err=%v", fi, err)
+	}
+}
+
+// TestFchmodNoFollowTightensTheRealFile is the other half, so the refusal above
+// cannot be satisfied by refusing everything: a regular file has to reach the
+// tightened mode, through the descriptor rather than the name.
+func TestFchmodNoFollowTightensTheRealFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ghost.db")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := fchmodNoFollow(path, 0o600); err != nil {
+		t.Fatalf("fchmodNoFollow on a regular file: %v", err)
+	}
+	if got := permOf(t, path); got != 0o600 {
+		t.Errorf("mode = %#o, want 0600", got)
+	}
+}
+
+// TestTightenPermissionsNeverOpensASQLiteSidecarReadOnly pins the route each
+// file takes, which is otherwise invisible: for any file the descriptor can
+// open, both routes reach the same mode.
+//
+// The separating mode is 0220 — no owner-read bit, so fchmodNoFollow's O_RDONLY
+// open fails and leaves the mode alone, while os.Chmod still reaches 0200. A
+// sidecar seeded there and left at 0220 took the descriptor route; one at 0200
+// did not. Both are asserted in the configured data directory and outside it,
+// because the hazard the descriptor poses there is a live connection rather than
+// a location: OpenDB runs this pass from inside its own connection in every
+// tree, so a location-scoped exception would reopen the write loss the eval, bench
+// and scratch trees depend on not having. See fchmodNoFollow.
+//
+// Skipped as root, which can read a 0220 file (CAP_DAC_OVERRIDE) and so would
+// reach 0200 through the descriptor too — the assertion would pass for the wrong
+// reason and the test would claim a discrimination it does not have. The same
+// skip the tree uses elsewhere for the same reason.
+func TestTightenPermissionsNeverOpensASQLiteSidecarReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a 0220 file is still readable, so the two routes are indistinguishable")
+	}
+	const (
+		unreadable = 0o220
+		readable   = 0o666
+	)
+	// One assertion set, run against both locations.
+	assertRoutes := func(t *testing.T, dbPath string) {
+		t.Helper()
+		for i, mode := range []os.FileMode{readable, unreadable, unreadable} {
+			name := []string{dbPath, dbPath + "-wal", dbPath + "-shm"}[i]
+			if err := os.WriteFile(name, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			setPerm(t, name, mode)
+		}
+		TightenPermissions(dbPath)
+
+		if got := permOf(t, dbPath); got != 0o600 {
+			t.Errorf("the database is %#o, want 0600 — the descriptor route", got)
+		}
+		// 0220 &^ 077 == 0200, reachable only by a chmod that does not open the
+		// file first.
+		for _, name := range []string{dbPath + "-wal", dbPath + "-shm"} {
+			if got := permOf(t, name); got != 0o200 {
+				t.Errorf("%s is %#o, want 0200 — it took the name-based route", filepath.Base(name), got)
+			}
+		}
+	}
+
+	t.Run("in the configured data directory", func(t *testing.T) {
+		assertRoutes(t, filepath.Join(fakeDataDir(t), "ghost.db"))
+	})
+
+	t.Run("outside it, as eval, bench and scratch open a database", func(t *testing.T) {
+		fakeDataDir(t) // XDG_DATA_HOME now names a tree unrelated to the one below
+		assertRoutes(t, filepath.Join(t.TempDir(), "ghost.db"))
+	})
+}
+
 // TestOpenDBDoesNotChmodAForeignDirectory: eval, cycle and bench harnesses open
 // databases in scratch trees, and a user can point GHOST_SCRATCH_DIR anywhere.
 // Only the configured DataDir is Ghost's own directory to tighten; the parent

@@ -990,10 +990,135 @@ func TestCLIResolveSupersede(t *testing.T) {
 		}
 	})
 
+	t.Run("supersede --reassess survives a flaky harness", func(t *testing.T) {
+		s := newSandbox(t)
+		cs := s.mcpSession(t)
+		older := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay port is 2222",
+		}))
+		time.Sleep(1100 * time.Millisecond) // the orientation is by updated_at
+		newer := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay port is 3333 now",
+		}))
+		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port is 2222")
+		s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
+		live := func() int {
+			return s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND source_id = ? AND target_id = ?`, newer, older)
+		}
+		if n := live(); n != 1 {
+			t.Fatalf("the fixture wrote %d supersedes link(s), want 1", n)
+		}
+
+		// One failed call, answered by the retry: the repair completes, the
+		// edge the verdict confirmed stands, and the report says it needed a
+		// retry — a pass that quietly re-asked would describe a run nobody made.
+		s.failHarnessCalls("supersede", 1)
+		ok := s.mustRun("supersede", e2eProject, "--reassess", "--apply", "--source", "opencode")
+		mustMatch(t, "reassess retry", ok.stdout, `1 still supersedes`)
+		mustMatch(t, "reassess retry", ok.stdout, `1 retried after a failed call`)
+		if n := live(); n != 1 {
+			t.Fatalf("a confirmed edge was withdrawn: %d left", n)
+		}
+
+		// A call and its retry both dead: the edge is left standing and NAMED,
+		// and the pass exits non-zero, because a repair that judged nothing and
+		// withdrew nothing is a partial one and must not read as a clean run.
+		s.failHarnessCalls("supersede", 2)
+		bad := s.mustFail("supersede", e2eProject, "--reassess", "--apply", "--source", "opencode")
+		mustMatch(t, "reassess failed call", bad.stdout, `1 unjudged`)
+		mustMatch(t, "reassess failed call", bad.stderr, `(?i)classify|exit status`)
+		if n := live(); n != 1 {
+			t.Fatalf("a classify call that failed withdrew the edge it never judged: %d left", n)
+		}
+	})
+
 	t.Run("supersede without a project is a usage error", func(t *testing.T) {
 		s := newSandbox(t)
 		s.mustFail("supersede")
 	})
+}
+
+// TestCLISupersedeReassessFeedsResolveReassess runs the whole repair chain
+// against the built binary (#698): a wrong supersession is written, resolve's
+// piggyback stamps the older endpoint, the edge is withdrawn, and the
+// withdrawal's own follow-up clears exactly that one memory — leaving another
+// resolved memory in the same project resolved, which is the failure the scoped
+// repair exists to prevent.
+//
+// The corpus is built in the order the chain needs rather than all at once: the
+// fake opencode harness can only answer a single note per call (its JSON
+// envelope does not escape a newline), so no classify call here may see a batch
+// of two. The bystander is therefore saved after the edge exists, and it is the
+// only note any classifier call in this test is asked about besides the repair.
+func TestCLISupersedeReassessFeedsResolveReassess(t *testing.T) {
+	s := newSandbox(t)
+	cs := s.mcpSession(t)
+
+	// The older note carries a resolution keyword so the ordinary pass
+	// considers it at all; the newer one does not, so it stays a live note and
+	// the pair is unambiguously about the older memory.
+	older := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "the staging relay port was fixed in the 0.36.0 release: it is 2222",
+	}))
+	time.Sleep(1100 * time.Millisecond)
+	newer := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "the staging relay port is 3333 now",
+	}))
+
+	s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port was 2222")
+	s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND source_id = ? AND target_id = ? AND invalidated_at IS NULL`,
+		newer, older); n != 1 {
+		t.Fatalf("the setup did not write the supersedes edge %s->%s", newer, older)
+	}
+
+	// A second memory the same resolve run resolves, and which the scoped
+	// repair must therefore never touch.
+	bystander := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "the port 2222 rollout experiment was abandoned upstream",
+	}))
+
+	// The ordinary pass stamps the older endpoint for free off the live edge,
+	// and the bystander from the classifier.
+	s.setHarnessAnswer("resolve", "RESOLVED | closed-by: the experiment was abandoned upstream")
+	s.mustRun("resolve", e2eProject, "--source", "opencode", "--apply")
+	for _, id := range []string{older, bystander} {
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, id); n != 1 {
+			t.Fatalf("memory %s is not resolved; the reassess has nothing to repair", id)
+		}
+	}
+
+	// Withdraw the edge. The follow-up has to name the withdrawn target, and it
+	// has to be the exact command, because the whole value of the run is that
+	// the operator does not have to work out the second half themselves.
+	s.setHarnessAnswer("supersede", "NEITHER")
+	repair := s.mustRun("supersede", e2eProject, "--source", "opencode", "--reassess", "--apply")
+	want := "ghost resolve " + e2eProject + " --reassess --only " + older + " --apply"
+	mustContain(t, "supersede --reassess --apply", repair.stdout, want)
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND source_id = ? AND invalidated_at IS NULL`, newer); n != 0 {
+		t.Fatalf("the reassess did not withdraw the edge")
+	}
+
+	// The id list is a file under the data dir's scratch, and it is a
+	// --only-file input: same list, no retyping.
+	files, err := filepath.Glob(filepath.Join(s.scratch, "supersede-reassess-*.ids"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("want exactly one follow-up id file under %s, got %v (%v)", s.scratch, files, err)
+	}
+	s.setHarnessAnswer("resolve", "KEEP")
+	s.mustRun("resolve", e2eProject, "--source", "opencode", "--reassess", "--only-file", files[0], "--apply")
+
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NULL`, older); n != 1 {
+		t.Fatalf("the withdrawn edge's target is still resolved: the repair did not run")
+	}
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND resolved_at IS NOT NULL`, bystander); n != 1 {
+		t.Fatalf("the scoped repair touched a memory it was not asked about")
+	}
 }
 
 // TestCLIProject covers project bind and merge, and the absence of a

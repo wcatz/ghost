@@ -100,7 +100,7 @@ func TestReassessIgnoresScopeConflictingSupersedesAssertion(t *testing.T) {
 	}
 	cls := &fakeClassifier{drop: map[string]bool{}}
 
-	res, _, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	res, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}

@@ -538,17 +538,29 @@ func salvageDeclinedToolRun(raw string) (string, bool) {
 	return sb.String(), true
 }
 
+// maxOpencodeOutputLine bounds one line of an opencode output stream. It is the
+// same ceiling the host transcript reader uses (hostevent.maxTranscriptLine) and
+// it exists for the same reason: lines carry whole agentic turns, so a reflect
+// or resolve answer can be megabytes on one line. The 4 MiB bufio.Scanner cap
+// this replaced refused one with "token too long" — the same failure #632 fixed
+// on the stop-hook side, left in place here — and it read exactly like a
+// malformed stream, so a long answer was reported as a broken harness.
+//
+// A var so a test can lower it rather than push megabytes through the parser;
+// the tests that do must not run in parallel, since the value is process-wide.
+var maxOpencodeOutputLine = 64 << 20
+
 // parseOpenCodeOutput concatenates the text events from an opencode JSON-lines
 // stream into the model's answer, ignoring step_start/step_finish/reasoning. A
-// line that isn't valid JSON, or a line exceeding the scanner buffer, is an
-// error rather than a silent skip — a malformed stream means the answer is
-// incomplete, and treating it as a clean reflection output would be wrong.
-// Blank lines are skipped defensively (opencode may emit an empty line
-// mid-stream without it indicating truncation).
+// line that isn't valid JSON, or a line past maxOpencodeOutputLine, is an error
+// rather than a silent skip — a malformed stream means the answer is incomplete,
+// and treating it as a clean reflection output would be wrong. Blank lines are
+// skipped defensively (opencode may emit an empty line mid-stream without it
+// indicating truncation).
 func parseOpenCodeOutput(raw string) (string, error) {
 	var sb strings.Builder
 	sc := bufio.NewScanner(strings.NewReader(raw))
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), maxOpencodeOutputLine)
 	for sc.Scan() {
 		if len(strings.TrimSpace(string(sc.Bytes()))) == 0 {
 			continue

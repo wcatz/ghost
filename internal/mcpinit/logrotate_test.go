@@ -112,6 +112,79 @@ func TestOpenLogForAppendLeavesSmallLogAlone(t *testing.T) {
 	}
 }
 
+// TestRotateLogIfOversizedRechecksBeforeRenaming is the #608 race. Two Ghost
+// processes can both read an oversized log, and the second one's rename then
+// replaces the rotated copy with the first one's fresh log — so the full log
+// the first process had just preserved is overwritten by a few lines, and
+// nothing is logged about it. The disk is arranged in the state the WINNER
+// leaves behind (a small fresh log at the name, the full one already in ".1"),
+// and the probe answers "oversized" only on the first read, which is what the
+// loser's stale read says.
+func TestRotateLogIfOversizedRechecksBeforeRenaming(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lifecycle.log")
+	rotatedPath := path + ".1"
+
+	// The winner's state: the full log is in ".1" and the name holds what this
+	// process's own open would have just created.
+	full := seedOversizedLog(t, rotatedPath, "the big one")
+	if err := os.WriteFile(path, []byte("the winner's first line\n"), 0o600); err != nil {
+		t.Fatalf("seed the fresh log: %v", err)
+	}
+
+	var reads int
+	probe := func(name string) (os.FileInfo, error) {
+		reads++
+		if reads == 1 {
+			// The stale read: the size this process saw before the winner
+			// rotated. Answered from the real file's own stat so the mode
+			// check has something true to agree with.
+			held, err := os.Lstat(rotatedPath)
+			if err != nil {
+				return nil, err
+			}
+			_ = name
+			return held, nil
+		}
+		return os.Lstat(path)
+	}
+
+	if rotateLogIfOversized(path, rotatedPath, probe) {
+		t.Error("rotated on a stale read, so the winner's rotated copy was replaced by its own fresh log")
+	}
+	if reads < 2 {
+		t.Errorf("the size was read %d time(s), want a second read before the rename", reads)
+	}
+	if got, err := os.ReadFile(rotatedPath); err != nil || string(got) != full {
+		t.Errorf("the rotated copy is %d bytes (err %v), want the full %d-byte log still there",
+			len(got), err, len(full))
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "the winner's first line\n" {
+		t.Errorf("the log at its own name is %q (err %v), want it left where it was", got, err)
+	}
+}
+
+// TestRotateLogIfOversizedStillRotatesWhenBothReadsAgree is the other half, so
+// the re-read cannot be satisfied by never rotating: a log that really has
+// reached the cap on both reads moves, exactly as before.
+func TestRotateLogIfOversizedStillRotatesWhenBothReadsAgree(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lifecycle.log")
+	rotatedPath := path + ".1"
+	full := seedOversizedLog(t, path, "the big one")
+
+	if !rotateLogIfOversized(path, rotatedPath, os.Lstat) {
+		t.Fatal("an oversized log reported both reads and was not rotated")
+	}
+	got, err := os.ReadFile(rotatedPath)
+	if err != nil {
+		t.Fatalf("read .1: %v", err)
+	}
+	if string(got) != full {
+		t.Errorf(".1 holds %d bytes, want the full %d-byte log", len(got), len(full))
+	}
+}
+
 // TestOpenLogForAppendCreatesMissingLog: the common case for a fresh install —
 // no log yet, so there is nothing to rotate and the file is simply created.
 func TestOpenLogForAppendCreatesMissingLog(t *testing.T) {

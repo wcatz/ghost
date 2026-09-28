@@ -91,10 +91,10 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 	}
 
 	// Pass 2: render + diff-write + collect keep-set, then prune. The keep-set
-	// holds each entity's canonical basename, not its id: a content edit
-	// rewrites a memory in place (same ID, new slug), so the old-slug file is
-	// stale and its name is simply not in the set. See keepSet for why it is
-	// keyed on the name.
+	// holds each entity's canonical path from the vault root, not its id and not
+	// its bare name: a content edit rewrites a memory in place (same ID, new
+	// slug), so the old-slug file is stale and its path is simply not in the
+	// set. See keepSet for why it is keyed on the path.
 	keep := make(keepSet)
 	var subtrees []string
 	written, skipped := 0, 0
@@ -104,8 +104,9 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			if err != nil {
 				return fmt.Errorf("links for %s: %w", m.ID, err)
 			}
-			keep[fileFor[m.ID]] = struct{}{}
-			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Memories", fileFor[m.ID]), renderMemory(m, links, fileFor))
+			path := filepath.Join(vaultDir, d.folder, "Memories", fileFor[m.ID])
+			keep[keepKey(vaultDir, path)] = struct{}{}
+			w, err := writeIfChanged(path, renderMemory(m, links, fileFor))
 			if err != nil {
 				return err
 			}
@@ -120,9 +121,9 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			d.trunc = true
 		}
 		for _, dec := range decisions {
-			name := fileNameFor(dec.Title, dec.ID)
-			keep[name] = struct{}{}
-			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Decisions", name), renderDecision(dec))
+			path := filepath.Join(vaultDir, d.folder, "Decisions", fileNameFor(dec.Title, dec.ID))
+			keep[keepKey(vaultDir, path)] = struct{}{}
+			w, err := writeIfChanged(path, renderDecision(dec))
 			if err != nil {
 				return err
 			}
@@ -137,9 +138,9 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			d.trunc = true
 		}
 		for _, tk := range tasks {
-			name := fileNameFor(tk.Title, tk.ID)
-			keep[name] = struct{}{}
-			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Tasks", name), renderTask(tk))
+			path := filepath.Join(vaultDir, d.folder, "Tasks", fileNameFor(tk.Title, tk.ID))
+			keep[keepKey(vaultDir, path)] = struct{}{}
+			w, err := writeIfChanged(path, renderTask(tk))
 			if err != nil {
 				return err
 			}

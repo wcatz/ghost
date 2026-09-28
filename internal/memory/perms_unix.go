@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/wcatz/ghost/internal/config"
 )
 
@@ -79,7 +81,15 @@ func TightenPermissions(dbPath string) {
 			}
 			continue
 		}
-		chmodTighten(name, info)
+		// The database always goes through a descriptor. The two files SQLite
+		// maintains beside it never do, in any tree: see fchmodNoFollow for the
+		// measurement and for why the hazard is about a live connection rather
+		// than about where the database lives.
+		if i == 0 {
+			chmodTighten(name, info)
+		} else {
+			chmodByName(name, info)
+		}
 	}
 }
 
@@ -104,14 +114,90 @@ func isDataDir(dir string) bool {
 // keeps its execute bit, and a path already at 0700 or 0600 is never chmod'ed at
 // all. info must come from an Lstat of path, and the caller has already
 // established that path is of the kind Ghost owns.
-//
-// The stat is advisory, not a lock. os.Chmod resolves the name again, so a path
-// swapped for a symlink between the caller's Lstat and here would be chmod'ed
-// through — closing that would mean an O_NOFOLLOW open plus fchmod on the
-// descriptor, at the cost of an fd and a platform-specific path in a function
-// whose whole failure mode is "log a warning". The window needs write access
-// inside the data directory, which is 0700, so it is not the weak link.
 func chmodTighten(path string, info os.FileInfo) {
+	perm := info.Mode().Perm()
+	tightened := perm &^ permsGroupOther
+	if tightened == perm {
+		return
+	}
+	if err := fchmodNoFollow(path, tightened); err != nil {
+		slog.Warn("could not tighten ghost data permissions",
+			"path", path, "was", perm, "now", tightened, "error", err)
+	}
+}
+
+// fchmodNoFollow applies mode to the file path names, through a descriptor
+// rather than through the name.
+//
+// os.Chmod resolves the name a second time, so the Lstat the caller took and
+// the chmod that acted on it were two lookups of one path: anything that
+// replaced a regular file with a symlink in between had the mode applied to the
+// link's target. Inside the data directory that needs write access to a 0700
+// directory, but dbPath also names a database in an eval scratch tree, a bench
+// tree or a maintenance tree, where the parent is the user's own and nothing
+// stops a rename. The consequence is not a wider mode — it is a NARROWER one
+// applied to a file Ghost does not own, which is how a pass that promises "only
+// ever subtractive" becomes destructive.
+//
+// O_NOFOLLOW makes the open itself the decision, so there is no second lookup
+// to be wrong about, and File.Chmod is fchmod(2) on the descriptor the open
+// returned. A symlink at the name is therefore refused (ELOOP) rather than
+// followed, and a path that stopped being a regular file in the window is left
+// alone — the pass's contract is to never make Ghost's own data less
+// protected, and a refusal here is reported by the caller's warning.
+//
+// The cost is a descriptor, and one shape the old name-based call handled: a
+// file with no read bit for its owner (0220 and the like) cannot be opened
+// O_RDONLY, so it keeps its group and other bits and the caller logs a warning.
+// A database Ghost can open at all needs to read it, so that mode is a
+// curiosity rather than a case, and the alternative — a write-only fallback —
+// would put the name back in the path and reopen the window this closes.
+//
+// Where it is NOT used, and why: the -wal and -shm files, in every tree.
+//
+// The precondition is a LIVE CONNECTION that has just created them, and two call
+// sites have it. OpenDB runs this pass from inside its own connection, after the
+// first query that brings the sidecars into existence, and the session hook's
+// bumpSessionCount calls it with its rwDSN handle still open and its
+// uncheckpointed session counter sitting in that -wal. Opening a sidecar
+// read-only at that point changes what a later write records: the e2e suite
+// caught it as a save whose history row was never written at all — not a wrong
+// mode, missing data. Bisected to the open rather than to O_NOFOLLOW: an
+// O_RDONLY open with no NOFOLLOW reproduces it, os.Chmod does not, and
+// hardening the database alone does not.
+//
+// The hazard is therefore NOT about where the database lives, and an earlier
+// version of this that scoped the name-based route to the configured data
+// directory reintroduced it for the eval, bench and scratch trees — which
+// OpenDB opens from a live connection too. There is no location test that
+// separates them, and no way to tell from inside the pass whether a connection
+// is live, so the two sidecars keep the name-based route everywhere.
+//
+// What that gives up is bounded. A swap staged between the Lstat above and the
+// chmod has its mode narrowed on the link's target, and the parent is 0700 in
+// the data directory so only the owner can stage one; outside it, the sidecars
+// are files SQLite itself creates, replaces and will not use when symlinked, so
+// the window has to be raced by something already writing to the directory. The
+// database — the file whose identity a wrong chmod would actually reach — is
+// hardened everywhere.
+func fchmodNoFollow(path string, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// chmodByName is the name-based chmod TightenPermissions uses for a database's
+// -wal and -shm, kept separate from chmodTighten so the reason sits on the
+// choice rather than in a comment nobody reading the caller finds. Subtractive
+// like the descriptor path — it can only narrow — and the two-resolution race is
+// the trade fchmodNoFollow documents.
+func chmodByName(path string, info os.FileInfo) {
 	perm := info.Mode().Perm()
 	tightened := perm &^ permsGroupOther
 	if tightened == perm {

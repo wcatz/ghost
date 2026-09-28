@@ -6,6 +6,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -42,53 +43,12 @@ type embedderDiagnostics interface {
 	Model() string
 }
 
-// emptyWhy explains an empty result that is not an absence, and returns "" for a
-// plain no-match — where the leading sentence is true and the caveat covers the
-// window. The reasons it covers are the two whose cause is not already named
-// elsewhere in the answer: a row withheld as out of date, and a row cut by the
-// item budget. The category and scope reasons are not listed because
-// filterCaveat below already names those filters and suggests the next step, and
-// the dedup and diversity reasons belong to stages that do not run in this
-// version — a version that cannot explain an empty answer says the absence
-// sentence rather than inventing one.
-//
-// No sentence here claims every row was removed the same way. A closed reason set
-// carries the dominant cause, and the note appended to the answer carries the
-// per-stage breakdown; "every" would contradict that note whenever two stages
-// shared the work.
-//
-// This text is read by an agent, not by a reviewer of this repository: it names
-// what happened to the rows and what to do about it, and nothing else. Design
-// vocabulary ("stage 2", "Decision 3") stays in the comments.
-func emptyWhy(result assemble.Result) string {
-	switch result.Reason {
-	case "all_invalid":
-		return "No memory was returned: the candidates found were withheld as out of date, their validity windows having closed or not yet opened. " +
-			"The query was not wrong — the answer is withheld, not absent."
-	case "all_over_budget":
-		return "No memory was returned: the candidates found were cut by the item budget. Raise the limit to see them."
-	}
-	return ""
-}
-
-// assemblerNotes renders the assembler's bounded diagnostics for an empty answer,
-// as a leading label so the lines below it are not mistaken for more memories.
-func assemblerNotes(result assemble.Result) string {
-	if len(result.Notes) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	for _, note := range result.Notes {
-		b.WriteString("\n(Note: ")
-		b.WriteString(note)
-		b.WriteString(")")
-	}
-	return b.String()
-}
-
-// failedLegs names the retrieval legs the assembler recorded as errored, or ""
-// when every applicable leg ran. A leg the request made applicable but could not
-// run (a hybrid search with no query vector) is not a failure and is not named.
+// failedLegs names the retrieval legs that were applicable, ran and could not
+// answer. It exists here rather than being read off Result for one caller: the
+// assembler's own copy renders the failure as a sentence inside the response,
+// and this one is the fragment an error message interpolates. A leg the request
+// made applicable but could not run — a hybrid search with no query vector — is
+// not a failure and is not named.
 func failedLegs(result assemble.Result) string {
 	if result.Trace == nil {
 		return ""
@@ -120,22 +80,6 @@ func parseAsOf(raw string) (*time.Time, error) {
 	}
 	utc := parsed.UTC()
 	return &utc, nil
-}
-
-// qualifierBlock renders the assembler's qualifiers as a block that leads an
-// answer, and "" when there are none — which is every current read, so a surface
-// that renders it unconditionally is unchanged for them.
-//
-// A block rather than inline sentences, because these are the statements a
-// reader must not scroll past: a historical answer that reads as a present one
-// is the failure mode, and the reader is the one who has to be told. It carries
-// its own trailing blank line so a caller can place it before either a listing or
-// a sentence without deciding the spacing again.
-func qualifierBlock(result assemble.Result) string {
-	if len(result.Qualifiers) == 0 {
-		return ""
-	}
-	return strings.Join(result.Qualifiers, "\n") + "\n\n"
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -398,7 +342,45 @@ type Server struct {
 	// concurrent calls). Zero value preserves the pre-pin behavior: PATH
 	// lookup, no model pin.
 	resolveCLI config.CLIConfig
+	// contextCfg is the assembler's relevance configuration. Its zero value is
+	// the shipped default — vector arm B off — so a test that skips the setter
+	// exercises the state every machine without a configured floor is in.
+	contextCfg config.ContextConfig
+	// searchMaxBytes bounds one formatted ghost_memory_search response. It is a
+	// field rather than a constant read inline because a test needs a cap below
+	// the empty envelope to reach the error path, and adding a tool flag to get
+	// there would put a budget knob in front of every caller. Its zero value is
+	// the shipped default, as the two fields above it are: `assemble.Budget.MaxBytes`
+	// reads 0 as UNBOUNDED, so a Server built without New (the tree has one, and a
+	// future constructor would too) would otherwise lose the cap silently and
+	// answer with whatever the corpus holds.
+	searchMaxBytes int
 }
+
+// searchResponseCap is one formatted search response's byte cap: the field's
+// value where it was set, and the shipped default where it was not.
+func (s *Server) searchResponseCap() int {
+	if s.searchMaxBytes > 0 {
+		return s.searchMaxBytes
+	}
+	return searchResponseMaxBytes
+}
+
+// searchResponseMaxBytes is the default response cap for the formatted search
+// answer. It is the same order as the session-start injector's block — 15
+// project memories at 200 bytes plus 8 globals at 300 is about 5.4 KB of content,
+// so a search answer that can fill a harness's context window is larger than
+// anything Ghost is willing to inject (#580).
+//
+// It must also clear the largest single thing a caller can ask for, and that is
+// the binding constraint: memory.MaxContentLen is 8000, so a memory at the
+// store's own cap plus the truncation marker, the item line's framing and the
+// verdict line is already past 8000. A cap at or below that cannot return a
+// maximum-length memory at all — the fit pass would drop the only row and the
+// caller would be told to raise a limit no tool argument reaches. Two times the
+// content cap leaves room for one maximum-length memory and still bounds the
+// answer well inside a context window.
+const searchResponseMaxBytes = 2 * memory.MaxContentLen
 
 // Content length caps enforced on free-text tool arguments. The memory
 // content cap itself lives in memory.MaxContentLen — one named constant
@@ -456,6 +438,15 @@ Save immediately with ghost_memory_save — do NOT batch or wait:
 Do NOT save: ephemeral debug state, info derivable from code/git, content in CLAUDE.md.
 Also do NOT save credential values — an API key, access token, password, private key, seed phrase, or anything a detector recognizes as one. Every save is refused, and what you store is replayed into later sessions and sent to models, so a saved secret is a leaked secret. Save the pointer instead: which service, where the value lives, how to read it, when to rotate it.
 
+## Reading Search Results
+ghost_memory_search reports whether its answer can be relied on, and you must read that before quoting it. Every formatted ghost_memory_search answer ends with one machine line: "[ghost:outcome=... reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...]" — optionally followed by " retrieval_partial" inside the brackets, when a retrieval leg ran and failed, so parse to the closing "]". (explain:true returns a JSON scoring breakdown instead of a formatted answer, and carries no verdict. ghost_search_all is a different tool, answers a different question, and carries no verdict line.)
+- answerable — nothing was withheld as weak. READ THE REASON before relying on the rows, because two of the reasons this tool can produce mean NO FLOOR COULD BE APPLIED AT ALL, and the rows are then unjudged: no_floor_arm (no arm had a value to compare — neither a keyword rank nor a cosine reached these rows, which is what a paraphrase sharing no words with the corpus looks like) and retrieval_partial (a leg ran and broke, so no verdict was possible). Judge those rows yourself before relying on them. Every other answerable reason means a floor DID clear a row: a machine with no embedder does not make a match unjudged, because the keyword arm still judges it.
+- weak — the memories are listed, but NONE cleared the relevance floor. They are leads, not answers: verify against the source before acting on one, and say the result is weak if you rely on it anyway.
+- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope and all_out_of_category mean the filters excluded rows that WERE found, all_invalid means they were withheld as out of date, all_over_budget means the answer was too large to return, and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty.
+- abstain_cosine is the configured cosine floor, and its three states are three different facts: off means none is configured, not_applied means one IS configured and no cosine could be compared because the vector leg never ran OR ran and failed (reason= and legs= say which), and a number means the arm was configured AND the vector leg ran, so a cosine was available to compare — it does not mean any particular row was judged against it. not_applied is how a floor you set tells you it did nothing.
+- admitted is how many rows the answer carries. It is lower than candidates whenever something was cut, and after a byte-cap trim it is the only place that shows: a too-large answer is shortened, not refused. legs names each retrieval leg as ok, failed, not_run (asked for, never executed) or absent — and absent means the leg does not APPLY to this request rather than that nobody asked for it, which is what an as_of read reports for the vector leg.
+- legs=vector:not_run means the vector leg did not execute — either no embedder is configured or the query could not be embedded; legs=vector:failed means it ran and broke. Either way the answer is narrower than a full hybrid search, so treat a surprising miss as worth retrying rather than as proof the memory is gone. A search with NO surviving rows and a failed leg comes back as a tool error instead of a verdict — so if you got a line, at least one leg answered.
+
 ## Cross-Project
 When learning about project B while working in project A, pass project B's name as project_id.
 Use ghost_save_global for preferences/facts that apply to ALL repos (not project-specific).
@@ -470,8 +461,9 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		version = "dev"
 	}
 	s := &Server{
-		store:  store,
-		logger: logger,
+		store:          store,
+		logger:         logger,
+		searchMaxBytes: searchResponseMaxBytes,
 	}
 
 	s.mcp = mcp.NewServer(&mcp.Implementation{
@@ -560,6 +552,15 @@ func (s *Server) SetEmbedder(e Embedder, projectCh chan<- string) {
 // keep the old behavior.
 func (s *Server) SetResolveCLI(cfg config.CLIConfig) {
 	s.resolveCLI = cfg
+}
+
+// SetContextConfig hands the assembler's relevance configuration to the search
+// handler. Called once from runMCP before Run. The zero value is the shipped
+// state — vector arm B off, which is what every machine without a measured
+// threshold should be on — so a caller that skips it is not silently running a
+// different floor, it is running the default one.
+func (s *Server) SetContextConfig(cfg config.ContextConfig) {
+	s.contextCfg = cfg
 }
 
 // Run starts the MCP server on stdio transport. Blocks until done.
@@ -846,7 +847,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Title:       "Search Memories",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when a category is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Pass as_of (RFC 3339) to search the store as it stood at that instant instead: the wording each memory held then, including memories deleted since, matched by keyword only because an embedding records current content. as_of cannot be combined with explain, which diagnoses the current ranking. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when a category is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Every formatted answer (explain:true returns a JSON breakdown instead) ends with a machine-readable verdict line, `[ghost:outcome=answerable|weak|empty reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...], optionally followed by \" retrieval_partial\" inside the brackets when a retrieval leg ran and failed` \u2014 `abstain_cosine=off` means no cosine floor is configured, `not_applied` means one is but no cosine could be compared (the vector leg never ran, or ran and failed), and `admitted` is how many rows the answer carries after any trim: `answerable` means nothing was withheld as weak (read its reason: no_floor_arm and retrieval_partial mean no floor could be applied at all, so those rows are unjudged), `weak` means the memories are listed but none cleared the floor \u2014 treat them as leads and verify before relying on them \u2014 and `empty` means the reason on the line says why. A `weak` answer, and an `empty` answer whose reason names a filter or the budget, say so in words as well, because in those cases the rows were found and are not good enough (or were withheld) rather than absent. The complete answer is capped at 16000 bytes \u2014 enough for one memory at the store's own 8,000-byte content cap \u2014 so a large result is trimmed to its highest-ranked memories and the line reports how many were admitted. Pass as_of (RFC 3339) to search the store as it stood at that instant instead: the wording each memory held then, including memories deleted since, matched by keyword only because an embedding records current content. as_of cannot be combined with explain, which diagnoses the current ranking. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -891,11 +892,18 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
+		// Read the cap through the accessor rather than off the field: a zero
+		// there means UNBOUNDED to the assembler, so a Server built without New
+		// would answer with whatever the corpus holds. Resolved once, and the
+		// error text below quotes the same number the request was fitted to.
+		maxBytes := s.searchResponseCap()
 
 		// One request, built before the branches below, so explain and the
 		// formatted path cannot disagree about the window: explain reports the
 		// ranking of a window, and the only honest window to report is the one
-		// the tool searches.
+		// the tool searches. MaxBytes is the response's own cap, which the
+		// assembler's response-fit post-pass enforces against the complete
+		// envelope — an item count alone cannot bound what a caller pays for.
 		searchRequest := assemble.Request{
 			ProjectID: args.ProjectID,
 			Query:     args.Query,
@@ -903,10 +911,14 @@ func (s *Server) registerTools() {
 			Scope:     scopeFilter,
 			Category:  args.Category,
 			Source:    assemble.SourceSearch,
-			Budget:    assemble.Budget{MaxItems: args.Limit},
-			Condition: assemble.CondHybrid,
-			Now:       time.Now().UTC(),
-			AsOf:      asOf,
+			Budget: assemble.Budget{
+				MaxItems: args.Limit,
+				MaxBytes: maxBytes,
+			},
+			Condition:     assemble.CondHybrid,
+			Now:           time.Now().UTC(),
+			AsOf:          asOf,
+			AbstainCosine: s.contextCfg.AbstainCosine,
 		}
 		// explain returns the store's ranking diagnosis instead of the
 		// formatted list. The explain projection of the assembler's trace
@@ -953,6 +965,18 @@ func (s *Server) registerTools() {
 		}
 		result, err := assemble.Run(ctx, candidates, searchRequest)
 		if err != nil {
+			// A budget the response cannot fit is not a failed retrieval and not an
+			// empty answer, so it gets its own sentence: `empty` would send the
+			// caller looking for a memory to save, and the generic incomplete
+			// message would send it to retry a search that fails identically every
+			// time. The cap is named so the next step is a number, not a guess.
+			if errors.Is(err, assemble.ErrResponseBudgetExceeded) {
+				// Not "raise the limit": a bigger limit admits MORE rows, which
+				// makes the response larger and fails identically. The cap is
+				// server-side and the only lever the caller holds is the item
+				// count, so the advice has to point down.
+				return nil, nil, fmt.Errorf("response budget exceeded: even this answer's verdict does not fit in %d bytes, so nothing was returned \u2014 ask for fewer results (a lower `limit`) or narrow the query: %w", maxBytes, err)
+			}
 			// A failed retrieval and an empty result are the two answers an
 			// agent acts on oppositely — one says retry, the other says there
 			// is no such memory. The error says which, in the words the caller
@@ -962,79 +986,26 @@ func (s *Server) registerTools() {
 		// A leg that errored makes the search incomplete, but "incomplete" and
 		// "empty" are only the same answer when there is nothing to show. With
 		// rows admitted, the answer is degraded rather than destroyed: the rows
-		// the working leg found are returned, and the broken leg is named, so
-		// the caller can retry without losing a retrieval that succeeded. The
-		// assembler records it in the trace; this is the projection.
-		failedLegs := failedLegs(result)
-		if failedLegs != "" && len(result.Items) == 0 {
-			return nil, nil, fmt.Errorf("search was incomplete, so it is unknown whether anything matches (a retrieval leg failed, so this is not an empty result — retry, or read the log): %s", failedLegs)
+		// the working leg found are returned and the broken leg named, which the
+		// assembler's own response already does. With nothing admitted there is
+		// no degraded answer to give — only the incompleteness to report.
+		if result.Outcome == assemble.OutcomeEmpty {
+			if legs := failedLegs(result); legs != "" {
+				return nil, nil, fmt.Errorf("search was incomplete, so it is unknown whether anything matches (a retrieval leg failed, so this is not an empty result \u2014 retry, or read the log): %s", legs)
+			}
 		}
-
-		// The shared item renderer, one line per admitted memory. Search keeps
-		// its own framing: this surface's answer is the listing plus, when a
-		// filter left it short, the caveat below.
+		// The complete response — listing, verdict sentence, filter caveat,
+		// diagnostics and the machine line — is rendered by the assembler,
+		// which is the only place that can measure it. A second rendering here
+		// would let the cap be enforced against text the caller never receives.
 		//
-		// The qualifiers lead the listing, not the notes, and not only for an
-		// empty answer: a block assembled at an instant reads as a block about the
-		// present unless the reader is told otherwise, and the rows themselves
-		// carry nothing that says which it is. This is the only place a current
-		// answer changes at all — the list is empty, so nothing is added.
-		leading := qualifierBlock(result)
-		var listing strings.Builder
-		listing.WriteString(leading)
-		for _, item := range result.Items {
-			listing.WriteString(item.Line())
-			listing.WriteString("\n")
-		}
-		if failedLegs != "" {
-			listing.WriteString("\n")
-			listing.WriteString("Warning: this answer is incomplete — one retrieval leg failed, so matches it would have found are missing (")
-			listing.WriteString(failedLegs)
-			listing.WriteString(").\n")
-		}
-		// A filtered result shorter than the requested limit may reflect a
-		// finite candidate window rather than the whole store. The assembler
-		// has already applied both filters, so this reads the admitted count.
-		maybeIncomplete := (args.Category != "" || len(scopeFilter) > 0) && len(result.Items) < args.Limit
-
-		if len(result.Items) == 0 {
-			// "No matching memories found." is an absence claim, and it is only
-			// true when nothing removed a row that was found. The assembler knows
-			// whether a stage emptied the set, so when one did, the answer leads
-			// with that instead: a row withheld as out of date is a different
-			// instruction to the caller (refresh it) from a row that does not
-			// exist (ask about something else), and leading with the absence
-			// sentence would bury the difference under the line a caller stops
-			// reading at.
-			//
-			// The assembler's notes go with it either way. A closed reason set can
-			// name one cause, and these rows may have been removed by more than
-			// one stage, so the per-stage breakdown is what makes the sentence
-			// above checkable rather than merely plausible.
-			text := "No matching memories found."
-			if why := emptyWhy(result); why != "" {
-				text = why
-			}
-			if leading != "" {
-				text = leading + text
-			}
-			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
-				text += "\n\n" + caveat
-			}
-			text += assemblerNotes(result)
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: text}},
-			}, nil, nil
-		}
-
-		text := listing.String()
-		if maybeIncomplete {
-			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
-				text += "\n\n" + caveat
-			}
-		}
+		// It includes the qualifier block — the disclosure that an as_of answer is
+		// a past reading — because the assembler renders it and measures it with
+		// the rest. A surface that prepended its own copy would ship ~800 bytes
+		// the cap never saw, and the fit pass would already have dropped rows to
+		// fit a number that understated what the caller received.
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: text}},
+			Content: []mcp.Content{&mcp.TextContent{Text: result.Response}},
 		}, nil, nil
 	})
 
@@ -2703,33 +2674,4 @@ func sourceLabel(source string) string {
 		return ""
 	}
 	return " source=" + label
-}
-
-// filterCaveat names the filters that can make a windowed result short and
-// gives the caller a filter-appropriate next step. Both filters are applied
-// before the final cut now, but the candidate pool they select from is still
-// finite, so further matches may exist beyond it.
-func filterCaveat(category string, scope map[string]string) string {
-	var filters []string
-	if category != "" {
-		filters = append(filters, "category")
-	}
-	if len(scope) > 0 {
-		filters = append(filters, "scope")
-	}
-	if len(filters) == 0 {
-		return ""
-	}
-
-	which := "the " + filters[0] + " filter"
-	verb := "was"
-	if len(filters) > 1 {
-		which = "the " + strings.Join(filters, " and ") + " filters"
-		verb = "were"
-	}
-	next := "raise the limit"
-	if category != "" {
-		next += " or use ghost_memories_list for exhaustive category browsing"
-	}
-	return "(Note: " + which + " " + verb + " applied to a finite search window, so further matches may exist beyond the retrieved candidates — " + next + ".)"
 }

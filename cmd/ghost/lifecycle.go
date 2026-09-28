@@ -1392,9 +1392,16 @@ ancestry — an undetectable caller is an error, never a fallback to a different
 harness). The harness owns its authentication and billing.
 
 Withdrawing an edge (--reassess --apply) writes the unsupersede history row and
-leaves the resolution it may have caused in place: follow it with
-"ghost resolve <project> --reassess" to clear a resolved_at that only a
-withdrawn edge justified.
+leaves the resolution it may have caused in place: resolve treats a live edge as
+a floor, so that resolution becomes clearable only now. The run therefore prints
+its own follow-up — the exact
+
+  ghost resolve <project> --reassess --only <those ids> --apply
+
+— and writes the same id list under the data dir's scratch, ready for
+--only-file. Prefer that scoped command over a bare "ghost resolve <project>
+--reassess": an unscoped repair re-judges every resolved memory in the project,
+not only the ones this withdrawal orphaned.
 `
 
 // supersedeReassessReport renders the --reassess result: the per-outcome counts,
@@ -1408,7 +1415,7 @@ withdrawn edge justified.
 // Printing ReassessResult.Withdrawn in a dry run would put "would withdraw 0"
 // above a list of three edges, because that field counts only invalidations that
 // actually landed.
-func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls int) string {
+func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls, retries int) string {
 	verb := "would withdraw"
 	causesVerb := "would sweep"
 	count := len(withdrawn)
@@ -1422,9 +1429,30 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	if res.CausesSweepFailed > 0 {
 		sweptNote = fmt.Sprintf(", %d causes sweep(s) FAILED (unknown)", res.CausesSweepFailed)
 	}
-	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN, %s %d, %s %d causes edge(s)%s (%d classify call(s))\n",
+	// A prediction the pass could not read is its own sentence, beside the sweep
+	// failures rather than inside them: no sweep ran, so "FAILED" would name a
+	// write that never happened — and "would sweep 0" for a read that never
+	// happened would tell an operator about to apply that there is nothing else
+	// to delete.
+	if res.CausesPredictionFailed > 0 {
+		sweptNote += fmt.Sprintf(", %d causes prediction(s) unavailable (read failed, unknown)", res.CausesPredictionFailed)
+	}
+	// Pairs the classifier never answered (#699). The count and the list are
+	// both here because the withdrawal lines below can look like the whole
+	// story: a pass that withdrew six vetoed edges and judged nothing else is a
+	// partial repair, and the edges it never reached have to be findable rather
+	// than countable. The wording names BOTH ways a pair reaches this list — a
+	// call that failed and a reply whose verdict count did not match the pairs
+	// asked about — because on the second one the harness is fine and sending
+	// the operator after the network would be a wrong lead printed by the
+	// report whose whole job is the partial state.
+	unjudgedNote := ""
+	if n := len(res.Unjudged); n > 0 {
+		unjudgedNote = fmt.Sprintf(", %d unjudged (no verdict: the classify call failed or answered with the wrong number of verdicts; their edges stand)", n)
+	}
+	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN%s, %s %d, %s %d causes edge(s)%s (%d classify call(s)%s)\n",
 		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
-		res.Unclassified, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls)
+		res.Unclassified, unjudgedNote, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls, retryNote(retries))
 	short := func(id string) string {
 		if len(id) > 8 {
 			return id[:8]
@@ -1457,15 +1485,27 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		// the veto rows it is the only deletion no model adjudicated. A sweep
 		// that ERRORED says "unknown" rather than a count, because the count is
 		// not knowable after a failed write and a 0 would read as "nothing else
-		// was deleted".
+		// was deleted" — and so does a dry-run row whose PREDICTION could not be
+		// read, which is the same mistake one step earlier.
 		swept := ""
 		switch {
 		case w.SweepFailed:
 			swept = "  [causes sweep FAILED — unknown]"
+		case w.PredictionUnknown:
+			swept = "  [causes edge — unknown: the prediction read failed]"
 		case w.CausesSwept > 0:
 			swept = fmt.Sprintf("  [+%d causes edge]", w.CausesSwept)
 		}
 		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]%s  %s\n", marker, short(w.NewerID), short(w.OlderID), by, swept, w.Reason)
+	}
+	// One line per unjudged edge, in the same shape as the withdrawn rows so a
+	// reader can tell at a glance which edges moved and which did not. The
+	// reason is the same in every row — no verdict exists — so it is the state,
+	// not a per-edge finding, and the pass exits non-zero for the rerun. It
+	// names both causes for the reason the summary does.
+	for _, u := range res.Unjudged {
+		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]\n",
+			short(u.NewerID), short(u.OlderID))
 	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")
@@ -1478,13 +1518,26 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 // not do and printed the same totals as a pass that found nothing to do reads
 // as "nothing was skipped", so the veto is on the report (#686) — and it is
 // printed by the one call below, so the report and the pass cannot drift.
-func supersedeReport(projectName string, res supersede.Result, verb string, calls int) string {
-	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s), %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
-		projectName, res.Candidates, calls, res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+//
+// A retried call is on the report too, and only when there was one: a pass that
+// had to re-ask a failed call is not the pass the summary describes, and a
+// harness that is flapping shows up here before it shows up as a failure.
+func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
+	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
 	if res.Vetoed == 0 {
 		return out
 	}
 	return out + fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
+}
+
+// retryNote is the ", N retried call(s)" clause the call counts share: empty
+// when nothing was retried, so an ordinary pass's line is unchanged.
+func retryNote(retries int) string {
+	if retries <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d retried after a failed call", retries)
 }
 
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
@@ -1533,7 +1586,21 @@ func runSupersede() {
 		// exit stays: each invalidation is its own transaction, so a failure on
 		// the Nth edge leaves N-1 already withdrawn and unreachable by a later
 		// pass. A repair that partly happened has to be visible as such.
-		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls()))
+		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls(), cls.Retries()))
+		// The follow-up too, for the same reason and before the exit: the edges
+		// that did land orphaned resolutions that only a scoped resolve repair
+		// can clear, and an operator who does not learn that from this run
+		// learns it from a memory that stayed out of every session.
+		if targets := withdrawnTargets(withdrawn); apply && len(targets) > 0 {
+			path, werr := writeReassessTargets(projectName, targets)
+			if werr != nil {
+				// The repair already landed and the command is printed either
+				// way, so a scratch file that could not be written is a warning
+				// and not a failed run.
+				fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", werr)
+			}
+			fmt.Print(supersedeReassessFollowup(projectName, targets, path))
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -1557,7 +1624,7 @@ func runSupersede() {
 		}
 		return id
 	}
-	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls()))
+	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls(), cls.Retries()))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}
@@ -1586,6 +1653,25 @@ func runSupersede() {
 	}
 }
 
+// resolveArgs is `ghost resolve`'s parsed command line, as one value rather
+// than seven positional returns: --only and --only-file arrived with the repair
+// scope (#698) and a call site that had to remember which string was which would
+// be one transposition away from judging the wrong memories.
+type resolveArgs struct {
+	project  string
+	source   string
+	apply    bool
+	reassess bool
+	// only holds the --only selectors together with the --only-file lines, in
+	// that order. Both flags may be given and the list is the union: the
+	// supersede repair prints both forms for one set of ids, and an operator
+	// who pastes both meant those ids, not a mistake worth refusing over.
+	only []string
+	// onlyFile is the path as typed, kept for the report line that names the
+	// file the selectors came from.
+	onlyFile string
+}
+
 // parseResolveArgs parses `ghost resolve`'s arguments (everything after the
 // subcommand word). Hand-rolled, matching the historical loop exactly: exactly
 // one project — positionally (unchanged back-compat) or from --project, which
@@ -1595,48 +1681,139 @@ func runSupersede() {
 // and "--flag=value" forms; any other flag an unknown-flag error — which the
 // caller prints and exits on. A valueless --project is an error. --reassess
 // selects the repair pass over already-resolved memories (issue #640); it
-// combines with --apply exactly like it does on the ordinary pass. Extracted
-// from runResolve so the argv contract is unit-testable without os.Exit.
-func parseResolveArgs(args []string) (project, source string, apply, reassess bool, err error) {
+// combines with --apply exactly like it does on the ordinary pass.
+//
+// --only/--only-file scope the repair pass to the memories it is about (#698)
+// and are refused without --reassess. The ordinary pass has no resolved pool to
+// narrow, so accepting them there would be two flags that parse, say nothing in
+// the report and change no decision. A scope flag that yields NO selector is also
+// an error rather than an absent scope: `--only "$IDS"` with IDS unset is a
+// routine shell mistake, and an unscoped `--apply` is the one repair outcome
+// that must never happen by accident. Extracted from runResolve so the argv
+// contract is unit-testable without os.Exit.
+func parseResolveArgs(args []string) (resolveArgs, error) {
+	var out resolveArgs
+	// addOnly records the comma-separated selectors one flag value carries, and
+	// refuses a value that yields none — so the check is the same whether the
+	// value arrived as "--only x" or "--only=x", and neither can leave the scope
+	// silently empty.
+	addOnly := func(value string) error {
+		added := 0
+		for _, part := range strings.Split(value, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out.only = append(out.only, part)
+				added++
+			}
+		}
+		if added == 0 {
+			return errors.New("--only requires at least one memory id or prefix")
+		}
+		return nil
+	}
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--apply":
-			apply = true
+			out.apply = true
 		case args[i] == "--reassess":
-			reassess = true
+			out.reassess = true
 		case args[i] == "--project":
 			if i+1 >= len(args) {
-				return "", "", false, false, errors.New("--project requires a value")
+				return resolveArgs{}, errors.New("--project requires a value")
 			}
-			if project != "" {
-				return "", "", false, false, errors.New("expected exactly one project")
+			if out.project != "" {
+				return resolveArgs{}, errors.New("expected exactly one project")
 			}
-			project = args[i+1]
+			out.project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
 			v := strings.TrimPrefix(args[i], "--project=")
 			if v == "" {
-				return "", "", false, false, errors.New("--project requires a value")
+				return resolveArgs{}, errors.New("--project requires a value")
 			}
-			if project != "" {
-				return "", "", false, false, errors.New("expected exactly one project")
+			if out.project != "" {
+				return resolveArgs{}, errors.New("expected exactly one project")
 			}
-			project = v
+			out.project = v
 		case args[i] == "--source" && i+1 < len(args):
-			source = args[i+1]
+			out.source = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--source="):
-			source = strings.TrimPrefix(args[i], "--source=")
-		case !strings.HasPrefix(args[i], "-"):
-			if project != "" {
-				return "", "", false, false, errors.New("expected exactly one project")
+			out.source = strings.TrimPrefix(args[i], "--source=")
+		case args[i] == "--only" && i+1 < len(args):
+			if err := addOnly(args[i+1]); err != nil {
+				return resolveArgs{}, err
 			}
-			project = args[i]
+			i++
+		case strings.HasPrefix(args[i], "--only="):
+			if err := addOnly(strings.TrimPrefix(args[i], "--only=")); err != nil {
+				return resolveArgs{}, err
+			}
+		case args[i] == "--only":
+			return resolveArgs{}, errors.New("--only requires at least one memory id or prefix")
+		case args[i] == "--only-file" && i+1 < len(args):
+			// The raw value is stored, the trimmed one is what is checked: a
+			// path may legitimately contain a space, and an empty or blank one
+			// is the unset-variable mistake that must not become an unscoped
+			// repair.
+			if strings.TrimSpace(args[i+1]) == "" {
+				return resolveArgs{}, errors.New("--only-file requires a path")
+			}
+			out.onlyFile = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--only-file="):
+			v := strings.TrimPrefix(args[i], "--only-file=")
+			if strings.TrimSpace(v) == "" {
+				return resolveArgs{}, errors.New("--only-file requires a path")
+			}
+			out.onlyFile = v
+		case args[i] == "--only-file":
+			return resolveArgs{}, errors.New("--only-file requires a path")
+		case !strings.HasPrefix(args[i], "-"):
+			if out.project != "" {
+				return resolveArgs{}, errors.New("expected exactly one project")
+			}
+			out.project = args[i]
 		default:
-			return "", "", false, false, fmt.Errorf("unknown flag %q", args[i])
+			return resolveArgs{}, fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
-	return project, source, apply, reassess, nil
+	if len(out.only) > 0 || out.onlyFile != "" {
+		if !out.reassess {
+			return resolveArgs{}, errors.New("--only/--only-file scope the repair pass: use them with --reassess")
+		}
+	}
+	return out, nil
+}
+
+// readOnlySelectors reads a --only-file: one memory id or 8+ character hex
+// prefix per line, '#' starting a comment, blank lines ignored. Comments are
+// stripped from the first '#', not only from a whole line, because a file a
+// human annotated ("the changelog note") is the expected input here and a line
+// with a trailing note is not worth failing a repair over. It is safe because a
+// selector can never contain a '#': an id is hex and so is a prefix of one.
+//
+// A file that yields no selectors is an error rather than an unscoped run. The
+// operator pointed the pass at a file, and judging the whole project because
+// the file turned out to be empty is the one outcome that must never happen by
+// accident.
+func readOnlySelectors(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read --only-file %s: %w", path, err)
+	}
+	var out []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		if idx := strings.IndexByte(line, '#'); idx >= 0 {
+			line = line[:idx]
+		}
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("--only-file %s names no memory ids or prefixes", path)
+	}
+	return out, nil
 }
 
 // resolveUsage is the help for `ghost resolve`: stderr when the project comes
@@ -1649,6 +1826,11 @@ Flags:
   --reassess      Re-judge memories that are ALREADY resolved and, with --apply,
                   clear resolved_at on the ones that now come back KEEP. This is
                   how a wrong resolution is repaired.
+  --only ids      With --reassess: judge only these memories — a comma-separated
+                  list of memory ids, or of 8+ character hex prefixes of them.
+  --only-file p   With --reassess: the same, read from a file: one id or prefix
+                  per line, where '#' starts a comment. For a list too long to
+                  type on one line.
   --source string CLI harness to classify through: claude-code, opencode,
                   codex, or goose. Defaults to the calling harness (detected
                   from the environment and process ancestry); an undetectable
@@ -1658,9 +1840,17 @@ Flags:
 
 Marks resolved-evidence memories so they drop from session-start injection
 (still searchable). Runs through the configured CLI harness of the calling
-session (--source overrides; otherwise detected from the environment and
-process ancestry — an undetectable caller is an error, never a fallback to a
-different harness). The harness owns its authentication and billing.
+session (--source overrides; otherwise detected from the environment and process
+ancestry — an undetectable caller is an error, never a fallback to a different
+harness). The harness owns its authentication and billing.
+
+Scope a repair with --only or --only-file rather than running a bare
+--reassess: an unscoped repair re-judges EVERY resolved memory in the project,
+and on a real store that proposed un-hiding memories which had been resolved
+for good reasons. "ghost supersede <project> --reassess --apply" prints the
+exact --only command that repairs what its withdrawal left resolved. Scoping
+narrows which memories are judged and nothing else — a live 'supersedes' edge, a
+correction pairing and the KEEP cache all still hold a judged row back.
 `
 
 // resolveSummaryLine renders the one-line resolve result, including the
@@ -1684,6 +1874,11 @@ func resolveSummaryLine(projectName string, res resolve.Result, apply bool, conf
 // The verb reports what --apply would clear, or what it cleared — reKept counts
 // the rows judged, Cleared the rows actually written — so a repair is never
 // reported as larger than it was.
+//
+// A scoped run says how much of the project it looked at. "40 already resolved"
+// would be a lie the moment --only narrowed the pool: the operator needs to see
+// that 3 of 143 rows were judged, because the 140 they did not judge are the
+// ones the flag exists to leave resolved (#698).
 func reassessSummaryLine(projectName string, res resolve.ReassessResult, apply bool, reKept int, calls int) string {
 	verb := "would clear resolved_at for"
 	count := reKept
@@ -1691,8 +1886,29 @@ func reassessSummaryLine(projectName string, res resolve.ReassessResult, apply b
 		verb = "cleared resolved_at for"
 		count = res.Cleared
 	}
-	return fmt.Sprintf("%s: %d already resolved, %d KEEP vetoed, %d KEEP cached, %d still RESOLVED, %d still asserted by a link or correction, %d UNKNOWN, %s %d (%d classify call(s))\n",
-		projectName, res.Loaded, res.Vetoed, res.Cached, res.StillResolved, res.Demoted, res.Unknown, verb, count, calls)
+	scoped := ""
+	if res.Pool > res.Loaded {
+		scoped = fmt.Sprintf("%d of %d already resolved judged", res.Loaded, res.Pool)
+	} else {
+		scoped = fmt.Sprintf("%d already resolved", res.Loaded)
+	}
+	return fmt.Sprintf("%s: %s, %d KEEP vetoed, %d KEEP cached, %d still RESOLVED, %d still asserted by a link or correction, %d UNKNOWN, %s %d (%d classify call(s))\n",
+		projectName, scoped, res.Vetoed, res.Cached, res.StillResolved, res.Demoted, res.Unknown, verb, count, calls)
+}
+
+// reassessMissLines renders one line per selector that named no memory the
+// repair could judge, so a mistyped id is visible in the run that ignored it
+// rather than discovered later as a resolution that was never repaired. Empty
+// for an unscoped pass, and for a scoped run in which every selector matched.
+func reassessMissLines(res resolve.ReassessResult) string {
+	if len(res.Misses) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, m := range res.Misses {
+		fmt.Fprintf(&b, "  %s  not judged: %s\n", m.Spec, m.Reason)
+	}
+	return b.String()
 }
 
 // runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence
@@ -1710,11 +1926,12 @@ func reassessSummaryLine(projectName string, res resolve.ReassessResult, apply b
 // already stamped. The stop hook spawns `ghost lifecycle` detached
 // (internal/mcpinit/stophook.go); its resolve phase runs this with --apply.
 func runResolve() {
-	projectName, source, apply, reassess, parseErr := parseResolveArgs(os.Args[2:])
+	parsed, parseErr := parseResolveArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
 		os.Exit(1)
 	}
+	projectName, source, apply, reassess := parsed.project, parsed.source, parsed.apply, parsed.reassess
 	if projectName == "" {
 		fmt.Fprint(os.Stderr, resolveUsage)
 		os.Exit(1)
@@ -1748,12 +1965,27 @@ func runResolve() {
 	}
 
 	if reassess {
-		res, reKept, err := resolve.Reassess(ctx, store, cls, projectID, apply, logger)
+		// The scope is read here rather than in the parser because it is file
+		// IO: parseResolveArgs stays a pure function of argv, and a missing or
+		// unreadable file is a usage error an operator can act on. The union is
+		// built into a fresh slice so the file's lines cannot land in the parsed
+		// args' backing array.
+		only := append([]string{}, parsed.only...)
+		if parsed.onlyFile != "" {
+			fromFile, ferr := readOnlySelectors(parsed.onlyFile)
+			if ferr != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", ferr)
+				os.Exit(1)
+			}
+			only = append(only, fromFile...)
+		}
+		res, reKept, err := resolve.Reassess(ctx, store, cls, projectID, apply, resolve.Scope{Only: only}, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Print(reassessSummaryLine(projectName, res, apply, len(reKept), cls.Calls()))
+		fmt.Print(reassessMissLines(res))
 		for _, m := range reKept {
 			fmt.Printf("  %s  [%s]  %s\n", short(m.ID), m.Category, firstLine(m.Content, 70))
 		}

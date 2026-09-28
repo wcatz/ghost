@@ -39,19 +39,6 @@ func newToolSession(t *testing.T) *mcp.ClientSession {
 	return connectedClient(t, New(testStore(t), logger, "test"))
 }
 
-// searchText runs a plain project search and returns the rendered listing.
-func searchText(t *testing.T, session *mcp.ClientSession, projectID, query string) string {
-	t.Helper()
-	res := callTool(t, session, "ghost_memory_search", map[string]any{
-		"project_id": projectID,
-		"query":      query,
-	})
-	if res.IsError {
-		t.Fatalf("search failed: %s", resultText(res))
-	}
-	return resultText(res)
-}
-
 // savedMemory saves through a live tool and returns the row the store kept, so
 // a test asserts what was persisted rather than what the handler received.
 func savedMemory(t *testing.T, srv *Server, session *mcp.ClientSession, tool string, args map[string]any) memory.Memory {
@@ -721,7 +708,7 @@ func TestADateValidUntilIsTrueThroughThatWholeDay(t *testing.T) {
 	// The behavioural half: the row is still returned today. Midnight semantics
 	// would have withheld it, and only a row the filter actually keeps can show
 	// that.
-	if out := searchText(t, session, "test-project", "freeze rest of today"); !strings.Contains(out, m.ID) {
+	if out := searchText(t, session, "freeze rest of today"); !strings.Contains(out, m.ID) {
 		t.Errorf("a claim dated valid_until %s was withheld on %s itself: %q", today, today, out)
 	}
 }
@@ -1264,7 +1251,7 @@ func TestExpiredMemoryIsWithheldFromSearch(t *testing.T) {
 		"valid_until": today.AddDate(1, 0, 0).Format("2006-01-02"),
 	})
 
-	out := searchText(t, session, "test-project", "summer")
+	out := searchText(t, session, "summer")
 	if !strings.Contains(out, live.ID) {
 		t.Fatalf("the live control memory is missing from the result, so the test proves nothing: %q", out)
 	}
@@ -1290,7 +1277,7 @@ func TestOpenValidityWindowIsKeptAndRendered(t *testing.T) {
 		"source_ref":  "docs/alerts.md",
 	})
 
-	out := searchText(t, session, "test-project", "queue depth alert")
+	out := searchText(t, session, "queue depth alert")
 	if !strings.Contains(out, m.ID) {
 		t.Fatalf("an open validity window was withheld from search: %q", out)
 	}
@@ -1320,7 +1307,7 @@ func TestNotYetValidMemoryIsWithheldFromSearch(t *testing.T) {
 		"valid_from": today.AddDate(0, 1, 0).Format("2006-01-02"),
 	})
 
-	out := searchText(t, session, "test-project", "sharded index rollout")
+	out := searchText(t, session, "sharded index rollout")
 	if strings.Contains(out, future.ID) {
 		t.Errorf("a memory whose window has not opened is in the search result: %q", out)
 	}
@@ -1342,7 +1329,7 @@ func TestUnverifiedWindowIsKeptAndMarked(t *testing.T) {
 		"valid_until": "2199-12-31",
 	})
 
-	out := searchText(t, session, "test-project", "replica lag budget")
+	out := searchText(t, session, "replica lag budget")
 	if !strings.Contains(out, m.ID) {
 		t.Fatalf("an unverified window was withheld from search: %q", out)
 	}
@@ -1366,7 +1353,7 @@ func TestSearchLineShowsAgentAndSourceRef(t *testing.T) {
 		"confidence": 0.9,
 	})
 
-	out := searchText(t, session, "test-project", "backup schedule weekly")
+	out := searchText(t, session, "backup schedule weekly")
 	if !strings.Contains(out, "agent=") {
 		t.Errorf("the search line does not name the writing agent: %q", out)
 	}
@@ -1424,7 +1411,7 @@ func TestSearchLineDelimitsSourceRef(t *testing.T) {
 		"source_ref": hostile,
 	})
 
-	out := searchText(t, session, "test-project", "maintenance ticket ops")
+	out := searchText(t, session, "maintenance ticket ops")
 	if strings.Contains(out, "source_ref="+hostile) {
 		t.Errorf("the source reference is rendered raw, so its own delimiter escapes the field: %q", out)
 	}

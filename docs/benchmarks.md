@@ -309,7 +309,31 @@ The floor rows are a sweep, not a proposal — `search.min_similarity` ships 0, 
 
 Read the third line as the actual baseline for the abstention work: **the two distributions overlap.** A floor of 0.697 would refuse all 24 no-answer queries and would also refuse 51 of the 220 answerable ones, so a threshold alone cannot abstain — the near-miss flavor is what makes the overlap visible, and it is why the answer is likely to be a calibrated decision rather than a constant.
 
-Cost: the block runs the production search for 244 queries (24 no-answer plus the 220 answerable contrast) so that every returned row can be scored from its own vector, which takes `ghost bench` from about 3.5s to about 9s. That is the price of scoring the window rather than a short list; a future change that wants the same numbers faster has to make the production search hand back its legs (`searchHybridLegs` already does, for explain mode).
+### The keyword arm, measured (#580, PR 4)
+
+`ghost_memory_search` now returns a verdict (`answerable` / `weak` / `empty`) rather than a list that is either long or literally empty. Two arms decide the `weak` case, and only one of them is a keyword rank (a returned row within the top 4 FTS ranks clears it); the vector arm ships **off** because the paragraph above is the reason.
+
+Measured over the built-in fixture with the arm-A rule applied to what `Store.Candidates` returns for each query:
+
+| Query set | n | best keyword rank | `weak` or `empty` |
+|---|---:|---|---:|
+| answerable (graded) | 220 | 0 for all 220 | 0 |
+| no-answer | 24 | 0 for all 24 | 0 |
+
+So the keyword arm is a strict **no-op on this corpus**: it abstains on none of the 24 no-answer queries, and it flags none of the 220 answerable ones as weak. (The measurement is a one-off run over `Store.Candidates`, not a shipped path — see the cost note at the end of this section.) That is the property that makes it safe to ship on by default — a clear keyword hit is never withheld — and it is also why it buys nothing here. Every fixture query, answerable or not, has *some* keyword hit at rank 0, so the floor cannot separate the two sets; only a calibrated decision over the vector leg can, and that is arm B, which stays off until it has a measured threshold. `context.abstain_cosine` is how a user sets one.
+
+The same run confirms the ranked metrics are untouched. `ghost bench` output on `origin/main` (`a34e07a8`) and on this branch is byte-identical:
+
+```
+condition          R@1     R@5    R@10   MRR@10  NDCG@10
+hybrid             0.520   0.712   0.763    0.902    0.818
+```
+
+`ghost bench` does not route through `assemble.Run` — by design (Decision 5 of the assembler spec, so the existing hybrid floor keeps meaning what it means), which is why the delta is exactly 0.000 on NDCG@10 and R@5 rather than merely inside the 0.005 gate.
+
+Cost of the no-answer report above (shipped, and unchanged by #580): the block runs the production search for 244 queries (24 no-answer plus the 220 answerable contrast) so that every returned row can be scored from its own vector, which takes `ghost bench` from about 3.5s to about 9s. That is the price of scoring the window rather than a short list; a future change that wants the same numbers faster has to make the production search hand back its legs (`searchHybridLegs` already does, for explain mode).
+
+Cost of the arm-A table in this section (a one-off, not shipped): producing it ran `Store.Candidates` for all 244 queries and read each candidate's keyword rank, which is repository code but not a path any command takes. `ghost bench` itself is unaffected by #580 — it still calls `store.SearchHybrid`/`SearchFTS`/`SearchVector` directly, which is the asymmetry Decision 5 of the assembler design specifies so the existing hybrid floors keep meaning what they mean.
 
 ## Phase 4 — end-to-end LongMemEval-S (retrieve → generate → judge) — SHIPPED (DeepSeek v4 Pro)
 

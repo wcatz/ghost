@@ -35,13 +35,24 @@ type Trace struct {
 	Floors    Floors
 }
 
-// Floors records the exact thresholds a relevance floor used. It is zero while
-// no floor is applied — the arms arrive with abstention — and a non-zero value
-// here always names a threshold that was actually evaluated.
+// Floors records the exact thresholds a relevance floor used. FTSRankMax is the
+// keyword arm and is always set, because a request with no vector leg still
+// judges on keyword rank.
+//
+// FTSApplied is the keyword arm's counterpart to VectorApplied, and it exists for
+// the same reason: a threshold and a threshold that ran are different facts, and
+// the keyword arm is not always run. A retriever that never ranked a row by
+// keyword leaves the -1 "this leg did not retrieve it" sentinel on every row, and
+// a threshold printed next to that verdict asserts a judgement nobody made — the
+// ordinary state of a semantic query whose words share nothing with the memory.
+// It is a fact about the RUN, not the request, so Run sets it beside
+// VectorApplied rather than newTrace, which only knows what was asked for.
 type Floors struct {
-	FTSRankMax   int
-	VectorCosine float32
-	VectorArmOn  bool
+	FTSRankMax    int
+	FTSApplied    bool
+	VectorCosine  float32
+	VectorArmOn   bool
+	VectorApplied bool
 }
 
 // Signals is one candidate's contribution, copied from the retriever rather than
@@ -110,6 +121,15 @@ const (
 	stageResponseFit = "response_fit"
 )
 
+// The three caps stage 8 applies, as the sentence names them. They are recorded
+// per removal because their remedies differ: a row count is raised and a content
+// byte budget is not, so advice that fits one is wrong advice for the other.
+const (
+	boundSliceItems = "slice_item_cap"
+	boundSliceBytes = "slice_byte_cap"
+	boundTotalItems = "item_cap"
+)
+
 // newTrace seeds the trace from the request and the candidate set. Recording
 // starts here and is unconditional.
 func newTrace(req Request, set *memory.CandidateSet) *Trace {
@@ -126,6 +146,9 @@ func newTrace(req Request, set *memory.CandidateSet) *Trace {
 		Mode:            string(projectMode(req)),
 		Legs:            set.Legs,
 		Signals:         map[string]Signals{},
+		// The thresholds this run will judge against, recorded before the stages
+		// so a projection of the trace cannot report a floor nobody evaluated.
+		Floors: floorsOf(req),
 	}
 	if req.AsOf != nil {
 		t.AsOf = req.AsOf.UTC().Format(time.RFC3339)

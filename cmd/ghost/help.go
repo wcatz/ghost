@@ -46,7 +46,7 @@ var helpValueFlagsByCommand = map[string]map[string]bool{
 	"obsidian":                  {"--out": true, "--project": true, "--interval": true},
 	"opencode cleanup-sessions": {"--grace": true, "--limit": true},
 	"reflect":                   {"--project": true, "--source": true, "--tier": true},
-	"resolve":                   {"--project": true, "--source": true},
+	"resolve":                   {"--project": true, "--source": true, "--only": true, "--only-file": true},
 	"supersede":                 {"--project": true, "--source": true, "--threshold": true},
 }
 

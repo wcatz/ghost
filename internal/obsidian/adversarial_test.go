@@ -47,7 +47,7 @@ var hostileIDs = []struct{ name, id string }{
 	// an id carrying one is written to the front matter as something other than
 	// itself. That was a second, independent way a note could be written and then
 	// removed on the same pass, and it is what moved the keep-set off the id and
-	// onto the filename (see keepSet).
+	// onto the path the system wrote the note at (see keepSet).
 	{"tab", "tab\tid-xyz"},
 	{"newline", "line\nid-xyz"},
 	{"carriage-return", "cr\rid-xyz"},

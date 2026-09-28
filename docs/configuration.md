@@ -235,6 +235,29 @@ Two more ranking signals are fixed rather than configurable, because they descri
 
 Both apply before the result window is chosen, so they affect which memories are returned as well as their order. Neither removes a memory from the candidate pool, but both can drop it from the window: a demoted row is cut as soon as enough candidates outscore its halved score, or loses its slot to the keyword reservation's score-blind eviction when a top-`limit/5` keyword hit is admitted — an exchange that can put a strictly lower-scoring row in its place; and the reservation never admits a row whose factor is below 1, so a demoted keyword hit must make that cut on its demoted score. With RRF k=60 the factors effectively rank a demoted row below every live candidate in the fetched pool: the best fused score any row can earn is 1/61 ≈ 0.0164, so a halved row sits at ≈ 0.0082 — under the 0.7/80 ≈ 0.0088 the deepest vector-leg row in a default `limit`-10 window still scores, and under the 1/80 = 0.0125 of the deepest row in a keyword-only search. They only reorder what the legs fetched: each leg pulls `limit*2` rows from the project plus `_global`, and `_global` rows count against that budget, so a project that matches fewer rows than the limit still has demoted `_global` rows fill the remainder. Session injection never sees either factor: `loadSessionContext` (`internal/mcpinit/hook.go`) builds the session-start digest and `Store.GetTopMemories` backs the MCP tool surface, both rank in SQL without reaching fusion, and both queries already exclude resolved rows. `ghost_memory_search` with `explain: true` reports them per row as `status_factor`.
 
+## Abstention
+
+`ghost_memory_search` reports whether its answer can be relied on. Every formatted `ghost_memory_search` answer ends with a machine line (`explain: true` returns a JSON scoring breakdown and carries no verdict; `ghost_search_all` is a different tool, answers a different question, and carries no verdict line — this setting does not reach it), `[ghost:outcome=answerable|weak|empty reason=...]`, and a human sentence for the two non-answerable cases:
+
+- `answerable` — nothing was withheld as weak. Read the reason before relying on the rows, because two of the reasons this tool can produce mean **no floor could be applied at all**, and the rows are then unjudged: `no_floor_arm` (no arm had a value to compare — neither a keyword rank nor a cosine reached these rows, which is what a paraphrase sharing no words with the corpus produces) and `retrieval_partial` (a leg ran and broke, so no verdict was possible). Judge those rows yourself. Every other `answerable` reason means a floor did clear a row, and a machine with no embedder is not one of them: the keyword arm still judges a keyword-only result.
+- `weak` — the memories are listed but **none** cleared the relevance floor. Treat them as leads and verify before relying on them.
+- `empty` — nothing was returned, and the reason says why. `all_out_of_scope`, `all_out_of_category` and `all_invalid` mean rows were found and then withheld; `all_over_budget` means the answer was too large to return; `vector_backend_unavailable` means the vector leg never ran, so the keyword leg was all that searched, and a leg that ran and *broke* is a tool error rather than a verdict. `no_candidates` is the only reason that may claim the store has nothing matching, and it may only do so over complete coverage; where the search was windowed the answer says "no match within the searched window" instead, because that is not the same claim.
+
+The vector arm of that floor is configurable and ships off:
+
+```yaml
+context:
+  abstain_cosine: 0.0   # 0 = arm disabled
+```
+
+A returned memory clears the vector arm when its cosine is **at least** this value. The value must be between 0 and 1: a negative one is satisfied by every row including the worst match, an infinite one by none, and a NaN reads as no threshold at all, so all three are refused as the load error they are rather than accepted as settings. The assembler refuses them again on the request itself, so a caller that builds a `Request` without going through this file inherits the guard instead of a silently wrong floor. The default is 0 — meaning *disabled*, not "a threshold of zero", which every row clears. The verdict line renders three states, because a threshold and a threshold that ran are different facts: `abstain_cosine=off` (nobody configured one), `abstain_cosine=not_applied` (one is configured and no cosine could be compared — the vector leg never ran, the ordinary state on a machine with no working embedder, or it ran and failed; the verdict line's `reason=` and `legs=` say which, so the threshold you set is never silently doing nothing without also saying why), and the number itself, printed when the vector leg executed — which is not the same as a row being compared, because an empty result reads no cosine at all and a result whose first row cleared the keyword arm never reads one.
+
+The default is off deliberately, and the measurement behind it is about the distributions rather than about any one number. `ghost bench` reports that the answerable and no-answer cosine distributions overlap (mean top cosine 0.740 against 0.584, and the no-answer maximum of 0.697 would separate the two only by also refusing 52 of the 220 answerable queries), so no constant separates them. That 0.697 is a property of *this* corpus measured with the strict-above convention `search.min_similarity` uses, not a threshold for this key: this arm clears ties, so a value of 0.697 here would admit every query the bench counted as refused at that level. Set it only after measuring against your own corpus, and read the number off your own distribution rather than off that one.
+
+The keyword arm needs no key: a result within the top four keyword ranks clears it. This is also why an unavailable embedder is never a reason to call a match weak — a result whose rows carry keyword ranks is judged by that arm whether or not a vector leg ran, and the line reports the vector arm separately (`abstain_cosine=not_applied`, `legs=vector:not_run`). What is reported as `no_floor_arm` is the opposite case: no arm held a value to compare, because no row carried a keyword rank and no cosine reached them. That is `answerable` rather than below a floor nobody applied.
+
+`context.abstain_cosine` is unrelated to `search.min_similarity` above: that floor runs inside the vector leg *before* fusion and so never sees a keyword-only result, which is the case this one exists to judge.
+
 ## Session injection
 
 The SessionStart hook injects a bounded context digest. The default category bias reserves slots for high-signal behavioral notes:
@@ -434,6 +457,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_INJECTION_CATEGORY_CAPS` | `injection.category_caps` |
 | `GHOST_INJECTION_SESSION_SCOPE` | `injection.session_scope` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
+| `GHOST_CONTEXT_ABSTAIN_COSINE` | `context.abstain_cosine` |
 | `GHOST_ROUTING_DEFAULT_PROJECT` | `routing.default_project` |
 | `GHOST_LIFECYCLE_MIN_INTERVAL` | `lifecycle.min_interval` |
 
