@@ -3225,6 +3225,35 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// for the same reason: an empty value means "the caller said nothing",
 			// and a detectable harness on this save is no evidence against the
 			// author of the row being folded into.
+			//
+			// Merging a stated boundary onto the target's other one makes this the
+			// second writer that can produce a window out of two halves stated
+			// independently, so it is judged the same way UpdateMemoryWithOptions
+			// judges it and for the same reason: the read is inside the transaction
+			// that already holds the write lock, so the pair is the target's window
+			// at the moment the merge lands. Before this COALESCE the target kept
+			// its own consistent pair and a contradictory claim stayed on the copy
+			// this save inserts; readValidity tests expiry first, so the merged row
+			// would read as `future` and then `expired` and drop out of ranked
+			// retrieval with no error anywhere. Gated on the caller stating a
+			// boundary, for the update path's reason: a fold that says nothing about
+			// the window cannot make it inconsistent.
+			if opts.Validity.ValidFrom != nil || opts.Validity.ValidUntil != nil {
+				var targetFrom, targetUntil sql.NullString
+				readErr := tx.QueryRowContext(ctx,
+					`SELECT valid_from, valid_until FROM memories WHERE id = ? AND project_id = ?`,
+					existingID, projectID,
+				).Scan(&targetFrom, &targetUntil)
+				if readErr != nil && readErr != sql.ErrNoRows {
+					return "", "", 0, fmt.Errorf("lookup fold target window: %w", readErr)
+				}
+				if orderErr := CheckWindowOrder(opts.Validity, Validity{
+					ValidFrom:  nullStringPtr(targetFrom),
+					ValidUntil: nullStringPtr(targetUntil),
+				}); orderErr != nil {
+					return "", "", 0, orderErr
+				}
+			}
 			res, updateErr := tx.ExecContext(ctx, `
 				UPDATE memories
 				SET importance = MIN(1.0, importance + ?), access_count = access_count + 1,

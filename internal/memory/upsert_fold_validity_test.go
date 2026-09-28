@@ -19,31 +19,44 @@ func stampPtr(v string) *string { return &v }
 // The pin-on-fold path (TestUpsertPin_FoldPinsTheExistingRowToo) is the same
 // argument about a different column, and it is why the fix is not "the caller
 // can always follow duplicateOf and update it themselves".
+//
+// Both tests here drive the fold through FoldOnly rather than through
+// near-identical wording. The default fold is chosen by a 0.5 Jaccard bar on
+// token overlap, so a test that depends on it depends on a constant this PR does
+// not own: a threshold change would turn a skip — two green tests asserting
+// nothing, and the only coverage of the new merge — into a silent hole. FoldOnly
+// folds on foldOnlyEquivalent, which is case, whitespace and terminal-punctuation
+// normalization, so the fold is a property of the text rather than of a bar. It
+// is the same UPDATE statement in the same transaction, which is the code under
+// test; the default fold adds an INSERT and a link on top of it.
 func TestUpsertFoldAppliesTheCallersValidityToTheTarget(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	target, _, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
-		"the vector identity is compared as an opaque string, never parsed",
-		"mcp", 0.6, nil, UpsertOptions{
+	const text = "the vector identity is compared as an opaque string, never parsed"
+	target, dup, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
+		text, "mcp", 0.6, nil, UpsertOptions{
 			Validity: Validity{ValidUntil: stampPtr("2026-10-01 23:59:59")},
 		})
 	if err != nil {
 		t.Fatalf("UpsertWithOptions (target): %v", err)
 	}
+	if dup != "" {
+		t.Fatalf("the first save folded into %q; a fresh memory is not a fold target", dup)
+	}
 
-	// A near-duplicate that folds into it rather than a distinct memory.
-	_, dup, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
-		"the vector identity is an opaque compared string, not parsed",
+	got, dup, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
+		"The vector identity is compared as an opaque string, never parsed",
 		"mcp", 0.6, nil, UpsertOptions{
 			Validity:   Validity{ValidUntil: stampPtr("2027-03-31 23:59:59")},
 			Provenance: Provenance{Agent: "codex", SourceRef: "internal/memory/vector.go"},
+			FoldOnly:   true,
 		})
 	if err != nil {
 		t.Fatalf("UpsertWithOptions (fold): %v", err)
 	}
-	if dup != target {
-		t.Skipf("wording did not fold onto %s (dup=%q); the fold branch was not reached", target, dup)
+	if got != target || dup != target {
+		t.Fatalf("fold returned (%q, duplicateOf %q), want the target %q twice — the fold branch was not reached", got, dup, target)
 	}
 
 	mems, err := s.GetByIDs(ctx, []string{target})
@@ -51,7 +64,7 @@ func TestUpsertFoldAppliesTheCallersValidityToTheTarget(t *testing.T) {
 		t.Fatalf("GetByIDs(%s): %v (n=%d)", target, err, len(mems))
 	}
 	if mems[0].ValidUntil == nil {
-		t.Fatalf("fold target %s has no valid_until: the caller's claim reached only the copy it also inserted", target)
+		t.Fatalf("fold target %s has no valid_until: the caller's claim reached no row", target)
 	}
 	if *mems[0].ValidUntil != "2027-03-31 23:59:59" {
 		t.Errorf("fold target ValidUntil = %q, want the caller's 2027-03-31 23:59:59", *mems[0].ValidUntil)
@@ -73,9 +86,9 @@ func TestUpsertFoldLeavesAnUnstatedWindowAlone(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
+	const text = "the vector identity is compared as an opaque string, never parsed"
 	target, _, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
-		"the vector identity is compared as an opaque string, never parsed",
-		"mcp", 0.6, nil, UpsertOptions{
+		text, "mcp", 0.6, nil, UpsertOptions{
 			Validity: Validity{ValidUntil: stampPtr("2026-10-01 23:59:59")},
 		})
 	if err != nil {
@@ -83,13 +96,13 @@ func TestUpsertFoldLeavesAnUnstatedWindowAlone(t *testing.T) {
 	}
 
 	_, dup, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
-		"the vector identity is an opaque compared string, not parsed",
-		"mcp", 0.6, nil, UpsertOptions{})
+		"The vector identity is compared as an opaque string, never parsed",
+		"mcp", 0.6, nil, UpsertOptions{FoldOnly: true})
 	if err != nil {
 		t.Fatalf("UpsertWithOptions (fold): %v", err)
 	}
 	if dup != target {
-		t.Skipf("wording did not fold onto %s (dup=%q); the fold branch was not reached", target, dup)
+		t.Fatalf("fold returned duplicateOf %q, want the target %q — the fold branch was not reached", dup, target)
 	}
 
 	mems, err := s.GetByIDs(ctx, []string{target})
@@ -98,6 +111,94 @@ func TestUpsertFoldLeavesAnUnstatedWindowAlone(t *testing.T) {
 	}
 	if mems[0].ValidUntil == nil || *mems[0].ValidUntil != "2026-10-01 23:59:59" {
 		t.Errorf("fold target ValidUntil = %v, want the 2026-10-01 23:59:59 it already held", mems[0].ValidUntil)
+	}
+}
+
+// The merge joins two halves that were stated independently — the target's
+// boundary and the caller's — so it is the one writer that can build a window no
+// caller ever wrote. Before this the target kept its own consistent pair and a
+// contradictory claim landed only on the copy the save inserted; readValidity
+// tests expiry first, so the merged row would read as `future` and then
+// `expired` and drop out of ranked retrieval with no error at the tool or the
+// store.
+func TestUpsertFoldRefusesAWindowThatEndsBeforeTheTargetsWindowStarts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const text = "the vector identity is compared as an opaque string, never parsed"
+	target, _, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
+		text, "mcp", 0.6, nil, UpsertOptions{
+			Validity: Validity{ValidFrom: stampPtr("2026-12-01 00:00:00")},
+		})
+	if err != nil {
+		t.Fatalf("UpsertWithOptions (target): %v", err)
+	}
+
+	// A perfectly legal claim on its own: nothing says valid_until has to be
+	// later than some date it never heard of.
+	_, _, _, err = s.UpsertWithOptions(ctx, testProject, "gotcha",
+		"The vector identity is compared as an opaque string, never parsed",
+		"mcp", 0.6, nil, UpsertOptions{
+			Validity: Validity{ValidUntil: stampPtr("2026-10-01 00:00:00")},
+			FoldOnly: true,
+		})
+	if err == nil {
+		t.Fatal("fold merged a valid_until onto a target's valid_from and stored a window that ends two months before it starts")
+	}
+	if !strings.Contains(err.Error(), "not after valid_from") {
+		t.Errorf("error does not name the contradiction: %v", err)
+	}
+
+	// The refusal is the whole save's: the target keeps the window it had rather
+	// than taking half of a pair that was refused.
+	mems, err := s.GetByIDs(ctx, []string{target})
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("GetByIDs(%s): %v (n=%d)", target, err, len(mems))
+	}
+	if mems[0].ValidUntil != nil {
+		t.Errorf("a refused fold still wrote valid_until = %q to the target", *mems[0].ValidUntil)
+	}
+}
+
+// The gate that keeps the check above off unrelated saves: a fold that states no
+// boundary cannot make the target's window inconsistent, so it is not judged
+// against the target's own stored pair. Store.Create, ImportMemory and
+// RestoreSnapshot all write the stamps through with no order check, and that is
+// deliberate, so a row whose window is out of order is reachable — and an
+// ordinary re-save of its text has to keep working. The target is the out-of-order
+// row itself, because a target with no window has nothing to mis-judge.
+func TestUpsertFoldDoesNotJudgeTheTargetsOwnWindow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const text = "the vector identity is compared as an opaque string, never parsed"
+	target, err := s.Create(ctx, testProject, Memory{
+		Category:   "gotcha",
+		Content:    text,
+		Source:     "mcp",
+		ValidFrom:  stampPtr("2026-12-01 00:00:00"),
+		ValidUntil: stampPtr("2026-10-01 00:00:00"),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, dup, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
+		text, "mcp", 0.6, nil, UpsertOptions{FoldOnly: true})
+	if err != nil {
+		t.Fatalf("a fold that stated no window was refused over the target's own stored window: %v", err)
+	}
+	if got != target || dup != target {
+		t.Fatalf("fold returned (%q, duplicateOf %q), want the target %q twice — the fold branch was not reached", got, dup, target)
+	}
+
+	// And the pair is untouched: the check read it and did nothing with it.
+	mems, err := s.GetByIDs(ctx, []string{target})
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("GetByIDs(%s): %v (n=%d)", target, err, len(mems))
+	}
+	if mems[0].ValidUntil == nil || *mems[0].ValidUntil != "2026-10-01 00:00:00" {
+		t.Errorf("a fold that stated no window changed the target's own: ValidUntil = %v", mems[0].ValidUntil)
 	}
 }
 

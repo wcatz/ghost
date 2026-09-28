@@ -829,6 +829,146 @@ func TestSaveBoundsTheSourceReference(t *testing.T) {
 	}
 }
 
+// A fold moves the claim onto the row that keeps answering, and the result
+// message names the copy the save just inserted. So the message has to say which
+// fields the target now records — the same argument, and the same treatment, as
+// the pin line beside it, and a stronger claim: a validity window can take the
+// target out of ranked retrieval entirely, which the caller cannot check
+// afterwards without a second tool call it has no reason to know it needs.
+func TestSaveNamesTheFieldsAFoldMovedOntoTheTarget(t *testing.T) {
+	srv, session := newCapSession(t)
+	pinAgent(t, "codex")
+
+	const text = "the nightly reconcile job holds the advisory lock for the whole window"
+	target := savedDistinctMemory(t, srv, session, map[string]any{
+		"project_id": "test-project",
+		"content":    text,
+		"category":   "gotcha",
+	})
+
+	// Same text, so the store folds deterministically on the content it was
+	// given rather than on a similarity bar a threshold change could move.
+	res := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id":  "test-project",
+		"content":     text,
+		"category":    "gotcha",
+		"valid_until": "2027-03-31",
+		"confidence":  0.6,
+		"source_ref":  "docs/reconcile.md",
+	})
+	if res.IsError {
+		t.Fatalf("the re-save was refused: %s", resultText(res))
+	}
+	msg := resultText(res)
+	if !strings.Contains(msg, "likely duplicate") {
+		t.Skipf("the re-save did not fold, so the duplicate message was not reached: %q", msg)
+	}
+	if !strings.Contains(msg, target.ID) {
+		t.Fatalf("the message does not name the target it folded into: %q", msg)
+	}
+	for _, want := range []string{
+		"it folded into now records",
+		"valid_until 2027-03-31 23:59:59",
+		"confidence 0.6",
+		"agent codex",
+		"source_ref docs/reconcile.md",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the fold message is missing %q: %q", want, msg)
+		}
+	}
+	// And it names only what the caller sent: COALESCE in the store means an
+	// unmentioned field provably did not move, so listing one would be a claim
+	// the store did not honour.
+	if strings.Contains(msg, "valid_from") {
+		t.Errorf("the fold message claims valid_from moved on a save that stated none: %q", msg)
+	}
+}
+
+// The mirror: a save that states no claim folds, and its message names only the
+// author — which every save carries, because provenanceFor derives it and the
+// store COALESCEs a non-empty one onto the target exactly as the update path
+// does. Naming it is the point: the target's recorded author really did change,
+// and a caller that cannot see that has no way to learn it. What must NOT appear
+// is a window, a rating or a reference, since none moved.
+func TestFoldMessageNamesOnlyTheAuthorWhenNoClaimWasStated(t *testing.T) {
+	srv, session := newCapSession(t)
+	pinAgent(t, "opencode")
+
+	const text = "the reconcile job retries the batch endpoint three times before failing"
+	savedDistinctMemory(t, srv, session, map[string]any{
+		"project_id": "test-project",
+		"content":    text,
+		"category":   "gotcha",
+	})
+
+	res := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    text,
+		"category":   "gotcha",
+	})
+	if res.IsError {
+		t.Fatalf("the re-save was refused: %s", resultText(res))
+	}
+	msg := resultText(res)
+	if !strings.Contains(msg, "now records agent opencode") {
+		t.Errorf("a fold did not report the author it moved onto the target: %q", msg)
+	}
+	for _, unwanted := range []string{"valid_from", "valid_until", "verified_at", "confidence", "source_ref"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("a save that stated no claim reports %s on the target: %q", unwanted, msg)
+		}
+	}
+}
+
+// ghost_save_global has its own handler and its own message, so the same
+// reporting is pinned on it. A fold into _global moves the same fields, and
+// _global is read by every project's session start, so a silently re-dated row
+// there is the version of this a caller notices last.
+func TestSaveGlobalNamesTheFieldsAFoldMovedOntoTheTarget(t *testing.T) {
+	_, session := newCapSession(t)
+	pinAgent(t, "goose")
+
+	const text = "a project-agnostic rule about how memories are written"
+	// Not savedDistinctMemory: that helper hardcodes ghost_memory_save, and the
+	// first save here has to go through the same tool as the second or the fold
+	// is into a row the project handler wrote.
+	first := callTool(t, session, "ghost_save_global", map[string]any{
+		"content":  text,
+		"category": "convention",
+	})
+	if first.IsError {
+		t.Fatalf("the first save was refused: %s", resultText(first))
+	}
+
+	res := callTool(t, session, "ghost_save_global", map[string]any{
+		"content":    text,
+		"category":   "convention",
+		"valid_from": "2026-01-15",
+		"source_ref": "CLAUDE.md",
+	})
+	if res.IsError {
+		t.Fatalf("the re-save was refused: %s", resultText(res))
+	}
+	msg := resultText(res)
+	if !strings.Contains(msg, "likely duplicate") {
+		t.Skipf("the re-save did not fold, so the duplicate message was not reached: %q", msg)
+	}
+	for _, want := range []string{
+		"it folded into now records",
+		"valid_from 2026-01-15 00:00:00",
+		"agent goose",
+		"source_ref CLAUDE.md",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the fold message is missing %q: %q", want, msg)
+		}
+	}
+	if strings.Contains(msg, "valid_until") {
+		t.Errorf("the fold message claims valid_until moved on a save that stated none: %q", msg)
+	}
+}
+
 // Two arguments for one fact. Picking either one silently means the caller's
 // other value is discarded without a word, and the two disagree by
 // construction — one is now, the other is not.

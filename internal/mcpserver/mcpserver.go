@@ -1039,8 +1039,11 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, err
 		}
+		// Resolved once: provenanceFor can consult process ancestry, and the
+		// duplicate message below needs the same agent the row was written with.
+		prov := fields.provenance(provenanceFor(req))
 		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{
-			Provenance: fields.provenance(provenanceFor(req)),
+			Provenance: prov,
 			Scope:      scope,
 			Validity:   fields.Validity,
 			Pin:        args.Pin,
@@ -1073,6 +1076,14 @@ func (s *Server) registerTools() {
 			msg += " — pinned, so consolidation will not rewrite it"
 			if duplicateOf != "" {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is pinned too)", duplicateOf)
+			}
+		}
+		// And the same for the fields a fold hands the target, for the same reason:
+		// the id above is the copy, and the claim landed on the row that keeps
+		// answering. COALESCE in the store means only what is named here moved.
+		if duplicateOf != "" {
+			if moved := fields.foldNotice(prov); moved != "" {
+				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", duplicateOf, moved)
 			}
 		}
 		if truncated {
@@ -1437,8 +1448,11 @@ func (s *Server) registerTools() {
 		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 			return nil, nil, fmt.Errorf("ensure global project: %w", err)
 		}
+		// Resolved once: provenanceFor can consult process ancestry, and the
+		// duplicate message below needs the same agent the row was written with.
+		prov := fields.provenance(provenanceFor(req))
 		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, "_global", args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{
-			Provenance: fields.provenance(provenanceFor(req)),
+			Provenance: prov,
 			Validity:   fields.Validity,
 		})
 		if err != nil {
@@ -1457,6 +1471,14 @@ func (s *Server) registerTools() {
 		msg := fmt.Sprintf("Global memory saved (id: %s)", id)
 		if duplicateOf != "" {
 			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
+		}
+		// The fold's message names the fields the claim moved onto the target
+		// rather than only the copy's id; see ghost_memory_save for why, and
+		// writeFields.foldNotice for the COALESCE half of it.
+		if duplicateOf != "" {
+			if moved := fields.foldNotice(prov); moved != "" {
+				msg += fmt.Sprintf(" (the existing memory %s it folded into now records %s)", duplicateOf, moved)
+			}
 		}
 		if globalTruncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)

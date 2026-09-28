@@ -243,3 +243,44 @@ func (w writeFields) provenance(prov memory.Provenance) memory.Provenance {
 	prov.Confidence = w.Confidence
 	return prov
 }
+
+// foldNotice names the fields this write stated, for the message a save reports
+// when it folded. It is a report of what the caller sent, not a read-back, and
+// that is the point: the store's fold statement COALESCEs, so a field absent
+// from this list provably did not move, and the handler has the values already
+// so naming them costs no extra read.
+//
+// It exists because a fold writes two rows and the response names the copy that
+// was just inserted, while the fields landed on the target — the row retrieval
+// keeps answering, and the one whose expiry, author and reference just changed.
+// A validity window is a stronger claim than a pin (it can take the target out
+// of ranked retrieval entirely) and a weaker claim to detect afterwards, since
+// the caller has no reason to know it needs a second tool call. Same argument as
+// the pin line, and it is reported the same way.
+//
+// Empty when nothing was stated, which is the common case and says nothing.
+func (w writeFields) foldNotice(prov memory.Provenance) string {
+	var parts []string
+	for _, f := range []struct {
+		name  string
+		value *string
+	}{
+		{"valid_from", w.Validity.ValidFrom},
+		{"valid_until", w.Validity.ValidUntil},
+		{"verified_at", w.Validity.VerifiedAt},
+	} {
+		if f.value != nil {
+			parts = append(parts, f.name+" "+*f.value)
+		}
+	}
+	if w.Confidence != nil {
+		parts = append(parts, fmt.Sprintf("confidence %g", *w.Confidence))
+	}
+	if prov.Agent != "" {
+		parts = append(parts, "agent "+prov.Agent)
+	}
+	if w.SourceRef != "" {
+		parts = append(parts, "source_ref "+w.SourceRef)
+	}
+	return strings.Join(parts, ", ")
+}
