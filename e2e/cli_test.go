@@ -1063,6 +1063,17 @@ func TestCLIResolveSupersede(t *testing.T) {
 			"project_id": e2eProject,
 			"content":    "the staging relay port is 3333 now",
 		}))
+		// And NO wait for the vector index, which is a product guarantee rather
+		// than luck. The corpus above was written through `ghost mcp`, whose
+		// embedding worker fills the index on its own schedule in another
+		// process, while the creation pass below is a one-shot CLI that has no
+		// part in that worker. A note with no vector is not a candidate for
+		// anything, so before #716 the pass raced the worker here: it proposed
+		// nothing, spawned no classifier, and reported a clean "0 candidate
+		// pairs" — which is how a flaky fixture and a real empty result looked
+		// identical. The pass embeds what it cannot score before it scans, so the
+		// only timing dependency left in this fixture is the one-second
+		// updated_at resolution the sleep above already handles.
 		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port is 2222")
 		s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
 		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND invalidated_at IS NULL`); n != 1 {
