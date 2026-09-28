@@ -681,7 +681,9 @@ ghost bench
 ghost bench --sweep
 ```
 
-It prints the three-conditions table (keyword, vector, fused) over the embedded dataset, the **no-answer false-positive table beneath it** — what each condition returns for the 24 queries nothing in the corpus answers — and the abstention baseline for the shipped fused path. See [Benchmarks and methodology](benchmarks.md).
+Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then three things beneath it: the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — the abstention baseline for the shipped fused path, and the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs.
+
+`--sweep` is a different report: it grid-searches the vector-leg weight (FTS weight is the complement) and prints each point's NDCG@10, R@1, R@10 and MRR@10 **plus a paired 95% interval against the shipped default** — because a sort by point estimate is not a ranking of points the dataset cannot separate. It returns there, so it prints neither table above. See [Benchmarks and methodology](benchmarks.md).
 
 ## Scratch hygiene
 
