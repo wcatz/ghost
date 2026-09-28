@@ -69,7 +69,7 @@ var claudeCapabilityCache sync.Map // claudeBinaryID -> claudeCapabilities
 //
 // What it does cost is the caller's own context, which singleflight never
 // consults: both consequences are handled at the call site below and the shared
-// half is sharedProbeCancellation in probe.go.
+// half is isSharedProbeCancellation in probe.go.
 var claudeProbeGroup singleflight.Group
 
 func parseClaudeCapabilities(help string) claudeCapabilities {
@@ -104,41 +104,54 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 	// and this call has already stored its answer. A caller arriving after even
 	// that is served from the cache by the first check and never reaches the
 	// group at all, so the warm path costs what it always did.
-	flight := claudeProbeGroup.DoChan(id.probeKey(), func() (any, error) {
-		if cached, ok := claudeCapabilityCache.Load(id); ok {
-			return cached.(claudeCapabilities), nil
+	//
+	// The loop covers the one case a single round cannot: the leader's context
+	// died mid-probe, so the flight's answer is that leader's accident rather than
+	// this caller's answer, and this caller goes round again under its own
+	// context. Re-entering the GROUP rather than probing directly is the point — a
+	// direct re-probe puts this burst back to one child per caller, the bug #741
+	// removes, on the rare path out of a common one. Re-reading the cache instead
+	// would not do it either: the followers all arrive within microseconds of each
+	// other, so a cache check they all make before the first one has answered is a
+	// check they all miss.
+	//
+	// Each round consumes one more cancellation, so the rounds are bounded by the
+	// callers sharing this key, and this caller leaves on the first arm below if
+	// its OWN context dies. It is never worse than the behaviour before #741,
+	// which was one probe per caller, however many rounds that took.
+	for {
+		flight := claudeProbeGroup.DoChan(id.probeKey(), func() (any, error) {
+			if cached, ok := claudeCapabilityCache.Load(id); ok {
+				return cached.(claudeCapabilities), nil
+			}
+			caps, err := probeClaudeCapabilities(ctx, path, id)
+			if err != nil && ctx.Err() != nil {
+				// This is OUR context dying, and a follower cannot see that from the
+				// error alone — see probeContextError. Marking it here is the only
+				// place the two facts are both known.
+				return claudeCapabilities{}, probeContextError{err}
+			}
+			return caps, err
+		})
+		// DoChan and this select are two halves of the same requirement: a
+		// caller's own context governs its own call, and the flight's outcome is
+		// somebody else's. Neither a shared error nor a wait for an answer this
+		// caller cannot use may be handed back as if it were this caller's own.
+		select {
+		case <-ctx.Done():
+			return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", ctx.Err())
+		case res := <-flight:
+			if res.Err == nil {
+				return res.Val.(claudeCapabilities), nil
+			}
+			if isSharedProbeCancellation(res.Err, ctx) {
+				// The leader's context died, not this caller's, so this failure is
+				// not this caller's to report and not this caller's to inherit as
+				// an answer. Round again under this caller's own context.
+				continue
+			}
+			return claudeCapabilities{}, res.Err
 		}
-		caps, err := probeClaudeCapabilities(ctx, path, id)
-		if err != nil && ctx.Err() != nil {
-			// This is OUR context dying, and a follower cannot see that from the
-			// error alone — see probeContextError. Marking it here is the only
-			// place the two facts are both known.
-			return claudeCapabilities{}, probeContextError{err}
-		}
-		return caps, err
-	})
-	// DoChan and this select are two halves of the same requirement: a caller's
-	// own context governs its own call, and the flight's outcome is somebody
-	// else's. Neither a shared error nor a wait for an answer this caller cannot
-	// use may be handed back as if it were this caller's own.
-	select {
-	case <-ctx.Done():
-		return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", ctx.Err())
-	case res := <-flight:
-		if res.Err == nil {
-			return res.Val.(claudeCapabilities), nil
-		}
-		if isSharedProbeCancellation(res.Err, ctx) {
-			// The leader's context died, not this caller's, so this failure is
-			// not this caller's to report. Probe under this caller's own context:
-			// a fresh attempt rather than a follower of the flight that just
-			// failed, which is why it goes direct and bypasses the group. A burst
-			// whose leader disconnected can therefore spawn more than one probe —
-			// what every caller did before #741, on a rare path out of a common
-			// one.
-			return probeClaudeCapabilities(ctx, path, id)
-		}
-		return claudeCapabilities{}, res.Err
 	}
 }
 

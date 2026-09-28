@@ -18,6 +18,19 @@ import (
 // number small enough to keep the package's CI budget boring.
 const coldProbeBurst = 50
 
+// allCodexFeatureRows is `codex features list` output naming every key the
+// no-tools policy asks for, in the three-field row shape isCodexFeatureTable
+// requires. One const rather than a repeat in five fakes: a fake that drifts to
+// a two-field row would stop being a feature table, and every test using it
+// would quietly be testing the unverified path instead of the positive one.
+const allCodexFeatureRows = "shell_tool stable true\nunified_exec stable true\nview_image stable true\napps stable true\nplugins stable true\ntool_suggest stable true\nskill_mcp_dependency_install stable true\nremote_plugin stable true\nhooks stable true\nmulti_agent stable true\n"
+
+// claudeHelpFlags is a `claude --help` body declaring every capability
+// claudeInvocationArgs requires, so a probe that reads it refuses nothing. It
+// exists for the same reason as allCodexFeatureRows: a fake whose help text
+// drifts would make a test pass by REFUSING rather than by answering.
+const claudeHelpFlags = "--safe-mode\n--restricted\n--strict-mcp-config\n--disable-slash-commands\n--tools\n--disallowedTools\n--setting-sources\n"
+
 // runColdProbeBurst releases n goroutines together and runs fn(i) on each, so
 // every caller reaches a COLD cache at once rather than arriving in a stagger.
 // The start channel is what makes this a burst: without it the loop would hand
@@ -64,6 +77,74 @@ func countProbeSpawns(t *testing.T, logPath string) int {
 	return count
 }
 
+// waitForProbeSpawns blocks until the fake's log records at least want spawns,
+// so a test can put a second caller INSIDE a flight instead of guessing how long
+// the probe takes to start. It is the difference between a window and a wish:
+// these tests are about what happens while a probe is in flight, and a bare sleep
+// against a 2s probe is a race against machine speed dressed up as a window.
+func waitForProbeSpawns(t *testing.T, logPath string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if countProbeSpawns(t, logPath) >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("probe log %s never recorded %d spawns", logPath, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// codexIdentityFor is the cache key codexFeaturesFor computes for a binary, so
+// a test can look in the cache the way the production code does — through
+// codexCachedSupport, expiry and all — instead of reading the sync.Map and
+// re-implementing the freshness rule it is testing.
+func codexIdentityFor(t *testing.T, binary string) codexBinaryID {
+	t.Helper()
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		t.Fatalf("LookPath(%s): %v", binary, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", path, err)
+	}
+	return codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
+}
+
+// sleepingCodexFake is a codex fake that records each `features list` probe and
+// holds it open for two seconds, which is what makes "a second caller joined the
+// flight" a fact rather than a timing hope. It is countingClaudeFake's codex
+// counterpart, and it exists in both this file and the other probe tests only
+// because the log path and the sleep are what a caller INSIDE a flight needs.
+//
+// The sleep's fds are redirected, and that is load-bearing rather than tidy: the
+// sleep is a GRANDCHILD of the process Go spawned, it inherits the stdout pipe,
+// and `Cmd.Output` waits for that pipe to close — so without the redirect a
+// cancelled probe's `Wait` blocks until the orphaned sleep exits anyway, and
+// every test here that needs the flight to LAND would be waiting out a sleep
+// instead of observing a cancellation. Redirected, the shell dying closes the
+// pipe and the wait returns at once, which is what killing a real single-process
+// binary does.
+func sleepingCodexFake(t *testing.T) (bin, probeLog string) {
+	t.Helper()
+	setHarnessPolicyParentEnv(t)
+	probeLog = filepath.Join(t.TempDir(), "probes")
+	t.Setenv("CODEX_PROBE_LOG", probeLog)
+	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_LOG")
+	bin = fakeHarnessPolicyBinary(t, "codex", `
+if [ "$1" = "features" ]; then
+  printf 'probe\n' >> "$CODEX_PROBE_LOG"
+  sleep 2 >/dev/null 2>&1
+  printf '`+allCodexFeatureRows+`'
+  exit 0
+fi
+printf '%s' 'KEEP'
+`)
+	return bin, probeLog
+}
+
 // TestCodexProbeIsSingleFlightedOnAColdCache: N concurrent callers arriving on a
 // cold cache run ONE `codex features list`, and every caller gets that one
 // probe's answer.
@@ -82,26 +163,13 @@ func countProbeSpawns(t *testing.T, logPath string) int {
 // callers disagreed about when the binary was probed.
 func TestCodexProbeIsSingleFlightedOnAColdCache(t *testing.T) {
 	resetCodexFeatureProbe(t)
-	setHarnessPolicyParentEnv(t)
-	probeLog := filepath.Join(t.TempDir(), "probes")
-	t.Setenv("CODEX_PROBE_LOG", probeLog)
-	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_LOG")
-
-	// The sleep is not decoration. Without a probe that outlives the burst's
-	// arrival, the first caller to be scheduled can finish and fill the cache
-	// before the last one looks, and an implementation with no single-flight at
-	// all would pass this test on a fast machine. Holding the probe open makes
-	// the duplicate spawns certain rather than likely, so the test fails for the
-	// reason it names.
-	bin := fakeHarnessPolicyBinary(t, "codex", `
-if [ "$1" = "features" ]; then
-  printf 'probe\n' >> "$CODEX_PROBE_LOG"
-  sleep 1
-  printf 'shell_tool stable true\nunified_exec stable true\nview_image stable true\napps stable true\nplugins stable true\ntool_suggest stable true\nskill_mcp_dependency_install stable true\nremote_plugin stable true\nhooks stable true\nmulti_agent stable true\n'
-  exit 0
-fi
-printf '%s' 'KEEP'
-`)
+	// The fake holds its probe open for two seconds, and that is not decoration.
+	// Without a probe that outlives the burst's arrival, the first caller to be
+	// scheduled can finish and fill the cache before the last one looks, and an
+	// implementation with no single-flight at all would pass this test on a fast
+	// machine. Holding the probe open makes the duplicate spawns certain rather
+	// than likely, so the test fails for the reason it names.
+	bin, probeLog := sleepingCodexFake(t)
 
 	results := make([]codexFeatureSupport, coldProbeBurst)
 	runColdProbeBurst(coldProbeBurst, func(i int) {
@@ -140,20 +208,7 @@ printf '%s' 'KEEP'
 // asserted one of those differences away would leave the other untested.
 func TestClaudeCapabilityProbeIsSingleFlightedOnAColdCache(t *testing.T) {
 	resetClaudeCapabilityProbe(t)
-	setHarnessPolicyParentEnv(t)
-	probeLog := filepath.Join(t.TempDir(), "probes")
-	t.Setenv("CLAUDE_PROBE_LOG", probeLog)
-	t.Setenv("GHOST_PASSTHROUGH_ENV", "CLAUDE_PROBE_LOG")
-
-	bin := fakeHarnessPolicyBinary(t, "claude", `
-if [ "$1" = "--help" ]; then
-  printf 'probe\n' >> "$CLAUDE_PROBE_LOG"
-  sleep 1
-  printf '%s\n' '--safe-mode' '--restricted' '--strict-mcp-config' '--disable-slash-commands' '--tools' '--disallowedTools' '--setting-sources'
-  exit 0
-fi
-printf '%s' 'KEEP'
-`)
+	bin, probeLog := countingClaudeFake(t)
 
 	caps := make([]claudeCapabilities, coldProbeBurst)
 	errs := make([]error, coldProbeBurst)
@@ -184,6 +239,9 @@ printf '%s' 'KEEP'
 // countingClaudeFake is codexFeaturesFake's claude counterpart: a fake that
 // records each `--help` probe to a log file and holds the probe open for a
 // beat, so a test can put a second caller INSIDE a flight rather than racing it.
+// The sleep's fds are redirected for the reason given on sleepingCodexFake: the
+// sleep holds the stdout pipe open past the shell's death, and a cancelled probe
+// would not land until it finished.
 func countingClaudeFake(t *testing.T) (bin, probeLog string) {
 	t.Helper()
 	setHarnessPolicyParentEnv(t)
@@ -193,8 +251,8 @@ func countingClaudeFake(t *testing.T) (bin, probeLog string) {
 	bin = fakeHarnessPolicyBinary(t, "claude", `
 if [ "$1" = "--help" ]; then
   printf 'probe\n' >> "$CLAUDE_PROBE_LOG"
-  sleep 2
-  printf '%s\n' '--safe-mode' '--restricted' '--strict-mcp-config' '--disable-slash-commands' '--tools' '--disallowedTools' '--setting-sources'
+  sleep 2 >/dev/null 2>&1
+  printf '%s' "`+claudeHelpFlags+`"
   exit 0
 fi
 printf '%s' 'KEEP'
@@ -296,23 +354,11 @@ func TestClaudeCapabilityProbeFollowerWithADeadContextDoesNotInheritSuccess(t *t
 // returning the zero value.
 func TestCodexProbeFollowerDoesNotInheritALeaderCancellation(t *testing.T) {
 	resetCodexFeatureProbe(t)
-	setHarnessPolicyParentEnv(t)
-	probeLog := filepath.Join(t.TempDir(), "probes")
-	t.Setenv("CODEX_PROBE_LOG", probeLog)
-	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_LOG")
-	bin := fakeHarnessPolicyBinary(t, "codex", `
-if [ "$1" = "features" ]; then
-  printf 'probe\n' >> "$CODEX_PROBE_LOG"
-  sleep 2
-  printf 'shell_tool stable true\nunified_exec stable true\nview_image stable true\napps stable true\nplugins stable true\ntool_suggest stable true\nskill_mcp_dependency_install stable true\nremote_plugin stable true\nhooks stable true\nmulti_agent stable true\n'
-  exit 0
-fi
-printf '%s' 'KEEP'
-`)
+	bin, probeLog := sleepingCodexFake(t)
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	go func() { _ = codexFeaturesFor(leaderCtx, bin) }()
-	time.Sleep(200 * time.Millisecond)
+	waitForProbeSpawns(t, probeLog, 1)
 	followersDone := make(chan struct{})
 	var support codexFeatureSupport
 	go func() {
@@ -331,15 +377,230 @@ printf '%s' 'KEEP'
 	// The negative must be GONE from the cache, not merely bypassed: it is the
 	// five-minute retention that turns one cancelled leader into a process-wide
 	// weaker policy.
-	path, err := exec.LookPath(bin)
-	if err != nil {
-		t.Fatalf("LookPath: %v", err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat: %v", err)
-	}
-	if cached, ok := codexCachedSupport(codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}); !ok || !cached.probed {
+	if cached, ok := codexCachedSupport(codexIdentityFor(t, bin)); !ok || !cached.probed {
 		t.Errorf("cache still holds %+v, want the follower's positive verdict", cached)
+	}
+}
+
+// TestProbeCodexFeaturesCachesNothingUnderADeadContext: the store rule itself,
+// checked on the function that owns it, because the whole of it is one
+// condition and the condition is what a later edit would drop.
+//
+// A probe that hit its OWN 10s cap knows nothing about the codex and must be
+// remembered anyway — that is the negative this design exists to cache. A probe
+// killed by its caller's cancellation knows nothing either, but for a different
+// reason, and caching it would be a statement about the CALLER's connection
+// rather than about the binary, lasting codexFeatureRetry. The test asserts both
+// halves from the same fake, because the difference between them is the whole
+// content of the rule: the same binary, the same silence, two opposite answers.
+func TestProbeCodexFeaturesCachesNothingUnderADeadContext(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	bin, _ := sleepingCodexFake(t)
+	path := codexIdentityFor(t, bin).path
+
+	deadCtx, cancelDead := context.WithCancel(context.Background())
+	cancelDead()
+	probeCodexFeatures(deadCtx, path, codexIdentityFor(t, bin))
+	if cached, ok := codexCachedSupport(codexIdentityFor(t, bin)); ok {
+		t.Errorf("a probe under a dead context cached %+v, want nothing stored", cached)
+	}
+
+	// The other half, and the one that would be broken by a fix that simply
+	// stopped caching negatives: a probe with a live context still caches, and
+	// still caches the NEGATIVE, because an unanswering codex is the install
+	// this design supports.
+	if support := probeCodexFeatures(context.Background(), path, codexIdentityFor(t, bin)); !support.probed {
+		t.Errorf("live probe got %+v, want an answered verdict", support)
+	}
+	if cached, ok := codexCachedSupport(codexIdentityFor(t, bin)); !ok || !cached.probed {
+		t.Errorf("cache holds %+v, want the live probe's positive verdict", cached)
+	}
+}
+
+// TestCodexProbeCancelledLeaderLeavesNoCachedNegative: the end-to-end shape of
+// the same rule, on the path where it actually bites. The follower case is
+// covered elsewhere, and there the follower's own re-probe OVERWRITES the
+// negative, so the cache looks clean whether or not it was ever written. This
+// is the case with no follower to do the overwriting: a cancelled leader on a
+// cold cache, alone, in the long-lived `ghost mcp` server — and the next caller
+// arrives with a perfectly live context, never shared the burst, and is handed
+// "this codex declares nothing" for five minutes.
+//
+// The wait is not slack. The flight goroutine outlives the caller that walked
+// away from it, so the write under test can land AFTER the leader returned, and
+// a check made at the instant the leader returned would be a check of nothing.
+// Polling for it is watching for the bug over a window two orders of magnitude
+// longer than the killed child takes to be reaped and its caller to write.
+func TestCodexProbeCancelledLeaderLeavesNoCachedNegative(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	bin, probeLog := sleepingCodexFake(t)
+	id := codexIdentityFor(t, bin)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_ = codexFeaturesFor(leaderCtx, bin)
+	}()
+	waitForProbeSpawns(t, probeLog, 1)
+	cancelLeader()
+	<-leaderDone
+
+	settle := time.Now().Add(500 * time.Millisecond)
+	for {
+		if cached, ok := codexCachedSupport(id); ok {
+			t.Fatalf("a cancelled leader left %+v in the cache, which is served to every caller for %s", cached, codexFeatureRetry)
+		}
+		if time.Now().After(settle) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// And the consequence, which is the part an operator would see: a later
+	// caller with a live context still gets a real answer, and it costs the
+	// second probe because the first one told us nothing.
+	support := codexFeaturesFor(context.Background(), bin)
+	if !support.probed {
+		t.Errorf("a live caller after a cancelled leader got %+v, want a real verdict", support)
+	}
+	if got := countProbeSpawns(t, probeLog); got != 2 {
+		t.Errorf("probes spawned %d, want 2: the cancelled leader's, and the live caller's", got)
+	}
+}
+
+// TestCodexProbeCancelledTurnDoesNotBurnTheUnverifiedWarning: a caller that
+// stopped waiting has learned NOTHING about this codex, so the placeholder it
+// is handed is not a probe result and must not be reported as one. Reporting it
+// fires the "unverified" WARN, and that WARN is once per process precisely so a
+// later GENUINE unverified verdict is not silenced — so one cancelled turn in a
+// long-lived server would suppress the real diagnostic for the rest of the
+// process, and the one case a running server most needs to hear about is the one
+// it would have swallowed.
+//
+// Both halves are asserted because either alone passes on a version that only
+// skips the warn: a call that skips it and spends the latch anyway, or one that
+// spends the latch and then lets the real verdict through, would each be caught
+// by the second.
+func TestCodexProbeCancelledTurnDoesNotBurnTheUnverifiedWarning(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	logs := captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	// A codex whose `features list` does not answer, which is the unverified
+	// case, and whose turn succeeds so the only thing the cancelled call can
+	// produce is the probe verdict.
+	bin := fakeHarnessPolicyBinary(t, "codex", `
+if [ "$1" = "features" ]; then
+  printf 'no features subcommand\n' >&2
+  exit 2
+fi
+printf '%s' 'KEEP'
+`)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(cancelled, "prompt"); err == nil {
+		t.Fatal("a cancelled turn reported success")
+	}
+	if strings.Contains(logs.String(), "unverified") {
+		t.Errorf("a caller that stopped waiting reported the unverified verdict: %q", logs.String())
+	}
+
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("second Reflect: %v", err)
+	}
+	if !strings.Contains(logs.String(), "unverified") {
+		t.Errorf("a genuine unverified verdict was silenced by the cancelled turn: %q", logs.String())
+	}
+}
+
+// TestClaudeCapabilityProbeFollowersReDeduplicateAfterALeaderCancellation: the
+// burst survives a dead leader, which is the case a direct re-probe loses. Once
+// the leader's flight lands as a cancellation, every follower in the burst needs
+// an answer of its own, and if each re-probes DIRECTLY the burst is back to one
+// child per caller — the #741 bug reappearing on the rare path out of a common
+// one, which is worse than not having fixed it because the burst is now slower
+// than before.
+//
+// The count is two, and both numbers are accounted for: one probe for the flight
+// that died with its leader, one for the flight the burst shares on the retry.
+// A version that probes directly spawns one per follower, and a version that
+// gave up on the retry spawns one and answers none of them.
+func TestClaudeCapabilityProbeFollowersReDeduplicateAfterALeaderCancellation(t *testing.T) {
+	resetClaudeCapabilityProbe(t)
+	bin, probeLog := countingClaudeFake(t)
+	const followers = 20
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	go func() { _, _ = claudeCapabilitiesFor(leaderCtx, bin) }()
+	waitForProbeSpawns(t, probeLog, 1)
+
+	caps := make([]claudeCapabilities, followers)
+	errs := make([]error, followers)
+	burstDone := make(chan struct{})
+	go func() {
+		runColdProbeBurst(followers, func(i int) {
+			caps[i], errs[i] = claudeCapabilitiesFor(context.Background(), bin)
+		})
+		close(burstDone)
+	}()
+	// Let the whole burst arrive on the doomed flight. The fake holds it open
+	// for two seconds, so this is a wide window rather than a lucky one.
+	time.Sleep(300 * time.Millisecond)
+	cancelLeader()
+	<-burstDone
+
+	if got := countProbeSpawns(t, probeLog); got != 2 {
+		t.Errorf("a burst of %d followers behind a cancelled leader spawned %d probes, want 2: the dead flight's, and the burst's own", followers, got)
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("follower %d: %v", i, err)
+			continue
+		}
+		if !caps[i].safeMode || !caps[i].restricted || !caps[i].strictMCP || !caps[i].tools || !caps[i].disallowedTools {
+			t.Errorf("follower %d got %+v, want the capabilities the real binary declares", i, caps[i])
+		}
+	}
+}
+
+// TestCodexProbeFollowersReDeduplicateAfterALeaderCancellation: the same
+// property on the probe whose retry has to OVERWRITE rather than merely refill,
+// which is why the two paths differ and why neither may be inferred from the
+// other. A cancelled codex leader leaves nothing in the cache at all, so the
+// retry flight's own cache check misses and the burst really does share one
+// probe; the followers' verdicts are positive rather than a placeholder, and the
+// negative the dead leader produced reaches nobody.
+func TestCodexProbeFollowersReDeduplicateAfterALeaderCancellation(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	bin, probeLog := sleepingCodexFake(t)
+	const followers = 20
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	go func() { _ = codexFeaturesFor(leaderCtx, bin) }()
+	waitForProbeSpawns(t, probeLog, 1)
+
+	verdicts := make([]codexFeatureSupport, followers)
+	burstDone := make(chan struct{})
+	go func() {
+		runColdProbeBurst(followers, func(i int) {
+			verdicts[i] = codexFeaturesFor(context.Background(), bin)
+		})
+		close(burstDone)
+	}()
+	time.Sleep(300 * time.Millisecond)
+	cancelLeader()
+	<-burstDone
+
+	if got := countProbeSpawns(t, probeLog); got != 2 {
+		t.Errorf("a burst of %d followers behind a cancelled leader spawned %d probes, want 2: the dead flight's, and the burst's own", followers, got)
+	}
+	for i, got := range verdicts {
+		if !got.probed {
+			t.Errorf("follower %d got %+v, want the shared retry's answer", i, got)
+		}
+	}
+	if cached, ok := codexCachedSupport(codexIdentityFor(t, bin)); !ok || !cached.probed {
+		t.Errorf("cache holds %+v, want the burst's positive verdict", cached)
 	}
 }

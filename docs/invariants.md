@@ -146,8 +146,10 @@ warn-once latches are untouched. The freshness test for codex therefore lives in
 places and a check-then-probe pair with that test in only one of them is how a
 long-lived parent stops noticing a codex upgraded in place. The mutex-map argument
 is CLAUDE'S, and codex is the case that would survive without the group:
-`probeCodexFeatures` caches its verdict whether or not the probe answered, so a
-per-key lock would leave each follower a fresh negative to return. Both use the same
+`probeCodexFeatures` caches a verdict the probe could not REACH, so a per-key
+lock would leave each follower a fresh negative to return. (A verdict reached under a
+DEAD context is the one it refuses to cache — a cancellation, not an answer — which
+does not change this.) Both use the same
 mechanism, chosen once, rather than a claim each probe needs a guarantee it lacks.
 
 **A caller's own context still governs its own call.** `Do` blocks on the leader's
@@ -158,16 +160,31 @@ call. The other half is that a leader whose context dies must not fail the follo
 whose contexts are fine, or hand them its negative: in the long-lived `ghost mcp`
 server one disconnected client would fail every concurrent turn in the burst. The
 follower cannot tell those cases apart, because `exec.CommandContext` kills the child
-and `Wait` reports `signal: killed`, never the context error — so the leader MARKS
-its own failure (`probeContextError`, `internal/ai/probe.go`) and a live follower
-re-probes under its own context. For codex that overwrite is the point: the negative
-is retained for `codexFeatureRetry`, so bypassing it without replacing it would leave
-the weaker policy in the cache for every caller for five minutes. The converse is not
-treated as shared — a leader sees the same marker, and a dead caller must not start a
-fresh attempt under a dead context, which is why `isSharedProbeCancellation` requires
-a LIVE `ctx` as well as the marker. A burst whose leader disconnected can therefore
-spawn more than one probe: what every caller did before #741, on a rare path out of a
-common one.
+and `Wait` reports `signal: killed`, never the context error — so the leader MARKS its
+own failure (`probeContextError`, `internal/ai/probe.go`) and a live follower goes round
+AGAIN, re-entering the same `singleflight.Group` under its own context. Re-entering the
+group is load-bearing on the retry: a direct re-probe would restore the #741 burst (one
+child per follower) on the rare path out of a common one, and re-reading the cache would
+not do it either, because the followers all arrive within microseconds of each other and
+would all miss it. Each round consumes one more cancellation, so rounds are bounded by
+the callers sharing the key, and a caller whose OWN context is dead leaves on the first
+arm of every round rather than looping. The converse is not treated as shared — a leader
+sees the same marker, and a dead caller must not start a fresh attempt under a dead
+context, which is why `isSharedProbeCancellation` requires a LIVE `ctx` as well as the
+marker.
+
+**A cancelled caller leaves NOTHING behind.** The negative a killed probe produces says
+more about the caller's connection than about the codex, so `probeCodexFeatures` stores
+nothing when its own context is dead — measured on the CALLER's context and not on
+`probeCtx`, because a probe that hit its own 10s cap also knows nothing and must still be
+cached for `codexFeatureRetry`. Nothing was cached by the round that died, so the next
+round's re-read misses and a live caller really does re-probe rather than inherit the
+negative. For the same reason a caller that stopped waiting gets no
+`warnOnWeakerCodexPolicy` at all (`CodexClient.run` checks `ctx.Err()` first): nothing
+was learned about the codex, so the placeholder it was handed is not a probe result, and
+reporting it would fire the `unverified` WARN and CONSUME its once-per-process latch —
+silencing the real diagnostic for the rest of a long-lived server, over the one turn that
+lost the most information.
 
 The filter matters because codex **silently IGNORES** a `-c` key it does not know
 (the fail-OPEN direction): `-c` overrides are applied onto the config tree without
