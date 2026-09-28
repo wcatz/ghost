@@ -247,6 +247,14 @@ func TestStalenessDecayProof(t *testing.T) {
 // this package runs within ~120s of CI's 10-minute ceiling; the ranking-state
 // suite is where the demote is measured against edges that exist.
 func TestDecayDoesNotPerturbGradedBench(t *testing.T) {
+	// Parallel: this test seeds and searches the immutable headline corpus and only
+	// reads it, and at 60-130s under -race it is one of the five that decide whether
+	// this package fits Go's 600s per-binary default. The corpus grew by four rows in
+	// #677 and took it over. There is no shared state to order against — the
+	// package-level values are embedded bytes and one constant floor slice, and no
+	// bench test sets an env var or the default logger — so the only thing running
+	// these together buys is the overlap. Measured, in the commit that added this.
+	t.Parallel()
 	ds, vecs := loadTestdataDataset(t)
 	ctx := context.Background()
 
