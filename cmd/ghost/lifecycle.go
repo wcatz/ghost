@@ -2184,8 +2184,9 @@ it also writes the 'resolve' history row every writer appends — with YOU as th
 performer, which is the only resolve row in the database that can say a person
 decided it rather than a classifier. It also drops the row's KEEP cache entry, so
 the pass does not report the row as cached-KEEP and bring it straight back after
-any edit. The inverse is --reassess --only, and every --mark report prints the
-exact command for the memories it just stamped.
+any edit. The inverse is --reassess --only, and every --mark --apply report prints
+the exact command for the memories it just stamped. A dry run prints none: it
+stamped nothing, so a repair command would name memories the run never touched.
 `
 
 // runResolveMark implements `ghost resolve <project> --mark <ids> [--apply]`:

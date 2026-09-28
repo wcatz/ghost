@@ -1,4 +1,4 @@
-// Package followup renders the command that completes a supersede repair.
+// Package followup renders the command that completes a resolve or supersede repair.
 //
 // Withdrawing a 'supersedes' edge is not the whole repair. `ghost resolve`'s
 // piggyback stamps resolved_at on the older endpoint for free, and resolve's own
@@ -9,12 +9,22 @@
 // re-judges every resolved memory in the project, and #698 measured that
 // proposing to un-hide 143 rows on a real store, about 35% of them stale.
 //
-// It lives in its own package because two surfaces print it and neither may
-// render it differently. The CLI prints it under a per-edge list; the MCP tool
-// answers an agent that may have no shell at all, where the same string is a
-// sentence rather than something to paste. One renderer means the project-name
-// quoting — the part that decides whether the command RUNS — is decided once, and
-// a change to it cannot leave the two surfaces disagreeing about it.
+// It lives in its own package because THREE surfaces print it and none may
+// render it differently. The CLI prints it under a supersede withdrawal's
+// per-edge list; the CLI's `resolve --mark` report prints it for the memories
+// that run stamped, which is the other direction of the same stamp and so the
+// same command read backwards; and the MCP `ghost_link_withdraw` tool answers an
+// agent that may have no shell at all, where the same string is a sentence rather
+// than something to paste. One renderer means the project-name quoting — the part
+// that decides whether the command RUNS — is decided once, and a change to it
+// cannot leave the surfaces disagreeing about it.
+//
+// The two directions are why this is the ONE renderer rather than two that happen
+// to agree. `--mark`'s follow-up is a supersede repair's follow-up read in the
+// other direction: a withdrawal's report says "run this to clear the resolution
+// the edge caused", and a mark's says "run this to clear the resolution this
+// stamp caused". Two renderers for one command would drift on the quoting, and a
+// command that does not run is worse than one whose wording is inconsistent.
 package followup
 
 import (

@@ -934,7 +934,7 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		// quoted. An agent told nothing would run the command above, judge fewer
 		// memories than this call orphaned, and report a repair that did not
 		// happen. The id is given verbatim so a person can put it in a file
-		// themselves — one id per line, and readOnlySelectors never splits.
+		// themselves — one id per line, and the --only-file reader never splits.
 		if cmd == "" {
 			sb.WriteString("\nNo --only command can name the target: its id holds a comma, which --only splits on.")
 		}
@@ -1032,7 +1032,14 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 		Apply:      true,
 	}, s.logger)
 	if err != nil {
-		return "", fmt.Errorf("ghost_resolve_mark: %w", err)
+		// The per-row result is NOT thrown away with the error. MarkResolved is one
+		// transaction, so nothing moved — but "nothing moved" is only half an answer
+		// to an agent: it asked about N named memories and is told a store error
+		// with no statement of which ones, so it cannot tell the user which
+		// memories are still live and cannot retry the ones it can. The CLI prints
+		// its report before raising the same error, for the same reason; this is the
+		// same thing in the one shape a tool result has.
+		return "", fmt.Errorf("ghost_resolve_mark: %w%s", err, markFailureRows(res.Memories))
 	}
 
 	var sb strings.Builder
@@ -1116,6 +1123,32 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	}
 	return sb.String(), nil
+}
+
+// markFailureRows names the memories a failed mark was asked about, one per line
+// with their first line of text, so an agent reading a store error knows which
+// memories it named and which of them are still live.
+//
+// It says nothing moved, because on this path nothing did: MarkResolved is one
+// transaction, so an error is a rollback. That is worth stating rather than
+// leaving to the agent's inference, since "database is locked" reads like a
+// transient failure to retry — and it must not be retried blindly, because these
+// rows are unchanged and a retry is the operator's decision to make again, not a
+// continuation.
+//
+// Empty when no row was resolved, which is the case where the error came from the
+// request rather than the write — a refused ref writes nothing, so there is no
+// list of memories to report.
+func markFailureRows(rows []resolve.MarkedMemory) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nNothing was marked: the stamp, its history row and its cache clear are one transaction, so this rolled all %d back. These memories are unchanged and still live:", len(rows))
+	for _, m := range rows {
+		fmt.Fprintf(&b, "\n  %s  [%s]  %s", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+	}
+	return b.String()
 }
 
 // markedMemoryIDs is the ids THIS call stamped, in the order they were reported.

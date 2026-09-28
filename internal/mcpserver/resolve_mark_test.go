@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -391,6 +392,76 @@ func TestMCPResolveMarkReportNeverClaimsAMarkItDidNotMake(t *testing.T) {
 	if strings.Contains(out, late) {
 		t.Errorf("the follow-up names a memory this call did not stamp:\n%s", out)
 	}
+}
+
+// TestResolveMarkNamesTheMemoriesAFailedWriteAskedAbout: the CLI prints its
+// report before raising the error, and this used not to — so an agent whose mark
+// hit a store error got "database is locked" and no statement of WHICH memories
+// it had named. It cannot then tell its user which of them are still live, and
+// "database is locked" reads like a transient failure to retry blindly.
+//
+// The answer must also say that nothing moved. MarkResolved is one transaction,
+// so an error is a rollback, and an agent that believes it half-succeeded will
+// act on that belief.
+func TestResolveMarkNamesTheMemoriesAFailedWriteAskedAbout(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	id := seedMarkable(t, store, "test-project", "a note the mark could not stamp")
+	// The store is swapped BEFORE the client connects, because the handler reads
+	// s.store at call time and a session made before the swap would not be looking
+	// at the wrapper at all.
+	srv.store = &failingMarkStore{
+		MemoryStore: srv.store,
+		store:       store,
+		err:         errors.New("database is locked"),
+	}
+	session := connectedClientNamed(t, srv, "claude-code")
+
+	// Through the session rather than the handler, because where a refusal
+	// surfaces is itself a contract worth observing: a tool error can reach the
+	// client as a protocol error or as an IsError result depending on the SDK's
+	// routing, and an agent sees the TEXT either way. Which one it is must not
+	// decide whether the answer names the rows.
+	msg := callToolErr(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": "test-project",
+		"memory_ids": []string{id},
+	})
+	// The store's own error, so a caller can act on what actually went wrong.
+	if !strings.Contains(msg, "database is locked") {
+		t.Errorf("the error does not carry the store's own reason: %s", msg)
+	}
+	// The memory it named, with its text: an agent cannot report on a memory it
+	// cannot identify. The report form is the abbreviated id, which is what every
+	// Ghost report prints and therefore what a caller has to be able to read back
+	// into something it can act on.
+	if !strings.Contains(msg, id[:8]) {
+		t.Errorf("the error does not name the memory the call asked about (%s): %s", id[:8], msg)
+	}
+	if !strings.Contains(msg, "a note the mark could not stamp") {
+		t.Errorf("the error does not quote the memory's own text: %s", msg)
+	}
+	// And that nothing moved, so the failure is not retried as if it were partial.
+	if !strings.Contains(msg, "rolled all") && !strings.Contains(msg, "unchanged") {
+		t.Errorf("the error does not say the rows are unchanged: %s", msg)
+	}
+	if isMarkedResolved(t, store, id) {
+		t.Error("the row is resolved: the write did not roll back")
+	}
+}
+
+// failingMarkStore is the tool's store with a mark that always errors, which is
+// what a locked or full database looks like to this call.
+type failingMarkStore struct {
+	provider.MemoryStore
+	store *memory.Store
+	err   error
+}
+
+func (f *failingMarkStore) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix string) ([]string, error) {
+	return f.store.MemoryIDsByIDPrefix(ctx, projectID, prefix)
+}
+
+func (f *failingMarkStore) MarkResolved(context.Context, string, []string, memory.Provenance) ([]string, error) {
+	return nil, f.err
 }
 
 // decliningMarkStore is the tool's store with a mark that drops one id, which is
