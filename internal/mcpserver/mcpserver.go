@@ -1038,9 +1038,16 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Marked %d of %d named memory/memories resolved. The rest are unchanged:\n", res.Marked, res.Resolved)
 	for _, m := range res.Memories {
-		marker := "marked"
+		// The default is the CLAIM, not the absence of one, and that ordering is
+		// the point: a row state this switch does not know about must fall
+		// through to a marker that says nothing was stamped. The store re-checks
+		// its eligibility guard at write time, so a row pinned or recategorized
+		// between the read and the write is declined SILENTLY — and an agent told
+		// "marked" for it will tell its user the memory is buried when it is not.
+		marker := "not marked"
 		switch {
 		case m.Marked:
+			marker = "marked"
 		case m.MarkFailed:
 			marker = "FAILED"
 		case m.AlreadyResolved:
@@ -1052,10 +1059,12 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 			marker = "pinned (kept visible on purpose)"
 		case m.ExemptCategory:
 			marker = "standing category (never marked)"
+		case m.Declined:
+			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}
 		fmt.Fprintf(&sb, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, firstLine(m.Content, 70))
 	}
-	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 {
+	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.Declined > 0 {
 		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, or in a standing category is left as it is, and a\n"+
 			"report saying otherwise would be claiming a change that did not happen.\n")
 	}

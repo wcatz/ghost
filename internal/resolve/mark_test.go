@@ -472,6 +472,96 @@ func TestMarkNeedsAProject(t *testing.T) {
 	}
 }
 
+// TestMarkRefusesTheGlobalProject: the sentinel is not a project a caller runs a
+// lifecycle pass against, and the ownership guard does not catch it. `_global`
+// holds promoted rows that EVERY project injects, so a mark naming it would bury
+// a memory in all of them on the say-so of one command — and the per-row check
+// passes, because the row's own project_id IS `_global` and the named project is
+// too. The refusal therefore has to be a separate one, and it belongs at the
+// store layer beside the empty-project refusal so every caller inherits it rather
+// than each re-deriving it.
+func TestMarkRefusesTheGlobalProject(t *testing.T) {
+	store, _ := markSeed(t)
+	ctx := context.Background()
+	promoted := markMem(t, store, "a promoted row every project injects", "")
+	if err := store.PromoteToGlobal(ctx, "p", promoted); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	// Both entry points, because each resolves a project name of its own and a
+	// caller could reach the sentinel through either.
+	if _, err := Mark(ctx, store, MarkRequest{ProjectID: memory.GlobalProjectID, Refs: []string{promoted[:8]}, Apply: true}, markLogger()); err == nil {
+		t.Error("Mark accepted a request naming the _global project")
+	}
+	if _, err := store.MarkResolved(ctx, memory.GlobalProjectID, []string{promoted}, memory.Provenance{}); err == nil {
+		t.Error("MarkResolved accepted the _global project directly, so any caller reaching the store can cross the guard")
+	}
+	if isMarkResolved(t, store, promoted) {
+		t.Fatal("a promoted memory was stamped: one project's command buried it for all of them")
+	}
+}
+
+// TestMarkReportsARowTheWriteTimeGuardDeclined: the store re-checks eligibility
+// where it writes, so a row that was eligible when this call read it can be
+// ineligible by the time it writes — pinned, recategorized into a standing
+// category, or moved to another project in between. The store declines such a row
+// SILENTLY, because that is somebody else's decision rather than a failure here,
+// and nothing in the returned ids distinguishes it from a row that was written.
+//
+// Without an explicit state the report's default marker says it was marked, and
+// the memory is not buried: an operator who reads that will not look for it again,
+// and the memory stays in every session's ranked context. The fake below is the
+// only way to reach the state — a real store makes the race window vanishingly
+// small, and a test that waits for it would be a test that passes by not running.
+func TestMarkReportsARowTheWriteTimeGuardDeclined(t *testing.T) {
+	store, _ := markSeed(t)
+	ctx := context.Background()
+	fresh := markMem(t, store, "a note that was eligible when the call read it", "")
+	late := markMem(t, store, "a note another process pinned in the meantime", "")
+
+	s := &decliningStore{MarkStore: store, decline: late}
+	res, err := Mark(ctx, s, MarkRequest{ProjectID: "p", Refs: []string{fresh, late}, Apply: true}, markLogger())
+	if err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	if res.Marked != 1 || res.Declined != 1 {
+		t.Fatalf("Mark = %+v, want one marked and one declined", res)
+	}
+	for _, m := range res.Memories {
+		switch m.ID {
+		case fresh:
+			if !m.Marked {
+				t.Error("the stamped row is not marked")
+			}
+		case late:
+			if m.Marked {
+				t.Error("the row the write-time guard declined is reported as marked: the memory is not buried")
+			}
+			if !m.Declined {
+				t.Error("the row the write-time guard declined carries no state saying so")
+			}
+		}
+	}
+}
+
+// decliningStore is the real store with a write that drops one id, which is what
+// the store's own write-time guard does to a row that became ineligible between
+// the caller's read and its write.
+type decliningStore struct {
+	MarkStore
+	decline string
+}
+
+func (d *decliningStore) MarkResolved(ctx context.Context, projectID string, ids []string, prov memory.Provenance) ([]string, error) {
+	keep := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != d.decline {
+			keep = append(keep, id)
+		}
+	}
+	return d.MarkStore.MarkResolved(ctx, projectID, keep, prov)
+}
+
 // TestMarkMakesNoClassifierCall: nothing is judged here, so a machine that cannot
 // spawn a harness at all can still repair its corpus and nothing is billed. The
 // same property internal/supersede.Withdraw has, and the reason both repairs are

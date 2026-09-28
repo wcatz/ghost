@@ -4146,6 +4146,39 @@ func TestMarkResolvedIsProjectScoped(t *testing.T) {
 	if _, err := s.MarkResolved(ctx, "", []string{ours}, Provenance{}); err == nil {
 		t.Error("MarkResolved accepted an empty project, which would unbind the guard it exists to hold")
 	}
+	// And the sentinel, which the project binding does NOT catch: a promoted
+	// row's own project_id IS _global, so naming _global satisfies every
+	// predicate this method has and buries a memory every project injects. The
+	// refusal is a separate one, at this layer, so a caller reaching the store
+	// directly inherits it rather than re-deriving it.
+	promoted, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create promoted: %v", err)
+	}
+	if err := s.PromoteToGlobal(ctx, testProject, promoted); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+	if _, err := s.MarkResolved(ctx, GlobalProjectID, []string{promoted}, Provenance{}); err == nil {
+		t.Error("MarkResolved accepted the _global project, so a promoted memory can be buried for every project at once")
+	}
+	// ResolveCandidates returns the UNRESOLVED rows, so the promoted row must
+	// still be in it. Its presence is the proof the stamp did not happen: a
+	// committed one would have taken it out of that set.
+	globalCands, err := s.ResolveCandidates(ctx, GlobalProjectID)
+	if err != nil {
+		t.Fatalf("ResolveCandidates(_global): %v", err)
+	}
+	var stillThere bool
+	for _, m := range globalCands {
+		if m.ID == promoted {
+			stillThere = true
+		}
+	}
+	if !stillThere {
+		t.Error("the promoted row was stamped: one command buried a memory every project injects")
+	}
 }
 
 // TestMarkResolvedRecordsThePerformerOnItsHistoryRow: the reason an operator's

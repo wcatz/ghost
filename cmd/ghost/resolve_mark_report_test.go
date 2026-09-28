@@ -101,6 +101,57 @@ func TestResolveMarkReportNamesEachNoOpForWhatItIs(t *testing.T) {
 // header reading "0 named, marked resolved 0" printed above that error is a
 // report about a corpus nobody asked about, presented as though it were the
 // answer — and it precedes the diagnostic, so it is the line a reader sees first.
+// TestResolveMarkReportNeverClaimsAMarkItDidNotMake: the store re-checks
+// eligibility WHERE IT WRITES, so a row that was eligible when the report's
+// result was built can be ineligible by the time it is stamped — pinned or
+// recategorized in between. The store declines such a row silently, because that
+// is somebody else's decision rather than a failure, and nothing in the result
+// distinguishes it from a row that was written.
+//
+// So the report's DEFAULT marker under --apply has to be the negative one. A
+// report about a change that claims a change it did not make is the one thing it
+// must never do: the memory is not buried, it stays in every session's ranked
+// context, and an operator who was told otherwise does not go looking for it.
+func TestResolveMarkReportNeverClaimsAMarkItDidNotMake(t *testing.T) {
+	// Every state the switch might not know about, including a row carrying
+	// none of them at all — the one a new state added tomorrow would look like.
+	for _, m := range []resolve.MarkedMemory{
+		{ID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Category: "fact", Content: "declined by the write-time guard", Declined: true},
+		{ID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Category: "fact", Content: "a state this report does not know about"},
+	} {
+		out := resolveMarkReport("myproj", resolve.MarkResult{Resolved: 1, Memories: []resolve.MarkedMemory{m}}, true)
+		if !strings.Contains(out, "not marked") {
+			t.Errorf("a row the run did not stamp is not reported as unmarked:\n%s", out)
+		}
+		for _, claim := range []string{"  marked  ", "  would mark  "} {
+			if strings.Contains(out, claim) {
+				t.Errorf("the report claims %q for a row it did not stamp:\n%s", claim, out)
+			}
+		}
+		// And no repair for it: a command to clear a stamp that was never set.
+		if strings.Contains(out, "--reassess") {
+			t.Errorf("the report printed a repair for a stamp it did not write:\n%s", out)
+		}
+	}
+	// The known declines keep their own markers, which is why the default is
+	// safe: nothing that names a reason falls through to it.
+	res := resolve.MarkResult{Resolved: 4, Marked: 1, Pinned: 1, Declined: 1, Memories: []resolve.MarkedMemory{
+		{ID: "11111111111111111111111111111111", Marked: true, Content: "written"},
+		{ID: "22222222222222222222222222222222", Pinned: true, Content: "pinned"},
+		{ID: "33333333333333333333333333333333", Declined: true, Content: "declined"},
+		{ID: "44444444444444444444444444444444", ExemptCategory: true, Content: "standing"},
+	}}
+	out := resolveMarkReport("myproj", res, true)
+	for _, want := range []string{"  marked  ", "  pinned  ", "  standing category  ", "not marked (no longer eligible"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not mark a row %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "1 declined") {
+		t.Errorf("the summary does not count the declined row:\n%s", out)
+	}
+}
+
 func TestResolveMarkReportNamesNothingForARequestThatNamedNothing(t *testing.T) {
 	for _, apply := range []bool{false, true} {
 		if out := resolveMarkReport("myproj", resolve.MarkResult{}, apply); out != "" {

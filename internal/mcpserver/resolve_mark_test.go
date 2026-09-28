@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/provider"
 )
 
 // seedMarkable stores a memory with no resolution keyword, which is the corpus
@@ -344,4 +345,73 @@ func TestResolveMarkNamesAnIDNoFlagCanCarry(t *testing.T) {
 	if strings.Contains(out, "--reassess --only ") {
 		t.Errorf("the result emitted an --only command for a comma-bearing id, which cannot address it:\n%s", out)
 	}
+}
+
+// TestMCPResolveMarkReportNeverClaimsAMarkItDidNotMake: the same contract on the
+// tool surface, and there it matters more. An operator reads a report and goes
+// looking for the memory; an AGENT reads one and tells its user the memory is
+// buried, and the user then relies on that for as long as the conversation lasts.
+// The store declines a row that became ineligible between the read and the write
+// silently, so the tool's default marker has to be the negative one.
+func TestMCPResolveMarkReportNeverClaimsAMarkItDidNotMake(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	session := connectedClientNamed(t, srv, "claude-code")
+	// Two rows, and the store is wrapped so the second is declined at write time
+	// exactly as a concurrent pin would decline it.
+	fresh := seedMarkable(t, store, "test-project", "a note the write did stamp")
+	late := seedMarkable(t, store, "test-project", "a note pinned in the meantime")
+	srv.store = &decliningMarkStore{
+		MemoryStore: srv.store,
+		store:       store,
+		decline:     late,
+	}
+	// The session is reconnected so the handler holds the wrapped store.
+	session = connectedClientNamed(t, srv, "claude-code")
+	out := resultText(callTool(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": "test-project",
+		"memory_ids": []string{fresh, late},
+	}))
+	if !strings.Contains(out, "Marked 1") {
+		t.Errorf("the result does not report its one stamp:\n%s", out)
+	}
+	if !isMarkedResolved(t, store, fresh) {
+		t.Error("the eligible row was not stamped")
+	}
+	if isMarkedResolved(t, store, late) {
+		t.Error("the declined row was stamped after all")
+	}
+	if !strings.Contains(out, "not marked") {
+		t.Errorf("the declined row is not reported as unmarked:\n%s", out)
+	}
+	// And the follow-up names only the row that was actually written: a command
+	// clearing the other would be a repair for a stamp that does not exist.
+	if !strings.Contains(out, fresh) {
+		t.Errorf("the follow-up omits the stamped memory:\n%s", out)
+	}
+	if strings.Contains(out, late) {
+		t.Errorf("the follow-up names a memory this call did not stamp:\n%s", out)
+	}
+}
+
+// decliningMarkStore is the tool's store with a mark that drops one id, which is
+// what the write-time eligibility guard does to a row that became ineligible
+// between the caller's read and its write.
+type decliningMarkStore struct {
+	provider.MemoryStore
+	store   *memory.Store
+	decline string
+}
+
+func (d *decliningMarkStore) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix string) ([]string, error) {
+	return d.store.MemoryIDsByIDPrefix(ctx, projectID, prefix)
+}
+
+func (d *decliningMarkStore) MarkResolved(ctx context.Context, projectID string, ids []string, prov memory.Provenance) ([]string, error) {
+	keep := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id != d.decline {
+			keep = append(keep, id)
+		}
+	}
+	return d.store.MarkResolved(ctx, projectID, keep, prov)
 }

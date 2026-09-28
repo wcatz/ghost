@@ -2287,10 +2287,20 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 		count = res.Marked
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category\n",
-		projectName, res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory)
+	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category, %d declined\n",
+		projectName, res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.Declined)
 	for _, m := range res.Memories {
+		// The default is the CLAIM, not the absence of one, and that ordering is
+		// deliberate: a state this switch does not know about must fall through
+		// to a marker that says nothing was stamped, never to the success. The
+		// store re-checks its eligibility guard at write time, so a row pinned or
+		// recategorized between the read and the write is declined SILENTLY, and a
+		// memory buried by mistake is invisible afterwards — an operator told
+		// "marked" will not look for it again.
 		marker := "would mark"
+		if apply {
+			marker = "not marked"
+		}
 		switch {
 		case m.Marked:
 			marker = "marked"
@@ -2305,6 +2315,8 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 			marker = "pinned"
 		case m.ExemptCategory:
 			marker = "standing category"
+		case m.Declined:
+			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}
 		fmt.Fprintf(&b, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, firstLine(m.Content, 70))
 	}

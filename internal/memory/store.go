@@ -4070,16 +4070,35 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 // as "nothing happened" — which is the property a repair needs to be reportable
 // as a single outcome rather than as a count of whatever it reached before the
 // failure.
+//
+// That leaves one outcome the caller cannot see, and it is why the guard is a
+// read-time AND a write-time check rather than either: a row that was eligible
+// when the caller read it and is not by the time this runs is simply absent from
+// the returned ids. It is not an error — a concurrent pin or a recategorisation
+// is somebody else's decision, not a failure here — so the caller has to treat
+// "not returned" as its own state rather than as a stamp.
 func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string, prov Provenance) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	if projectID == "" {
+	switch projectID {
+	case "":
 		// The one guard this method exists to hold. A caller with no project has
 		// not asked about a project, and the shared statement treats an empty
 		// binding as "no binding" — so the refusal is here rather than left to
 		// the argument it would otherwise weaken.
 		return nil, fmt.Errorf("mark resolved: a project is required, so no memory can be reached from it")
+	case GlobalProjectID:
+		// And the sentinel, for the same reason one layer up: `_global` is not a
+		// project a caller runs a lifecycle pass against. It holds promoted rows
+		// that EVERY project injects, so naming it would let one command bury a
+		// memory in all of them — and a caller that got there by typing the
+		// reserved name would be doing it deliberately, which is exactly the case
+		// the guard is for. Every other store method that refuses `_global` refuses
+		// it here (see DeleteProject), so the refusal is at this layer rather than
+		// left to each caller to re-derive: a guard one caller re-implements is a
+		// guard the next caller forgets.
+		return nil, fmt.Errorf("mark resolved: refusing to mark in the %s project — it holds the promoted memories every project injects, and a lifecycle pass over one project cannot decide for all of them", GlobalProjectID)
 	}
 	return s.setResolvedStampTx(ctx, ids, projectID, prov)
 }

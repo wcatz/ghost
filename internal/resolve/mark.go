@@ -144,6 +144,18 @@ type MarkedMemory struct {
 	// the resolved_at the request did not set.
 	Pinned         bool
 	ExemptCategory bool
+	// Declined marks a row that was ELIGIBLE when this call read it and was not
+	// stamped anyway: the store re-checks its guard at write time, and a pin, a
+	// recategorisation or a move to another project that lands between the two
+	// reads makes the row ineligible without anything failing.
+	//
+	// It is its own state rather than the absence of Marked because the store
+	// declines such a row silently — it is somebody else's decision, not an error
+	// — so nothing else in the result says it happened. Without it a report's
+	// default marker ("marked") claims a stamp that was never written, which is
+	// the one thing a report about a change must never do: the memory is not
+	// buried, and the operator who reads that it is will not look for it again.
+	Declined bool
 	// MarkFailed marks every row in a request whose write errored. It is
 	// all-or-nothing by construction rather than by reporting convention:
 	// MarkResolved is ONE transaction over every batch, so an error is a rollback
@@ -172,7 +184,12 @@ type MarkResult struct {
 	AlreadyResolved int
 	Pinned          int
 	ExemptCategory  int
-	Memories        []MarkedMemory
+	// Declined counts rows the store's write-time guard refused, which is only
+	// ever non-zero under --apply. It is counted and not left to the difference
+	// between Resolved and the other four, because that difference is also
+	// where a row this code failed to think of would land.
+	Declined int
+	Memories []MarkedMemory
 }
 
 // Mark stamps resolved_at on the memories the request names and returns them
@@ -278,15 +295,25 @@ func Mark(ctx context.Context, store MarkStore, req MarkRequest, logger *slog.Lo
 		written[id] = true
 	}
 	for i := range rows {
-		if written[rows[i].ID] {
+		switch {
+		case written[rows[i].ID]:
 			rows[i].Marked = true
+		case rows[i].AlreadyResolved || rows[i].Pinned || rows[i].ExemptCategory:
+			// Already named from the read, with the reason it applies.
+		default:
+			// Eligible on the read, absent from the write: the store's write-time
+			// guard declined it and nothing failed. Said explicitly, because the
+			// row is otherwise indistinguishable from one that was written.
+			rows[i].Declined = true
 		}
 	}
 	res.Marked = len(stamped)
+	res.Declined = countMarked(rows, func(m *MarkedMemory) bool { return m.Declined })
 	if logger != nil {
 		logger.Info("resolve marked named memories",
 			"project", req.ProjectID, "resolved", res.Resolved, "marked", res.Marked,
-			"already_resolved", res.AlreadyResolved, "pinned", res.Pinned, "exempt", res.ExemptCategory)
+			"already_resolved", res.AlreadyResolved, "pinned", res.Pinned, "exempt", res.ExemptCategory,
+			"declined", res.Declined)
 	}
 	return res, nil
 }
