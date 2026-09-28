@@ -52,6 +52,23 @@ func IsPrerelease(s string) bool {
 	return err == nil && v.prerelease != ""
 }
 
+// IsRelease reports whether a version string names a published release: a
+// parseable semantic version with no prerelease identifier. "0.35.0",
+// "v0.35.0" and "0.35.0+dirty" are releases; "dev", "nightly", "1.0" and
+// "0.36.0-rc.1" are not.
+//
+// It is the other half of IsPrerelease and the same parser, deliberately: the
+// two must never disagree about one string, and the one case where they both
+// answer false is the one this function exists to change. A tag that is not a
+// semantic version is NOT a release, because nothing about it says it is one —
+// and that includes the `git describe` stamp a local build carries
+// ("v0.38.0-14-gabc1234"), whose "-14-gabc1234" tail parses as a prerelease
+// identifier even though nothing was ever published under it.
+func IsRelease(s string) bool {
+	v, err := parseVersion(s)
+	return err == nil && v.prerelease == ""
+}
+
 // version is a parsed semantic version. Build metadata is dropped: it never
 // takes part in precedence.
 type version struct {

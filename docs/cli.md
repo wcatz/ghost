@@ -822,3 +822,69 @@ ghost lifecycle <project>
 ```
 
 This is an internal integration command rather than the normal way to start maintenance. It runs enabled phases in order—`reflect`, `resolve`, then `supersede`—and logs progress to the Ghost data directory. Each phase is bounded by the lifecycle timeout configured in `docs/configuration.md`.
+
+## Development builds: refusing a real store
+
+`GHOST_DEV_FORBID_DATA_DIR` names data directories a build that is **not a
+release** refuses to open. It exists because a development build opened against a
+real store migrates it to the branch's schema, and the installed release then
+refuses that store as "newer than this build" until a release catches up. The
+protection used to be an instruction to set the data paths on every command, and
+an instruction is not a mechanism — the case that broke was a malformed
+environment export that left `XDG_DATA_HOME` pointing at the real store.
+
+```bash
+# In a development shell:
+export GHOST_DEV_FORBID_DATA_DIR="$HOME/.local/share/ghost"
+```
+
+- **The value is a list** of data directories, separated by the platform's list
+  separator (`:` on Unix and macOS, `;` on Windows). An empty entry is a
+  separator, not a directory.
+- **Name the data directory itself** — `$XDG_DATA_HOME/ghost`, or
+  `~/.local/share/ghost` — not its parent. The match is equality, so a store
+  nobody listed is never refused.
+- **Both sides are canonicalized** before they are compared: made absolute, with
+  symlinks resolved and a path that does not exist yet handled. A store reached
+  through a symlinked home, named relatively, or written with a trailing
+  separator is the same store, and refusing one spelling only would be a guard
+  that works for the spelling its author tested.
+- **A release build ignores the variable entirely.** "Release" is read from the
+  build's own version — the same semantic-version parser `ghost upgrade` orders
+  releases with — so `dev`, a `git describe` stamp, a prerelease, and anything
+  that is not a semantic version are all development builds, and `0.39.0` (with
+  or without a leading `v`) is not. That is what makes the variable safe to
+  export into a development shell: the same environment reaches the release Ghost
+  those sessions use through their MCP integration, and that one keeps working
+  against the real store.
+
+The refusal happens **before** anything touches the file, so nothing is created,
+migrated or backed up — including the pre-migration copy a schema change would
+otherwise write beside the database. The error names both the variable and the
+directory:
+
+```console
+$ XDG_DATA_HOME=/home/ada/.local/share ghost backup --out /tmp/snap.db
+error: GHOST_DEV_FORBID_DATA_DIR refuses to open the data directory /home/ada/.local/share/ghost: this build is "dev", which is not a release, and a development build migrates a store it opens. Run a released ghost against this directory, or unset GHOST_DEV_FORBID_DATA_DIR
+$ echo $?
+1
+```
+
+**Every path that opens a store honors it** — the CLI subcommands, `ghost mcp`,
+`ghost mcp init`, and the read-only `ghost export` / dry-run `ghost import`. Two
+paths behave differently, and both are deliberate:
+
+- **The hook paths fail open.** A SessionStart/Stop hook, and the `ghost context`
+  render opencode's plugin spawns, open the store read-only and already answer
+  every failure by rendering an empty block; a refused directory is one more
+  such failure. The session is never blocked, no database is opened, and nothing
+  is written beside it — so a development session simply has no context, while
+  the release Ghost in the same session keeps serving the real store. A
+  development build that is refused the store is not a broken session, it is the
+  outcome the variable asked for.
+- **`ghost mcp status` reports it.** The status report's job is to say what is
+  wrong, so a refused directory appears as a failed line naming the variable,
+  and the run exits non-zero.
+
+`ghost backup verify <file>` is the one command that reads nothing but the file
+it was handed, so it resolves no data directory and has nothing to refuse.

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -16,8 +15,14 @@ import (
 // and neither should leave a data directory behind on a machine that has none —
 // a backup of a store that does not exist is an error, not a reason to make an
 // empty one.
+//
+// It is the guarded resolver (#721), not a bare one: every caller opens a store
+// with the directory this returns — `ghost history` and `ghost backup` through
+// bootstrap(), `ghost export` and a dry-run `ghost import` through
+// openReadOnlyTransferStore — so this is where the GHOST_DEV_FORBID_DATA_DIR
+// refusal reaches all four.
 func dataDirPath() (string, error) {
-	dir, err := config.DataDirPath()
+	dir, err := requireDataDirPath()
 	if err != nil {
 		return "", fmt.Errorf("resolve data directory: %w", err)
 	}
@@ -33,6 +38,10 @@ func dataDirPath() (string, error) {
 // store would not expect a file to appear because they ran a read. That is also
 // why the missing-database case is named here rather than left as a stat error:
 // the actionable next step is to start a session.
+//
+// The refusal check is its caller's (dataDirPath), which is the one function
+// every transfer entry point resolves the directory through; this opens what it
+// was handed.
 func openReadOnlyTransferStore(dataDir string) (*memory.Store, error) {
 	store, db, dbPath, err := openReadOnlyTransferStoreUnchecked(dataDir)
 	if err != nil {

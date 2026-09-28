@@ -35,7 +35,12 @@ func ensureObsidianSyncRunning() {
 		return
 	}
 
-	dataDir, err := config.DataDir()
+	// Guarded, and not only because this function writes a pid file and a log
+	// into the data directory: the mirror it spawns opens the STORE, and
+	// `ghost obsidian export|sync` refuses a forbidden data directory (#721).
+	// Spawning one that cannot run would claim the pid, exit on the refusal and
+	// be respawned by the next session, forever.
+	dataDir, err := guardedDataDir()
 	if err != nil {
 		return
 	}

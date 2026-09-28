@@ -174,3 +174,59 @@ func TestIsPrereleaseAgreesWithCompareVersions(t *testing.T) {
 		}
 	}
 }
+
+// TestIsRelease pins the one question the data-dir guard asks of a build
+// version: is this the artifact a release published? The answer decides whether
+// a development-only refusal applies, so a build that is not a release — a plain
+// `go build` ("dev"), a `git describe` stamp, a prerelease, or a tag that is not
+// a version at all — must never be read as one.
+func TestIsRelease(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  string
+		want bool
+	}{
+		{name: "a final release is a release", tag: "0.35.0", want: true},
+		{name: "a v-prefixed final release is a release", tag: "v0.35.0", want: true},
+		{name: "build metadata does not unmake a release", tag: "v0.35.0+dirty", want: true},
+		{name: "a two-component version is not a release", tag: "1.0", want: false},
+		// The interesting negative is a git describe stamp, which PARSES: its
+		// "-14-gabc1234" tail is a legal semver prerelease identifier. Reading it
+		// as a release would leave every local build of a tagged commit
+		// unguarded, which is most of them.
+		{name: "a describe stamp is not a release", tag: "v0.38.0-14-gabc1234", want: false},
+		{name: "a dirty describe stamp is not a release", tag: "v0.38.0-0-gabc1234-dirty", want: false},
+		{name: "an rc is not a release", tag: "0.39.0-rc.1", want: false},
+		{name: "a dev build is not a release", tag: "dev", want: false},
+		{name: "a non-semver tag is not a release", tag: "nightly", want: false},
+		{name: "an empty tag is not a release", tag: "", want: false},
+		{name: "an unparseable prerelease is not a release", tag: "1.0.0-", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsRelease(tt.tag); got != tt.want {
+				t.Errorf("IsRelease(%q) = %v, want %v", tt.tag, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsReleaseIsExactlyTheComplementOfIsPrereleaseWhereAVersionParses holds
+// the two answers to one parser apart: IsPrerelease deliberately answers false
+// for a tag it cannot read, so the pair can only be "one of the two is false"
+// by construction — which is what makes IsRelease safe to rest on. Any version
+// this parser reads is either a prerelease or a release, never both and never
+// neither.
+func TestIsReleaseIsExactlyTheComplementOfIsPrereleaseWhereAVersionParses(t *testing.T) {
+	for _, tag := range []string{
+		"0.0.1", "0.9.0", "0.10.0", "0.35.0", "0.35.0-rc.1", "0.35.0-rc.2",
+		"0.36.0-beta", "1.0.0-alpha.2", "v1.0.0-rc.1", "0.35.0+dirty",
+		"v0.38.0-14-gabc1234",
+	} {
+		if IsRelease(tag) == IsPrerelease(tag) {
+			t.Errorf("IsRelease(%q) and IsPrerelease(%q) both answer %v, want exactly one of them true",
+				tag, tag, IsRelease(tag))
+		}
+	}
+}

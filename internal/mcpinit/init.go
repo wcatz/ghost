@@ -674,7 +674,10 @@ type projectInfo struct {
 // importMemories opens the Ghost DB and imports Claude Code memory files
 // for all known projects.
 func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
-	dataDir, err := config.DataDir()
+	// The read-WRITE open below migrates, so the data-dir guard runs first
+	// (#721): `ghost mcp init` is a command, not a hook, so the refusal is an
+	// error it reports rather than an empty session.
+	dataDir, err := guardedDataDir()
 	if err != nil {
 		return nil, fmt.Errorf("data dir: %w", err)
 	}

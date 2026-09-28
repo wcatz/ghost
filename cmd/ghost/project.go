@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/repo"
 )
@@ -382,8 +381,10 @@ func projectLabel(name, id string) string {
 func openDiagnosticStore() *memory.Store {
 	// DataDirPath, not DataDir: the latter creates the directory, and this
 	// helper's whole contract is that it leaves nothing behind. mcpinit's
-	// non-creating paths use the same choice.
-	dataDir, err := config.DataDirPath()
+	// non-creating paths use the same choice. The guarded resolver is what turns
+	// a GHOST_DEV_FORBID_DATA_DIR refusal into a nil store (#721), which is this
+	// function's own answer to every failure it has: nothing to report.
+	dataDir, err := requireDataDirPath()
 	if err != nil {
 		return nil
 	}

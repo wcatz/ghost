@@ -261,6 +261,14 @@ func resolveMarkerProject(dataDir, project string) string {
 	if project == "" {
 		return ""
 	}
+	// The single point every marker path (WriteLifecycleFailure,
+	// ClearLifecycleFailure, ReadLifecycleFailure, TouchLifecycleStart) turns a
+	// data directory into a store read, so the GHOST_DEV_FORBID_DATA_DIR refusal
+	// belongs here. "" is this function's existing answer to a store it cannot
+	// read: no marker, no blocked session (#721).
+	if err := config.CheckDevDataDir(buildVersion, dataDir); err != nil {
+		return ""
+	}
 	db, err := sql.Open("sqlite", roDSN(filepath.Join(dataDir, "ghost.db")))
 	if err != nil {
 		return ""

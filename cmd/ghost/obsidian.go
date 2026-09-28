@@ -114,7 +114,9 @@ func runObsidian(mode string, args []string) {
 		interval = cfg.Obsidian.Interval
 	}
 
-	dataDir, err := config.DataDir()
+	// The guard runs before the directory is created, because this command opens
+	// the store below (#721) and the mirror reads every row of it.
+	dataDir, err := requireDataDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

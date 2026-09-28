@@ -476,13 +476,22 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	// function's doc comment for why a stale marker must never be printed
 	// next to a currently-passing Ollama check.
 	if alive := checkOllama(w, cfg, check); cfg.Embedding.Enabled && !alive {
-		if dataDir, ddErr := config.DataDir(); ddErr == nil {
+		// The guarded resolver here as well: this writes a marker into the data
+		// directory, and a run that is refusing that directory should not have
+		// written anything into it before it said so (#721).
+		if dataDir, ddErr := guardedDataDir(); ddErr == nil {
 			reportOllamaDownDuration(w, dataDir)
 		}
 	}
 
-	dataDir, err := config.DataDir()
+	// The read-write open below migrates, so the data-dir guard runs first
+	// (#721). A status run that must not open the store has something to report
+	// — that, and why — so this is a failed check and not a silent nil: a run
+	// that exited non-zero having printed nothing would be a run that diagnosed
+	// nothing.
+	dataDir, err := guardedDataDir()
 	if err != nil {
+		check(false, "", fmt.Sprintf("database: %v", err))
 		return nil
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")

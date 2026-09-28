@@ -79,7 +79,11 @@ func runMaintenanceStatus() {
 	}
 	view := maintenanceStatusView{Budget: cfg.Scratch.MaxBytes}
 
-	dataDir, err := config.DataDirPath()
+	// DataDirPath, not DataDir, and through the guard: the report below opens the
+	// store read-write when it exists (#721's refusal arrives here, before that
+	// open), and it must not create the data directory on a machine that has
+	// none — the "no database" branch is what says so.
+	dataDir, err := requireDataDirPath()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

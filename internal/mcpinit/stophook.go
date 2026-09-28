@@ -236,7 +236,10 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 		}
 	}
 
-	dataDir, err := config.DataDir()
+	// A refused data dir stops the spawn here rather than in the child's own
+	// guard: the hook must not block, and a chain that read a forbidden store
+	// would do it in a process nobody is watching (#721).
+	dataDir, err := guardedDataDir()
 	if err != nil {
 		return
 	}
@@ -338,7 +341,10 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 // project: an unattributable skip cannot be matched to a session later, so
 // recording it would only produce a stray alert. Best-effort throughout.
 func recordReflectSkipMarker(cwd string) {
-	dataDir, err := config.DataDirPath()
+	// DataDirPath, not DataDir, and through the guard: this reads the store to
+	// attribute a skip to a project, and a forbidden data dir must not be read
+	// to do it (#721).
+	dataDir, err := guardedDataDirPath()
 	if err != nil {
 		return
 	}

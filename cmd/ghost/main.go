@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/repo"
 )
@@ -127,6 +128,14 @@ func dispatchCommand(argv []string) int {
 	// server, the lifecycle hooks and every CLI subcommand, so a single line
 	// covers the whole binary.
 	memory.SetDetectRemote(repo.DetectRemote)
+	// The build version, for the same reason and by the same route: the
+	// GHOST_DEV_FORBID_DATA_DIR guard decides whether this is a release build,
+	// and internal/mcpinit's entry points (the hook dispatch, the installers,
+	// the status check) are reached from here rather than from a dozen callers
+	// who would each have to pass it down (#721). The hooks read it rather than
+	// taking it as an argument precisely so the hook contract does not grow a
+	// parameter every host's wiring would have to pass.
+	mcpinit.SetBuildVersion(version)
 
 	if len(argv) > 0 {
 		switch argv[0] {
