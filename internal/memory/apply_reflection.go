@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // ApplyReflection replaces the project-scoped reflection result and, when
@@ -28,7 +29,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, lock, err := s.beginWrite(ctx, "reflect-apply")
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("begin reflection apply tx: %w", err)
 	}
@@ -70,6 +71,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	if err := tx.Commit(); err != nil {
 		return nil, 0, nil, fmt.Errorf("commit reflection apply tx: %w", err)
 	}
+	lock.reportHold("reflect-apply", time.Now())
 	if s.onSave != nil {
 		if len(projectMems) > 0 || len(keptMems) > 0 {
 			s.onSave(projectID)

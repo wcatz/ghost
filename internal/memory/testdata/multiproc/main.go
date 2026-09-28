@@ -52,6 +52,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -77,6 +78,13 @@ type report struct {
 	// Observed holds the distinct states the poller role saw, in the order it
 	// first saw them.
 	Observed []string `json:"observed,omitempty"`
+	// LockSamples holds every write-lock measurement this process's own store
+	// took, one entry per write transaction it opened (#671). They travel raw
+	// rather than as a summary because a distribution is a property of the
+	// whole fleet, not of one process: the parent merges them across every
+	// writer and reports the percentiles of the union, which is the number the
+	// issue asks for.
+	LockSamples []lockSample `json:"lock_samples,omitempty"`
 	// IDs holds every row id this process created and still holds a handle on.
 	// The parent checks each one against the database afterwards, which is what
 	// "no write is silently dropped" means across process boundaries: a child
@@ -96,6 +104,69 @@ type report struct {
 	// processes reporting the same inherited SQLITE_BUSY would bury the one that
 	// actually caused it.
 	Aborted string `json:"aborted,omitempty"`
+}
+
+// lockSample is one measured write transaction, in milliseconds, so the JSON
+// stays readable and the parent does not parse a duration string. The two halves
+// are reported apart because they answer different questions: Hold is how long
+// this process made every other writer wait, Wait is how long this process was
+// made to wait, and #671's failure is one starving the other.
+//
+// Lost is the half that has no hold at all — the BEGIN that spent its whole
+// budget and was refused — and it travels because a distribution over committed
+// transactions only describes the contention that was survivable.
+type lockSample struct {
+	Op      string  `json:"op"`
+	WaitMS  float64 `json:"wait_ms"`
+	HoldMS  float64 `json:"hold_ms"`
+	Retried bool    `json:"retried,omitempty"`
+	Lost    bool    `json:"lost,omitempty"`
+}
+
+// lockRecorder collects the write-lock samples a process's store reports. One
+// recorder per process, installed before any handle is opened, because the
+// observer is process-wide and the fleet's point is that these are real
+// processes' real handles.
+type lockRecorder struct {
+	mu      sync.Mutex
+	samples []lockSample
+	retries int
+	lost    int
+}
+
+// install makes the store's write transactions measurable for the rest of this
+// process. It is deliberately the only place the seam is touched, so a role
+// cannot measure a transaction nobody else is measuring.
+func (r *lockRecorder) install() {
+	memory.SetWriteLockObserver(func(s memory.WriteLockSample) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.samples = append(r.samples, lockSample{
+			Op:      s.Op,
+			WaitMS:  float64(s.Wait) / float64(time.Millisecond),
+			HoldMS:  float64(s.Hold) / float64(time.Millisecond),
+			Retried: s.Retried,
+			Lost:    s.Lost,
+		})
+		if s.Retried {
+			r.retries++
+		}
+		if s.Lost {
+			r.lost++
+		}
+	})
+}
+
+// collect hands the recorded samples to the report and reports the retry and
+// loss counts on their own, so a fleet that needed the bounded BEGIN retry — and
+// a write that could not get in at all — are visible in the run's own numbers
+// rather than only in the parent's log.
+func (r *lockRecorder) collect(rep *report) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rep.LockSamples = r.samples
+	rep.put("busy_retries", fmt.Sprint(r.retries))
+	rep.put("busy_lost", fmt.Sprint(r.lost))
 }
 
 func (r *report) put(key, value string) { r.KV[key] = value }
@@ -193,6 +264,13 @@ func main() {
 		os.Exit(2)
 	}
 
+	// The write-lock recorder is installed before any role opens a handle, so
+	// every write transaction this process's store opens is measured — the
+	// fleet's claim is about real handles, and a role that started measuring
+	// after its first save would report the quiet half of the run.
+	rec := &lockRecorder{}
+	rec.install()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -238,6 +316,9 @@ func main() {
 			_ = b.signal(stopSignal)
 		}
 	}
+	// Collected on every path, including a failed one: a role that died holding
+	// a write lock is exactly the process whose hold time the parent needs.
+	rec.collect(rep)
 	emit(stdout, rep)
 	if len(rep.Errs) > 0 || rep.Aborted != "" {
 		os.Exit(1)
