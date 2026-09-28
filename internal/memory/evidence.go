@@ -199,6 +199,43 @@ func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, 
 	return appendEvidenceTx(ctx, tx, memoryID, evidenceVerified, prov, true)
 }
 
+// appendVerificationIfStatedTx appends a `verified` record when — and only when
+// — the caller stated a verification IN THIS CALL, and does nothing otherwise.
+//
+// "Stated in this call" is the whole rule, and it is a narrower test than "the
+// row ends up with a verified_at". A partial update COALESCEs, so a row that was
+// verified last month still reads verified_at when this week's edit touches only
+// the content — and appending a record for that would manufacture evidence of a
+// check nobody made, in the one table whose entire claim is that a record means
+// an event happened. The memories column and the evidence table are answering
+// different questions: the column is the latest state, the table is the history
+// of who said what, and a column read as a history is how a store ends up
+// reporting "3 observations, 3 verified" for one check.
+//
+// stated is the caller's verified_at pointer, not a parsed instant: nil means the
+// caller passed neither `verified: true` nor `verified_at`, and every non-nil
+// value means the same thing here — somebody asserted the fact was checked. The
+// value itself is NOT copied onto the record, because AppendVerifiedEvidenceTx
+// stamps the store's own clock (see its comment): the caller's stamp lands on the
+// memories column where a reader can see what was claimed, and the record says
+// when Ghost learned of the check. Two facts, two places, and a verifier cannot
+// date its own check.
+//
+// Every writer that stores a verified_at calls this, so the rule is written once
+// rather than four times. The two writers that reach a verified_at WITHOUT
+// calling it are the byte-exact ones — RestoreSnapshot (SQL, from the snapshot
+// table) and CreateFromCorpus (insertMemory directly) — and they are the same
+// exclusions MaxContentLen and the credential guard draw: a restore is a
+// faithful copy of a corpus, and a corpus's evidence rows come back with it
+// (MemoryProvenance travels in the portable artifact), so inventing a record for
+// each restored row would double-count the checks the artifact already carries.
+func appendVerificationIfStatedTx(ctx context.Context, tx *sql.Tx, memoryID string, prov Provenance, stated *string) error {
+	if stated == nil {
+		return nil
+	}
+	return AppendVerifiedEvidenceTx(ctx, tx, memoryID, prov)
+}
+
 // carryEvidenceTx copies the evidence of the memories an emission was derived
 // from onto the row that now holds their text, in ONE statement.
 //

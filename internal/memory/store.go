@@ -2489,6 +2489,15 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, provenanceFromMemory(m), false); err != nil {
 		return "", err
 	}
+	// And a second record when the same call said the fact was CHECKED. A column
+	// that says verified_at and a table that says nothing would be two answers to
+	// one question, and EvidenceCounts.Verified is the one a reader is meant to
+	// trust. appendVerificationIfStatedTx carries the "stated in THIS call" rule;
+	// here a fresh INSERT has no stored value to keep, so m.VerifiedAt is exactly
+	// the caller's statement.
+	if err := appendVerificationIfStatedTx(ctx, tx, id, provenanceFromMemory(m), m.VerifiedAt); err != nil {
+		return "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit create: %w", err)
 	}
@@ -3328,6 +3337,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if err := appendEvidenceTx(ctx, tx, existingID, evidenceObserved, opts.Provenance, false); err != nil {
 				return "", "", 0, err
 			}
+			// And the same for a VERIFICATION this call stated, on the same
+			// survivor and for the same reason: the copy that fold inserted may be
+			// the row a reader never sees, while this one is what the corpus keeps
+			// and what a later consolidation absorbs. Gated on what the CALLER
+			// stated, never on what the row now holds — the target may already be
+			// verified from an earlier save, and re-recording that would inflate
+			// EvidenceCounts.Verified for a check nobody repeated.
+			if err := appendVerificationIfStatedTx(ctx, tx, existingID, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
+				return "", "", 0, err
+			}
 		}
 
 		if opts.FoldOnly && existingID != "" {
@@ -3372,6 +3391,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// its own with its own text; the fold's SECOND report is the one that goes on
 		// the survivor above.
 		if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, false); err != nil {
+			return "", "", 0, err
+		}
+		// And its own verification, for the same reason the observation is its own:
+		// this row's verified_at column says somebody checked the text on this row,
+		// and a record that counted only the survivor's would leave the two
+		// disagreeing about whether THIS memory was checked.
+		if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 			return "", "", 0, err
 		}
 
@@ -3435,6 +3461,12 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return "", "", 0, err
 	}
 	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, false); err != nil {
+		return "", "", 0, err
+	}
+	// A save that verified the fact it is storing leaves a record of the check as
+	// well as the column: a fresh row's verified_at is written by the INSERT above,
+	// and the table is where a reader counts checks.
+	if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 		return "", "", 0, err
 	}
 	if err = commit(); err != nil {
@@ -4313,6 +4345,22 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	// admission every other history phase makes, and the reason this row can
 	// name an editor that the pre-history UPDATE could not.
 	if err := appendHistoryTx(ctx, tx, id, phaseUpdate, opts.Provenance); err != nil {
+		return err
+	}
+	// An edit that also asserted the fact was CHECKED leaves a record of the
+	// check, in the transaction that wrote verified_at, so a row cannot read
+	// verified with no account of who checked it. Note what this path does NOT
+	// append: an `observed` record. #682's writers append one to Create and to
+	// every Upsert branch but not here, and an edit is not a new report of a fact
+	// — it is a change to one that is already recorded. Adding the observed leg
+	// here would be widening #673's design from inside a PR about #575, and it
+	// would make every content edit inflate Observations.
+	//
+	// Gated on the caller's stated verified_at, and the gate is what makes this
+	// path's COALESCE safe: an edit that fixes a typo on a memory verified last
+	// month leaves the stored column alone, and appending for that would
+	// manufacture a check. See appendVerificationIfStatedTx.
+	if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 		return err
 	}
 	return tx.Commit()
