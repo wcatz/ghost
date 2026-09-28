@@ -276,6 +276,46 @@ func TestEveryVerifiedAtWriterIsEnumerated(t *testing.T) {
 			why:               "a live save; Ghost recorded the check, so the store's clock is the honest stamp",
 		},
 		{
+			name: "CreateWithID",
+			write: func(t *testing.T, s *Store) string {
+				const id = "enumcreatewithid0000000000AA"
+				got, err := s.CreateWithID(context.Background(), testProject, id, Memory{
+					Category: "fact", Content: "a corpus row whose author checked it",
+					Source: "mcp", VerifiedAt: verifiedStamp(claimed),
+				})
+				if err != nil {
+					t.Fatalf("CreateWithID: %v", err)
+				}
+				if got != id {
+					t.Fatalf("CreateWithID stored the row as %q, want the caller's id %q — this row is not the one the assertions below read", got, id)
+				}
+				return id
+			},
+			wantVerifiedKinds: []string{evidenceVerified},
+			wantVerified:      1,
+			why:               "a live write on the harness's behalf, so the store's clock is the honest stamp — it is Create's write with a named row, and a check stated on it is a check Ghost observed",
+		},
+		{
+			name: "CreateWithIDFromCorpus",
+			write: func(t *testing.T, s *Store) string {
+				const id = "enumcorpusid000000000000AA"
+				got, err := s.CreateWithIDFromCorpus(context.Background(), testProject, id, Memory{
+					Category: "fact", Content: "a named dataset row carrying a verified_at value",
+					Source: "mcp", VerifiedAt: verifiedStamp(claimed),
+				})
+				if err != nil {
+					t.Fatalf("CreateWithIDFromCorpus: %v", err)
+				}
+				if got != id {
+					t.Fatalf("CreateWithIDFromCorpus stored the row as %q, want the caller's id %q — this row is not the one the assertions below read", got, id)
+				}
+				return id
+			},
+			wantVerifiedKinds: nil,
+			wantVerified:      0,
+			why:               "the corpus route under a caller-chosen id, so the same value-with-nothing-observed-behind-it as CreateFromCorpus: naming the row changes nothing about whose claim the stamp would be",
+		},
+		{
 			name: "CreateFromCorpus",
 			write: func(t *testing.T, s *Store) string {
 				id, err := s.CreateFromCorpus(context.Background(), testProject, Memory{
@@ -393,7 +433,16 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 	// Each set answers a different question, so a name in two of them is a
 	// documentation failure as much as a name in none.
 	writesMemory := map[string]bool{
-		"store.go:insertMemory":            true, // behind Create; the corpus route opts out
+		// Behind THREE callers, and the scan cannot see any of them: Create,
+		// CreateWithID and CreateFromCorpus all reach the column through
+		// insertMemory, and none of their bodies names it (measured — the scan
+		// reports all three unseen, exactly as it reports
+		// AppendVerifiedEvidenceTx and migrateV10). So this single entry is the
+		// classification for all three, which is why their per-writer OUTCOMES are
+		// enumerated where a test walks them —
+		// TestEveryVerifiedAtWriterIsEnumerated — instead of being listed here.
+		// The corpus route opts out of the stamp.
+		"store.go:insertMemory":            true,
 		"store.go:UpsertWithOptions":       true, // all three branches, one function
 		"store.go:UpdateMemoryWithOptions": true,
 		"portable.go:ImportMemory":         true, // attested by the artifact, on its own record

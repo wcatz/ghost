@@ -169,6 +169,16 @@ func sweepHeader() string {
 // exported, so a caller can hand FormatSweep a hand-built slice; deriving the
 // answer from one row's nil pointer lets a slice carrying the default print "no
 // default in grid" beside it.
+//
+// The footer discloses the tie-break, which is the one thing a reader of a
+// point-estimate table cannot see: the store breaks tied fused scores by memory
+// id, so the id a corpus row is written under is part of the measurement. Until
+// #708 it was drawn from randomblob and the footer had to tell the reader to
+// discount the affected row; now it is a function of the corpus item and the
+// footer says the table reproduces instead. It says it here rather than leaving
+// it to docs/benchmarks.md because this is the output the claim is about, and a
+// disclosure that lives only in a document is one a reader of the output never
+// meets.
 func FormatSweep(points []SweepPoint) string {
 	var b bytes.Buffer
 	fmt.Fprintln(&b, sweepHeader())
@@ -202,9 +212,8 @@ func FormatSweep(points []SweepPoint) string {
 		fmt.Fprintf(&b, "\n%d parameter combinations, sorted by NDCG@10; %d graded queries each.\n", n, points[0].Result.Queries)
 		fmt.Fprintf(&b, "The sort is by point estimate. The interval column is the paired per-query NDCG@10 difference against the shipped default;\n")
 		fmt.Fprintf(&b, "an interval containing 0.0 means the point is not separable from the default, whatever its position in the sort.\n")
-		fmt.Fprintf(&b, "Caveat on that last rule, which this table cannot resolve for you (#708): the store breaks tied fused scores by memory id and\n")
-		fmt.Fprintf(&b, "the benchmark seeds every id from randomblob, so a point whose two legs are weighted EQUALLY re-draws that tie-break on\n")
-		fmt.Fprintf(&b, "every run and its interval moves. Read such a row as a shape, not as four decimals.\n")
+		fmt.Fprintf(&b, "Ties in the fused score are broken by memory id, and every row above is stored under an id derived from the corpus item it\n")
+		fmt.Fprintf(&b, "seeds, so a tie resolves by the dataset's own key order and the table reproduces to every digit it prints (#708).\n")
 	}
 	return b.String()
 }

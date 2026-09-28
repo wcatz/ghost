@@ -453,12 +453,21 @@ func TestFormatSweepAsksTheGridWhetherItHasADerivedDefault(t *testing.T) {
 	}
 }
 
-// TestFormatSweepCaveatNamesNoWeightItWasNotGiven: the footer used to say
-// "vec=0.50 here (#708), the other five reproduce exactly" for every grid it was
-// handed, so a two-point grid with no 0.50 in it printed a claim about a row that
-// was not on the page and a count that was not true. The caveat has to describe
-// the mechanism and cite the issue, and must not name a weight or a count.
-func TestFormatSweepCaveatNamesNoWeightItWasNotGiven(t *testing.T) {
+// TestFormatSweepDisclosesTheTieBreakAndClaimsNothingElse: the store breaks tied
+// fused scores by memory id, so the id a corpus row is written under is part of
+// what the table measures — a reader of a four-decimal point estimate cannot see
+// that, and before #708 it was true that they had to be told. The footer has to
+// disclose the mechanism, and it has to describe the MECHANISM rather than a
+// weight or a row count: the previous wording named "vec=0.50 here, the other
+// five reproduce exactly" for every grid it was handed, so a two-point grid with
+// no 0.50 in it printed a claim about a row that was not on the page and a count
+// that was not true.
+//
+// The disclosure is also the place the reproducibility claim is made, and it
+// must not carry the old discount with it: a footer telling the reader to read
+// the affected row "as a shape, not as four decimals" would contradict the table
+// above it and the two tests that now hold the table still.
+func TestFormatSweepDisclosesTheTieBreakAndClaimsNothingElse(t *testing.T) {
 	wide := memory.DefaultSearchParams()
 	wide.VecWeight, wide.FTSWeight = 0.8, 0.2
 	points := []SweepPoint{
@@ -466,19 +475,37 @@ func TestFormatSweepCaveatNamesNoWeightItWasNotGiven(t *testing.T) {
 		{Params: wide, Result: Result{Condition: "vec=0.80", NDCG10: 0.8, Queries: 2}},
 	}
 	out := FormatSweep(points)
-	caveat := out[strings.Index(out, "Caveat"):]
-	if caveat == "" {
-		t.Fatalf("the report prints no caveat at all:\n%s", out)
+	i := strings.Index(out, "Ties in the fused score")
+	if i < 0 {
+		t.Fatalf("the report does not disclose the tie-break:\n%s", out)
 	}
-	if !strings.Contains(caveat, "#708") {
-		t.Errorf("the caveat does not point at the issue that tracks it:\n%s", caveat)
+	footer := out[i:]
+	if !strings.Contains(footer, "memory id") {
+		t.Errorf("the disclosure does not say WHAT breaks the tie, which is the part a reader cannot see:\n%s", footer)
 	}
-	// No weight, and no count of the other rows.
-	if strings.Contains(caveat, "vec=") {
-		t.Errorf("the caveat names a specific weight, which is a claim about a grid it was not given:\n%s", caveat)
+	if !strings.Contains(footer, "corpus") {
+		t.Errorf("the disclosure does not say where the id comes from, so the reproducibility claim has no stated cause:\n%s", footer)
 	}
-	if strings.Contains(caveat, "other five") || strings.Contains(caveat, "other ") {
-		t.Errorf("the caveat counts rows, which is a claim about a grid it was not given:\n%s", caveat)
+	// The issue that tracked the caveat, so a reader who remembers the old footer
+	// can find the change.
+	if !strings.Contains(footer, "#708") {
+		t.Errorf("the disclosure does not cite the issue it answers:\n%s", footer)
+	}
+	// No weight, and no count of the other rows: both are claims about a grid
+	// this call was not given.
+	if strings.Contains(footer, "vec=") {
+		t.Errorf("the disclosure names a specific weight, which is a claim about a grid it was not given:\n%s", footer)
+	}
+	if strings.Contains(footer, "other five") || strings.Contains(footer, "other ") {
+		t.Errorf("the disclosure counts rows, which is a claim about a grid it was not given:\n%s", footer)
+	}
+	// And the discount the caveat used to print is gone: the table above it is
+	// reproducible now, and a footer saying otherwise would be the same
+	// contradiction #708 was filed about.
+	for _, gone := range []string{"Caveat", "shape", "randomblob", "discount"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("the report still tells the reader to discount a row (%q), which is no longer true:\n%s", gone, out)
+		}
 	}
 }
 

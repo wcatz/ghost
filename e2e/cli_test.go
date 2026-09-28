@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -1925,6 +1926,58 @@ func TestCLIBench(t *testing.T) {
 	bad := s.mustFail("bench", "--nope")
 	mustMatch(t, "bench with an unknown flag", bad.stderr, "(?i)unknown flag")
 }
+
+// TestCLIBenchSweepReproducesAcrossProcesses: `ghost bench --sweep` publishes four
+// decimals per grid point, and every published number in docs/benchmarks.md is
+// read off a run of it. It could not reproduce its own: the benchmark seeded
+// every row under the id column's `hex(randomblob(16))` default and with
+// `datetime('now')` written per row, and the ranking reads BOTH — the id breaks
+// tied fused scores, and the decay factor orders a tied pair of different
+// categories by their ages. So a grid point weighting its two legs equally, where
+// the ties actually happen, re-drew both on every run: `vec=0.50` took four
+// NDCG@10 values and its paired interval crossed zero between runs of one binary,
+// while the other five points were byte-identical every time (#708).
+//
+// This is the cross-process half of that claim, and the half only the built
+// binary can make: two separate processes, each seeding its own in-memory store
+// from the same committed corpus, each sweeping the FULL six-point grid over all
+// 220 queries with its intervals. The in-process test in internal/bench compares
+// two seeds at the one affected grid point, because a second full sweep there
+// costs ~75s under -race against a package whose CI budget is nearly spent (that
+// budget and its headroom are written down in its package-map bullet); here a
+// whole sweep is 14s. If the two tables ever differ again, the first place to
+// look is what a seeded row's id and created_at are drawn from — corpusID and
+// corpusStamp in internal/bench/corpusstore.go.
+func TestCLIBenchSweepReproducesAcrossProcesses(t *testing.T) {
+	t.Parallel()
+	s := newSandbox(t)
+
+	first := s.mustRun("bench", "--sweep")
+	second := s.mustRun("bench", "--sweep")
+
+	// The row that moved is named by its weights rather than written down twice:
+	// the affected point is the one whose two legs are weighted equally, and that
+	// is a property of the grid the binary ships rather than a constant here. If
+	// the grid stopped carrying it, this test would pass on a table that no longer
+	// covers what it is for.
+	if !strings.Contains(first.stdout, "vec=0.50") {
+		t.Fatalf("the swept table has no vec=0.50 row, so this test no longer covers the point that was unreproducible:\n%s", first)
+	}
+	// Intervals too: a point estimate that reproduces is a weaker claim than the
+	// paired interval column docs/benchmarks.md quotes off this table.
+	if !intervalColumnRE.MatchString(first.stdout) {
+		t.Errorf("the swept table prints no paired interval at four decimals:\n%s", first)
+	}
+	if first.stdout != second.stdout {
+		t.Errorf("two processes sweeping the same corpus printed two different tables\nfirst:\n%s\nsecond:\n%s", first.stdout, second.stdout)
+	}
+}
+
+// intervalColumnRE matches the interval a sweep row prints: a signed mean and a
+// signed pair of edges, at the four decimals the report and the published table
+// both use. Spelled out here rather than shared with internal/bench because e2e
+// is a separate binary and cannot import a test-only regexp out of it.
+var intervalColumnRE = regexp.MustCompile(`[+-]\d\.\d{4} \[[+-]\d\.\d{4}, [+-]\d\.\d{4}\]`)
 
 // TestCLIMCPInit runs `mcp init` for every client into the sandbox HOME, twice
 // each, so idempotence and the preservation of user content are both checked.
