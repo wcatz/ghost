@@ -1,8 +1,11 @@
 # Ghost retrieval benchmark dataset v2. Domain: Cardano stake-pool infra,
 # Ghost internals, SRE/security/Go engineering (paraphrase-heavy queries).
 # Keys are stable; embeddings.json is keyed by these keys (and by query names
-# in queries.jsonl). Regenerate embeddings via Ollama POST /api/embed
-# (nomic-embed-text:v1.5, 768 dims) when this file changes. See docs/benchmarks.md.
+# in queries.jsonl). When this file changes, regenerate embeddings through
+# internal/embedding's client — EmbedDocument for these keys, EmbedQuery for the
+# query names — NOT via raw Ollama POST /api/embed, which omits the nomic task
+# prefixes production applies and is the mistake this fixture used to carry.
+# The full procedure is in docs/benchmarks.md, Phase 2.
 #
 # The four validity_* rows carry valid_from/valid_until/verified_at so the corpus
 # exercises temporal validity instead of assuming it away: a corpus where every row
