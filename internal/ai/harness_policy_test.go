@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -100,6 +101,73 @@ func TestConfigureOpenCodeIsolationWritesAskConfig(t *testing.T) {
 	}
 	if len(config.MCP) != 0 || len(config.Plugin) != 0 {
 		t.Errorf("MCP/plugins survived isolation: mcp=%v plugin=%v", config.MCP, config.Plugin)
+	}
+}
+
+// TestOpenCodePolicyConfigsAreGoldens pins the isolated config blob, not just the
+// one rule in it.
+//
+// The check above is vacuous for the thing that matters. `mcp: {}` and
+// `plugin: []` are present precisely so the child's plugin and MCP discovery
+// finds nothing — and `len(config.MCP) != 0` is equally true when those keys are
+// ABSENT, because a missing field decodes to a nil map of length zero. Deleting
+// both lines from both policy blobs left the whole suite green, which an
+// independent review found by doing exactly that.
+//
+// This is the config-blob counterpart of the argv goldens, and the PR's own
+// invariant already claims it: "every harness argv is a WHOLE-SLICE GOLDEN ...
+// `openCodePolicyFor` ... so the whole slice is assertable". That claim was false
+// of the blob until now, because only `"*": "ask"` was grepped. So the whole
+// normalised JSON is the assertion, and every key is present or absent by
+// decision rather than by omission.
+func TestOpenCodePolicyConfigsAreGoldens(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "V2 ask policy",
+			got:  openCodeAskConfig,
+			want: `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {"*": "ask"},
+  "mcp": {},
+  "plugin": []
+}`,
+		},
+		{
+			// The tool map is the legacy spelling of the same policy, so every
+			// entry is named here. Adding one is a decision; dropping one is a
+			// tool that comes back.
+			name: "V1 deny policy",
+			got:  openCodeDenyConfig,
+			want: `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {"*": "deny", "mcp_*": "deny"},
+  "tools": {
+    "bash": false, "edit": false, "write": false, "read": false,
+    "grep": false, "glob": false, "list": false, "patch": false,
+    "webfetch": false, "task": false, "todowrite": false, "todoread": false
+  },
+  "mcp": {},
+  "plugin": []
+}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got, want any
+			if err := json.Unmarshal([]byte(tc.got), &got); err != nil {
+				t.Fatalf("the policy blob is not valid JSON, so opencode would reject it: %v", err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+				t.Fatalf("the golden is not valid JSON: %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				gotJSON, _ := json.MarshalIndent(got, "", "  ")
+				t.Errorf("the isolated config policy drifted.\n got: %s\nwant: %s", gotJSON, tc.want)
+			}
+		})
 	}
 }
 
@@ -198,26 +266,6 @@ func TestHarnessInvocationArgsAreGoldens(t *testing.T) {
 	}
 }
 
-// TestCodexFeatureKeysAreDeclaredNames holds the codex policy to the one thing
-// a CI run can check: every feature key Ghost passes must be a key codex's own
-// feature registry declares. The set comes from a recorded `codex features list`
-// transcript rather than a hand-written list, so a key that does not exist
-// upstream cannot be asserted into existence here — the argv golden would
-// happily pin a typo, and codex silently ignores a `-c` override whose key it
-// does not know, which is the fail-OPEN direction this policy exists to prevent.
-//
-// It fixes both directions of drift: a key passed but not declared is a silent
-// no-op, and a required key missing from the transcript says the transcript and
-// the policy must be updated together.
-//
-// WHAT IT DOES NOT DO, stated plainly because the distinction is the whole
-// point: a frozen transcript cannot fail when UPSTREAM renames a key. It only
-// fails when Ghost's own argv drifts from the record, and an upstream rename
-// leaves it passing unchanged. This test pins Ghost's BELIEF about which keys
-// exist; TestLiveCodexDeclaresTheNoToolFeatureKeys is the sole detector of an
-// upstream rename, and it is GHOST_LIVE_TESTS=1-gated, so it is absent from CI.
-// Between them: CI keeps the belief honest, and a machine with codex installed
-// is the only place the belief is actually tested.
 // codexFeaturesFake builds a fake codex that answers `features list` with the
 // given rows and records BOTH the probe invocations and the argv of the real
 // `exec` invocation.
@@ -253,7 +301,9 @@ if [ "$1" = "features" ]; then
 fi
 # The real turn: record every argument so a test can read the policy the child
 # was actually given. Each -c value lands on its own line because a
-# features.shell_tool=false pair must survive intact.
+# features.shell_tool=false pair must survive intact, and a separator marks each
+# invocation so a test that made several calls can read the one it cares about.
+printf -- '--- invocation\n' >> "$CODEX_EXEC_LOG"
 for arg in "$@"; do
   case "$arg" in
     -c) ;;
@@ -347,7 +397,9 @@ func TestCodexProbeOmitsUndeclaredKeysAndWarnsOnce(t *testing.T) {
 	// is the effect. Both directions, because the filter could be deleted (all
 	// ten, silent policy claim) or inverted (only the missing ones, which
 	// disables nothing) and the warning assertions would be satisfied either way.
-	want := []string{"shell_tool", "unified_exec", "hooks", "tool_suggest", "multi_agent"}
+	// In POLICY order, not the table's order: argv order is the policy's, and
+	// equalStrings compares positionally so a reordering is caught.
+	want := []string{"shell_tool", "unified_exec", "tool_suggest", "hooks", "multi_agent"}
 	if got := codexPolicyArgvKeys(t); !equalStrings(got, want) {
 		t.Errorf("child got feature keys %v, want only the five this codex declares %v", got, want)
 	}
@@ -424,11 +476,11 @@ func TestCodexProbeIsConfinedLikeEveryOtherChild(t *testing.T) {
 	captureCodexWarnings(t)
 	report := filepath.Join(t.TempDir(), "probe-report")
 	setHarnessPolicyParentEnv(t)
-	// The hatch is set after setHarnessPolicyParentEnv, which blanks it, and it
-	// carries the decoy credentials the probe must NOT see as well as the
-	// passthrough itself — so a probe that inherited the parent environment would
-	// carry them, which is what makes the assertion below meaningful.
-	t.Setenv("GHOST_PASSTHROUGH_ENV", "GITHUB_TOKEN,AWS_SECRET_ACCESS_KEY,GHOST_API_KEY,GHOST_DATABASE_URL,CODEX_PROBE_REPORT")
+	// The hatch carries ONLY the probe's report path. The credentials are decoys
+	// in the PARENT's environment and deliberately NOT in the passthrough list —
+	// naming them there would have the hatch hand them to the child, which is the
+	// leak this test exists to catch rather than to permit.
+	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_REPORT")
 	t.Setenv("CODEX_PROBE_REPORT", report)
 	bin := fakeHarnessPolicyBinary(t, "codex", `
 if [ "$1" = "features" ]; then
@@ -527,6 +579,34 @@ func TestCodexOneRealRowIsEnoughToTrustTheTable(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "view_image") {
 		t.Errorf("the warning does not name the keys this codex is missing, so shell_tool would not be disabled either:\n%s", logs.String())
+	}
+}
+
+// TestCodexParseTakesEveryNonBlankLine pins the deliberate permissiveness of
+// parseCodexFeaturesList, which the split with isCodexFeatureTable depends on.
+// An independent review restricted the parse to well-formed rows and the whole
+// suite stayed green, which is the problem: the two functions do different jobs
+// and merging them makes "codex printed a header" indistinguishable from "codex
+// printed a row", which is what silently disabled the policy once already.
+//
+// So the parse is asserted to be total over non-blank lines, and the VALIDITY
+// judgement is asserted to live elsewhere — TestCodexUnreadableProbeOutputIsNotAnAnswer
+// is that other test, and it is the one that decides the policy.
+func TestCodexParseTakesEveryNonBlankLine(t *testing.T) {
+	got := parseCodexFeaturesList("NAME  STAGE  ENABLED\nshell_tool  stable  true\n\n2 features\n")
+	want := map[string]bool{"NAME": true, "shell_tool": true, "2": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parse = %v, want every non-blank line's first field %v", got, want)
+	}
+	// Blank and whitespace-only lines contribute nothing, which is the one thing
+	// the parse does filter.
+	if got := parseCodexFeaturesList("   \n\t\n\n"); len(got) != 0 {
+		t.Errorf("parse of blank output = %v, want empty", got)
+	}
+	// And it always returns a non-nil map, which is what lets `declared != nil`
+	// stand in for "the probe answered" without a second flag.
+	if parseCodexFeaturesList("") == nil {
+		t.Error("parse of empty output returned nil, and a nil map is how an unanswered probe is represented")
 	}
 }
 
@@ -652,6 +732,133 @@ func TestCodexBothVerdictsCanBeReported(t *testing.T) {
 	}
 }
 
+// TestCodexProbeIsRekeyedWhenTheBinaryChanges is the other half of the cache's
+// contract, and the half that was unprotected: an independent review reduced the
+// cache key to the path alone and the whole suite stayed green, while four
+// separate places in the code and the docs state that a long-lived process
+// re-probes a codex upgraded IN PLACE.
+//
+// "In place" is the operative phrase. A user upgrading codex with npm replaces
+// the binary at the same path, and that is precisely the case the size and
+// mtime components of the key exist to catch. Keying on the path alone would make
+// the first probe's answer permanent for the life of an MCP server that outlives
+// several upgrades — a positive verdict that no longer matches the binary, which
+// is the one cached answer that is actively wrong rather than merely stale.
+//
+// The fake is a real file, so os.Stat sees a real size and a real mtime, and the
+// test rewrites it with different content so both change. It is not asserting
+// anything about npm: it is asserting that a changed file is a different key,
+// which is the property the docs claim.
+func TestCodexProbeIsRekeyedWhenTheBinaryChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script policy fake requires a POSIX shell")
+	}
+	resetCodexFeatureProbe(t)
+	captureCodexWarnings(t)
+	setHarnessPolicyParentEnv(t)
+	dir := t.TempDir()
+	log := filepath.Join(dir, "probes")
+	rows := filepath.Join(dir, "rows")
+	execLog := filepath.Join(dir, "exec")
+	t.Setenv("CODEX_PROBE_LOG", log)
+	t.Setenv("CODEX_EXEC_LOG", execLog)
+	t.Setenv("FAKE_FEATURE_ROWS_FILE", rows)
+	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_LOG,CODEX_EXEC_LOG,FAKE_FEATURE_ROWS_FILE")
+	// The same body in both revisions, so the only thing that differs is the
+	// byte count and mtime. Padding in a comment changes one without changing the
+	// other.
+	const body = `
+if [ "$1" = "features" ]; then
+  printf 'probed\n' >> "$CODEX_PROBE_LOG"
+  cat "$FAKE_FEATURE_ROWS_FILE"
+  exit 0
+fi
+printf -- '--- invocation\n' >> "$CODEX_EXEC_LOG"
+for arg in "$@"; do
+  case "$arg" in
+    -c) ;;
+    *) printf '%s\n' "$arg" >> "$CODEX_EXEC_LOG" ;;
+  esac
+done
+printf '%s' 'KEEP'
+`
+	// One stable path, rewritten in place. The shell reads the rows from a file
+	// rather than an env var so the change is visible to the child without
+	// depending on the parent environment changing too.
+	writeRows := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(rows, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin := filepath.Join(dir, "codex")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(bin, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all := "shell_tool stable true\nunified_exec stable true\nview_image stable true\napps stable true\nplugins stable true\ntool_suggest stable true\nskill_mcp_dependency_install stable true\nremote_plugin stable true\nhooks stable true\nmulti_agent stable true\n"
+	writeRows(all)
+	write("#!/bin/sh\n" + "# revision one\n" + "#" + strings.Repeat("x", 64) + "\n" + body)
+	firstInfo, err := os.Stat(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if n := probeCallLog(t); n != 1 {
+		t.Fatalf("probe ran %d times on the first revision, want 1", n)
+	}
+	if got := codexPolicyArgvKeys(t); !equalStrings(got, codexNoToolFeatureKeys) {
+		t.Fatalf("first revision: child got %v, want the whole policy", got)
+	}
+
+	// Revision 2: the SAME bytes, so the size is unchanged, and a different
+	// mtime. This is the only revision that can be caught by the mtime alone —
+	// an earlier version of this test used one revision differing in both, and
+	// dropping either component of the key still passed, because the other one
+	// noticed. A tool reinstall that rewrites identical bytes is the real case
+	// this is here for, so it has to be the one the assertion rests on.
+	future := firstInfo.ModTime().Add(2 * time.Hour)
+	if err := os.Chtimes(bin, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if second, err := os.Stat(bin); err != nil {
+		t.Fatal(err)
+	} else if second.Size() != firstInfo.Size() {
+		t.Fatalf("fixture drifted: revision 2 is %d bytes, revision 1 was %d", second.Size(), firstInfo.Size())
+	}
+	writeRows("shell_tool stable true\nunified_exec stable true\n")
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect after the rewrite: %v", err)
+	}
+	if n := probeCallLog(t); n != 2 {
+		t.Errorf("probe ran %d times after the binary was rewritten identically, want 2: a tool reinstall changes nothing but the mtime, and keying on the path alone would serve the old verdict forever", n)
+	}
+
+	// Revision 3: DIFFERENT bytes, and the ORIGINAL mtime restored. Only the size
+	// distinguishes this from revision 1, so the size has to be in the key too.
+	write("#!/bin/sh\n" + "# revision three\n" + "#" + strings.Repeat("z", 700) + "\n" + body)
+	if err := os.Chtimes(bin, firstInfo.ModTime(), firstInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect after the size change: %v", err)
+	}
+	if n := probeCallLog(t); n != 3 {
+		t.Errorf("probe ran %d times after the binary grew with its mtime restored, want 3: a replaced binary with a preserved timestamp is the case a size-only or mtime-only key misses", n)
+	}
+	// The current revision declares two keys, and the child must get exactly those
+	// two — the same effect the filter has on a real upgrade, asserted here at the
+	// end so the count above is never the only thing being checked.
+	if got := codexPolicyArgvKeys(t); !equalStrings(got, []string{"shell_tool", "unified_exec"}) {
+		t.Errorf("child got %v after the upgrade, want only the two keys the new codex declares", got)
+	}
+}
+
 // TestCodexProbeFailureIsCachedButExpires is the cost half of the FAILING case,
 // and the two halves pull in opposite directions.
 //
@@ -738,7 +945,12 @@ func TestCodexProbeSuccessIsCachedIndefinitely(t *testing.T) {
 }
 
 // codexPolicyArgvKeys returns the `features.<key>=false` keys the fake codex
-// actually received on its `exec` invocation, in the order they arrived.
+// actually received on its LAST `exec` invocation, in the order they arrived.
+//
+// "Last" rather than "all", because several of these tests make three or four
+// calls to prove the probe and the warning are per-process, and concatenating
+// three invocations' keys would assert nothing. Reading the last one is what lets
+// the multi-call tests keep asserting the argv without a second fake.
 //
 // This reads what reached the CHILD rather than what the code computed, which is
 // the whole point: the unit under test is the filter's effect on argv, and a
@@ -752,8 +964,13 @@ func codexPolicyArgvKeys(t *testing.T) []string {
 		}
 		t.Fatalf("read exec log: %v", err)
 	}
+	// Keep only the text after the final separator.
+	text := string(data)
+	if idx := strings.LastIndex(text, "--- invocation\n"); idx >= 0 {
+		text = text[idx+len("--- invocation\n"):]
+	}
 	var keys []string
-	for _, arg := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+	for _, arg := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
 		key, ok := strings.CutPrefix(arg, "features.")
 		if !ok {
 			continue
@@ -779,6 +996,26 @@ func probeCallLog(t *testing.T) int {
 	return strings.Count(string(data), "probed")
 }
 
+// TestCodexFeatureKeysAreDeclaredNames holds the codex policy to the one thing
+// a CI run can check: every feature key Ghost passes must be a key codex's own
+// feature registry declares. The set comes from a recorded `codex features list`
+// transcript rather than a hand-written list, so a key that does not exist
+// upstream cannot be asserted into existence here — the argv golden would
+// happily pin a typo, and codex silently ignores a `-c` override whose key it
+// does not know, which is the fail-OPEN direction this policy exists to prevent.
+//
+// It fixes both directions of drift: a key passed but not declared is a silent
+// no-op, and a required key missing from the transcript says the transcript and
+// the policy must be updated together.
+//
+// WHAT IT DOES NOT DO, stated plainly because the distinction is the whole
+// point: a frozen transcript cannot fail when UPSTREAM renames a key. It only
+// fails when Ghost's own argv drifts from the record, and an upstream rename
+// leaves it passing unchanged. This test pins Ghost's BELIEF about which keys
+// exist; TestLiveCodexDeclaresTheNoToolFeatureKeys is the sole detector of an
+// upstream rename, and it is GHOST_LIVE_TESTS=1-gated, so it is absent from CI.
+// Between them: CI keeps the belief honest, and a machine with codex installed
+// is the only place the belief is actually tested.
 func TestCodexFeatureKeysAreDeclaredNames(t *testing.T) {
 	declared := parseCodexFeaturesList(codexFeaturesListTranscript)
 	for _, arg := range codexInvocationArgs(nil) {

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// The two live tests in this file check the halves of #552 that NO fake binary
+// The three live tests in this file check the halves of #552 that NO fake binary
 // can demonstrate, and the distinction is the whole point of them.
 //
 // A shell fake that reads `$GOOSE_MODE` out of its own environment proves that
@@ -35,11 +35,22 @@ import (
 // TestCodexFeatureKeysAreDeclaredNames is the same claim without a binary; this
 // is the claim with one.
 //
-// Both are gated behind GHOST_LIVE_TESTS=1 like every other test here that
-// spawns a real binary, and neither makes an LLM call, so neither spends
-// anything: `goose info -v` prints resolved configuration and `codex features
-// list` prints the registry. Running them on a machine with the binary installed
-// is what turns two documented assumptions into two checked ones.
+// What the three cost, which differs and is stated rather than glossed:
+//
+//   - TestLiveGooseAcceptsTheNoToolsMode and TestLiveCodexDeclaresTheNoToolFeatureKeys
+//     make NO model call. `goose info -v` prints resolved configuration and
+//     `codex features list` prints a table from the compiled registry, so running
+//     them costs a process and nothing else.
+//   - TestLiveGooseRunsATurnInChatMode DOES spend a model call. It runs a real
+//     `goose run` turn, because "chat is accepted and outranks config.yaml" is not
+//     the same question as "a headless run still completes under chat mode", and
+//     the second one is the one that decides whether #552 breaks the goose
+//     backend.
+//
+// All three are gated behind GHOST_LIVE_TESTS=1 like every other test here that
+// spawns a real binary. Running them on a machine with the binary installed is
+// what turns documented assumptions into checked ones — and only the first two
+// are free.
 
 // sessionCommandTimeout bounds a real-binary probe. Copied from the opencode
 // live test, and for the same reason: a first run against a fresh directory can
@@ -135,10 +146,17 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	if liveGooseIsolate(t, t.TempDir(), realHome, realXDG) == 0 {
 		t.Skipf("no config.yaml or secrets.yaml under %v; nothing would authenticate", roots)
 	}
-	// A decoy in the PARENT's environment, so a passing turn is attributable to
-	// the child's GOOSE_MODE rather than to an inherited "auto". This is the
-	// precedence half: the child's value must beat both the file and whatever the
-	// parent had.
+	// A decoy GOOSE_MODE in the PARENT's environment, asserting the value the
+	// child sees is the one this code sets rather than one it inherited.
+	//
+	// The unit test is where that is actually decided: setHarnessPolicyParentEnv
+	// installs `GOOSE_MODE=auto` as a decoy there, and
+	// TestGooseClientUsesNoToolPolicy asserts the child sees `chat` regardless,
+	// because setHarnessEnvValue replaces the value and GOOSE_MODE is absent from
+	// the allowlist. An independent review pointed out that setting it here is
+	// therefore decorative — the parent's value cannot reach the child with or
+	// without this line — which is right, so it is kept only as a live-side
+	// belt-and-braces and not claimed to prove anything the unit test does not.
 	t.Setenv("GOOSE_MODE", "auto")
 	// gooseInvocationArgs is the production argv, read here rather than
 	// reconstructed, so a change to the policy is exercised rather than

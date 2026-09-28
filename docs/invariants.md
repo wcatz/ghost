@@ -151,12 +151,23 @@ first probe fails while the binary is mid-upgrade (unverified), after which the
 latch would drop the second, and that is the one which says which surfaces are on.
 A probe that cannot answer says "unverified" rather than accusing the codex of
 lacking features it was never asked about. The refusal is the part deliberately
-absent, and the reason is the blast radius: `CLIProvider` selects codex by
-`exec.LookPath` with no version floor, so refusing would fail every reflect,
-resolve and supersede call on a working install over a surface that may not exist —
-a worse failure, and much larger, than the one the policy prevents. An older codex
-therefore gets the keys it understands, a weaker policy than a current one, and a
-warning that says so.
+absent, and the reason is which failure is larger: codex is selected with **no
+version floor anywhere** — `CLIProvider` picks it by `exec.LookPath` below claude
+and opencode, and a session-routed client names it as its backend with nothing
+checked at all — so refusing would fail that session's reflect, resolve and
+supersede calls on a working install over a surface that may not exist. The
+failure the policy prevents is a tool that is already absent; the failure a refusal
+creates is a lifecycle that does not run at all. An older codex therefore gets the
+keys it understands, a weaker policy than a current one, and a warning that says
+so.
+
+The cache key is `{path, size, modTime}`, not the path alone, and an independent
+review deleting the other two components passed the whole suite — so
+`TestCodexProbeIsRekeyedWhenTheBinaryChanges` now rewrites a real executable in
+place and requires a second probe. The limitation that test does NOT solve: codex
+is commonly an **npm shim**, and the identity observed is the shim's, not the
+vendor binary's. A real binary replaced behind a byte-identical, mtime-stable shim
+is invisible to this key, and to every one like it in this package.
 
 **opencode has no disabling flag either** — `run`'s only permission flag is
 `--auto`, which moves in the WRONG direction and is never passed. The policy is a

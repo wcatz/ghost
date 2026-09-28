@@ -75,23 +75,31 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 // no-op that costs nothing.
 //
 // The filter warns and NEVER refuses. A codex missing a key is codex without the
-// surface that key governs, and Ghost picks codex by exec.LookPath with no
-// version floor anywhere, so refusing would fail every reflect, resolve and
-// supersede call on a working install over a surface that may not exist — a
-// worse failure than the one this policy prevents, and one with a much larger
-// blast radius. The weaker policy is reported once per process (a lifecycle run
-// makes hundreds of calls on the same binary, and a warning per call would bury
-// the phase output it exists to interrupt) and recorded nowhere else, which is
-// the honest limit of what a diagnostic can do.
+// surface that key governs, and codex is selected with no version floor anywhere
+// — CLIProvider picks it by exec.LookPath with no lower bound, and a session-
+// routed client names it as its backend with nothing checked at all — so
+// refusing would fail that session's reflect, resolve and supersede calls on a
+// working install over a surface that may not exist. The failure being prevented
+// is a tool that is already absent; the failure a refusal creates is a lifecycle
+// that does not run at all. The weaker policy is reported once per process (a
+// lifecycle run makes hundreds of calls on the same binary, and a warning per
+// call would bury the phase output it exists to interrupt) and recorded nowhere
+// else, which is the honest limit of what a diagnostic can do.
 //
 // The probe runs ONCE per binary identity, cached in codexFeatureCache and keyed
 // by path/size/mtime exactly as claudeCapabilitiesFor keys its own probe: a
 // long-lived Ghost process (the MCP server) must re-probe a codex upgraded in
 // place rather than reuse a stale answer, and a per-call probe would double the
 // process count of a lifecycle that spawns one harness per consolidation, per
-// resolve candidate and per supersede pair. A probe that gets no answer is NOT
-// cached, so a codex mid-upgrade is re-asked rather than remembered as
-// declaring nothing.
+// resolve candidate and per supersede pair.
+//
+// A probe that gets NO ANSWER is cached too, for codexFeatureRetry rather than
+// forever. The negative verdict is the common case on exactly the old codex this
+// design supports, so leaving it uncached would cost that install an extra
+// process on every call; caching it for the life of the process is the opposite
+// failure, because a codex mid-upgrade would be remembered as "declares nothing"
+// until the parent exited. The interval is far longer than a call and far shorter
+// than a process.
 //
 // codex has no "no tools" flag — `--sandbox read-only` bounds what a tool may
 // DO, not which tools EXIST — so the policy is the list. The three that matter
@@ -385,6 +393,14 @@ func parseCodexFeaturesList(out string) map[string]bool {
 		if len(fields) == 0 {
 			continue
 		}
+		// The first field of EVERY non-blank line, not just of well-formed rows.
+		// That permissiveness is the point: the validity question belongs to
+		// isCodexFeatureTable, so that "what did codex say" and "did codex say
+		// anything usable" stay separate and only the second can change the
+		// policy. TestCodexParseTakesEveryNonBlankLine pins it, because an
+		// independent review restricted this to well-formed rows and the whole
+		// suite stayed green — and the split it broke is what keeps a
+		// mis-parsed table from silently disabling the policy.
 		keys[fields[0]] = true
 	}
 	return keys
