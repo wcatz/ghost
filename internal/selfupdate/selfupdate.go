@@ -149,6 +149,12 @@ func readCapped(r io.Reader, limit int64, what string) ([]byte, error) {
 	return data, nil
 }
 
+// ChecksumCap is the largest checksums.txt ReadChecksums will read. It is
+// exported so a caller that has to serve a manifest larger than the cap — a
+// test of the cap itself — names the same number this package refuses over,
+// rather than a copy of it that can drift.
+func ChecksumCap() int64 { return maxChecksumBytes }
+
 // ReadChecksums reads a checksums.txt manifest, refusing anything over
 // maxChecksumBytes.
 func ReadChecksums(r io.Reader) ([]byte, error) {
@@ -473,7 +479,23 @@ func extractZipBinary(archive []byte) ([]byte, error) {
 // leave one file behind per upgrade.
 const asideSuffix = ".old"
 
+// writeStaged writes the replacement binary into the staged file. It is a var
+// only so a test can interrupt a staged write part-way: that is the one failure
+// the staging file exists to survive, and no test can provoke it without a full
+// disk or a permission the fixture has to revoke first. Production never
+// reassigns it.
+var writeStaged = func(f *os.File, newBinary []byte) error {
+	_, err := f.Write(newBinary)
+	return err
+}
+
 // Replace atomically replaces the binary at targetPath.
+//
+// The replacement is staged in a temporary file beside the target and then
+// renamed into place, so the install path only ever holds one whole binary: a
+// write that is interrupted, a download that turns out to be wrong, or a disk
+// that fills all fail against the staging file, and the installed binary is
+// left exactly as it was.
 func Replace(targetPath string, newBinary []byte) error {
 	// Resolve symlinks so we replace the actual file.
 	resolved, err := resolveSymlinks(targetPath)
@@ -494,7 +516,7 @@ func Replace(targetPath string, newBinary []byte) error {
 	}
 	tmpPath := tmp.Name()
 
-	if _, err := tmp.Write(newBinary); err != nil {
+	if err := writeStaged(tmp, newBinary); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp: %w", err)

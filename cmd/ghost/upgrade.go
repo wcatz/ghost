@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/selfupdate"
@@ -19,25 +21,67 @@ const (
 	upgradeProceed upgradeOutcome = iota
 	upgradeCurrent
 	upgradeRefuseDowngrade
+	upgradeRefusePrerelease
 )
+
+// upgradeBudget bounds one whole `ghost upgrade` run: the release lookup, the
+// checksum manifest and the archive, together. The per-request deadlines inside
+// selfupdate bound each request, so three requests in sequence bound the run at
+// their sum — 30s for the lookup plus 10 minutes per transfer is twenty and a
+// half minutes — which is what an interactive command can otherwise sit through
+// on a link that is slow but not broken.
+//
+// Twelve minutes is longer than a single transfer's own deadline, so a transfer
+// that begins at once and would have finished on its own is never cut short, and
+// shorter than that sum, so a run that keeps making progress still stops. Which
+// request gets squeezed is not specified: a slow manifest can leave the archive
+// less than its own ten minutes, and that is the budget working, not a second
+// rule.
+//
+// It is a var only so a test can shorten it below what a local server can
+// answer; production never reassigns it.
+var upgradeBudget = 12 * time.Minute
+
+// upgradeStreams is where a run writes. Progress and results go to out;
+// warnings go to err, where they do not interleave with what the command is
+// reporting it is doing. Both are parameters so a test can read what a run said
+// without capturing the process's own streams.
+type upgradeStreams struct{ out, err io.Writer }
+
+// discardStreams is the quiet pair, for the cases where what a run said is not
+// the assertion.
+func discardStreams() upgradeStreams { return upgradeStreams{out: io.Discard, err: io.Discard} }
+
+// upgradeDeps is the outside world a run acts on, as parameters: the release
+// lookup and the install step. Production passes selfupdate.LatestRelease and a
+// selfupdate.Replace over the running binary; a test passes a local server and a
+// scratch file, so the decision and verification path can be exercised end to
+// end without GitHub and without the binary the test runner is executing.
+type upgradeDeps struct {
+	fetch   func(context.Context) (*selfupdate.Release, error)
+	install func([]byte) error
+}
 
 // upgradeOptions is the parsed `ghost upgrade` command line.
 type upgradeOptions struct {
-	allowDowngrade bool
+	allowDowngrade  bool
+	allowPrerelease bool
 }
 
-// parseUpgradeArgs parses `ghost upgrade` arguments. Only --allow-downgrade is
-// recognized; anything else is an error rather than being ignored, because a
-// flag that does not parse here is a flag the user believes is in effect while
-// the command does something else.
+// parseUpgradeArgs parses `ghost upgrade` arguments. Only --allow-downgrade and
+// --allow-prerelease are recognized; anything else is an error rather than
+// being ignored, because a flag that does not parse here is a flag the user
+// believes is in effect while the command does something else.
 func parseUpgradeArgs(args []string) (upgradeOptions, error) {
 	var opts upgradeOptions
 	for _, arg := range args {
 		switch arg {
 		case "--allow-downgrade":
 			opts.allowDowngrade = true
+		case "--allow-prerelease":
+			opts.allowPrerelease = true
 		default:
-			return upgradeOptions{}, fmt.Errorf("unknown argument %q (usage: ghost upgrade [--allow-downgrade])", arg)
+			return upgradeOptions{}, fmt.Errorf("unknown argument %q (usage: ghost upgrade [--allow-downgrade] [--allow-prerelease])", arg)
 		}
 	}
 	return opts, nil
@@ -45,26 +89,37 @@ func parseUpgradeArgs(args []string) (upgradeOptions, error) {
 
 // decideUpgrade compares the running version against the latest release tag.
 //
-// Ordering matters: the release has to be newer than what is already
-// installed. A tag that is merely *different* is not an upgrade, and installing
-// it moves the user backwards — the "upgrade" that unpicks a yanked release
-// whose tag no longer points at the newest build, or that reads "0.9.0" as
-// newer than "0.10.0" because it compared the strings.
+// Ordering matters, twice. First the release has to be newer than what is
+// already installed: a tag that is merely *different* is not an upgrade, and
+// installing it moves the user backwards — the "upgrade" that unpicks a yanked
+// release whose tag no longer points at the newest build, or that reads "0.9.0"
+// as newer than "0.10.0" because it compared the strings. Second, the release
+// has to be a release at all: a prerelease is unfinished, and installing one
+// because its number is higher is how a candidate ends up running on machines
+// that asked for a stable build. That check comes first of the two refusals
+// because it is about what the release *is*, not about which direction it
+// moves — an older rc is refused as a prerelease, and the flag that permits it
+// is the prerelease one.
 //
-// allowDowngrade is the user's explicit override for the case where backwards
-// is what they want: a release that was withdrawn, or a build that has to be
-// pinned while the newer one is investigated. It changes the direction
-// decision and nothing else — being on the latest version is still "already up
-// to date", and an unorderable version is still unorderable below.
+// The two opt-ins are independent, and each changes its own decision and nothing
+// else. allowDowngrade permits a release older than the installed one, for a
+// release that was withdrawn or a build that has to be pinned while the newer
+// one is investigated. allowPrerelease permits a release that is not final yet.
+// Being on the latest version is still "already up to date" with either flag
+// set, and an unorderable version is still unorderable.
 //
 // A version that cannot be ordered — a "dev" build, a tag like
 // "vscode-pre-rewrite" — keeps the pre-guard behaviour of going ahead, because
-// the alternative is refusing to update every developer build, and the archive
-// checksum still has to agree before anything is installed. An unorderable
-// version identical to the release is still the one installed, as before.
-func decideUpgrade(running, latest string, allowDowngrade bool) upgradeOutcome {
+// the alternative is refusing to update every developer build, and it is not
+// read as a prerelease either: nothing about "dev" says it is a candidate
+// release. The archive digest still has to agree before anything is installed. An
+// unorderable version identical to the release is still the one installed.
+func decideUpgrade(running, latest string, opts upgradeOptions) upgradeOutcome {
 	if strings.TrimPrefix(running, "v") == strings.TrimPrefix(latest, "v") {
 		return upgradeCurrent
+	}
+	if !opts.allowPrerelease && selfupdate.IsPrerelease(latest) {
+		return upgradeRefusePrerelease
 	}
 	cmp, err := selfupdate.CompareVersions(latest, running)
 	switch {
@@ -74,7 +129,7 @@ func decideUpgrade(running, latest string, allowDowngrade bool) upgradeOutcome {
 		// Equal precedence, different text: "0.1.0" and "0.1.0+build.5" are
 		// the same release.
 		return upgradeCurrent
-	case cmp < 0 && !allowDowngrade:
+	case cmp < 0 && !opts.allowDowngrade:
 		return upgradeRefuseDowngrade
 	default:
 		return upgradeProceed
@@ -99,18 +154,30 @@ func downgradeMessage(running, latest string) string {
 		latest, running, running)
 }
 
+// prereleaseMessage names the release and the one flag that permits it. It must
+// not mention a downgrade: --allow-downgrade does not reach this guard, and a
+// message naming it would send the user to re-run into the same refusal.
+func prereleaseMessage(latest string) string {
+	return fmt.Sprintf(
+		"refusing to install the prerelease %s: it is not a release. Re-run with --allow-prerelease to install it deliberately, or wait for the release it leads to",
+		latest)
+}
+
 // upgradeUsage is the help for `ghost upgrade`: stdout for -h/--help (see
 // handleHelp), so a help request never checks GitHub Releases, downloads an
 // archive or replaces the running binary.
-const upgradeUsage = `Usage: ghost upgrade [--allow-downgrade]
+const upgradeUsage = `Usage: ghost upgrade [--allow-downgrade] [--allow-prerelease]
 
 Checks GitHub Releases and replaces this binary after verifying the archive
 against the digest GitHub reports for that release asset and against the
-published checksum manifest. A plugin-managed binary refuses this path: update
-it with /plugin update in Claude Code instead.
+published checksum manifest. The whole run is bounded by a 12 minute budget.
+A plugin-managed binary refuses this path: update it with /plugin update in
+Claude Code instead.
 
   --allow-downgrade   Install a release older than this binary. Without it, an
                       older latest release is refused.
+  --allow-prerelease  Install a prerelease (an rc, a beta). Without it, a
+                      prerelease is refused however new it is.
 `
 
 // runUpgrade downloads and installs the latest ghost release.
@@ -138,54 +205,101 @@ func runUpgrade(args []string) {
 	fmt.Printf("Current: ghost %s (%s)\n", version, exe)
 	fmt.Println("Checking for updates...")
 
-	// One context for the whole command: the deadlines inside selfupdate bound
-	// each request, and cancelling this one ends an in-flight transfer if the
-	// command is ever given a reason to stop.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	rel, err := selfupdate.LatestRelease(ctx)
+	// The budget is applied inside performUpgrade, so that the bound belongs to
+	// the run rather than to the one call site that starts it.
+	installed, err := performUpgrade(context.Background(), upgradeStreams{out: os.Stdout, err: os.Stderr}, version, opts, upgradeDeps{
+		fetch: selfupdate.LatestRelease,
+		install: func(binary []byte) error {
+			fmt.Printf("Replacing %s...\n", exe)
+			return selfupdate.Replace(exe, binary)
+		},
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-
-	latest := strings.TrimPrefix(rel.TagName, "v")
-	switch decideUpgrade(version, latest, opts.allowDowngrade) {
-	case upgradeCurrent:
-		fmt.Printf("Already up to date (%s).\n", version)
+	if installed == "" {
 		return
-	case upgradeRefuseDowngrade:
-		fmt.Fprintf(os.Stderr, "error: %s\n", downgradeMessage(version, latest))
-		os.Exit(1)
 	}
-	if opts.allowDowngrade && isOlderRelease(version, latest) {
-		// The flag is what let a backwards install through, so say that where
-		// a warning is visible rather than leaving a downgrade to read as an
-		// upgrade in the line of output below.
-		fmt.Fprintf(os.Stderr, "warning: installing %s over %s — --allow-downgrade was given\n", latest, version)
-	}
-
-	asset, err := selfupdate.FindAsset(rel)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := installRelease(ctx, os.Stdout, rel, asset, func(binary []byte) error {
-		fmt.Printf("Replacing %s...\n", exe)
-		return selfupdate.Replace(exe, binary)
-	}); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("Updated: ghost %s → %s\n", version, latest)
+	fmt.Printf("Updated: ghost %s → %s\n", version, installed)
 
 	// A new binary can invalidate wiring the old one installed (hook flags,
 	// embedded plugin sources). Surface stale integrations instead of letting
 	// them fail open invisibly on every fire.
 	mcpinit.ReportStaleIntegrations(os.Stdout)
+}
+
+// performUpgrade is the command with its two dependencies injected: it looks the
+// release up, decides, and installs what verifies. It returns the version it
+// installed, or "" when the command stopped without installing anything because
+// the binary is already that release.
+//
+// Every refusal is returned before anything is downloaded, so a release that is
+// not wanted costs one metadata request rather than a transfer and an install.
+//
+// The total budget is applied here rather than by the caller, so that the bound
+// is a property of the run and not of the one place that happens to start it —
+// and so a test can shorten it. A caller that knows better still bounds it
+// further: the budget is the later of the two deadlines, never the only one.
+func performUpgrade(parent context.Context, streams upgradeStreams, running string, opts upgradeOptions, deps upgradeDeps) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, upgradeBudget)
+	defer cancel()
+
+	rel, err := deps.fetch(ctx)
+	if err != nil {
+		return "", withBudget(ctx, err)
+	}
+
+	latest := strings.TrimPrefix(rel.TagName, "v")
+	switch decideUpgrade(running, latest, opts) {
+	case upgradeCurrent:
+		// Reporting, not a result: a stdout that has gone away (a closed pipe,
+		// a redirect to a full disk) is not a reason to fail a run that has
+		// already decided there is nothing to do.
+		_, _ = fmt.Fprintf(streams.out, "Already up to date (%s).\n", running)
+		return "", nil
+	case upgradeRefusePrerelease:
+		return "", errors.New(prereleaseMessage(latest))
+	case upgradeRefuseDowngrade:
+		return "", errors.New(downgradeMessage(running, latest))
+	}
+
+	// Both warnings say what the flag allowed, on stderr where a warning does
+	// not interleave with the progress a run is reporting. The prerelease one
+	// matters most: the line below it reads like an ordinary upgrade. Neither
+	// write is checked — a warning that could not be printed is not a reason to
+	// refuse an install whose verification has already passed.
+	if opts.allowPrerelease && selfupdate.IsPrerelease(latest) {
+		_, _ = fmt.Fprintf(streams.err, "warning: installing the prerelease %s over %s — --allow-prerelease was given\n", latest, running)
+	}
+	if opts.allowDowngrade && isOlderRelease(running, latest) {
+		_, _ = fmt.Fprintf(streams.err, "warning: installing %s over %s — --allow-downgrade was given\n", latest, running)
+	}
+
+	asset, err := selfupdate.FindAsset(rel)
+	if err != nil {
+		return "", withBudget(ctx, err)
+	}
+	if err := installRelease(ctx, streams.out, rel, asset, deps.install); err != nil {
+		return "", withBudget(ctx, err)
+	}
+	return latest, nil
+}
+
+// withBudget names the total bound in an error that came from it. "context
+// deadline exceeded" on its own says which request gave up, not that the command
+// as a whole ran out of time, and a user watching an upgrade stop has to be able
+// to tell those apart — the first is a slow link, the second is a run that has to
+// be re-run. A cancelled context is left alone: that is the caller stopping the
+// command, which is not a budget.
+func withBudget(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("ghost upgrade exceeded its %s total budget: %w", upgradeBudget, err)
+	}
+	return err
 }
 
 // installRelease downloads the release's archive for asset, verifies it against

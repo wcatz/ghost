@@ -90,3 +90,69 @@ func TestCompareVersionsIsAntisymmetric(t *testing.T) {
 		}
 	}
 }
+
+// TestIsPrerelease is the fact the pre-release guard refuses on, and it is not
+// the same question as CompareVersions: that one orders two versions, this one
+// asks whether a single tag names a release that is still a candidate. An
+// unorderable tag answers false in both directions — CompareVersions reports it
+// as an error and IsPrerelease reports that nothing says it is one — so a
+// developer build keeps upgrading and a malformed prerelease is not read as
+// consent to install.
+func TestIsPrerelease(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  string
+		want bool
+	}{
+		{name: "a final release is not a prerelease", tag: "0.35.0", want: false},
+		{name: "a v-prefixed final release is not a prerelease", tag: "v0.35.0", want: false},
+		{name: "build metadata does not make a prerelease", tag: "v0.35.0+dirty", want: false},
+		{name: "an rc is a prerelease", tag: "0.35.0-rc.1", want: true},
+		{name: "a v-prefixed rc is a prerelease", tag: "v0.35.0-rc.1", want: true},
+		{name: "a beta is a prerelease", tag: "v0.36.0-beta", want: true},
+		{name: "a dotted alpha is a prerelease", tag: "1.0.0-alpha.2", want: true},
+		{name: "a dev build is not a prerelease", tag: "dev", want: false},
+		{name: "a non-semver tag is not a prerelease", tag: "nightly", want: false},
+		{name: "an empty tag is not a prerelease", tag: "", want: false},
+		// Unorderable, not a prerelease: a bare hyphen is not a prerelease
+		// identifier, so the version cannot be read at all.
+		{name: "an empty prerelease is not a prerelease", tag: "1.0.0-", want: false},
+		{name: "a two-component version is not a prerelease", tag: "1.0-rc.1", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPrerelease(tt.tag); got != tt.want {
+				t.Errorf("IsPrerelease(%q) = %v, want %v", tt.tag, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsPrereleaseAgreesWithCompareVersions pins the two answers together. The
+// guard in decideUpgrade refuses a release that is a prerelease and a release
+// that is older, and it reports which one it refused, so the two questions must
+// not be able to disagree about a version: a tag IsPrerelease calls one has to
+// compare as newer than the final release it would replace, or the refusals
+// would contradict each other.
+func TestIsPrereleaseAgreesWithCompareVersions(t *testing.T) {
+	for _, tag := range []string{
+		"0.0.1", "0.9.0", "0.10.0", "0.35.0", "0.35.0-rc.1", "0.35.0-rc.2",
+		"0.36.0-beta", "1.0.0-alpha.2", "v1.0.0-rc.1", "0.35.0+dirty",
+	} {
+		// A prerelease is always older than its own final release, never newer:
+		// that is the semver rule, and the guard leans on it by refusing every
+		// prerelease regardless of direction.
+		if IsPrerelease(tag) {
+			core := strings.TrimPrefix(strings.SplitN(tag, "-", 2)[0], "v")
+			cmp, err := CompareVersions(tag, core)
+			if err != nil {
+				t.Fatalf("CompareVersions(%q, %q): %v", tag, core, err)
+			}
+			if cmp >= 0 {
+				t.Errorf("IsPrerelease(%q) is true but %q does not rank below its final release %q (%d)",
+					tag, tag, core, cmp)
+			}
+		}
+	}
+}
