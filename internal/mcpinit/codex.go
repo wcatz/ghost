@@ -1118,10 +1118,16 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	// the "\r" that goes with it. A repair that split on "\n" and joined on
 	// "\n" left every line ghost does not own with its CR and every line it
 	// does without one: still valid TOML, and a document whose real shape no
-	// editor will show. Stripping here rather than at the join also lets the
-	// "already current" check below see a CRLF file as current, which it could
-	// not while the CRs were part of the compared text — so a CRLF config was
-	// rewritten on every single run.
+	// editor will show. Stripping at the split rather than at the join is what
+	// lets the file be put back together with one ending.
+	//
+	// What the strip does NOT do is make the "already current" check
+	// CR-tolerant, because that check already was: findCodexTOMLTable reads the
+	// header after a TrimSpace, and splitCodexAssignment and the two value
+	// decoders TrimSpace as well, so a CRLF config compared as current and was
+	// never rewritten. That is why the defect here is the mixed-endings one and
+	// not a repeated repair of a CRLF file, and why the test repairs a stale
+	// command rather than asserting anything about the current check.
 	//
 	// ANY CRLF anywhere in the file makes the WHOLE file CRLF, and a file that
 	// already carries both endings is NORMALISED rather than preserved. The test

@@ -99,13 +99,21 @@ func parseVersion(s string) (version, error) {
 // parseNumeric reads one non-negative decimal component, rejecting signs,
 // spaces and anything strconv would happily accept but semver does not.
 //
-// A leading zero is refused too, for both halves of a version: semver says a
-// numeric identifier must not include one, in a core component and in a
-// prerelease identifier alike. strconv reads "0.32.00" as 0.32.0, so a tag
-// carrying a zero-padded component would compare EQUAL to the release it
-// pads — and `ghost upgrade` reads equality as already current, so the user
-// would be told they are up to date on a build that is not. A single "0" is
-// the one leading zero semver allows, so it is not a leading zero here.
+// A leading zero is refused too. semver says a numeric identifier must not
+// include one, and strconv reads "0.32.00" as 0.32.0, so a tag carrying a
+// zero-padded COMPONENT would compare EQUAL to the release it pads — and
+// `ghost upgrade` reads equality as already current, so the user would be
+// told they are up to date on a build that is not. A single "0" is the one
+// leading zero semver allows, so it is not a leading zero here.
+//
+// In a PRERELEASE identifier the same rule does not make the version
+// unparseable, because validPrerelease checks the identifier list and never
+// consults this function: semver's numeric production is `0 | [1-9][0-9]*`, so
+// "00" matches the ALPHANUMERIC production and "1.0.0-00" is a legal version.
+// What the leading zero changes there is the RANK, not the parse:
+// comparePrereleaseIdentifier reads a refusal as "not a number", and a numeric
+// identifier always ranks below an alphanumeric one. So "0" and "00" order,
+// where reading both as numbers said they were equal.
 func parseNumeric(s string) (int, bool) {
 	if s == "" {
 		return 0, false
