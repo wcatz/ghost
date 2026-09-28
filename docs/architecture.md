@@ -436,6 +436,20 @@ scope-exclusion reasons describe the store result rather than an unscoped
 ranking. Ordering is deterministic (ties broken by ID), because the demotion
 penalties applied downstream depend on order.
 
+That makes a store's *contents* part of what a measurement of it means, which is
+why the benchmark derives the ids it seeds: `internal/bench` writes every corpus
+row under `bench:<project>:<key>` and stamps the whole corpus with one
+`created_at`, so a tie is settled by the dataset's own key order — and, after
+`decayRank` re-sorts the window by base × decay factor, a tied pair in different
+categories by their categories — rather than by a draw from
+`hex(randomblob(16))` or by which side of a wall-clock second a seeded row landed
+on ([#708](https://github.com/wcatz/ghost/issues/708)). Production rows are
+untouched: `Store.Create` still mints every id a live save gets, and the only
+caller that hands the store a key it computed for a fresh row is the benchmark.
+The two writers that do take an id from a caller are preserving one Ghost already
+held rather than being given a new one — `ImportMemory` writes the id an artifact
+carries, and `RestoreSnapshot` brings a row back under the id it had.
+
 The formatted `ghost_memory_search` path does not call that entry point
 directly. It goes through `assemble.Run` (see [Context assembly](#context-assembly-target-design)),
 which asks `Store.Candidates` for the same legs, parameters and configured

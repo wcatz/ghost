@@ -2435,19 +2435,99 @@ func secretSourceRefField(sourceRef string) []secretField {
 // row that records it share one transaction, so a memory cannot exist without
 // its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
-	if err := rejectSecretFields(secretContentAndTags(m.Content, m.Tags)...); err != nil {
-		return "", err
-	}
-	if err := rejectSecretFields(secretSourceRefField(m.SourceRef)...); err != nil {
-		return "", err
-	}
-	if _, err := boundedSourceRef(m.SourceRef); err != nil {
-		return "", err
-	}
-	if _, err := boundedAgent(m.Agent); err != nil {
+	if err := checkMemoryWrite(m); err != nil {
 		return "", err
 	}
 	return s.insertMemory(ctx, projectID, m, insertOptions{recordVerification: true})
+}
+
+// checkMemoryWrite is the whole of what a memory write is checked for before it
+// reaches SQL: the credential guard over the body, the tags and the source
+// reference, and the two length bounds. It is a named function rather than the
+// body of Create because CreateWithID is the same write with a different id, and
+// two copies of a guard eventually disagree about which fields it covers — the
+// failure being a check that one writer applies and the other does not.
+func checkMemoryWrite(m Memory) error {
+	if err := rejectSecretFields(secretContentAndTags(m.Content, m.Tags)...); err != nil {
+		return err
+	}
+	if err := rejectSecretFields(secretSourceRefField(m.SourceRef)...); err != nil {
+		return err
+	}
+	if _, err := boundedSourceRef(m.SourceRef); err != nil {
+		return err
+	}
+	if _, err := boundedAgent(m.Agent); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CreateWithID is Create under a caller-chosen id, and it exists for one caller:
+// the benchmark, which seeds a store from a committed corpus and needs the
+// store's contents to be a function of that corpus rather than of the id column's
+// `hex(randomblob(16))` default.
+//
+// Why the benchmark needs it: the store breaks tied fused scores by memory id
+// (fuseCandidatePool) precisely so production results are stable, and a bench
+// corpus that drew its ids at random re-drew that tie-break on every run. A grid
+// point weighting its two legs EQUALLY collides often enough that its published
+// interval moved between runs of one binary (#708). Nothing about the tie-break
+// is wrong; the benchmark was discarding the input it reads. So the ids become a
+// function of the corpus item and the production order is untouched.
+//
+// The write is otherwise Create's: same transaction, same history and evidence
+// rows, same recordVerification, and the same checks — an id a caller chose is
+// not a licence to write a body Create would have refused. An empty id is
+// refused rather than falling back to the column default, because a caller that
+// asked for a named row and silently got a random one would never find out, and
+// reproducibility is the only reason to be here.
+//
+// Not on provider.MemoryStore and not in the MCP surface: nothing a session can
+// reach names its own id. A row whose verified_at is a THIRD-PARTY DATASET's claim
+// rather than a check made through this store is not this function's business —
+// see CreateWithIDFromCorpus, which is the same write with that one bit off.
+func (s *Store) CreateWithID(ctx context.Context, projectID, id string, m Memory) (string, error) {
+	if id == "" {
+		return "", errors.New("create memory: no id given; CreateWithID stores the row under the id it is given, and an empty one would be a row the caller cannot find again")
+	}
+	if err := checkMemoryWrite(m); err != nil {
+		return "", err
+	}
+	return s.insertMemory(ctx, projectID, m, insertOptions{id: id, recordVerification: true})
+}
+
+// CreateWithIDFromCorpus is CreateWithID with the corpus opt-out: the caller's id,
+// the credential guard and the whole write are CreateWithID's, and the one bit that
+// differs is recordVerification — so a verified_at the DATASET states is stored
+// verbatim as the column's value and no `verified` record is appended for it.
+//
+// It exists because those are two different claims and only one of them is an
+// event. `insertOptions.recordVerification`'s comment carries the argument in full
+// — a record's stamp is the store's clock by design, so appending one for a
+// dataset's own claim says "this was checked now" about a check the dataset may
+// date to years ago, which is the inversion the store-clock rule exists to
+// prevent. CreateFromCorpus has always been the route that declines it; this is
+// that same decline for a caller which also has to name the row.
+//
+// The credential guard is the deliberate difference from CreateFromCorpus, and it
+// is the safer direction to be surprised in: THIS function still refuses a body
+// carrying a credential, and only the id and the record bit are the corpus route's.
+// The corpora that need the wider carve-out are the downloaded public eval sets
+// under bench/, and they keep calling CreateFromCorpus. The benchmark's own corpora
+// are committed fixtures a review has read, seeded into a scratch store that dies
+// with the run — so it can have the rule without giving up the guard.
+//
+// Not on provider.MemoryStore and not in the MCP surface, for the same reason
+// CreateWithID is not: a corpus row is not something a session saves.
+func (s *Store) CreateWithIDFromCorpus(ctx context.Context, projectID, id string, m Memory) (string, error) {
+	if id == "" {
+		return "", errors.New("create memory: no id given; CreateWithIDFromCorpus stores the row under the id it is given, and an empty one would be a row the caller cannot find again")
+	}
+	if err := checkMemoryWrite(m); err != nil {
+		return "", err
+	}
+	return s.insertMemory(ctx, projectID, m, insertOptions{id: id})
 }
 
 // insertOptions is the one bit insertMemory cannot infer from the Memory it is
@@ -2480,6 +2560,17 @@ type insertOptions struct {
 	// TestCreateStillRecordsAVerificationBesideTheCorpusOptOut is what keeps the
 	// opt-out from being implemented by dropping the append wholesale.
 	recordVerification bool
+
+	// id is the row's primary key, or "" to take the column's own default
+	// (`hex(randomblob(16))`). Create leaves it empty, which is why the INSERT
+	// spells both cases in one statement — a second INSERT that has to stay in
+	// step with the schema is a worse failure mode than a COALESCE, and this is
+	// the same expression importEvidenceTx already uses for the same reason.
+	//
+	// Only CreateWithID sets it, and only the benchmark calls that: every other
+	// writer draws its id, so a row's identity is still nobody's choice but the
+	// column's.
+	id string
 }
 
 // insertMemory is Create's statement, with the credential guard and nothing
@@ -2500,12 +2591,12 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 
 	var id string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO memories (project_id, category, content, source, importance, tags,
+		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
 		                      agent, session_id, source_ref, confidence, scope,
 		                      valid_from, valid_until, verified_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (COALESCE(NULLIF(?, ''), hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
-	`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags),
+	`, opts.id, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags),
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID),
 		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope),
 		nullIfEmptyPtr(m.ValidFrom), nullIfEmptyPtr(m.ValidUntil),

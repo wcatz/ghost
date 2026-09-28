@@ -230,12 +230,13 @@ func seedVectorStore(t *testing.T, project string, mems []vectorMemory) (*memory
 		t.Fatalf("EnsureProject global: %v", err)
 	}
 	ids := make(map[string]string, len(mems))
+	stamp := newCorpusStamp()
 	for _, m := range mems {
 		projectID := project
 		if m.global {
 			projectID = globalProject
 		}
-		id, err := store.Create(ctx, projectID, memory.Memory{
+		id, err := store.CreateWithIDFromCorpus(ctx, projectID, corpusID(projectID, m.key), memory.Memory{
 			Category: m.category, Content: m.content, Importance: 0.7, Source: "mcp",
 		})
 		if err != nil {
@@ -245,8 +246,8 @@ func seedVectorStore(t *testing.T, project string, mems []vectorMemory) (*memory
 			t.Fatalf("embed %s: %v", m.key, err)
 		}
 		if m.ageDays > 0 {
-			if err := backdate(ctx, db, id, m.ageDays); err != nil {
-				t.Fatalf("backdate %s: %v", m.key, err)
+			if err := stamp.apply(ctx, db, id, m.ageDays); err != nil {
+				t.Fatalf("stamp %s: %v", m.key, err)
 			}
 		}
 		ids[m.key] = id

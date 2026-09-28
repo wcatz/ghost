@@ -210,13 +210,32 @@ func loadFile[T any](path string, parse func(io.Reader) (T, error)) (T, error) {
 
 // Seed inserts the dataset's memories into store (with their fixture
 // embeddings) and returns the runnable queries with relevance maps translated
-// from stable Keys to the store's generated IDs. It validates that every
+// from stable Keys to the store's IDs. It validates that every
 // memory and query has a fixture vector and that every query references only
 // known memory keys, so a malformed dataset fails loudly rather than scoring
 // silently wrong.
 //
+// The ids are NOT the ones the store would mint: each row is written under
+// corpusID(project, key) and carries the pass's own corpusStamp, so the store a
+// run measures is a function of the committed corpus and not of a draw from
+// randomblob or of where a second boundary fell. Nothing about the ranking
+// changed to get here — the store breaks tied fused scores by memory id, and the
+// last stage re-sorts the window by a decay factor built from created_at, so a
+// corpus that named and stamped its rows at random re-drew both of them on every
+// run. See corpusID and corpusStamp, and #708.
+//
+// The route is CreateWithIDFromCorpus rather than CreateWithID because these rows
+// are a DATASET's, not a live save's, and the corpus route keeps the dataset's own
+// verified_at as the column's value WITHOUT manufacturing a `verified` record for
+// it. This corpus carries one — `validity_current_wallet_policy` claims a check
+// dated 2026-01-01 — and a record stamped with the store's clock would assert that
+// check happened now, which is the inversion insertOptions.recordVerification
+// exists to prevent. The credential guard is the one thing this corpus route keeps
+// that CreateFromCorpus waives, and the committed fixtures give no reason to have
+// it waived. See internal/memory.CreateWithIDFromCorpus.
+//
 // db is the same connection store was built on, and it is used for exactly one
-// thing a store cannot be asked to do through its API: backdating created_at,
+// thing a store cannot be asked to do through its API: writing created_at,
 // because Create always stamps now. The supersedes edges go through
 // store.CreateLink, the production writer, so a fixture describes a state a
 // store could actually hold rather than one only raw SQL can produce.
@@ -235,6 +254,12 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 	}
 
 	keyToID := make(map[string]string, len(ds.Memories))
+	// One stamp for the whole pass, applied to every row including the ones the
+	// fixture gives no age: two rows whose created_at differ by a second are
+	// enough to reorder a pair whose fused scores tie exactly, so a seed loop
+	// that straddles a second boundary is a coin flip on which of the two is
+	// younger. See corpusStamp, which is where that was measured.
+	stamp := newCorpusStamp()
 	for _, m := range ds.Memories {
 		if m.Key == "" {
 			return nil, fmt.Errorf("memory with empty key: %q", m.Content)
@@ -249,7 +274,7 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 		if err := checkDim("memory "+m.Key, vec); err != nil {
 			return nil, err
 		}
-		id, err := store.Create(ctx, ds.Project, memory.Memory{
+		id, err := store.CreateWithIDFromCorpus(ctx, ds.Project, corpusID(ds.Project, m.Key), memory.Memory{
 			Category: m.Category, Content: m.Content, Importance: m.Importance,
 			Tags: m.Tags, Source: "mcp",
 			ValidFrom: m.ValidFrom, ValidUntil: m.ValidUntil, VerifiedAt: m.VerifiedAt,
@@ -257,10 +282,12 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 		if err != nil {
 			return nil, fmt.Errorf("create memory %q: %w", m.Key, err)
 		}
-		if m.AgeDays > 0 {
-			if err := backdate(ctx, db, id, m.AgeDays); err != nil {
-				return nil, fmt.Errorf("backdate %q: %w", m.Key, err)
-			}
+		// Every row is stamped, including the ones the fixture gives no age:
+		// a shared created_at is what makes the decay factor identical across
+		// candidates, and a row that kept its own datetime('now') is a row whose
+		// age can differ from its twin's by a second and reorder a tied pair.
+		if err := stamp.apply(ctx, db, id, m.AgeDays); err != nil {
+			return nil, fmt.Errorf("stamp %q: %w", m.Key, err)
 		}
 		if err := store.StoreEmbedding(ctx, id, vec, "bench"); err != nil {
 			return nil, fmt.Errorf("embed memory %q: %w", m.Key, err)
