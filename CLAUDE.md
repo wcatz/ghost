@@ -6,7 +6,7 @@ Go 1.26+ MCP memory server: SQLite + FTS5 (modernc.org/sqlite, pure Go, no CGO),
 - `docs/invariants.md` — the package map and every load-bearing invariant (credential guard, memory history, drop guard, scope rules, schema refusal, spawn guards). Check the bullets for the packages you touch.
 - `docs/architecture.md` — the full design, the concurrency contract, backup/transfer and the context-assembly target design.
 - `docs/cli.md`, `docs/mcp.md` — the command and tool surfaces; keep them and the tool count in sync with code.
-- New invariants go in `docs/invariants.md`, not here: this file holds only the rules every change must follow.
+- New package or subsystem invariants go in `docs/invariants.md`, under the bullet for that package. The Critical Rules below are the repository-wide ones: build, test and schema rules every change follows whatever it touches.
 
 ## Critical Rules
 - Always `go vet ./...` before committing
