@@ -219,10 +219,12 @@ func clipOpText(s string) string {
 	// the MIXED-case literals — google-api-key `AIza…`, pypi `pypi-AgEIcHlwaS5vcmc…`,
 	// JWT `eyJ…`, PuTTY `PuTTY-User-Key-File-` — match neither fold, so a
 	// re-spelled one (`aizasyd-…`) is caught by the original probe alone. Note the
-	// consequence for the parser, which is why the verb site above keeps a raw copy
-	// instead of gating the folded verb: lower-casing a token before this function
-	// sees it converts a mixed-case literal into a shape no probe recognises, which
-	// is the leak this gate exists to close. Pinned by
+	// consequence for the parser, which is why parseOpLine keeps a raw copy of the
+	// verb instead of gating the folded one: lower-casing a token before this
+	// function sees it converts a mixed-case literal into a shape no probe
+	// recognises, which is the leak this gate exists to close. Named rather than
+	// pointed at with a direction, because a positional pointer in a comment like
+	// this one goes stale on the next edit above it. Pinned by
 	// TestReaderComplaintGatesAMixedCaseLiteral, which fails if either the
 	// as-written probe or the raw verb is removed.
 	//
