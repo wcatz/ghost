@@ -34,6 +34,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -66,6 +68,77 @@ type ReassessResult struct {
 	Cleared       int // rows actually cleared (0 in dry-run)
 	Pool          int // the project's already-resolved pool before any scope narrowed it
 	Misses        []ScopeMiss
+	// Held is every row the pass left resolved for a deterministic reason, in
+	// pool order, each naming what holds it. Demoted is len(Held): the count and
+	// the list are one finding read two ways, and a summary count that can
+	// disagree with the list under it is the defect #712 opened with.
+	Held []HeldMemory
+	// Rounds is how many hold-back re-checks the pass needed to reach a fixed
+	// point, and BoundHit says the bound stopped it with a row still changing —
+	// so the repair is short of the answer a further pass would give. Both are
+	// properties of the DECISION, so a dry run reports the same pair as --apply
+	// and a dry run's bound is the bound --apply would hit.
+	Rounds   int
+	BoundHit bool
+}
+
+// HoldKind is which of Run's two free demotions is asserting a row, because the
+// two need different remedies and an operator cannot tell which from a count.
+type HoldKind string
+
+const (
+	// HoldSupersedes is a live 'supersedes'/'llm' edge whose older endpoint is the
+	// held row. `ghost supersede --withdraw` can undo it.
+	HoldSupersedes HoldKind = "supersedes"
+	// HoldCorrection is an explicit correction that pairs the held row. Nothing
+	// withdraws a pairing, so this is a row to READ, and the correction's own id
+	// is what makes that checkable.
+	HoldCorrection HoldKind = "correction"
+)
+
+// Hold is one thing asserting an already-resolved row, and the id an operator
+// acts on. Holder is the edge's SOURCE — 'supersedes' is written newer→older, so
+// the source is the newer note an operator withdraws or reads — and the
+// correction's own id.
+type Hold struct {
+	Kind   HoldKind
+	Holder string
+}
+
+// HeldMemory is a row the repair leaves resolved, with everything holding it.
+// A row can have more than one holder: a note two newer notes both supersede is
+// held by either, and withdrawing one of the two releases nothing, so naming only
+// one would send the operator to undo an edge whose undo changes nothing.
+type HeldMemory struct {
+	Memory memory.Memory
+	Holds  []Hold
+}
+
+// Reason is the sentence the report prints for a held row. Sorted on a copy —
+// supersedes before corrections, then by id — so the list reads the same way
+// however the caller assembled it, and so a report a reader compares between two
+// runs is comparable. Empty when nothing holds the row, which the pass never
+// renders: a row with no holder is not a held row.
+func (h HeldMemory) Reason() string {
+	if len(h.Holds) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(h.Holds))
+	supersedes := make([]string, 0, len(h.Holds))
+	corrections := make([]string, 0, len(h.Holds))
+	for _, k := range h.Holds {
+		switch k.Kind {
+		case HoldSupersedes:
+			supersedes = append(supersedes, string(k.Kind)+" "+k.Holder)
+		default:
+			corrections = append(corrections, string(k.Kind)+" "+k.Holder)
+		}
+	}
+	sort.Strings(supersedes)
+	sort.Strings(corrections)
+	parts = append(parts, supersedes...)
+	parts = append(parts, corrections...)
+	return "held by " + strings.Join(parts, ", ")
 }
 
 // Reassess re-runs the vetoes and the classifier over the memories resolve has
@@ -126,8 +199,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	var pending []memory.Memory
 	var pendingContents []string
 	for _, m := range loaded {
-		if asserted[m.ID] {
-			res.Demoted++
+		if len(asserted[m.ID]) > 0 {
 			continue
 		}
 		if reason, vetoed := VetoKeep(m.Content); vetoed {
@@ -196,7 +268,8 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		}
 	}
 	kept := reKept
-	reKept, res.Demoted = holdBack(kept, unresolved, res.Demoted)
+	heldByHoldBack := holdBack(kept, unresolved, maxHoldBackRounds)
+	reKept, res.Rounds, res.BoundHit = heldByHoldBack.kept, heldByHoldBack.rounds, heldByHoldBack.boundHit
 	if len(reKept) != len(kept) {
 		inReKept := make(map[string]bool, len(reKept))
 		for _, m := range reKept {
@@ -209,11 +282,28 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		}
 	}
 	res.ReKept = len(reKept)
+	// One list, in pool order, holding both the up-front floor's rows and the
+	// hold-back's. A row can be held by both, and then it is listed once with
+	// both reasons, so the list cannot over-count against Demoted either.
+	byID := make(map[string]memory.Memory, len(loaded))
+	for _, m := range loaded {
+		byID[m.ID] = m
+	}
+	for _, m := range loaded {
+		holds := asserted[m.ID]
+		holds = append(holds, heldByHoldBack.holds[m.ID]...)
+		if len(holds) == 0 {
+			continue
+		}
+		res.Held = append(res.Held, HeldMemory{Memory: byID[m.ID], Holds: holds})
+	}
+	res.Demoted = len(res.Held)
 	if logger != nil {
 		logger.Info("reassess classified",
 			"loaded", res.Loaded, "rekept", len(reKept), "vetoed", res.Vetoed,
 			"cached", res.Cached, "asserted", res.Demoted,
-			"still_resolved", res.StillResolved, "unknown", res.Unknown)
+			"still_resolved", res.StillResolved, "unknown", res.Unknown,
+			"holdback_rounds", res.Rounds, "holdback_bound_hit", res.BoundHit)
 	}
 
 	if apply && len(reKept) > 0 {
@@ -242,6 +332,25 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	return res, reKept, nil
 }
 
+// maxHoldBackRounds bounds the hold-back re-check. The re-check is monotone — a
+// row held back leaves the pool the frequency count is taken over, which can
+// only make more subject tokens rare, which can only reveal MORE pairings — so
+// it converges on its own, and in practice in two or three rounds. The bound is
+// not a heuristic about how long that takes; it is the guarantee that a repair
+// never spins, and when it is reached with a row still changing, that is a
+// finding the report has to carry rather than a truncation to swallow.
+const maxHoldBackRounds = 8
+
+// holdBackResult is the hold-back re-check's answer: the rows still repairable,
+// the rows it holds with what holds them, how many re-checks it took, and
+// whether the bound stopped it short of a fixed point.
+type holdBackResult struct {
+	kept     []memory.Memory
+	holds    map[string][]Hold
+	rounds   int
+	boundHit bool
+}
+
 // holdBack removes from the repair set any row a correction that is itself being
 // repaired would re-demote. Both rows are resolved right now, so the up-front
 // floor sees no pairing; but clearing the correction puts it back in
@@ -250,56 +359,78 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 // can save it. The repair would be undone by the pass that follows it, so the
 // row is held back and reported as asserted instead.
 //
-// Corrections are drawn from the unresolved pool plus the re-KEEP rows that are
-// correction-marked, and the drop repeats until it finds nothing new. Dropping is
-// one-way: a row removed because a correction asserted it is never re-added, so
-// a correction that is itself held back cannot free its row again. That errs
-// toward leaving durable knowledge resolved, which is the status quo and the
-// visible, safe direction, rather than toward a repair the next pass undoes.
-func holdBack(reKept, unresolved []memory.Memory, already int) ([]memory.Memory, int) {
-	corrections := unresolved
-	for _, m := range reKept {
-		if isCorrection(m.Content) {
-			corrections = append(corrections, m)
-		}
-	}
-	held := 0
-	for {
-		dropped := make(map[string]bool)
+// The re-check reads the pool the NEXT ORDINARY PASS will read, which is the
+// unresolved pool plus the rows this run clears, and it reads it as both the
+// frequency pool and the correction pool — the same two jobs Run gives its own
+// ResolveCandidates pool. That is the whole of #712's second observation: read
+// over the live pool alone, a row this run clears is missing from the count, so
+// its subject tokens look rarer than the next pass will find them, and a pairing
+// that next pass will not make holds a row back for a second, identical pass to
+// release.
+//
+// One round cannot answer it. A row held back leaves that pool, which lowers the
+// document frequency of the tokens it carries, which can turn a token rare that
+// was not, which can reveal a pairing that was invisible a round earlier. So the
+// re-check repeats until it finds nothing new, and the rounds are reported: an
+// operator who sees the repair needed three of them knows the answer is not the
+// one a single re-check would have given. Bounded at maxHoldBackRounds, and a
+// bound reached with a row still changing says so, because the repair is then
+// short of the answer a further pass would give.
+//
+// Dropping is one-way: a row removed because a correction asserted it is never
+// re-added, so a correction that is itself held back cannot free its row again.
+// That errs toward leaving durable knowledge resolved, which is the status quo
+// and the visible, safe direction, rather than toward a repair the next pass
+// undoes.
+func holdBack(repair, unresolved []memory.Memory, maxRounds int) holdBackResult {
+	out := holdBackResult{kept: repair, holds: make(map[string][]Hold)}
+	kept := repair
+	for round := 1; round <= maxRounds; round++ {
+		// The pool the next ordinary pass reads: the live one, plus every row
+		// this run is about to clear into it. Built fresh each round — the set
+		// changes as rows are held back, and appending onto the live pool's own
+		// backing array would corrupt the next round's count.
+		pool := make([]memory.Memory, 0, len(unresolved)+len(kept))
+		pool = append(pool, unresolved...)
+		pool = append(pool, kept...)
+
 		// The candidate pool is the keyword-prefiltered subset, because that is
 		// what Run pairs: a row with no resolution keyword is never a pairing
 		// target there, so holding it back here would be a permanent,
 		// mislabelled hold that no later pass could undo.
-		for _, m := range correctionPairTargetsFrom(unresolved, Prefilter(reKept), corrections) {
-			if !dropped[m.ID] {
-				dropped[m.ID] = true
-				held++
-			}
+		dropped := make(map[string][]Hold)
+		for _, p := range correctionPairingsFrom(pool, Prefilter(kept), pool) {
+			dropped[p.Target.ID] = append(dropped[p.Target.ID], Hold{Kind: HoldCorrection, Holder: p.Correction.ID})
 		}
+		out.rounds = round
 		if len(dropped) == 0 {
-			return reKept, already + held
+			return out
 		}
-		// Rebuild both lists: the correction pool can only shrink here, since a
-		// dropped correction-marked row leaves the repair set with it.
-		var next []memory.Memory
-		for _, m := range reKept {
-			if !dropped[m.ID] {
+		for id, holds := range dropped {
+			out.holds[id] = append(out.holds[id], holds...)
+		}
+		// Rebuild the repair set: the pool the next round counts over can only
+		// shrink here, since a dropped row never reaches the next ordinary pass.
+		next := make([]memory.Memory, 0, len(kept))
+		for _, m := range kept {
+			if _, dropped := dropped[m.ID]; !dropped {
 				next = append(next, m)
 			}
 		}
-		reKept = next
-		corrections = unresolved
-		for _, m := range reKept {
-			if isCorrection(m.Content) {
-				corrections = append(corrections, m)
-			}
+		kept = next
+		out.kept = kept
+		if round == maxRounds {
+			out.boundHit = true
+			return out
 		}
 	}
+	return out
 }
 
-// assertedByDemotions returns the IDs among the already-resolved pool that Run
-// would stamp again for free on its next pass, so the repair pass leaves them
-// alone. It mirrors the two mechanisms in Run, in the same order they matter:
+// assertedByDemotions returns, for every ID among the already-resolved pool that
+// Run would stamp again for free on its next pass, what holds it — so the repair
+// pass leaves those rows alone AND can name why. It mirrors the two mechanisms in
+// Run, in the same order they matter:
 //
 //   - the supersedes-edge piggyback: the older endpoint of a live
 //     'supersedes'/'llm' link, which is the only demotion that needs no other
@@ -311,8 +442,18 @@ func holdBack(reKept, unresolved []memory.Memory, already int) ([]memory.Memory,
 //     searched for corrections, exactly as in Run. A correction that is itself
 //     resolved asserts nothing, because the next ordinary pass will not see it
 //     either.
-func assertedByDemotions(ctx context.Context, store reassessStore, projectID string, resolved, unresolved []memory.Memory) (map[string]bool, error) {
-	asserted := make(map[string]bool, len(resolved))
+//
+// It is a FLOOR, and deliberately the conservative one: corrections come only
+// from the live pool, because a resolved correction this run does not clear will
+// not be there for the next ordinary pass. The count it therefore takes is over
+// the live pool too, which can only make tokens look rarer than the next pass
+// will find them, so this floor can hold a row the hold-back re-check releases.
+// That is the right way round — an over-held row is left resolved and reported
+// with a reason an operator can check, while an under-held one is cleared and
+// immediately re-stamped — but it is why the re-check exists and why it runs on
+// the post-repair pool.
+func assertedByDemotions(ctx context.Context, store reassessStore, projectID string, resolved, unresolved []memory.Memory) (map[string][]Hold, error) {
+	asserted := make(map[string][]Hold, len(resolved))
 	if len(resolved) == 0 {
 		return asserted, nil
 	}
@@ -335,7 +476,7 @@ func assertedByDemotions(ctx context.Context, store reassessStore, projectID str
 	}
 	for _, l := range links {
 		if resolvedIDs[l.TargetID] {
-			asserted[l.TargetID] = true
+			asserted[l.TargetID] = append(asserted[l.TargetID], Hold{Kind: HoldSupersedes, Holder: l.SourceID})
 		}
 	}
 
@@ -349,8 +490,8 @@ func assertedByDemotions(ctx context.Context, store reassessStore, projectID str
 	// Prefilter, for the same reason as in holdBack: Run pairs only the
 	// keyword-passing subset, so only those rows can be re-stamped by the next
 	// ordinary pass and only those may be held back here.
-	for _, m := range correctionPairTargetsFrom(unresolved, Prefilter(resolved), unresolved) {
-		asserted[m.ID] = true
+	for _, p := range correctionPairingsFrom(unresolved, Prefilter(resolved), unresolved) {
+		asserted[p.Target.ID] = append(asserted[p.Target.ID], Hold{Kind: HoldCorrection, Holder: p.Correction.ID})
 	}
 	return asserted, nil
 }

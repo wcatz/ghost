@@ -142,8 +142,14 @@ func TestConcurrentAccess(t *testing.T) {
 			// would be measuring the timestamp's resolution.
 			record(fmt.Sprintf("cli writer %d backup %d", index, i),
 				s.run("backup", "--out", filepath.Join(s.t.TempDir(), fmt.Sprintf("b-%d-%d.db", index, i))))
+			// A whole-length id (32 characters, the length Ghost mints), and a
+			// deliberately absent one: `ghost history` takes a ref, so a SHORTER
+			// string is a prefix and matching nothing is a refusal with a non-zero
+			// exit (#720) rather than the read this loop is here to make. The read
+			// is the point — it contends with the writers through the same open —
+			// so the id has to be one this command reports on rather than refuses.
 			record(fmt.Sprintf("cli writer %d history %d", index, i),
-				s.run("history", "0000000000000000000000000000000"))
+				s.run("history", "00000000000000000000000000000000"))
 			time.Sleep(50 * time.Millisecond)
 		}
 	}

@@ -185,6 +185,17 @@ It is how a wrong resolution gets undone — the ordinary pass never looks at a 
 
 Rows that the ordinary pass would re-stamp for free are left alone and reported as **still asserted by a link or correction**: the older endpoint of a live `supersedes` link, a row an unresolved correction still pairs with, and a row whose own correction is being repaired in the same run (clearing that correction would put it back in the pool and re-assert the pairing on the next pass). Clearing any of those would print a repair that the next ordinary pass immediately undoes.
 
+Every one of those rows is **named**, one line each, with the thing that holds it — `held by supersedes <source-id>` or `held by correction <id>` — and every holder is listed when more than one applies, because the two reasons have different remedies and only one of them has a command attached to it:
+
+```
+myproject: 3 of 143 already resolved judged, 0 KEEP vetoed, 0 KEEP cached, 1 still RESOLVED, 1 still asserted by a link or correction, 0 UNKNOWN, would clear resolved_at for 1 (1 classify call(s))
+  9f2c1d4e5a6b7c8d9e0f1a2b3c4d5e6f  [changelog]  held by supersedes 1122334455667788990011223344556677  Cost estimate from May: $148/mo projected; …
+```
+
+The id named for an edge is its **source** — the newer note `ghost supersede --withdraw` takes — and all of these ids print in full, not abbreviated to eight characters, because they are operands rather than references: a repair is already in your hand and should not need a second lookup.
+
+That hold-back is re-checked to a **fixed point inside one run**, because whether a row is held depends on which other rows the run clears: a row the run clears joins the pool the next ordinary pass reads, and holding a row takes it back out. The re-check iterates until a round finds nothing new (it is bounded, and the bound is reported), so one `--reassess --apply` reaches the answer a second identical pass used to be needed for. A dry run iterates the same way and reports the same rounds and the same held rows — it is a preview of that run, not a cheaper approximation of it.
+
 Only rows the ordinary pass would actually consider are held back: its pairing mechanism pairs the keyword-prefiltered subset, so a durable rule with no resolution keyword is repaired even when a correction being cleared in the same run shares its subject tokens. A hold is not a soft warning — it is reported as asserted on every later run, so the filter keeps the pass from parking a row nothing asserts.
 
 #### `--mark`
@@ -607,25 +618,30 @@ ghost context --cwd /path/to/project
 
 This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response.
 
-### `ghost history <memory-id>` / `ghost history purge <memory-id>`
+### `ghost history <memory-ref>` / `ghost history purge <memory-id>`
 
 Prints one memory's append-only history: every insert, edit, reflection rewrite,
 duplicate fold, resolve, supersession, restore, import and deletion, oldest
 first.
 
 ```bash
-ghost history <memory-id>                    # human-readable changelog
-ghost history <memory-id> --limit 5          # the newest 5 entries
-ghost history <memory-id> --json | jq .phase # one JSON object per entry
+ghost history <memory-ref>                   # human-readable changelog
+ghost history <memory-ref> --limit 5         # the newest 5 entries
+ghost history <memory-ref> --json | jq .phase # one JSON object per entry
 
 ghost history purge <memory-id>              # erase the row AND its history
 ```
 
-```bash
-ghost history <memory-id>                    # human-readable changelog
-ghost history <memory-id> --limit 5          # the newest 5 entries
-ghost history <memory-id> --json | jq .phase # one JSON object per entry
-```
+`<memory-ref>` is a full memory id **or** 8 or more characters of one — the same
+eight characters every Ghost report prints, so an id copied out of one can be
+pasted straight in. A prefix naming more than one memory is refused and says which,
+rather than picking one, and a short argument that matches nothing is told it is a
+prefix no id starts with rather than that a memory was never written. The id is
+resolved across the whole store, so a ref reaches a memory in any project, and it
+reaches **deleted** ones too: the tombstone is in `memory_history` and it is the
+reason to read a history. It also reaches a live memory that predates the history
+table, which has no history rows of its own. A full id the store does not hold
+keeps its own answer — that it was never written, or its history has been pruned.
 
 Each entry names when it happened, which write path made it (`save`, `update`,
 `reflect`, `merge`, `resolve`, `unresolve`, `supersede`, `unsupersede`, `restore`,
@@ -670,6 +686,16 @@ row back, with its text and no history:
   feature, so "erase that secret" asked an hour after the memory was deleted would
   otherwise report the memory as not found and leave the text where it is. The
   memory is not brought back — only the text goes.
+
+`purge` takes the **whole id** and refuses a prefix, which is the one difference
+from the read above. It erases recorded text for good, so a mistyped argument is
+not a message but an unprintable memory, and echoing the resolved id would not make
+it safe — the announcement and the transaction are one breath apart, and one wrong
+character in a pasted prefix is still a unique match. The refusal prints the full id
+the prefix names, so the way through is `ghost history <prefix>` and then
+`ghost history purge <that id>`. A whole id the store does not hold is reported as a
+miss ("nothing to purge"), not as a prefix — which is also what re-running a purge
+that already succeeded looks like.
 
 The MCP equivalent is `ghost_memory_delete` with `purge_history: true`, in both
 directions — including for a memory that is already deleted, where it purges the
