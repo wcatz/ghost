@@ -50,6 +50,22 @@
 # search:
 #   min_similarity: 0.0
 
+# --- Context assembly / abstention ---
+# Cosine floor for the assembler's vector arm: a returned memory "clears the
+# floor" when its vector score is at least this. 0 (the default) leaves the arm
+# OFF, which is deliberate: `ghost bench`'s no-answer report shows the
+# answerable and no-answer cosine distributions OVERLAP (0.740 vs 0.584 mean top,
+# and a 0.697 floor would refuse all 24 no-answer queries while also refusing
+# 52 of the 220 answerable ones), so no constant separates them and a default
+# here would be a relevance verdict nobody derived from data. Those counts were
+# measured with `search.min_similarity`'s strictly-above convention and this arm
+# clears ties, so 0.697 here would NOT reproduce them: read your own number off
+# your own distribution. The keyword arm (a result within the top 4 keyword
+# ranks) is always on and needs no key. Only set this after measuring against
+# your own corpus with `ghost bench`.
+# context:
+#   abstain_cosine: 0.0              # e.g. 0.62; 0 = arm disabled
+
 # --- Subprocess LLM binary paths ---
 # Same as the defaults above: the harness path override applies to every
 # LLM-backed operation (reflection, resolve, supersede), not just one tier.

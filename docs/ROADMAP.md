@@ -282,7 +282,7 @@ The four axes are named in [`architecture.md`](architecture.md#memory-axes). Val
 |---|---|
 | [#575](https://github.com/wcatz/ghost/issues/575) | Validity is preserved by snapshot replacement/restore but is not exposed or consulted by normal retrieval; confidence is written but not read by ranking |
 | [#579](https://github.com/wcatz/ghost/issues/579) | Define the four axes and their invariants; the documentation half can land first and this section already starts it |
-| [#580](https://github.com/wcatz/ghost/issues/580) | Retrieval never abstains: weak matches are returned as if authoritative |
+| [#580](https://github.com/wcatz/ghost/issues/580) | Retrieval never abstains: weak matches are returned as if authoritative. **Landed:** `ghost_memory_search` returns a verdict (`answerable`/`weak`/`empty`) with a reason from a closed set, a machine-readable verdict line and a human abstention sentence for the two non-answerable cases; a response that is empty because rows were withheld no longer says nothing matched. The keyword floor is on and the vector arm ships off, because the bench no-answer report shows the two cosine distributions overlap (see [benchmarks.md](benchmarks.md)) |
 | [#588](https://github.com/wcatz/ghost/issues/588) | **Bug.** Every lifecycle call leaks a `[ghost]` OpenCode session into the user's session list (6,397 measured); needs an isolated data dir plus post-call deletion |
 
 ### P1 — one context assembler, explainable

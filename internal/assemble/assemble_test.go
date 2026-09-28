@@ -555,7 +555,7 @@ func TestTraceRecordsEveryStage(t *testing.T) {
 
 	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
 
-	want := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "budget", "render"}
+	want := []string{"validity", "predicates", "provenance", "conflicts", "dedup", "diversity", "budget", "render", "response_fit"}
 	got := make([]string, 0, len(res.Trace.Stages))
 	for _, st := range res.Trace.Stages {
 		got = append(got, st.Stage)
@@ -1056,11 +1056,15 @@ func TestMixedRemovalsReportTheDominantCause(t *testing.T) {
 	rows = append(rows, candidate("z", "proj", "fact", "expired row", 0.9))
 	rows[9].ValidUntil = &expired
 
-	// A one-byte response budget is what makes the mixed case empty: every
-	// survivor is longer than a byte, so the budget removes all nine and the
-	// answer is empty with one row gone to validity and nine to the budget.
+	// A one-byte item budget is what makes the mixed case empty: every survivor
+	// is longer than a byte, so the budget removes all nine and the answer is
+	// empty with one row gone to validity and nine to the budget. The cap is a
+	// SLICE item-content cap because Budget.MaxBytes is the whole response's
+	// bytes now, and this test is about which stage removed the rows — the
+	// response-fit pass would remove them for the same reason but would refuse
+	// the block outright rather than report an empty one.
 	req := baseRequest()
-	req.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	req.Budget = Budget{MaxItems: 10, Slices: []Slice{{Bucket: "proj", MaxBytes: 1}}}
 	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
 
 	if res.Reason != "all_over_budget" {
@@ -1087,7 +1091,7 @@ func TestMixedRemovalsReportTheDominantCause(t *testing.T) {
 		tie = append(tie, candidate(string(rune('c'+i)), "proj", "fact", "live tie row", 0.5))
 	}
 	tieReq := baseRequest()
-	tieReq.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	tieReq.Budget = Budget{MaxItems: 10, Slices: []Slice{{Bucket: "proj", MaxBytes: 1}}}
 	if got := run(t, &fakeRetriever{set: setOf(tie...)}, tieReq); got.Reason != "all_invalid" {
 		t.Errorf("tied removals (validity 2, budget 2) reported %q, want all_invalid: "+
 			"a tie resolves to the earlier stage, not to iteration order", got.Reason)
@@ -1138,7 +1142,7 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 	// reviewer is about, and the one a caller sees as a bare "No matching
 	// memories found." with a link-graph claim attached.
 	emptyReq := baseRequest()
-	emptyReq.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	emptyReq.Budget = Budget{MaxItems: 10, Slices: []Slice{{Bucket: "proj", MaxBytes: 1}}}
 	emptySet := setOf(a, b)
 	emptySet.Edges = set.Edges
 	emptySet.EdgesStatus = set.EdgesStatus
@@ -1161,7 +1165,7 @@ func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
 	failed := setOf(a, b)
 	failed.EdgesStatus = memory.EdgeStatus{Status: "err", Err: "database is locked"}
 	failedReq := baseRequest()
-	failedReq.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	failedReq.Budget = Budget{MaxItems: 10, Slices: []Slice{{Bucket: "proj", MaxBytes: 1}}}
 	failedRes := run(t, &fakeRetriever{set: failed}, failedReq)
 	if len(failedRes.Items) != 0 {
 		t.Fatalf("precondition: wanted an empty result, got %v", itemIDs(failedRes.Items))
@@ -1217,7 +1221,7 @@ func TestBreakdownSurvivesNotePressure(t *testing.T) {
 		rows = append(rows, row)
 	}
 	req := baseRequest()
-	req.Budget = Budget{MaxItems: 10, MaxBytes: 1} // everything removed, nothing admitted
+	req.Budget = Budget{MaxItems: 10, Slices: []Slice{{Bucket: "proj", MaxBytes: 1}}} // everything removed, nothing admitted
 
 	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
 

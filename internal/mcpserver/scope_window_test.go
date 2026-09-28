@@ -127,18 +127,27 @@ func TestUnscopedRowsStayEligibleUnderAScopeFilter(t *testing.T) {
 }
 
 // TestScopeSearchZeroResultNamesTheFilter: when a scoped search finds nothing,
-// saying only "no matching memories" claims the store has no such memory. That
-// may only be true of the candidates searched, and the caller cannot tell from
-// the text alone — so the caveat belongs on the zero-result answer too, not
-// only on the partial one.
+// the answer has to name the filter, or the caller reads it as a fact about the
+// store. The absence SENTENCE is no longer the thing to look for: the tool asks
+// for a hybrid search, so a machine with no embedder never runs the vector leg,
+// and a search that did not run every leg it asked for may not claim the store
+// has nothing. The machine line still names the reason and the caveat still
+// names the filter, so what this test exists for is unchanged.
 func TestScopeSearchZeroResultNamesTheFilter(t *testing.T) {
 	_, session := newCapSession(t)
 	seedTermDense(t, session, "development", "development")
 
 	out := searchScopedWithLimit(t, session, "database configuration", map[string]string{"environment": "production"}, 3)
 
-	if !strings.Contains(out, "No matching memories found") {
+	// What this test needs is a search that admitted nothing, and `admitted=0` is
+	// that fact. The REASON is not a proxy for it: on a machine with no embedder
+	// the tool names the leg that never ran, and a retriever whose vector leg
+	// answered would name the window instead.
+	if !strings.Contains(out, "admitted=0") {
 		t.Fatalf("precondition: expected no production rows, got:\n%s", out)
+	}
+	if strings.Contains(out, "No matching memories found") {
+		t.Errorf("a search that never ran its vector leg claims the store has nothing:\n%s", out)
 	}
 	if !strings.Contains(out, "scope filter") {
 		t.Errorf("a zero-result scoped search must name the filter that emptied the window, or the "+
