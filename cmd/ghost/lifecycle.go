@@ -1337,10 +1337,13 @@ type supersedePair struct{ source, target string }
 // parser does not claim, and the reason the pair is read inside the flag's own
 // clause instead of being collected as positionals. Neither operand may look
 // like a flag, so `--withdraw <id> --apply` is a missing operand rather than a
-// pair whose target is the string "--apply"; a ref is hex, and `isHexRef`
-// refuses anything else anyway. And a command that re-judged every edge AND
-// removed named ones would have two dry-run answers, so the reader is told which
-// of the two repairs they asked for twice.
+// pair whose target is the string "--apply": a ref is a memory id or a prefix of
+// one, and neither form begins with a dash, so the dash test is what separates
+// an operand from a flag here — the resolution half decides nothing about the
+// spelling, because an imported id is nameable too (internal/supersede/resolveRef).
+// And a command that re-judged every edge AND removed named ones would have two
+// dry-run answers, so the reader is told which of the two repairs they asked for
+// twice.
 func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, withdraw []supersedePair, err error) {
 	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
 	for i := 0; i < len(args); i++ {

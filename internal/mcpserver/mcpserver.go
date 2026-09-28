@@ -242,12 +242,14 @@ type resolveCapableStore interface {
 }
 
 // linkCapableStore narrows provider.MemoryStore's concrete backing store to what
-// ghost_link_withdraw needs: the ref resolution, the live-edge read scoped to
-// the project that owns the edge, the target-text read the result quotes, and
-// the invalidation that writes the `unsupersede` history row. None of it is on
-// provider.MemoryStore, so s.store is type-asserted to this interface at call
-// time; *memory.Store satisfies it — the same shape resolveCapableStore and
-// historyCapableStore take.
+// ghost_link_withdraw needs beyond it: the ref resolution, the live-edge read
+// scoped to the project that owns the edge, and the invalidation that writes the
+// `unsupersede` history row. None of those three is on provider.MemoryStore, so
+// s.store is type-asserted to this interface at call time; *memory.Store
+// satisfies it — the same shape resolveCapableStore and historyCapableStore
+// take. The fourth method it embeds, GetByIDs, IS on provider.MemoryStore and
+// needs no assertion: the result quotes the memory each edge was burying, and
+// that read is one the interface already offers.
 type linkCapableStore interface {
 	supersede.WithdrawStore
 }
@@ -744,7 +746,13 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 //
 // The result names the memory the edge was burying and the step that un-hides it,
 // because a caller that sees "withdrew 1 edge" and no more has been told the
-// repair finished when half of it has.
+// repair finished when half of it has. That is also the reason the message ends
+// there: an agent that reports the repair as complete will tell its user the
+// memory is back, which it is not until the resolve pass runs. The reminder
+// belongs in the tool's answer rather than in guidance about how to use it —
+// guidance concatenated into that answer is text the agent may act on, and a
+// clause addressed to the implementer inside it reads as an instruction to the
+// agent rather than as part of the answer.
 func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID, targetID string) (string, error) {
 	if projectID == "" || sourceID == "" || targetID == "" {
 		return "", fmt.Errorf("project_id, source_id and target_id are required")
@@ -770,9 +778,13 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	for _, l := range res.Links {
 		fmt.Fprintf(&sb, "  %s -> %s  [%s]  %s\n", shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, firstLine(l.TargetText, 70))
 	}
+	// Ends at the instruction, with nothing about how to word it to the user:
+	// this string is the tool's whole answer, and a clause addressed to the
+	// implementer inside it reads as an instruction to the agent reading it.
+	// That guidance lives in this function's doc comment instead.
 	sb.WriteString("\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of " +
 		"ranked injection until `ghost resolve " + projectID + " --reassess --apply` clears it (that pass honours a " +
-		"live edge as a floor, which is why the edge has to go first). Say so rather than telling the user the memory is back.")
+		"live edge as a floor, which is why the edge has to go first).")
 	return sb.String(), nil
 }
 
