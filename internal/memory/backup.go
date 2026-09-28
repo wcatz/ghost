@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"io"
 	"database/sql"
 	"fmt"
 	"os"
@@ -115,7 +114,7 @@ func (s *Store) vacuumAndCount(ctx context.Context, dest string) (BackupResult, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := fileCopySnapshot(ctx, s.db, dest); err != nil {
+	if err := vacuumInto(ctx, s.db, dest); err != nil {
 		return BackupResult{}, err
 	}
 	info, err := os.Stat(dest)
@@ -213,26 +212,6 @@ func vacuumInto(ctx context.Context, db *sql.DB, dest string) error {
 	// database. Two cheap checks, neither load-bearing alone.
 	TightenPermissions(dest)
 	return nil
-}
-
-// fileCopySnapshot stands in for VACUUM INTO in this mutation only.
-func fileCopySnapshot(ctx context.Context, db *sql.DB, dest string) error {
-	var seq, name, path string
-	if err := db.QueryRowContext(ctx, "PRAGMA database_list").Scan(&seq, &name, &path); err != nil {
-		return err
-	}
-	in, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	f, err := os.OpenFile(dest, os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	_, err = io.Copy(f, in)
-	return err
 }
 
 // reserveBackupPath creates dest as an empty 0600 regular file and closes it, so
