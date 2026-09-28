@@ -1125,9 +1125,12 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 		// The protection map, not a pin list, and a map rather than a column read
 		// inside SupersedePenalties because this handle is the read-only one
 		// (memory.OpenReadDB), which cannot migrate a store predating the tier.
+		// Tier-only, matching the search path and GetTopMemories: a pin keeps a
+		// row visible but does not declare its claim current, so it does not
+		// protect a supersedes target.
 		supersedeProtected := make(map[string]bool, len(memories))
 		for _, m := range memories {
-			supersedeProtected[m.ID] = m.Pinned || m.Retention == memory.RetentionPersistent
+			supersedeProtected[m.ID] = m.Retention == memory.RetentionPersistent
 		}
 		penalty, penaltyErr := memory.SupersedePenalties(context.Background(), db, ids, supersedeProtected)
 		if penaltyErr != nil {

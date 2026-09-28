@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -75,11 +76,15 @@ func historyPhases(t *testing.T, s *Store, id string) []string {
 }
 
 // TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace: the predicate is the whole
-// safety argument, and it has four parts that each have to hold. A durable row is
-// never removed however old it is. A session row is not removed before its
-// expiry. A session row whose last activity is inside the grace period is not
-// removed even after it expires. And a recorded last access is preferred over the
-// row's last write, because a memory somebody is still reading is not garbage.
+// safety argument, and it has five parts that each have to hold. A durable row is
+// never removed however old it is, and neither is a pinned row. A session row is
+// not removed before its expiry. A session row whose last activity is inside the
+// grace period is not removed even after it expires. And a recorded last access
+// is preferred over the row's last write, because a memory somebody is still
+// reading is not garbage. TestPruneNeverRemovesAPinnedRow and
+// TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace sit side by side because a
+// predicate that dangled either clause would look identical to a caller watching
+// the other one hold.
 func TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -288,12 +293,50 @@ func TestPruneLeavesADeleteTombstonePerRemoval(t *testing.T) {
 	}
 }
 
-// TestPruneIsOneTransaction: a prune that appended its tombstones and then failed
-// before the DELETE would leave the store claiming two removals that did not
-// happen — and the failure that matters is the ordinary one, a busy database or a
-// full disk, not a crash between two statements nobody would notice. The seam
-// below is the only way to make that happen on purpose.
-func TestPruneIsOneTransaction(t *testing.T) {
+// TestPruneNeverRemovesAPinnedRow is one of the review blockers on #587: prune
+// reuses a single predicate for its SELECT and its DELETE, and the predicate
+// carried no `pinned = 0`, so a pinned session row whose expiry and activity
+// were in the past was removed like any other expired session row. A pin is an
+// explicit user override — the same "keep this where it is" the tier design is
+// built on — and the session tier is a promise made for rows the user did NOT
+// override, so the DELETE must re-check the pin at the same instant it deletes,
+// exactly as it re-checks the tier. The unpinned control is in the same test:
+// without it, a predicate that spared everything would pass.
+func TestPruneNeverRemovesAPinnedRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	pinned := pruneFixture(t, s, "a pinned session note that expired long ago", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	control := pruneFixture(t, s, "an unpinned session note that expired long ago", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, pinned); err != nil {
+		t.Fatalf("pin %s: %v", pinned, err)
+	}
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if report.Removed != 1 {
+		t.Errorf("prune removed %d row(s), want exactly the 1 unpinned control", report.Removed)
+	}
+	if len(report.RemovedIDs) != 1 || report.RemovedIDs[0] != control {
+		t.Errorf("removed %v, want only the unpinned control %s", report.RemovedIDs, control)
+	}
+	if liveCount(t, s, testProject) != 1 {
+		t.Errorf("after the prune the project holds %d row(s), want 1 (the pinned one): a pinned session row was removed", liveCount(t, s, testProject))
+	}
+}
+
+// TestPruneRollsBackTheBatchThatFailed: a batch that appended its tombstones and
+// then failed before the DELETE would leave the store claiming removals that did
+// not happen — and the failure that matters is the ordinary one, a busy database
+// or a full disk, not a crash between two statements nobody would notice. The
+// seam below is the only way to make that happen on purpose, and the single
+// candidate here is one batch: the failure must undo the tombstones AND the
+// DELETE together, which is the guarantee TestPruneBatchesCommitPerBatch relies
+// on for the boundary between two batches.
+func TestPruneRollsBackTheBatchThatFailed(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	id := pruneFixture(t, s, "a session note whose removal fails halfway", RetentionSession,
@@ -312,6 +355,86 @@ func TestPruneIsOneTransaction(t *testing.T) {
 	if got := len(historyPhases(t, s, id)); got != before {
 		t.Errorf("a failed prune left %d history row(s) behind; the append was not rolled back", got-before)
 	}
+}
+
+// TestPruneBatchesCommitPerBatch: the review's bounded-batch ask, proven in the
+// two directions it has. A backlog bigger than one batch is fully pruned by a
+// clean apply — removed == seeded everywhere. And a failure on the SECOND batch
+// leaves the FIRST batch's removals committed (rows gone, tombstones present)
+// while everything after the failure stays: each batch is its own transaction,
+// so the earlier progress is real, and a rerun continues from where it stopped
+// rather than redoing an already-committed window. Without batching (one
+// unbounded transaction), the failure would have rolled back the whole backlog
+// and the first half would still be in the store.
+func TestPruneBatchesCommitPerBatch(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const total = 3*pruneBatchSize + 50 // four batches
+	for i := 0; i < total; i++ {
+		pruneFixture(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession,
+			stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	}
+	if liveCount(t, s, testProject) != total {
+		t.Fatalf("seeded %d rows, store has %d", total, liveCount(t, s, testProject))
+	}
+
+	// Direction 1: a clean apply over a >1-batch backlog removes everything.
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("full prune: %v", err)
+	}
+	if report.Removed != total || len(report.RemovedIDs) != total {
+		t.Errorf("full prune removed %d row(s), %d ids tracked — want %d of each", report.Removed, len(report.RemovedIDs), total)
+	}
+	if liveCount(t, s, testProject) != 0 {
+		t.Errorf("after the full prune %d row(s) remain, want 0", liveCount(t, s, testProject))
+	}
+	if got := countDeleteTombstones(t, s); got != total {
+		t.Errorf("the full prune left %d delete tombstone(s), want %d — one per removal, across all batches", got, total)
+	}
+
+	// Direction 2: a failure on the second batch proves each batch commits
+	// separately. Re-seed, then interrupt at the batch boundary.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM memory_history`); err != nil {
+		t.Fatalf("clear history between directions: %v", err)
+	}
+	for i := 0; i < total; i++ {
+		pruneFixture(t, s, fmt.Sprintf("an expired session note %d again", i), RetentionSession,
+			stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	}
+
+	var seamCalls int
+	restore := setPruneBeforeDelete(func() error {
+		seamCalls++
+		if seamCalls > 1 {
+			return errPruneInterrupted
+		}
+		return nil
+	})
+	defer restore()
+
+	if _, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true}); err == nil {
+		t.Fatal("a prune interrupted on the second batch reported success")
+	}
+	if got := liveCount(t, s, testProject); got != total-pruneBatchSize {
+		t.Errorf("after the interrupted prune %d row(s) remain, want %d: the first batch did not commit", got, total-pruneBatchSize)
+	}
+	if got := countDeleteTombstones(t, s); got != pruneBatchSize {
+		t.Errorf("after the interrupted prune %d delete tombstone(s) remain, want %d: the first batch's tombstones did not commit alongside its DELETE", got, pruneBatchSize)
+	}
+}
+
+// countDeleteTombstones counts the delete-phase rows in memory_history across the
+// whole store — the tombstone is memory_history's own visible world, so a batch
+// that committed is a batch whose tombstones a rerun would see too.
+func countDeleteTombstones(t *testing.T, s *Store) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_history WHERE phase = ?`, phaseDelete).Scan(&n); err != nil {
+		t.Fatalf("count delete tombstones: %v", err)
+	}
+	return n
 }
 
 // TestPruneReadsAnAccessStampInEitherTimestampShape: the grace term coalesces

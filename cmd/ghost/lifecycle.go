@@ -353,13 +353,14 @@ func clampReflectMemories(mems []reflection.ReflectMemory) int {
 }
 
 // consolidatable returns the memories reflection may rewrite: non-resolved,
-// unpinned, non-manual/non-builtin rows. ReplaceNonManual preserves exactly
-// the excluded set, so this is the input the consolidator sees — and
+// unpinned, non-manual/non-builtin rows — and, like every other pass reflection
+// could reach with a rewrite, NOT a persistent row. ReplaceNonManual preserves
+// exactly the excluded set, so this is the input the consolidator sees — and
 // therefore the set the skip-unchanged fingerprint must cover.
 func consolidatable(mems []memory.Memory) []memory.Memory {
 	out := make([]memory.Memory, 0, len(mems))
 	for _, m := range mems {
-		if m.ResolvedAt != nil || m.Pinned || m.Source == "manual" || m.Source == "builtin" {
+		if m.ResolvedAt != nil || m.Pinned || memory.RetentionExempt(m) || m.Source == "manual" || m.Source == "builtin" {
 			continue
 		}
 		out = append(out, m)
@@ -866,15 +867,17 @@ func runReflect() {
 		os.Exit(1)
 	}
 	// Load every memory, not a capped page: ReplaceNonManual replaces the whole
-	// non-manual/unpinned/unresolved set for the project, so the input must
-	// cover exactly that set. A LIMIT silently dropped the overflow (memories
-	// beyond the cap were deleted by the replace but never seen by the
+	// non-manual/unpinned/unresolved/non-persistent set for the project, so the
+	// input must cover exactly that set. A LIMIT silently dropped the overflow
+	// (memories beyond the cap were deleted by the replace but never seen by the
 	// consolidator, surviving only in the snapshot), reachable as soon as a
-	// project exceeds the cap. GetAll applies no source/pinned filter, so
-	// consolidatable below excludes manual, pinned, and resolved rows — ReplaceNonManual
-	// preserves all three and inserts the consolidator output alongside, so
-	// feeding them in would duplicate each as a fresh reflection row on every
-	// apply.
+	// project exceeds the cap. GetAll applies no source/pinned/retention filter,
+	// so consolidatable below excludes manual, pinned, resolved, and persistent
+	// rows — ReplaceNonManual preserves all four and inserts the consolidator
+	// output alongside, so feeding them in would duplicate each as a fresh
+	// reflection row on every apply (measured for a persistent row: the sqlite
+	// tier "passed through (not named)" a keep-forever memory and the replace
+	// inserted a project-tier reflection copy beside it).
 	existingMemories, err := store.GetAll(ctx, projectID, -1)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: get memories: %v\n", err)

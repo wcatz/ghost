@@ -463,17 +463,18 @@ func TestCreateRefusesToPutAnExpiryOnADurableRow(t *testing.T) {
 	}
 }
 
-// protectionOf is the caller's obligation, written once so the tests that depend
-// on it and the production callers that perform it say the same thing: a row is
-// protected when it is pinned or its tier may not be taken back. SupersedePenalties
-// and DemotionPenalties are handed ids, not rows, so a caller holding a row it did
-// not read cannot protect it — which is why every one of them hydrates first.
+// protectionOf is the supersede caller's obligation, written once so the tests
+// that depend on it and the production callers that perform it say the same
+// thing: on the supersede path a row is protected only when its tier may not be
+// taken back — a plain pin never protects a supersedes target (see
+// TestAPinDoesNotStopASupersedesEdge). SupersedePenalties is handed ids, not
+// rows, so a caller holding a row it did not read cannot protect it — which is
+// why every one of them hydrates first.
 func protectionOf(t *testing.T, s *Store, ids ...string) map[string]bool {
 	t.Helper()
 	out := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		m := getOne(t, s, id)
-		out[id] = m.Pinned || RetentionExempt(m)
+		out[id] = RetentionExempt(getOne(t, s, id))
 	}
 	return out
 }
@@ -538,30 +539,42 @@ func TestTheDemotionLookupsDoNotNameTheTierColumn(t *testing.T) {
 	}
 }
 
-// TestASupersedesEdgeDoesNotSinkAPinnedRow: a pin is not a tier, and the
-// protection map spares both — which is a RANKING change, not a pass over it. A
-// pinned superseded target used to sink below its replacement and now does not, on
-// all four production paths, so the claim needs a test rather than a comment: a
-// pin already means "not dimmed out of ranking" to DecayFactor (a pinned row
-// scores as if brand new), and sparing a row from the near-duplicate demotion
-// while still letting a `supersedes` edge bury it would be the inconsistency.
+// TestAPinDoesNotStopASupersedesEdge: a pin is not a tier, and this test pins the
+// boundary between the two. The near-duplicate demotion spares a pinned row — that
+// is what DemotionPenalties did before tiers existed, and the tier merely extends
+// it — but a `supersedes` edge does not spare one: the edge states that one claim
+// replaced another, and keeping a row on screen is not the same as declaring its
+// claim current. So on every supersede ranking path a pinned target sinks below its
+// replacement exactly as it did before #587, for the same reason a project-tier
+// target does.
 //
 // The control is in the same test: with the pin cleared and no tier, the same edge
-// sinks the same row. Without it, a map that spared everything would pass.
-func TestASupersedesEdgeDoesNotSinkAPinnedRow(t *testing.T) {
+// sinks the same row; the assertion is that the pin changes NOTHING. A future
+// follow-up that wants to exempt pins from supersede demotion (sparing a pinned
+// row the way this test's predecessor did) must flip this test and the callers'
+// maps together — issue #739 documents the variant-follow-up.
+func TestAPinDoesNotStopASupersedesEdge(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	newer := retentionTierFixture(t, s, "the newer note that corrects the earlier claim", RetentionProject)
-	target := retentionTierFixture(t, s, "the earlier claim the newer note corrects", RetentionProject)
+	newer := retentionTierFixture(t, s, "the block producer reads its slot-leader schedule from the ledger-state directory", RetentionProject)
+	target := retentionTierFixture(t, s, "the KES watermark lives under /var/lib/cardano/kes with private permissions", RetentionProject)
 	if err := s.CreateLink(ctx, newer, target, "supersedes", 0.9, "llm"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
 	ids := []string{newer, target}
 
+	tierOnly := func() map[string]bool {
+		out := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			out[id] = RetentionExempt(getOne(t, s, id))
+		}
+		return out
+	}
+
 	// The control first, on the ordinary row: this edge DOES sink its target, so
 	// the assertion below is about the pin and not about a broken fixture.
-	before, err := SupersedePenalties(ctx, s.queryDB(), ids, protectionOf(t, s, ids...))
+	before, err := SupersedePenalties(ctx, s.queryDB(), ids, tierOnly())
 	if err != nil {
 		t.Fatalf("SupersedePenalties control: %v", err)
 	}
@@ -572,12 +585,12 @@ func TestASupersedesEdgeDoesNotSinkAPinnedRow(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, target); err != nil {
 		t.Fatalf("pin the superseded target: %v", err)
 	}
-	after, err := SupersedePenalties(ctx, s.queryDB(), ids, protectionOf(t, s, ids...))
+	after, err := SupersedePenalties(ctx, s.queryDB(), ids, tierOnly())
 	if err != nil {
 		t.Fatalf("SupersedePenalties after the pin: %v", err)
 	}
-	if after[target] != 0 {
-		t.Errorf("the pinned superseded target carries a penalty of %d: a pin that DemotionFactor honours and this ignores", after[target])
+	if after[target] != 1 {
+		t.Errorf("the pinned superseded target carries a penalty of %d, want 1: a pin changed what a `supersedes` edge does", after[target])
 	}
 	if after[newer] != 0 {
 		t.Errorf("the superseder carries a penalty of %d: the edge points the wrong way", after[newer])
@@ -587,16 +600,15 @@ func TestASupersedesEdgeDoesNotSinkAPinnedRow(t *testing.T) {
 	// the helper is where the rule now lives, `demoteResults` is what a search
 	// calls, and it is handed the caller's map through the same path a user's
 	// query takes.
-	window := []Memory{getOne(t, s, target), getOne(t, s, newer)}
-	ranked := s.demoteResults(ctx, window, SearchParams{SupersedeDemote: true})
-	if ranked[0].ID != target {
-		t.Errorf("the search window after the demotion is %s, %s — the pinned superseded row is not first", ranked[0].ID, ranked[1].ID)
+	ranked := s.demoteResults(ctx, []Memory{getOne(t, s, target), getOne(t, s, newer)}, SearchParams{SupersedeDemote: true})
+	if ranked[0].ID != newer {
+		t.Errorf("the search window after the demotion is %s, %s — the pinned superseded row outranks its replacement", ranked[0].ID, ranked[1].ID)
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET pinned = 0 WHERE id = ?`, target); err != nil {
 		t.Fatalf("clear the pin: %v", err)
 	}
 	ranked = s.demoteResults(ctx, []Memory{getOne(t, s, target), getOne(t, s, newer)}, SearchParams{SupersedeDemote: true})
 	if ranked[0].ID != newer {
-		t.Errorf("with the pin cleared the window is %s, %s, want the replacement first — the control edge stopped sinking", ranked[0].ID, ranked[1].ID)
+		t.Errorf("with the pin cleared the window is %s, %s, want the replacement first — clearing the pin changed the ranking", ranked[0].ID, ranked[1].ID)
 	}
 }

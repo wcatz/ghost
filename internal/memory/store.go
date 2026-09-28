@@ -3929,7 +3929,13 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		supersedeProtected := make(map[string]bool, len(results))
 		for i, m := range results {
 			ids[i] = m.ID
-			supersedeProtected[m.ID] = m.Pinned || RetentionExempt(m)
+			// The KEEP-FOREVER tier only — a `supersedes` edge says the target's
+			// claim was replaced, and a pin keeps a row visible rather than
+			// declaring it current, so a pinned superseded target sinks exactly as
+			// it did before tiers existed. Same rule as the search path's
+			// demoteSuperseded, and unlike the near-duplicate map below, whose
+			// pin half predates tiers and is described there.
+			supersedeProtected[m.ID] = RetentionExempt(m)
 		}
 		penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, supersedeProtected)
 		if err != nil {
@@ -3943,7 +3949,11 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		// A protection map, not a pin list (see DemotionPenalties): this is the
 		// session-start injection read, so a keep-forever memory that is the
 		// lower-ranked member of a near-duplicate pair would be cut out of the
-		// very block the tier exists to keep it in.
+		// very block the tier exists to keep it in. Unlike the supersede
+		// protection above, THIS map still carries a plain pin: sparing a pinned
+		// row from the near-duplicate demotion is what DemotionPenalties did
+		// before tiers existed, and the tier only extends that standing rule to
+		// keep-forever rows.
 		protected := make(map[string]bool, len(results))
 		for i, m := range results {
 			ids[i] = m.ID

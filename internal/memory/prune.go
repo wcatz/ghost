@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -19,9 +20,13 @@ import (
 //     delete is the most destructive write in the product, and the default that
 //     erases a user's own memories is the one failure mode the whole tier design
 //     is arranged to avoid.
-//   - The dry run is the default, and it is the SAME transaction as the apply —
-//     rolled back instead of committed. A preview built from a different query
-//     than the one that deletes is a preview of something else.
+//   - The dry run is the default, and the preview is the SAME query the apply
+//     re-runs against each batch — same predicate, same scope, same order — so a
+//     preview built from a different query than the one that deletes is a
+//     preview of something else. The apply itself deletes in bounded batches
+//     (pruneBatchSize rows per transaction), because one unbounded BEGIN
+//     IMMEDIATE held the store's single connection — and with it every
+//     concurrent save — open for an entire backlog.
 //   - Every removal appends a memory_history tombstone in that same transaction,
 //     so the store still knows what it removed, when, and which agent's project
 //     it belonged to.
@@ -38,8 +43,9 @@ const DefaultPruneGrace = DefaultSessionGrace
 // error to roll back from.
 var errPruneInterrupted = errors.New("prune: interrupted before the delete")
 
-// pruneBeforeDelete is the seam TestPruneIsOneTransaction uses to fail a prune
-// between its tombstones and its DELETE. It is a var, and it is nil in
+// pruneBeforeDelete is the seam the batch-rollback tests use to fail a prune
+// between its tombstones and its DELETE — once per batch, so a test can let the
+// first batch commit and interrupt the second. It is a var, and it is nil in
 // production, for the reason the hydration hook above it is: a failure that
 // depends on timing is not something a test can cause on purpose, so the step
 // itself is made reachable and the test drives it.
@@ -94,9 +100,11 @@ type PruneCandidate struct {
 
 // PruneReport is what one run did, or would do.
 //
-// Candidates is populated on both paths — it is the SELECT, and the apply's
-// DELETE re-derives the same set — so a dry run's list and an apply's list are
-// the same list by construction rather than by agreement.
+// Candidates is populated on both paths — it is the preview read, and every
+// apply batch re-derives the same predicate, scope, and order — so a dry run's
+// list and an apply's list are the same list by construction rather than by
+// agreement, modulo rows that the store itself changed between the preview and a
+// batch (a promoted or pinned row simply stops matching).
 type PruneReport struct {
 	// Applied says whether this run committed. A report that says so is the only
 	// thing that distinguishes the two shapes, and a caller that printed the rest
@@ -143,25 +151,47 @@ type PruneReport struct {
 // derivation in sessionExpiry, in the one shape every other timestamp column uses.
 // A value set by hand in another shape does not match, which leaves the row in the
 // store rather than taking it out.
+//
+// pinned = 0 is the fifth term, and it sits in the predicate rather than in Go
+// for the same reason the tier does: a pin is decided by the same statement that
+// reads the row. A pin is an explicit user override, and the session promise was
+// made for rows the user did NOT override; a pinned session row that happens to
+// have an expired past is a row being kept, not garbage. Re-checking it at the
+// DELETE is not paranoid — the terms that decide the DELETE are the terms that
+// decide the SELECT, and their absence is how a row nobody has looked at in a
+// long time looks exactly like a row about to go.
 const prunePredicate = `
 		retention = '` + RetentionSession + `'
+		AND pinned = 0
 		AND expires_at IS NOT NULL
 		AND expires_at <= ?
 		AND datetime(COALESCE(last_accessed, updated_at, created_at)) <= datetime(?)
 `
 
+// pruneBatchSize bounds the write lock: an apply removes candidates in batches
+// of this many rows, each batch in its own BEGIN IMMEDIATE transaction with its
+// own tombstones, so a prune backlog can never hold the store's write lock open
+// for the whole cleanup. The batch is selected by the same predicate, in the
+// same order, so it is the same window a dry run previewed.
+const pruneBatchSize = 500
+
 // PruneSessionMemories removes expired session-tier memories that nothing has
 // touched for the grace period, and appends a delete tombstone for each.
 //
-// It is one transaction from the SELECT to the COMMIT — or to the ROLLBACK that a
-// dry run takes instead. The dry run is the same statement sequence rather than a
-// read-only preview, so the report cannot describe rows the apply would not have
-// selected, and a rollback guarantees the preview wrote nothing at all.
+// The preview is one read of the full candidate set — the same predicate, scope,
+// and order every batch later re-derives. An apply then removes the candidates
+// in batches of pruneBatchSize: each batch is selected under the write lock (the
+// DSN asks for BEGIN IMMEDIATE), audited with tombstones, and deleted in one
+// transaction, so every batch is internally consistent — a row cannot change
+// between the SELECT that names it and the DELETE that removes it — and a batch
+// that fails rolls back whole, leaving the pre-batch store state intact.
 //
-// The lock is s.mu for the whole body, and the DSN asks for BEGIN IMMEDIATE, so
-// a concurrent save either happens entirely before this run's SELECT or entirely
-// after its COMMIT. A save that lands in between is not a lost memory: it is a
-// row whose expiry the prune never saw, and it is picked up by the next run.
+// Between batches the lock is dropped, so a concurrent save either happens
+// entirely before a batch's SELECT or entirely after its COMMIT. A save that
+// lands in between is not a lost memory: it is a row whose expiry the prune
+// never saw, and it is picked up by the next run. The report carries what
+// actually committed — an apply that failed partway reports the batches that
+// landed and the error — never a prediction of a clean run.
 func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (PruneReport, error) {
 	if opts.Grace < 0 {
 		return PruneReport{}, fmt.Errorf("invalid grace period %s: it must be zero (the %s default) or a positive duration",
@@ -178,106 +208,173 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 	now = now.UTC()
 	report := PruneReport{Applied: opts.Apply, Grace: grace, Now: now, ProjectID: opts.ProjectID}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return report, fmt.Errorf("begin prune: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	query := `
-		SELECT id, project_id, category, content, retention, expires_at,
-		       COALESCE(last_accessed, updated_at, created_at)
-		FROM memories
-		WHERE ` + prunePredicate
-	args := []any{stampForCompare(now), stampForCompare(now.Add(-grace))}
+	predArgs := []any{stampForCompare(now), stampForCompare(now.Add(-grace))}
+	scope := ""
 	if opts.ProjectID != "" {
-		query += "\n\t\t  AND project_id = ?"
-		args = append(args, opts.ProjectID)
+		scope = "\n\t\t  AND project_id = ?"
+		predArgs = append(predArgs, opts.ProjectID)
 	}
 	// Oldest activity first, id to break a tie: a prune that runs over a large
 	// corpus should take the row nobody has looked at in the longest time, and
 	// two rows with the same stamp have to come out in an order a second run
-	// would repeat.
-	query += "\n\t\tORDER BY COALESCE(last_accessed, updated_at, created_at), id"
+	// would repeat. The order is part of the query so a batch is the same window
+	// the preview named.
+	order := "\n\t\tORDER BY COALESCE(last_accessed, updated_at, created_at), id"
 
-	rows, err := tx.QueryContext(ctx, query, args...)
+	candQuery := `
+		SELECT id, project_id, category, content, retention, expires_at,
+		       COALESCE(last_accessed, updated_at, created_at)
+		FROM memories
+		WHERE ` + prunePredicate + scope + order
+
+	// The preview is a plain read, and it shares the predicate, scope, and order
+	// with every batch the apply runs — never a second query of its own.
+	s.mu.RLock()
+	rows, err := s.db.QueryContext(ctx, candQuery, predArgs...)
 	if err != nil {
+		s.mu.RUnlock()
 		return report, fmt.Errorf("find prunable memories: %w", err)
 	}
 	for rows.Next() {
 		var c PruneCandidate
 		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Category, &c.Content, &c.Retention, &c.ExpiresAt, &c.ActivityAt); err != nil {
 			rows.Close() //nolint:errcheck
+			s.mu.RUnlock()
 			return report, fmt.Errorf("scan prunable memory: %w", err)
 		}
 		report.Candidates = append(report.Candidates, c)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close() //nolint:errcheck
+		s.mu.RUnlock()
 		return report, fmt.Errorf("iterate prunable memories: %w", err)
 	}
 	if err := rows.Close(); err != nil {
+		s.mu.RUnlock()
 		return report, fmt.Errorf("close prunable memories: %w", err)
 	}
+	s.mu.RUnlock()
 
 	if !opts.Apply || len(report.Candidates) == 0 {
-		// The rollback above is the whole of a dry run. There is no branch here
-		// that could have written: the only statements that ran are the BEGIN and
-		// the SELECT.
+		// The whole of a dry run is the read above. There is no other branch
+		// here that could have written.
 		return report, nil
 	}
 
-	for _, c := range report.Candidates {
-		report.RemovedIDs = append(report.RemovedIDs, c.ID)
-	}
+	batchQuery := `
+		SELECT id
+		FROM memories
+		WHERE ` + prunePredicate + scope + order + "\n\t\tLIMIT ?"
 
-	// The tombstone first, from the state the row holds right now — memory_id
-	// carries no foreign key, so this row is the only thing that will still know
-	// the text once the DELETE lands.
-	if err := appendHistoryForIDsTx(ctx, tx, report.RemovedIDs, phaseDelete, Provenance{}); err != nil {
-		return report, err
-	}
+	for {
+		s.mu.Lock()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			s.mu.Unlock()
+			return report, fmt.Errorf("begin prune batch: %w", err)
+		}
 
-	// The seam, AFTER the audit and BEFORE the delete: that is the only position
-	// from which the rollback is under test. Placed before the append it would
-	// prove only that an error returned, which any implementation does; here a
-	// failure leaves written history rows that the transaction has to undo, so
-	// the test fails if the append is not in the same transaction as the delete.
-	// See pruneBeforeDelete.
-	if pruneBeforeDelete != nil {
-		if err := pruneBeforeDelete(); err != nil {
+		// The batch, decided under the write lock: whatever the predicate names
+		// at THIS instant, in removal order, capped at one batch. A row promoted
+		// to pinned or persistent by a save that landed since the preview simply
+		// stops matching and is not in the batch.
+		batchArgs := append(append([]any{}, predArgs...), pruneBatchSize)
+		idRows, err := tx.QueryContext(ctx, batchQuery, batchArgs...)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			s.mu.Unlock()
+			return report, fmt.Errorf("find prune batch: %w", err)
+		}
+		ids := make([]string, 0, pruneBatchSize)
+		for idRows.Next() {
+			var id string
+			if err := idRows.Scan(&id); err != nil {
+				idRows.Close() //nolint:errcheck
+				tx.Rollback()  //nolint:errcheck
+				s.mu.Unlock()
+				return report, fmt.Errorf("scan prune batch: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		if err := idRows.Err(); err != nil {
+			idRows.Close() //nolint:errcheck
+			tx.Rollback()  //nolint:errcheck
+			s.mu.Unlock()
+			return report, fmt.Errorf("iterate prune batch: %w", err)
+		}
+		if err := idRows.Close(); err != nil {
+			tx.Rollback() //nolint:errcheck
+			s.mu.Unlock()
+			return report, fmt.Errorf("close prune batch: %w", err)
+		}
+		if len(ids) == 0 {
+			if err := tx.Commit(); err != nil {
+				s.mu.Unlock()
+				return report, fmt.Errorf("commit empty prune batch: %w", err)
+			}
+			s.mu.Unlock()
+			break
+		}
+
+		// The tombstone first, from the state the row holds right now — memory_id
+		// carries no foreign key, so this row is the only thing that will still know
+		// the text once the DELETE lands.
+		if err := appendHistoryForIDsTx(ctx, tx, ids, phaseDelete, Provenance{}); err != nil {
+			tx.Rollback() //nolint:errcheck
+			s.mu.Unlock()
 			return report, err
 		}
-	}
 
-	del := `
-		DELETE FROM memories
-		WHERE ` + prunePredicate
-	delArgs := args
-	if opts.ProjectID != "" {
-		del += "\n\t\t  AND project_id = ?"
-	}
-	res, err := tx.ExecContext(ctx, del, delArgs...)
-	if err != nil {
-		return report, fmt.Errorf("remove pruned memories: %w", err)
-	}
-	removed, err := res.RowsAffected()
-	if err != nil {
-		return report, fmt.Errorf("count pruned memories: %w", err)
-	}
-	if int(removed) != len(report.RemovedIDs) {
-		// The SELECT and the DELETE name the same rows in the same transaction,
-		// so a difference here is not a race — it is a broken invariant, and it
-		// must not be reported as a successful prune of a set nobody can name.
-		return report, fmt.Errorf("prune removed %d rows but recorded %d tombstones: the delete and the audit disagree", removed, len(report.RemovedIDs))
-	}
-	report.Removed = int(removed)
+		// The seam, AFTER the audit and BEFORE the delete: that is the only position
+		// from which the batch rollback is under test. Placed before the append it
+		// would prove only that an error returned, which any implementation does;
+		// here a failure leaves written history rows that the transaction has to
+		// undo, so the test fails if the append is not in the same transaction as
+		// the delete. See pruneBeforeDelete.
+		if pruneBeforeDelete != nil {
+			if err := pruneBeforeDelete(); err != nil {
+				tx.Rollback() //nolint:errcheck
+				s.mu.Unlock()
+				return report, err
+			}
+		}
 
-	if err := tx.Commit(); err != nil {
-		return report, fmt.Errorf("commit prune: %w", err)
+		placeholders := make([]string, len(ids))
+		delArgs := make([]any, len(ids))
+		for i, id := range ids {
+			placeholders[i] = "?"
+			delArgs[i] = id
+		}
+		del := `DELETE FROM memories WHERE id IN (` + strings.Join(placeholders, ",") + `)`
+		res, err := tx.ExecContext(ctx, del, delArgs...)
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			s.mu.Unlock()
+			return report, fmt.Errorf("remove pruned memories: %w", err)
+		}
+		removed, err := res.RowsAffected()
+		if err != nil {
+			tx.Rollback() //nolint:errcheck
+			s.mu.Unlock()
+			return report, fmt.Errorf("count pruned memories: %w", err)
+		}
+		if int(removed) != len(ids) {
+			// The batch SELECT and the DELETE run in the same transaction, so a
+			// difference here is not a race — it is a broken invariant, and it
+			// must not be reported as a successful prune of a set nobody can name.
+			tx.Rollback() //nolint:errcheck
+			s.mu.Unlock()
+			return report, fmt.Errorf("prune removed %d rows but recorded %d tombstones in one batch: the delete and the audit disagree", removed, len(ids))
+		}
+
+		if err := tx.Commit(); err != nil {
+			s.mu.Unlock()
+			return report, fmt.Errorf("commit prune batch: %w", err)
+		}
+		s.mu.Unlock()
+
+		report.RemovedIDs = append(report.RemovedIDs, ids...)
+		report.Removed += int(removed)
 	}
 	return report, nil
 }

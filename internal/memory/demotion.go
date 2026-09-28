@@ -287,11 +287,15 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // the hydrated rows — the session loaders select the tier for exactly this — and
 // a caller holding a row it did not read is a caller that cannot protect it.
 //
-// A PINNED target is spared too, which the comment above does not say and this
-// parameter does: a pin already means "not dimmed out of ranking" to DecayFactor
-// (a pinned row scores as if brand new), so sparing it here and not from the
-// near-duplicate demotion would be the inconsistency. Same rule as
-// DemotionPenalties; TestASupersedesEdgeDoesNotSinkAPinnedRow.
+// The map is tier-PROTECTED, and "tier" is the whole of it: only the
+// `persistent` retention is protection here, never a plain pin. The near-duplicate
+// demotion spares a pinned row because that is what DemotionPenalties did before
+// tiers existed and the tier extends it; the supersede demotion does not, because
+// a `supersedes` edge states that one claim replaced another — keeping a row on
+// screen is not the same as declaring its claim current, so a pinned superseded
+// target sinks exactly as it did before #587. Same rule as
+// DemotionPenalties' PROTECTION-and-tier map; TestASupersedesEdgeDoesNotSinkAPersistentRow
+// and TestAPinDoesNotStopASupersedesEdge pin both halves.
 func SupersedePenalties(ctx context.Context, db Queryer, ids []string, protected map[string]bool) (map[string]int, error) {
 	penalty, err := supersedeVerdicts(ctx, db, ids, nil, protected)
 	if err != nil {

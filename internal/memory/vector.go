@@ -507,7 +507,13 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 	protected := make(map[string]bool, len(results))
 	for i, m := range results {
 		ids[i] = m.ID
-		protected[m.ID] = m.Pinned || RetentionExempt(m)
+		// The supersede protection is the KEEP-FOREVER tier only, never a plain
+		// pin: a `supersedes` edge is a statement that one claim replaced another,
+		// so a pinned superseded target still sinks — pinning keeps a row visible,
+		// it does not declare the claim current. See the supersede demotion
+		// discussion in docs/invariants.md; the pin exemption variant is filed as
+		// issue #739, because tiers must not change what a pin means.
+		protected[m.ID] = RetentionExempt(m)
 	}
 	s.mu.RLock()
 	penalty, err := supersedeVerdicts(ctx, s.queryDB(), ids, p.trace, protected)

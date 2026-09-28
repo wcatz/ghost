@@ -38,6 +38,95 @@ var distinctFacts = []struct {
 	{"convention", "YAML files in this repository are indented with two spaces"},
 }
 
+// seedPersistentRow writes a single keep-forever row and ages it, so the row is
+// part of a corpus reflect would otherwise rewrite. The concurrent-save guard
+// in ReplaceNonManual treats any row created at or after the round trip's start
+// as concurrent and leaves it alone, so both timestamps have to move — the same
+// reason seedAllKeepProject runs execBackdate + execBackdateAges.
+func seedPersistentRow(t *testing.T, dataHome, project string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	s := openReflectStore(t, dataHome, project)
+	ctx := context.Background()
+	id, _, _, err := s.UpsertWithOptions(ctx, project, "fact",
+		"the one durable fact reflection must never rewrite", "mcp", 0.6, nil,
+		memory.UpsertOptions{Retention: memory.RetentionPersistent})
+	if err != nil {
+		t.Fatalf("create the persistent row: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+	if err := execBackdate(dataHome, project); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if err := execBackdateAges(dataHome, project); err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
+	}
+	return id
+}
+
+func countContent(t *testing.T, dataHome, content string) int {
+	t.Helper()
+	db, err := openRawDB(dataHome)
+	if err != nil {
+		t.Fatalf("open for count: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE content = ?`, content).Scan(&n); err != nil {
+		t.Fatalf("count content: %v", err)
+	}
+	return n
+}
+
+// TestRunReflectDoesNotDuplicateAPersistentRow is the review reproduction for
+// #587: one persistent row, then `ghost reflect <project> --tier sqlite
+// --apply`. Before the fix, consolidatable() fed the persistent row to the
+// consolidator (the sqlite tier printed "passed through (not named): 1"), and
+// ReplaceNonManual — whose replaceable set already excluded persistent rows via
+// retentionExemptSQL, so the original survived — inserted the passed-through row
+// as a fresh reflection copy beside it. A keep-forever memory came out
+// duplicated on every apply, with the duplicate's own default tier and source.
+//
+// The fix is on the input side: a persistent row must not reach the
+// consolidator at all, because the consolidator's output is a *rewrite* and
+// every rewrite of a keep-forever row is a change the user asked it to be
+// exempt from. With the input empty the sqlite tier emits nothing and the run
+// returns before ReplaceNonManual, so the corpus is byte-identical after the
+// apply as well as before it.
+func TestRunReflectDoesNotDuplicateAPersistentRow(t *testing.T) {
+	dataHome := isolatedLifecycleEnv(t)
+	const project = "persistz"
+	const durable = "the one durable fact reflection must never rewrite"
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	id := seedPersistentRow(t, dataHome, project)
+
+	before := map[string]string{
+		"retention": readColumn(t, dataHome, `SELECT retention FROM memories WHERE id = ?`, id),
+		"source":    readColumn(t, dataHome, `SELECT source FROM memories WHERE id = ?`, id),
+	}
+
+	runReflectArgs(t, "reflect", project, "--tier", "sqlite", "--apply")
+
+	if n := countContent(t, dataHome, durable); n != 1 {
+		t.Errorf("the persistent memory exists %d time(s) after an apply, want 1: consolidation duplicated it", n)
+	}
+	if got := readColumn(t, dataHome, `SELECT retention FROM memories WHERE id = ?`, id); got != before["retention"] {
+		t.Errorf("the persistent row's tier is %q after the apply, want %q: reflection rewrote it", got, before["retention"])
+	}
+	if got := readColumn(t, dataHome, `SELECT source FROM memories WHERE id = ?`, id); got != before["source"] {
+		t.Errorf("the persistent row's source is %q after the apply, want %q: reflection replaced it", got, before["source"])
+	}
+	if n := countHistory(t, dataHome, "reflect"); n != 0 {
+		t.Errorf("an apply over a persistent-only corpus wrote %d reflect history row(s), want none", n)
+	}
+}
+
 // seedAllKeepProject writes a project the sqlite tier will carry through
 // unchanged, and returns the ids in write order.
 func seedAllKeepProject(t *testing.T, dataHome, project string) []string {
