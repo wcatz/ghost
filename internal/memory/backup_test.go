@@ -214,6 +214,13 @@ func TestStoreBackupIsConsistentUnderWrites(t *testing.T) {
 	}
 	var snapshotRows int
 	countErr := bdb.QueryRow(`SELECT count(*) FROM memories`).Scan(&snapshotRows)
+	// SQLite's own verdict on the copy, which is the part of "consistent under
+	// writes" a row count cannot show. A torn page can hold the right number of
+	// rows and still be unrestorable, and this is the check that says so; the
+	// concurrent-writer property is worthless without it, because a snapshot
+	// nobody can open is not a copy.
+	var integrity string
+	integrityErr := bdb.QueryRow(`PRAGMA integrity_check`).Scan(&integrity)
 	_ = bdb.Close()
 	// Commits after the backup returned are excluded: what matters is that the
 	// writer was running *across* the vacuum.
@@ -223,6 +230,12 @@ func TestStoreBackupIsConsistentUnderWrites(t *testing.T) {
 	<-done
 	if countErr != nil {
 		t.Fatalf("count snapshot memories: %v", countErr)
+	}
+	if integrityErr != nil {
+		t.Fatalf("integrity_check the snapshot taken under concurrent writes: %v", integrityErr)
+	}
+	if integrity != "ok" {
+		t.Errorf("integrity_check = %q on the snapshot taken while a writer was committing, want \"ok\"", integrity)
 	}
 	if res.Counts.Memories != snapshotRows {
 		t.Errorf("report says %d memories, the snapshot holds %d — the counts must describe the file, not the live store",
