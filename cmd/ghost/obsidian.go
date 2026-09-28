@@ -85,7 +85,8 @@ Flags:
 // the store into an Obsidian-readable Markdown vault. mode is the subcommand
 // the dispatch already matched (it is the only caller, and it is what answers a
 // word that is neither mode with obsidianUsage and exit 2), and args are the
-// flags that follow it.
+// flags that follow it — both from the same argv, so a caller that drove the
+// dispatch with a synthetic one cannot have the mode and the flags disagree.
 func runObsidian(mode string, args []string) {
 	out, project, interval, err := parseObsidianFlags(args)
 	if err != nil {

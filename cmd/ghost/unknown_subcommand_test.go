@@ -179,6 +179,45 @@ func TestRunCLI_UnknownTopLevelCommandIsAUsageError(t *testing.T) {
 	}
 }
 
+// TestRunCLI_EmptyCommandWordIsAUsageError is the case where a word is PRESENT
+// and empty, which is not the same as no word at all: a wrapper running
+// `ghost mcp "$SUB"` with an unset $SUB passes one. Every level answers it as
+// the unrecognised word it is — in particular `ghost mcp ""`, which is a group
+// whose bare form starts the server, so an empty word took the bare invocation
+// and connected on stdio instead of refusing. That is why the dispatch branches
+// on PRESENCE rather than on the word being non-empty, and why "no subcommand
+// given" stays reserved for a word that is genuinely absent.
+func TestRunCLI_EmptyCommandWordIsAUsageError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{name: "the command word", argv: []string{""}, want: `ghost: unknown command: ""`},
+		{name: "a group with a default action", argv: []string{"mcp", ""}, want: `ghost mcp: unknown command: ""`},
+		{name: "a group", argv: []string{"project", ""}, want: `ghost project: unknown command: ""`},
+		{name: "a group whose usage is one line", argv: []string{"opencode", ""}, want: `ghost opencode: unknown command: ""`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			roots := isolatedHelpFS(t)
+			resetDetectRemote(t)
+			var code int
+			stdout, stderr := captureStreams(t, func() { code = runCLI(tc.argv, dispatchCommand) })
+
+			if code != 2 {
+				t.Errorf("`ghost %s` exit code = %d, want 2", strings.Join(tc.argv, " "), code)
+			}
+			if stdout != "" {
+				t.Errorf("`ghost %s` stdout = %q, want the diagnostic on stderr", strings.Join(tc.argv, " "), stdout)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("`ghost %s` stderr = %q, want an empty word reported as the unrecognised one it is: %q", strings.Join(tc.argv, " "), stderr, tc.want)
+			}
+			assertNoFiles(t, roots)
+		})
+	}
+}
+
 // TestRunCLI_HelpRequestStillExitsZero keeps the #630 gate in front of the
 // usage error: a help request is a question, so it exits 0 and never reaches
 // the dispatch — even when the subcommand next to the help flag is not a

@@ -94,7 +94,11 @@ func dispatchCommand(argv []string) int {
 		case "help", "--help", "-h":
 			return runHelpCommand(argv[1:])
 		case "mcp":
-			if sub := subArg(argv, 1); sub != "" {
+			// Presence, not a non-empty word: `ghost mcp "$SUB"` with an unset
+			// $SUB passes an EMPTY word, and taking the bare invocation for it
+			// starts the server — a typo that produces a long-lived process,
+			// which is the exit-0 shape #691 is about. subArg reports both.
+			if sub, given := subArg(argv, 1); given {
 				switch sub {
 				case "init":
 					runMCPInit()
@@ -103,11 +107,7 @@ func dispatchCommand(argv []string) int {
 					runMCPStatus()
 					return 0
 				}
-				// A word that is neither subcommand is a mistake, not a reason
-				// to start the server: `ghost mcp inittt` used to connect on
-				// stdio and sit there, which is the exit-0 case #691 is about
-				// wearing a long-lived process.
-				return usageError("mcp", sub, mcpUsage)
+				return usageError("mcp", sub, true, mcpUsage)
 			}
 			// Bare `ghost mcp` is the server, which is what every client spawns:
 			// the one command group whose bare invocation runs its own action
@@ -130,7 +130,7 @@ func dispatchCommand(argv []string) int {
 			runLifecycle()
 			return 0
 		case "project":
-			sub := subArg(argv, 1)
+			sub, given := subArg(argv, 1)
 			switch sub {
 			case "delete":
 				runProjectDelete()
@@ -142,7 +142,7 @@ func dispatchCommand(argv []string) int {
 				runProjectBind()
 				return 0
 			}
-			return usageError("project", sub, projectUsage)
+			return usageError("project", sub, given, projectUsage)
 		case "upgrade":
 			runUpgrade(argv[1:])
 			return 0
@@ -159,21 +159,21 @@ func dispatchCommand(argv []string) int {
 			runImport()
 			return 0
 		case "obsidian":
-			sub := subArg(argv, 1)
+			sub, given := subArg(argv, 1)
 			switch sub {
 			case "export", "sync":
-				runObsidian(sub, os.Args[3:])
+				runObsidian(sub, argv[2:])
 				return 0
 			}
-			return usageError("obsidian", sub, obsidianUsage)
+			return usageError("obsidian", sub, given, obsidianUsage)
 		case "opencode":
-			sub := subArg(argv, 1)
+			sub, given := subArg(argv, 1)
 			switch sub {
 			case "cleanup-sessions":
-				runOpenCodeCleanupSessions(os.Args[3:])
+				runOpenCodeCleanupSessions(argv[2:])
 				return 0
 			}
-			return usageError("opencode", sub, opencodeUsage)
+			return usageError("opencode", sub, given, opencodeUsage)
 		case "bench":
 			runBench()
 			return 0
@@ -181,7 +181,7 @@ func dispatchCommand(argv []string) int {
 			runContext()
 			return 0
 		case "maintenance":
-			sub := subArg(argv, 1)
+			sub, given := subArg(argv, 1)
 			switch sub {
 			case "status":
 				runMaintenanceStatus()
@@ -190,7 +190,7 @@ func dispatchCommand(argv []string) int {
 				runMaintenanceCleanScratch(argv[2:])
 				return 0
 			}
-			return usageError("maintenance", sub, maintenanceUsage)
+			return usageError("maintenance", sub, given, maintenanceUsage)
 		}
 	}
 	// Nothing above matched the command word. `ghost` with no arguments at all
@@ -201,41 +201,46 @@ func dispatchCommand(argv []string) int {
 	// #691: the text was right, the code said it had succeeded. A help request
 	// never arrives here, because runCLI answered it first (#630).
 	if len(argv) == 0 {
-		return usageError("", "", topLevelUsage())
+		return usageError("", "", false, topLevelUsage())
 	}
-	return usageError("", argv[0], topLevelUsage())
+	return usageError("", argv[0], true, topLevelUsage())
 }
 
-// subArg returns argv[i], or "" when argv is shorter than that: the word after
-// a command, which is a subcommand for a command group and an operand for
+// subArg returns argv[i] and whether a word was given there at all: the word
+// after a command, which is a subcommand for a command group and an operand for
 // everything else. One accessor so every group reads its subcommand — and the
 // difference between "none was given" and "that one does not exist" — from the
 // same place.
-func subArg(argv []string, i int) string {
+//
+// The two are reported separately because an EMPTY word is given, not absent:
+// a wrapper running `ghost mcp "$SUB"` with an unset $SUB passes one, and
+// treating it as no word at all starts the MCP server. The word is returned
+// unquoted here; usageError quotes it.
+func subArg(argv []string, i int) (word string, given bool) {
 	if i < len(argv) {
-		return argv[i]
+		return argv[i], true
 	}
-	return ""
+	return "", false
 }
 
 // usageError reports a command line the CLI cannot act on and returns
 // exitUsage: the diagnostic naming the mistake, then the usage of the level the
 // word was typed at, both on stderr. level is the command group the word
 // followed, or "" for the CLI itself; name is the word that matched no
-// subcommand, or "" when none was given at all. The two are different mistakes
-// — a mistyped subcommand and a missing one — and saying which is the reason
-// the diagnostic leads.
+// subcommand, and given says whether one was given at all. The two cases are
+// different mistakes — a word that is not a subcommand and no word — and saying
+// which is the reason the diagnostic leads.
 //
 // Nothing goes to stdout: that is where a subcommand's own help lands (#630),
 // so a caller reading a command's output sees an empty stream rather than the
 // command list where its results should have been.
-func usageError(level, name, usage string) int {
+func usageError(level, name string, given bool, usage string) int {
 	where := "ghost"
 	if level != "" {
 		where += " " + level
 	}
 	switch {
-	case name != "":
+	case given:
 		fmt.Fprintf(os.Stderr, "%s: unknown command: %q\n\n", where, name)
 	case level != "":
 		fmt.Fprintf(os.Stderr, "%s: no subcommand given\n\n", where)
