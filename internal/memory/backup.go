@@ -79,10 +79,16 @@ type BackupResult struct {
 // A manifest lands beside the snapshot (see writeBackupManifest), and a failure
 // to write it fails the backup rather than being reported as a success with a
 // quiet omission: the whole point of a copy is that it can be checked later, and
-// a snapshot nothing can check is a claim, not a backup. The snapshot itself is
-// left in place when that happens — it is a real, restorable copy, and deleting
-// a user's only backup because a sidecar could not be written would trade a
-// smaller problem for a larger one.
+// a snapshot nothing can check is a claim, not a backup.
+//
+// The snapshot itself is left in place when that happens. It is a real,
+// restorable copy — a full VACUUM INTO that completed — and deleting a user's
+// only backup because a sidecar could not be written would trade a smaller
+// problem for a larger one. So the error says so, naming the file and what state
+// it is in, because the CLI prints no report for a failed backup and this string
+// is the only account of what is now on disk.
+// TestBackupLeavesTheSnapshotWhenTheManifestWriteFails holds all of that: the
+// zero result, the surviving database, and the message.
 //
 // The manifest is written AFTER s.mu is released, and that is load-bearing rather
 // than incidental. Hashing it re-reads every byte of the snapshot, and a second
@@ -99,7 +105,13 @@ func (s *Store) Backup(ctx context.Context, dest string) (BackupResult, error) {
 	}
 	manifestPath, err := writeBackupManifest(dest, res.Counts, time.Now())
 	if err != nil {
-		return BackupResult{}, fmt.Errorf("backup manifest: %w", err)
+		// The second clause is the whole job, because nothing else will do it.
+		// The CLI prints no report for a failed backup — runBackupCore returns
+		// before printBackupReport — so this string is the only account of what is
+		// now on disk, and without it a failed `ghost backup` reads as "no backup
+		// was taken", which is the opposite of what happened: the reader takes a
+		// fresh one to find out they already had a good copy.
+		return BackupResult{}, fmt.Errorf("backup manifest: %w — the snapshot at %s is complete and restorable, but uncheckable until one can be written", err, dest)
 	}
 	res.ManifestPath = manifestPath
 	return res, nil
