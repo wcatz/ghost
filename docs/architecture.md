@@ -543,6 +543,60 @@ memory has none, so re-running the step cannot double them.
 | `import` | `ImportMemory` | the imported row, attributed to the artifact's agent |
 | `delete` | `Delete`, the replace's bulk delete, the restore's cleanup | the state the row held immediately before it went |
 
+**`ghost history` takes a ref, and the ids it resolves over are BOTH tables**
+([#720](https://github.com/wcatz/ghost/issues/720)). Every Ghost report shortens
+an id to eight characters, so `ghost history <id>` taking only a full id meant the
+one command whose output is those eight characters could not be driven from them —
+and `ghost resolve --mark` and `ghost supersede --withdraw`, which print exactly
+that form, already took the short one. It now goes through `internal/memref`, so a
+ref means here exactly what it means on every other surface: a full id of any
+shape, or a prefix of 8 or more CHARACTERS naming one memory, with an ambiguous
+prefix refused rather than guessed. The rules are not restated, which is the point
+— two implementations eventually disagree about which id one spelling addresses,
+and this is the command that would be most expensive to get wrong, since it prints
+a memory's whole recorded text.
+
+The id set is `Store.AnyMemoryIDsByIDPrefix`: every `memory_history.memory_id`
+UNION every `memories.id`, the whole store, no project predicate. Each half is
+load-bearing, and the first is the one the issue is about. A deleted memory has no
+row in `memories` — the `delete` history row **is** the tombstone and carries the
+text the memory held — so a set read from the live rows alone reports a deleted
+memory as never written, which is the exact false claim #720 removes. The live half
+is the easy miss in the other direction: a memory predating this table has NO
+history row, because `migrateV17` deliberately does not backfill, so a history-only
+set refuses a prefix of an id the store plainly holds. It is a `UNION` and not a
+concatenation for a third reason: the same id is in both tables as soon as a memory
+has any history, and a set listing it twice makes its own prefix **ambiguous** —
+the memory's own history would make it unnameable.
+
+The scope is the whole store, deliberately, and it is the reason this is `ResolveIn`
+rather than `Resolve` with a project. `memref.Resolve`'s project scoping exists
+because its caller is about to change the row it names. This caller changes
+nothing, and `ghost history` has no project operand: a full id has always reached
+any row in the store, so scoping a PREFIX to a project would make the two forms of
+one ref disagree about where a memory may be looked for. `ResolveIn` therefore
+takes the id set as an argument and its refusals name **no** project — printing one
+would be a claim about a scope the set never searched, and the kind of claim a
+reader acts on. The same store read is why `resolveIn` applies the prefix match
+itself rather than trusting the caller's set: `Resolve`'s query is already a prefix
+filter so re-filtering it is a no-op, and a caller that collected ids for another
+reason is then not obliged to have filtered them.
+
+Two arguments do not go through the refusal, and both are about what a full id
+means. One is a ref **at least as long** as a whole id (32 characters, what
+`hex(randomblob(16))` mints) that no id begins with: it cannot be a truncation, so
+the miss is about the id and `readHistoryView` reports it as it always has —
+"never written, or its history has been pruned" — rather than as a prefix of
+nothing. The other is `purge`, which takes the **whole id only** and refuses a
+prefix. It is the one place in Ghost that erases recorded text for good, where a
+mistyped argument is not a message but an unprintable memory; echoing the resolved
+full id would not make that safe, because the announcement and the transaction are
+one breath apart and a single-character slip in a pasted prefix is still a unique
+match. So the prefix is refused and the full id it names is printed, and the way
+through is `ghost history <prefix>`, which resolves the ref and shows the id. An id
+the store never held is a **miss**, not a prefix — which is also what re-running a
+successful purge looks like, since a purge removes the id from both tables.
+
 Three properties are deliberate:
 
 - **Each row is a version, not a diff.** It holds the content, category,

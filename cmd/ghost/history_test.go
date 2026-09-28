@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/memref"
 )
 
 func TestParseHistoryArgs(t *testing.T) {
@@ -383,6 +384,103 @@ func TestParseHistoryArgsPurge(t *testing.T) {
 				t.Errorf("parseHistoryArgs(%v) = %+v, want %+v", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRunHistoryPurgeTakesAFullIDOnly: a purge erases a memory's text for good,
+// and the argument that says which memory is the only thing standing between an
+// operator and a mistake nothing can undo. The read path takes the eight
+// characters a report prints (#720); this one does not, and the refusal says so
+// instead of reporting the memory as absent — which is what a prefix-shaped
+// argument used to be answered with, and it is false whenever the memory is
+// there.
+//
+// The confirmation is a whole id rather than an echoed one, deliberately. An
+// irreversible write that announces its target and proceeds in the same breath is
+// a warning nobody can act on: a single-character slip in a pasted prefix is
+// still a unique match, and there is no moment between the announcement and the
+// transaction in which to notice it was the wrong one. So the repair is the one
+// the read path exists for — `ghost history <prefix>` prints the full id it
+// resolved — and the full id goes in by hand.
+func TestRunHistoryPurgeTakesAFullIDOnly(t *testing.T) {
+	s, live, gone := refTestStore(t)
+	ctx := context.Background()
+	_ = live
+
+	// A prefix of a live memory, and of one already deleted: both are ids this
+	// store holds and neither may be purged by a prefix.
+	for _, tc := range []struct{ what, ref string }{
+		{"a live memory", memref.Short(refTestLiveID)},
+		{"an already deleted memory", memref.Short(gone)},
+	} {
+		t.Run("a prefix of "+tc.what, func(t *testing.T) {
+			err := purgeHistoryMemory(ctx, s, tc.ref)
+			if err == nil {
+				t.Fatal("a purge resolved a prefix")
+			}
+			if !strings.Contains(err.Error(), "whole memory id") {
+				t.Errorf("the refusal does not say a whole id is needed: %v", err)
+			}
+		})
+	}
+
+	// And nothing was erased by either refusal: the read that decides is a read,
+	// but the guarantee has to be that no text went with it.
+	if entries, err := s.MemoryHistory(ctx, gone, 0); err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	} else if len(entries) == 0 {
+		t.Error("a refused prefix purge erased the deleted memory's recorded text")
+	}
+	if rows, err := s.GetByIDs(ctx, []string{refTestLiveID}); err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	} else if len(rows) == 0 {
+		t.Error("a refused prefix purge deleted the live memory")
+	}
+}
+
+// TestRunHistoryPurgeReportsAnIdItNeverHeldAsAMiss: a full id the store does not
+// hold is a MISS, and the sentence says so. It is not a prefix — nothing begins with
+// it — and calling an absent id a prefix would be a false claim about a string the
+// caller never shortened. It is also what a re-run of a purge that already succeeded
+// looks like, because a purge removes the id from both tables, so this is the answer
+// an operator gets for running the same command twice.
+func TestRunHistoryPurgeReportsAnIdItNeverHeldAsAMiss(t *testing.T) {
+	s, _, _ := refTestStore(t)
+	ctx := context.Background()
+
+	const never = "0000000000000000000000000000000FFF"
+	err := purgeHistoryMemory(ctx, s, never)
+	if err == nil {
+		t.Fatal("a purge of an id the store never held reported success")
+	}
+	if !strings.Contains(err.Error(), "nothing to purge") {
+		t.Errorf("the refusal does not report a miss: %v", err)
+	}
+	if strings.Contains(err.Error(), "prefix") {
+		t.Errorf("the refusal calls an absent whole id a prefix: %v", err)
+	}
+}
+
+// TestRunHistoryPurgeErasesTheFullID: the full-id path is unchanged — the row and
+// its recorded text go in one transaction, and the report says how much text was
+// about to go. This is the regression guard for the asymmetry above: refusing a
+// prefix must not cost a full id the thing the command exists to do.
+func TestRunHistoryPurgeErasesTheFullID(t *testing.T) {
+	s, live, _ := refTestStore(t)
+	ctx := context.Background()
+
+	if err := purgeHistoryMemory(ctx, s, live); err != nil {
+		t.Fatalf("purgeHistoryMemory: %v", err)
+	}
+	if rows, err := s.GetByIDs(ctx, []string{live}); err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	} else if len(rows) != 0 {
+		t.Error("the purge left the live row")
+	}
+	if entries, err := s.MemoryHistory(ctx, live, 0); err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	} else if len(entries) != 0 {
+		t.Errorf("the purge left %d recorded version(s)", len(entries))
 	}
 }
 

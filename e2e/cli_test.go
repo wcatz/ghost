@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wcatz/ghost/internal/memref"
 )
 
 // cliCommand is one row of the subcommand table this suite exercises.
@@ -2230,6 +2232,47 @@ func TestCLIHistory(t *testing.T) {
 		}
 	})
 
+	t.Run("a ref a report printed resolves", func(t *testing.T) {
+		// The eight characters `ghost resolve --mark` and `ghost supersede
+		// --withdraw` print are what an operator has on screen, so pasting one
+		// here has to reach the same memory. This is the built binary, so it is
+		// also the only proof that the argument survives the whole command.
+		short := memref.Short(id)
+		byRef := s.mustRun("history", short)
+		mustContain(t, "history <8-char ref>", byRef.stdout, "production")
+		mustContain(t, "history <8-char ref>", byRef.stdout, id)
+
+		// A longer prefix resolves the same way.
+		mustContain(t, "history <16-char ref>", s.mustRun("history", id[:16]).stdout, "production")
+
+		// A prefix of nothing is a refusal, and it says the ref is a prefix no
+		// id starts with rather than reporting a memory that was never written.
+		missing := s.mustFail("history", "F0F0F0F0")
+		mustMatch(t, "a prefix no id starts with", missing.stdout+missing.stderr, `(?i)starting with|prefix`)
+
+		// Below the floor it is refused as too short, without listing the store's
+		// ids.
+		tooShort := s.mustFail("history", "F0F0F0")
+		mustMatch(t, "a too-short ref", tooShort.stdout+tooShort.stderr, "(?i)too short|prefix")
+
+		// A full id the store never held keeps its own answer: this is a report
+		// about the id, not an error about the argument.
+		never := "0000000000000000000000000000000FFF"
+		absent := s.mustRun("history", never)
+		mustContain(t, "a full id the store does not hold", absent.stdout, "never written")
+
+		// --json reports a refused ref in the one shape a script can branch on,
+		// and prints no entry for it.
+		refused := s.mustFail("history", "F0F0F0F0", "--json")
+		entries := parseJSONLines(t, writeTemp(t, s, "refused.jsonl", refused.stdout))
+		if len(entries) != 1 {
+			t.Fatalf("a refused ref printed %d JSON line(s), want the one error object:\n%s", len(entries), refused.stdout)
+		}
+		if _, ok := entries[0]["error"]; !ok {
+			t.Errorf("the refused --json run did not print an error object: %v", entries[0])
+		}
+	})
+
 	t.Run("a deleted memory's history outlives it, until purge", func(t *testing.T) {
 		deleted := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
 			"project_id": e2eProject,
@@ -2241,6 +2284,25 @@ func TestCLIHistory(t *testing.T) {
 		})
 		survivor := s.mustRun("history", deleted)
 		mustContain(t, "history of a deleted memory", survivor.stdout, "whose text is recorded")
+
+		// And by the eight characters a report prints, which is the case a
+		// deleted memory is most often asked about: the row is gone from
+		// `memories`, so an id set read from the live rows alone would report it
+		// as never written.
+		byRef := s.mustRun("history", memref.Short(deleted))
+		mustContain(t, "history of a deleted memory by ref", byRef.stdout, "whose text is recorded")
+		mustContain(t, "history of a deleted memory by ref", byRef.stdout, "no longer live")
+
+		// purge takes the WHOLE id and refuses a prefix, because it erases
+		// recorded text for good. The refusal names the full id to use, and
+		// nothing was erased by it — which is the property that matters, so it
+		// is checked against the database and not only against the message.
+		refused := s.mustFail("history", "purge", memref.Short(deleted))
+		mustMatch(t, "purge by prefix", refused.stderr+refused.stdout, "(?i)whole memory id")
+		mustContain(t, "purge by prefix names the full id", refused.stderr+refused.stdout, deleted)
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, deleted); n == 0 {
+			t.Fatal("a refused prefix purge erased the recorded text anyway")
+		}
 
 		// purge erases the row AND every recorded version, and says how much
 		// text it is about to destroy.

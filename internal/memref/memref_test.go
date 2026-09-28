@@ -239,6 +239,161 @@ func TestResolveAsksTheStoreAboutTheGivenProject(t *testing.T) {
 	}
 }
 
+// ResolveIn takes the id set as an argument rather than reading it, so a caller
+// whose ids are NOT "this project's live memories" gets these rules instead of a
+// second copy of them. `ghost history` (#720) is that caller: its set is every id
+// memory_history records, deleted ones included, plus every id still live — a set
+// that names a memory the change paths must not reach, and a set the change
+// paths' project-scoped query cannot produce.
+//
+// The rules are unchanged, and these tests hold each of them over this entry
+// point, because a shared rule reached by two functions is still two
+// implementations of it: the floor, the byte-exact and fold precedence, the
+// refusal to choose between two matches, and the refusal to print a match list
+// for a ref below the floor.
+
+// TestResolveInAcceptsPrefixesAndFullIDs: the report form resolves here exactly
+// as it does on the project-scoped path, which is the point — an operator pasting
+// eight characters of an id out of a report has the same eight characters whichever
+// command they carry them to.
+func TestResolveInAcceptsPrefixesAndFullIDs(t *testing.T) {
+	ids := hexIDs("a1b2c3d4", 1)
+	for _, ref := range []string{ids[0], ids[0][:8], ids[0][:16], strings.ToUpper(ids[0][:8]), strings.ToUpper(ids[0])} {
+		t.Run(ref, func(t *testing.T) {
+			got, err := ResolveIn(ids, "id", ref)
+			if err != nil {
+				t.Fatalf("ResolveIn(%q): %v", ref, err)
+			}
+			if got != ids[0] {
+				t.Errorf("ResolveIn(%q) = %q, want %q", ref, got, ids[0])
+			}
+		})
+	}
+}
+
+// TestResolveInRefusesAnAmbiguousPrefixWithoutNamingAProject: two matches is a
+// refusal, and it says how to choose. It does NOT name a project, because the set
+// it searched is not confined to one — printing a project here would be a claim
+// about the scope that is false for every caller of this entry point, and it is the
+// kind of false claim a reader acts on: they would go looking in that project for a
+// memory the set says is ambiguous.
+func TestResolveInRefusesAnAmbiguousPrefixWithoutNamingAProject(t *testing.T) {
+	ids := hexIDs("aaaaaaaa", 2)
+
+	_, err := ResolveIn(ids, "id", "aaaaaaaa")
+	if err == nil {
+		t.Fatal("ResolveIn accepted an ambiguous prefix")
+	}
+	for _, want := range append(append([]string{}, ids...), "more") {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not contain %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "project") {
+		t.Errorf("the refusal names a project it did not search: %v", err)
+	}
+}
+
+// TestResolveInRefusesAShortRefWithoutListingTheSet: the same floor, and the same
+// deliberate absence of a match list. This is the refusal that must not enumerate
+// — a caller's set here can be the whole store rather than one project, which is
+// a larger thing to dump, not a smaller one.
+func TestResolveInRefusesAShortRefWithoutListingTheSet(t *testing.T) {
+	ids := hexIDs("a", 12)
+
+	_, err := ResolveIn(ids, "id", "a")
+	if err == nil {
+		t.Fatal("ResolveIn accepted a one-character ref")
+	}
+	if !strings.Contains(err.Error(), "too short to be a prefix") {
+		t.Errorf("the refusal does not say the ref is too short: %v", err)
+	}
+	for _, id := range ids {
+		if strings.Contains(err.Error(), id) {
+			t.Errorf("the refusal for a too-short ref listed %s, turning it into a dump of the id set", id)
+		}
+	}
+}
+
+// TestResolveInCountsRefLengthInCharactersNotBytes: the floor is a rune count
+// because `ghost import` writes an artifact's ids verbatim, and a byte-counted
+// floor accepts four CJK characters as a prefix and rejects eight of them.
+func TestResolveInCountsRefLengthInCharactersNotBytes(t *testing.T) {
+	cjk := "日本語のメモ本文です" // 9 runes
+	ids := []string{cjk}
+
+	if got, err := ResolveIn(ids, "id", cjk); err != nil || got != cjk {
+		t.Fatalf("ResolveIn on a full multi-byte id = %q, %v; want the id itself", got, err)
+	}
+	prefix := string([]rune(cjk)[:MinRefLen])
+	if got, err := ResolveIn(ids, "id", prefix); err != nil || got != cjk {
+		t.Errorf("ResolveIn on the eight-rune prefix %q = %q, %v; want %q", prefix, got, err, cjk)
+	}
+	// Three CJK characters are nine BYTES and three characters. A byte-counted
+	// floor clears an 8-byte floor with a third of an identity, so this has to be
+	// refused as a prefix — and by the floor, not by anything about the id.
+	tooShort := string([]rune(cjk)[:3])
+	_, err := ResolveIn(ids, "id", tooShort)
+	if err == nil {
+		t.Fatalf("ResolveIn accepted %q (%d bytes, %d characters) as a prefix", tooShort, len(tooShort), utf8.RuneCountInString(tooShort))
+	}
+	if !strings.Contains(err.Error(), "too short to be a prefix") {
+		t.Errorf("a three-character ref was refused for the wrong reason: %v", err)
+	}
+}
+
+// TestResolveInRefusesAThirdCasingOfTwoIds: ids differing only in letter case are
+// each reachable by their own stored spelling and a third spelling reaches
+// neither, so the refusal names the two spellings rather than a remedy.
+func TestResolveInRefusesAThirdCasingOfTwoIds(t *testing.T) {
+	lower := "abcdef01" + strings.Repeat("0", 24)
+	upper := "ABCDEF01" + strings.Repeat("0", 24)
+	ids := []string{lower, upper}
+
+	_, err := ResolveIn(ids, "id", "Abcdef01"+strings.Repeat("0", 24))
+	if err == nil {
+		t.Fatal("ResolveIn accepted a spelling that reaches neither stored id")
+	}
+	for _, want := range []string{lower, upper} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not list %s: %v", want, err)
+		}
+	}
+	for _, spelling := range []string{lower, upper} {
+		if got, err := ResolveIn(ids, "id", spelling); err != nil || got != spelling {
+			t.Errorf("ResolveIn(%q) = %q, %v; want %q", spelling, got, err, spelling)
+		}
+	}
+}
+
+// TestResolveInNamesWhichRefFailed: a caller with several refs on one command line
+// has to be able to say which of them was wrong, which is what the which argument
+// is for — and it reaches this entry point's refusals too, not only Resolve's.
+func TestResolveInNamesWhichRefFailed(t *testing.T) {
+	_, err := ResolveIn(hexIDs("aaaaaaaa", 1), "source", "ffffffffffffffff")
+	if err == nil {
+		t.Fatal("ResolveIn accepted a ref naming nothing")
+	}
+	if !strings.Contains(err.Error(), "source") {
+		t.Errorf("the refusal does not name the operand: %v", err)
+	}
+}
+
+// TestResolveInRefusesAnEmptySetAndAnEmptyRef: both are "nothing was named", and
+// the empty ref has to be distinguishable from a ref naming a row nobody holds.
+func TestResolveInRefusesAnEmptySetAndAnEmptyRef(t *testing.T) {
+	if _, err := ResolveIn(nil, "id", "a1b2c3d4"); err == nil {
+		t.Error("ResolveIn accepted a ref against an empty id set")
+	}
+	_, err := ResolveIn(hexIDs("aaaaaaaa", 1), "id", "")
+	if err == nil {
+		t.Fatal("ResolveIn accepted an empty ref")
+	}
+	if !strings.Contains(err.Error(), "too short") {
+		t.Errorf("the refusal does not say why: %v", err)
+	}
+}
+
 // TestShortMeasuresEightCharactersNotEightBytes: the report form has to be a ref
 // the query can accept, and on a multi-byte id `id[:8]` is neither — it is
 // invalid UTF-8 in a report line and a prefix no query matches.
