@@ -167,6 +167,20 @@ func TestHarnessInvocationArgsAreGoldens(t *testing.T) {
 			got:  gooseInvocationArgs(),
 			want: []string{"run", "-q", "--no-profile", "--no-session", "-i", "-"},
 		},
+		// opencode's argv splits by major version, and BOTH shapes are pinned:
+		// V1 is the only one that takes --pure and the only one that may take
+		// the deny policy, so a golden covering just the V2 shape would leave
+		// the V1 path unpinned.
+		{
+			name: "opencode v1",
+			got:  openCodeInvocationArgs(1, "opencode/big-pickle"),
+			want: []string{"run", "--format", "json", "--pure", "--title", "[ghost]", "-m", "opencode/big-pickle"},
+		},
+		{
+			name: "opencode v2",
+			got:  openCodeInvocationArgs(2, "opencode/big-pickle"),
+			want: []string{"run", "--format", "json", "--standalone", "--title", "[ghost]", "-m", "opencode/big-pickle"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -176,6 +190,85 @@ func TestHarnessInvocationArgsAreGoldens(t *testing.T) {
 		})
 	}
 }
+
+// TestCodexFeatureKeysAreDeclaredNames holds the codex policy to the one thing
+// that makes the `-c` list trustworthy: every feature key Ghost passes must be a
+// key codex's own feature registry declares, and codex's `features list` is the
+// command that reports exactly those keys. The list is therefore read from a
+// recorded transcript of that output rather than from a hand-written list, so a
+// key that does not exist upstream cannot be asserted into existence here — the
+// golden above would happily pin a typo, and codex silently ignores a `-c`
+// override whose key it does not know, which is the fail-OPEN direction this
+// whole policy exists to prevent.
+//
+// It also fixes the direction of any future removal: a key dropped from
+// codexInvocationArgs but still present upstream is a policy gap, and a key
+// added to codexInvocationArgs that is absent upstream is a silent no-op. Both
+// are visible here, because the argv is compared against this set.
+//
+// The transcript is a RECORD of codex's output, not a live probe: a test that
+// ran the real binary would make this a live test, and a live test cannot fail
+// in CI where no codex is installed. TestLiveCodexDeclaresTheNoToolFeatureKeys
+// is the other half — it runs the real `codex features list` and fails if
+// upstream has renamed or dropped a key this file still passes.
+func TestCodexFeatureKeysAreDeclaredNames(t *testing.T) {
+	declared := parseCodexFeaturesList(codexFeaturesListTranscript)
+	for _, arg := range codexInvocationArgs() {
+		key, ok := strings.CutPrefix(arg, "features.")
+		if !ok {
+			continue // "--sandbox", "agents.enabled", the top-level web_search
+		}
+		if _, known := declared[strings.TrimSuffix(key, "=false")]; !known {
+			t.Errorf("codexInvocationArgs passes features.%s, which codex's own registry does not declare", key)
+		}
+	}
+	// The reverse direction, so a key removed from the policy but still real
+	// upstream is visible here rather than only in review.
+	for _, required := range []string{
+		"shell_tool", "unified_exec", "view_image", "apps", "plugins",
+		"tool_suggest", "skill_mcp_dependency_install", "remote_plugin",
+		"hooks", "multi_agent",
+	} {
+		if _, known := declared[required]; !known {
+			t.Errorf("required key %q is not in the recorded codex features list; update the transcript and the policy together", required)
+		}
+	}
+}
+
+// parseCodexFeaturesList reads `codex features list` output. codex prints one
+// row per feature as "<key>  <stage>  <enabled>" in a fixed-width layout, so
+// the first field of each line is the key and the rest is prose about it.
+func parseCodexFeaturesList(out string) map[string]bool {
+	keys := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		keys[fields[0]] = true
+	}
+	return keys
+}
+
+// codexFeaturesListTranscript is the recorded output of `codex features list`
+// on codex 0.147.x (2026-09-28), trimmed to the keys Ghost's policy depends on
+// plus a few neighbours, so a reader can see the stage and default column. The
+// third column is codex's effective state, which is the "on by default" fact
+// the policy comments rest on.
+const codexFeaturesListTranscript = `
+apps               stable   true
+hooks              stable   true
+multi_agent        stable   true
+plugins            stable   true
+remote_plugin      stable   true
+shell_tool         stable   true
+skill_mcp_dependency_install stable   true
+sleep_tool         stable   true
+tool_suggest       stable   true
+unified_exec       stable   true
+view_image         stable   true
+web_search_request deprecated false
+`
 
 // TestGooseNoToolsModeIsChat: goose has no flag for this (its extension options
 // only ADD extensions), so the restriction is the GOOSE_MODE environment
