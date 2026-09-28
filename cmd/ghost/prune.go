@@ -216,6 +216,45 @@ func printPrune(w io.Writer, v pruneView) error {
 	return nil
 }
 
+// renderApplyFailure prints what a failed apply actually landed, when anything
+// did. PruneSessionMemories returns its report together with the error so a
+// half-finished prune is visible, and the handler renders it before the non-zero
+// exit: a failure that removed rows in earlier batches and then hit a busy
+// database would otherwise tell the operator nothing but the error, leaving the
+// destruction visible only as tombstones nobody knew to look for.
+//
+// The report is filtered to the rows that LANDED. The candidate list is the
+// full selection, and the headline counts candidates, so printing the raw
+// report would headline a removal count no one actually performed — the failed
+// batch's rows are named without ever being removed.
+//
+// Rendered only when something landed: an apply that failed on its first batch
+// destroyed nothing, and the error line already says the run failed.
+func renderApplyFailure(w io.Writer, report memory.PruneReport, scope string) error {
+	if report.Removed == 0 {
+		return nil
+	}
+	landed := make(map[string]bool, len(report.RemovedIDs))
+	for _, id := range report.RemovedIDs {
+		landed[id] = true
+	}
+	kept := make([]memory.PruneCandidate, 0, report.Removed)
+	for _, c := range report.Candidates {
+		if landed[c.ID] {
+			kept = append(kept, c)
+		}
+	}
+	return printPrune(w, pruneView{
+		Applied:    true,
+		Grace:      report.Grace,
+		Now:        report.Now,
+		Scope:      scope,
+		Candidates: kept,
+		Removed:    report.Removed,
+		RemovedIDs: report.RemovedIDs,
+	})
+}
+
 // runPrune implements `ghost prune`: open the store, resolve the project scope,
 // and run the one prune pass. It is a thin shell over the store's own
 // PruneSessionMemories so the dry run and the apply are the same transaction on
@@ -280,6 +319,12 @@ func runPrune(args []string) {
 		ProjectID: scope,
 	})
 	if err != nil {
+		// The store returns its report alongside the error so a half-finished
+		// apply is visible; print what actually committed before the non-zero
+		// exit (see renderApplyFailure).
+		if rerr := renderApplyFailure(os.Stdout, report, opts.Project); rerr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", rerr)
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

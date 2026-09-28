@@ -82,6 +82,54 @@ func TestParsePruneArgsRefusesWhatItDoesNotUnderstand(t *testing.T) {
 	}
 }
 
+// TestRenderApplyFailureShowsWhatActuallyLanded: PruneSessionMemories returns
+// its report alongside the error so a half-finished prune is visible, and the
+// handler must print the batches that committed before it exits non-zero — a
+// failure that removed rows in two batches and then hit a busy database would
+// otherwise tell the operator nothing but the error, leaving the destruction
+// visible only as tombstones nobody knew to look for. The report is filtered to
+// the rows that LANDED: the candidate list is the full selection, and the
+// headline counts candidates, so printing the raw report would headline a
+// removal count no one actually performed.
+func TestRenderApplyFailureShowsWhatActuallyLanded(t *testing.T) {
+	report := memory.PruneReport{
+		Applied: true,
+		Grace:   168 * time.Hour,
+		Candidates: []memory.PruneCandidate{
+			{ID: "row-1", ProjectID: "p", Category: "fact", Content: "the first batch", Retention: memory.RetentionSession, ExpiresAt: "2026-09-01 10:00:00", ActivityAt: "2026-08-20 09:00:00"},
+			{ID: "row-2", ProjectID: "p", Category: "fact", Content: "the second batch", Retention: memory.RetentionSession, ExpiresAt: "2026-09-01 10:00:00", ActivityAt: "2026-08-20 09:00:00"},
+			{ID: "row-3", ProjectID: "p", Category: "fact", Content: "the batch that never committed", Retention: memory.RetentionSession, ExpiresAt: "2026-09-01 10:00:00", ActivityAt: "2026-08-20 09:00:00"},
+		},
+		Removed:    2,
+		RemovedIDs: []string{"row-1", "row-2"},
+	}
+	var out bytes.Buffer
+	if err := renderApplyFailure(&out, report, "ghost"); err != nil {
+		t.Fatalf("renderApplyFailure: %v", err)
+	}
+	for _, want := range []string{"2 session memories removed", "row-1", "row-2", "the first batch"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the failed apply does not report %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "row-3") || strings.Contains(out.String(), "the batch that never committed") {
+		t.Errorf("the failed apply names a row the failed batch never removed:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "3 session memories") {
+		t.Errorf("the failed apply headlines the candidate count, not the rows that landed:\n%s", out.String())
+	}
+
+	// Nothing landed: the failure changed nothing in the store, and the error
+	// line already says the run failed — an empty render keeps that path clean.
+	out.Reset()
+	if err := renderApplyFailure(&out, memory.PruneReport{Applied: true}, "ghost"); err != nil {
+		t.Fatalf("renderApplyFailure(empty): %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a failed apply that landed nothing printed: %q", out.String())
+	}
+}
+
 // TestPrintPruneSaysWhichRunItWas: the dry run and the apply print the same rows,
 // so the headline is the only thing that tells a reader whether anything was
 // destroyed — and the dry run's closing line has to name the flag that would do
