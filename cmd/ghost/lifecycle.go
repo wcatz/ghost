@@ -436,8 +436,12 @@ const reductionWarnMinInput = 6
 // one thing a report meant to inform an --apply decision must not do.
 //
 // It is a function taking a writer rather than an inline loop because runReflect
-// exits the process, so the loop is not reachable from a test.
-func reportDisposedClaims(w io.Writer, result reflection.ReflectionResult) {
+// exits the process, so the loop is not reachable from a test. The limit is the
+// caller's, so `ghost reflect --full` reaches the claim's text as well as the
+// proposal list's, and the claim's text goes through displayClaim for the same
+// reason the proposal list's does: it is derived from stored text and can carry
+// a value a pre-guard row held.
+func reportDisposedClaims(w io.Writer, limit int, result reflection.ReflectionResult) {
 	if len(result.Replacements) == 0 {
 		return
 	}
@@ -454,9 +458,9 @@ func reportDisposedClaims(w io.Writer, result reflection.ReflectionResult) {
 			_, _ = fmt.Fprintln(w, "  Disposed of (model's claim): (no replacement text recorded)")
 		case !inResult[r.Text]:
 			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): its replacement is NOT in this result — %s\n",
-				truncateForDisplay(r.Text, 80))
+				displayClaim(r.Text, limit))
 		default:
-			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): replaced by %s\n", truncateForDisplay(r.Text, 80))
+			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): replaced by %s\n", displayClaim(r.Text, limit))
 		}
 	}
 }
@@ -553,6 +557,12 @@ type reflectArgs struct {
 	allowDrops     bool
 	skipUnchanged  bool
 	promoteGlobals bool
+	// full asks for the whole text of every memory the run reports, instead of
+	// the compact preview (#684). It is a display flag and nothing else: the
+	// stored text, the content cap and the operations are identical either way,
+	// and it is deliberately not on the unattended lifecycle path, whose stdout
+	// is an append-only log a longer report would fill for nobody to read.
+	full bool
 }
 
 // parseReflectArgs parses `ghost reflect`'s arguments (everything after the
@@ -597,6 +607,8 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 			p.allowDrops = true
 		case args[i] == "--skip-unchanged":
 			p.skipUnchanged = true
+		case args[i] == "--full":
+			p.full = true
 		case args[i] == "--promote-globals":
 			p.promoteGlobals = true
 		case args[i] == "--source" && i+1 < len(args):
@@ -609,6 +621,26 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 		}
 	}
 	return p, nil
+}
+
+// reflectProposalLimit is how many bytes of a memory `ghost reflect` prints by
+// default. A proposal list is a summary — 120 is a screenful of context per
+// memory and a large project has hundreds — and the section that accounts for
+// every input id is where a reader looks for detail when a line says something
+// surprising. `ghost reflect --full` removes the cut everywhere at once, so the
+// compact default and the whole text are one flag apart rather than two modes.
+const reflectProposalLimit = 120
+
+// reflectTextLimit resolves --full against one print site's compact default: no
+// limit at all under --full, and the site's own default otherwise. It is a
+// function rather than a bare `if full` at each site so the flag cannot reach
+// some of them and not others, which is the failure mode a display flag spread
+// across five call sites has.
+func reflectTextLimit(full bool, compact int) int {
+	if full {
+		return 0
+	}
+	return compact
 }
 
 // reflectUsage is the help for `ghost reflect`: stderr when the project comes
@@ -626,6 +658,9 @@ Flags:
   --promote-globals Write cross-project candidates to _global (default: keep them project-scoped)
   --skip-unchanged Skip when the consolidatable set is unchanged since the last
                    applied consolidation (used by the auto lifecycle)
+  --full           Print every reported memory whole, instead of truncating it
+                   to a compact preview. Display only: the result and the write
+                   are identical either way.
   --source string CLI harness for the auto tier: claude-code, opencode, codex,
                    or goose. Defaults to the calling harness (detected from
                    the environment and process ancestry); an undetectable
@@ -942,7 +977,7 @@ func runReflect() {
 	if len(projectMems) > 0 {
 		fmt.Printf("  Project-scoped (%d):\n", len(projectMems))
 		for _, m := range projectMems {
-			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, 120))
+			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, reflectTextLimit(parsed.full, reflectProposalLimit)))
 		}
 	}
 	if len(globalMems) > 0 {
@@ -952,7 +987,7 @@ func runReflect() {
 			fmt.Printf("  Cross-project (%d) — kept project-scoped unless --promote-globals:\n", len(globalMems))
 		}
 		for _, m := range globalMems {
-			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, 120))
+			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, reflectTextLimit(parsed.full, reflectProposalLimit)))
 		}
 	}
 	fmt.Println()
@@ -979,7 +1014,7 @@ func runReflect() {
 	if len(guardedDrops) > 0 {
 		fmt.Fprintf(os.Stderr, "WARNING: %d memory(ies) had no surviving merge target:\n", len(guardedDrops))
 		for _, d := range guardedDrops {
-			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, displayProposal(d.Content, d.Category, 100))
+			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, displayProposal(d.Content, d.Category, reflectTextLimit(parsed.full, 100)))
 		}
 		if allowDrops {
 			fmt.Fprintf(os.Stderr, "  --allow-drops set: these %d memories will be DELETED\n", len(guardedDrops))
@@ -999,9 +1034,24 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-byte cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
 	}
 
+	// What became of every input id (#684). Printed here, after the drop guard has
+	// run and the cap has been applied and BEFORE the write, so a dry run and an
+	// apply read the same and the dry run previews this section exactly. It is
+	// the part of the report a person is actually auditing: the result list
+	// above says what the corpus became, and this says what became of the rows
+	// the run was given, which is the only place a merge is distinguishable from
+	// a loss.
+	reportInputAccounting(os.Stdout, reflectRun{
+		input:      input,
+		result:     result,
+		guarded:    guardedDrops,
+		allowDrops: allowDrops,
+		full:       parsed.full,
+	})
+
 	// What the response claimed it disposed of, and whether the claimed
 	// replacement survived into the result. See reportDisposedClaims.
-	reportDisposedClaims(os.Stdout, result)
+	reportDisposedClaims(os.Stdout, reflectTextLimit(parsed.full, 80), result)
 
 	// The >50% reduction warning. On the unattended lifecycle path this is the
 	// only report of a hard compression, and it goes to the stderr of a process
@@ -1260,29 +1310,32 @@ func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provi
 // the subcommand word). Hand-rolled, matching the historical loop exactly:
 // value flags accept both "--flag value" and "--flag=value", positionals set
 // the project (last one wins — --project assigns the same way), a
-// non-numeric --threshold keeps the default, and any other flag is an
-// unknown-flag error (which the caller prints and exits on). The project may
-// come from --project, which takes the NEXT argument verbatim — a
-// dash-leading name such as -x or --odd is a name, not a flag — so the
-// lifecycle coordinator can emit one uniform form for every project; a
-// valueless --project is an error. Extracted from runSupersede so the argv
-// contract is unit-testable without os.Exit.
-func parseSupersedeArgs(args []string) (project, source string, apply bool, threshold float32, err error) {
+// non-numeric --threshold keeps the default, --reassess selects the repair
+// pass over the edges already in the graph (issue #686), and any other flag is
+// an unknown-flag error (which the caller prints and exits on). The project may
+// come from --project, which takes the NEXT argument verbatim — a dash-leading
+// name such as -x or --odd is a name, not a flag — so the lifecycle coordinator
+// can emit one uniform form for every project; a valueless --project is an
+// error. Extracted from runSupersede so the argv contract is unit-testable
+// without os.Exit.
+func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, err error) {
 	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--apply":
 			apply = true
+		case args[i] == "--reassess":
+			reassess = true
 		case args[i] == "--project":
 			if i+1 >= len(args) {
-				return "", "", false, 0, errors.New("--project requires a value")
+				return "", "", false, false, 0, errors.New("--project requires a value")
 			}
 			project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
 			project = strings.TrimPrefix(args[i], "--project=")
 			if project == "" {
-				return "", "", false, 0, errors.New("--project requires a value")
+				return "", "", false, false, 0, errors.New("--project requires a value")
 			}
 		case args[i] == "--threshold" && i+1 < len(args):
 			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
@@ -1301,10 +1354,10 @@ func parseSupersedeArgs(args []string) (project, source string, apply bool, thre
 		case !strings.HasPrefix(args[i], "-"):
 			project = args[i]
 		default:
-			return "", "", false, 0, fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, 0, fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
-	return project, source, apply, threshold, nil
+	return project, source, apply, reassess, threshold, nil
 }
 
 // supersedeUsage is the help for `ghost supersede`: stderr when the project
@@ -1314,6 +1367,10 @@ const supersedeUsage = `Usage: ghost supersede <project> [flags]
 
 Flags:
   --apply             Write the supersedes/causes links (default is dry-run/preview)
+  --reassess          Re-judge the supersedes links ALREADY in the graph and, with
+                      --apply, withdraw the ones that no longer hold. This is how a
+                      wrong supersession is repaired. --threshold is not used: there
+                      are no candidates to select.
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
@@ -1323,24 +1380,124 @@ Flags:
                       takes the next argument verbatim, so dash-prefixed names work.
 
 Classifies each candidate as supersedes, causes, reversed, or neither. A
-reversed verdict — the older note is the current one and the newer note restates
-an obsolete claim — is refused rather than written, because a supersedes link
-only ever points from the newer note to the older one. Runs through the
-configured CLI harness of the calling session (--source overrides; otherwise
-detected from the environment and process ancestry — an undetectable caller is
-an error, never a fallback to a different harness). The harness owns its
-authentication and billing.
+supersedes answer has to name the older note's claim that no longer holds, and
+one that cannot is neither: a supersedes link demotes its target in ranking and
+marks it resolved, so an edge between two notes that are both still true takes a
+live memory out of every later session. A reversed verdict — the older note is
+the current one and the newer note restates an obsolete claim — is refused
+rather than written, because a supersedes link only ever points from the newer
+note to the older one. Runs through the configured CLI harness of the calling
+session (--source overrides; otherwise detected from the environment and process
+ancestry — an undetectable caller is an error, never a fallback to a different
+harness). The harness owns its authentication and billing.
+
+Withdrawing an edge (--reassess --apply) writes the unsupersede history row and
+leaves the resolution it may have caused in place: follow it with
+"ghost resolve <project> --reassess" to clear a resolved_at that only a
+withdrawn edge justified.
 `
+
+// supersedeReassessReport renders the --reassess result: the per-outcome counts,
+// then one line per edge the pass withdrew or would withdraw. The list is the
+// point of the pass — a repair whose edges cannot be read is a repair nobody
+// can decide about — and each line names the rule that withdrew the edge, which
+// is what separates a wrong edge from a genuinely obsolete one.
+//
+// The count follows resolve's repair report: a dry run reports what the pass
+// would do (the list it is about to print) and --apply reports what it did.
+// Printing ReassessResult.Withdrawn in a dry run would put "would withdraw 0"
+// above a list of three edges, because that field counts only invalidations that
+// actually landed.
+func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls int) string {
+	verb := "would withdraw"
+	causesVerb := "would sweep"
+	count := len(withdrawn)
+	if apply {
+		verb = "withdrew"
+		causesVerb = "swept"
+		count = res.Withdrawn
+	}
+	var b strings.Builder
+	sweptNote := ""
+	if res.CausesSweepFailed > 0 {
+		sweptNote = fmt.Sprintf(", %d causes sweep(s) FAILED (unknown)", res.CausesSweepFailed)
+	}
+	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN, %s %d, %s %d causes edge(s)%s (%d classify call(s))\n",
+		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
+		res.Unclassified, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls)
+	short := func(id string) string {
+		if len(id) > 8 {
+			return id[:8]
+		}
+		return id
+	}
+	for _, w := range withdrawn {
+		// Three markers, because under --apply a row can be neither of the two
+		// the other modes use: a concurrent pass withdrew the supersedes edge
+		// first, and this run's own sweep may still have taken the 'causes' one.
+		// Calling that "would withdraw" would claim a deletion that did not
+		// happen and hide one that did.
+		marker := "would withdraw"
+		switch {
+		case w.Written:
+			marker = "withdrew   "
+		case apply:
+			marker = "already gone"
+		}
+		// A vetoed row was settled with no harness call, and a false veto here
+		// deletes a correct edge the ordinary pass will not re-create, so the
+		// line says which of the two decided it rather than leaving the reader
+		// to infer it from the reason's wording.
+		by := "classifier"
+		if w.Vetoed {
+			by = "veto, no harness call"
+		}
+		// The sweep removes a second graph row, so a row that has one says so:
+		// an operator applying this is deciding about that deletion too, and on
+		// the veto rows it is the only deletion no model adjudicated. A sweep
+		// that ERRORED says "unknown" rather than a count, because the count is
+		// not knowable after a failed write and a 0 would read as "nothing else
+		// was deleted".
+		swept := ""
+		switch {
+		case w.SweepFailed:
+			swept = "  [causes sweep FAILED — unknown]"
+		case w.CausesSwept > 0:
+			swept = fmt.Sprintf("  [+%d causes edge]", w.CausesSwept)
+		}
+		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]%s  %s\n", marker, short(w.NewerID), short(w.OlderID), by, swept, w.Reason)
+	}
+	if !apply && len(withdrawn) > 0 {
+		b.WriteString("\nRe-run with --apply to withdraw these edges.")
+	}
+	return b.String()
+}
+
+// supersedeReport renders the pass's per-outcome report: the one-line summary
+// followed by the deterministic veto's count. A pass that declined work it did
+// not do and printed the same totals as a pass that found nothing to do reads
+// as "nothing was skipped", so the veto is on the report (#686) — and it is
+// printed by the one call below, so the report and the pass cannot drift.
+func supersedeReport(projectName string, res supersede.Result, verb string, calls int) string {
+	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s), %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, calls, res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	if res.Vetoed == 0 {
+		return out
+	}
+	return out + fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
+}
 
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
 // half of staleness-aware ranking. It proposes newer→older 'supersedes' links
-// over the project's live memories (cosine-similar candidates, CLI-harness
-// confirmed) and, with --apply, writes them. Dry-run by default. Re-runnable:
-// it self-heals after `ghost reflect` cascade-deletes links. Consumed by
-// search only when SupersedeDemote is set. A reversed verdict is reported and
-// refused, never written (#641). See docs/benchmarks.md Phase 3.
+// over the project's live memories (cosine-similar candidates, a deterministic
+// imperative veto, then CLI-harness confirmation) and, with --apply, writes
+// them. Dry-run by default. Re-runnable: it self-heals after `ghost reflect`
+// cascade-deletes links. Consumed by search only when SupersedeDemote is set. A
+// reversed verdict is reported and refused, never written (#641); a pair whose
+// older note states a rule the newer note never retires is vetoed for free
+// (#686). See docs/benchmarks.md Phase 3.
 func runSupersede() {
-	projectName, source, apply, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
+	projectName, source, apply, reassess, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
 		os.Exit(1)
@@ -1369,6 +1526,21 @@ func runSupersede() {
 	}
 	cls := supersede.NewRelationClassifier(provider)
 	cls.SetLogger(logger)
+
+	if reassess {
+		res, withdrawn, err := supersede.Reassess(ctx, store, cls, projectID, apply, logger)
+		// The report is printed before the error is raised, and the non-zero
+		// exit stays: each invalidation is its own transaction, so a failure on
+		// the Nth edge leaves N-1 already withdrawn and unreachable by a later
+		// pass. A repair that partly happened has to be visible as such.
+		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls()))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -1385,8 +1557,7 @@ func runSupersede() {
 		}
 		return id
 	}
-	fmt.Printf("%s: %d candidate pairs in %d classify call(s), %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
-		projectName, res.Candidates, cls.Calls(), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls()))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}

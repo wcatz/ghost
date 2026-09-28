@@ -304,6 +304,27 @@ func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string, polic
 // auth.json (never the user's config, plugins, or MCP definitions) when no
 // OPENCODE_API_KEY is supplied; the credential file is then reachable under the
 // invocation-owned data root without reopening the global config tree.
+//
+// The data root is what keeps a lifecycle run out of the user's session list
+// (#588). `opencode run` has no flag to suppress or skip saving a session, so
+// the store's location is the only control: OpenCode resolves its session
+// database from XDG_DATA_HOME (verified against v2.0.15 with `opencode debug
+// paths`, which reports data, db, log and repos under it, and re-checked by
+// TestLiveOpenCodeDebugPathsHonourScratchRoot), so pointing that at the
+// invocation-owned dir is what confines the titled "[ghost]" run to scratch.
+// V2 additionally needs --standalone for this to hold, because without it `run`
+// attaches to the user's shared background service and the SERVER, holding the
+// user's own data dir, is what creates the session.
+//
+// No `opencode session delete` follows a run, because there is nothing left to
+// delete: the store lives in the per-invocation directory whose deferred cleanup
+// removes it, so a session cannot outlive the call that created it (pinned by
+// TestOpenCodeClient_SessionStoreDiesWithTheInvocation). Deleting it first would
+// cost a second OpenCode process per harness call — Ghost spawns one per
+// consolidation, resolve candidate and supersede pair, hundreds per lifecycle —
+// to remove a row from a directory about to be deleted wholesale. The
+// pre-isolation backlog is a different matter and has its own command: `ghost
+// opencode cleanup-sessions` (internal/ai/opencode_cleanup.go).
 func configureOpenCodeIsolation(cmd *exec.Cmd, policy string) error {
 	if cmd.Dir == "" {
 		return fmt.Errorf("opencode scratch directory is empty")

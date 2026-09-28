@@ -71,7 +71,7 @@ func TestSessionContextDoesNotClaimReflectionGlobalsAreYours(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := formatSessionContext(
-				"p1", "ghost", nil, "", nil, nil, 1, 0, true,
+				"p1", "ghost", nil, nil, "", nil, nil, 1, 0, true,
 				tc.globals, len(tc.globals), true,
 			)
 
@@ -93,7 +93,7 @@ func TestSessionContextDoesNotClaimReflectionGlobalsAreYours(t *testing.T) {
 // row is global by construction, so it carries the global project as its own.
 func TestSessionContextDoesNotClaimLegacyShapedBuiltinSeed(t *testing.T) {
 	out := formatSessionContext(
-		"p1", "ghost", nil, "", nil, nil, 1, 0, true,
+		"p1", "ghost", nil, nil, "", nil, nil, 1, 0, true,
 		[]sessionMemory{{ID: "1", ProjectID: memory.GlobalProjectID, Category: "preference", Content: builtinSeedText, Source: "manual"}},
 		1, true,
 	)
@@ -137,7 +137,7 @@ func TestSessionContextGuidanceNamesTheLegacyShapedBuiltinSeed(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			out := formatSessionContext("p1", "ghost", nil, "", nil, nil, 1, 0, true, tc.globals, len(tc.globals), true)
+			out := formatSessionContext("p1", "ghost", nil, nil, "", nil, nil, 1, 0, true, tc.globals, len(tc.globals), true)
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("guidance must name %q:\n%s", tc.want, out)
 			}
@@ -154,7 +154,7 @@ func TestSessionContextGuidanceNamesTheLegacyShapedBuiltinSeed(t *testing.T) {
 // summarising possibly-untrusted content, the other from an explicit save.
 func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 	out := formatSessionContext(
-		"p1", "ghost", nil, "", nil, nil, 1, 0, true,
+		"p1", "ghost", nil, nil, "", nil, nil, 1, 0, true,
 		[]sessionMemory{
 			{ID: "1", Category: "fact", Content: "Reflection derived this.", Source: "reflection"},
 			{ID: "2", Category: "fact", Content: "An agent saved this.", Source: "mcp"},
@@ -191,7 +191,7 @@ func TestSessionContextGuidanceNamesTheOriginsActuallyPresent(t *testing.T) {
 	}
 	globals = append(globals, sessionMemory{ID: "z", Category: "preference", Content: "user row", Source: "manual"})
 
-	out := formatSessionContext("p1", "ghost", nil, "", nil, nil, 1, 0, true, globals, len(globals), true)
+	out := formatSessionContext("p1", "ghost", nil, nil, "", nil, nil, 1, 0, true, globals, len(globals), true)
 	for _, source := range sources {
 		if !strings.Contains(out, "("+source+")") {
 			t.Errorf("source %q is rendered without its origin tag:\n%s", source, out)

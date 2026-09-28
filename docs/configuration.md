@@ -290,6 +290,21 @@ reflection:
   consolidation_timeout_minutes: 10
 ```
 
+**Leave `auto_supersede: false` for now, and run the phase by hand.** The
+supersede pass was measured at 43% precision on a real store
+([#686](https://github.com/wcatz/ghost/issues/686)): most of the edges it
+proposed joined two notes that were both still true, and an edge is not an
+annotation — it demotes the older note in ranking and `ghost resolve` then stamps
+`resolved_at` on it, which takes a live memory out of every later session. The
+pass is now KEEP-biased (the rubric asks whether the older claim is still false, a
+`supersedes` answer must name the claim in a `replaced:` field, and a standing
+rule the newer note never retires is vetoed before any harness call) and its
+labeled eval reads 1.00 precision / 1.00 recall against the free
+`opencode/big-pickle`, but the eval is synthetic and the corpus it came from is
+not. Turning the phase on means writing real edges from a model that has not yet
+been measured on your notes; running `ghost supersede <project>` by hand and
+reading the list is free of that, and it is dry-run by default.
+
 When enabled, the Stop hook spawns one detached lifecycle process and runs the phases in this order:
 
 ```text
@@ -301,6 +316,23 @@ reflect → resolve → supersede
 - The lifecycle process is fire-and-forget. Failures are logged in the Ghost data directory and do not block the Stop hook.
 - The unattended reflect path requires a real CLI harness; it does not silently use the offline fallback for an automatic rewrite.
 - The unattended reflect path also runs through the consolidation quality gate, which is what bounds how hard it may compress with nobody watching. The gate applies from 6 consolidatable memories up, and `--require-llm` (which the lifecycle phase passes, and which omits the mechanical SQLite fallback) is what makes failing it a failed run rather than a fall-through: a corpus of up to 60 must retain 30% of itself, a corpus of 200 or more must come back with at least 5 memories, and the minimum in between interpolates. Those are the shipped values — the backlog figure is the absolute floor `gateBacklogMinOutput` in `internal/reflection/consolidator.go`, not a fraction, because the prompt asks for a corpus of high-quality memories rather than a fixed count and a percentage would demand more output than it ever asks for on a large backlog. `--tier cli` and `--tier opencode` are held to the same floor and, having no fallback tier, report a too-small answer as a failure. A round of 6 consolidatable memories or more that keeps less than half of them prints a `>50% reduction` warning, counted as the memories the project ends up holding. A pin on a memory (`ghost_memory_save` with `pin: true`, or `ghost_memory_pin`) is the way to keep one specific memory out of a rewrite entirely.
+
+### Repairing what the resolve and supersede passes got wrong
+
+Both passes are re-runnable and both have a repair flag, because neither decision
+can be undone by re-running the pass that made it. Both are dry-run by default;
+`--apply` writes.
+
+```text
+ghost resolve <project> --reassess [--apply]
+ghost supersede <project> --reassess [--apply]
+```
+
+- `ghost resolve --reassess` re-judges the memories already stamped `resolved_at` and, with `--apply`, clears the stamp on the ones that now come back KEEP. It does not re-run the keyword prefilter, so every already-resolved memory in the project is re-judged and the report has no silent gap.
+- `ghost supersede --reassess` re-judges every `supersedes` link already in the graph — the edges, not the candidate pairs, so `--threshold` does not apply — and with `--apply` **withdraws** the ones that no longer hold: a pair that comes back `neither`, a pair whose older note states a rule the newer note never retires, and a `causes` or `reversed` verdict. Each withdrawn edge is printed with the rule that withdrew it and with `[veto, no harness call]` or `[classifier]`, so the rows no model looked at are visible as such; a withdrawal that also drops the pair's `causes` edge says so on the row (`[+1 causes edge]`) and on the summary line — predicted in a dry run, and read back from the store under `--apply`, so a concurrent pass that took that edge first reports `0` rather than claiming a deletion. A sweep that *fails* is reported as unknown, not as `0`: the count is not knowable after a failed write. The withdrawal records an `unsupersede` row in the memory history, and a write that fails after some have landed still reports those, because each is its own transaction and a later pass will not see them again. A scope-conflicting edge is left alone: scope says which pairs may be related at all, not that one of them was a supersession. Note the one asymmetry with the ordinary pass: withdrawing a **vetoed** edge deletes a correct edge if the veto is wrong, and the ordinary pass will not re-create it, because the veto is deterministic on the same two notes — so read that row before applying.
+- **Order matters if a memory was buried by a wrong edge.** `ghost resolve` stamps `resolved_at` on the older endpoint of a live `supersedes` edge for free, and `ghost resolve --reassess` deliberately treats a live edge as a floor — so run `ghost supersede --reassess --apply` **first**, then `ghost resolve --reassess --apply`. Withdrawing the edge is what makes the resolution it justified clearable.
+- Neither flag is ever emitted by the Stop hook's lifecycle chain. They are operator commands, and both spend harness calls on every pair they judge.
+- `ghost resolve --reassess` also honours a correction pairing as a floor, and holds back any row whose correction the same run is repairing — so a repair that the next ordinary pass would undo is reported as still asserted rather than done.
 
 ### How often the chain runs
 

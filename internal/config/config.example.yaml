@@ -76,6 +76,14 @@
 #   auto_resolve: false               # run ghost resolve automatically after reflect
 #   auto_supersede: false             # run ghost supersede automatically after reflect
 #                                     # (the enabled phases run in order: reflect, resolve, supersede)
+#                                     # Leave this false until you have run
+#                                     # `ghost supersede <project>` by hand and read
+#                                     # the list: a supersedes edge demotes its
+#                                     # target in ranking and resolve then stamps it
+#                                     # resolved, so a wrong edge removes a live
+#                                     # memory from every later session (#686).
+#                                     # `ghost supersede <project> --reassess` is
+#                                     # how a wrong edge is withdrawn.
 #   lifecycle_timeout_minutes: 60     # bound each phase; 0 disables. Keep it above
 #                                     # consolidation_timeout_minutes.
 #   consolidation_timeout_minutes: 10 # bound ONE reflect consolidation call; 0 disables.

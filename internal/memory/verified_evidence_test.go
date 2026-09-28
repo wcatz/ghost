@@ -415,6 +415,13 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		// phase1aProvenanceColumns — invisible to the body scan, and the reason
 		// TestColumnListWritersAreClassified exists.
 		"migrate.go:migrateV10": true,
+		// #683's historical read SELECTs the triple off the current row — a
+		// reader, and the one that made this test earn its place on an upstream
+		// merge rather than only on this branch's own additions. The window is then
+		// judged at the instant asked for, because assemble.Run moves Now to the
+		// as_of value before the stages run, so this read carrying the present's
+		// boundaries is a documented decision rather than an oversight.
+		"asof.go:ReadMemoriesAsOf": true,
 		// The exported seam the live writers reach verified_at THROUGH, so its own
 		// body names no column and the scan cannot see it either. Listed so a future
 		// writer that only calls the seam is a known shape, not a silent one.
@@ -599,6 +606,7 @@ func TestColumnListWritersAreClassified(t *testing.T) {
 // because the two tests failing for different reasons is the point: a name missing
 // from here and from there should be visible in both.
 var classifiedNames = map[string]bool{
+	"asof.go:ReadMemoriesAsOf":              true,
 	"migrate.go:migrateV10":                 true,
 	"migrate.go:migrateV13":                 true,
 	"migrate.go:migrateV18":                 true,

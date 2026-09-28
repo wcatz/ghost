@@ -126,7 +126,7 @@ var helpCases = []struct {
 	{name: "opencode cleanup-sessions with grace", path: []string{"opencode", "cleanup-sessions"}, pre: []string{"--grace", "24h"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
 	{name: "bench", path: []string{"bench"}, want: "ghost bench [--sweep]"},
 	{name: "upgrade", path: []string{"upgrade"}, want: "ghost upgrade"},
-	{name: "context", path: []string{"context"}, want: "ghost context [--cwd <dir>]"},
+	{name: "context", path: []string{"context"}, want: "ghost context [--cwd <dir>] [--as-of <RFC3339>]"},
 	{name: "maintenance", path: []string{"maintenance"}, want: "ghost maintenance status"},
 	{name: "maintenance status", path: []string{"maintenance", "status"}, want: "ghost maintenance status"},
 	{name: "maintenance clean-scratch", path: []string{"maintenance", "clean-scratch"}, want: "ghost maintenance clean-scratch"},
@@ -543,6 +543,7 @@ var valueFlagOwners = map[string][]string{
 	"parseHistoryArgs":         {"history"},
 	"parseCleanupSessionsArgs": {"opencode cleanup-sessions"},
 	"runContext":               {"context"},
+	"contextAsOf":              {"context"},
 	"runHook":                  {"hook"},
 }
 

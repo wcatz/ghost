@@ -6,6 +6,31 @@ Every subcommand accepts `-h` or `--help`: it prints that command's usage on std
 
 Two spellings decide whether a flag is a request. The token after a flag that *this* command takes a value for is a value, never a help request — `ghost reflect --project -h` runs reflect for a project named `-h` — and a flag belonging to a different command is not a value at all, so `ghost upgrade --cwd -h` prints the upgrade usage instead of upgrading with the help flag swallowed as `--cwd`'s value. And a bare `--` ends the options for that scan: a token after it is an operand, never a help request, so `ghost reflect -- --help` runs reflect rather than printing usage. What the command then does with that operand is its own parser's business — none of them implements `--` (several report it as an unknown flag), so a project whose name looks like a flag is still addressed with the verbatim `--project <name>` form.
 
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | The command ran, or the reader asked a question (`-h`/`--help`, `ghost help`). |
+| `2` | **Usage error.** The CLI cannot act on the command line: a command that does not exist, a subcommand that is not one of its command's, a command group invoked with no subcommand, or no command at all. |
+| `1` | The command was found and ran, and failed: a database that would not open, a refused operation, a harness that could not be reached, an argument its own parser rejects. |
+
+A usage error prints one diagnostic line naming the word that matched nothing, then the usage of the level it was typed at — both on stderr — and nothing on stdout, so a caller reading a command's output sees an empty stream rather than a command list where results should have been:
+
+```console
+$ ghost project frobnicate
+ghost project: unknown command: "frobnicate"
+
+Usage: ghost project delete <name-or-id> [--apply]
+       ghost project merge <old-name-or-id> <new-name-or-id>
+       ghost project bind <project-id> <checkout-directory>
+$ echo $?
+2
+```
+
+The same shape applies at every level: `ghost mcp nope` and `ghost project` (no subcommand) exit `2` the same way, `ghost frobnicate` names the top level and shows the command list, and bare `ghost` reports that no command was given. A command group with a default action is the one exception — bare `ghost mcp` starts the server, because that is what every MCP client spawns.
+
+A word after a command that takes an *operand* is not a subcommand and is never reported as an unknown one: `ghost history <memory-id>`, `ghost reflect <project>` and `ghost import <file>` all take the word as the thing they were asked about, and their own parsers report an operand they cannot use — a missing memory id (`ghost history`), a second project (`ghost resolve`), a file that is not there (`ghost import`), an unknown flag. `ghost reflect` is the exception among those parsers and keeps its historical behaviour: given two positionals it consolidates the last one, without a diagnostic. An unknown **flag** is not a routing error either, and never exits `2` — the command was found, so what answers the flag is that command's own parser: `ghost bench --wat` and `ghost upgrade --wat` reject the flag — an unknown flag and an unknown argument respectively — and exit `1`, while `ghost reflect --wat` ignores an unknown flag, as it always has.
+
 ## MCP server
 
 ### `ghost mcp`
@@ -93,12 +118,30 @@ ghost reflect myproject --apply
 | `--allow-drops` | Apply even when memories would be removed without a merge. Every category is under the drop guard, so without this flag an input memory no surviving memory explains is re-added verbatim instead of deleted. **Nothing is exempt**: an explicit `obsolete` drop, a rewrite, and a `superseded by <id>` drop are all audited the same way, and a row the model disposed of comes back unless a single output memory carries at least 45% of its tokens. A merge source is audited against the text of its OWN merge, not the whole result. A memory the harness simply never named is carried through unchanged, so a rewrite is not a free change of wording — its replacement has to carry the memory's substance, or the old row survives beside it until a later `ghost resolve` or `ghost supersede` demotes it. The cost of that is a possible duplicate; the alternative is a silent deletion with nobody watching. |
 | `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
 | `--skip-unchanged` | Skip the LLM call when the consolidatable set is unchanged since the last applied pass. |
+| `--full` | Print the full text of every memory the run reports, instead of the 120-byte preview. Display only — the result and the write are identical either way. |
 | `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
 The `auto` tier uses the explicit source when provided, otherwise detects the calling harness. It does not silently switch to a different harness or billing path. When a source is known but its CLI binary is unavailable, auto can fall back to SQLite; the offline tier is also available for an explicit local run.
 
 A harness-backed consolidation is asked for operations on the memory ids it is shown — `keep <id>`, `merge <id>,<id> -> <text>`, `rewrite <id> -> <text>`, `drop <id> reason: obsolete | superseded by <id>` — rather than for a rewritten list of memories. A memory leaves the corpus only through one of those operations: named as a merge source, named for a rewrite, or named in a drop with a reason — and only where a surviving memory accounts for it, or `--allow-drops` accepts the deletion. Naming an id is not by itself enough: a `rewrite` whose replacement does not carry the old row's substance leaves that row in the corpus verbatim, so a rewrite is not a free change of wording on an unattended run. Anything the response does not name is carried through unchanged, byte for byte, so it keeps its id, its embedding, its links and its age. A merge or rewrite that introduces a path, hash, version, hostname or number found in none of the memories it names is rejected and those memories are kept as they are, which is why a `rewrite` fixes a claim and never a specific. An operation Ghost cannot read, an id it did not supply, or a response carrying no operations fails that tier's result, and consolidation falls through to the next tier.
+
+The report ends with an accounting of every input id, printed the same way for a dry run and for `--apply` and before the write, so a dry run previews it exactly:
+
+```text
+Inputs (7) accounted for; every count below is ids, so they add up to it:
+Merges (3):
+  new <- A1B2…02, A1B2…03, A1B2…04   (48 B from 141 B)
+Refused by the grounding check (0):
+Rewrites (1):
+  A1B2…05 -> the ledger ingests through the bastion on port 2222, never 22
+Dropped (1, each audited by the drop guard):
+  A1B2…06 reason: obsolete — nothing in the result carries it; the drop guard re-added 1 row verbatim
+Deleted (0):
+Kept verbatim: 1    Passed through (not named): 1
+```
+
+Every input id appears in exactly one line or one count, and every count is a count of ids — a merge may name any number of sources, so `Merges (3)` above is three ids folded into one row, and the numbers add up to the input total. Every id is quoted in the spelling the database holds: the parser accepts any case (`memIDKey` compares case-insensitively) and normalises only a drop's successor target, so a response that spelled an id differently would otherwise put a key on the page that looks up nothing. That quoted-id discipline is what makes the count arithmetic checkable, and the reason an input a merge consumed can no longer disappear from the report. A merge line names no successor id because the merged row does not exist until `--apply` writes it; `ghost history <id>` shows the `related_id` that names it. `Deleted` is the set of rows an apply removes, one line each with the reason, and it is counted by the replace's own reuse pass rather than by asking whether the row's text is still in the result: reuse is content-keyed and claims **one** row per emission, so two inputs holding the same bytes both have their text in the result and only one of them is still there afterwards. A row nothing carries is a loss; a row whose identical twin was reused is a deduplication, and the knowledge is still in the project either way. That is the whole of the offline SQLite tier's absorptions, which name no ids and so appeared in no bucket of any report. A line the drop guard overrode says so, rather than leaving a drop to be read as a deletion that did not happen. A `superseded by` reason names the successor it replaces, so that id is quoted on the drop line and accounted for by its own count — the accounting is per input id, not per mention.
 
 CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
 
@@ -599,7 +642,8 @@ Checks GitHub Releases and replaces a standalone binary after verifying the rele
 
 ```bash
 ghost upgrade
-ghost upgrade --allow-downgrade   # install a release older than this binary
+ghost upgrade --allow-downgrade    # install a release older than this binary
+ghost upgrade --allow-prerelease   # install a prerelease (an rc, a beta)
 ```
 
 A plugin-managed binary refuses this path because the plugin manager owns it; use `/plugin update` in Claude Code instead.
@@ -609,15 +653,21 @@ A plugin-managed binary refuses this path because the plugin manager owns it; us
 1. the `digest` GitHub reports for that asset in the releases API (`sha256:<hex>`) — a digest GitHub computed for the bytes it holds, rather than one uploaded beside them. A missing digest, a digest for an algorithm this binary cannot compute, and a mismatch are all refusals, not warnings;
 2. the release's `checksums.txt`, which every ghost release carries. The two checks are independent: `checksums.txt` is a second file in the same release, so whoever can replace the archive can replace the manifest that vouches for it.
 
-The archive is checked before it is unpacked, so a substituted release is refused without its bytes ever being decompressed. Cryptographic *signature* verification (cosign, minisign, or GitHub artifact attestations against a key shipped in the binary) is not implemented — a digest from the release API proves the download matches what GitHub holds, not who published it.
+The archive is checked before it is unpacked, so a substituted release is refused without its bytes ever being decompressed.
 
-**Ordering.** The release tag and the running version are compared as semantic versions, so a release older than the one already installed is refused rather than installed. `--allow-downgrade` turns that refusal into a deliberate install (with a warning on stderr) for a release that was withdrawn, or a build that has to be pinned while a newer one is investigated; it does not re-install the release you already have. A version that cannot be ordered — a `dev` build, a tag that is not a semver — keeps upgrading unless it is identical to the release tag (ignoring a leading `v`), which reports up to date as before; the digests still have to agree before anything is replaced.
+**What is not verified: who published it.** Cryptographic *signature* verification is not implemented, and cannot be until the release publishes something to verify: as of v0.35.0 the release workflow has no signing or attestation step, `.goreleaser.yml` has no `signs:` block, and the releases API reports no attestations for any asset. So a digest from the releases API proves the download matches what GitHub holds, not who published it — anyone able to replace a release asset *and* the API's record of it defeats every check above. Tracked, with the workflow-side options and their key-distribution trade-offs, in [#694](https://github.com/wcatz/ghost/issues/694).
 
-**Bounds.** Every request carries a context deadline (30s for the release lookup, 10 minutes for an asset transfer) that a caller can shorten or cancel, and every response is size-capped — 4 MiB of release metadata, 1 MiB of `checksums.txt`, 200 MiB of archive, and 128 MiB of what an archive inflates into. For a `.tar.gz` that last cap covers *every* entry, not just the binary: opening one inflates the entries ahead of it too, so a few KiB of highly compressible data in `README.md` would otherwise expand without limit. A stalled connection, a hung server or an oversized body fails the command instead of hanging or exhausting memory.
+**Ordering.** Two guards, and the release has to pass both. The release tag and the running version are compared as semantic versions, so a release older than the one already installed is refused rather than installed; `--allow-downgrade` turns that refusal into a deliberate install (with a warning on stderr) for a release that was withdrawn, or a build that has to be pinned while a newer one is investigated. And a release that is not final — a prerelease, an rc, a beta — is refused however new it is, so a candidate never ends up installed by a machine that asked for a stable build; `--allow-prerelease` is the deliberate opt-in, and it does not also permit an older release (a prerelease that is *also* backwards needs both flags). The prerelease check is reported as the prerelease it is, so the message names the flag that actually reaches it. Both refusals happen before anything is downloaded.
+
+Neither flag re-installs the release you already have: being on the latest version is still "up to date". A version that cannot be ordered — a `dev` build, a tag that is not a semver — keeps upgrading unless it is identical to the release tag (ignoring a leading `v`), which reports up to date as before, and it is not read as a prerelease either; the digests still have to agree before anything is replaced.
+
+**Bounds.** The whole run is bounded by a 12 minute budget — the release lookup, the manifest and the archive together — so an upgrade cannot sit through the sum of three per-request deadlines (twenty and a half minutes) on a link that is slow but not broken; the error names the budget, because "context deadline exceeded" on its own says which request gave up and not that the command ran out of time. The budget is longer than one transfer's own deadline, so a transfer that begins at once and would have finished is never cut short — but a slow manifest can leave the archive less than its own ten minutes, which is the budget working rather than a separate rule. Every request also carries its own context deadline (30s for the release lookup, 10 minutes for an asset transfer) that a caller can shorten or cancel, and every response is size-capped — 4 MiB of release metadata, 1 MiB of `checksums.txt`, 200 MiB of archive, and 128 MiB of what an archive inflates into. For a `.tar.gz` that last cap covers *every* entry, not just the binary: opening one inflates the entries ahead of it too, so a few KiB of highly compressible data in `README.md` would otherwise expand without limit. A stalled connection, a hung server or an oversized body fails the command instead of hanging or exhausting memory.
 
 **Archive formats.** Windows releases ship a `.zip` and everything else a `.tar.gz`; both are unpacked, and the container decides which, not the file name. Only a regular, non-empty `ghost` or `ghost.exe` at the archive root is accepted — a directory or link entry carrying that name has no body, and installing one would leave a zero-byte executable behind a "Updated" line.
 
 **Replacing a running binary on Windows.** Windows holds a running executable's image open, so a new binary cannot be renamed over it. The old one is renamed to `<binary>.old` first — which Windows does allow — and the new one takes the path it vacates. If the second step fails, the old binary is moved back, so a failed upgrade cannot leave an install with no binary. The `.old` file is this process's own image and cannot be deleted until the process exits, so it stays until the next upgrade reuses the name; delete it once no `ghost` is running. Unix renames over the target atomically and leaves nothing behind.
+
+**When a write does not finish.** The replacement is staged in a temporary file beside the binary and renamed into place, so the install path only ever holds one whole binary. A write that is interrupted, a digest that does not agree, or a disk that fills all fail against the staging file: the installed binary comes out of them byte for byte unchanged and the partial file is removed, so a failed upgrade is a failed upgrade and never a half-installed ghost.
 
 ### `ghost version`
 

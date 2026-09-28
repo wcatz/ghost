@@ -71,7 +71,7 @@ func roDSN(dbPath string) string {
 }
 
 // obsidianUsage is the help for `ghost obsidian`: stderr when the mode is
-// missing or unknown (a usage error, exit 1), stdout for -h/--help (see
+// missing or unknown (a usage error, exit 2), stdout for -h/--help (see
 // handleHelp). One text for both, so the two can never drift.
 const obsidianUsage = `Usage: ghost obsidian <export|sync> [flags]
 
@@ -82,14 +82,13 @@ Flags:
 `
 
 // runObsidian implements `ghost obsidian export|sync` — a one-way mirror of
-// the store into an Obsidian-readable Markdown vault.
-func runObsidian() {
-	if len(os.Args) < 3 || (os.Args[2] != "export" && os.Args[2] != "sync") {
-		fmt.Fprint(os.Stderr, obsidianUsage)
-		os.Exit(1)
-	}
-	mode := os.Args[2]
-	out, project, interval, err := parseObsidianFlags(os.Args[3:])
+// the store into an Obsidian-readable Markdown vault. mode is the subcommand
+// the dispatch already matched (it is the only caller, and it is what answers a
+// word that is neither mode with obsidianUsage and exit 2), and args are the
+// flags that follow it — both from the same argv, so a caller that drove the
+// dispatch with a synthetic one cannot have the mode and the flags disagree.
+func runObsidian(mode string, args []string) {
+	out, project, interval, err := parseObsidianFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

@@ -25,6 +25,8 @@ ghost hook <event> --source <host> Normalize a host lifecycle event
 ghost reflect <project>           Consolidate memories
 ghost resolve <project>           Mark resolved evidence
 ghost supersede <project>         Classify replacement relationships
+                                   (--reassess re-judges the edges
+                                   already in the graph)
 ghost lifecycle <project>         Run the detached maintenance phases
 ghost project delete|merge        Manage project records
 ghost project bind <id> <path>     Record a project checkout so a session in
@@ -36,6 +38,7 @@ ghost backup                      Snapshot the live database (VACUUM INTO)
 ghost export                      Write the store as a portable JSONL artifact
 ghost import <file> [--apply]     Load a JSONL artifact (dry-run by default)
 ghost context                     Render passive session context
+ghost context --as-of <RFC3339>   Render it as the store stood at an instant
 ghost history <memory-id>         Print one memory's append-only history
 ghost history purge <memory-id>   Erase a memory and every recorded version of it
 ghost bench [--sweep]             Run the built-in benchmark
@@ -147,6 +150,22 @@ host Stop
 The lifecycle is opt-in. A phase failure is logged and does not prevent later phases from running. The reflect phase can use a source-matched CLI harness or an explicitly selected offline tier; the autonomous path requires a real harness when it is configured to rewrite memories.
 
 The cooldown exists because the hook fires once per turn, so a chain per turn is a chain per turn. Two independent guards bound it: the per-project PID file (`AcquireLifecycleLock` — a run is not already in progress) and `lifecycle.min_interval` (a run did not start too recently). The second is a file's mtime rather than a row, because the hook's synchronous path must not open the database to ask the question. The `ghost lifecycle` process writes it, once it has passed every precondition that can exit non-zero — so a run that dies before doing any work does not burn the window, and does not add to the silent-death class the failure marker exists to catch. A foreground run writes it too, which is what a user retrying the alert's command wants.
+
+### The supersede pass, and why it is KEEP-biased
+
+`ghost supersede` proposes newer→older `supersedes` edges over cosine-similar pairs and asks the calling session's CLI harness to judge each one, four ways: `supersedes`, `causes`, `reversed` (refused — the older note is the current one) and `neither`. The edge is not informational, and that is the whole design constraint: `SupersedePenalties` demotes the older endpoint in ranking, and `ghost resolve`'s supersedes piggyback stamps `resolved_at` on it for free, so a wrong edge takes a live memory out of every later session's context and nothing in the ordinary pass will look at it again.
+
+An independent judge graded the edges one real v0.35.0 dry run proposed over a real project store — 253 candidate pairs, 32 proposed edges, **43% precision** ([#686](https://github.com/wcatz/ghost/issues/686)). There were no direction errors any more; every wrong edge joined two notes that were **both still true**, sharing a topic (a follow-up, an addendum, a restatement, a partial fix of one detail) with neither replacing the other. Three rules answer that, and they are KEEP-biased for resolve's reason — a missed supersession leaves a stale note ranked and a later pass can still link it, while a false one buries a memory:
+
+- **The falsity question, asked.** The rubric asks whether the older note's claim is false or no longer applicable *after* the newer note, and says outright that two notes both still true are `neither` even on the same topic.
+- **A named retired claim.** A `supersedes` answer must carry `replaced: <the older note's claim that no longer holds>`; a missing, empty or placeholder value reads `neither`, which is a decision and therefore cacheable — and so does a value that OPENS by declining to name one ("not applicable", "no such claim", "cannot name it", "unclear"), because a refusal is the likeliest way a model says it cannot tell you what stopped being true, and a nine-word placeholder list does not catch it. `replaced:` is the twin of resolve's `closed-by:` and is read by the same grammar (`resolve.ReasonedField`, `resolve.ReasonlessValue`), so a value that keeps a note in one pass's injection cannot bury it in the other's ranking. The NEITHER cache key prefix moved with the rule: a cache hit is a permanent skip for the life of that text, so verdicts judged without these rules are re-asked.
+- **A free veto, before the call.** `VetoSupersede` settles a pair whose older note states a standing rule — an imperative from resolve's own vocabulary — and whose newer note never names that rule as retired or changed. No call, no link, no cache row, and the count is on the report. Its second half is what makes the first safe: "the no-merge rule is retired" is a real supersession of an imperative and reaches the classifier, because whether the retirement covers the *same* rule is the judgement the veto refuses to make. A false veto costs a stale-but-visible note, which is the cheap direction, and the labeled regression set pins that cost on a real [#641](https://github.com/wcatz/ghost/issues/641) fixture whose older note says a build "never gets past" a missing fix.
+
+The measurement is a labeled eval, not an assertion: 28 synthetic pairs — 14 true supersessions and 14 both-true pairs, covering every class the judge named — scored through the shipped decision, off by default like resolve's (`GHOST_LIVE_TESTS=1`). Measured against the free `opencode/big-pickle`, it reads 1.00 precision and 1.00 recall on both the single-pair and the batched path, 2 of the 14 both-true pairs settled by the veto without a call; before the many-fact clause was added the same set read 0.93/1.00. Precision is the gated number (≥ 0.90), recall is reported without a gate.
+
+Two repair paths exist because the ordinary pass cannot undo either decision. `ghost supersede <project> --reassess [--apply]` re-judges every live `supersedes` edge under these rules and withdraws the ones that come back `neither`, vetoed, `causes` or `reversed`, through `InvalidateLink` — which writes the `unsupersede` history row, so an audit that shows a supersession with no withdrawal cannot read as though the stale claim is still live. It prints each withdrawn edge with the rule that withdrew it and which of the two decided it (`veto, no harness call` for the deterministic half), a dry run says "would withdraw" per edge and reports the count it is about to print, and a failed invalidation still reports the edges that landed before it — each one is its own transaction, and a later pass will not see them again. The withdrawal also sweeps the other relation's edge, as the ordinary pass does on the same self-contradicting verdicts, because a `causes` link pointing into a note the pass just decided is still current asserts the opposite. That is a second graph row per withdrawal, so it is reported too: a `[+1 causes edge]` on the row and a sweep count on the summary line, predicted in a dry run and *observed* under `--apply` — the row carries what the sweep moved, never what it was going to move, so a concurrent pass that took the edge first reports 0 rather than claiming a deletion, and a sweep that *errored* is reported as unknown rather than as a count, because after a failed write the count is not knowable. The prediction is read through each pair's own endpoints, not through a project-scoped query, because the sweep deletes by id: a pair whose older note has been promoted to `_global` or moved by `ghost project merge` is still swept, and a project-scoped read cannot see it. A `causes` verdict is the one withdrawal that sweeps nothing — it affirms that relation instead.
+
+One asymmetry is worth stating, because it is the only place the creation pass's error argument does not carry over. On the ordinary pass a false veto costs recall — a stale note stays ranked, and a later pass can still link it. On the repair pass it costs a correct edge, and since the veto is deterministic on the same two note bodies, the ordinary pass will re-fire it on every later run: the pair stays unlinked until one of the notes changes. That is the trade the operator is being asked to make when they pass `--apply`, and it is why the report marks those rows. Then `ghost resolve <project> --reassess` clears the `resolved_at` those edges caused: that repair pass deliberately honours a live edge as a floor, so the withdrawal has to come first or the memory stays out of injection. Until both run, the safe direction holds — a duplicated stale note beats a memory nobody is reminded of.
 
 ## Persistence and search
 
@@ -343,9 +362,13 @@ When embeddings are available, search combines:
 - Cosine-similarity vector candidates for paraphrases
 - Reciprocal Rank Fusion with the shipped 70% vector / 30% FTS weighting
 - Category-aware decay applied to the surviving result window
-- Targeted demotion when a present memory is superseded by another present memory
+- Targeted demotion when a present memory is superseded by another present memory — an edge that only exists if the older note's claim is no longer true, which is what `ghost supersede`'s KEEP-biased rubric, its required `replaced:` claim and its imperative veto are for (see [The supersede pass](#the-supersede-pass-and-why-it-is-keep-biased))
 
 Without Ollama, the same API remains available with FTS5-only results. Search membership is not discarded solely because of age; decay changes ordering.
+
+A search may also read a past instant instead of the present (`as_of`); that path
+retrieves from `memory_history` and runs no vector leg. See
+[Historical retrieval](#historical-retrieval-as_of).
 
 ### Memory history
 
@@ -593,6 +616,136 @@ assumed:
 `Store.MemoryHistory` reads one memory's history oldest first — a changelog, not
 a log tail — and `ghost history <memory-id>` prints it.
 
+### Historical retrieval (`as_of`)
+
+[`#647`](https://github.com/wcatz/ghost/issues/647) adds a read of a project's
+memory set **as it stood at an instant T**. It exists because the live tables can
+only answer "what does Ghost know now": `reflect` replaces rows and
+`ghost_memory_update` overwrites content in place, so a benchmark cannot replay
+what a past session was given. The history table can, because each of its rows is
+a VERSION rather than a diff — the state a memory held once that write landed — so
+the newest row at or before T *is* the state at T. There is no reconstruction step
+anywhere in the read, and no inference: it is a selection.
+
+`Store.MemoriesAsOf(ctx, projectID, T)` returns an `AsOfSet` in **one statement**,
+`internal/memory/asof.go`:
+
+- **The version set.** The newest history row at or before T for every in-scope
+  memory, partitioned with `ROW_NUMBER() OVER (PARTITION BY memory_id ORDER BY
+  recorded_at DESC, rowid DESC)`. `rowid` is the second key because
+  `recorded_at` is second-precision and every write one reflection makes shares a
+  timestamp, so the newest among them would be a tie-break rather than an answer.
+  The driving table is `memory_history`, **not** `memories`: a consolidation's
+  delete takes the row and leaves a tombstone, and a read that started from the
+  live tables would find nothing for a memory the store held for months.
+- **Liveness from the sequence.** A row whose newest version at or before T is a
+  `delete` is dropped (it was already gone), and a memory whose first recorded
+  version is after T is dropped (it did not exist yet). `resolved_at` comes from
+  the version row, so a `resolve` / `unresolve` pair is read as a sequence rather
+  than as a single current value. The supersede **claim** is read separately,
+  from the newest `supersede`/`unsupersede` row at or before T, because a
+  supersede records a claim about a memory rather than a change to it: the
+  target's own state columns are identical whether the claim is live or
+  withdrawn.
+- **The gap, reported.** A live in-scope memory with no recorded version at or
+  before T is **unknown**, not guessed. `migrateV17` backfills nothing, so every
+  memory written before the table existed reads this way until something writes
+  one. It is left out of the set and counted in `AsOfSet.Unknown`, and
+  `AsOfUnknownNote` turns the count into the sentence a surface must show — a
+  shorter set that says nothing about the gap reads as the whole truth.
+- **Which columns are historical.** `content`, `category`, `importance`,
+  `resolved_at`, `source` and `project_id` come from the version row. Tags,
+  scope, pin, access count, provenance and the validity triple were never
+  versioned, so they are read from the row as it stands, and a deleted memory has
+  no row at all — those fields are zero for it, which is the honest reading rather
+  than a guess. `valid_from` / `valid_until` are the sharpest case: nothing
+  writes them yet ([#575](https://github.com/wcatz/ghost/issues/575), and the
+  assembler validity work in parallel), so an `as_of` read's validity window is
+  the current one and only the current one. One imprecision is recorded rather
+  than worked around: a promotion **rewrites** the history rows' `project_id` (it
+  has to, or the project-delete cascade takes a memory's past with it), so a
+  pre-promotion instant reports a promoted memory under `_global`.
+- **Which timestamp the age is measured from.** The row's own `created_at`, which
+  is what the current read decays on, whenever it can answer — it is set on
+  INSERT and never rewritten (a snapshot restore carries the snapshot's
+  `created_at` back on both its UPDATE and its INSERT). Two cases it cannot, and
+  both fall back to the version row's own `recorded_at`, which is at or before T
+  by definition: **the row is gone** (a delete takes the memory, so every current
+  column is NULL, and an empty `created_at` reads as ~56,000 days — a memory
+  deleted yesterday sat at the decay floor in every listing covering the past
+  year, on the strength of a column that says nothing about it), and
+  **`created_at` is later than T** (no current writer produces that, and it is
+  refused because `ageDays` clamps a negative age at 0, which makes a
+  future-dated column the most favourable value a row could carry into a ranking
+  of the past). The composite is otherwise the same rule at T, so a historical and
+  a current listing stay ordered by one thing.
+- **The gap is never silent.** The two halves of the read partition the in-scope
+  set, and the "no version recorded" half is bounded by T on **both** its tests —
+  `created_at <= T` and "no history row at or before T" — because an unbounded
+  `NOT EXISTS` answered a different question ("does this memory have history at
+  all") and a pre-v17 memory the lifecycle touched after the upgrade *does* have
+  history. A resolve, a supersede, a delete or a reflection reuse is enough, and
+  the memory then fell out of both halves and vanished from an answer it belongs
+  to. The half that reports tombstones exists for the same reason: a pre-v17
+  memory deleted after T has no live row either, so its gap is reachable only
+  through the tombstone's own project id. Two things make that half count a memory
+  once, and both are needed: it **excludes ids that are live again** (a snapshot
+  restore reinstates a row under the id it recorded, so "tombstoned" does not imply
+  "not live", and a delete → restore → delete memory would otherwise be in both
+  halves), and it is **ranked per memory** keeping its newest tombstone (the same
+  `(recorded_at DESC, rowid DESC)` the version set uses, because a second delete
+  after a restore is a second row and `UNION ALL` does not dedup). Either defect
+  alone reaches `CandidateSet.Unrecorded` and every surface's count. (No writer
+  needs to file a baseline
+  there: every one of those first writes appends a row read out of the memories row
+  in the same transaction, so the text it is about to stop holding is recorded
+  anyway — which is why `recordBaselineHistoryTx` is needed only on
+  `UpdateMemory`, the one write that overwrites the text in place.)
+
+`as_of` (RFC 3339) is a parameter on `ghost_memory_search` and
+`ghost_project_context`, and `--as-of` on `ghost context`. In the assembler it is
+a **binding, not a filter**: `Run` moves `Now` to it, so a row's age, its validity
+window and the trace that describes the block are all decided against T rather
+than against the wall clock. The store treats `AsOf` as authoritative over
+`Now` for the same reason.
+
+A historical retrieval is **keyword-only**, and says so in the answer, the trace
+and the store's leg status. Every statement in the read names `memory_history` or
+`memories` and nothing else, so a store that predates v18 — or one whose evidence
+table a later migration has not created yet — answers an `as_of` read in full
+(`TestCandidatesAsOfDoesNotDependOnMemoryProvenance` drops the table and reads on):
+
+| | current | `as_of` |
+|---|---|---|
+| keyword leg | FTS5 over `memories_fts` | term match over the versions' own text — `memories_fts` holds current content only |
+| vector leg | cosine, when an embedding is available | **not applicable** — an embedding is a vector of the text as it is *now*, and the vectors for the versions being chosen between were never computed. `Condition: vector_only` with `as_of` is refused rather than downgraded, and so is `explain` with `as_of` (`explain` is the store's `ExplainSearchScoped`, a diagnosis of the current ranking, and it runs before the assembler — so a historical request would otherwise have come back as a present-day payload with nothing to say so). The two refusals live at different layers, and the difference matters to anyone auditing the contract: the `explain` one is on an input the tool accepts and is **advertised in the tool's own `as_of` and `explain` argument descriptions**, while the `vector_only` one is a store-level guard on `CandidateRequest.Condition` — a condition `ghost_memory_search` never sets, because its handler hardcodes `Condition: assemble.CondHybrid`. The tool's published schema therefore has no argument that can trigger it |
+| ranking | RRF fusion, then decay | matched query terms, then the same decay composite at T — not bm25, so it is not comparable with a current order. The window and the tail are cut the way the current path cuts them, tail included, so a set is at most about twice the window however many versions matched |
+| link graph | supersede and near-duplicate demotion, `contradicts` edges | **not read** — `memory_links` records when an edge was invalidated, never what the graph looked like at T. The supersede demotion uses the recorded sequence instead, and the edge status is `not_applicable` so the conflict stage makes no claim in either direction |
+| evidence counts (`memory_provenance`, v18) | read on the same snapshot as the rows, recorded in the trace | **not read** — an evidence record is one *observation* of a memory, not a version of it, so nothing in that table can be placed at an instant and a count taken now would be a present-day claim about a past memory. The counts therefore stay zero, and a zero renders as "no recorded evidence", which is why the `as_of` disclosure says the counts were not read rather than leaving that phrase to stand as a claim |
+| edges status | `ok` / `unavailable` / `err` | adds `not_applicable`: "no edge joins these candidates" is a claim, and a retrieval that made none must not render it |
+
+The term extraction is the **same** one the FTS leg uses (`ftsQueryTerms`, so the
+10-term budget, the identifier ranking and the stopword rule are one rule), and a
+term is matched as the PHRASE FTS5 would make it — `ghost_windows_arm64` is three
+adjacent tokens — with a trailing `*` still meaning a prefix match.
+
+Every surface states the instant and what did not run, in one shared sentence
+(`memory.AsOfSourceNote` plus the assembler's retrieval half) and one shared
+omission note (`memory.AsOfUnversionedNote`, for tasks, decisions and learned
+context, none of which is versioned). They are `Result.Qualifiers` rather than
+`Result.Notes`: a note list is a diagnostic list shown for the empty answer and
+bounded from the end, where the first thing to go is exactly the sentence that
+changes what the answer *means*.
+
+`ghost context --as-of` runs **none** of the startup side effects the current
+path runs. The Obsidian mirror and the session-count bump exist because that
+command backs a session start; a past reading is a diagnostic a person asked for,
+and counting it would move the present's session number to answer a question about
+the past.
+
+Restoring or rolling the store back to a past state is explicitly **not** this —
+that is export/import ([#586](https://github.com/wcatz/ghost/issues/586)).
+
 A vector candidate is only scored when its stored vector belongs to the vector
 space this process embeds into. Every embedding records that identity — model,
 dimensions, and whether the model needs a task prefix (`nomic-embed-text` takes
@@ -799,6 +952,8 @@ An LLM tier's answer is additionally bounded by a scale-aware quality gate, from
 
 Before replacement, every input memory is audited for a surviving merge target, in all eight categories: an input under 45% token containment in the output it is compared against is re-added verbatim rather than deleted, and `--allow-drops` accepts the deletions instead. With the pass-through above the guard no longer has omissions to rescue, and what remains is narrow. A **merge's** sources are measured against the text of **that merge**, which is the only witness available: a merge source is consumed by its merge, so its own text is never in the result, and an id claimed by two operations is rejected, so a sibling cannot be there either. It used to be measured against the union of the outputs, which was right when the union was a handful of survivors and which the pass-through turned into the whole project's vocabulary — every id the response never named is emitted verbatim — so a source whose substance its merge discarded passed containment on the strength of an unrelated memory that happened to share its words. That is the same class of loss the pass-through exists to remove, reintroduced through the merge branch. A merge that is not in the result has no witness at all, and its sources fall back to the strict per-output test. Everything else — an explicit `obsolete` drop, and every input of the offline SQLite tier, which names no ids — is measured against a **single** output, because there the guard is the only thing between a claim and a deletion and it has to be answered by one survivor. **There is no exemption.** An input the response **disposed of** — named for a rewrite, or named in a `superseded by` drop — is audited exactly like an `obsolete` drop: the corpus has to be able to show the row is gone. An unattended reflect never deletes a memory on the model's say-so alone. The result does still *record* the ids a response disposed of and the text it says took their place, and `ghost reflect` prints each of them under `Disposed of (model's claim)`, so a person deciding whether to pass `--apply` can see that the model tried to drop something; the guarded-drop report beside it says what was actually retained or deleted. The record is not consulted to decide anything, and the report deliberately does not predict the outcome — a second opinion about it would be a second implementation of the guard's decision waiting to disagree with the first. The carve-out that used to exist was the hole: a `superseded by` drop disposed of a row whenever the named successor's text was in the result, and the parser's only rule is that the target survives the response — so naming a neighbour was a valid operation, and two ordinary deployment notes in the same project, paired because they sat adjacent in the prompt, was a silent deletion with no warning, no `--allow-drops` and a zero exit status. Requiring the witness to be *related* closed that and then turned out to be redundant, because the witness text is itself an output and a row at 45% containment against it also passes the per-output scan; the whole branch was dead code. The rule is **keep-biased** on purpose, and the reason is repairability: a stale row that is kept can be demoted, because the lifecycle runs `resolve` and `supersede` immediately after `reflect` and demoting a genuinely stale row is their job, while a deleted row is gone. The failure direction is therefore a duplicate — the old text back beside its replacement — never a silent deletion. The cost is real and worth naming: a supersession whose successor is reworded below the containment bar leaves the stale row behind (this project's own superseded note about calling the Anthropic API client directly scores 0.429 against its replacement), and it stays visible until `resolve` or `supersede` demote it, so a corpus of those grows the input each pass has to read. That is the right way round for a command that rewrites a memory store with no human in the loop.
 
+The result list above it says what the corpus became; the accounting says what became of the rows the run was **given**, which is the question a reviewer or an independent judge is actually asking, and it is the same section for a dry run and for an apply, printed before the write so a dry run previews it exactly. Every input id appears in exactly one line or one count, every count is a count of **ids** — a merge may name any number of sources, so `Merges (3)` is three ids folded into one row — which is what makes the section checkable by adding its numbers up to the input total. Ids are printed in the spelling the store holds rather than the one the response used, because `memIDKey` compares them case-insensitively and these ids are what an operator copies out of the report to look a row up. The sixth bucket, **deleted**, is the one that makes the section an audit: the rows an apply removes, one line each with its reason, decided by the replace's own reuse pass rather than by whether the row's text is still in the result. `ReplaceNonManual` reuses stored rows by byte-identical content and claims ONE per emission — the row in the same category, else the oldest, in `(created_at, id)` order — and deletes every candidate left in the bucket, so two inputs holding the same bytes both have their text in the result and only one of them is still there afterwards; keying on the text called both of them carried, which is this report's own defect pointed the other way. The two reasons are different outcomes and the section has to be able to tell them: a row nothing carries is a loss, a row whose identical twin was reused is a deduplication whose knowledge is still in the project. On the LLM path the bucket is empty or holds one row a post-filter removed the carrier for; on the SQLite tier, which names no ids, it is every duplicate the tier absorbed. The reuse rule is re-implemented in `claimedRows` rather than shared — the store's copy runs against an open transaction — and the two are held together by tests that assert the id the section reports as deleted is the id a real store stopped holding. `--promote-globals` deliberately does NOT reach the accounting: an input no operation named is always carried by its own pass-through, and a pass-through states no scope, so it is project-scoped under either setting; a named input is the one a promotion could change, and a named input is owned by its own line. A merge prints `new <- <ids> (<bytes> B from <bytes> B)`, a rewrite prints the text it wrote, a drop prints the reason the response gave and what the drop guard decided about the row, a refused merge or rewrite prints the ids the grounding check kept and the identifiers that caused the refusal, and two counts cover the ids a `keep` named and the ids nothing named. A merge names no successor id because the row it produces does not exist until the apply writes it — `memory_history`'s `related_id` is where the identity becomes visible, and a preview that had to guess at it would not be a preview. A `superseded by` reason names the successor that replaces the dropped row, so that id is quoted on the drop line while its own bucket accounts for it: the accounting is per input id, not per mention. `reflection.AccountInputs` computes the partition as a pure function of the result, and `cmd/ghost`'s `reportInputAccounting` only formats it. Three of the buckets are the result's own records, which is why `ReflectionResult` grew them: `Kept` (an explicit `keep` is otherwise indistinguishable from the pass-through), `Drops` (an `obsolete` drop names no successor, so the result previously said **nothing** about the id it disposed of) and `Refusals` (a grounding rejection was a log line inside the tier, invisible to every reader of the result). All three are records; nothing acts on them, and the drop guard still audits every disposed row on its own evidence. A guard verdict annotates the line that named the id and says whether the row was re-added or `--allow-drops` accepted the deletion, so a drop line cannot be read as a deletion that did not happen. `ghost reflect --full` prints the memory text whole; the default stays the 120-byte preview.
+
 A round is also reported when it compresses hard: a corpus of six consolidatable memories or more that keeps less than half of them prints a `>50% reduction` warning, counted as the memories the project ends up **holding** rather than the ones emitted under the project scope. A cross-project candidate is counted as retained in two of the three promotion states and not in the third, which is why the count has to be taken where it is known. With promotion off every candidate is folded back into the project, so all of them are survivors; with promotion on, a candidate that could not become a `_global` row is written back into the project too and is likewise a survivor; but a candidate that *did* become a `_global` row has left the project deliberately and is not counted as retained, because counting it would overstate survival and hide a compression that did happen. Only that third state is knowable after the write, so an apply with promotion on reports after the write rather than before — a count built from the project-scoped memories alone would understate retention by the whole candidate set, and a run where every promotion failed would report a far larger reduction than actually occurred. A dry run has no write to wait for, so it reports before. With promotion on that is the optimistic count and the note says so, since a candidate it cannot yet place is counted as though it had left the project; with promotion off every candidate is folded back into the project either way, so the count there is already the final one. It is a warning, not a refusal: the number of operations a response carries says nothing about how much it folded, and on the unattended lifecycle path it is the only report a compression gets, on the stderr of a detached process, with the exit status still 0.
 
 ## Credential guard
@@ -860,10 +1015,10 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
-| **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — `memory_history` now records every state change and who made it, but nothing reads it during retrieval; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
-| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memory_search` is the only surface that runs the pipeline, so it is the only one that filters a closed window out — the browsing surfaces still show it, marked `expired`, and the session-start block shows it with no marker at all because it renders its own rows (see the assembler section below). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way. A bare date is a whole day, and a `valid_until` is the END of it (see the assembler section). A `verified_at` also leaves a record: every writer that stores one appends a `verified` row to `memory_provenance` in the same transaction, so `EvidenceCounts.Verified` counts checks rather than reading a column that only ever holds the latest. The record is stamped with the store's clock, not the caller's — a verifier must not be able to date its own check — so the column and the record are two different facts and both are kept. Gated on the caller stating one in that call: a partial edit keeps an earlier `verified_at` by `COALESCE`, and re-recording that would report a check nobody repeated |
+| **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — `memory_history` now records every state change and who made it, and an `as_of` read consumes it for liveness and content (see [Historical retrieval](#historical-retrieval-as_of)), but a current retrieval still does not; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
+| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memory_search` is the only surface that runs the pipeline, so it is the only one that filters a closed window out — the browsing surfaces still show it, marked `expired`, and the session-start block shows it with no marker at all because it renders its own rows (see the assembler section below). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way. A bare date is a whole day, and a `valid_until` is the END of it (see the assembler section). A `verified_at` also leaves a record: every writer that stores one appends a `verified` row to `memory_provenance` in the same transaction, so `EvidenceCounts.Verified` counts checks rather than reading a column that only ever holds the latest. The record is stamped with the store's clock, not the caller's — a verifier must not be able to date its own check — so the column and the record are two different facts and both are kept. Gated on the caller stating one in that call: a partial edit keeps an earlier `verified_at` by `COALESCE`, and re-recording that would report a check nobody repeated. An `as_of` read is filtered too, and against the instant it asked for rather than the wall clock: `assemble.Run` moves `Now` to the `as_of` value before the stages run, so stage 2 judges the window at T and a row that was true at T but has since expired is kept for that question ([#683](https://github.com/wcatz/ghost/pull/683)) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate) |
-| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write; `memory_provenance` records every observation ([#673](https://github.com/wcatz/ghost/issues/673)) | Inert for ranking, visible to the reader. The three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four. Nothing scores on any of them: stage 4's multiplier stays pinned at `1.0`, and the evidence counts are recorded in the assembler's trace and weigh nothing. `memory_history` has no reader but two — `ghost history <memory-id>` and `Store.MemoryHistory` — and no retrieval path consults them. `memory_provenance` has four: `Store.MemoryProvenance`, `Store.MemoryEvidenceCounts`, the portable artifact, and `Signals.Evidence` in the trace |
+| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write; `memory_provenance` records every observation ([#673](https://github.com/wcatz/ghost/issues/673)) | Inert for ranking, visible to the reader. The three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four. Nothing scores on any of them: stage 4's multiplier stays pinned at `1.0`, and the evidence counts are recorded in the assembler's trace and weigh nothing. The history has three readers: `ghost history <memory-id>`, `Store.MemoryHistory`, and the `as_of` read, which consults it for content and liveness but not for confidence. The evidence table has four: `Store.MemoryProvenance`, `Store.MemoryEvidenceCounts`, the portable artifact, and `Signals.Evidence` in the trace |
 
 Axis interaction rules:
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
@@ -1137,7 +1292,7 @@ Every other open is read-only and deliberately stays that way: a diagnostic must
 "Read-only" is a property of the open, not of the command, and a read-write open tightens wherever it is called. `cmd/ghost`'s shared `bootstrap()` is the usual route, and it already ran migrations and stamped `user_version` before any command-specific work, so most commands tighten simply by starting up. Three paths open read-write without it, and each was already writing or migrating for its own reasons: `mcpinit.checkStoreHealth` (behind `ghost mcp status`, which must not bootstrap — a status check that created the database would turn the next run's "no Ghost database" line into a healthy one), `runMaintenanceStatus`, and three paths under `ghost hook` / `ghost context`:
 - `mcpinit.importMemories`, reached by `finalizePlugin` before any of the session-start gates when a Claude Code plugin install is finalizing for the first time. It opens read-write to import memory files, so that one fire tightens regardless of source or whether it is a subagent.
 - `runSessionStart`, which returns early for a subagent, a `resume` and a `compact`, and gates the bump on `projectID != ""` and on the source being empty or `startup` — so a `clear` does not bump either.
-- `RenderSessionContext`, which opencode's plugin reaches by spawning `ghost context` at start, because opencode has no context-injection surface of its own — it returns before `runSessionStart` on the `InjectContext` gate, and its plugin spawns the context render instead. It has no source or subagent gate at all, and is gated only on `projectID != ""`.
+- `RenderSessionContext`, which opencode's plugin reaches by spawning `ghost context` at start, because opencode has no context-injection surface of its own — it returns before `runSessionStart` on the `InjectContext` gate, and its plugin spawns the context render instead. It has no source or subagent gate at all, and is gated only on `projectID != ""`. Its `as_of` half (`RenderSessionContextAt` with an instant) is not on that list at all: a historical read opens the same read-only handle, runs no Obsidian sync and no counter bump, so it tightens nothing — which is the point, since a question about the past must not touch the present.
 
 So a genuine new session in a directory that resolves to a project tightens; on the `ghost hook` path a resumed, cleared or compacted one does not, while on the opencode path any start does. That is the same gate that keeps the session counter honest. Goose's session start tightens nothing at all, for the same `InjectContext` reason. A session stop can reach a read-write open indirectly when the stop hook spawns `ghost lifecycle` for a reflection pass.
 
@@ -1156,6 +1311,38 @@ CGO_ENABLED=0 go build -o ghost ./cmd/ghost
 ```
 
 GoReleaser produces Linux, macOS, and Windows binaries for amd64 and arm64, with checksums. The Docker build uses a Go Alpine builder and an Alpine runtime, also with `CGO_ENABLED=0`. CI runs tests, race tests, vetting, linting, vulnerability scanning, and workflow validation.
+
+## Testing
+
+Three layers, and the third is about the artifact rather than the packages.
+
+**In-process tests** call into `internal/...` directly. That is where logic is tested, and it is the overwhelming majority of the tree: the store, the assembler, the consolidation tiers, the migration steps, the hook parsers. `go test ./...` runs them, and they run in CI on every leg.
+
+**Contract guards** pin the properties a change could quietly undo. `TestConcurrentProcessesMixedReadWrite` and `TestMultiProcessSharedDatabase` (see [the concurrency contract](#concurrency-contract)) are the largest; there are others for permission tightening, the credential guard's reach, and the prompt contracts. They are named for the property, not the function, and each one fails if the setting or rule it depends on is removed.
+
+**End-to-end tests** exercise the BUILT binary, and they live in `e2e/` behind the `e2e` build tag:
+
+```bash
+make test-e2e          # or: go test -tags e2e ./e2e/ -count=1
+```
+
+The tag is the whole mechanism for keeping `go test ./...` and CI unchanged: with it absent every file in `e2e/` is excluded, and the `./...` pattern skips a directory whose files are all build-constrained out — silently, and verified rather than assumed. There is no second `go test` line in CI, so the layer runs on demand and locally, not on every push.
+
+What it covers, and why it cannot be in-process:
+
+- **The MCP surface**, read from the server's own `tools/list` and checked in both directions against a table of subtests: a tool added to the product with no subtest fails the suite. Every resource, resource template and prompt too, driven over the real stdio transport with the go-sdk client.
+- **Every CLI subcommand** in `cmd/ghost/help.go`'s `usageByCommand` table, **parsed out of that file at run time** and compared against the suite's own table in both directions — a subcommand registered with no table row fails, and so does a row for a subcommand the product does not register. Each row accounts for itself in exactly one of three declared ways (a `run` closure that invokes it, a `coveredBy` naming the dedicated test that does, or a `helpOnly` reason), so "never run" cannot hide in a comment. One command is help-only: `ghost upgrade` reaches a hardcoded `api.github.com` URL that no environment variable redirects, and this suite makes no network call by design. Its help and its refusal of an unknown flag are both exercised.
+- **The lifecycle hooks** for all four hosts and all three events, with per-host transcript fixtures in each host's own native format, the fail-open contract for eleven malformed payloads, and the Stop hook's spawn behind its pid lock and `min_interval` cooldown.
+- **The upgrade path**: a store downgraded to the previous schema version is migrated by an ordinary read-write open, and the pre-migration backup, the version stamp, the surviving rows and the first post-migration history baseline are all asserted. A store stamped NEWER is refused, and the assertion is that the refusal wrote nothing.
+- **Concurrency across processes**: two `ghost mcp` servers and a CLI writer against one store for a few seconds, asserting no `SQLITE_BUSY` reaches a caller and every reported id is in the store exactly once afterwards.
+
+Three things make it safe to run, and each is enforced rather than hoped for:
+
+- **One build, the real program.** `TestMain` runs `go build` once into a temp dir; every test executes that file. Nothing re-execs `os.Args[0]`, because under `go test` the test binary IS the suite.
+- **A sandbox per test.** Temp `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME`, and a child environment BUILT from an allowlist rather than filtered from `os.Environ()` — a filter cannot answer "is there a variable here nobody thought of". Nothing reaches the developer's own `~/.local/share/ghost`, `~/.claude`, `~/.codex`, `~/.config/opencode` or `~/.config/goose`. The one layer a sandbox cannot redirect is the system-wide `/etc/ghost/config.yaml`.
+- **No real model call, ever.** The four CLI harnesses are shell fakes first on `PATH`, answering from the prompt they were handed rather than from a table of test names: the reflect answer is a `keep` per id in the prompt, the resolve and supersede answers are the files a test writes. The embedding endpoint is an in-process HTTP server producing a deterministic hashed bag-of-words vector, so hybrid search and the supersede candidate scan have a real vector space and no model is loaded.
+
+Two properties of the fakes are load-bearing and easy to get wrong, so they are stated here. A backend's answer shape is not uniform: `opencode` requires JSONL on stdout (`{"type":"text","part":{"type":"text","text":…}}`) and any non-JSON line is a hard error there, while `claude`, `codex` and `goose` take bare text. And the operation is decided by scanning BOTH stdin and argv, because the `claude` backend is invoked with the system prompt as a real `--system-prompt` argument and only the user content on stdin.
 
 ## Historical design records
 

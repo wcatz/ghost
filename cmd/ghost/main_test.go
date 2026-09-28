@@ -22,6 +22,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/resolve"
+	"github.com/wcatz/ghost/internal/supersede"
 )
 
 // testDeleteStore returns a real in-memory Store with one project ("proj",
@@ -1013,7 +1014,7 @@ func TestReportDisposedClaims(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	reportDisposedClaims(&buf, result)
+	reportDisposedClaims(&buf, 80, result)
 	got := buf.String()
 
 	for _, want := range []string{
@@ -1037,7 +1038,7 @@ func TestReportDisposedClaims(t *testing.T) {
 // carrying an empty section.
 func TestReportDisposedClaimsSaysNothingWithoutClaims(t *testing.T) {
 	var buf bytes.Buffer
-	reportDisposedClaims(&buf, reflection.ReflectionResult{
+	reportDisposedClaims(&buf, 80, reflection.ReflectionResult{
 		Memories: []reflection.ReflectMemory{{Category: "fact", Content: "anything"}},
 	})
 	if buf.Len() != 0 {
@@ -1410,10 +1411,119 @@ func TestReassessSummaryLine(t *testing.T) {
 	}
 }
 
+// TestSupersedeReport: the pass's report carries the deterministic veto's
+// count, and only when the veto settled something. A pass that declined work it
+// did not do and printed the same totals as a pass that found nothing to do
+// reads as "nothing was skipped" (#686).
+func TestSupersedeReport(t *testing.T) {
+	dry := "proj: 4 candidate pairs in 1 classify call(s), 2 cached, 1 supersedes, 0 causes, 0 reclassified, would link\n"
+	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1); got != dry {
+		t.Errorf("supersedeReport() with nothing vetoed = %q, want %q", got, dry)
+	}
+	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1)
+	if !strings.HasPrefix(got, dry) {
+		t.Errorf("supersedeReport() = %q, want the summary line first, unchanged", got)
+	}
+	if !strings.Contains(got, "  3 pair(s) vetoed:") {
+		t.Errorf("supersedeReport() = %q, want it to report 3 vetoed pairs", got)
+	}
+	if !strings.Contains(got, "no classify call") || !strings.Contains(got, "not cached") {
+		t.Errorf("supersedeReport() = %q, want it to say what the veto costs and does not cost", got)
+	}
+	// The report is mode-agnostic about the veto: a vetoed pair is never linked,
+	// so there is nothing for --apply to write either. The apply verb is the
+	// only thing that changes.
+	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0)
+	if !strings.HasPrefix(apply, "proj: 1 candidate pairs in 0 classify call(s), 0 cached, 0 supersedes, 0 causes, 0 reclassified, linked\n") {
+		t.Errorf("supersedeReport() apply = %q, want the apply verb and the veto count", apply)
+	}
+}
+
+// TestSupersedeReassessReport: the repair pass's report is per outcome, and its
+// list is the point of the pass — so each line has to name the edge, the rule
+// that withdrew it and WHICH decided it, and the headline count has to be the
+// one the operator is about to act on. A dry run reports the list it is about to
+// print; --apply reports the rows that actually moved, which is fewer whenever a
+// concurrent pass got there first.
+func TestSupersedeReassessReport(t *testing.T) {
+	edges := []supersede.WithdrawnEdge{
+		{NewerID: "abcdef0123456789", OlderID: "9876543210fedcba", Reason: "vetoed: older note states a rule (never) the newer note does not retire", Vetoed: true, CausesSwept: 1},
+		{NewerID: "1122334455667788", OlderID: "8877665544332211", Reason: "neither: both notes are still true"},
+	}
+	dry := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Neither: 1, Unclassified: 1,
+		Withdrawn: 0, CausesWithdrawn: 1, // what the pass predicts for a dry run
+	}, false, edges, 2)
+	for _, want := range []string{
+		// The per-outcome numbers add up to Loaded, the withdrawal count is the
+		// two edges below it rather than the (dry-run-zero) Withdrawn field, and
+		// the sweep is PREDICTED here — it is a second graph row the operator is
+		// about to delete, so a dry run that hid it would be deciding for them.
+		"proj: 5 live supersedes edge(s), 1 not judged, 1 vetoed, 1 still supersedes, 1 neither, 0 causes, 0 reversed, 1 UNKNOWN, would withdraw 2, would sweep 1 causes edge(s) (2 classify call(s))",
+		"  would withdraw  abcdef01 -> 98765432  [veto, no harness call]  [+1 causes edge]  vetoed:",
+		"  would withdraw  11223344 -> 88776655  [classifier]  neither: both notes are still true",
+		"Re-run with --apply to withdraw these edges.",
+	} {
+		if !strings.Contains(dry, want) {
+			t.Errorf("dry report missing %q:\n%s", want, dry)
+		}
+	}
+	if strings.Contains(dry, "  withdrew ") {
+		t.Errorf("a dry run reported a withdrawal as done:\n%s", dry)
+	}
+
+	// Under --apply the list says so per edge, and the headline counts the rows
+	// actually invalidated — one here, because a concurrent pass withdrew the
+	// vetoed edge first and the report must not claim this pass wrote it.
+	applied := []supersede.WithdrawnEdge{
+		{NewerID: edges[1].NewerID, OlderID: edges[1].OlderID, Reason: edges[1].Reason, Written: true, CausesSwept: 1},
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true},
+	}
+	apply := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 2, Vetoed: 1, Neither: 1, Withdrawn: 1, CausesWithdrawn: 1,
+	}, true, applied, 1)
+	if !strings.Contains(apply, "withdrew 1, swept 1 causes edge(s) (1 classify call(s))") {
+		t.Errorf("apply report does not count the withdrawal that landed and the edge swept with it:\n%s", apply)
+	}
+	if !strings.Contains(apply, "  withdrew     11223344 -> 88776655  [classifier]  [+1 causes edge]") {
+		t.Errorf("apply report does not mark the edge it wrote, or the causes edge it swept with it:\n%s", apply)
+	}
+	if strings.Contains(apply, "Re-run with --apply") {
+		t.Errorf("an applied report must not offer to apply again:\n%s", apply)
+	}
+	// A row a concurrent pass withdrew first is neither of the other two
+	// markers: calling it "would withdraw" under --apply claims a deletion that
+	// did not happen.
+	if !strings.Contains(apply, "  already gone  abcdef01 -> 98765432") {
+		t.Errorf("apply report mislabels the edge a concurrent pass withdrew first:\n%s", apply)
+	}
+
+	// A sweep that failed says "unknown" — on the row and in the summary — and
+	// never a count, because after a failed write the count is not knowable and
+	// a 0 would read as "nothing else was deleted".
+	failed := []supersede.WithdrawnEdge{
+		{NewerID: edges[1].NewerID, OlderID: edges[1].OlderID, Reason: edges[1].Reason, Written: true, SweepFailed: true},
+	}
+	failReport := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 1, Neither: 1, Withdrawn: 1, CausesSweepFailed: 1,
+	}, true, failed, 1)
+	if !strings.Contains(failReport, "[causes sweep FAILED — unknown]") {
+		t.Errorf("a failed sweep must not be reported as a count:\n%s", failReport)
+	}
+	if !strings.Contains(failReport, "1 causes sweep(s) FAILED (unknown)") {
+		t.Errorf("the summary must count the failed sweeps separately from the swept ones:\n%s", failReport)
+	}
+	if strings.Contains(failReport, "[+0 causes edge]") {
+		t.Errorf("a failed sweep printed a marker that says nothing was moved:\n%s", failReport)
+	}
+}
+
 // TestParseSupersedeArgs pins `ghost supersede` argv parsing: same shapes as
 // resolve except the project is last-wins across positionals (historical
 // behavior) and --threshold exists in both value forms, defaulting to 0.80
-// when the value does not parse.
+// when the value does not parse. --reassess is resolve's repair flag with the
+// same meaning (#686): the edges are already in the graph, so --apply withdraws
+// them instead of writing new ones.
 func TestParseSupersedeArgs(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -1421,29 +1531,35 @@ func TestParseSupersedeArgs(t *testing.T) {
 		project   string
 		source    string
 		apply     bool
+		reassess  bool
 		threshold float32
 	}{
-		{"positional", []string{"myproj"}, "myproj", "", false, 0.80},
-		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, 0.80},
-		{"threshold separate value", []string{"myproj", "--threshold", "0.5"}, "myproj", "", false, 0.5},
-		{"threshold equals value", []string{"myproj", "--threshold=0.25"}, "myproj", "", false, 0.25},
-		{"threshold bad value keeps default", []string{"myproj", "--threshold", "abc"}, "myproj", "", false, 0.80},
-		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, 0.80},
-		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, 0.80},
-		{"last positional wins", []string{"a", "b"}, "b", "", false, 0.80},
-		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, 0.80},
-		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, 0.80},
-		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, 0.80},
-		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, 0.80},
+		{"positional", []string{"myproj"}, "myproj", "", false, false, 0.80},
+		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, false, 0.80},
+		{"reassess dry run", []string{"myproj", "--reassess"}, "myproj", "", false, true, 0.80},
+		{"reassess with apply", []string{"myproj", "--reassess", "--apply"}, "myproj", "", true, true, 0.80},
+		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true, 0.80},
+		{"threshold separate value", []string{"myproj", "--threshold", "0.5"}, "myproj", "", false, false, 0.5},
+		{"threshold equals value", []string{"myproj", "--threshold=0.25"}, "myproj", "", false, false, 0.25},
+		{"threshold bad value keeps default", []string{"myproj", "--threshold", "abc"}, "myproj", "", false, false, 0.80},
+		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false, 0.80},
+		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false, 0.80},
+		{"last positional wins", []string{"a", "b"}, "b", "", false, false, 0.80},
+		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false, 0.80},
+		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false, 0.80},
+		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false, 0.80},
+		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, 0.80},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			project, source, apply, threshold, err := parseSupersedeArgs(tc.args)
+			project, source, apply, reassess, threshold, err := parseSupersedeArgs(tc.args)
 			if err != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", tc.args, err)
 			}
-			if project != tc.project || source != tc.source || apply != tc.apply || threshold != tc.threshold {
-				t.Errorf("parseSupersedeArgs(%v) = (%q, %q, %v, %v), want (%q, %q, %v, %v)",
-					tc.args, project, source, apply, threshold, tc.project, tc.source, tc.apply, tc.threshold)
+			if project != tc.project || source != tc.source || apply != tc.apply ||
+				reassess != tc.reassess || threshold != tc.threshold {
+				t.Errorf("parseSupersedeArgs(%v) = (%q, %q, %v, %v, %v), want (%q, %q, %v, %v, %v)",
+					tc.args, project, source, apply, reassess, threshold,
+					tc.project, tc.source, tc.apply, tc.reassess, tc.threshold)
 			}
 		})
 	}
@@ -1458,7 +1574,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"threshold missing value", []string{"myproj", "--threshold"}, `unknown flag "--threshold"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, _, err := parseSupersedeArgs(tc.args)
+			_, _, _, _, _, err := parseSupersedeArgs(tc.args)
 			if err == nil {
 				t.Fatalf("parseSupersedeArgs(%v) must fail", tc.args)
 			}
@@ -1525,9 +1641,12 @@ func TestDashProjectLifecycleRoundTrip(t *testing.T) {
 			}
 			got, apply = project, a
 		case "supersede":
-			project, _, a, _, perr := parseSupersedeArgs(args)
+			project, _, a, reassess, _, perr := parseSupersedeArgs(args)
 			if perr != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", ph.args, perr)
+			}
+			if reassess {
+				t.Errorf("the supersede phase must never emit --reassess (phase argv: %v)", ph.args)
 			}
 			got, apply = project, a
 		default:

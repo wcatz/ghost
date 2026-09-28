@@ -198,6 +198,105 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$XDG_DATA_HOME"'"}
 	}
 }
 
+// TestOpenCodeClient_SessionStoreDiesWithTheInvocation is the other half of
+// the #588 isolation, and the reason Ghost does not delete each run's session
+// afterwards. TestOpenCodeClient_SessionStoreStaysInScratchRoot proves the store
+// is somewhere inside the scratch root; this proves it is GONE once the call
+// returns, because the per-invocation directory that holds it is removed by the
+// same deferred cleanup that already removes the child's temp files. The store
+// therefore cannot outlive the run no matter what OpenCode wrote into it.
+//
+// That is what makes an `opencode session delete` per invocation redundant: it
+// would spend a second OpenCode process (Ghost spawns one per consolidation, per
+// resolve candidate and per supersede pair — hundreds per lifecycle) to delete a
+// row in a directory that is about to be removed wholesale. If the teardown ever
+// regresses, the store starts accumulating under the scratch root instead, and
+// only this test notices.
+//
+// The fake writes the store the way real OpenCode does — the sqlite database and
+// a titled session row under the data dir it was given — then reports both that
+// store's path and the credential it can read there, so the same run also pins
+// that the isolated data dir carries the auth file the child needs to
+// authenticate (issue #627) without the user's config or MCP tree.
+func TestOpenCodeClient_SessionStoreDiesWithTheInvocation(t *testing.T) {
+	bin := fakeOpenCodeBinary(t, `
+store="$XDG_DATA_HOME/opencode"
+mkdir -p "$store" || exit 1
+printf 'sqlite-store' > "$store/opencode.db" || exit 1
+printf '[ghost]' > "$store/session" || exit 1
+if [ -r "$store/auth.json" ]; then auth=$(cat "$store/auth.json"); else auth=MISSING; fi
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"store='"$store"' ;; auth='"$auth"' ;; "}}'
+`)
+	// fakeOpenCodeBinary pinned its own scratch root first; pin the one this
+	// test walks, so the parent can search the root the child actually used.
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	// A credential in a temp home, at the default data path opencode itself
+	// documents. Nothing real is at risk, and it is the one file copyOpenCodeAuth
+	// is allowed to carry across.
+	const credential = "ghost-test-credential-sentinel"
+	home := t.TempDir()
+	authDir := filepath.Join(home, ".local", "share", "opencode")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		t.Fatalf("seed auth dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(credential), 0o600); err != nil {
+		t.Fatalf("seed auth file: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
+	// The file carry only runs when there is no key in the environment:
+	// copyOpenCodeAuth returns early for a set OPENCODE_API_KEY, because the
+	// child then authenticates from the variable and needs no auth.json. Pin it
+	// empty so this exercises the copy, and so the test does not change meaning
+	// depending on the harness it happens to run inside — a session spawned by
+	// OpenCode itself exports OPENCODE_API_KEY, which would silently turn the
+	// assertion below into a check of the wrong path.
+	t.Setenv("OPENCODE_API_KEY", "")
+
+	c := &OpenCodeClient{binary: bin}
+	report, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	store, auth, ok := strings.Cut(report, " ;; ")
+	if !ok {
+		t.Fatalf("fake binary reported %q, want a store=... ;; auth=... report", report)
+	}
+	store = strings.TrimPrefix(store, "store=")
+	auth = strings.TrimSuffix(strings.TrimPrefix(auth, "auth="), " ;; ")
+
+	// The credential reached the isolated data dir, byte for byte: isolation
+	// relocated where OpenCode looks for it instead of hiding it.
+	if auth != credential {
+		t.Errorf("auth the child could read = %q, want the carried credential %q", auth, credential)
+	}
+	if !strings.HasPrefix(store, root+string(os.PathSeparator)) {
+		t.Fatalf("child store %q is not inside the scratch root %q", store, root)
+	}
+	// The teardown, not an explicit delete: the whole store must be gone.
+	if _, err := os.Stat(store); !os.IsNotExist(err) {
+		t.Errorf("session store %s survived the call (stat err=%v) — it will accumulate", store, err)
+	}
+	// Belt and braces: nothing anywhere under the root may still look like a
+	// session store, so a store written outside $XDG_DATA_HOME/opencode would
+	// be caught too rather than passing on the reported path alone.
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && d.Name() == "opencode.db" {
+			t.Errorf("session store %s left under the scratch root", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk scratch root: %v", err)
+	}
+}
+
 // TestOpenCodeClient_ModelFlagFromEnv: when GHOST_OPENCODE_MODEL is set the
 // subprocess invocation must carry `-m <model>` so callers can pin the model
 // (e.g. deepseek) despite opencode's scrubbed config dir.

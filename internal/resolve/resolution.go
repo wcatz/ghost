@@ -118,16 +118,16 @@ func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (
 	return parseVerdict(result), nil
 }
 
-// closedByKey is the field a RESOLVED verdict must carry, and closedByTrim is
-// the punctuation stripped from a field before it is read as a value:
-// harnesses decorate fields freely ("closed-by: X", "**closed-by:** X",
-// "1 | closed-by: X"), and none of that decoration changes the contract.
-// closedByEdge is the same set without the colon, for the fields whose colon
-// decides whether they are the required field at all.
+// closedByKey is the field a RESOLVED verdict must carry. reasonTrim is the
+// punctuation stripped from a field before it is read as a value: harnesses
+// decorate fields freely ("closed-by: X", "**closed-by:** X", "1 | closed-by: X"),
+// and none of that decoration changes the contract. reasonEdge is the same set
+// without the colon, for the fields whose colon decides whether they are the
+// required field at all.
 const (
-	closedByKey  = "closed-by"
-	closedByTrim = ".,!?\"'`*;:|—–-"
-	closedByEdge = ".,!?\"'`*;|—–-"
+	closedByKey = "closed-by"
+	reasonTrim  = ".,!?\"'`*;:|—–-"
+	reasonEdge  = ".,!?\"'`*;|—–-"
 )
 
 // closedByPlaceholder are values that name nothing. A model that writes
@@ -137,6 +137,89 @@ const (
 var closedByPlaceholder = map[string]bool{
 	"none": true, "n/a": true, "tbd": true, "unknown": true,
 	"unspecified": true, "nothing": true, "nil": true, "-": true, "?": true,
+}
+
+// noClaimWords are the words a required-reason value may START with and still
+// name nothing. A placeholder list alone is not enough: the likeliest way a
+// model declines to name a fact is a phrase rather than a keyword — "not
+// applicable", "no such claim", "cannot name it", "unclear" — and a nine-word
+// list reads the first of those as a perfectly good reason. Each is a KEEP here
+// and a NEITHER in internal/supersede, and each is the safe direction: the note
+// stays injectable, the edge is not written.
+//
+// It is the value's FIRST word that decides, because that is where a refusal
+// appears. A reason's later words are its content, so a real reason is not
+// caught by a word it happens to contain: "the runbook was replaced" names a
+// fact even though nothing in the list matches it, and a claim like "it runs
+// Redis 6.2" is never read as a refusal. The cost of the rule is the shape it
+// cannot tell apart — a genuine reason that OPENS with a negation ("no decision
+// was ever recorded, so the thread closed") reads as no reason at all — and that
+// too errs towards keeping the note and not writing the edge.
+var noClaimWords = map[string]bool{
+	"unclear": true, "uncertain": true, "irrelevant": true,
+	"inapplicable": true, "unable": true, "impossible": true,
+	"indeterminate": true, "undecided": true, "pending": true,
+}
+
+// ReasonlessValue reports whether a required-reason field's value names nothing:
+// a placeholder word, the angle-bracketed template the prompt itself prints — a
+// harness echoing the format back verbatim is a routine failure mode of
+// format-constrained replies, and "<the fact that made note N obsolete>" names
+// nothing at all — or a value whose FIRST WORD declines to name one (see
+// noClaimWords and isNegation). The comparison is case-insensitive, because a
+// value that arrives uppercased ("replaced: NONE") is the same placeholder and
+// one that arrives lowercased ("closed-by: Not applicable") is the same refusal.
+//
+// Exported because internal/supersede's `replaced:` field is the same contract
+// for a supersedes verdict (#686): a SUPERSEDES that cannot say what the older
+// note claimed reads NEITHER for the same reason a reasonless RESOLVED reads
+// KEEP. One list decides both, because a value that keeps a note in resolve's
+// injection but buries it under a supersedes edge would be two vocabularies for
+// one rule.
+func ReasonlessValue(value string) bool {
+	if strings.HasPrefix(value, "<") {
+		return true
+	}
+	first := strings.ToLower(value)
+	if i := strings.IndexAny(first, " \t"); i >= 0 {
+		first = first[:i]
+	}
+	return closedByPlaceholder[first] || noClaimWords[first] || isNegation(first)
+}
+
+// ReasonedField reports whether the first occurrence of key in fields carries a
+// value that names something (see ReasonlessValue). The value may sit on the
+// key's own field ("closed-by: the runbook was replaced") or, when the model
+// broke the line right after the colon, in the following field.
+//
+// Only the colon form may take that fallback, because the colon is what
+// separates the required field from a bare mention of the key: in "RESOLVED —
+// no closed-by available" the word after the key is not a reason, and reading it
+// as one is exactly the false RESOLVED this contract exists to prevent.
+//
+// The FIRST key field decides, and a reasonless one settles the question: a
+// reply that names the field twice has already failed to answer it once, and
+// crediting the second mention would make the first one optional. The reason's
+// own wording is never judged — the passes only need to know the model could
+// point at something.
+func ReasonedField(fields []string, key string) bool {
+	for i, f := range fields {
+		field := strings.ToLower(strings.Trim(f, reasonEdge))
+		var value string
+		switch {
+		case field == key+":":
+			// The value is on the next field, or the reason is missing.
+			if i+1 < len(fields) {
+				value = strings.Trim(fields[i+1], reasonTrim)
+			}
+		case strings.HasPrefix(field, key+":"):
+			value = strings.Trim(strings.TrimPrefix(field, key+":"), reasonTrim)
+		default:
+			continue
+		}
+		return value != "" && !ReasonlessValue(value)
+	}
+	return false
 }
 
 // parseVerdict is the strict first-field parser shared by single-note replies
@@ -178,46 +261,12 @@ func parseVerdict(result string) Verdict {
 	return VerdictUnknown
 }
 
-// closedByReasonless reports whether a closed-by value is really a reason: a
-// placeholder word, or the angle-bracketed template the prompt itself prints —
-// a harness that echoes the format back verbatim is a routine failure mode of
-// format-constrained replies, and "<the fact that made note N obsolete>" names
-// nothing at all.
-func closedByReasonless(value string) bool {
-	return closedByPlaceholder[value] || strings.HasPrefix(value, "<")
-}
-
 // closedByVerdict decides the RESOLVED branch: RESOLVED only when the fields
-// after the verdict name a reason. The value may sit on the key's own field
-// ("closed-by: the runbook was replaced") or, when the model broke the line
-// right after the colon, in the following field.
-//
-// Only the colon form may take that fallback, because the colon is what
-// separates the required field from a bare mention of the key: in "RESOLVED —
-// no closed-by available" the word after the key is not a reason, and reading
-// it as one is exactly the false RESOLVED this contract exists to prevent. A
-// placeholder value names nothing, so it is a KEEP too. The reason's own wording
-// is never judged — the pass only needs to know the model could point at
-// something.
+// after the verdict name a reason, by the shared required-reason contract
+// (ReasonedField), which internal/supersede's `replaced:` field also obeys.
 func closedByVerdict(rest []string) Verdict {
-	for i, f := range rest {
-		field := strings.ToLower(strings.Trim(f, closedByEdge))
-		var value string
-		switch {
-		case field == closedByKey+":":
-			// The value is on the next field, or the reason is missing.
-			if i+1 < len(rest) {
-				value = strings.Trim(rest[i+1], closedByTrim)
-			}
-		case strings.HasPrefix(field, closedByKey+":"):
-			value = strings.Trim(strings.TrimPrefix(field, closedByKey+":"), closedByTrim)
-		default:
-			continue
-		}
-		if value != "" && !closedByReasonless(value) {
-			return VerdictResolved
-		}
-		return VerdictKeep
+	if ReasonedField(rest, closedByKey) {
+		return VerdictResolved
 	}
 	return VerdictKeep
 }

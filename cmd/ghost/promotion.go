@@ -113,15 +113,15 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 // eyes, substituting a description for the content whenever the content holds a
 // credential.
 //
-// All three print sites in `ghost reflect` go through this, and that is the
-// point. A guarantee made at the write boundary — the drop reports format,
-// category, scope and length, never the content — is not a guarantee about the
-// command's report if the same command prints the value somewhere else: the
-// proposal listing and the drop-guard warning both printed 120 truncated
-// characters, and 120 is far more than a GitHub PAT or a Docker Hub token needs.
-// In the autonomous path that stdout is the append-only lifecycle.log, so the
-// value outlives the run. The exposure the store's refusal exists to prevent,
-// reached from the other direction.
+// Every print site in `ghost reflect` goes through this or through
+// displayClaim, and that is the point. A guarantee made at the write boundary —
+// the drop reports format, category, scope and length, never the content — is not
+// a guarantee about the command's report if the same command prints the value
+// somewhere else: the proposal listing and the drop-guard warning both printed
+// 120 truncated characters, and 120 is far more than a GitHub PAT or a Docker Hub
+// token needs. In the autonomous path that stdout is the append-only
+// lifecycle.log, so the value outlives the run. The exposure the store's refusal
+// exists to prevent, reached from the other direction.
 //
 // The scope is `ghost reflect` and the scope is stated because a reader who greps
 // for `.Content` in cmd/ghost finds three more sites, in two other commands, and
@@ -147,11 +147,34 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 // still find the row and tell how much was withheld — a report that says only
 // "redacted" is indistinguishable from a report that lost the proposal.
 func displayProposal(content, category string, limit int) string {
-	finding, ok := secret.Detect(content)
-	if !ok {
-		return truncateForDisplay(content, limit)
+	if finding, ok := secret.Detect(content); ok {
+		return fmt.Sprintf("<withheld: %s, category=%s, bytes=%d>", finding.Label, category, len(content))
 	}
-	return fmt.Sprintf("<withheld: %s, category=%s, bytes=%d>", finding.Label, category, len(content))
+	return displayText(content, limit)
+}
+
+// displayClaim renders text a result records without a category: a rewrite's
+// replacement, a disposal claim's witness, an identifier the grounding check
+// rejected. It substitutes for a credential for the same reason displayProposal
+// does — a replacement is derived from stored text, so it can carry a value a
+// pre-guard row held — and reports no category, because the result records none.
+func displayClaim(content string, limit int) string {
+	if finding, ok := secret.Detect(content); ok {
+		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(content))
+	}
+	return displayText(content, limit)
+}
+
+// displayText is the truncation half both of those share: `limit` bytes of
+// caller-supplied memory text, or the whole of it when the limit is zero or less,
+// which is what `ghost reflect --full` asks for. The cut is a display decision
+// and the marker is display-only; a stored memory keeps its full content unless
+// the writer's content cap applies.
+func displayText(content string, limit int) string {
+	if limit <= 0 {
+		return content
+	}
+	return truncateForDisplay(content, limit)
 }
 
 // dropCredentialProposals removes the proposals whose content holds a
