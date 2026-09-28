@@ -434,6 +434,44 @@ func TestGooseIsolationNamesTheDirectoryItCouldNotProbe(t *testing.T) {
 	}
 }
 
+// TestGooseIsolationRefusesAConfigRootThatIsAFile: the leaf probe succeeded, so
+// nothing asked whether what it found was a directory. A plain file at
+// ~/.config/goose was then carried into the isolated home as itself and the
+// call reported success — so goose got a config "directory" that is a file, and
+// a failure that reads as a provider error with nothing pointing at the cause.
+// The walk that runs when the leaf is ABSENT already asks this question, which
+// is why the miss was only visible on the one path where the probe happened to
+// answer.
+//
+// Isolation still holds either way, which is why this is a clarity fix rather
+// than an escape: the call is refused before the child is spawned, and the
+// message names the path.
+func TestGooseIsolationRefusesAConfigRootThatIsAFile(t *testing.T) {
+	home := t.TempDir()
+	asFile := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(filepath.Dir(asFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(asFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// No XDG_CONFIG_HOME, so the first candidate root is the one under test.
+	isolated := t.TempDir()
+	err := linkGooseConfigDirs(isolated, []string{"HOME=" + home}, home)
+	if err == nil {
+		t.Fatal("a config root that is a plain file was carried and reported as a success")
+	}
+	if !strings.Contains(err.Error(), asFile) {
+		t.Errorf("error %q does not name the path that is not a directory (%s)", err, asFile)
+	}
+	// Nothing was carried: the refusal has to come before the link, or the
+	// child would be handed the file anyway.
+	if _, err := os.Lstat(filepath.Join(isolated, ".config", "goose")); !os.IsNotExist(err) {
+		t.Errorf("the file was carried into the isolated home anyway, Lstat err = %v", err)
+	}
+}
+
 // TestGooseChildCannotDiscoverGhostsOwnPluginUnderPathRoot: goose resolves its
 // plugin directory from GOOSE_PATH_ROOT FIRST, before any home variable. In
 // goose's own Paths::get_dir, path_root() short-circuits the whole match, so
