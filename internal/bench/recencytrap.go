@@ -144,6 +144,14 @@ type TrapOutcome struct {
 // never-decay scenario's correct memory out of the top-10 window. Splitting by
 // class is also what keeps the never-decay score the number the published
 // frontier quotes — same fourteen scenarios, same project, same window.
+//
+// Every row is stored under corpusID of its scenario and role, and the whole
+// pass carries one corpusStamp, so the store is a function of the scenarios. A
+// trap and the memory it is a trap for are written to score alike on the keyword
+// leg — that is what makes the suite a contest at all — and the suite's whole
+// subject is the decay factor, so both of the ranking's tie-breaks (the id, and
+// a tied pair's relative age) were live here and both would have made the
+// published frontier a function of the run.
 func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.SearchParams) ([]TrapOutcome, error) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
@@ -175,6 +183,7 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 	}
 	seed := make([]seeded, len(scenarios))
 	scenarioProject := make([]string, len(scenarios))
+	stamp := newCorpusStamp()
 	for i, sc := range scenarios {
 		category := sc.effectiveCategory()
 		project, err := projectFor(category)
@@ -182,13 +191,13 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 			return nil, err
 		}
 		scenarioProject[i] = project
-		cid, err := store.Create(ctx, project, memory.Memory{
+		cid, err := store.CreateWithID(ctx, project, corpusID(project, sc.Name+"-correct"), memory.Memory{
 			Category: category, Content: sc.Correct.Content, Importance: 0.7, Source: "mcp",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("seed %s correct: %w", sc.Name, err)
 		}
-		if err := backdate(ctx, db, cid, sc.Correct.AgeDays); err != nil {
+		if err := stamp.apply(ctx, db, cid, sc.Correct.AgeDays); err != nil {
 			return nil, err
 		}
 		if sc.Pinned {
@@ -202,13 +211,13 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 		}
 		var tids []string
 		for j, tv := range sc.Traps {
-			tid, err := store.Create(ctx, project, memory.Memory{
+			tid, err := store.CreateWithID(ctx, project, corpusID(project, fmt.Sprintf("%s-trap%d", sc.Name, j)), memory.Memory{
 				Category: category, Content: tv.Content, Importance: 0.7, Source: "mcp",
 			})
 			if err != nil {
 				return nil, fmt.Errorf("seed %s trap%d: %w", sc.Name, j, err)
 			}
-			if err := backdate(ctx, db, tid, tv.AgeDays); err != nil {
+			if err := stamp.apply(ctx, db, tid, tv.AgeDays); err != nil {
 				return nil, err
 			}
 			tids = append(tids, tid)

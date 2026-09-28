@@ -28,6 +28,12 @@ import (
 // there — which is why a shipped demotion of resolved and _global rows reported
 // no movement at all on the main table.
 //
+// Its rows are written under corpusID and carry the pass's own corpusStamp, so
+// the store it measures is a function of the fixture rather than of a draw from
+// randomblob or of the clock. This suite has a demotion in its ranking, so its
+// scores tie more often than the graded corpus's do and it is exactly the kind of
+// suite a run-varying id or age could have moved between runs.
+//
 // Deterministic and judge-free, like every other suite here: the corpus and the
 // questions are committed, and so are their nomic-embed-text:v1.5 vectors, so
 // both the keyword and the vector leg run in CI with no Ollama and no network.
@@ -290,6 +296,7 @@ func seedMaintenance(ctx context.Context, store *memory.Store, db *sql.DB, mems 
 
 	keyToID := make(map[string]string, len(mems))
 	var resolvedIDs []string
+	stamp := newCorpusStamp()
 	for _, m := range mems {
 		project := m.Project
 		if project == "" {
@@ -302,16 +309,18 @@ func seedMaintenance(ctx context.Context, store *memory.Store, db *sql.DB, mems 
 		if err := checkDim("memory "+m.Key, vec); err != nil {
 			return nil, err
 		}
-		id, err := store.Create(ctx, project, memory.Memory{
+		id, err := store.CreateWithID(ctx, project, corpusID(project, m.Key), memory.Memory{
 			Category: m.Category, Content: m.Content, Importance: m.Importance, Source: "mcp",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create memory %q: %w", m.Key, err)
 		}
 		// Create always stamps now, and the decay factor reads created_at, so
-		// the ages are the whole reason decay is observable on this suite.
-		if err := backdate(ctx, db, id, m.AgeDays); err != nil {
-			return nil, fmt.Errorf("backdate %q: %w", m.Key, err)
+		// the ages are the whole reason decay is observable on this suite — and
+		// every row shares the pass's own stamp, so a tied pair's order cannot
+		// depend on where a second boundary fell inside the seed loop.
+		if err := stamp.apply(ctx, db, id, m.AgeDays); err != nil {
+			return nil, fmt.Errorf("stamp %q: %w", m.Key, err)
 		}
 		if err := store.StoreEmbedding(ctx, id, vec, "bench"); err != nil {
 			return nil, fmt.Errorf("embed memory %q: %w", m.Key, err)

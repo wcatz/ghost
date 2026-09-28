@@ -3,7 +3,6 @@ package bench
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -112,6 +111,14 @@ func stalenessAll(outcomes []ProbeOutcome) StalenessSummary {
 // SearchHybridParams so the decay factor can be toggled: with DecayEnabled
 // false the suite measures pure relevance retrieval; with it on it measures
 // whether the fresh version is reordered above its stale siblings.
+//
+// Each version is stored under corpusID of its scenario and index, and the whole
+// pass carries one corpusStamp, so the store is a function of the scenarios. A
+// stale and a fresh version of the same fact score identically on the keyword
+// leg, which is the suite's whole premise, so the ranking's tie-breaks are live
+// here: the id decides a tied pair, and the decay factor orders a tied pair in
+// different categories by their ages. Both would otherwise have been a function
+// of the run rather than of the fixture.
 func RunStaleness(ctx context.Context, scenarios []StalenessScenario, p memory.SearchParams, seedSupersedes bool) ([]ProbeOutcome, error) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
@@ -127,20 +134,21 @@ func RunStaleness(ctx context.Context, scenarios []StalenessScenario, p memory.S
 
 	// versionIDs[i][j] = store ID of scenario i's j-th version (oldest first).
 	versionIDs := make([][]string, len(scenarios))
+	stamp := newCorpusStamp()
 	for i, sc := range scenarios {
 		versionIDs[i] = make([]string, len(sc.Versions))
 		for j, v := range sc.Versions {
 			// The scenarios are updated deployment facts (dependency versions);
 			// seed them in a decaying category. Under "fact" (never-decay) the
 			// time-decay feature would be unobservable to this suite.
-			id, err := store.Create(ctx, project, memory.Memory{
+			id, err := store.CreateWithID(ctx, project, corpusID(project, fmt.Sprintf("%s-v%d", sc.Name, j)), memory.Memory{
 				Category: "dependency", Content: v.Content, Importance: 0.7, Source: "mcp",
 			})
 			if err != nil {
 				return nil, fmt.Errorf("seed %s v%d: %w", sc.Name, j, err)
 			}
-			if err := backdate(ctx, db, id, v.AgeDays); err != nil {
-				return nil, fmt.Errorf("backdate %s v%d: %w", sc.Name, j, err)
+			if err := stamp.apply(ctx, db, id, v.AgeDays); err != nil {
+				return nil, fmt.Errorf("stamp %s v%d: %w", sc.Name, j, err)
 			}
 			versionIDs[i][j] = id
 		}
@@ -209,15 +217,6 @@ func judgeProbe(ranked []string, freshID string, staleIDs []string) (found, wins
 		}
 	}
 	return true, wins, fr == 0
-}
-
-// backdate rewrites a memory's timestamps; Create always stamps now, and the
-// suite needs realistic version ages. Raw SQL on the bench-owned store only.
-func backdate(ctx context.Context, db *sql.DB, id string, ageDays int) error {
-	_, err := db.ExecContext(ctx,
-		`UPDATE memories SET created_at = datetime('now', ?), updated_at = datetime('now', ?) WHERE id = ?`,
-		fmt.Sprintf("-%d days", ageDays), fmt.Sprintf("-%d days", ageDays), id)
-	return err
 }
 
 // SummarizeStaleness aggregates outcomes by probe type (sorted state before
