@@ -16,10 +16,18 @@
 // a newer->older 'supersedes' link (source 'llm'); CAUSES writes an
 // older->newer 'causes' link (cause precedes effect); NEITHER writes nothing;
 // REVERSED (the older note is the current one) is refused rather than written.
-// Each note's created_at goes to the prompt too, because updated_at is the wrong
-// ordering exactly when a note was re-saved after the fact it reports (#641):
-// a bare three-way answer cannot decline a direction, and the pass wrote a
-// backwards link that demoted a fix and promoted the stale claim it replaced.
+//
+// The pass is KEEP-biased, because the edge is not informational: the ranking
+// guards demote its target and `ghost resolve`'s supersedes piggyback stamps
+// resolved_at on it, so a wrong edge removes a live memory from every later
+// session's context. A SUPERSEDES therefore has to name the older note's claim
+// that no longer holds in a `replaced:` field, and a verdict without one reads
+// NEITHER (#686, 43% measured precision with every wrong edge a pair whose two
+// notes were both still true). Each note's created_at goes to the prompt too,
+// because updated_at is the wrong ordering exactly when a note was re-saved
+// after the fact it reports (#641): a bare three-way answer cannot decline a
+// direction, and the pass wrote a backwards link that demoted a fix and promoted
+// the stale claim it replaced.
 // Fresh NEITHER verdicts are cached by pair and both endpoints' content hashes
 // (supersede_checked, schema v8): unchanged fresh pairs are skipped on later
 // passes — a cache skip is equivalent to a NEITHER verdict, so a stale
@@ -78,7 +86,8 @@ type Relation string
 
 const (
 	// RelationSupersedes means newer states an updated/changed/replaced value
-	// of the SAME fact as older, making older obsolete.
+	// of the SAME fact as older, making older obsolete. A model that cannot name
+	// the claim it replaced does not reach this verdict (see requireReplaced).
 	RelationSupersedes Relation = "supersedes"
 	// RelationCauses means newer (typically a decision or change) was informed
 	// by older as supporting evidence, but older remains independently true.
@@ -105,14 +114,17 @@ type Classifier interface {
 
 // contentHash is the NEITHER-cache key component, mirroring resolve's
 // ContentHash: the classification question is about the notes' text, so a tag
-// or importance edit must not invalidate a cached verdict. The "v2\x00" prefix
+// or importance edit must not invalidate a cached verdict. The "v3\x00" prefix
 // versions the key — a prompt/rubric change that could flip verdicts bumps it
 // to reset every cached verdict in one step, the same reset resolve performed
-// when its rubric changed. v2 is the #641 rubric: it added the REVERSED
-// verdict and the created_at signal, so a NEITHER row written under v1 may be
-// judged the other way now and every v1 row has to be re-asked.
+// when its rubric changed. A cache hit is a permanent skip for the life of that
+// text, so a stored verdict that the current rules would answer differently is
+// not a stale row, it is a rule that can never be applied again to those two
+// notes. v2 was the #641 rubric (REVERSED plus the created_at signal) and v3 is
+// #686's: a SUPERSEDES now has to name the older note's retired claim, and
+// two-true pairs are NEITHER, so every v2 row has to be re-asked.
 func contentHash(content string) string {
-	sum := sha256.Sum256([]byte("v2\x00" + content))
+	sum := sha256.Sum256([]byte("v3\x00" + content))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -248,6 +260,12 @@ type Result struct {
 	Skipped       int // fresh pairs skipped via the NEITHER cache
 	Unclassified  int // pairs skipped because the classifier answer was unparseable
 	Reversed      int // REVERSED verdicts: refused, never written
+	// Vetoed counts pairs the deterministic imperative veto settled as
+	// no-supersedes-edge with no harness call (see VetoSupersede). They are
+	// counted rather than silently dropped, because a run that declines work it
+	// did not do and reports the same totals as one that found nothing to do
+	// reads as "nothing was skipped".
+	Vetoed int
 	// ReclassifiedNoWrite counts the reclassify pairs whose --apply effect is
 	// purely destructive: a reversal and a NEITHER both only invalidate the
 	// links they find, so neither re-links the pair.
@@ -460,6 +478,36 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	}
 	all = live
 	res.Candidates = len(all)
+
+	// The deterministic imperative veto, before the cache and before any call
+	// (issue #686). A pair whose OLDER note states a standing rule and whose
+	// NEWER note never names that rule as retired is settled here: no classify
+	// call, no link, and no NEITHER cache row, because the veto is free to
+	// recompute on every pass and a row would only add a stale one to reason
+	// about. Measured over a real store, 43% of the proposed edges were pairs
+	// whose two notes were both still true, and one of them demoted a "must"
+	// rule — which the ranking guards demote and resolve's supersedes piggyback
+	// then stamps resolved_at on, for good.
+	//
+	// It runs after the scope refusal, so the pass's two free "this pair may not
+	// be linked" decisions stand together, and before the cache, so a vetoed
+	// pair is never answered from a verdict the current rules would not have
+	// given. An existing edge such a pair carries is left alone: this is the
+	// creation pass, and Reassess is what withdraws an edge the current rules no
+	// longer support.
+	keep := all[:0]
+	for _, c := range all {
+		if reason, vetoed := VetoSupersede(c); vetoed {
+			res.Vetoed++
+			if logger != nil {
+				logger.Debug("supersede: vetoed pair whose older note states a rule",
+					"newer", c.NewerID, "older", c.OlderID, "reason", reason)
+			}
+			continue
+		}
+		keep = append(keep, c)
+	}
+	all = keep
 	if len(all) == 0 {
 		return res, nil, nil
 	}

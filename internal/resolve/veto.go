@@ -69,11 +69,34 @@ var (
 // adjudicated, and a correction's own text — and widening the veto to cover them
 // is a separate, deliberate change.
 func VetoKeep(content string) (reason string, vetoed bool) {
-	for _, list := range [][]vetoPattern{keepVetoImperatives, keepVetoOpenMarkers} {
-		for _, p := range list {
-			if p.re.MatchString(content) {
-				return p.pattern, true
-			}
+	if reason, vetoed := VetoKeepImperative(content); vetoed {
+		return reason, true
+	}
+	for _, p := range keepVetoOpenMarkers {
+		if p.re.MatchString(content) {
+			return p.pattern, true
+		}
+	}
+	return "", false
+}
+
+// VetoKeepImperative reports whether content states a standing rule or
+// instruction, and which pattern fired — the imperative half of VetoKeep, without
+// the open markers.
+//
+// It is exported because internal/supersede reads the SAME signal for the
+// opposite decision (#686): an older note that states a rule is not a stale fact
+// to be retired just because a newer, similar note exists, so supersede vetoes
+// the edge and asks nothing. One vocabulary has to decide both, or a word added
+// here to protect a memory from being buried would be missing from the list that
+// protects it from being demoted. The open markers stay out of it deliberately:
+// "still open" says a problem is unresolved, which is a claim about the state of
+// the world and can be genuinely superseded, while an imperative is a rule and a
+// rule is only retired by a note that says so.
+func VetoKeepImperative(content string) (reason string, vetoed bool) {
+	for _, p := range keepVetoImperatives {
+		if p.re.MatchString(content) {
+			return p.pattern, true
 		}
 	}
 	return "", false

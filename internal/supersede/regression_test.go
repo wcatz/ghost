@@ -324,27 +324,42 @@ func TestRunReversedVerdictInvalidatesBackwardsLink(t *testing.T) {
 // batched call with the verdicts the fixed prompt is supposed to produce, and
 // pins the resulting graph: the two status-report pairs supersede, the reversed
 // pair gets nothing, and the two parallel events on one host get nothing.
+//
+// One of them no longer reaches the classifier at all. "status-report-fix"'s
+// older note says the build "never gets past" the missing fix, which reads as a
+// rule to the imperative vocabulary the veto shares with resolve, and its newer
+// note never retires one — so the veto settles it as no-edge, for free, before
+// any call (#686). The cost is a missed staleness link: that older note stays
+// ranked beside its replacement. It is the cheap direction (a duplicate pair
+// visible in search) rather than a buried memory, it is what the issue's rule
+// asks for, and the expectation is pinned BY NAME here so narrowing the veto
+// has to be a deliberate change to this test.
 func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	ids := seedRegressionCases(t, store, db)
 
-	cls := NewRelationClassifier(newLabeledProvider(func(c relationCase) Relation { return c.want }))
+	cls := NewRelationClassifier(newLabeledProvider(func(c relationCase) Relation { return c.want }, replacedClaim))
 	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	vetoed := map[string]bool{"status-report-fix": true}
+	judged := len(regressionRelationCases) - len(vetoed)
 	if res.Candidates != len(regressionRelationCases) {
 		t.Fatalf("Candidates = %d, want %d (one pair per labeled case)", res.Candidates, len(regressionRelationCases))
 	}
+	if res.Vetoed != len(vetoed) {
+		t.Errorf("Vetoed = %d, want %d", res.Vetoed, len(vetoed))
+	}
 	if cls.Calls() != 1 {
-		t.Errorf("classify calls = %d, want 1 batched call for %d pairs", cls.Calls(), len(regressionRelationCases))
+		t.Errorf("classify calls = %d, want 1 batched call for the %d un-vetoed pair(s)", cls.Calls(), judged)
 	}
 	if res.Reversed != 1 {
 		t.Errorf("Reversed = %d, want 1 (%s)", res.Reversed, regressionCase(t, "reversed").name)
 	}
-	if res.Confirmed != 2 {
-		t.Errorf("Confirmed = %d, want 2 (the two status-report pairs)", res.Confirmed)
+	if res.Confirmed != 1 {
+		t.Errorf("Confirmed = %d, want 1 (the status-report pair the veto does not settle)", res.Confirmed)
 	}
 	// Which pair got which verdict, by identity: the per-pair verdicts are the
 	// fixture, so this fails if a reply ever lands on the wrong pair — which a
@@ -355,20 +370,33 @@ func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 	}
 	for i, c := range regressionRelationCases {
 		newer, older := ids[i][0], ids[i][1]
-		if got := gotVerdict[newer]; got != c.want {
-			t.Errorf("%s: verdict = %q, want %q", c.name, got, c.want)
+		want := c.want
+		wantLink := c.want == RelationSupersedes
+		if vetoed[c.key] {
+			want = ""
+			wantLink = false
+			if _, settled := VetoSupersede(Candidate{OlderContent: c.older, NewerContent: c.newer}); !settled {
+				t.Errorf("%s: the fixture claims the veto settles this pair, but VetoSupersede did not", c.name)
+			}
+		}
+		if got := gotVerdict[newer]; got != want {
+			t.Errorf("%s: verdict = %q, want %q", c.name, got, want)
 		}
 		pairs, err := store.SupersedesWithin(ctx, []string{newer, older})
 		if err != nil {
 			t.Fatalf("SupersedesWithin: %v", err)
 		}
-		wantLink := c.want == RelationSupersedes
 		if wantLink && len(pairs) != 1 {
 			t.Errorf("%s: want one supersedes link, got %d", c.name, len(pairs))
 		}
 		if !wantLink && len(pairs) != 0 {
-			t.Errorf("%s (%s): want no link, got %d", c.name, c.want, len(pairs))
+			t.Errorf("%s (%s): want no link, got %d", c.name, want, len(pairs))
 		}
+		// No labeled case in this set is labeled CAUSES — the prompt rules
+		// those out — so ANY causes link here is one the pass wrote against the
+		// fixture. The assertion is unconditional on purpose: narrowing it to
+		// the cases whose own `wrong` is CAUSES would stop catching a spurious
+		// edge on any other pair.
 		links, _ := store.GetLinks(ctx, older)
 		for _, l := range links {
 			if l.Relation == string(RelationCauses) {
@@ -384,12 +412,19 @@ func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 // from a correct verdict of the same shape, so the pass writes whatever it is
 // told; the rules that stop those three live in the prompt, pinned by the
 // TestClassifierPromptRefuses* tests below.
+//
+// It is the "status-report-divergence" pair that carries the misused `causes`,
+// not its "status-report-fix" sibling: the latter's older note says the build
+// "never gets past" the missing fix, so the imperative veto settles it before
+// the model is asked anything (see TestRunAppliesLabeledRealDataVerdicts). One
+// misused `causes` out of two labeled status reports is the shape the prompt
+// rule has to catch.
 func TestRunLeavesTheThreePromptOnlyPairsToThePrompt(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	ids := seedRegressionCases(t, store, db)
 
-	cls := NewRelationClassifier(newLabeledProvider(func(c relationCase) Relation { return c.wrong }))
+	cls := NewRelationClassifier(newLabeledProvider(func(c relationCase) Relation { return c.wrong }, replacedClaim))
 	res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -401,24 +436,24 @@ func TestRunLeavesTheThreePromptOnlyPairsToThePrompt(t *testing.T) {
 	// backwards link #641 reported — the exact harm the prompt rules remove by
 	// offering REVERSED. Asserting it here would pin the bug, so the count is
 	// only reported.
-	t.Logf("with the pre-fix verdict set: confirmed=%d created=%d causes=%d reversed=%d (the first case is the backwards link #641 found)",
-		res.Confirmed, res.Created, res.CausesCreated, res.Reversed)
+	t.Logf("with the pre-fix verdict set: confirmed=%d created=%d causes=%d reversed=%d vetoed=%d (the first case is the backwards link #641 found)",
+		res.Confirmed, res.Created, res.CausesCreated, res.Reversed, res.Vetoed)
 
 	// The misused causes link is the one the prompt now forbids, so it must be
 	// the one the pass still writes when the prompt does not forbid it.
-	causesCase := regressionCase(t, "status-report-fix")
-	causes, err := store.GetLinks(ctx, ids[1][1])
+	divergence := regressionCase(t, "status-report-divergence")
+	causes, err := store.GetLinks(ctx, ids[2][1])
 	if err != nil {
 		t.Fatalf("GetLinks: %v", err)
 	}
 	found := false
 	for _, l := range causes {
-		if l.Relation == string(RelationCauses) && l.SourceID == ids[1][1] && l.TargetID == ids[1][0] {
+		if l.Relation == string(RelationCauses) && l.SourceID == ids[2][1] && l.TargetID == ids[2][0] {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected the misused causes link for %s to be written when the prompt does not forbid it (see TestClassifierPromptRefusesCausesBetweenStatusReports)", causesCase.name)
+		t.Errorf("expected the misused causes link for %s to be written when the prompt does not forbid it (see TestClassifierPromptRefusesCausesBetweenStatusReports)", divergence.name)
 	}
 }
 
@@ -434,19 +469,37 @@ var batchPairPattern = regexp.MustCompile(`(?s)OLDER [^«\n]*«(.*?)»\nNEWER [^
 // candidates in GetAll's order (importance DESC, created_at DESC), not the
 // fixture table's order, so a fixed "1: …, 2: …, 3: …" reply grades whichever
 // pairs happen to come first — an accidentally green test.
+//
+// A SUPERSEDES line also carries claim(case) in its required `replaced:` field
+// (issue #686), because a verdict that cannot name what the older note claimed
+// is NEITHER — so a fixture graded through this provider has to speak the
+// current output contract or it grades the parser, not the pass.
 type labeledProvider struct {
 	byNewer map[string]Relation
+	claim   func(relationCase) string
 	last    string
 }
 
-// labeledProvider builds a provider that answers each labeled pair with
-// verdict(case), in whatever order the pass emits the pairs.
-func newLabeledProvider(verdict func(relationCase) Relation) *labeledProvider {
-	p := &labeledProvider{byNewer: make(map[string]Relation, len(regressionRelationCases))}
+// newLabeledProvider builds a provider that answers each labeled pair with
+// verdict(case), in whatever order the pass emits the pairs, carrying
+// claim(case) as the `replaced:` value of every SUPERSEDES line.
+func newLabeledProvider(verdict func(relationCase) Relation, claim func(relationCase) string) *labeledProvider {
+	p := &labeledProvider{
+		byNewer: make(map[string]Relation, len(regressionRelationCases)),
+		claim:   claim,
+	}
 	for _, c := range regressionRelationCases {
 		p.byNewer[c.newer] = verdict(c)
 	}
 	return p
+}
+
+// replacedClaim is a fixed, synthetic `replaced:` value standing for "the claim
+// this case's older note made". The parser judges only that a value is present
+// and non-empty, never what it says, so the exact wording carries nothing — and
+// a fixed wording keeps these fixtures free of any real memory text.
+func replacedClaim(relationCase) string {
+	return "the claim the older note made"
 }
 
 // Classify answers one call. An unknown note is a hard error, not a silent
@@ -463,10 +516,25 @@ func (p *labeledProvider) Classify(_ context.Context, _, userContent string) (st
 		if !ok {
 			return "", fmt.Errorf("labeled provider: no verdict for newer note %.60q", m[2])
 		}
-		lines = append(lines, strconv.Itoa(len(lines)+1)+": "+strings.ToUpper(string(rel)))
+		line := strconv.Itoa(len(lines)+1) + ": " + strings.ToUpper(string(rel))
+		if rel == RelationSupersedes {
+			line += " | replaced: " + p.claim(regressionCaseByNewer(m[2]))
+		}
+		lines = append(lines, line)
 	}
 	p.last = strings.Join(lines, "\n")
 	return p.last, nil
+}
+
+// regressionCaseByNewer looks a labeled case up by its newer note's text, the
+// key labeledProvider matches on.
+func regressionCaseByNewer(newer string) relationCase {
+	for _, c := range regressionRelationCases {
+		if c.newer == newer {
+			return c
+		}
+	}
+	return relationCase{}
 }
 
 // promptFor classifies one labeled case and returns the system prompt and the
@@ -508,12 +576,18 @@ func TestClassifierPromptCarriesBothCreatedAt(t *testing.T) {
 // promptFor renders the single-pair contract; the batch contract's "VERDICT is
 // SUPERSEDES, CAUSES, NEITHER, or REVERSED" is asserted in
 // TestRelationClassifierBatchMapsNumberedLines.
+//
+// The single-pair contract prints one answer per line rather than the old
+// "respond with exactly one word: SUPERSEDES, CAUSES, NEITHER, or REVERSED",
+// because a SUPERSEDES answer now carries a `replaced:` claim (#686) — so the
+// assertion is on REVERSED being offered as a bare answer line, which is what
+// "offers the verdict" means for that shape.
 func TestClassifierPromptOffersReversedVerdict(t *testing.T) {
 	system, _ := promptFor(t, regressionCase(t, "reversed"))
 	if !strings.Contains(system, "REVERSED") {
 		t.Errorf("prompt does not offer a REVERSED verdict:\n%s", system)
 	}
-	if !strings.Contains(system, "SUPERSEDES, CAUSES, NEITHER, or REVERSED") {
+	if !strings.Contains(system, "\nREVERSED\n") {
 		t.Errorf("output contract does not list REVERSED alongside the other verdicts:\n%s", system)
 	}
 	if !strings.Contains(system, "never writes a supersedes link backwards") {
@@ -561,9 +635,11 @@ func TestRunReclassifiesPairsCachedUnderTheOldRubric(t *testing.T) {
 	newer := add(t, store, db, c.newer, []float32{1, 0, 0, 0}, c.newerCreated)
 	older := add(t, store, db, c.older, []float32{0.999, 0.001, 0, 0}, c.olderCreated)
 
-	// A row written by a pass running the pre-#641 rubric.
+	// A row written by a pass running the pre-#686 rubric, whose prefix is v2.
+	// The prefix moved to v3 with the `replaced:` rule, so this row no longer
+	// matches and the pair is re-asked.
 	old := func(content string) string {
-		sum := sha256.Sum256([]byte("v1\x00" + content))
+		sum := sha256.Sum256([]byte("v2\x00" + content))
 		return hex.EncodeToString(sum[:])
 	}
 	if err := store.MarkSupersedeNeither(ctx, "p", map[[2]string]memory.SupersedeCheck{

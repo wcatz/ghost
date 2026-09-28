@@ -1,0 +1,88 @@
+package supersede
+
+import (
+	"regexp"
+
+	"github.com/wcatz/ghost/internal/resolve"
+)
+
+// retireMarkers are the ways a note says an older rule no longer binds. They are
+// the second half of the veto, and the reason a false veto is cheap: a rule the
+// newer note never retires is not a stale fact, it is a standing rule, and the
+// only thing that can retire one is a note saying it was retired. The list is
+// deliberately broad for that reason — a false NEGATIVE here lets the veto
+// stand on a genuine supersession, which costs recall, and every marker below
+// costs at most one pair's worth of that. They are bare patterns rather than
+// named ones because the only question asked of them is whether one matches:
+// the reason a vetoed pair reports names the IMPERATIVE that fired, which is the
+// signal a reader of lifecycle.log needs.
+var retireMarkers = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bno longer\b`),
+	// Every inflection, verbs AND nouns: a note that says it is "retiring" the
+	// rule, or that "retirement of the no-merge rule starts next sprint", has
+	// retired it as far as this veto is concerned. Each form here has a word in
+	// TestVetoSupersedeLetsEveryRetirementMarkerThrough, and that test exists
+	// because a form that stops matching is silent — on the creation pass it
+	// costs a supersession, and on the repair pass it costs an edge.
+	regexp.MustCompile(`(?i)\bretir(?:e|es|ed|ing|al|ement)\b`),
+	regexp.MustCompile(`(?i)\bremov(?:e|es|ed|ing|al)\b`),
+	regexp.MustCompile(`(?i)\bdeprecat(?:ed|ion|ing)\b`),
+	regexp.MustCompile(`(?i)\bobsolete\b`),
+	regexp.MustCompile(`(?i)\breplac(?:e|es|ed|ing|ement)\b`),
+	regexp.MustCompile(`(?i)\bsupersed(?:e|es|ed|ing)\b`),
+	regexp.MustCompile(`(?i)\bdrop(?:ped|s|ping)\b`),
+	// A rule that was relaxed, loosened, lifted or waived is still a rule the
+	// newer note changed, and "must now" is a rule the newer note rewrote.
+	regexp.MustCompile(`(?i)\brelax(?:ed|es|ing|ation)\b`),
+	regexp.MustCompile(`(?i)\bloosen(?:ed|s|ing)\b`),
+	regexp.MustCompile(`(?i)\blift(?:ed|s|ing)\b`),
+	regexp.MustCompile(`(?i)\bwaiv(?:ed|es|ing)\b`),
+	regexp.MustCompile(`(?i)\bmust now\b`),
+	regexp.MustCompile(`(?i)\bnot (?:be )?required\b`),
+	regexp.MustCompile(`(?i)\bexception to\b`),
+}
+
+// VetoSupersede reports whether a candidate pair is settled as "no supersedes
+// edge" without asking anything. It fires on one signal and one only: the OLDER
+// note states a standing rule, and the NEWER note does not name that rule as
+// retired or changed. The second half is what makes the first safe — a newer
+// note that says "the no-merge rule is retired", "X is no longer required" or
+// "use Y instead of X" is a real supersession of an imperative, and it reaches
+// the classifier, which judges whether the retirement is of the SAME rule.
+//
+// A rule is not a fact that goes out of date, and the imperative vocabulary is
+// resolve's own (VetoKeepImperative) rather than a copy: the same word has to
+// protect a memory from being buried by resolve and from being demoted here, or
+// one pass's list would grow while the other's did not. The open markers resolve
+// also vetoes on are deliberately absent — "still open" is a claim about the
+// state of the world, which a later note can genuinely overturn, while an
+// imperative is a rule and only a note that names it changes it.
+//
+// The direction of the error is the same one resolve's veto takes. A false veto
+// leaves a stale note ranked and visible, and a later pass can still link it; a
+// missed one buries a rule an agent would otherwise follow, and nothing in the
+// ordinary pass will look at it again.
+func VetoSupersede(c Candidate) (reason string, vetoed bool) {
+	imperative, _ := resolve.VetoKeepImperative(c.OlderContent)
+	if imperative == "" {
+		return "", false
+	}
+	if namesRetirement(c.NewerContent) {
+		return "", false
+	}
+	return "older note states a rule (" + imperative + ") the newer note does not retire", true
+}
+
+// namesRetirement reports whether the newer note names any rule as retired or
+// changed. Only the note's own text is read, and only as a signal that the
+// question is worth a classifier call: whether the retirement covers the SAME
+// rule the older note stated is the semantic judgement this veto deliberately
+// does not make.
+func namesRetirement(content string) bool {
+	for _, re := range retireMarkers {
+		if re.MatchString(content) {
+			return true
+		}
+	}
+	return false
+}
