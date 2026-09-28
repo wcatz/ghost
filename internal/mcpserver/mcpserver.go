@@ -1140,13 +1140,42 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 // request rather than the write — a refused ref writes nothing, so there is no
 // list of memories to report.
 func markFailureRows(rows []resolve.MarkedMemory) string {
-	if len(rows) == 0 {
+	// Split before rendering, because the two populations need opposite
+	// sentences. On this path resolve.Mark returns every row it resolved and marks
+	// them all failed, including rows it had ALREADY found resolved — nothing was
+	// written for those and nothing was rolled back, and they are not live, so
+	// lumping them in with "unchanged and still live" tells an agent that a memory
+	// Ghost has already buried is live. It relays that to its user and stops
+	// looking. The success path above already gets this state right, and the two
+	// reports disagreeing about one row is the defect.
+	already := make([]resolve.MarkedMemory, 0, len(rows))
+	live := make([]resolve.MarkedMemory, 0, len(rows))
+	for _, m := range rows {
+		if m.AlreadyResolved {
+			already = append(already, m)
+			continue
+		}
+		live = append(live, m)
+	}
+	if len(live) == 0 && len(already) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\nNothing was marked: the stamp, its history row and its cache clear are one transaction, so this rolled all %d back. These memories are unchanged and still live:", len(rows))
-	for _, m := range rows {
-		fmt.Fprintf(&b, "\n  %s  [%s]  %s", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+	if len(live) > 0 {
+		fmt.Fprintf(&b, "\nNothing was marked: the stamp, its history row and its cache clear are one transaction, so this rolled all %d back. These are unchanged and still live:", len(live))
+		for _, m := range live {
+			fmt.Fprintf(&b, "\n  %s  [%s]  %s", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+		}
+	}
+	if len(already) > 0 {
+		if len(live) == 0 {
+			fmt.Fprintf(&b, "\nNothing was written, and nothing needed to be: the %d below were already resolved before this call, so the write declined them and there was nothing to roll back.", len(already))
+		} else {
+			fmt.Fprintf(&b, "\nThe %d below were already resolved before this call: nothing was written for them and nothing was rolled back.", len(already))
+		}
+		for _, m := range already {
+			fmt.Fprintf(&b, "\n  already resolved  %s  [%s]  %s", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+		}
 	}
 	return b.String()
 }

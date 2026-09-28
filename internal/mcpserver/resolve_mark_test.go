@@ -448,6 +448,54 @@ func TestResolveMarkNamesTheMemoriesAFailedWriteAskedAbout(t *testing.T) {
 	}
 }
 
+// TestResolveMarkDoesNotCallAnAlreadyResolvedMemoryLiveOnAFailure: the same
+// report with a row Ghost had ALREADY buried in the request. Nothing was written
+// for it and nothing was rolled back, and it is not live — so a "unchanged and
+// still live" list containing it tells an agent that a memory Ghost has already
+// buried is visible, and the agent relays that to its user and stops looking.
+//
+// The success path of the same handler already names this state, so the failure
+// path calling it something else is the defect and not a wording preference.
+func TestResolveMarkDoesNotCallAnAlreadyResolvedMemoryLiveOnAFailure(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	buried := seedMarkable(t, store, "test-project", "a note an earlier pass already buried")
+	live := seedMarkable(t, store, "test-project", "a note the mark could not stamp")
+	// The fixture's own stamp, through the ordinary path — the state a re-run or a
+	// repair leaves behind.
+	if n, err := store.SetResolved(context.Background(), []string{buried}); err != nil || n != 1 {
+		t.Fatalf("SetResolved = %d, %v; want 1 and no error", n, err)
+	}
+
+	srv.store = &failingMarkStore{
+		MemoryStore: srv.store,
+		store:       store,
+		err:         errors.New("database is locked"),
+	}
+	session := connectedClientNamed(t, srv, "claude-code")
+
+	msg := callToolErr(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": "test-project",
+		"memory_ids": []string{buried, live},
+	})
+	// The already-resolved row is named, and named as what it is.
+	if !strings.Contains(msg, "already resolved") {
+		t.Errorf("the failure does not name the already-resolved row as such:\n%s", msg)
+	}
+	if !strings.Contains(msg, "a note an earlier pass already buried") {
+		t.Errorf("the failure does not quote that memory:\n%s", msg)
+	}
+	// And it is not inside the live list, with the count that goes with it. The
+	// rolled-back count is the ELIGIBLE rows, so it is 1 here and not 2.
+	if !strings.Contains(msg, "rolled all 1 back") {
+		t.Errorf("the failure counts a row nothing was written for as rolled back:\n%s", msg)
+	}
+	// The live row is still described as live and unchanged, or the split above
+	// went too far and the failure says nothing about what a retry would affect.
+	if !strings.Contains(msg, "a note the mark could not stamp") {
+		t.Errorf("the failure does not name the eligible row:\n%s", msg)
+	}
+}
+
 // failingMarkStore is the tool's store with a mark that always errors, which is
 // what a locked or full database looks like to this call.
 type failingMarkStore struct {
