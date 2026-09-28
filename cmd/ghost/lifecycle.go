@@ -1689,6 +1689,13 @@ const supersedeEmbedBound = 50
 // rather than by any decision this pass made. What a dry run promises is that
 // the GRAPH is untouched — no link, no invalidation, no cache row — and it still
 // is.
+//
+// It returns what it wrote and nothing more. What the pass could NOT read is
+// counted by the scan instead (Result.Unscored, via supersedeUnscoredNote),
+// because that is where the fact is true: a bound reached, an endpoint that did
+// not answer, and a vector written under another model all end up as the same
+// honest count of memories in no pair, where a report derived from the embed
+// call could only ever be a guess.
 func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory.Store, projectID string, logger *slog.Logger) int {
 	if !cfg.Embedding.Enabled {
 		return 0
@@ -1710,6 +1717,34 @@ func supersedeEmbedNote(embedded int) string {
 		return "  1 memory embedded for this pass — it had no vector yet, and a note with no vector is not a candidate for anything\n"
 	default:
 		return fmt.Sprintf("  %d memories embedded for this pass — they had no vector yet, and a note with no vector is not a candidate for anything\n", embedded)
+	}
+}
+
+// supersedeUnscoredNote reports the part of the project the candidate scan could
+// not read at all — a memory with no usable vector is in no pair the pass could
+// find, so every other number on the report is a total over the REST of the
+// project. It is counted where it is true (SelectCandidates, one pass over the
+// corpus) rather than inferred from what the pre-scan embed managed to write, so
+// it cannot disagree with the totals printed beside it: a bound reached, an
+// endpoint down, a list query that failed and a vector written under another
+// model all arrive here as the same honest fact.
+//
+// It says nothing at all when every memory was scorable, because an ordinary
+// pass's answer to the operator's question is that there was nothing missing.
+func supersedeUnscoredNote(unscored int, embeddingEnabled bool) string {
+	switch unscored {
+	case 0:
+		return ""
+	case 1:
+		if !embeddingEnabled {
+			return "  1 memory had no vector when the pass scanned, so it is in no pair this run considered — embedding is disabled, so nothing is keeping the vector index up to date\n"
+		}
+		return "  1 memory had no vector when the pass scanned, so it is in no pair this run considered — the index is filled by the embedding worker in `ghost mcp`, and `ghost mcp status` reports its coverage\n"
+	default:
+		if !embeddingEnabled {
+			return fmt.Sprintf("  %d memories had no vector when the pass scanned, so they are in no pair this run considered — embedding is disabled, so nothing is keeping the vector index up to date\n", unscored)
+		}
+		return fmt.Sprintf("  %d memories had no vector when the pass scanned, so they are in no pair this run considered — the index is filled by the embedding worker in `ghost mcp`, and `ghost mcp status` reports its coverage\n", unscored)
 	}
 }
 
@@ -1814,6 +1849,7 @@ func runSupersede() {
 	}
 	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls(), cls.Retries()))
 	fmt.Print(supersedeEmbedNote(embedded))
+	fmt.Print(supersedeUnscoredNote(res.Unscored, cfg.Embedding.Enabled))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}

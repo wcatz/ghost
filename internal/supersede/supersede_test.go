@@ -84,14 +84,19 @@ func TestSelectCandidates(t *testing.T) {
 	older := add(t, store, db, "postgres runs version 14", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
 	_ = add(t, store, db, "grafana listens on port 80", []float32{0, 0, 1}, "2026-06-01 00:00:00")
 
-	cands, err := SelectCandidates(ctx, store, "p", 0.9)
+	sel, err := SelectCandidates(ctx, store, "p", 0.9)
 	if err != nil {
 		t.Fatalf("SelectCandidates: %v", err)
 	}
-	if len(cands) != 1 {
-		t.Fatalf("want exactly 1 candidate (the postgres pair), got %d: %+v", len(cands), cands)
+	if len(sel.Candidates) != 1 {
+		t.Fatalf("want exactly 1 candidate (the postgres pair), got %d: %+v", len(sel.Candidates), sel.Candidates)
 	}
-	c := cands[0]
+	// Three memories, three vectors: nothing here is unscored, and the count is
+	// what lets a caller tell a complete scan from a partial one.
+	if sel.Unscored != 0 {
+		t.Errorf("Unscored = %d over a corpus where every memory has a vector", sel.Unscored)
+	}
+	c := sel.Candidates[0]
 	if c.NewerID != newer || c.OlderID != older {
 		t.Errorf("wrong orientation: newer=%s older=%s (want newer=%s older=%s)", c.NewerID, c.OlderID, newer, older)
 	}
@@ -100,6 +105,45 @@ func TestSelectCandidates(t *testing.T) {
 	// the older creation (#641).
 	if c.NewerCreatedAt != "2026-07-10 00:00:00" || c.OlderCreatedAt != "2026-01-01 00:00:00" {
 		t.Errorf("candidate created_at = (%q, %q), want (2026-07-10 00:00:00, 2026-01-01 00:00:00)", c.NewerCreatedAt, c.OlderCreatedAt)
+	}
+}
+
+// TestRunCountsMemoriesItCouldNotScore pins the fact that makes a pass's totals
+// checkable: a memory with no vector is in no pair the pass could find, so the
+// report is a total over the rest of the project, and the caller is told how big
+// the rest is. Without the count, "0 candidate pairs" over a corpus nobody had
+// finished indexing reads exactly like the same line over a corpus with nothing
+// similar in it — which is how #716 looked like a fixture problem for as long as
+// it did.
+//
+// The memory whose vector is missing is the NEAR-DUPLICATE half of a pair the
+// store could otherwise have proposed, so the count cannot be satisfied by a
+// note that was never a candidate anyway.
+func TestRunCountsMemoriesItCouldNotScore(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	_ = add(t, store, db, "postgres upgraded to 16", []float32{1, 0, 0}, "2026-07-10 00:00:00")
+	older := add(t, store, db, "postgres runs version 14", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// The vector row is what the embedding worker writes, so dropping it is
+	// exactly the state a save leaves behind for as long as the worker takes to
+	// notice — no row, not a row of the wrong width.
+	if _, err := db.ExecContext(ctx, `DELETE FROM memory_embeddings WHERE memory_id = ?`, older); err != nil {
+		t.Fatalf("drop the older memory's vector: %v", err)
+	}
+
+	cls := &mockClassifier{verdict: func(string, string) Relation { return RelationNeither }}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Unscored != 1 {
+		t.Errorf("Result.Unscored = %d, want 1: the memory with no vector is in no pair, so every total on the report is over the rest of the project", res.Unscored)
+	}
+	// And it is a count of what the scan could not read, not a failure: the pass
+	// still completes, and the pair it did find is still proposed.
+	if res.Candidates != 0 {
+		t.Errorf("Result.Candidates = %d, want 0: with one endpoint unvectorised the pair cannot be found", res.Candidates)
 	}
 }
 

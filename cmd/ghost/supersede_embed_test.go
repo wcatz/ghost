@@ -136,6 +136,34 @@ func TestSupersedeEmbedNoteSaysNothingWhenThereWasNothingToDo(t *testing.T) {
 	}
 }
 
+// TestSupersedeUnscoredNoteNamesWhatThePassCouldNotRead: the two counts on a
+// report answer different questions, and only the second one closes the gap a
+// reader cannot see. "embedded 2" says what the run did; "2 had no vector when
+// the pass scanned" says how much of the project the totals beside it cover. A
+// pass that found every memory scorable says nothing at all, and one running
+// with embedding disabled has to name THAT rather than send the operator to a
+// worker that is not running.
+func TestSupersedeUnscoredNoteNamesWhatThePassCouldNotRead(t *testing.T) {
+	if note := supersedeUnscoredNote(0, true); note != "" {
+		t.Errorf("a pass that scored every memory printed %q", note)
+	}
+	note := supersedeUnscoredNote(2, true)
+	if !strings.Contains(note, "2") {
+		t.Errorf("the note does not count what was unscored: %q", note)
+	}
+	// It must not read as a verdict on the pairs it did judge: those pairs are
+	// listed below it, and a reader who took this line as "nothing was found"
+	// would be right about a project the pass could not read.
+	if !strings.Contains(note, "no pair this run considered") {
+		t.Errorf("the note does not say what an unscored memory means for the pass: %q", note)
+	}
+	// With embedding off, naming the worker is a dead end: nothing is running to
+	// keep the index current, and that is the thing to say.
+	if off := supersedeUnscoredNote(2, false); !strings.Contains(off, "embedding is disabled") {
+		t.Errorf("a pass with embedding off still points at the worker that maintains the index: %q", off)
+	}
+}
+
 // seedUnembeddedPair writes two memories into a fresh project at dbPath and
 // returns their ids. Neither has a vector: seeding one would test a different
 // state than the one a save leaves behind.
