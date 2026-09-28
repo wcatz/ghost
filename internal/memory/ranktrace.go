@@ -166,20 +166,27 @@ func (tr *searchTrace) lookup(id string) (*tracedCandidate, bool) {
 	return c, ok
 }
 
-// clampScopeKeys bounds how many scope keys one explanation may name. The keys
-// come from a caller, so the list is as unbounded as the scope object; the
-// comparison itself is what the ranking used, and this only bounds how much of
-// it is rendered. It mirrors the attribution cap: a list is cut with a count
-// beside it, never silently.
-func clampScopeKeys(keys []string) []string {
-	const maxScopeKeys = 16
+// maxScopeKeys bounds how many scope keys one explanation may NAME. The keys come
+// from a caller, so the list is as unbounded as the scope object; the comparison
+// itself is what the ranking used, and this only bounds how much of it is
+// rendered. The cap is a rendering budget, so it is reported rather than applied
+// silently: ExplainRow carries ScopeKeysComparedTotal beside the list, and that
+// count is what makes the pair honest — a payload naming sixteen keys of a
+// forty-key scope would otherwise report scope_matched as the verdict the narrowing
+// reached over all forty, with nothing to say the list is short. It mirrors the
+// attribution cap, which is counted the same way for the same reason.
+const maxScopeKeys = 16
+
+// clampScopeKeys bounds how many scope keys one row names and reports how many
+// there really were, so the cut is visible rather than silent.
+func clampScopeKeys(keys []string) ([]string, int) {
 	// The copy is for the same reason clampAttribution makes one: the caller's
 	// slice is the searchTrace's own, so every row in the payload would otherwise
 	// share one backing array.
 	n := min(len(keys), maxScopeKeys)
 	out := make([]string, n)
 	copy(out, keys[:n])
-	return out
+	return out, len(keys)
 }
 
 // clampAttribution bounds how many counterpart ids one row may name. A

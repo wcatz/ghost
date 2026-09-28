@@ -1078,6 +1078,65 @@ func TestExplainSaysTheBaseIsUnweightedWhenTheVectorLegAddsNothing(t *testing.T)
 	})
 }
 
+// TestExplainReportsHowLongTheScopeKeyListReallyWas covers the cap on
+// scope_keys_compared.
+//
+// The scope object is caller-supplied and as unbounded as a JSON object, so the
+// list of keys the narrowing compared is capped at 16. A cap on a diagnostic list
+// is fine; a SILENT one is not, because the payload would report scope_matched as
+// the verdict the narrowing reached over the caller's whole key set while naming
+// sixteen of them, and the reader could not tell. The count beside the list is
+// what makes the pair honest — which is the convention the attribution lists
+// beside superseded_by and near_duplicate_of already follow, and which this cap's
+// own comment claimed while not doing.
+func TestExplainReportsHowLongTheScopeKeyListReallyWas(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	createTestMemory(t, store, ctx, "the compaction schedule runs on the first sunday of each month")
+
+	// More keys than the cap allows, so the cut actually engages. Twenty is
+	// comfortably past 16 and still a small enough scope object to read.
+	scope := make(map[string]string, 20)
+	for i := range 20 {
+		scope[fmt.Sprintf("zone-%02d", i)] = fmt.Sprintf("rack-%02d", i)
+	}
+
+	ex, err := store.ExplainSearchScoped(ctx, "test-proj", "compaction schedule sunday", []float32{0.8, 0.6}, 5, scope)
+	if err != nil {
+		t.Fatalf("ExplainSearchScoped: %v", err)
+	}
+	if len(ex.Rows) == 0 {
+		t.Fatal("a scoped search returned no rows, so there is no row to read the fields off")
+	}
+	row := ex.Rows[0]
+
+	if len(row.ScopeKeysCompared) != maxScopeKeys {
+		t.Errorf("scope_keys_compared names %d keys, want the %d the cap allows: the cap is a rendering "+
+			"budget and the fixture is past it, so a different number means the cap is not where it is documented",
+			len(row.ScopeKeysCompared), maxScopeKeys)
+	}
+	if row.ScopeKeysComparedTotal != 20 {
+		t.Errorf("scope_keys_compared_total = %d, want 20: the count beside a capped list is the only thing "+
+			"that makes the cut visible, and it must be the real length rather than the rendered one",
+			row.ScopeKeysComparedTotal)
+	}
+	// A short scope must NOT report a cap it did not apply, and the total has to
+	// equal the list — otherwise the count is decoration.
+	small := map[string]string{"zone-01": "rack-01"}
+	smallEx, err := store.ExplainSearchScoped(ctx, "test-proj", "compaction schedule sunday", []float32{0.8, 0.6}, 5, small)
+	if err != nil {
+		t.Fatalf("ExplainSearchScoped(one key): %v", err)
+	}
+	if len(smallEx.Rows) == 0 {
+		t.Fatal("the one-key scoped search returned no rows")
+	}
+	smallRow := smallEx.Rows[0]
+	if smallRow.ScopeKeysComparedTotal != 1 || len(smallRow.ScopeKeysCompared) != 1 {
+		t.Errorf("a one-key scope reports total %d and %d named key(s), want 1 and 1: with nothing cut the count "+
+			"must be the list's own length, or a reader cannot tell a capped list from a complete one",
+			smallRow.ScopeKeysComparedTotal, len(smallRow.ScopeKeysCompared))
+	}
+}
+
 func hasExplainNote(notes []string, substr string) bool {
 	for _, n := range notes {
 		if strings.Contains(n, substr) {

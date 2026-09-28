@@ -40,18 +40,6 @@ func parseStampPtr(s *string) *time.Time {
 	return &t
 }
 
-// ExpiredAt reports whether a row's validity window has closed. A nil boundary
-// is unset, not open-ended: a row that states no expiry has made no claim about
-// its own currency, which is the common case and must not be read as "expired".
-func ExpiredAt(until *time.Time, now time.Time) bool {
-	return until != nil && until.Before(now)
-}
-
-// NotYetValidAt reports whether a row's validity window has not opened yet.
-func NotYetValidAt(from *time.Time, now time.Time) bool {
-	return from != nil && from.After(now)
-}
-
 // ScopeContradicts reports whether a row's scope asserts a different place than
 // the request asked for. Silence is not disagreement: a row that does not mention
 // a key contradicts nothing, which is the rule that keeps unscoped knowledge
@@ -181,26 +169,27 @@ func validityLabel(state string, from, until, verified *time.Time) string {
 
 // ValidityStateOf is the stage-2 verdict for a stored triple read against a
 // clock, for the surfaces that have not run the pipeline and so cannot inherit
-// one from a trace. It is the same rule the stages apply, over the same two
-// leaves, so a browsing surface and a searched one cannot disagree about whether
-// a row is retired.
+// one from a trace. It is the SAME call readValidity makes, so a browsing surface
+// and a searched one cannot disagree about whether a row is retired.
 //
-// An unreadable value is not a state: it reads as unset, and the trace is where
-// that is reported.
+// It was a second copy until #583, with its own parseStamp, and the two did not
+// merely duplicate each other — they disagreed, which is worse. Both treated a
+// value of 0001-01-01 00:00:00 as unreadable, because a stamp that parses to the
+// zero time looked like a stamp that failed to parse. memory.ParseStamp reports
+// it as READABLE (time.Parse accepts it, and the store's own
+// TestImportVerification asserts that it should), so a row whose valid_until is
+// that string is expired: its window closed at the zero instant. readValidity
+// moved to the store's parser first and therefore started saying expired while
+// this copy still said unset, so a searched row was dropped while the same row
+// was still listed by every browsing surface. Delegating is what makes the
+// surfaces agree, and the agreement is the point — not a tidier factoring.
+//
+// An unreadable value is not a state: it reads as unset here, and the trace is
+// where the value itself is reported, since a string-only verdict has nowhere to
+// put it.
 func ValidityStateOf(from, until, verified *string, now time.Time) string {
-	f, u, v := parseStampPtr(from), parseStampPtr(until), parseStampPtr(verified)
-	switch {
-	case ExpiredAt(u, now):
-		return validityExpired
-	case NotYetValidAt(f, now):
-		return validityFuture
-	case f == nil && u == nil && v == nil:
-		return validityUnset
-	case v == nil:
-		return validityUnverified
-	default:
-		return validityValid
-	}
+	state, _ := memory.ValidityState(from, until, verified, now)
+	return state
 }
 
 // ValidityLabel renders a stored validity triple for a listing, for the surfaces

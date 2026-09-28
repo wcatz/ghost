@@ -90,7 +90,16 @@ type ExplainRow struct {
 	// decided rather than only that something did. A row whose own scope names
 	// none of them had nothing to compare against and was not excluded by scope;
 	// scope_matched says that per row, and this says what the axis was.
-	ScopeKeysCompared []string `json:"scope_keys_compared,omitempty"`
+	//
+	// The list is capped, because the scope object is caller-supplied and as
+	// unbounded as a JSON object, and ScopeKeysComparedTotal says how long the
+	// list really was. The count is what makes the cap honest: a payload naming
+	// sixteen keys of a forty-key scope would otherwise report scope_matched as
+	// the verdict the narrowing reached over all forty, and the reader could not
+	// tell. The attribution lists beside superseded_by and near_duplicate_of are
+	// capped the same way and are counted the same way, for the same reason.
+	ScopeKeysCompared      []string `json:"scope_keys_compared,omitempty"`
+	ScopeKeysComparedTotal int      `json:"scope_keys_compared_total,omitempty"`
 	// KeywordReserved says the row entered the window through the keyword
 	// reservation rather than the score cut. Its score is below the cut BY
 	// CONSTRUCTION, so this is the only thing that explains its presence, and it
@@ -371,6 +380,11 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		ex.Notes = append(ex.Notes, "no vector matches survived — ranking used the unweighted FTS base score, so rrf_score reports that base rather than a weighted sum")
 	}
 
+	// The request's scope key set is the same on every row, so it is clamped once
+	// here rather than per row — the copy is what keeps the rows from sharing a
+	// backing array, and doing it once makes that obvious.
+	scopeKeys, scopeKeysTotal := clampScopeKeys(p.trace.scopeKeys)
+
 	statusDemoted := false
 	for _, id := range ids {
 		m, ok := byID[id]
@@ -379,11 +393,12 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		}
 		t, traced := p.trace.lookup(id)
 		row := ExplainRow{
-			ID:                id,
-			Category:          m.Category,
-			Content:           explainSnippet(m.Content, 120),
-			ScopeKeysCompared: clampScopeKeys(p.trace.scopeKeys),
-			ProvenanceWeight:  explainProvenanceOff,
+			ID:                     id,
+			Category:               m.Category,
+			Content:                explainSnippet(m.Content, 120),
+			ScopeKeysCompared:      scopeKeys,
+			ScopeKeysComparedTotal: scopeKeysTotal,
+			ProvenanceWeight:       explainProvenanceOff,
 		}
 		if traced {
 			// Every scoring fact is the ranking path's own, and the sentinels on a
