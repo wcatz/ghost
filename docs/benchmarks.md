@@ -7,15 +7,15 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | Evaluation | What it measures | Headline result |
 |---|---|---|
 | LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions (measured pre-task-prefix — re-baseline pending, see Phase 1) |
-| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 551 memories |
-| LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
-| Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000** while the recency-trap case stays **0.929** |
+| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 551 memories || LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
+| Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000**, fresh@1 **0.521** (0.583 state / 0.458 premise) — the top slot is the stale answer on about half the premise probes |
+| Recency-trap suite | Old-but-correct memory against newer distractors | **0.929** in a never-decay category (invariant under decay, as claimed) and **0.417** in a decaying one |
+| Ranking-state suite | Graded corpus carrying `created_at` spread and `supersedes` edges | Demote alone **1.000** R@1, decay alone **0.071**, shipped pair **0.214** vs **0.571** with both off |
 | Maintenance-state suite | Ranking over a corpus with resolved, shared and superseded rows | Hybrid live-wins **0.810** on 21 questions; the graded table cannot see this class of change at all |
 | No-answer queries | What search returns when nothing in the corpus answers the query | Mean top cosine **0.584** vs **0.741** answerable; 51/220 answerable queries sit at or below the no-answer maximum |
+These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, a staleness fixture, a recency-trap fixture, a ranking-state fixture, a maintenance-state fixture and a false-positive count answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
 
-These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, a staleness fixture, a maintenance-state fixture and a false-positive count answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
-
-**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, maintenance-state and no-answer suites are report-only in CI. The official GPT-4o leaderboard-comparable run has not been executed.
+**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, recency-trap, ranking-state, maintenance-state and no-answer suites are report-only in CI. The official GPT-4o leaderboard-comparable run has not been executed.
 
 > Sections explicitly labeled **Historical record** document past experiments and their original implementation details. They are retained for reproducibility context, not as a description of current production routing. For current behavior, start with the [documentation index](README.md).
 
@@ -163,14 +163,13 @@ Two findings, both honest:
 - **The graph-expansion bonus was evaluated and removed.** An additive link-graph bonus (former 0.15 default) lifted semantically-adjacent neighbors above exact matches, and a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth. The former `GraphWeight` setting and the bonus are now removed entirely (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`). The link graph is retained for the Obsidian mirror and `supersedes` ranking.
 
 **What this table cannot see.** The v2 corpus is the *graded retrieval* dataset, and it is deliberately clean: every memory is created through `store.Create` in one batch, so all 551 share a `created_at` and the decay factor is identical across every candidate — inert, and pinned by `TestDecayDoesNotPerturbGradedBench`. It also holds no resolved row, no `_global` row and no `supersedes` edge. A ranking change that acts on any of that measures 0.000 on this table, which is exactly what happened when the resolved/`_global` demotion shipped: measured on one fixture, `f3a80f7` (pre-#634) and `main` both read 0.818 here. That is a property of the corpus, not a bug in the harness, so the coverage lives elsewhere: the [maintenance-state suite](#phase-3b--maintenance-state-suite-report-only) and the [no-answer queries](#no-answer-queries-the-abstention-baseline-report-only).
-
 The v2 dataset overshoots the original ~150/~40 growth target (551/220) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
 
 ### Parameter sweep (`ghost bench --sweep`)
 
 The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) — 6 combinations over the same dataset, one prepared store. Findings on the v2 dataset (full table: run `go run ./cmd/ghost bench --sweep`):
 
-- **Leg weights remain robust, and the default still wins.** On 220 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.818, level with vec 0.80; 0.60/0.90 are within 0.004; only vec 0.30 degrades (0.790). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30.
+- **Leg weights remain robust, and the default still wins.** On 220 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.818, level with vec 0.80; 0.60/0.90 are within 0.004; only vec 0.30 degrades (0.790). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30. **The top four points are not separable at this dataset size and the table should not be read as a ranking of them**: their whole spread is 0.004, against a paired 95% interval half-width of about 0.015 for a difference of this kind on this query set (the hybrid-vs-vector comparison above). What the grid does establish is the shape — a broad plateau with one bad corner — and not which point inside the plateau is best.
 - **Outcome: the 70/30 leg weighting ships unchanged, and the graph bonus was removed.** With the leg weights robust across the upper half of the grid, there is no evidence to change the shipped 70/30 split. The graph-expansion bonus was removed rather than kept disabled (see the spec linked above); the link graph is still built for the Obsidian mirror and `supersedes`.
 
 ## Phase 3 — staleness suite (the flagship)
@@ -181,7 +180,18 @@ Deterministic scenarios for the failure users actually complain about: agents ac
 - Deletion regressions: reflection must never drop pinned or manual memories (codifies the existing empty-set guard and snapshot behavior).
 - Runs in CI in seconds. No LLM judge.
 
-This suite was designed to *fail* at first — production search had no decay signal in `SearchHybrid` ranking (decay lived only in `GetTopMemories`). At the pre-decay shipped default it reported **fresh-wins 0.083** (fresh-found 1.000 — the update is always retrieved, just out-ranked by its shorter, older original). With `DecayEnabled: true` (the current default, reorder-only) it reports **fresh-wins 1.000** with trap correct-wins flat at **0.929** (`TestDecayFrontier`). It lands in CI as **report-only**; scenarios graduate to enforced assertions as the fix ships.
+This suite was designed to *fail* at first — production search had no decay signal in `SearchHybrid` ranking (decay lived only in `GetTopMemories`). At the pre-decay shipped default it reported **fresh-wins 0.083** (fresh-found 1.000 — the update is always retrieved, just out-ranked by its shorter, older original). With `DecayEnabled: true` (the current default, reorder-only) it reports **fresh-wins 1.000** at trap correct-wins 0.929 (`TestDecayFrontier`). It lands in CI as **report-only**; scenarios graduate to enforced assertions as the fix ships.
+
+**`fresh-wins` is not the whole headline, and reading it alone overstates the result.** It says the newest version outranks its stale siblings *somewhere in the window*; an agent reads the top result, and the two are not the same number:
+
+```text
+probe            n  fresh-found   fresh-wins    fresh@1
+state           24        1.000        1.000      0.583
+premise         24        1.000        1.000      0.458
+all             48        1.000        1.000      0.521
+```
+
+So on the 24 premise probes — the ones that presuppose the outdated state and are the failure users complain about — the stale version is the top result on 54% of them while every one of them is scored a win. The report carries all three columns and an all-probes row for exactly this reason (`TestStalenessReportNamesFreshAt1` pins the row's presence and that the aggregate is the arithmetic of the per-type rows). The size of the gap is not asserted: it is a statement about today's ranking, and freezing it would make the next ranking fix a test failure.
 
 ### Category-aware time decay (default on, reorder-only)
 
@@ -202,6 +212,23 @@ recency   staleness-fresh   trap-correct   min(both)
 
 At *every* weight that meaningfully helps staleness, the trap collapses. The best achievable `min(both)` is 0.214 — i.e. there is no global recency weight where both old-but-correct and newer-supersedes retrieval are acceptable, because the only signal (age) is exactly the thing that conflates the two cases. **Verdict: the blanket age-only recency prior is not defaultable and was removed.** Category-aware decay resolves the cliff because the trap suite's memories are `fact` category, which never decays — under `TestDecayFrontier` the frontier collapses to two points `decay-off 0.083/0.929 → decay-on 1.000/0.929`, so staleness flips while the trap stays flat. That never-decay exemption is what lets `DecayEnabled` ship on by default.
 
+**And the never-decay exemption is also the limit of that claim, which is why the trap fixture now spans both classes (#561).** Every scenario in the suite used to be `fact`, so 0.929 was a property of a category decay never touches and said nothing about the categories it reorders. Scenarios now carry a category (defaulting to `fact`, so the original fourteen are unchanged) and the score is reported per category, with decay off and on:
+
+```text
+category               decays     n  wins(off)   wins(on)     delta     @1(on)
+architecture           yes        2      1.000      0.500    -0.500      0.500
+decision               yes        2      0.500      0.500    +0.000      0.500
+dependency             yes        3      1.000      0.333    -0.667      0.333
+gotcha                 yes        3      0.667      0.333    -0.333      0.333
+pattern                yes        2      1.000      0.500    -0.500      0.500
+fact                   no        14      0.929      0.929    +0.000      0.929
+decaying (pooled)      yes       12      0.833      0.417    -0.417      0.417
+never-decay (pooled)   no        14      0.929      0.929    +0.000      0.929
+all probes             mixed     26      0.885      0.692    -0.192      0.692
+```
+
+The never-decay row is unchanged and is now asserted invariant scenario by scenario — that invariance is the frontier's claim and it holds. The decaying rows are its cost: **an old-but-correct memory competing with a fresh distractor in a category decay actually reorders loses the contest, 0.833 → 0.417.** That is decay working as designed rather than a defect, so it is reported rather than gated, and it is the number a reader needs in order to weigh the default. Two guarantees about those rows are asserted because production makes them: the old memory is still **retrieved** under decay (reordering never changes window membership), and a **pinned** one still takes the top slot against a fresh unpinned distractor in the same category — pinning is the only control a user has over a category that decays, and if the ranker multiplied a pinned row down the control would be decorative. The two classes are seeded into separate projects so neither one's window depends on how many scenarios the other contributes; pooling them let adding these fixtures push a never-decay scenario's answer out of the top-10 window, and keeping them apart is also what makes the never-decay row the number the tables above quote.
+
 **The real fix is targeted, and it clears the frontier.** `SearchParams.SupersedeDemote` (default true, alongside `DecayEnabled`) consumes directed `supersedes` links: within the result window it demotes a memory below every present memory that supersedes it (penalty = count of present superseders, stable-sorted — so update chains order correctly given star links, and it is a hard no-op when no supersedes edge joins two results). Because it only ever acts on genuine replacement pairs, it does what no blanket age-only prior could (`TestSupersedeDemoteClearsFrontier`):
 
 ```text
@@ -212,11 +239,13 @@ supersede demote on     1.000                  0.929   ← likewise, trap untouc
 both on (shipped default)              1.000                  0.929
 ```
 
-The trap is untouched in both cases: under decay its distractors are `fact` (never-decay, so decay never fires), and under demote they are *not* supersession pairs (no `supersedes` edge, so the demote never fires). That is the free lunch the blanket-recency frontier proved a global prior can't be.
+The trap is untouched in both cases: under decay its distractors are `fact` (never-decay, so decay never fires), and under demote they are *not* supersession pairs (no `supersedes` edge, so the demote never fires). That is the free lunch the blanket-recency frontier proved a global prior can't be. **The "trap untouched" in both rows is the never-decay half of the suite** — the same two rows measured before #561 added the decaying scenarios, whose score does move under decay. Every table on this page that reads a trap number off a frontier is scoped to that half on purpose, and the split is in the [table above](#phase-3--staleness-suite-the-flagship).
 
 **Both halves now ship. Creation:** `ghost supersede <project> [--apply]` (`internal/supersede`) proposes newer→older candidate pairs from cosine-similar memories (tighter than the 0.70 'related' floor), confirms them with batched CLI-harness classify calls (up to 8 pairs per call), and writes star `supersedes` links (`source='llm'`). It is re-runnable and self-heals after reflection cascade-deletes links (`ReplaceNonManual` reinserts memories with new IDs — a re-run rebuilds the links, exactly as the cosine worker rebuilds 'related'). The cosine worker is rejected as the creator itself — symmetric similarity can't assign direction (the failure that got the graph bonus disabled), so similarity only *proposes* and the LLM *confirms + directs*. The classifier prompt is biased toward NO (a false supersedes buries a valid memory), and on a labeled set of 10 genuine-vs-parallel pairs plus the 4 real pairs [#641](https://github.com/wcatz/ghost/issues/641) was filed from, both the single-pair and batched paths are scored against one table (`TestRelationClassifierLive`, `TestRelationClassifierLiveBatch`; run manually against a CLI harness, skipped when none is installed). The maintenance benchmark behind #641 judged 4 of 7 links wrong on a real database — one backwards, two `causes` between status reports of one open issue, one event record superseded by a later unrelated event on the same host — so the prompt now also shows each note's `created_at` (the pass orients a pair by `updated_at`, which is wrong whenever a note was re-saved after the fact it reports), offers a fourth verdict `reversed`, forbids `causes` between two status reports of one issue, and states that an event record is never superseded by a later unrelated event on the same host. `reversed` is the one wrong answer code can refuse: a `supersedes` link only points newer→older, so the pass reports and drops it instead of writing it backwards, and never caches it. `internal/supersede/regression_test.go` holds the four pairs as a labeled regression set, anonymized (the shape of each pair is the signal; the text is not).
 
 **Consumption has now graduated; creation stays opt-in.** `DefaultSearchParams` ships `DecayEnabled: true` and `SupersedeDemote: true`, so production `SearchHybrid` / `SearchHybridAll` (i.e. `ghost_memory_search` and `ghost_search_all`, including their FTS-only fallbacks) apply decay reordering and consume `supersedes` links. Creation of `supersedes` links remains opt-in — links only exist if the user ran `ghost supersede --apply` — so the demote is still a hard no-op for anyone who has not asked for it, and the numbers above are what back the flip: decay alone moves staleness fresh-wins 0.083 → 1.000 with recency-trap correct-wins unchanged at 0.929 (`TestDecayFrontier`); the demote does the same 0.083 → 1.000 with trap flat at 0.929 (`TestSupersedeDemoteClearsFrontier`). Either half alone clears the frontier, and both on keeps it cleared. It was flipped because an eval run found the opposite failure: a memory the user had explicitly marked as replaced still outranked its replacement in live search. `TestProductionSearchDemotesSuperseded` (internal/memory) guards the production entry points; `SearchHybridParams` still takes explicit params for the sweep harness.
+
+Note what those two suites are *not* measuring: a version chain is hand-built state in both, and the trap suite's two halves are scored on whether one memory outranks another rather than on graded relevance over a corpus. The [ranking-state suite](#phase-3c--ranking-state-suite-report-only) is the graded version of the same question, and its numbers do not agree with the headline table's.
 
 ### Decay re-selection (evaluated, NOT default)
 
@@ -272,16 +301,63 @@ Three things it says that the graded table cannot, each measured on **one fixtur
 
 - **The demotion moves this suite and not the graded table** — live-wins 0.476 → 0.810 while the 220-query table reads 0.818 on both. That 0.000 is what made the change look inert, and it is why this suite exists.
 - **The demotion costs findability, and only this suite can see it.** `answer-found` falls 1.000 → 0.905 and only **1 of 3** shared-row answers is still retrieved: halving a shared row's fused score puts it below the deepest live candidate, and the factor is applied before the window cut, so two shared answers are *evicted* rather than sunk. A demotion that sinks a row is a reorder; one that evicts it is a deletion, and a user whose only record of a preference is the shared row stops retrieving it. Whether the fix is a rescue lane for shared rows or a demotion that reorders after the cut is a ranking decision (#580) — recorded here so it inherits the number instead of re-deriving it.
-- **Category-exempt decay and resolve state pull against each other, and most of that pull was the missing demotion.** Shipped: live-wins 0.810 (NDCG 0.583). With decay off: 0.857 (NDCG 0.904) — a 0.047 live-wins gap, down from 0.429 before #634. The mechanism is visible question by question: a resolved `fact` never decays (factor 1.0) while a live `dependency` copy decays (0.33–0.75 at 10–80 days). Neither the staleness suite nor the recency-trap suite can see this, because in both the correct answer sits in a never-decay category — which is exactly the "old-but-correct memory in a decaying category" case the audit asked for. Not asserted, on purpose: it is a residual finding for the ranking work, and the day it is fixed this suite should show it.
+- **Category-exempt decay and resolve state pull against each other, and most of that pull was the missing demotion.** Shipped: live-wins 0.810 (NDCG 0.583). With decay off: 0.857 (NDCG 0.904) — a 0.047 live-wins gap, down from 0.429 before #634. The mechanism is visible question by question: a resolved `fact` never decays (factor 1.0) while a live `dependency` copy decays (0.33–0.75 at 10–80 days). Neither the staleness suite nor the recency-trap suite can see this, because in both the correct answer sits in a never-decay category — which is exactly the "old-but-correct memory in a decaying category" case the audit asked for, and the [ranking-state suite](#phase-3c--ranking-state-suite-report-only) below and the decaying half of the [recency-trap table](#phase-3--staleness-suite-the-flagship) are where that case is now measured. Not asserted, on purpose: it is a residual finding for the ranking work, and the day it is fixed this suite should show it.
+
+## Phase 3c — ranking-state suite (report-only)
+
+The [Phase 2 table](#phase-2--ghost-bench-an-in-repo-dataset--ci-regression-floors--shipped) cannot see either ranking path production runs. Its corpus seeds through `store.Create`, which stamps one `created_at` for every row, so the decay factor is identical across every candidate and cannot reorder them; and it holds no `supersedes` edge, so the demote is a hard no-op. A change to either path therefore measures **0.000** on the headline table — which is a property of the corpus, not evidence that the change did nothing, and it is how a shipped ranking change can look inert.
+
+This suite is the same measurement with the state those two paths consume present. 31 memories in `internal/bench/testdata/ranked_memories.jsonl` whose `created_at` spans 4 to 700 days across both decay classes, and eight supersession chains (two of them three deep) written through `store.CreateLink` with the same relation and source `ghost supersede --apply` uses. Its 14 questions are graded the way the headline set's are — one answer each, and the answer to a chain question is the LIVE row — and its vectors come from the same `nomic-embed-text:v1.5` with the same task prefixes, so the two tables are read next to each other rather than instead of each other. The superseded rows carry gain 0 and are the hard part: they are the same claim in older words, so a lexical search finds them first and a vector search finds them too.
+
+The answer to a change that acts on maintenance state is the whole set of configurations, not one number, because two reordering passes can undo each other on the same row:
+
+```text
+configuration        condition        R@1     R@5   MRR@10  NDCG@10
+reference (no params) fts-only       0.571   1.000    0.774    0.832
+reference (no params) vector-only    0.571   1.000    0.786    0.842
+both off             hybrid         0.571   1.000    0.786    0.842
+decay only           hybrid         0.071   0.571    0.327    0.486
+demote only          hybrid         1.000   1.000    1.000    1.000
+both on (shipped)    hybrid         0.214   0.786    0.409    0.548
+```
+
+Three things to read out of it, none of them comfortable and all of them the reason the suite exists:
+
+- **The demote alone takes the suite to 1.000.** Every chain resolves correctly with the demote on and decay off, including the three-deep chain, so the star-link ordering works and the targeted demote is doing the whole job on this corpus.
+- **Decay alone is the expensive half: R@1 0.571 → 0.071.** Six of the fourteen answers are live rows that are *old* and in a decaying category (`ogmios_port` at 500 days, `kv_store` at 640, `wire_protocol` at 700, and three more), and decay multiplies them down until something fresher outranks them. This is the graded form of the same cost the [decaying half of the recency-trap table](#phase-3--staleness-suite-the-flagship) shows, and it is the price of the default stated in a metric rather than inferred from a frontier.
+- **The shipped pair is 0.214, worse than either path's own contribution suggests**: the demote fixes the chains and decay still loses the six old live rows, so the two do not compose into the sum of their halves. The shipped default on this corpus is *worse* than no ranking path at all (0.214 vs 0.571 R@1). That is a finding about a 14-query corpus and is reported, not gated — but it is the number the ranking work inherits, and it was invisible while the headline table read 0.818 in every configuration.
+
+R@1 and MRR@10 are the columns the report is read on, because both paths are ordering-only: over a single-relevant-row probe, NDCG@10 is 1.000 for anything in the window. `recall@10` is asserted identical across all four configurations — the findability half, and the check that stops "ranking improved" from meaning "decay rescued something out of the cut". `TestRankedStateSuiteIsNotInert` also runs the **headline** corpus through the same four configurations and asserts it still reads 0.818 in all of them, so the comparison cannot rot: a future change that gives the headline corpus state says so there instead of quietly making the two suites incomparable. `TestRankedStateFixtureCarriesState` is the anti-vacuity guard — enough memories, at least eight distinct ages among decaying rows, at least six edges, at least one three-deep chain, and both classes of edge (one decay cannot move on its own, one with a wide age gap) — because a fixture that lost its state would score identically in all four rows and every delta above would be a difference between nothing and nothing.
+
+Cost: ~11s (31 memories, 14 queries, four configurations, plus the headline corpus through the same four). It is a test-only suite, not part of `ghost bench`; `go test ./internal/bench -run TestRankedStateSuiteIsNotInert -v`.
 
 ## No-answer queries: the abstention baseline (report-only)
 
-Recall cannot see a leak. A wrong memory returned counts as a hit for whatever it displaced, so a system can score well while feeding an agent plausible garbage — which is what [#537's negative retrieval fixtures](https://github.com/wcatz/ghost/pull/537) pin at the unit level (a named memory must not surface, each with a reason). What they cannot do is measure a query nothing answers, because recall has no denominator and `runCondition` skips such queries entirely.
+Recall cannot see a leak. A wrong memory returned counts as a hit for whatever it displaced, so a system can score well while feeding an agent plausible garbage — which is what [#537's negative retrieval fixtures](https://github.com/wcatz/ghost/pull/537) pin at the unit level (a named memory must not surface, each with a reason). What they cannot do is measure a query nothing answers, because recall has no denominator and the runner used to skip such queries entirely. It no longer does: a query with an empty relevance map is **measured** as a false positive rather than dropped, per condition, so the rate sits under the NDCG numbers where it can be read next to them.
 
-`testdata/negative_queries.jsonl` adds 24 of them to the graded corpus, with `rel` empty by construction, in two flavors: `off_domain` (no vocabulary overlap with the corpus — the floor) and `near_miss` (corpus vocabulary, unrecorded answer: "who is on call this weekend", "how do i restore a dropped postgres table by hand"). `ghost bench` prints them after the main table:
+`testdata/negative_queries.jsonl` adds 24 of them to the graded corpus, with `rel` empty by construction, in two flavors: `off_domain` (no vocabulary overlap with the corpus — the floor) and `near_miss` (corpus vocabulary, unrecorded answer: "who is on call this weekend", "how do i restore a dropped postgres table by hand"). `ghost bench` prints them under the main table:
 
 ```text
 no-answer queries (n=24, nothing in the corpus answers these; report-only, no gate)
+  A FALSE POSITIVE is a result returned for a query with no answer. The false-positive rate is the
+  share of queries with at least one returned row above that cosine floor; production keeps a row
+  only when score > floor, and search.min_similarity ships 0, so at the shipped setting every column
+  reads 1.000 and the mean top cosine is the only graded part of this table.
+
+  condition       results    mean top  rate @0.30  rate @0.40  rate @0.50
+  fts-only           10.0       0.548       1.000       1.000       0.625
+  vector-only        10.0       0.584       1.000       1.000       0.875
+  hybrid             10.0       0.584       1.000       1.000       0.875
+```
+
+**Read the rate columns as the finding they are.** `search.min_similarity` ships 0, so at the shipped setting Ghost never abstains: the false-positive rate is **1.000 in every condition**, and the only thing the number says is that the system returns ten rows for a question it cannot answer. The floors are therefore the graded part, and they say the two legs fail differently: at a 0.50 cosine the **vector leg leaks 0.875** of the no-answer set against the keyword leg's **0.625**, and the shipped hybrid path follows the vector leg exactly (0.875, mean top 0.584 against the keyword leg's 0.548). Fusion did not fix the leak and did not add to it — it inherited the vector leg's. A reader who had only the single hybrid number would not have known which leg was responsible, which is why the measurement is per condition.
+
+**Every score here is the row's own cosine, read from its stored vector** — not a lookup in the vector leg's fetched list. A hybrid result can arrive on the keyword leg alone (the keyword reservation guarantees the top keyword hits a place in the window whatever their cosine), and reading such a row's score from a truncated list yields 0, which counts it below every floor: the floor rows were undercounting precisely the results that came from the leg with no score of its own. The cosine is also the only calibrated number in the pipeline — an RRF score is a function of a row's rank rather than of its match, and the keyword-only fallback's synthesized `1/(K+rank+1)` is a position, not a confidence.
+
+The deeper block, still on the shipped hybrid path and still read from the runner's own measurement of it (one search per query, not one per report), names the condition it describes:
+
+```text
+abstention baseline (hybrid path, the shipped ranking)
   results returned per query   10.0 (window 10, no similarity floor configured)
   mean top cosine             0.584  vs 0.741 for the 220 answerable queries
   floor refusing all of them   0.697 (the no-answer maximum) costs 51/220 answerable queries
@@ -290,13 +366,11 @@ no-answer queries (n=24, nothing in the corpus answers these; report-only, no ga
   near_miss      12             10.0        0.623
   off_domain     12             10.0        0.545
 
-  floor     results/query   queries w/ hit
-  0.30              10.00         24/24
-  0.40               9.79         24/24
-  0.50               6.83         21/24
+  floor     results/query   queries w/ hit     rate
+  0.30              10.00         24/24       1.000
+  0.40               9.79         24/24       1.000
+  0.50               6.83         21/24       0.875
 ```
-
-**Every score here is the row's own cosine, read from its stored vector** — not a lookup in the vector leg's fetched list. A hybrid result can arrive on the keyword leg alone (the keyword reservation guarantees the top keyword hits a place in the window whatever their cosine), and reading such a row's score from a truncated list yields 0, which counts it below every floor: the floor rows were undercounting precisely the results that came from the leg with no score of its own. The cosine is also the only calibrated number in the pipeline — an RRF score is a function of a row's rank rather than of its match, and the keyword-only fallback's synthesized `1/(K+rank+1)` is a position, not a confidence.
 
 Two conventions, stated because both change what the numbers mean:
 
@@ -331,7 +405,7 @@ hybrid             0.520   0.712   0.763    0.902    0.818
 
 `ghost bench` does not route through `assemble.Run` — by design (Decision 5 of the assembler spec, so the existing hybrid floor keeps meaning what it means), which is why the delta is exactly 0.000 on NDCG@10 and R@5 rather than merely inside the 0.005 gate.
 
-Cost of the no-answer report above (shipped, and unchanged by #580): the block runs the production search for 244 queries (24 no-answer plus the 220 answerable contrast) so that every returned row can be scored from its own vector, which takes `ghost bench` from about 3.5s to about 9s. That is the price of scoring the window rather than a short list; a future change that wants the same numbers faster has to make the production search hand back its legs (`searchHybridLegs` already does, for explain mode).
+Cost: the runner now searches each of the 244 queries (24 no-answer plus the 220 answerable contrast) under **all three conditions** and scores every returned row from its own vector, which takes `ghost bench` to about **6.7s** on a laptop-class machine — less than the ~9s the hybrid-only version cost, because the deep report reads the runner's hybrid measurement instead of searching the no-answer set a second time. Scoring the window rather than a short list is the price; a future change that wants the same numbers faster has to make the production search hand back its legs (`searchHybridLegs` already does, for explain mode).
 
 Cost of the arm-A table in this section (a one-off, not shipped): producing it ran `Store.Candidates` for all 244 queries and read each candidate's keyword rank, which is repository code but not a path any command takes. `ghost bench` itself is unaffected by #580 — it still calls `store.SearchHybrid`/`SearchFTS`/`SearchVector` directly, which is the asymmetry Decision 5 of the assembler design specifies so the existing hybrid floors keep meaning what they mean.
 

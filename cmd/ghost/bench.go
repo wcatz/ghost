@@ -23,10 +23,10 @@ docs/benchmarks.md.
 `
 
 // runBench implements `ghost bench` — runs the built-in retrieval-quality
-// benchmark (four ablations over the embedded dataset) and prints the metric
-// table. With --sweep it instead grid-searches the fusion parameters and
-// prints the ranked table. Judge-free, deterministic, no network. See
-// docs/benchmarks.md.
+// benchmark (three ablations over the embedded dataset, plus the no-answer
+// false-positive table under them) and prints the metric table. With --sweep it
+// instead grid-searches the fusion parameters and prints the ranked table.
+// Judge-free, deterministic, no network. See docs/benchmarks.md.
 func runBench() {
 	sweep := false
 	for _, arg := range os.Args[2:] {

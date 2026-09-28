@@ -117,6 +117,25 @@ func TestFalsePositiveReport(t *testing.T) {
 	if rep.NoAnswerMax < rep.MeanTop {
 		t.Errorf("no-answer maximum %.3f is below the mean %.3f", rep.NoAnswerMax, rep.MeanTop)
 	}
+
+	// The deep report and the per-condition table describe the SAME run of the
+	// shipped path, so their floor rows have to be the same numbers: Results is a
+	// mean per query and Rate a fraction in both. A sum in one and a mean in the
+	// other reads as "240 results per query" against a window of 10.
+	sum := SummarizeNoAnswer(CondHybrid, measured)
+	if len(sum.Floors) != len(rep.Floors) {
+		t.Fatalf("the two reports have %d and %d floor rows", len(sum.Floors), len(rep.Floors))
+	}
+	for i := range sum.Floors {
+		if sum.Floors[i] != rep.Floors[i] {
+			t.Errorf("floor %.2f: per-condition table says %+v, deep report says %+v",
+				sum.Floors[i].Floor, sum.Floors[i], rep.Floors[i])
+		}
+	}
+	if rep.Floors[len(rep.Floors)-1].Results > scoreK {
+		t.Errorf("floor %.2f reports %.2f results per query, more than the %d-row window",
+			rep.Floors[len(rep.Floors)-1].Floor, rep.Floors[len(rep.Floors)-1].Results, scoreK)
+	}
 	t.Logf("no-answer queries against the graded corpus:\n%s", FormatFalsePositives(rep, CondHybrid))
 }
 

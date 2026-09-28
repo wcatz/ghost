@@ -27,7 +27,7 @@ func loadTestdataDataset(t *testing.T) (Dataset, Vectors) {
 }
 
 // runTestdata seeds a fresh store from the committed dataset and evaluates all
-// four ablations against it.
+// three ablations against it.
 func runTestdata(t *testing.T) []Result {
 	t.Helper()
 	ds, vecs := loadTestdataDataset(t)
@@ -44,7 +44,7 @@ func runTestdata(t *testing.T) []Result {
 	return results
 }
 
-// TestBenchDatasetReport runs the four ablations over the committed dataset and
+// TestBenchDatasetReport runs the three ablations over the committed dataset and
 // logs the metric table. It is the human-readable report; run with -v.
 func TestBenchDatasetReport(t *testing.T) {
 	results := runTestdata(t)

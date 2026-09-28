@@ -450,6 +450,11 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_CLI_MODEL_REFLECT` | `cli.model_reflect` |
 | `GHOST_CLI_MODEL_RESOLVE` | `cli.model_resolve` |
 | `GHOST_CLI_MODEL_SUPERSEDE` | `cli.model_supersede` |
+| `GHOST_REFLECTION_AUTO_REFLECT` | `reflection.auto_reflect` |
+| `GHOST_REFLECTION_AUTO_RESOLVE` | `reflection.auto_resolve` |
+| `GHOST_REFLECTION_AUTO_SUPERSEDE` | `reflection.auto_supersede` |
+| `GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES` | `reflection.lifecycle_timeout_minutes` |
+| `GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES` | `reflection.consolidation_timeout_minutes` |
 | `GHOST_LINKING_DEMOTION_THRESHOLD` | `linking.demotion_threshold` |
 | `GHOST_INJECTION_BEHAVIOR_FLOOR` | `injection.behavior_floor` |
 | `GHOST_INJECTION_BEHAVIOR_CATEGORIES` | `injection.behavior_categories` |
@@ -458,6 +463,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_INJECTION_SESSION_SCOPE` | `injection.session_scope` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
 | `GHOST_CONTEXT_ABSTAIN_COSINE` | `context.abstain_cosine` |
+| `GHOST_SCRATCH_MAX_BYTES` | `scratch.max_bytes` |
 | `GHOST_ROUTING_DEFAULT_PROJECT` | `routing.default_project` |
 | `GHOST_LIFECYCLE_MIN_INTERVAL` | `lifecycle.min_interval` |
 

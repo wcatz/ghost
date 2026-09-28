@@ -409,6 +409,10 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer []NoAnswe
 	rep.MeanTop = sumTop / n
 	rep.Flavors = flavorStats(byFlavor)
 	for i := range rep.Floors {
+		// Results is a MEAN (results per query), not a sum, and Rate is a
+		// fraction — the same two numbers SummarizeNoAnswer reports, so the deep
+		// table and the per-condition table cannot disagree about one condition.
+		rep.Floors[i].Results /= n
 		rep.Floors[i].Rate = float64(rep.Floors[i].Queries) / n
 	}
 

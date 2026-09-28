@@ -681,7 +681,7 @@ ghost bench
 ghost bench --sweep
 ```
 
-`--sweep` grid-searches the fusion parameters. See [Benchmarks and methodology](benchmarks.md).
+It prints the three-conditions table (keyword, vector, fused) over the embedded dataset, the **no-answer false-positive table beneath it** — what each condition returns for the 24 queries nothing in the corpus answers — and the abstention baseline for the shipped fused path. See [Benchmarks and methodology](benchmarks.md).
 
 ## Scratch hygiene
 
