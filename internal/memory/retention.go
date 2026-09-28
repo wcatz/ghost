@@ -175,6 +175,16 @@ func RetentionDecayFactor(tier string, ageDays float64) float64 {
 // decays by both, and DecayFactor is the Go mirror of the two together (there is
 // a parity test over the pair).
 //
+// A PINNED row is exempt here for the same reason the category CASE exempts it
+// and DecayFactor returns 1.0 immediately for one: a pin is a full decay
+// exemption, and a tier formula that decayed the very row the category formula
+// next to it exempted would split one score against itself. That is not a
+// theoretical divergence: the session-start pre-window ranks in SQL only and
+// cuts before the Go re-score, so a pinned session row the tier decayed would be
+// dropped from the block while every other path treated it as brand new. The
+// branch sits first for the same reason it sits first in the category CASE: the
+// pin is the strongest claim, so it wins before the tier is consulted.
+//
 // The numbers are formatted from the Go constants rather than written out, so
 // the bound that is documented above and the bound SQLite evaluates cannot
 // disagree — which is the one way this pair of formulas could rot silently,
@@ -183,6 +193,7 @@ func RetentionDecayFactor(tier string, ageDays float64) float64 {
 // notation, which SQL would not parse.
 var retentionDecayFactorSQL = fmt.Sprintf(`
     * CASE
+        WHEN pinned = 1 THEN 1.0
         WHEN retention = '%s' THEN
             MAX(%s, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / %s))
         ELSE 1.0

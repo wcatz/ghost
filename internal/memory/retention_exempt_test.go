@@ -363,22 +363,29 @@ func TestTheSessionDecayMatchesTheSQLItRanks(t *testing.T) {
 
 	for _, age := range []int{0, 1, 7, 14, 60, 365, 5000} {
 		for _, cat := range []string{"fact", "convention", "pattern", "decision"} {
-			id, err := s.Create(ctx, testProject, Memory{
-				Category: cat, Content: cat, Source: "manual", Importance: 1.0, Retention: RetentionSession,
-			})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-			setCreatedAtDaysAgo(t, s, id, age)
+			for _, pinned := range []bool{false, true} {
+				id, err := s.Create(ctx, testProject, Memory{
+					Category: cat, Content: cat, Source: "manual", Importance: 1.0, Retention: RetentionSession,
+				})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				setCreatedAtDaysAgo(t, s, id, age)
+				if pinned {
+					if err := s.TogglePin(ctx, id, true); err != nil {
+						t.Fatalf("pin %s: %v", id, err)
+					}
+				}
 
-			sqlFactor := memoryScore(t, s, id)
-			goAge := time.Since(memoryCreatedAtAsTime(t, s, id)).Hours() / 24.0
-			if goAge < 0 {
-				goAge = 0
-			}
-			goFactor := DecayFactor(cat, RetentionSession, false, goAge)
-			if diff := sqlFactor - goFactor; diff > eps || diff < -eps {
-				t.Errorf("category=%s age=%d: SQL=%v Go=%v", cat, age, sqlFactor, goFactor)
+				sqlFactor := memoryScore(t, s, id)
+				goAge := time.Since(memoryCreatedAtAsTime(t, s, id)).Hours() / 24.0
+				if goAge < 0 {
+					goAge = 0
+				}
+				goFactor := DecayFactor(cat, RetentionSession, pinned, goAge)
+				if diff := sqlFactor - goFactor; diff > eps || diff < -eps {
+					t.Errorf("category=%s age=%d pinned=%v: SQL=%v Go=%v", cat, age, pinned, sqlFactor, goFactor)
+				}
 			}
 		}
 	}

@@ -188,7 +188,12 @@ func printPrune(w io.Writer, v pruneView) error {
 		if _, err := fmt.Fprintf(w, "  %s  %s  %s  expired %s  last touched %s\n", c.ID, c.Category, c.Retention, c.ExpiresAt, activity); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "    %s\n", truncateForDisplay(c.Content, 160)); err != nil {
+		// The stored text, through the shared displayStored substitution: this is
+		// the surface an operator reads precisely when a stale, credential-shaped
+		// row is most likely to need purging, and the write-boundary guard is not
+		// retroactive — a pre-guard row can still carry a value, and 160 bytes is
+		// more than enough to print one whole.
+		if _, err := fmt.Fprintf(w, "    %s\n", displayStored(c.Content, c.Category, 160)); err != nil {
 			return err
 		}
 	}
