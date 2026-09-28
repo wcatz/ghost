@@ -96,10 +96,11 @@ type ReassessResult struct {
 	// CausesPredictionFailed counts the dry-run rows whose 'causes' prediction
 	// the pass could not read at all, so their second-deletion count is unknown
 	// rather than zero. It is 0 in every --apply run, which never reads the
-	// prediction (the sweep's observed count replaces it), and it is counted
-	// rather than silently dropped for the same reason as CausesSweepFailed: a
-	// preview that prints "would sweep 0" for a read that never happened sends
-	// the operator away believing there is nothing else to delete.
+	// prediction (the sweep's observed count is the only number it reports), and
+	// it is counted rather than silently dropped for the same reason as
+	// CausesSweepFailed: a preview that prints "would sweep 0" for a read that
+	// never happened sends the operator away believing there is nothing else to
+	// delete.
 	CausesPredictionFailed int
 	// Unjudged names the pairs the classifier produced no verdict for, because
 	// the call failed on both attempts or the reply's verdict count did not
@@ -250,10 +251,12 @@ func retriesOf(cls Classifier) int {
 // replacing the other.
 //
 // A read of the 'causes' edges the sweep would take fails the pass too, but it
-// does not stop it: that read only PRODUCES the dry run's per-row prediction
-// (under --apply every count comes from the sweep itself), so a dry run marks the
-// row's second deletion unknown rather than printing a count it does not have,
-// and --apply proceeds and reports what the sweep actually moved.
+// does not stop it, and only a DRY RUN makes it: that read exists solely to
+// produce the per-row prediction, and under --apply every count comes from the
+// sweep itself. So a dry run that cannot read it marks the row's second deletion
+// unknown rather than printing a count it does not have, and --apply never reads
+// it at all — a discarded read cannot be allowed to fail a repair that
+// completed.
 //
 // Scope is honoured as an exemption, not a verdict. A scope-conflicting edge
 // asserts no replacement — the ordinary pass leaves it in the graph and every
@@ -396,19 +399,23 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	for _, j := range settled {
 		rows = append(rows, judgedEdge{OlderID: j.cand.OlderID, NewerID: j.cand.NewerID})
 	}
-	// The 'causes' prediction is a DRY-RUN read: under --apply every row's
-	// CausesSwept is overwritten with what the sweep actually moved, so a read
-	// that cannot predict must not abandon the withdrawals themselves — that is
-	// #699 again, in the one path left standing. Neither mode prints a count it
-	// does not have, so a dry run marks the row's second deletion unknown
-	// instead of zero. The error is recorded in both modes and returned: a read
-	// failure on a live table is a real fault, and exit 0 would hide it behind
-	// a repair that (under --apply) did complete.
-	causesPairs, err := liveCausesPairs(ctx, store, rows)
-	predictionFailed := err != nil
-	if err != nil {
-		fail = errors.Join(fail, err)
-		causesPairs = nil
+	// The 'causes' prediction is a DRY-RUN read, and only a dry run's: under
+	// --apply every row's CausesSwept is overwritten with what the sweep actually
+	// moved, so reading it there would be a GetLinks per settled older id whose
+	// answer is discarded — and a discarded read that could fail the run would be
+	// a repair reporting a fault it did not have. When the read does fail, the
+	// dry run's rows are marked unknown rather than printed with a count of
+	// second deletions nobody looked for, and the error is returned.
+	var causesPairs map[[2]string]bool
+	predictionFailed := false
+	if !apply {
+		var err error
+		causesPairs, err = liveCausesPairs(ctx, store, rows)
+		if err != nil {
+			fail = errors.Join(fail, err)
+			causesPairs = nil
+			predictionFailed = true
+		}
 	}
 
 	withdrawn := make([]WithdrawnEdge, 0, len(settled))
@@ -420,11 +427,11 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			// is overwritten with what the sweep actually moved, because a report
 			// that claims a deletion which did not happen is the one thing this
 			// pass cannot be for. And when the read itself failed there is no
-			// prediction to print in EITHER mode, so a dry run says the count is
-			// unknown rather than 0 — an operator who is about to apply has to be
-			// able to tell "there is nothing else to delete" from "nobody looked".
+			// prediction to print at all, so the row says the count is unknown
+			// rather than 0 — an operator who is about to apply has to be able to
+			// tell "there is nothing else to delete" from "nobody looked".
 			switch {
-			case predictionFailed && !apply:
+			case predictionFailed:
 				w.PredictionUnknown = true
 				res.CausesPredictionFailed++
 			case causesPairs[[2]string{j.cand.OlderID, j.cand.NewerID}]:

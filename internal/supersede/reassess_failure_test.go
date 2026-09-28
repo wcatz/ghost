@@ -235,13 +235,8 @@ func (unreadableLinksStore) GetLinks(context.Context, string) ([]memory.Link, er
 // in one run are joined, not replaced, and the summary is still logged. The
 // unjudged edges are half of what the operator has to fix, and this is the exit
 // that would otherwise report neither their text nor the log that explains the
-// partial state.
-//
-// Under --apply it is also where the withdrawals go. The prediction the failed
-// read was making is a dry-run convenience — every row's CausesSwept is
-// overwritten with what the sweep actually moved — so a read that cannot predict
-// must not abandon decisions that needed no harness call. That was #699 all over
-// again, in the one path left standing.
+// partial state. A dry run is where the read happens at all, so that is the mode
+// this is exercised in.
 func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -251,9 +246,6 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 	openNewer, openOlder := seedEdge(t, store, db,
 		"The ingest service now runs Redis 7.2, revision a.",
 		"The ingest service runs Redis 6.2, revision a.")
-	// A 'causes' edge on the vetoed pair, so the assertion below can tell the
-	// OBSERVED count the sweep reports from a prediction the failed read never
-	// produced. Without it both are 0 and the assertion is vacuous.
 	if err := store.CreateLink(ctx, vetoOlder, vetoNewer, string(RelationCauses), 0.9, "llm"); err != nil {
 		t.Fatal(err)
 	}
@@ -262,9 +254,9 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 	cls := NewRelationClassifier(fp)
 	cls.SetRetryDelay(0)
 	var buf strings.Builder
-	res, withdrawn, err := Reassess(ctx, unreadableLinksStore{Store: store}, cls, "p", true, slog.New(slog.NewTextHandler(&buf, nil)))
+	res, withdrawn, err := Reassess(ctx, unreadableLinksStore{Store: store}, cls, "p", false, slog.New(slog.NewTextHandler(&buf, nil)))
 	if err == nil {
-		t.Fatal("an unreadable link read must fail the pass")
+		t.Fatal("a run that failed twice must fail once, whatever it managed in between")
 	}
 	if !strings.Contains(err.Error(), "links table is locked") {
 		t.Errorf("error %q does not carry the read failure", err)
@@ -275,29 +267,17 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 	if len(res.Unjudged) != 1 || res.Unjudged[0].NewerID != openNewer {
 		t.Errorf("Unjudged = %+v, want the pair the classifier never judged", res.Unjudged)
 	}
-	// The vetoed edge is withdrawn, and the sweep's count is what it moved — the
-	// OBSERVED number, from the sweep itself, not the prediction the failed read
-	// never produced (which would have been 1 here if the read had worked, so a
-	// pass that reported the prediction rather than the observation would look
-	// the same; the marker below is what separates them).
-	if res.Withdrawn != 1 || len(withdrawn) != 1 {
-		t.Fatalf("withdrawn = %+v (count %d), want the vetoed edge written despite the read failure", withdrawn, res.Withdrawn)
+	// The vetoed edge is still reported — the first failure must not take the
+	// free decisions with it — and its second deletion is unknown rather than a
+	// count the failed read never produced.
+	if len(withdrawn) != 1 || withdrawn[0].NewerID != vetoNewer || withdrawn[0].Written {
+		t.Fatalf("withdrawn = %+v, want the vetoed edge listed as an unwritten prediction", withdrawn)
 	}
-	if !withdrawn[0].Written || !withdrawn[0].Vetoed {
-		t.Errorf("row = %+v, want the vetoed edge, marked written", withdrawn[0])
+	if !withdrawn[0].PredictionUnknown {
+		t.Errorf("row = %+v, want PredictionUnknown: the read that predicts the sweep failed", withdrawn[0])
 	}
-	if withdrawn[0].PredictionUnknown || withdrawn[0].SweepFailed {
-		t.Errorf("row = %+v, want no unknown marker under --apply: the sweep ran and reported what it moved", withdrawn[0])
-	}
-	if withdrawn[0].CausesSwept != 1 || res.CausesWithdrawn != 1 {
-		t.Errorf("row swept %d and the result counted %d, want 1 each: the observed count, not the abandoned prediction",
-			withdrawn[0].CausesSwept, res.CausesWithdrawn)
-	}
-	if res.CausesPredictionFailed != 0 {
-		t.Errorf("CausesPredictionFailed = %d, want 0 under --apply: the prediction is never read, so nothing is unknown", res.CausesPredictionFailed)
-	}
-	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 0 {
-		t.Errorf("the vetoed edge survived a failed prediction read: %d pair(s) remain", len(pairs))
+	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 1 {
+		t.Errorf("a dry run withdrew the edge: %d pair(s) remain", len(pairs))
 	}
 	if pairs, _ := store.SupersedesWithin(ctx, []string{openNewer, openOlder}); len(pairs) != 1 {
 		t.Errorf("%d pair(s) remain on the unjudged edge, want 1", len(pairs))
@@ -310,6 +290,60 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 	// successful run (or the reverse) is the same defect in either direction.
 	if !strings.Contains(buf.String(), "failed=true") {
 		t.Errorf("the summary claims a run that did not fail, on an exit that returns an error:\n%s", buf.String())
+	}
+}
+
+// TestReassessUnderApplyNeverReadsThePrediction: the apply path's sweep count
+// comes from the sweep itself, so the prediction read a dry run needs is not
+// made. The store here cannot answer GetLinks at all, which is what makes this
+// the test: a discarded read must not be able to fail a repair that completed,
+// and the count reported has to be the one the sweep observed.
+func TestReassessUnderApplyNeverReadsThePrediction(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	if err := store.CreateLink(ctx, vetoOlder, vetoNewer, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A classifier that never gets asked, so nothing else can fail the run: this
+	// is about the read, and the veto settles the only edge.
+	cls := NewRelationClassifier(&fakeProvider{resp: "SUPERSEDES | replaced: never"})
+	res, withdrawn, err := Reassess(ctx, unreadableLinksStore{Store: store}, cls, "p", true, discardLogger())
+	if err != nil {
+		t.Fatalf("an apply run must not fail on a read it never needed: %v", err)
+	}
+	if res.Withdrawn != 1 || len(withdrawn) != 1 {
+		t.Fatalf("withdrawn = %+v (count %d), want the vetoed edge", withdrawn, res.Withdrawn)
+	}
+	if !withdrawn[0].Written || !withdrawn[0].Vetoed {
+		t.Errorf("row = %+v, want the vetoed edge, marked written", withdrawn[0])
+	}
+	if withdrawn[0].PredictionUnknown || withdrawn[0].SweepFailed {
+		t.Errorf("row = %+v, want no unknown marker: the sweep ran and reported what it moved", withdrawn[0])
+	}
+	if withdrawn[0].CausesSwept != 1 || res.CausesWithdrawn != 1 {
+		t.Errorf("row swept %d and the result counted %d, want 1 each: the observed count is the only one an apply run reports",
+			withdrawn[0].CausesSwept, res.CausesWithdrawn)
+	}
+	if res.CausesPredictionFailed != 0 {
+		t.Errorf("CausesPredictionFailed = %d, want 0: an apply run never predicts", res.CausesPredictionFailed)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 0 {
+		t.Errorf("the vetoed edge survived the apply: %d pair(s) remain", len(pairs))
+	}
+	// The 'causes' edge went with it, and only InvalidateLink writes history for
+	// that relation, so the audit is unchanged.
+	causes, gerr := store.GetLinks(ctx, vetoOlder)
+	if gerr != nil {
+		t.Fatalf("GetLinks: %v", gerr)
+	}
+	for _, l := range causes {
+		if l.Relation == string(RelationCauses) {
+			t.Errorf("the 'causes' edge survived the withdrawal: %+v", l)
+		}
 	}
 }
 
