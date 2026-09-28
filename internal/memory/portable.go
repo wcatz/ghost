@@ -123,6 +123,21 @@ type PortableEvidence struct {
 // real claim that somebody checked it, which is what earns the arrival record its
 // verified_at.
 //
+// anyCarriedVerification reports whether the artifact already carries a record with
+// a real verification stamp, whatever its kind.
+//
+// It is the other half of recordedVerification, and the two together decide whether
+// an import records a check or acknowledges one. See the arrival append's comment
+// for why the kind is not consulted.
+func anyCarriedVerification(records []PortableEvidence) bool {
+	for _, e := range records {
+		if recordedVerification(e.VerifiedAt) {
+			return true
+		}
+	}
+	return false
+}
+
 // A non-nil pointer is not enough. The artifact form is documented as something a
 // user reads and hand-edits, the column is a POINTER, and `omitempty` drops a nil
 // rather than a pointer to "" — so a record can carry `"verified_at": ""`, which
@@ -721,6 +736,17 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	); err != nil {
 		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
 	}
+	// And the length, for the same reason the writers apply it: the reference is
+	// printed as a labelled field on every listing, so an artifact is a way to
+	// plant a value that reaches every answer touching the row. Refused rather
+	// than clamped — a truncated path is a different path — and before the
+	// apply check, so a dry run classifies exactly as the apply run it previews.
+	if _, err := boundedSourceRef(m.SourceRef); err != nil {
+		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
+	if _, err := boundedAgent(m.Agent); err != nil {
+		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
 	// The tags too, and before the apply check so a dry run classifies exactly as
 	// the apply run it previews. An artifact's tags column is untrusted input
 	// from a file and was being written raw; the record it lands in is an
@@ -847,12 +873,30 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// above: the flag governs what a row IS (its source, its pin), while who the
 	// artifact says observed the fact is the artifact's claim about its own
 	// contents, kept as such.
+	//
+	// And the stamp is conditional, which is the whole of a round trip. A record
+	// that already carries a verification says the check HAPPENED — on the origin
+	// machine, by whoever did it — so stamping the arrival adds a second stamp for
+	// one event and a corpus that crosses a machine boundary N times reports N+1
+	// verifications of one check. The number a reader trusts has to survive being
+	// moved, so the arrival is stamped only when nothing carried already is.
+	//
+	// Kind-agnostic, and deliberately: the second hop's artifact carries the FIRST
+	// hop's arrival, whose kind is `imported`, so a guard that looked only for
+	// `verified` records would re-inflate on every hop after the first. A check
+	// already recorded is a check already recorded whatever kind recorded it.
+	//
+	// A non-empty value, because the artifact form is hand-edited and a record can
+	// carry `"verified_at": ""`, which every reader of the column treats as no
+	// claim. Empty is not a verification, and treating it as one would suppress a
+	// real arrival stamp.
+	arrivalStamped := recordedVerification(m.VerifiedAt) && !anyCarriedVerification(m.Evidence)
 	if err := appendEvidenceTx(ctx, tx, m.ID, evidenceImported, Provenance{
 		Agent:      m.Agent,
 		SessionID:  m.SessionID,
 		SourceRef:  m.SourceRef,
 		Confidence: m.Confidence,
-	}, recordedVerification(m.VerifiedAt)); err != nil {
+	}, arrivalStamped); err != nil {
 		return false, false, downgraded, err
 	}
 	if err := tx.Commit(); err != nil {

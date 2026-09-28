@@ -35,7 +35,12 @@ type Item struct {
 	ValidityState string
 	Confidence    *float64
 	Agent         string
-	Score         float64
+	// SourceRef is the reference the writer recorded: a file, a commit, a URL.
+	// It travels with the item for the same reason Agent does — it is what makes
+	// a claim checkable, and an item that could not show it would make writing
+	// it pointless.
+	SourceRef string
+	Score     float64
 	// Tokens is a token ESTIMATE for this item's content: Bytes/4, rounded up,
 	// so a short memory is never reported as free. It is derived from Bytes at
 	// materialisation and again after any presentation clamp, so the two cannot
@@ -81,8 +86,123 @@ func (i Item) Line() string {
 		origin = " source=" + label
 	}
 	return "- [" + i.Category + "] `" + i.ID + "` (" +
-		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) + origin +
+		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
+		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
+		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin +
 		") " + quoteData(i.Content)
+}
+
+// AgentLabel renders the writing harness, or "" when the row records none.
+//
+// The value is delimited like every other stored text in an answer, which looks
+// redundant against the closed vocabulary ai.SourceForClientName and
+// ai.DetectSource produce (claude-code, opencode, codex, goose) — and is not. A
+// portable artifact carries an `agent` field written by whoever exported it, and
+// the same renderer serves imported rows, so "the writer only ever sets one of
+// four tokens" is true of the MCP path rather than of the column.
+func AgentLabel(agent string) string {
+	if agent == "" {
+		return ""
+	}
+	// The display bound, for the same reason SourceRefLabel has one: the renderer
+	// cannot assume its input came from a writer that enforces the cap, and this
+	// label is printed beside the reference on every listing. Cut on a rune —
+	// the input is exactly the untrusted text a writer would have refused.
+	if len(agent) > MaxRenderedAgentLen {
+		agent = clampBytes(agent, MaxRenderedAgentLen) + "…[agent truncated]"
+	}
+	return " agent=" + quoteData(agent)
+}
+
+// MaxRenderedAgentLen is what a listing prints of an agent. It is a DISPLAY
+// bound, not a claim about the column: memory.MaxAgentLen refuses a longer one on
+// the writers that reach it, and this covers the three that deliberately do not —
+// RestoreSnapshot, CreateFromCorpus, and ReplaceNonManual, which inherits the
+// replaced row's agent onto the row a rewrite becomes.
+const MaxRenderedAgentLen = 128
+
+// MaxRenderedSourceRefLen bounds what a listing prints of a reference. It is a
+// DISPLAY bound, not a claim about what the column holds: every writer this build
+// controls refuses a longer one at write time (memory.MaxSourceRefLen), and this
+// covers what they cannot — a store written before that cap, a snapshot table
+// edited by hand, a row restored from one. It is here rather than only at the
+// writers because the renderer is the one place that cannot assume its input came
+// from a writer that enforces the cap — `RestoreSnapshot`, which writes the column
+// in SQL from the snapshot table, `CreateFromCorpus`, which reaches insertMemory
+// directly, and `ReplaceNonManual`, which inherits the replaced row's reference
+// onto the row a rewrite becomes, are the three writers that deliberately do not.
+//
+// The value is truncated, not refused, because at this point the row already holds
+// whatever it holds and refusing to show it would be worse than showing part of it.
+const MaxRenderedSourceRefLen = 512
+
+// SourceRefLabel renders the reference a claim was read from, or "" when the row
+// records none. Free text on its way into a tool answer, so it is delimited: a
+// path or URL carrying « or » would otherwise close the data block early and let
+// its own tail read as instruction.
+func SourceRefLabel(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	if len(ref) > MaxRenderedSourceRefLen {
+		// clampBytes, not a raw slice: this bound is the one handling values no
+		// writer vouched for, so its input is exactly the untrusted non-ASCII text
+		// a writer would have refused, and a cut through a multi-byte rune would
+		// put an invalid byte inside the data block.
+		ref = clampBytes(ref, MaxRenderedSourceRefLen) + "…[reference truncated]"
+	}
+	return " source_ref=" + quoteData(ref)
+}
+
+// ConfidenceLabel renders a recorded belief, or "" when the row records none.
+//
+// It is a label and not a score. Stage 4's multiplier is pinned at 1.0, so
+// nothing ranks on this number and a row with confidence 0.2 is not demoted — a
+// reader who believes otherwise is being told something the pipeline does not do,
+// which is the worse of the two errors available here.
+func ConfidenceLabel(confidence *float64) string {
+	if confidence == nil {
+		return ""
+	}
+	return " confidence " + strconv.FormatFloat(*confidence, 'g', -1, 64)
+}
+
+// stampText renders one validity boundary as a whole day when the instant is the
+// boundary that form stands for, and in full otherwise — into
+// memory.DateStampLayout, the same form a reader accepts.
+//
+// Which instant the date stands for depends on which boundary this is, and isEnd
+// is what says so:
+//
+//   - As a window's START or a verification, a date means midnight — which is
+//     where every writer puts a bare one — so midnight prints as the date. It is
+//     the same instant, and 23:59:59 is a time the caller chose, so it prints in
+//     full: collapsing it would read as though the claim began at midnight, and
+//     re-saving the boundary the line showed would move the row a day earlier.
+//   - As a window's END, a date means the last second of that day, because that is
+//     where a writer puts a bare one (see internal/mcpserver's parseStampArg
+//     endOfDay parameter) and because "valid until 2026-10-01" means the 1st. So
+//     23:59:59 prints as the date, and midnight — which the same date form does
+//     NOT stand for on this boundary — prints in full.
+//
+// The last pair is the asymmetry that matters, and it is why both directions are
+// conditional. A midnight `valid_until` is reachable without any of Ghost's tools:
+// memory.StampLayouts accepts a bare date, and a portable artifact, a restored
+// snapshot, a hand edit or a SQLite date() leaves one. Printing it as "until
+// 2026-10-01" would be a claim about the whole day while stage 2 retires the row at
+// midnight of it, and an agent re-saving what it was shown would extend the claim
+// by a day. Printing the instant keeps the line and the filter saying the same
+// thing, which is the only reason to render one from the other.
+func stampText(t *time.Time, isEnd bool) string {
+	hour, minute, second := t.Hour(), t.Minute(), t.Second()
+	isBoundary := hour == 0 && minute == 0 && second == 0
+	if isEnd {
+		isBoundary = hour == 23 && minute == 59 && second == 59
+	}
+	if isBoundary {
+		return t.Format(memory.DateStampLayout)
+	}
+	return t.Format(memory.StoredStampLayout)
 }
 
 // tokenEstimate converts content bytes into a token ESTIMATE at the conventional
@@ -195,6 +315,7 @@ func itemOf(c memory.Candidate) Item {
 		Scope:      c.Scope,
 		Confidence: c.Confidence,
 		Agent:      c.Agent,
+		SourceRef:  c.SourceRef,
 		Score:      c.Score,
 		Source:     c.Source,
 		Tokens:     tokenEstimate(len(c.Content)),

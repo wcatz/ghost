@@ -7,11 +7,11 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | Evaluation | What it measures | Headline result |
 |---|---|---|
 | LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions (measured pre-task-prefix — re-baseline pending, see Phase 1) |
-| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 547 memories |
+| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 551 memories |
 | LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
 | Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000** while the recency-trap case stays **0.929** |
 | Maintenance-state suite | Ranking over a corpus with resolved, shared and superseded rows | Hybrid live-wins **0.810** on 21 questions; the graded table cannot see this class of change at all |
-| No-answer queries | What search returns when nothing in the corpus answers the query | Mean top cosine **0.584** vs **0.740** answerable; 52/220 answerable queries sit at or below the no-answer maximum |
+| No-answer queries | What search returns when nothing in the corpus answers the query | Mean top cosine **0.584** vs **0.741** answerable; 51/220 answerable queries sit at or below the no-answer maximum |
 
 These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, a staleness fixture, a maintenance-state fixture and a false-positive count answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
 
@@ -42,7 +42,7 @@ hybrid      0.532   0.930   0.973   0.901   0.903     one-time local embedding ~
 
 - **Hybrid session Recall@5 is 93.0%, Recall@10 97.3%** — in the band of the best-reported hybrid retrieval results on -S (~95% R@5 published for hybrid BM25+vector on the original variant) and far above the paper's flat-index baseline (R@5 ≈ 0.64 on -M).
 - **The lift lands exactly where the architecture predicts.** FTS alone nearly solves keyword-friendly classes (`single-session-user` R@10 1.000) but fails vocabulary-mismatch classes; embeddings fix precisely those: `single-session-assistant` R@10 **0.607 → 1.000**, `temporal-reasoning` 0.767 → 0.938.
-- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the current v2 `ghost bench` dataset, hybrid beats vector (NDCG 0.818 vs 0.801) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
+- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the current v2 `ghost bench` dataset, hybrid beats vector (NDCG 0.818 vs 0.800) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
 - **Remaining headroom is at R@1** (0.532 overall; `multi-session` 0.371, `temporal-reasoning` 0.379) — R@10 is close to saturated, so the next win is ranking, not recall.
 - Reproduce: `go run ./bench/longmemeval --data <longmemeval_s_cleaned.json> --condition fts|vector|hybrid --embed-cache <cache.jsonl>`. The append-only content-hash cache makes reruns and interruptions cheap. The hash is taken over the **prefixed** input (`search_document: ` / `search_query: `, the same two the production client applies), so since the bench harnesses started applying those prefixes, cache entries written by older builds hash differently and are never hit again — an old cache file is inert, not wrong, and the first prefixed run re-embeds the corpus once.
 - **CI gating:** only the **fts** floor (`R@5 ≥ 0.74`, `NDCG@10 ≥ 0.72`) is enforced automatically on PRs — it needs no Ollama and finishes fast. The **hybrid** floor (`R@5 ≥ 0.91`, `NDCG@10 ≥ 0.89`) is run **manually** (`workflow_dispatch`) or locally, not on a schedule: the cold embedding pass is CPU-bound (the ~12h above), too slow for any CI cap. Because `nomic-embed-text:v1.5` is deterministic, a cold run computes the same vectors as a warm one, so the manual gate is justified by the warm local numbers here without CI re-deriving them — **but those numbers were measured before the harness adopted the task prefixes, and that space has since changed, so until the hybrid run below is re-baselined the manual hybrid gate is a floor-check, not a valid regression signal**: it can tell you a prefixed run is below a bar, not that this change made it worse (see the re-baseline note below). **Re-baseline pending:** the results table, the per-class claims above and the committed per-question logs predate the harness adopting the `search_document: `/`search_query: ` prefixes (the vector space the published numbers were measured in can no longer be reproduced by this harness), so a prefixed hybrid run measures a different space than the one that set these floors — re-run it to re-baseline the hybrid numbers, then restore the gate's regression meaning.
@@ -55,20 +55,74 @@ Published end-to-end (answer-accuracy) numbers use a GPT-4o judge and a generato
 
 `ghost bench` runs a self-authored graded dataset (in `internal/bench/testdata/`) with a committed real `nomic-embed-text:v1.5` embedding fixture, so CI runs the vector/hybrid conditions with no Ollama. The harness (`internal/bench/`) drives Ghost's production `SearchFTS`/`SearchVector`/`SearchHybrid` over a fresh in-memory store and scores judge-free IR metrics.
 
-Current numbers (v2 dataset: 547 memories spanning all 8 categories, 220 graded queries with heavy paraphrase/vocab-mismatch coverage; retrieval-only, no LLM judge; fully deterministic — reproduce with `go run ./cmd/ghost bench` after rebuild):
+Current numbers (v2 dataset: 551 memories spanning all 8 categories, 220 graded queries with heavy paraphrase/vocab-mismatch coverage; retrieval-only, no LLM judge; fully deterministic — reproduce with `go run ./cmd/ghost bench` after rebuild):
 
 ```
 condition          R@1     R@5    R@10   MRR@10  NDCG@10
-fts-only         0.467   0.626   0.697   0.836   0.749
-vector-only      0.506   0.694   0.764   0.885   0.801
+fts-only         0.467   0.625   0.697   0.836   0.749
+vector-only      0.503   0.694   0.764   0.882   0.800
 hybrid           0.520   0.712   0.763   0.902   0.818
 ```
 
 Every row above was measured on this build from the committed dataset and
 fixture, and reproduces exactly with `go run ./cmd/ghost bench` (or
-`go test ./internal/bench -run TestBenchDatasetReport -v`). Two things moved
-when the fixture was regenerated, and they need separating, because only one of
-them is the fixture's doing:
+`go test ./internal/bench -run TestBenchDatasetReport -v`). The corpus grew by
+four `validity_*` rows carrying `valid_from`/`valid_until`/`verified_at`, and
+three things moved with it that need separating, because only one of them is a
+ranking change:
+
+- **The four rows moved the numbers by at most 0.001 on the gated metrics.**
+  `fts-only` R@5 0.626 → 0.625, `vector-only` R@1 0.506 → 0.503 and
+  NDCG@10 0.801 → 0.800, `hybrid` unchanged on all five. The corpus grew
+  547 → 551, and four new candidates now compete for a ten-row window, so a
+  query that filled its window from eleven candidates fills it from fifteen.
+  That is the cost of a larger corpus rather than a ranking regression — the
+  shipped path did not move — and every condition stays inside the 0.005
+  NDCG@10 / R@5 tolerance the context-assembler plan applies to each of its
+  ranking-affecting PRs (the plan's own comparison contract, measured on the
+  branch against `origin/main`; there is no CI job asserting it). The floors
+  `TestBenchRegressionFloors` does enforce — NDCG@10 0.73/0.78/0.80 and
+  recall@10 0.67/0.75/0.75 — are met with the same headroom as before, which
+  is why the `fts` CI job stays green. Nothing in these conditions reads a validity
+  column: they call `SearchFTS`, `SearchVector` and `SearchHybrid` directly, so
+  the new rows are inert here on purpose. What the corpus now carries is a
+  validity window for the assembler's own condition to act on, which is where
+  a stage-2 filter becomes measurable (PR 7 of
+  [`docs/superpowers/specs/2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md)).
+  `TestBuiltinDatasetCarriesValidityIntoRetrieval` keeps that claim honest: it
+  reads the rows back out of `Store.Candidates` — the read stage 2 consumes
+  — with the stamps still attached, and
+  `TestValidityFixtureCoversEveryStage2State` fails if the four stop covering
+  every state stage 2 reads.
+- **The `embeddings.json` fixture was added to, never rewritten.** The four new
+  vectors were embedded through `internal/embedding`'s `EmbedDocument`, the same
+  client and `search_document: ` prefix that produced the committed ones, and
+  they were merged into the fixture by a one-off script that read the existing
+  keys, re-encoded them through the same JSON writer and refused to write unless
+  the result decoded to the original map. That script was not committed: it is
+  four keys in and nothing out, and a tool that exists to preserve one file's
+  keys is a thing to keep only while keys are being added. A future
+  regeneration goes through the route
+  [in this section](#phase-2--ghost-bench-an-in-repo-dataset--ci-regression-floors--shipped) — `EmbedDocument` for memory keys and
+  `EmbedQuery` for query names, not raw `/api/embed` calls, which is the mistake
+  the prefix-free fixture used to carry — and that route rewrites every key, so
+  its diff is expected to be whole-file. Re-embedding an existing key reproduces
+  the committed vector exactly on the current model, so this table is measured in
+  the same space as the one before it. Reproduce the additive shape against this
+  PR's own base with
+  `git diff --numstat $(git merge-base origin/main HEAD) -- internal/bench/testdata/embeddings.json`
+  — 3080 insertions, 0 deletions, and the 3080 is four keys of 770 lines (one key
+  line, 768 floats, one closing line). Reproduce the numbers with
+  `go run ./cmd/ghost bench`.
+- **The no-answer report moved with the corpus**: a floor that refuses all the
+  no-answer queries now costs 51/220 answerable queries rather than 52, because
+  the new rows are vector neighbours for one more answerable query.
+  Report-only, no gate.
+
+The bullets below record the earlier fixture regeneration, which is what moved
+the vector legs. Their before/after figures are re-measurements of the
+547-memory corpus, so they no longer describe the table above exactly; they still
+describe the change that caused them, which is what they are for.
 
 - **The `vector-only` and `hybrid` rows come from the committed
   `embeddings.json`**, which is produced by `nomic-embed-text:v1.5` **with its
@@ -89,7 +143,7 @@ them is the fixture's doing:
   fixture** — it never reads a vector. It is in this diff because the table it
   replaces had drifted from the committed dataset: it published
   `fts-only 0.469 0.623 0.689 0.837 0.748` where the committed `memories.jsonl`
-  and `queries.jsonl` produce `0.467 0.626 0.697 0.836 0.749` (measured on
+  and `queries.jsonl` produce `0.467 0.625 0.697 0.836 0.749` (measured on
   `origin/main` with the old fixture, so the drift predates the regeneration).
   The vector rows of that published table were stale for the same reason, which
   is why the "before" numbers quoted above are a re-measurement rather than the
@@ -105,12 +159,12 @@ the same space as production, prefixes and all; a fixture built by hand from raw
 
 Two findings, both honest:
 
-- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.818) beats both single legs (FTS 0.749, vector 0.801) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI. Absolute numbers are lower than the v1 starter because v2 deliberately adds paraphrase queries where lexical overlap is weak (the FTS leg's R@1 falls to 0.467; vector and hybrid carry those).
+- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.818) beats both single legs (FTS 0.749, vector 0.800) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI. Absolute numbers are lower than the v1 starter because v2 deliberately adds paraphrase queries where lexical overlap is weak (the FTS leg's R@1 falls to 0.467; vector and hybrid carry those).
 - **The graph-expansion bonus was evaluated and removed.** An additive link-graph bonus (former 0.15 default) lifted semantically-adjacent neighbors above exact matches, and a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth. The former `GraphWeight` setting and the bonus are now removed entirely (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`). The link graph is retained for the Obsidian mirror and `supersedes` ranking.
 
-**What this table cannot see.** The v2 corpus is the *graded retrieval* dataset, and it is deliberately clean: every memory is created through `store.Create` in one batch, so all 547 share a `created_at` and the decay factor is identical across every candidate — inert, and pinned by `TestDecayDoesNotPerturbGradedBench`. It also holds no resolved row, no `_global` row and no `supersedes` edge. A ranking change that acts on any of that measures 0.000 on this table, which is exactly what happened when the resolved/`_global` demotion shipped: measured on one fixture, `f3a80f7` (pre-#634) and `main` both read 0.818 here. That is a property of the corpus, not a bug in the harness, so the coverage lives elsewhere: the [maintenance-state suite](#phase-3b--maintenance-state-suite-report-only) and the [no-answer queries](#no-answer-queries-the-abstention-baseline-report-only).
+**What this table cannot see.** The v2 corpus is the *graded retrieval* dataset, and it is deliberately clean: every memory is created through `store.Create` in one batch, so all 551 share a `created_at` and the decay factor is identical across every candidate — inert, and pinned by `TestDecayDoesNotPerturbGradedBench`. It also holds no resolved row, no `_global` row and no `supersedes` edge. A ranking change that acts on any of that measures 0.000 on this table, which is exactly what happened when the resolved/`_global` demotion shipped: measured on one fixture, `f3a80f7` (pre-#634) and `main` both read 0.818 here. That is a property of the corpus, not a bug in the harness, so the coverage lives elsewhere: the [maintenance-state suite](#phase-3b--maintenance-state-suite-report-only) and the [no-answer queries](#no-answer-queries-the-abstention-baseline-report-only).
 
-The v2 dataset overshoots the original ~150/~40 growth target (547/220) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
+The v2 dataset overshoots the original ~150/~40 growth target (551/220) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
 
 ### Parameter sweep (`ghost bench --sweep`)
 
@@ -229,8 +283,8 @@ Recall cannot see a leak. A wrong memory returned counts as a hit for whatever i
 ```text
 no-answer queries (n=24, nothing in the corpus answers these; report-only, no gate)
   results returned per query   10.0 (window 10, no similarity floor configured)
-  mean top cosine             0.584  vs 0.740 for the 220 answerable queries
-  floor refusing all of them   0.697 (the no-answer maximum) costs 52/220 answerable queries
+  mean top cosine             0.584  vs 0.741 for the 220 answerable queries
+  floor refusing all of them   0.697 (the no-answer maximum) costs 51/220 answerable queries
 
   flavor          n    results/query     mean top
   near_miss      12             10.0        0.623
@@ -253,7 +307,7 @@ The floor rows are a sweep, not a proposal — `search.min_similarity` ships 0, 
 
 **What this suite asserts, and what it does not.** Nothing here gates the ranking. The enforced claims are about the *fixture and the report plumbing*: both flavors are present and their counts survive into the report, the searches returned something (otherwise the mean is a vacuous 0), one row per configured floor exists, the counts add up, and the maximum is not below the mean drawn from it. The near-miss flavor must not score *below* the off-domain one — that is a statement about the fixture being labelled correctly, not about the ranking. Notably **absent**: any assertion that the two distributions are separated. That is a claim about today's ranking, and the plausible abstention fix this baseline exists for — returning fewer, more similar rows for a query nothing answers — would move the no-answer mean up and trip a test whose job is to watch that fix land. The separation is reported, not asserted.
 
-Read the third line as the actual baseline for the abstention work: **the two distributions overlap.** A floor of 0.697 would refuse all 24 no-answer queries and would also refuse 52 of the 220 answerable ones, so a threshold alone cannot abstain — the near-miss flavor is what makes the overlap visible, and it is why the answer is likely to be a calibrated decision rather than a constant.
+Read the third line as the actual baseline for the abstention work: **the two distributions overlap.** A floor of 0.697 would refuse all 24 no-answer queries and would also refuse 51 of the 220 answerable ones, so a threshold alone cannot abstain — the near-miss flavor is what makes the overlap visible, and it is why the answer is likely to be a calibrated decision rather than a constant.
 
 ### The keyword arm, measured (#580, PR 4)
 

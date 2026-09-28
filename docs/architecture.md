@@ -826,8 +826,8 @@ Three concepts stay distinct, and prose that blurs them is a bug in the prose:
 
 A row is one observation: `observed` (a write path recorded what the host
 reported), `imported` (the fact arrived through a portable artifact), `verified`
-(reserved for the validity writers, [#575](https://github.com/wcatz/ghost/issues/575),
-which own that write) and `legacy` (the migration's seed). A CHECK, not a
+(somebody checked the fact, written by the validity writers,
+[#575](https://github.com/wcatz/ghost/issues/575)) and `legacy` (the migration's seed). A CHECK, not a
 convention: a kind no reader knows is a kind no reader can filter.
 
 | Writer | Appends | To which memory |
@@ -836,9 +836,11 @@ convention: a kind no reader knows is a kind no reader can filter.
 | `Upsert` fold, including `FoldOnly` | `observed` | the **surviving** memory — see below |
 | `RecordDecision` | `observed` | the companion memory, empty of provenance (the tool reports none) |
 | `ReplaceNonManual`, fresh insert | a **carry** of its sources' records | the row the rewrite or merge becomes — see below |
-| `ImportMemory` | the artifact's own records, then `imported` | the imported row |
+| `ImportMemory` | the artifact's own records, then `imported` | the imported row — and the arrival record is stamped when the artifact held a `verified_at`, so an imported fact still counts as checked |
 | `RestoreSnapshot` | the snapshot's records, verbatim | a re-created row — see below |
 | `migrateV18` | `legacy` | a memory that already recorded a provenance value |
+| `Create`, any `UpsertWithOptions` branch, `UpdateMemoryWithOptions`, when the call states a `verified_at` | `verified` | the row it wrote, or the fold target — stamped with the store's own clock, never the caller's |
+| `CreateFromCorpus` | `observed` only, **never a stamp** | the ingested row; its `verified_at` is a value in the dataset with no observation behind it, so a record would have to invent the check. The column keeps the dataset's own value |
 
 Two writers deliberately append nothing, and both are cases where a record would be
 a claim nobody made. `ReplaceNonManual`'s **reuse** branch updates a row in place, so
@@ -1052,9 +1054,9 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
 | **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `memory_history`, `audit_log` | Partial — `memory_history` now records every state change and who made it, and an `as_of` read consumes it for liveness and content (see [Historical retrieval](#historical-retrieval-as_of)), but a current retrieval still does not; there are still no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
-| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — the columns are read into `memory.Memory` and stage 2 of the assembler evaluates them against the request clock, so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)). No MCP writer exists yet (PR 3), so a store nobody has restored or imported reads every row as unset and the evaluation is corpus-neutral; `Store.RestoreSnapshot` and `Store.ImportMemory` both carry the triple, which is where a non-NULL window first comes from ([#575](https://github.com/wcatz/ghost/issues/575)) |
+| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Shipped — the columns are read into `memory.Memory`, stage 2 of the assembler evaluates them against the request clock so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)), and the three writer tools accept them so a caller can state a claim's period ([#575](https://github.com/wcatz/ghost/issues/575)). Partial in one respect: `ghost_memory_search` is the only surface that runs the pipeline, so it is the only one that filters a closed window out — the browsing surfaces still show it, marked `expired`, and the session-start block shows it with no marker at all because it renders its own rows (see the assembler section below). A store whose rows all predate the writer contract still reads every row as unset, and the evaluation is corpus-neutral for it; `Store.RestoreSnapshot` and `Store.ImportMemory` carry the triple too, so an imported window is honoured the same way. A bare date is a whole day, and a `valid_until` is the END of it (see the assembler section). A `verified_at` also leaves a record in `memory_provenance` in the same transaction, so `EvidenceCounts.Verified` counts checks rather than reading a column that only ever holds the latest, and it counts over records that CARRY a stamp rather than over `verified` rows. Which mechanism is in play differs per writer — a live save appends a `verified` row, an import stamps its own `imported` row, a restore reinstates a re-created row's records and deliberately leaves an in-place row's alone, and the corpus route records no stamp at all — so [Evidence provenance](#evidence-provenance) enumerates the set in its writer table rather than this cell, which is a summary, and a summary of four per-writer mechanisms is a fourth claim site. (Named by link rather than by direction: this cell also points at the assembler section below, so a reader told to look below for both finds one and not the other.) Where a record IS written its stamp is the store's clock and never the caller's — a verifier that could date its own check could date it before the thing it checked, and the import holds to that too rather than copying a date in from a file — so the column and the record are two different facts and both are kept. Gated on the caller stating one in that call: a partial edit keeps an earlier `verified_at` by `COALESCE`, and re-recording that would report a check nobody repeated. An `as_of` read is filtered too, and against the instant it asked for rather than the wall clock: `assemble.Run` moves `Now` to the `as_of` value before the stages run, so stage 2 judges the window at T and a row that was true at T but has since expired is kept for that question ([#683](https://github.com/wcatz/ghost/pull/683)) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate) |
-| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write; `memory_provenance` records every observation ([#673](https://github.com/wcatz/ghost/issues/673)) | Inert — `confidence` is written on some paths and never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)), and the evidence counts are recorded in the assembler's trace but weigh nothing (stage 4 stays at 1.0). The history has three readers: `ghost history <memory-id>`, `Store.MemoryHistory`, and the `as_of` read, which consults it for content and liveness but not for confidence. The evidence table has four: `Store.MemoryProvenance`, `Store.MemoryEvidenceCounts`, the portable artifact, and `Signals.Evidence` in the trace |
+| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref`; `memory_history` records who performed each write; `memory_provenance` records every observation ([#673](https://github.com/wcatz/ghost/issues/673)) | Inert for ranking, visible to the reader. The three writer tools accept `confidence` and `source_ref`, `agent` comes from the existing provenance path and `session_id` from the host's session when it reports one ([#575](https://github.com/wcatz/ghost/issues/575)), and the shared item line renders all four. Nothing scores on any of them: stage 4's multiplier stays pinned at `1.0`, and the evidence counts are recorded in the assembler's trace and weigh nothing. The history has three readers: `ghost history <memory-id>`, `Store.MemoryHistory`, and the `as_of` read, which consults it for content and liveness but not for confidence. The evidence table has four: `Store.MemoryProvenance`, `Store.MemoryEvidenceCounts`, the portable artifact, and `Signals.Evidence` in the trace |
 
 Axis interaction rules:
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
@@ -1111,15 +1113,43 @@ What exists now:
   answer, so a matching row the window cut was invisible and the tool reported
   absence while the memory existed. Project membership stays in SQL and is
   recorded as a per-row verdict, never applied as a second drop.
-- **The three validity columns are readable.** `Memory` now carries
+- **The three validity columns are readable and writable.** `Memory` carries
   `valid_from`, `valid_until` and `verified_at` as `*string`, bound on every
   retrieval scan, and stage 2 interprets them against the request clock
   (`valid`, `future`, `expired`, `unverified`, `unset`; an unreadable value is
-  reported as `validity_unparseable` rather than read as valid). No MCP writer
-  exists yet, so a store nobody has restored or imported reads every row as
-  unset and stage 2 is corpus-neutral; `Store.RestoreSnapshot` and `Store.ImportMemory`
-  do write the triple, which is where a non-NULL window first comes from. The
-  writer contract is the next change.
+  reported as `validity_unparseable` rather than read as valid). The three writer
+  tools accept them, so a claim's period is expressible at last. `Create`,
+  `ImportMemory` and `RestoreSnapshot` carry the triple too, and every row
+  written before any of those reads nil, which is what stage 2 calls unset —
+  so a store nobody has written a window into is corpus-neutral for the stage.
+
+  **Only `ghost_memory_search` filters on it**, because it is the only surface
+  that runs the pipeline. `ghost_memories_list`, `ghost_search_all`,
+  `ghost_project_context` and the `ghost://` resources still return a closed
+  window, and the shared renderer marks it `expired` rather than printing a
+  retired claim unmarked — honest, but not yet a filter. The session-start block
+  is the one surface that shows a closed window with nothing marking it, because
+  it renders its own rows through none of the shared labels. All of them move
+  onto the pipeline with the rest of the PR plan; until then, a window that has
+  closed is a fact only search acts on.
+- **A stamp can be replaced but not removed.** The write path stores NULL for an
+  absent value and treats an empty string as the same request — "no claim" — so
+  a claim recorded by mistake is corrected by writing a different one rather than
+  by retracting it. The alternative, an explicit clear, would give the column a
+  third state ("stated, then withdrawn") that retrieval would have to interpret,
+  and nothing consumes one today.
+- **A bare date is a whole day, and which end of it depends on the field.** A
+  `valid_from` is the start of the named day, at midnight; a `valid_until` is the
+  end of it, at 23:59:59. The asymmetry is the point rather than an artefact:
+  `assemble.ExpiredAt` is a strict "before now", so a `valid_until` stored at
+  midnight would retire the claim from the first instant of the day the caller said
+  it was true through, and `assemble.stampText` prints a date back for the
+  boundary a date stands for — midnight on a start and a verification, 23:59:59 on
+  an end — so the rendered label and the filter cannot disagree about which day a
+  claim covers. Two equal dates are therefore a one-day window; two equal instants
+  are refused. A stamp the writer did not produce — one an artifact or a restored
+  snapshot left — is printed at the instant it is stored.
+
 - **The session-start surface shows and applies scope.** The two session-start
   loaders select `memories.scope`, print it with `assemble.ScopeLabel` — the same
   label a search line carries, so the two cannot spell one scope differently —
@@ -1260,7 +1290,17 @@ query
 Rules the pipeline must hold:
 
 - **Filters precede window closure.** Stages 2-4 run over the widened candidate set from stage 1, never over an already-truncated list.
-- **One renderer, one field set.** Scope, validity state, and confidence appear identically in `ghost_memory_search` output and in the injected session-start block. Scope does today: both surfaces print the label from `assemble.ScopeLabel`, and validity state and confidence arrive with the writer that can set them.
+- **One renderer, one field set.** Scope, validity, confidence, the writing agent
+  and the source reference are rendered by one implementation per field — scope
+  already, through `assemble.ScopeLabel`; the rest through
+  `assemble.ValidityLabel`, `ConfidenceLabel`, `AgentLabel` and `SourceRefLabel`.
+  `ghost_memory_search` reaches them through `assemble.Item.Line`, and the
+  surfaces that still render `memory.Memory` directly — `ghost_memories_list`,
+  `ghost_search_all`, `ghost_project_context`, the `ghost://` resources — call
+  the same four, and scope is already one implementation across the search,
+  listing and session-start surfaces. What is **not** converged is the
+  session-start block, which shows none of the four; it moves onto `assemble`
+  with the rest of the plan.
 - **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
 - **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)). An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
 - **The budget is a hard boundary, in the unit it names.** Stage 8's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.

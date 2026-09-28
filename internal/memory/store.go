@@ -80,15 +80,16 @@ type Memory struct {
 	//
 	// All three are pointers because nil is the honest reading of a NULL
 	// column — no claim was made — while an empty string would look like a
-	// claim about the empty moment. No MCP writer sets them yet (that writer
-	// contract is the follow-up change), so a store nobody has restored or
-	// imported reads every row as nil; ImportMemory and RestoreSnapshot carry
-	// the triple, which is where a non-NULL window first comes from. Either way the
-	// fields are on the type because the schema already stores them and the
-	// retrieval path has to carry them to the assembler that evaluates them.
-	// SQLite holds them as unconstrained text, so the values are the stored
-	// strings, not parsed times: interpreting them belongs to the caller, which
-	// is the only layer that knows the request clock.
+	// claim about the empty moment. The tools write them (ghost_memory_save,
+	// ghost_save_global, ghost_memory_update) and Create writes them, so a row
+	// with a window is now expressible; ImportMemory and RestoreSnapshot carry
+	// the triple too, and every row written before any of those reads nil, which
+	// is what stage 2 calls unset. SQLite holds them as unconstrained text, so
+	// the values are the stored strings, not parsed times: interpreting them
+	// belongs to the caller, which is the only layer that knows the request
+	// clock. The tools normalize what they accept into memory.StoredStampLayout,
+	// but nothing here may assume it — an imported artifact, a restored snapshot
+	// or a hand-edited row can hold the whole-day form the readers also accept.
 	ValidFrom  *string `json:"valid_from,omitempty"`
 	ValidUntil *string `json:"valid_until,omitempty"`
 	VerifiedAt *string `json:"verified_at,omitempty"`
@@ -2384,7 +2385,7 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 // was true only of the corpora in this repository, and a downloaded corpus
 // proved it wrong on the first CI run.
 func (s *Store) CreateFromCorpus(ctx context.Context, projectID string, m Memory) (string, error) {
-	return s.insertMemory(ctx, projectID, m)
+	return s.insertMemory(ctx, projectID, m, insertOptions{})
 }
 
 // secretTagFields is the guard's view of a memory's tags.
@@ -2412,6 +2413,23 @@ func secretTagFields(tags []string) []secretField {
 	return out
 }
 
+// secretSourceRefField checks a write-time source reference, or nothing when the
+// caller stated none.
+//
+// A reference is a path, a commit, a URL or a ticket, and it is stored on the same
+// row and rendered on the same line as the content — the shared item line prints
+// it as a labelled field on every listing, and an exported artifact carries it to
+// whoever imports one. A caller pasting a token into it would be storing and
+// replaying a credential by exactly the route the guard exists to close, and the
+// field is the one place on the line where a credential looks least like one:
+// a long unbroken string after "source_ref=" reads as a URL.
+func secretSourceRefField(sourceRef string) []secretField {
+	if sourceRef == "" {
+		return nil
+	}
+	return []secretField{{"source_ref", sourceRef}}
+}
+
 // Create inserts a new memory and returns its ID. The insert and the history
 // row that records it share one transaction, so a memory cannot exist without
 // its own first entry in its history.
@@ -2419,14 +2437,55 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 	if err := rejectSecretFields(secretContentAndTags(m.Content, m.Tags)...); err != nil {
 		return "", err
 	}
-	return s.insertMemory(ctx, projectID, m)
+	if err := rejectSecretFields(secretSourceRefField(m.SourceRef)...); err != nil {
+		return "", err
+	}
+	if _, err := boundedSourceRef(m.SourceRef); err != nil {
+		return "", err
+	}
+	if _, err := boundedAgent(m.Agent); err != nil {
+		return "", err
+	}
+	return s.insertMemory(ctx, projectID, m, insertOptions{recordVerification: true})
+}
+
+// insertOptions is the one bit insertMemory cannot infer from the Memory it is
+// given, so the caller has to say it.
+//
+// It is a parameter rather than a field on Memory because Memory is what a reader
+// gets back: a stored verified_at is true of the row whichever route wrote it, and
+// a flag on the read shape would suggest the two rows differ when the only
+// difference is who observed them.
+type insertOptions struct {
+	// recordVerification appends a `verified` evidence record when m carries a
+	// VerifiedAt. Every writer that stores a verified_at from a live call sets it.
+	//
+	// CreateFromCorpus does not, and the reason is the stamp rather than the
+	// claim. A corpus row's verified_at is DATA ABOUT THE DATASET — a third-party
+	// benchmark asserting when its own rows were checked, possibly years ago — and
+	// the record's verified_at is the STORE's clock by design, because a verifier
+	// that could date its own check could date it before the thing it checked.
+	// Appending one therefore says "this fact was checked now", which is the exact
+	// inversion that rule exists to prevent, reached through a path the rule was
+	// never stated on. The column keeps the dataset's value verbatim: losing the
+	// dataset's own data would be the opposite defect, and appendVerificationIf
+	// StatedTx's comment is what says so.
+	//
+	// Nothing can read the fabricated record today — this path's own contract says
+	// the row is never injected, mirrored or quoted, and it lands in a scratch
+	// database that dies with the run — which is exactly why the invariant is
+	// stated and pinned rather than left to the accident that no corpus sets the
+	// field yet. TestCreateFromCorpusRecordsNoVerification is that pin, and
+	// TestCreateStillRecordsAVerificationBesideTheCorpusOptOut is what keeps the
+	// opt-out from being implemented by dropping the append wholesale.
+	recordVerification bool
 }
 
 // insertMemory is Create's statement, with the credential guard and nothing
 // else above it. Split out so CreateFromCorpus is the same write rather than a
 // second copy of an INSERT that has to stay in step with the schema — a worse
 // failure mode than a less obvious call graph.
-func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (string, error) {
+func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, opts insertOptions) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2441,12 +2500,15 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 	var id string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
-		                      agent, session_id, source_ref, confidence, scope)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      agent, session_id, source_ref, confidence, scope,
+		                      valid_from, valid_until, verified_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags),
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID),
-		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope)).Scan(&id)
+		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope),
+		nullIfEmptyPtr(m.ValidFrom), nullIfEmptyPtr(m.ValidUntil),
+		nullIfEmptyPtr(m.VerifiedAt)).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create memory: %w", err)
 	}
@@ -2458,6 +2520,23 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 	// fact and the store kept what it reported about itself.
 	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, provenanceFromMemory(m), false); err != nil {
 		return "", err
+	}
+	// And a second record when the same call said the fact was CHECKED. A column
+	// that says verified_at and a table that says nothing would be two answers to
+	// one question, and EvidenceCounts.Verified is the one a reader is meant to
+	// trust. appendVerificationIfStatedTx carries the "stated in THIS call" rule;
+	// here a fresh INSERT has no stored value to keep, so m.VerifiedAt is exactly
+	// the caller's statement.
+	//
+	// Gated on opts.recordVerification as well, and the gate is the only reason
+	// this is not simply "append whenever m.VerifiedAt is set": the record's stamp
+	// is the store's clock, so on the corpus route it would assert that a dataset's
+	// own check happened now. See insertOptions.recordVerification, which is where
+	// that argument is written down in full.
+	if opts.recordVerification {
+		if err := appendVerificationIfStatedTx(ctx, tx, id, provenanceFromMemory(m), m.VerifiedAt); err != nil {
+			return "", err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit create: %w", err)
@@ -2482,15 +2561,176 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 // under a manual-sourced target (or any target) is never silently discarded.
 // If no candidate scores above the applicable bar, it creates a new,
 // unlinked row.
+
+// MaxSourceRefLen is the byte cap on a write-time source reference, at the store
+// rather than at the tool boundary.
+//
+// The column is caller-supplied text that the shared item line prints as a labelled
+// field on every listing and every browsing surface, so an unbounded one is a
+// megabyte echoed into every answer that touches the row — and that is a property
+// of the column, not of the MCP tools — and the tools are the only writers an MCP
+// caller reaches, so the cap lives here and the refusal surfaces from the store.
+// It is not repeated in the tool argument resolver: one cap, one message, and a
+// second copy could disagree about the size without anything noticing.
+//
+// A reference is a path, a commit, a URL or a ticket — a few hundred bytes at the
+// outside — and it is NOT clamped the way content is: ClampContent cuts prose and
+// leaves a marker in its place, while a truncated path or URL is a different
+// reference, and a wrong one that looks right is worse than an error.
+//
+// THREE writers of the column do not reach the bound, and all three are the
+// deliberate exclusions this codebase already draws for MaxContentLen and the
+// credential guard. `RestoreSnapshot` copies the column in SQL from the snapshot
+// table and would need the check per restored row; `CreateFromCorpus` reaches
+// insertMemory's INSERT directly rather than through Create; and
+// `ReplaceNonManual`, since #677, inherits the replaced row's provenance onto the
+// row a rewrite becomes — a COPY of a value this database already bounded, not new
+// caller text, and filtering there deletes the stored row rather than refusing one.
+// `assemble.SourceRefLabel` bounds what a listing PRINTS for exactly those three,
+// since the renderer cannot assume its input came from a writer that enforces the
+// cap. A new statement that writes the column has to call boundedSourceRef — the
+// bound is one call each writer remembers, not something the schema enforces.
+const MaxSourceRefLen = 512
+
+// MaxAgentLen is the byte cap on a write-time agent, for the same reason and by
+// the same route as MaxSourceRefLen: the shared item line prints `agent=` beside
+// `source_ref=` on every listing, so a value with no bound is a value echoed into
+// every answer that touches the row.
+//
+// On the harness path the column holds one of four tokens, so the cap can only
+// bite on an artifact — which is the point. A portable artifact's `agent` is
+// whatever wrote the export, and internal/portable accepts a 1 MiB record, so
+// without a bound an export could plant close to a megabyte of it in a column the
+// renderer had started echoing in this change. The same three writers are exempt —
+// RestoreSnapshot, CreateFromCorpus, and ReplaceNonManual, which inherits the
+// replaced row's agent onto the row a rewrite becomes — and assemble.AgentLabel
+// bounds the display.
+const MaxAgentLen = 128
+
+// StoredStampLayout is the layout a writer stores a validity stamp in: SQLite's
+// own datetime() shape, in UTC.
+//
+// The columns are unconstrained text, so nothing in the schema enforces this and
+// a row may legitimately hold a date alone — a portable artifact, a hand edit,
+// or the short form SQLite's date() produces. Writers normalize what they accept
+// to this one layout so their own rows need a single case to read, and every
+// reader still has to try both. It lives here because the column is the storage
+// layer's and the layout is part of its contract, not a detail of any one
+// caller: a writer that stored one shape and a renderer that printed another
+// would show a caller a moment Ghost never recorded.
+const StoredStampLayout = "2006-01-02 15:04:05"
+
+// DateStampLayout is the whole-day form, the other shape SQLite's date() produces.
+const DateStampLayout = "2006-01-02"
+
+// StampLayouts is every layout a reader of a validity column accepts, in the order
+// to try them: what Ghost's own writers store first, then the whole-day form a
+// portable artifact, a hand edit or a date() call can leave behind.
+//
+// One list, owned here, because the column is the storage layer's. A writer
+// validating a value it did not store and a reader interpreting one have to agree
+// on what is readable, and two private copies of the layout set are two answers to
+// that question free to drift: a writer that accepted only the shape it writes
+// would wave through a contradiction on a date-only row, and a reader that
+// accepted only its own would read a real claim as no claim at all.
+var StampLayouts = []string{StoredStampLayout, DateStampLayout}
+
+// ParseStamp reads a stored validity stamp over every layout StampLayouts names,
+// reporting whether it was readable. The store owns it because a writer judging a
+// value it did not store and a reader interpreting one have to reach the same
+// answer: a check that understood only the shape Ghost writes would wave through
+// a contradiction on every imported, restored or hand-edited row, and a reader
+// that understood only its own would read a real claim as no claim at all.
+func ParseStamp(s string) (time.Time, bool) {
+	for _, layout := range StampLayouts {
+		if at, err := time.Parse(layout, s); err == nil {
+			return at, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// CheckWindowOrder refuses a window that does not end after it starts, judging the
+// effective pair: the boundaries the caller supplied, with a missing half taken
+// from what the row already holds.
+//
+// Both halves matter because a save carries a window or nothing, while an edit
+// carries one boundary and inherits the other. Only a contradiction is refused: a
+// window that has already closed, or one that has not opened, is a legitimate
+// thing to record — it is what a caller writes to say a claim is over, or not yet
+// in force.
+//
+// A half no layout reads is not a claim, and the reader treats it as unset, so
+// there is nothing here to contradict. Refusing on one would make an unrelated
+// edit fail on a row whose own stored value this build cannot interpret.
+func CheckWindowOrder(v, stored Validity) error {
+	from, until := v.ValidFrom, v.ValidUntil
+	if from == nil {
+		from = stored.ValidFrom
+	}
+	if until == nil {
+		until = stored.ValidUntil
+	}
+	if from == nil || until == nil {
+		return nil
+	}
+	fromAt, fromOK := ParseStamp(*from)
+	untilAt, untilOK := ParseStamp(*until)
+	if !fromOK || !untilOK {
+		return nil
+	}
+	if !untilAt.After(fromAt) {
+		return fmt.Errorf("valid_until %s is not after valid_from %s — a window must end after it starts, or a claim that is true for no time at all", *until, *from)
+	}
+	return nil
+}
+
+// Validity is the optional temporal claim attached to one write: when the
+// memory became true, when it stops being true, and when someone last checked.
+//
+// Every field is a pointer and every nil means "no claim was made", which is
+// distinct from a claim about the zero moment — the same reason the columns
+// themselves are nullable. A caller that states nothing is recorded as NULL and
+// read back as unset, so a store can tell the difference between "nobody has
+// said" and "said to be valid forever".
+//
+// It is separate from Provenance rather than a fifth field on it because the two
+// answer different questions: Provenance is who wrote this and how much they
+// were trusted, Validity is when it stopped being true. A memory can be
+// certainly true right now and expire next month, and collapsing the two would
+// make the next check of a fact look like a reason to doubt the agent that
+// stated it.
+type Validity struct {
+	// ValidFrom is when the memory became true. A time after now makes the row
+	// unreadable until then, which is a real claim about a scheduled change and
+	// not a data error.
+	ValidFrom *string
+	// ValidUntil is when the memory stops being true. A time at or before now
+	// withholds the row from ranked retrieval; see internal/assemble stage 2.
+	ValidUntil *string
+	// VerifiedAt is when a human or agent last checked the claim. In v1 it is a
+	// flag: it marks a row as re-checked and does not by itself decide anything.
+	VerifiedAt *string
+}
+
+// IsZero reports whether the claim is entirely absent, so a write can leave the
+// three columns alone without the caller having to know which of them exist. It
+// is the one place that question is answered, because the callers that need it —
+// a tool deciding whether a request stated anything at all — must not each hold
+// their own copy of it and disagree about what "stated nothing" means.
+func (v Validity) IsZero() bool {
+	return v.ValidFrom == nil && v.ValidUntil == nil && v.VerifiedAt == nil
+}
+
 // Provenance is the optional write-time context attached to a single save.
 // Every field is optional and its zero value means "not known": passing no
 // Provenance at all records NULL across the board rather than a guess.
 //
-// SessionID is deliberately not auto-populated. Ghost has no session identity
-// available on the MCP path — no column, no handshake field, no env marker —
-// so it stays empty until a caller that genuinely knows supplies it. An
-// auto-filled value would be fabricated provenance, which is the exact thing
-// these columns exist to avoid.
+// SessionID is never auto-populated from process state. It names a session the
+// host controls, so only a caller that has one may supply it: the MCP tools
+// pass the transport's session id, which a stdio host does not have, and every
+// other path leaves it empty. A store-invented value would be fabricated
+// provenance, which is the exact thing these columns exist to avoid.
 type Provenance struct {
 	// Agent names the harness that produced the memory. The values are the
 	// source tokens ai.NewSourceProviderForSource understands — claude-code,
@@ -2524,14 +2764,100 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
+// nullStringPtr turns a nullable column into the pointer shape a Validity field
+// carries, and NULL into the nil that means "no claim was made".
+func nullStringPtr(s sql.NullString) *string {
+	if !s.Valid {
+		return nil
+	}
+	return &s.String
+}
+
+// readableStampPtr is nullStringPtr for the places that must not treat a value
+// Ghost cannot read as a claim.
+//
+// nullStringPtr maps only SQL NULL to nil, so a stored empty string — or any text
+// no layout parses — arrives as a non-nil boundary. That is the right answer when
+// the caller is reporting what is in the column, and the wrong one when a value is
+// being judged for whether it says anything: CheckWindowOrder deliberately returns
+// nil for a pair it cannot read, so an unreadable pair passes the check meant to
+// qualify it and looks like a real assertion. So a boundary counts as stated only
+// when ParseStamp reads it, which is the same rule nullIfEmptyPtr applies to the
+// empty moment at the writers that bind the triple.
+//
+// Such a value is reachable rather than hypothetical: Store.Create stores a stamp
+// verbatim, and ImportMemory and RestoreSnapshot write the column with no check at
+// all, so a database can hold a window recorded in prose.
+func readableStampPtr(s sql.NullString) *string {
+	if !s.Valid {
+		return nil
+	}
+	// A zero time is not readable either, even though ParseStamp reports it ok:
+	// time.Parse succeeds on "0001-01-01 00:00:00" and yields the zero time, while
+	// the reader that consumes the column — assemble.parseStampPtr — maps
+	// t.IsZero() to nil, so readValidity records it in `unparseable` and stage 2
+	// emits validity_unparseable. Readable here has to mean readable by the reader
+	// the rule exists to satisfy, not by ParseStamp alone, or this function and
+	// the renderer disagree about exactly one value and the store believes it
+	// carries a claim stage 2 says it does not.
+	if at, ok := ParseStamp(s.String); !ok || at.IsZero() {
+		return nil
+	}
+	return &s.String
+}
+
+// nullIfEmptyPtr maps a validity stamp to SQL NULL, and an empty string to NULL
+// as well, so no writer can record a claim about the empty moment. A nil pointer
+// is the caller's statement that no claim was made; an empty string would be a
+// claim with no readable value, which stage 2 reports as validity_unparseable —
+// a permanently confusing row to leave in a store on the caller's behalf.
+func nullIfEmptyPtr(s *string) any {
+	if s == nil || *s == "" {
+		return nil
+	}
+	return *s
+}
+
+// boundedAgent applies MaxAgentLen, refusing rather than truncating, and maps an
+// empty agent to NULL. It refuses because the column's own values are short: a
+// value past the cap is not a harness name, so there is no honest prefix of it to
+// keep.
+func boundedAgent(agent string) (any, error) {
+	if agent == "" {
+		return nil, nil
+	}
+	if len(agent) > MaxAgentLen {
+		return nil, fmt.Errorf("agent must be at most %d bytes, got %d — it names the harness that wrote a row, not a document", MaxAgentLen, len(agent))
+	}
+	return agent, nil
+}
+
+// boundedSourceRef applies MaxSourceRefLen, refusing rather than truncating, and
+// maps an empty reference to NULL on the way through.
+func boundedSourceRef(s string) (any, error) {
+	if s == "" {
+		return nil, nil
+	}
+	if len(s) > MaxSourceRefLen {
+		return nil, fmt.Errorf("source_ref must be at most %d bytes, got %d — it is a file path, commit or URL, not a document", MaxSourceRefLen, len(s))
+	}
+	return s, nil
+}
+
 // Upsert stores a memory with no provenance, exactly as before.
-// UpsertOptions carries the optional facts about one save. Provenance and
-// scope are orthogonal — where a memory came from and where it applies — so
-// they are separate fields rather than one growing parameter list, and a zero
-// UpsertOptions is exactly what plain Upsert passes.
+// UpsertOptions carries the optional facts about one save. Provenance, scope
+// and validity are orthogonal — where a memory came from, where it applies, and
+// when it was true — so they are separate fields rather than one growing
+// parameter list, and a zero UpsertOptions is exactly what plain Upsert passes.
 type UpsertOptions struct {
 	Provenance Provenance
 	Scope      map[string]string
+	// Validity is the temporal claim this save makes, if any. A zero Validity
+	// writes NULL to all three columns, which is the record for a memory whose
+	// author stated no currency — the state of every memory written before the
+	// columns existed, and the state the tools write when the caller says
+	// nothing.
+	Validity Validity
 
 	// FoldOnly changes what happens when an equivalent row is found (the same
 	// text after foldOnlyEquivalent's normalization): the existing row is
@@ -2681,6 +3007,15 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// is the correct outcome — the secret is not stored, and the caller's
 	// caller is told why.
 	if err := rejectSecretFields(secretContentAndTags(content, tags)...); err != nil {
+		return "", "", 0, err
+	}
+	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
+		return "", "", 0, err
+	}
+	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return "", "", 0, err
+	}
+	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
 		return "", "", 0, err
 	}
 	parentTx, inTx := storeTxFromContext(ctx)
@@ -2967,11 +3302,66 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// save that strengthened this row in between was silently
 			// overwritten (issue #560). MIN(1.0, …) is the same cap the Go
 			// arithmetic applied.
+			//
+			// The caller's claim rides along to the target, for the reason pin
+			// does: the target is the row that keeps being retrieved and the one a
+			// later consolidation absorbs, so a save of near-identical text
+			// carrying valid_until that reached only the copy just inserted would
+			// report success and leave the row search returns with no window at
+			// all. COALESCE, as in the update path, so a save that says nothing
+			// about the window leaves whatever the target already holds — a fold
+			// re-states a fact, and re-stating it is not a retraction of a
+			// boundary somebody else recorded.
+			//
+			// agent and source_ref take the same COALESCE(NULLIF(?, ''), …) form
+			// for the same reason: an empty value means "the caller said nothing",
+			// and a detectable harness on this save is no evidence against the
+			// author of the row being folded into.
+			//
+			// Merging a stated boundary onto the target's other one makes this the
+			// second writer that can produce a window out of two halves stated
+			// independently, so it is judged the same way UpdateMemoryWithOptions
+			// judges it and for the same reason: the read is inside the transaction
+			// that already holds the write lock, so the pair is the target's window
+			// at the moment the merge lands. Before this COALESCE the target kept
+			// its own consistent pair and a contradictory claim stayed on the copy
+			// this save inserts; readValidity tests expiry first, so the merged row
+			// would read as `future` and then `expired` and drop out of ranked
+			// retrieval with no error anywhere. Gated on the caller stating a
+			// boundary, for the update path's reason: a fold that says nothing about
+			// the window cannot make it inconsistent.
+			if opts.Validity.ValidFrom != nil || opts.Validity.ValidUntil != nil {
+				var targetFrom, targetUntil sql.NullString
+				readErr := tx.QueryRowContext(ctx,
+					`SELECT valid_from, valid_until FROM memories WHERE id = ? AND project_id = ?`,
+					existingID, projectID,
+				).Scan(&targetFrom, &targetUntil)
+				if readErr != nil && readErr != sql.ErrNoRows {
+					return "", "", 0, fmt.Errorf("lookup fold target window: %w", readErr)
+				}
+				if orderErr := CheckWindowOrder(opts.Validity, Validity{
+					ValidFrom:  nullStringPtr(targetFrom),
+					ValidUntil: nullStringPtr(targetUntil),
+				}); orderErr != nil {
+					return "", "", 0, orderErr
+				}
+			}
 			res, updateErr := tx.ExecContext(ctx, `
 				UPDATE memories
-				SET importance = MIN(1.0, importance + ?), access_count = access_count + 1
+				SET importance = MIN(1.0, importance + ?), access_count = access_count + 1,
+				    valid_from  = COALESCE(?, valid_from),
+				    valid_until = COALESCE(?, valid_until),
+				    verified_at = COALESCE(?, verified_at),
+				    confidence  = COALESCE(?, confidence),
+				    agent       = COALESCE(NULLIF(?, ''), agent),
+				    session_id  = COALESCE(NULLIF(?, ''), session_id),
+				    source_ref  = COALESCE(NULLIF(?, ''), source_ref)
 				WHERE id = ? AND project_id = ?
-			`, importance*0.2, existingID, projectID)
+			`, importance*0.2,
+				nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
+				nullIfEmptyPtr(opts.Validity.VerifiedAt), opts.Provenance.Confidence,
+				opts.Provenance.Agent, opts.Provenance.SessionID, opts.Provenance.SourceRef,
+				existingID, projectID)
 			if updateErr != nil {
 				return "", "", 0, fmt.Errorf("strengthen memory: %w", updateErr)
 			}
@@ -3024,6 +3414,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if err := appendEvidenceTx(ctx, tx, existingID, evidenceObserved, opts.Provenance, false); err != nil {
 				return "", "", 0, err
 			}
+			// And the same for a VERIFICATION this call stated, on the same
+			// survivor and for the same reason: the copy that fold inserted may be
+			// the row a reader never sees, while this one is what the corpus keeps
+			// and what a later consolidation absorbs. Gated on what the CALLER
+			// stated, never on what the row now holds — the target may already be
+			// verified from an earlier save, and re-recording that would inflate
+			// EvidenceCounts.Verified for a check nobody repeated.
+			if err := appendVerificationIfStatedTx(ctx, tx, existingID, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
+				return "", "", 0, err
+			}
 		}
 
 		if opts.FoldOnly && existingID != "" {
@@ -3048,13 +3448,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 
 		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags,
-			                      agent, session_id, source_ref, confidence, scope, pinned)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			                      agent, session_id, source_ref, confidence, scope, pinned,
+			                      valid_from, valid_until, verified_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
 		`, projectID, category, content, source, importance, string(tagsJSON),
 			nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 			nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
-			scopeJSON(opts.Scope), boolToInt(opts.Pin)).Scan(&id); err != nil {
+			scopeJSON(opts.Scope), boolToInt(opts.Pin),
+			nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
+			nullIfEmptyPtr(opts.Validity.VerifiedAt)).Scan(&id); err != nil {
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
 		}
 		if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
@@ -3065,6 +3468,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// its own with its own text; the fold's SECOND report is the one that goes on
 		// the survivor above.
 		if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, false); err != nil {
+			return "", "", 0, err
+		}
+		// And its own verification, for the same reason the observation is its own:
+		// this row's verified_at column says somebody checked the text on this row,
+		// and a record that counted only the survivor's would leave the two
+		// disagreeing about whether THIS memory was checked.
+		if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 			return "", "", 0, err
 		}
 
@@ -3112,19 +3522,28 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// another writer between that decision and the row.
 	if err = db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
-		                      agent, session_id, source_ref, confidence, scope, pinned)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      agent, session_id, source_ref, confidence, scope, pinned,
+		                      valid_from, valid_until, verified_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, category, content, source, importance, string(tagsJSON),
 		nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 		nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
-		scopeJSON(opts.Scope), boolToInt(opts.Pin)).Scan(&id); err != nil {
+		scopeJSON(opts.Scope), boolToInt(opts.Pin),
+		nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
+		nullIfEmptyPtr(opts.Validity.VerifiedAt)).Scan(&id); err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
 		return "", "", 0, err
 	}
 	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, false); err != nil {
+		return "", "", 0, err
+	}
+	// A save that verified the fact it is storing leaves a record of the check as
+	// well as the column: a fresh row's verified_at is written by the INSERT above,
+	// and the table is where a reader counts checks.
+	if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 		return "", "", 0, err
 	}
 	if err = commit(); err != nil {
@@ -3771,6 +4190,30 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	return tx.Commit()
 }
 
+// UpdateOptions is the optional set of facts an edit may change. Every field is
+// optional and its zero value means "not part of this edit", which is what makes
+// the edit partial: a caller correcting a port number must not silently drop the
+// validity window and the source reference the row already carries.
+//
+// The one asymmetry is Tags, where nil means keep and a non-nil empty slice
+// means clear. A caller that wants to remove every tag has no other way to say
+// it, and an empty tag list is a real state rather than an absent one.
+type UpdateOptions struct {
+	Content    *string
+	Category   *string
+	Importance *float32
+	Tags       []string
+	// Validity replaces only the stamps it carries. A nil field leaves the
+	// stored value alone, so a caller restating one boundary does not erase the
+	// other, and an edit about something else erases nothing.
+	Validity Validity
+	// Provenance re-attributes the row to the session performing this edit. An
+	// empty field keeps the stored value rather than clearing it, because a
+	// write whose author Ghost could not identify is no evidence that the
+	// author of the previous write was wrong.
+	Provenance Provenance
+}
+
 // UpdateMemory applies a partial update to a memory. Nil content/category/
 // importance preserve current values; a non-nil tags slice replaces the tag
 // list (pass an empty slice to clear). Source and pinned are never touched.
@@ -3783,24 +4226,63 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 // atomically inside a single transaction — closing the check-then-write race
 // where a separate lookup-then-write could target a memory that moved to a
 // different project (e.g. via PromoteToGlobal) between the check and the write.
+//
+// The validity triple and the provenance fields are not reachable through this
+// signature: they need UpdateMemoryWithOptions, which is the only path that
+// writes them. This wrapper keeps the pre-existing callers (the reflection and
+// maintenance paths, which know no validity claim) from having to spell out a
+// zero UpdateOptions each. The credential guards are in the method it delegates
+// to, not here, so that the options path is guarded on the same terms as this
+// one.
 func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error {
-	// The incoming content only, never the composed result. A row written
-	// before this guard existed can hold a credential, and a user clearing it
-	// out must still be able to retag, re-categorise, or re-prioritise that row
-	// on the way to deleting it — refusing a metadata-only edit would strand
-	// it with ghost_memory_delete as the only remaining move.
-	if content != nil {
-		if err := rejectSecret("content", *content); err != nil {
+	return s.UpdateMemoryWithOptions(ctx, projectID, id, UpdateOptions{
+		Content: content, Category: category, Importance: importance, Tags: tags,
+	})
+}
+
+// UpdateMemoryWithOptions is UpdateMemory over the full partial-edit set, adding
+// the validity triple and the write-time provenance an MCP edit may carry.
+//
+// A validity stamp that changes does not invalidate the embedding: the vector
+// describes the text, and an edit that only re-dates a claim leaves the text —
+// and therefore the vector — exactly as it was. Invalidating it would re-embed
+// every row whose window was merely corrected, for no change in what the memory
+// says.
+func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id string, opts UpdateOptions) error {
+	// The credential guards live here rather than in UpdateMemory, because this
+	// is where the fields arrive on both paths and a guard one call above would
+	// leave the options path — the one the MCP edit tool uses — unguarded.
+	//
+	// The incoming content only, never the composed result. A row written before
+	// the guard existed can hold a credential, and a user clearing it out must
+	// still be able to retag, re-categorise, or re-prioritise that row on the way
+	// to deleting it — refusing a metadata-only edit would strand it with
+	// ghost_memory_delete as the only remaining move.
+	if opts.Content != nil {
+		if err := rejectSecret("content", *opts.Content); err != nil {
 			return err
 		}
 	}
 	// The tags, unconditionally, and that unconditional part is the point: this
-	// method is reachable with tags and nil content, so a content-only guard
-	// skips exactly the call that carries them. validateTags upstream caps the
-	// shape at ten tags of 64 characters and nothing else, and a tag is returned
-	// by search and quoted into the next reflect prompt — so the exposure is the
-	// same one the body has.
-	if err := rejectSecretList("tags", tags); err != nil {
+	// method is reachable with tags and no content, so a content-only guard skips
+	// exactly the call that carries them. validateTags upstream caps the shape at
+	// ten tags of 64 characters and nothing else, and a tag is returned by search
+	// and quoted into the next reflect prompt — so the exposure is the same one
+	// the body has.
+	if err := rejectSecretList("tags", opts.Tags); err != nil {
+		return err
+	}
+	// The reference, on the same terms as the content and the tags: it is
+	// caller-supplied text stored on the row and rendered beside the content on
+	// every listing. Empty is skipped, so a caller that mentions no reference is
+	// not charged for a check.
+	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
+		return err
+	}
+	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return err
+	}
+	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -3814,9 +4296,21 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 
 	var curContent, curCategory, curTags string
 	var curImportance float32
+	// The stored window comes out of the same statement as the fields this edit
+	// replaces, because it is judged against and has to be the row's at the moment
+	// the write lands. Reading it before the transaction — as a tool-level
+	// pre-check does — would leave two concurrent edits to two different
+	// boundaries able to each pass against a snapshot the other has already
+	// invalidated, and store a window that ends before it starts.
+	//
+	// The two boundaries only, because the rule is the window's: verified_at has
+	// no order to be out of, and the UPDATE below writes all three by COALESCE
+	// rather than read-modify-write, so nothing here would use it.
+	var curFrom, curUntil sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT content, category, importance, tags FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
-	).Scan(&curContent, &curCategory, &curImportance, &curTags)
+		`SELECT content, category, importance, tags, valid_from, valid_until
+		 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+	).Scan(&curContent, &curCategory, &curImportance, &curTags, &curFrom, &curUntil)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("memory %s not found in project %s", id, projectID)
 	}
@@ -3824,18 +4318,36 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 		return fmt.Errorf("lookup memory: %w", err)
 	}
 
+	//
+	// Only when the caller supplied a boundary, which is the only way an edit can
+	// change the window. With nothing supplied the stored pair is judged against
+	// itself, and a row whose own window was written out of order — Store.Create,
+	// ImportMemory and RestoreSnapshot all pass the stamps through with no order
+	// check, and that is deliberate — would refuse an unrelated content or tag
+	// edit over a defect the caller cannot see or fix without restating a window
+	// they never touched. An edit that only moves verified_at is not a window
+	// edit either, and is not refused.
+	if opts.Validity.ValidFrom != nil || opts.Validity.ValidUntil != nil {
+		if err := CheckWindowOrder(opts.Validity, Validity{
+			ValidFrom:  nullStringPtr(curFrom),
+			ValidUntil: nullStringPtr(curUntil),
+		}); err != nil {
+			return err
+		}
+	}
+
 	newContent, newCategory, newImportance, newTags := curContent, curCategory, curImportance, curTags
-	if content != nil {
-		newContent = *content
+	if opts.Content != nil {
+		newContent = *opts.Content
 	}
-	if category != nil {
-		newCategory = *category
+	if opts.Category != nil {
+		newCategory = *opts.Category
 	}
-	if importance != nil {
-		newImportance = *importance
+	if opts.Importance != nil {
+		newImportance = *opts.Importance
 	}
-	if tags != nil {
-		b, mErr := json.Marshal(tags)
+	if opts.Tags != nil {
+		b, mErr := json.Marshal(opts.Tags)
 		if mErr != nil {
 			return fmt.Errorf("marshal tags: %w", mErr)
 		}
@@ -3860,12 +4372,33 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 	if newContent != curContent {
 		clearResolved = 1
 	}
+	// The validity and provenance columns are written with COALESCE rather than
+	// read, merged and written back: this statement is the only thing that
+	// touches them, so an omitted field has to be the stored value by
+	// construction. A read-modify-write would make two concurrent edits to two
+	// different fields of the same row able to lose one of the two, and it would
+	// put the current values in Go variables the caller cannot see.
+	//
+	// NULLIF(?, '') is what makes an empty provenance string mean "keep" rather
+	// than "clear": an undetectable harness is no evidence against the author of
+	// the previous write, and NULLIF turns "" into the NULL COALESCE skips.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE memories
 		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now'),
-		    resolved_at = CASE WHEN ? THEN NULL ELSE resolved_at END
+		    resolved_at = CASE WHEN ? THEN NULL ELSE resolved_at END,
+		    valid_from   = COALESCE(?, valid_from),
+		    valid_until  = COALESCE(?, valid_until),
+		    verified_at  = COALESCE(?, verified_at),
+		    confidence   = COALESCE(?, confidence),
+		    agent        = COALESCE(NULLIF(?, ''), agent),
+		    session_id   = COALESCE(NULLIF(?, ''), session_id),
+		    source_ref   = COALESCE(NULLIF(?, ''), source_ref)
 		WHERE id = ?
-	`, newContent, newCategory, newImportance, newTags, clearResolved, id); err != nil {
+	`, newContent, newCategory, newImportance, newTags, clearResolved,
+		nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
+		nullIfEmptyPtr(opts.Validity.VerifiedAt), opts.Provenance.Confidence,
+		opts.Provenance.Agent, opts.Provenance.SessionID, opts.Provenance.SourceRef,
+		id); err != nil {
 		return fmt.Errorf("update memory: %w", err)
 	}
 
@@ -3880,10 +4413,31 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 		}
 	}
 	// The state this write produced, which is the only other copy of the new text
-	// once the next edit overwrites it. No Provenance: this call carries no agent
-	// or session, and inventing one would be the fabricated provenance the agent
-	// columns exist to avoid.
-	if err := appendHistoryTx(ctx, tx, id, phaseUpdate, Provenance{}); err != nil {
+	// once the next edit overwrites it.
+	//
+	// The caller's Provenance, not a zero one: a history row records who
+	// performed the write, and an edit through a session knows that. The MCP
+	// path passes provenanceFor's result, whose empty fields mean "nobody
+	// reported an agent" rather than "nobody acted" — which is the same
+	// admission every other history phase makes, and the reason this row can
+	// name an editor that the pre-history UPDATE could not.
+	if err := appendHistoryTx(ctx, tx, id, phaseUpdate, opts.Provenance); err != nil {
+		return err
+	}
+	// An edit that also asserted the fact was CHECKED leaves a record of the
+	// check, in the transaction that wrote verified_at, so a row cannot read
+	// verified with no account of who checked it. Note what this path does NOT
+	// append: an `observed` record. #682's writers append one to Create and to
+	// every Upsert branch but not here, and an edit is not a new report of a fact
+	// — it is a change to one that is already recorded. Adding the observed leg
+	// here would be widening #673's design from inside a PR about #575, and it
+	// would make every content edit inflate Observations.
+	//
+	// Gated on the caller's stated verified_at, and the gate is what makes this
+	// path's COALESCE safe: an edit that fixes a typo on a memory verified last
+	// month leaves the stored column alone, and appending for that would
+	// manufacture a check. See appendVerificationIfStatedTx.
+	if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -4070,6 +4624,169 @@ func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandida
 // consolidation round trip (the consolidatedSince race) — callers must not
 // treat the post-apply corpus as fully consolidated when this is non-empty.
 //
+// rowClaims is the set of columns a rewrite inherits from the rows it replaces: the
+// validity triple, the trust rating, and the three provenance strings.
+type rowClaims struct {
+	validFrom, validUntil, verifiedAt *string
+	confidence                        *float64
+	agent, sessionID, sourceRef       string
+}
+
+// inheritedClaims resolves the columns a rewritten or merged row takes from the
+// rows it stands in for.
+//
+// One rule, the same one the reuse branch inside ReplaceNonManual already follows:
+// a value the EMISSION states wins, and silence inherits. Nothing is defaulted and
+// nothing invented, because a consolidation has no authority to re-attribute a
+// claim it was never told about. The sources are read in the order ReplacesIDs
+// names them — for a merge that is the consolidator's own order — and the FIRST
+// source stating a value supplies it, so the result is a function of the proposal
+// rather than of rowid order.
+//
+// THE WINDOW IS THE EXCEPTION, and it is not a smaller version of that rule. The
+// two boundaries are resolved TOGETHER after every source has been read, because
+// filling them independently composes a pair no row ever asserted, and deciding
+// per source lets a single-boundary row lock the unit and lose a later source's
+// complementary end — a loss that depends on the order the consolidator named. See
+// the resolution below for the order of preference. verified_at, confidence, agent,
+// session_id and source_ref remain first-source-wins: each is one value with no
+// partner to disagree with, and a half-window problem cannot arise for any of
+// them. verified_at is a single value by that same reasoning AND is read by the
+// same reader as the two boundaries, so it is judged by readability too rather
+// than for pairing alone. A maintainer reading this paragraph must not
+// reimplement the window the per-value way — that is the bug, and the resolution
+// below exists because of it.
+//
+// It is the SOURCES rather than the emission alone because an emission carries none
+// of this: reflectMemoriesToMemory builds it from the consolidator's output and has
+// nothing to copy a window from, so binding only the emission's columns would store
+// NULL every time and fix nothing. Read here because the delete below is what
+// disposes of the sources, and this loop runs before it — the same reordering
+// carryEvidenceTx already depends on.
+func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (rowClaims, error) {
+	claims := rowClaims{
+		validFrom:  m.ValidFrom,
+		validUntil: m.ValidUntil,
+		verifiedAt: m.VerifiedAt,
+		confidence: m.Confidence,
+		agent:      m.Agent,
+		sessionID:  m.SessionID,
+		sourceRef:  m.SourceRef,
+	}
+	// The window is decided AFTER every source has been read, because the choice
+	// between a complete pair and a single boundary is only knowable once the whole
+	// set has been seen — deciding per source is the bug this shape exists to fix.
+	var completeWindow, firstHalfWindow Validity
+	var haveComplete, haveHalf bool
+	for _, id := range m.ReplacesIDs {
+		if id == "" {
+			continue
+		}
+		var validFrom, validUntil, verifiedAt sql.NullString
+		var confidence sql.NullFloat64
+		var agent, sessionID, sourceRef sql.NullString
+		err := tx.QueryRowContext(ctx,
+			`SELECT valid_from, valid_until, verified_at, confidence, agent, session_id, source_ref
+			 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+		).Scan(&validFrom, &validUntil, &verifiedAt, &confidence, &agent, &sessionID, &sourceRef)
+		if err == sql.ErrNoRows {
+			// A source the proposal named but this store does not hold, or one
+			// another writer took. Its evidence is not carried either, so there is
+			// nothing to inherit and the row is written on what the emission said.
+			continue
+		}
+		if err != nil {
+			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", id, err)
+		}
+		// This source is a WINDOW CANDIDATE, remembered rather than decided on.
+		// See the resolution after the loop for why, and for what a candidate is
+		// allowed to become. Only a boundary readableStampPtr recognises counts:
+		// a source whose window is prose in the column states nothing Ghost can
+		// act on, and letting it qualify as a complete pair would let it win rule
+		// 1 from any position and discard a real window.
+		candidate := Validity{ValidFrom: readableStampPtr(validFrom), ValidUntil: readableStampPtr(validUntil)}
+		switch {
+		case candidate.ValidFrom != nil && candidate.ValidUntil != nil:
+			// A source states a COMPLETE window. It is preferred, but only if the
+			// pair it states is one that passes CheckWindowOrder; a source whose
+			// own window is out of order contributes NOTHING, not a half. Keeping
+			// one of its boundaries would pick a side the row itself never took,
+			// and the pair is the only thing it ever asserted.
+			if err := CheckWindowOrder(candidate, Validity{}); err == nil && !haveComplete {
+				completeWindow, haveComplete = candidate, true
+			}
+		case !haveHalf && (candidate.ValidFrom != nil || candidate.ValidUntil != nil):
+			// Exactly one boundary: a genuine half, and the fallback's source.
+			firstHalfWindow, haveHalf = candidate, true
+		}
+		// verified_at is the third value of the same triple and is read by the same
+		// reader, so it takes the same rule: a value no layout reads is not a stated
+		// verification. nullIfEmptyPtr at the INSERT maps only the empty string, so
+		// without this a source's prose in the column was copied onto the successor
+		// verbatim and stage 2 reported validity_unparseable forever.
+		if claims.verifiedAt == nil {
+			claims.verifiedAt = readableStampPtr(verifiedAt)
+		}
+		if claims.confidence == nil && confidence.Valid {
+			f := confidence.Float64
+			claims.confidence = &f
+		}
+		if claims.agent == "" {
+			claims.agent = agent.String
+		}
+		if claims.sessionID == "" {
+			claims.sessionID = sessionID.String
+		}
+		if claims.sourceRef == "" {
+			claims.sourceRef = sourceRef.String
+		}
+	}
+	// The window is inherited AS A UNIT, from one source or from none — never half
+	// from one row and half from another.
+	//
+	// Filling the two boundaries independently is what a merge must not do. A source
+	// stating only valid_from and another stating only valid_until compose a pair
+	// neither row ever asserted, and the halves can land backwards: a row born
+	// expired, with both sources' evidence carried onto it as though the pair were
+	// one claim, so stage 2 withholds it from ranked retrieval with no error
+	// anywhere. That is the contradiction UpdateMemoryWithOptions and
+	// UpsertWithOptions' fold both refuse by running CheckWindowOrder over the pair
+	// they compose.
+	//
+	// Order of preference, and the second rule is the one a single-pass version
+	// gets wrong:
+	//
+	//  1. A source holding a COMPLETE consistent pair of READABLE stamps wins,
+	//     whichever id the consolidator named first. Readable is load-bearing
+	//     here, not decoration: rule 1 is position-independent, so an unreadable
+	//     pair that qualified would win from anywhere and discard a real window,
+	//     which is the mirror of the loss these rules exist to remove. Deciding per source instead would let a
+	//     single-boundary row claim the unit and lock the window, discarding a
+	//     later source's complete pair — and a row that inherits a start and
+	//     loses its end never retires, which is the outcome valid_until exists to
+	//     prevent, on a path that runs unattended over the whole corpus.
+	//  2. Failing that, ONE boundary from the first source that states any. Half a
+	//     real claim beats none, and the other half is not invented. Which half
+	//     survives is the first id's, and that order dependence is a stated cost
+	//     rather than a silent one: it is bounded by rule 1 removing it whenever
+	//     any source in the set states a complete pair.
+	//
+	// The CheckWindowOrder on rule 1 is not redundant with the unit. A source row
+	// can hold a window that is ITSELF out of order, because Store.Create,
+	// ImportMemory and RestoreSnapshot write the triple with no order check, so
+	// inheriting a pair whole still needs judging. A source failing it falls to
+	// rule 2 and contributes no half.
+	if claims.validFrom == nil && claims.validUntil == nil {
+		switch {
+		case haveComplete:
+			claims.validFrom, claims.validUntil = completeWindow.ValidFrom, completeWindow.ValidUntil
+		case haveHalf:
+			claims.validFrom, claims.validUntil = firstHalfWindow.ValidFrom, firstHalfWindow.ValidUntil
+		}
+	}
+	return claims, nil
+}
+
 // consolidatedSince should be a timestamp (see CurrentTimestamp) captured
 // before the caller fetched the memories it fed to the consolidator. ghost
 // reflect runs as a separate process from the long-lived MCP server, so a
@@ -4324,12 +5041,39 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			}
 			continue
 		}
+		// The claims the row stands in for, resolved from the rows it replaces. The
+		// insert below used to list none of these columns, so a rewrite or a merge
+		// dropped a source row's window, its verification, its confidence and its
+		// reference while carryEvidenceTx carried that row's EVIDENCE forward — which
+		// is how a row comes to read verified_at NULL beside evidence that says
+		// somebody checked it, and a reader comparing the two finds the table
+		// contradicting the memory it describes.
+		//
+		// From the SOURCES, not from the emission, because an emission carries none:
+		// reflectMemoriesToMemory builds it from the consolidator's output and has
+		// nothing to copy a window from, so binding m's columns here would store
+		// NULL every time and fix nothing. It is also the rule the reuse branch
+		// above already follows — an emission inherits rather than invents — and the
+		// one carryEvidenceTx follows for the records.
+		//
+		// Read here because the delete below is what takes the sources, and this loop
+		// runs before it: the same reordering the carry already depends on.
+		claims, err := inheritedClaims(ctx, tx, projectID, m)
+		if err != nil {
+			return nil, err
+		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags, scope)
-			VALUES (?, ?, ?, 'reflection', ?, ?, ?)
+			INSERT INTO memories (project_id, category, content, source, importance, tags, scope,
+			                      valid_from, valid_until, verified_at,
+			                      confidence, agent, session_id, source_ref)
+			VALUES (?, ?, ?, 'reflection', ?, ?, ?,
+			        ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
-		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope)).Scan(&newID); err != nil {
+		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope),
+			nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
+			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
+			nullIfEmpty(claims.sourceRef)).Scan(&newID); err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
 		// The support this emission was consolidated FROM, carried onto the row that

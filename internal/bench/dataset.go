@@ -14,12 +14,22 @@ import (
 // MemorySpec is one dataset memory. Key is a stable human-authored identifier
 // used to reference the memory from query relevance maps and the embedding
 // fixture; it is NOT the store's generated ID.
+//
+// The three validity stamps are the corpus's exercise of validity itself: a
+// corpus in which every row states no window cannot tell a retrieval stage that
+// honours one from one that ignores it, because both produce the same answer.
+// Pointers, because the store's own columns are nullable and a fixture that
+// could not say "no claim" would have to state a claim instead — the same
+// distinction the tools draw when a caller omits an argument.
 type MemorySpec struct {
 	Key        string   `json:"key"`
 	Category   string   `json:"category"`
 	Content    string   `json:"content"`
 	Importance float32  `json:"importance"`
 	Tags       []string `json:"tags,omitempty"`
+	ValidFrom  *string  `json:"valid_from,omitempty"`
+	ValidUntil *string  `json:"valid_until,omitempty"`
+	VerifiedAt *string  `json:"verified_at,omitempty"`
 }
 
 // QuerySpec is one dataset query. Rel maps memory Keys to graded relevance.
@@ -170,6 +180,7 @@ func Seed(ctx context.Context, store *memory.Store, ds Dataset, vecs Vectors) ([
 		id, err := store.Create(ctx, ds.Project, memory.Memory{
 			Category: m.Category, Content: m.Content, Importance: m.Importance,
 			Tags: m.Tags, Source: "mcp",
+			ValidFrom: m.ValidFrom, ValidUntil: m.ValidUntil, VerifiedAt: m.VerifiedAt,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("create memory %q: %w", m.Key, err)

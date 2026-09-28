@@ -68,7 +68,7 @@ func TestFalsePositiveReport(t *testing.T) {
 	// an abstention fix that legitimately returns fewer, more similar rows for an
 	// unanswered query would move the no-answer mean up and trip a test whose
 	// whole job is to watch that fix land. The separation is reported instead
-	// (mean top 0.584 vs 0.740), where a human reads it.
+	// (mean top 0.584 vs 0.741), where a human reads it.
 	//
 	// The one outcome claim left is the flavor ordering below, and it is a
 	// statement about the fixture: the near-miss set is supposed to be the hard
