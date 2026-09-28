@@ -18,9 +18,12 @@ import (
 // signal a reader of lifecycle.log needs.
 var retireMarkers = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bno longer\b`),
-	// Every inflection, verbs AND nouns: a note that says it is "retiring" the
-	// rule, or that "retirement of the no-merge rule starts next sprint", has
-	// retired it as far as this veto is concerned. Each form here has a word in
+	// Every inflection, and the noun wherever the verb has one: a note that
+	// says it is "retiring" the rule, or that "retirement of the no-merge rule
+	// starts next sprint", has retired it as far as this veto is concerned. The
+	// exceptions are the two markers called out below (relax, waive) and the
+	// three verbs with no English noun form of their own (drop, loosen, lift).
+	// Each form here has a word in
 	// TestNamesRetirementCoversEveryInflection, and that test exists because a
 	// form that stops matching is silent — on the creation pass it costs a
 	// supersession, and on the repair pass it costs an edge. It also exists
@@ -38,21 +41,25 @@ var retireMarkers = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bdeprecat(?:e|es|ed|ing|ion)\b`),
 	regexp.MustCompile(`(?i)\bobsolete\b`),
 	regexp.MustCompile(`(?i)\breplac(?:e|es|ed|ing|ement)\b`),
-	regexp.MustCompile(`(?i)\bsupersed(?:e|es|ed|ing)\b`),
+	// The noun is spelled on a different stem: "supersession" is supersess+ion,
+	// not supersed+ion — the d is dropped — so it cannot be an alternative hung
+	// off the verb stem and is listed whole. The plural is here too, because
+	// "the supersessions are complete" is a note someone writes.
+	regexp.MustCompile(`(?i)\b(?:supersed(?:e|es|ed|ing)|supersessions?)\b`),
 	// drop, relax, loosen and lift do not take a silent e — their bare form IS
 	// the stem — so their inflection group is optional rather than a member. The
 	// trailing \b is what keeps "dropdown", "liftoff" and "looseners" out.
 	regexp.MustCompile(`(?i)\bdrop(?:s|ped|ping)?\b`),
 	// A rule that was relaxed, loosened, lifted or waived is still a rule the
 	// newer note changed, and "must now" is a rule the newer note rewrote.
-	// relax is the one marker that deliberately does NOT carry its noun:
-	// "relaxation" reads as often as a Grace period or a policy term as a
-	// retirement, and a marker that fires on it lets a note that retires
-	// nothing through the veto. It is the only narrowing in this list, and it
-	// costs a false NEGATIVE — the one error the list above is deliberately
-	// broad to suppress — which is why it is called out here rather than left
-	// to be discovered. The near-miss half of
-	// TestNamesRetirementCoversEveryInflection pins it.
+	// relax and waive are the two markers that deliberately carry NO noun, and
+	// they are the only narrowing in this list: "relaxation" and "waiver" each
+	// read as often as a Grace period or a legal instrument as a retirement,
+	// and a marker that fires on either lets a note that retires nothing
+	// through the veto. Both cost a false NEGATIVE — the one error the list
+	// above is deliberately broad to suppress — which is why they are called
+	// out here rather than left to be discovered as gaps. The near-miss half of
+	// TestNamesRetirementCoversEveryInflection pins both.
 	regexp.MustCompile(`(?i)\brelax(?:es|ed|ing)?\b`),
 	regexp.MustCompile(`(?i)\bloosen(?:s|ed|ing)?\b`),
 	regexp.MustCompile(`(?i)\blift(?:s|ed|ing)?\b`),
