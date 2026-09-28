@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
@@ -1861,14 +1862,22 @@ func toWithdrawPairs(pairs []supersedePair) []supersede.WithdrawPair {
 	return out
 }
 
-// shortID is the report form of a memory id: its first eight characters, which
+// shortID is the report form of a memory id: its first eight CHARACTERS, which
 // is the form every Ghost report prints and therefore the form an operator has
 // on screen when they paste one into --withdraw. Ids are longer than 8 only
 // because they are random, so the truncation is presentation and never a
 // lookup key — the one path that resolves an id prefix does its own matching.
+//
+// By characters, not bytes, and that is what makes it pasteable at all. An id is
+// not necessarily hex — `ghost import` writes an artifact's ids verbatim — so
+// `id[:8]` on a CJK id is invalid UTF-8 on the report line and a selector the
+// prefix query can never match. internal/supersede.short, internal/mcpserver's
+// shortID and internal/followup's renderer all measure the same eight the same
+// way, because the premise of the feature is that the printed id is the one you
+// can hand back.
 func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
+	if utf8.RuneCountInString(id) > 8 {
+		return string([]rune(id)[:8])
 	}
 	return id
 }

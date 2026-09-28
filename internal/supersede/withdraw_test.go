@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/resolve"
@@ -730,4 +731,78 @@ func hasUnsupersedeHistory(t *testing.T, store *memory.Store, id string) bool {
 		}
 	}
 	return false
+}
+
+// The whole feature rests on one round trip: a report prints the first eight
+// characters of an id, and that string is what the operator pastes back into
+// --withdraw. If the report abbreviates by BYTES and the query bounds by runes,
+// the two measures disagree and the ref can never resolve — and the refusal
+// asserts no memory has that id, which is the opposite of the truth.
+//
+// Ids are not necessarily hex: `ghost import` writes an artifact's ids verbatim,
+// so this is reachable, and only through an id no ordinary test would use.
+func TestWithdrawalRoundTripsTheReportFormOfANonASCIIID(t *testing.T) {
+	ctx := context.Background()
+	store, _ := seed(t)
+	const source = "新しい復元手順-2026"
+	const target = "古い復元手順-2025"
+	if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
+		ID: source, ProjectID: "p", Category: "fact",
+		Content: "A restore that spanned two spindles took 41 minutes.", Source: "mcp",
+	}, memory.ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory(source): %v", err)
+	}
+	if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
+		ID: target, ProjectID: "p", Category: "fact",
+		Content: "The restore path on one spindle is safe and takes under a minute.", Source: "mcp",
+	}, memory.ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory(target): %v", err)
+	}
+	if err := store.CreateLink(ctx, source, target, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	// What a report would have put on screen for the wrong edge.
+	reported := short(source)
+	if !utf8.ValidString(reported) {
+		t.Fatalf("the report form %q is not valid UTF-8 — it cannot be pasted, let alone matched", reported)
+	}
+	if n := utf8.RuneCountInString(reported); n != 8 {
+		t.Fatalf("the report form is %d characters, want the documented 8: %q", n, reported)
+	}
+	// And pasting it withdraws the edge the report named.
+	if _, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: reported, Target: target}}, true, discardLogger()); err != nil {
+		t.Fatalf("Withdraw with the reported form %q: %v", reported, err)
+	}
+	if n := liveEdgeCount(t, store, target); n != 0 {
+		t.Errorf("the withdrawal left %d live edge(s) — the report form did not address the row", n)
+	}
+}
+
+// The floor is a floor in CHARACTERS, which is what the docs say. A byte count
+// admits a 3-character CJK ref (9 bytes) as an identity and refuses a
+// 2-character one (6 bytes) — the exact class of near-miss the floor exists to
+// prevent, inverted.
+func TestResolveRefCountsCharactersNotBytes(t *testing.T) {
+	store, _ := seed(t)
+	const threeChars = "日本語" // 3 characters, 9 bytes
+	if _, _, _, err := store.ImportMemory(context.Background(), memory.PortableMemory{
+		ID: threeChars + "-note", ProjectID: "p", Category: "fact",
+		Content: "An imported note with a short non-ASCII id.", Source: "mcp",
+	}, memory.ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	if _, err := resolveRef(context.Background(), store, "p", "source", threeChars); err == nil {
+		t.Error("a 3-character ref is under the 8-character floor and must be refused as too short")
+	} else if !strings.Contains(err.Error(), "too short") {
+		t.Errorf("error %q must say the ref is too short, not that it is ambiguous or unknown", err)
+	}
+	// The full id still resolves, whatever its length: the floor is about prefixes.
+	got, err := resolveRef(context.Background(), store, "p", "source", threeChars+"-note")
+	if err != nil {
+		t.Fatalf("resolveRef on the full id: %v", err)
+	}
+	if got != threeChars+"-note" {
+		t.Errorf("resolveRef = %q, want the stored id", got)
+	}
 }

@@ -45,6 +45,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -354,13 +355,13 @@ func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref 
 		return "", fmt.Errorf("the %s ref %q matches %d memories whose stored ids differ only in letter case (%s), and it is spelled as neither: ids are matched case-insensitively here, so this ref cannot address either of them",
 			which, ref, len(folded), strings.Join(folded, ", "))
 	}
-	if len(ref) < minRefLen {
+	if utf8.RuneCountInString(ref) < minRefLen {
 		// Deliberately WITHOUT the match list. A ref this short names a slice of
 		// the project rather than a row, and printing that slice would turn a
 		// refusal into a dump of the project's id set — the one answer here that
 		// hands out what the caller could not otherwise enumerate.
 		return "", fmt.Errorf("the %s ref %q is %d character(s), too short to be a prefix of an id — a prefix needs %d or more, or the full id",
-			which, ref, len(ref), minRefLen)
+			which, ref, utf8.RuneCountInString(ref), minRefLen)
 	}
 	switch len(ids) {
 	case 0:
@@ -397,11 +398,18 @@ func intoSuffix(links []memory.Link) string {
 		" — withdraw that pair as well, or note that the other edge still buries it)"
 }
 
-// short is the report's id form: the first eight characters, which is what every
+// short is the report's id form: the first eight CHARACTERS, which is what every
 // Ghost report prints and therefore what an operator will have on screen.
+//
+// By characters, not bytes, and that is the whole point of the function. Ids are
+// not necessarily hex — `ghost import` writes an artifact's ids verbatim — so
+// `id[:8]` on a 16-byte CJK id returns the first two runes plus two bytes of the
+// third: invalid UTF-8 in a report line, and a string the prefix query can never
+// match even with a rune bound. The report would then print a ref that cannot
+// address the row it names, which is the one thing this feature promises to avoid.
 func short(id string) string {
-	if len(id) > 8 {
-		return id[:8]
+	if n := utf8.RuneCountInString(id); n > 8 {
+		return string([]rune(id)[:8])
 	}
 	return id
 }

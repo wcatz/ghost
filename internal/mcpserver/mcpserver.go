@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/ai"
@@ -281,10 +282,17 @@ type asOfCapableStore interface {
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
-// memory and task IDs), mirroring cmd/ghost/main.go's local `short` closure.
+// memory and task IDs), mirroring cmd/ghost's package-level shortID.
+//
+// By characters, not bytes: an id is not necessarily hex (`ghost import` writes
+// an artifact's ids verbatim), and `id[:8]` on a CJK id returns invalid UTF-8 — a
+// preview line that cannot be read, and a selector that can never resolve. The
+// eight-hex ids Ghost mints have byte length == rune count, so this changes
+// nothing for them and is the difference between working and nonsense for the
+// rest.
 func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
+	if utf8.RuneCountInString(id) > 8 {
+		return string([]rune(id)[:8])
 	}
 	return id
 }
