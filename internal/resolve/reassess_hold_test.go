@@ -401,27 +401,6 @@ func newHoldChainFixture(n int) holdChainFixture {
 	return holdChainFixture{live: live, loaded: loaded, c: loaded[0]}
 }
 
-// chainDepth is the largest position in a held set, or the smallest in a
-// repaired one, read off the chain row ids — so a test can say which END of the
-// chain a set came from. The correction and anything that is not a chain row
-// sorts as 0, which never wins either comparison.
-func chainDepth(rows []memory.Memory, held bool) int {
-	best := 0
-	for _, m := range rows {
-		if m.ID == "chain-correction" {
-			continue
-		}
-		var n int
-		if _, err := fmt.Sscanf(m.ID, "chain-e%d", &n); err != nil {
-			continue
-		}
-		if best == 0 || (held && n > best) || (!held && n < best) {
-			best = n
-		}
-	}
-	return best
-}
-
 // TestHoldBackBoundIsReportedWhenHit: the re-check is bounded, and a bound that
 // stops it with a row still changing is not a quiet truncation — the repair is
 // short of its fixed point and a further pass may clear more. That is a sentence
