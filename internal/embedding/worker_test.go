@@ -16,6 +16,43 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// TestProbeDeadlineIsRestored pins the property the helper's contract rests on:
+// a test that lowers aliveProbeTimeout must not leave it lowered. It is invisible
+// in a green run — the tests that follow simply pass or fail depending on the
+// machine — and a flake in someone else's, so it is asserted directly rather than
+// left to a shuffle.
+//
+// The tests that lower it are walked in the order they run here, each inside its
+// own sub-subtest so its cleanup has definitely fired, and the check is the
+// shipped value afterwards. The streak-spent one is first and called out, because
+// it is the only one that reassigns mid-test and discards two of its three
+// returns — the leak the finding was about.
+func TestProbeDeadlineIsRestored(t *testing.T) {
+	const shipped = 2 * time.Second
+	if aliveProbeTimeout != shipped {
+		t.Fatalf("aliveProbeTimeout is %v at the start of the package, want the shipped %v", aliveProbeTimeout, shipped)
+	}
+
+	// Each is walked in its own sub-subtest, and the assertion is made by THIS
+	// function once that one has returned — a restore registered with t.Cleanup
+	// runs when the test that registered it returns, so the check has to sit
+	// outside it or it would read the value before the cleanup has run.
+	runOne := func(name string, run func(*testing.T)) {
+		t.Run(name, func(t *testing.T) {
+			t.Run("under_test", run)
+		})
+		if aliveProbeTimeout != shipped {
+			t.Errorf("aliveProbeTimeout = %v after %s, want the shipped %v", aliveProbeTimeout, name, shipped)
+		}
+	}
+	runOne("the_streak-spent_test, which reassigns mid-test", TestCheckAlive_ForgetsInconclusiveStreakOnAnAnsweredProbe)
+	runOne("the_marker-stamps_test", TestCheckAlive_StampsTheMarkerOnARepeatedlyInconclusiveProbe)
+	runOne("the_one-tick_test", TestSweepOnce_OneTickDoesNotStampTheMarker)
+	runOne("the_leaves-the-marker_test", TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive)
+	runOne("the_embed-pending_test", TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer)
+	runOne("the_probe_test", TestProbe_DistinguishesAnOutageFromASlowMachine)
+}
+
 // TestProbe_DistinguishesAnOutageFromASlowMachine is the unit-level statement
 // of the same distinction TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer
 // makes at the worker: the three answers come from three different situations,
@@ -66,6 +103,9 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 	defer wedged.Close()
 	defer close(release)
 	restore := setProbeDeadline(t, wedgeProbeDeadline)
+	// Registered as well as called, so a probe below that panics cannot leave the
+	// package-global at 20ms for the tests that follow.
+	t.Cleanup(restore)
 	if got := NewClient(wedged.URL, "m", 3).Probe(context.Background()); got != Inconclusive {
 		t.Errorf("Probe at an endpoint that misses the deadline = %v, want Inconclusive", got)
 	}
@@ -102,6 +142,14 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 //     is ~100x a loopback round trip and 4x under the shipped 2s (a value this
 //     repository itself documents as routinely missed under load), so the suite
 //     stays seconds rather than minutes.
+// A value left behind is a value inherited: aliveProbeTimeout is
+// package-global, so a test that lowers it and does not put it back narrows every
+// LATER test in the package too, and `-shuffle=on` would make that a coin toss
+// rather than a fact. So every caller that lowers it either passes the returned
+// function to t.Cleanup or calls it, and a test that reassigns it mid-way
+// registers the FIRST call — the only one whose restore is the shipped value.
+// TestProbeDeadlineIsRestored pins that, because a leak here is invisible in a
+// green run and a flake in someone else's.
 func setProbeDeadline(t *testing.T, d time.Duration) (restore func()) {
 	t.Helper()
 	prev := aliveProbeTimeout
@@ -292,7 +340,13 @@ func TestCheckAlive_ForgetsInconclusiveStreakOnAnAnsweredProbe(t *testing.T) {
 	}
 	worker := NewWorker(NewClient(wedge.URL, "nomic-embed-text", 3), store, logger, time.Minute, dataDir)
 
-	setProbeDeadline(t, wedgeProbeDeadline)
+	// The FIRST set is the one registered: its restore is the value the test
+	// started with, and the two later sets below only reassign. Registering only
+	// the first is what keeps the package-global back at the shipped 2s when this
+	// test returns — a 20ms probe left behind is the budget this whole change
+	// exists to keep off probes that have to answer, and every later test in the
+	// package (and any -shuffle=on ordering) would inherit it.
+	t.Cleanup(setProbeDeadline(t, wedgeProbeDeadline))
 	for range inconclusiveStampsAfter - 1 {
 		worker.SweepOnce(context.Background())
 	}
@@ -311,7 +365,8 @@ func TestCheckAlive_ForgetsInconclusiveStreakOnAnAnsweredProbe(t *testing.T) {
 	// that is only true if the answered sweep above really spent the streak. The
 	// wedge budget is set AGAIN rather than the shipped value restored, because
 	// 2s here would make this one sweep cost 1 + len(projects) full deadlines —
-	// fourteen seconds to assert a marker is absent.
+	// fourteen seconds to assert a marker is absent. The cleanup registered above
+	// is what puts the shipped value back at the end.
 	setProbeDeadline(t, wedgeProbeDeadline)
 	worker.client = NewClient(wedge.URL, "nomic-embed-text", 3)
 	worker.SweepOnce(context.Background())
