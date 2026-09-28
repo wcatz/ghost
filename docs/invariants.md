@@ -144,12 +144,30 @@ negative expires at `codexFeatureRetry`, a failure is never stored, and the
 warn-once latches are untouched. The freshness test for codex therefore lives in
 `codexCachedSupport` rather than at the lookup, because it is now read from two
 places and a check-then-probe pair with that test in only one of them is how a
-long-lived parent stops noticing a codex upgraded in place. What the group DOES
-change is whose deadline the shared probe runs under: the probe is the function
-INSIDE `Do`, so a burst inherits the first caller's context. That is the accepted
-cost of one probe rather than N, and it is bounded twice — the probe is a diagnostic
-capped at 10s, and an unanswered flight is re-asked after the retry interval rather
-than left cached as a verdict only one caller agreed to.
+long-lived parent stops noticing a codex upgraded in place. The mutex-map argument
+is CLAUDE'S, and codex is the case that would survive without the group:
+`probeCodexFeatures` caches its verdict whether or not the probe answered, so a
+per-key lock would leave each follower a fresh negative to return. Both use the same
+mechanism, chosen once, rather than a claim each probe needs a guarantee it lacks.
+
+**A caller's own context still governs its own call.** `Do` blocks on the leader's
+flight and never consults the follower, so both probes use `DoChan` and `select` on
+`ctx.Done()`: a caller whose context is dead reports its own error instead of waiting
+out a verdict it cannot use — and on claude that error REFUSES the whole harness
+call. The other half is that a leader whose context dies must not fail the followers
+whose contexts are fine, or hand them its negative: in the long-lived `ghost mcp`
+server one disconnected client would fail every concurrent turn in the burst. The
+follower cannot tell those cases apart, because `exec.CommandContext` kills the child
+and `Wait` reports `signal: killed`, never the context error — so the leader MARKS
+its own failure (`probeContextError`, `internal/ai/probe.go`) and a live follower
+re-probes under its own context. For codex that overwrite is the point: the negative
+is retained for `codexFeatureRetry`, so bypassing it without replacing it would leave
+the weaker policy in the cache for every caller for five minutes. The converse is not
+treated as shared — a leader sees the same marker, and a dead caller must not start a
+fresh attempt under a dead context, which is why `isSharedProbeCancellation` requires
+a LIVE `ctx` as well as the marker. A burst whose leader disconnected can therefore
+spawn more than one probe: what every caller did before #741, on a rare path out of a
+common one.
 
 The filter matters because codex **silently IGNORES** a `-c` key it does not know
 (the fail-OPEN direction): `-c` overrides are applied onto the config tree without

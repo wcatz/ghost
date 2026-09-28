@@ -53,17 +53,23 @@ var claudeCapabilityCache sync.Map // claudeBinaryID -> claudeCapabilities
 // arrives before the first one stores runs its own (#741).
 //
 // It is a singleflight.Group and not a per-key mutex map because of the failure
-// path, which is the whole difference between the two. A mutex map serializes
-// the burst: the leader probes, and each follower then takes the lock, finds the
-// cache STILL EMPTY (a failed claude probe is deliberately not cached, so the
-// next call retries with its own live context), and probes again — N processes
-// for the same burst, which is the bug rather than a fix for it. singleflight
-// shares the outcome of the concurrent call whether it succeeded or not.
+// path, which is the whole difference between the two HERE. A mutex map
+// serializes the burst: the leader probes, and each follower then takes the lock,
+// finds the cache STILL EMPTY (a failed claude probe is deliberately not cached,
+// so the next call retries with its own live context), and probes again — N
+// processes for the same burst, which is the bug rather than a fix for it.
+// singleflight shares the outcome of the concurrent call whether it succeeded or
+// not. The codex probe would tolerate a mutex map, because its negative verdict
+// IS cached; see codexProbeGroup for that difference stated where it applies.
 //
-// What it does NOT do is decide what is RETAINED. A flight is forgotten the
-// moment it lands and keeps nothing of its own, so the cache above still owns
+// What the group does NOT do is decide what is RETAINED. A flight is forgotten
+// the moment it lands and keeps nothing of its own, so the cache above still owns
 // that decision — a success is stored, a failure is not, and nothing here can
 // turn an unprobed identity into a cached one.
+//
+// What it does cost is the caller's own context, which singleflight never
+// consults: both consequences are handled at the call site below and the shared
+// half is sharedProbeCancellation in probe.go.
 var claudeProbeGroup singleflight.Group
 
 func parseClaudeCapabilities(help string) claudeCapabilities {
@@ -98,16 +104,42 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 	// and this call has already stored its answer. A caller arriving after even
 	// that is served from the cache by the first check and never reaches the
 	// group at all, so the warm path costs what it always did.
-	outcome, err, _ := claudeProbeGroup.Do(id.probeKey(), func() (any, error) {
+	flight := claudeProbeGroup.DoChan(id.probeKey(), func() (any, error) {
 		if cached, ok := claudeCapabilityCache.Load(id); ok {
 			return cached.(claudeCapabilities), nil
 		}
-		return probeClaudeCapabilities(ctx, path, id)
+		caps, err := probeClaudeCapabilities(ctx, path, id)
+		if err != nil && ctx.Err() != nil {
+			// This is OUR context dying, and a follower cannot see that from the
+			// error alone — see probeContextError. Marking it here is the only
+			// place the two facts are both known.
+			return claudeCapabilities{}, probeContextError{err}
+		}
+		return caps, err
 	})
-	if err != nil {
-		return claudeCapabilities{}, err
+	// DoChan and this select are two halves of the same requirement: a caller's
+	// own context governs its own call, and the flight's outcome is somebody
+	// else's. Neither a shared error nor a wait for an answer this caller cannot
+	// use may be handed back as if it were this caller's own.
+	select {
+	case <-ctx.Done():
+		return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", ctx.Err())
+	case res := <-flight:
+		if res.Err == nil {
+			return res.Val.(claudeCapabilities), nil
+		}
+		if isSharedProbeCancellation(res.Err, ctx) {
+			// The leader's context died, not this caller's, so this failure is
+			// not this caller's to report. Probe under this caller's own context:
+			// a fresh attempt rather than a follower of the flight that just
+			// failed, which is why it goes direct and bypasses the group. A burst
+			// whose leader disconnected can therefore spawn more than one probe —
+			// what every caller did before #741, on a rare path out of a common
+			// one.
+			return probeClaudeCapabilities(ctx, path, id)
+		}
+		return claudeCapabilities{}, res.Err
 	}
-	return outcome.(claudeCapabilities), nil
 }
 
 // probeClaudeCapabilities is the body of the single flight: the one child, and

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // coldProbeBurst is the size of the concurrent cold-cache burst both probe tests
@@ -176,5 +178,168 @@ printf '%s' 'KEEP'
 	// while failing every real caller at claudeInvocationArgs.
 	if !caps[0].safeMode || !caps[0].restricted || !caps[0].strictMCP || !caps[0].tools || !caps[0].disallowedTools {
 		t.Errorf("shared verdict %+v lacks a required no-tools capability", caps[0])
+	}
+}
+
+// countingClaudeFake is codexFeaturesFake's claude counterpart: a fake that
+// records each `--help` probe to a log file and holds the probe open for a
+// beat, so a test can put a second caller INSIDE a flight rather than racing it.
+func countingClaudeFake(t *testing.T) (bin, probeLog string) {
+	t.Helper()
+	setHarnessPolicyParentEnv(t)
+	probeLog = filepath.Join(t.TempDir(), "probes")
+	t.Setenv("CLAUDE_PROBE_LOG", probeLog)
+	t.Setenv("GHOST_PASSTHROUGH_ENV", "CLAUDE_PROBE_LOG")
+	bin = fakeHarnessPolicyBinary(t, "claude", `
+if [ "$1" = "--help" ]; then
+  printf 'probe\n' >> "$CLAUDE_PROBE_LOG"
+  sleep 2
+  printf '%s\n' '--safe-mode' '--restricted' '--strict-mcp-config' '--disable-slash-commands' '--tools' '--disallowedTools' '--setting-sources'
+  exit 0
+fi
+printf '%s' 'KEEP'
+`)
+	return bin, probeLog
+}
+
+// TestClaudeCapabilityProbeFollowerDoesNotInheritALeaderCancellation: a leader
+// whose context dies mid-probe must not fail the followers whose contexts are
+// fine. Found by review, and it is the one case where the single-flight is
+// worse than no single-flight: before it, every caller probed under its own
+// context, so one client's disconnect could only fail that client. Sharing the
+// leader's ERROR made it fail every concurrent `claude -p` turn in the burst —
+// and claudeCapabilitiesFor's error refuses the whole harness call, so in the
+// long-lived `ghost mcp` server a disconnect took down unrelated work.
+//
+// A plain `Do` fails this: the follower receives the leader's wrapped
+// context.Canceled. A dead caller's own context cannot rescue it either, which
+// is why the fix tests the shared error rather than wrapping the flight.
+func TestClaudeCapabilityProbeFollowerDoesNotInheritALeaderCancellation(t *testing.T) {
+	resetClaudeCapabilityProbe(t)
+	bin, _ := countingClaudeFake(t)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := claudeCapabilitiesFor(leaderCtx, bin)
+		leaderDone <- err
+	}()
+	// Let the leader own the flight, then join it. The fake holds its probe
+	// open, so the window is wide rather than lucky.
+	time.Sleep(200 * time.Millisecond)
+	followerDone := make(chan error, 1)
+	var caps claudeCapabilities
+	go func() {
+		var err error
+		caps, err = claudeCapabilitiesFor(context.Background(), bin)
+		followerDone <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	// Cancel MID-FLIGHT, which is the only ordering that tests anything: the
+	// leader's probe has to die while the follower is still waiting on it. A
+	// cancel after the follower returns would find a flight that already
+	// succeeded, and both callers would be right.
+	cancelLeader()
+
+	if err := <-followerDone; err != nil {
+		t.Fatalf("follower with a live context inherited the leader's failure: %v", err)
+	}
+	if !caps.safeMode || !caps.restricted || !caps.strictMCP || !caps.tools || !caps.disallowedTools {
+		t.Errorf("follower got %+v, want the capabilities the real binary declares", caps)
+	}
+	// The leader is the caller that lost its context, so it is the caller that
+	// must report it.
+	if err := <-leaderDone; err == nil {
+		t.Error("the cancelled leader reported success; its own context governed nothing")
+	}
+}
+
+// TestClaudeCapabilityProbeFollowerWithADeadContextDoesNotInheritSuccess: the
+// converse, and the half a fallback alone would leave broken. A caller whose
+// OWN context is already dead must report that, not block for the leader's
+// probe and then report the leader's success — which is what it did before its
+// own context was consulted at all, and which reads to CLIClient.run as a
+// working probe from a turn that is already cancelled.
+//
+// The assertion is the ERROR, not a duration, so it cannot flake on a slow
+// machine: the leader's probe succeeds, so the only way this test can fail is
+// if the dead caller's context is consulted at all.
+func TestClaudeCapabilityProbeFollowerWithADeadContextDoesNotInheritSuccess(t *testing.T) {
+	resetClaudeCapabilityProbe(t)
+	bin, _ := countingClaudeFake(t)
+
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := claudeCapabilitiesFor(context.Background(), bin)
+		leaderDone <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	deadCtx, cancelDead := context.WithCancel(context.Background())
+	cancelDead()
+	_, err := claudeCapabilitiesFor(deadCtx, bin)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("dead-context caller got %v, want an error wrapping context.Canceled", err)
+	}
+	if err := <-leaderDone; err != nil {
+		t.Errorf("the live leader failed: %v", err)
+	}
+}
+
+// TestCodexProbeFollowerDoesNotInheritALeaderCancellation: the same property on
+// the probe that cannot error, where the damage is quieter. A leader whose
+// context dies produces a NEGATIVE verdict, and the negative is cached for
+// codexFeatureRetry — so a plain `Do` does not merely hand the followers a
+// weaker policy once, it poisons the cache and every caller for the next five
+// minutes gets it, including callers that never shared the burst. The follower's
+// own probe overwrites the negative, which is why the fix re-probes rather than
+// returning the zero value.
+func TestCodexProbeFollowerDoesNotInheritALeaderCancellation(t *testing.T) {
+	resetCodexFeatureProbe(t)
+	setHarnessPolicyParentEnv(t)
+	probeLog := filepath.Join(t.TempDir(), "probes")
+	t.Setenv("CODEX_PROBE_LOG", probeLog)
+	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_LOG")
+	bin := fakeHarnessPolicyBinary(t, "codex", `
+if [ "$1" = "features" ]; then
+  printf 'probe\n' >> "$CODEX_PROBE_LOG"
+  sleep 2
+  printf 'shell_tool stable true\nunified_exec stable true\nview_image stable true\napps stable true\nplugins stable true\ntool_suggest stable true\nskill_mcp_dependency_install stable true\nremote_plugin stable true\nhooks stable true\nmulti_agent stable true\n'
+  exit 0
+fi
+printf '%s' 'KEEP'
+`)
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	go func() { _ = codexFeaturesFor(leaderCtx, bin) }()
+	time.Sleep(200 * time.Millisecond)
+	followersDone := make(chan struct{})
+	var support codexFeatureSupport
+	go func() {
+		support = codexFeaturesFor(context.Background(), bin)
+		close(followersDone)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	// Mid-flight, for the same reason as the claude test: the leader's probe has
+	// to be killed while the follower is still waiting on its verdict.
+	cancelLeader()
+	<-followersDone
+
+	if !support.probed {
+		t.Error("follower with a live context inherited the leader's unprobed negative")
+	}
+	// The negative must be GONE from the cache, not merely bypassed: it is the
+	// five-minute retention that turns one cancelled leader into a process-wide
+	// weaker policy.
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		t.Fatalf("LookPath: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if cached, ok := codexCachedSupport(codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}); !ok || !cached.probed {
+		t.Errorf("cache still holds %+v, want the follower's positive verdict", cached)
 	}
 }
