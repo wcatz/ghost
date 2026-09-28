@@ -27,9 +27,15 @@ import (
 // last is what a busy machine looks like, so `Inconclusive` has to be the answer
 // for it — a false Unreachable is a caller told to skip work it could do.
 func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
+	// The wedge below is only reached by a probe that runs out of time, so the
+	// deadline is shortened (wedgedEndpoint's reasoning) rather than sat out.
+	prev := aliveProbeTimeout
+	aliveProbeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { aliveProbeTimeout = prev })
+
 	// Refused: nothing is listening. localhost:0 is the same shape the
 	// unreachable-client tests use above, and it fails at connect rather than
-	// waiting, so the probe's own 2s is not what ends it.
+	// waiting, so the probe's own deadline is not what ends it.
 	if got := NewClient("http://localhost:0", "m", 3).Probe(context.Background()); got != Unreachable {
 		t.Errorf("Probe at a refused port = %v, want Unreachable", got)
 	}
@@ -79,6 +85,14 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 // request context).
 func wedgedEndpoint(t *testing.T) *httptest.Server {
 	t.Helper()
+	// The wedge is only ever REACHED by a probe that runs out of time, so this
+	// test's whole subject is the probe's own deadline — the shipped two seconds
+	// would make it a two-second test per sweep for no extra signal. The value is
+	// still an order of magnitude above a local round trip, so a probe that CAN
+	// answer still does.
+	prev := aliveProbeTimeout
+	aliveProbeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { aliveProbeTimeout = prev })
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only the LIVENESS PROBE wedges. /api/embed is refused immediately, so
@@ -141,8 +155,7 @@ func TestCheckAlive_StampsTheMarkerOnARepeatedlyInconclusiveProbe(t *testing.T) 
 		t.Fatalf("marker %q is not RFC3339: %v", since, err)
 	}
 	// Between the start of the run and now, rather than a fixed small number: the
-	// assertion is that the stamp is from THIS run and not a leftover, and each
-	// sweep here costs a full 2s probe deadline.
+	// assertion is that the stamp is from THIS run and not a leftover.
 	if age := time.Since(ts); age < -time.Second || age > time.Since(start)+time.Second {
 		t.Errorf("marker timestamp %v is not from this run (age %v, run took %v)", ts, age, time.Since(start))
 	}
@@ -150,27 +163,33 @@ func TestCheckAlive_StampsTheMarkerOnARepeatedlyInconclusiveProbe(t *testing.T) 
 
 // TestSweepOnce_OneTickDoesNotStampTheMarker is the second review round's
 // finding, and it is about WHERE the count is advanced rather than how large it
-// is. `checkAlive` is called from three places and more than once per tick:
-// SweepOnce at the top, and inside EmbedPending's loop after every failed
-// embed. On a wedged endpoint one tick therefore produces a dozen probes, so a
-// streak counted per PROBE reaches its threshold inside a single tick — and the
-// busy machine the streak exists to protect against gets the outage marker
-// anyway, which is the whole bug the streak was added to fix.
+// is.
 //
-// So this drives the real entry point, `SweepOnce`, and asserts that ONE tick
-// of a wedged endpoint — with the store holding several memories, so the embed
-// loop re-probes after each one — writes no marker. The count belongs to the
-// interval, not the probe.
+// A tick issues 1 + len(projects) probes, not one: `SweepOnce` probes at the top
+// and, on an Inconclusive, does NOT return — it walks every project into
+// `EmbedPending`, which probes again, and the embed loop re-probes after every
+// failed embed on top of that. `Run`'s save-notification branch adds one more per
+// save. So on any real store a machine that is merely busy for a few seconds
+// produces three consecutive Inconclusive verdicts inside ONE tick, and a streak
+// counted per PROBE reaches its threshold there — writing the marker with a
+// timestamp of "now", which `mcpinit.reportOllamaDownDuration` prints as
+// "! Ollama down since <ts> (0m)". That is the false outage the streak exists to
+// prevent, and it makes "three sweeps is about six minutes" wrong by orders of
+// magnitude.
+//
+// So this drives the real entry point with several projects, each holding
+// memories, and asserts that one tick writes no marker. The count belongs to the
+// interval.
 func TestSweepOnce_OneTickDoesNotStampTheMarker(t *testing.T) {
 	srv := wedgedEndpoint(t)
 	dataDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	store := newMockStore()
-	// Enough memories that EmbedPending re-probes several times inside this
-	// one tick, which is what made a per-probe count reach its threshold here.
-	store.projects = []string{"proj-a"}
-	for _, id := range []string{"mem-1", "mem-2", "mem-3", "mem-4", "mem-5"} {
-		store.memories[id] = "a memory the index does not have yet"
+	// Three projects each with an unembedded memory: more probes than the streak
+	// threshold inside one tick, which is what a per-probe count would ride.
+	for _, p := range []string{"proj-a", "proj-b", "proj-c"} {
+		store.projects = append(store.projects, p)
+		store.memories[p+"-mem"] = "a memory the index does not have yet"
 	}
 	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), store, logger, time.Minute, dataDir)
 
@@ -178,7 +197,7 @@ func TestSweepOnce_OneTickDoesNotStampTheMarker(t *testing.T) {
 
 	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
 		t.Errorf("one sweep of an endpoint that never answered wrote the down-since marker "+
-			"(%d memories, so the embed loop probed many times): err=%v", len(store.memories), err)
+			"(%d projects, so the tick probed past the streak threshold): err=%v", len(store.projects), err)
 	}
 }
 
@@ -234,8 +253,10 @@ func TestCheckAlive_ForgetsInconclusiveStreakOnAnAnsweredProbe(t *testing.T) {
 	// Through the real entry point, so the assertions are about the behaviour a
 	// daemon actually has rather than about the helper.
 	store := newMockStore()
-	store.projects = []string{"proj-a"}
-	store.memories["mem-1"] = "a memory the index does not have yet"
+	for _, p := range []string{"proj-a", "proj-b", "proj-c"} {
+		store.projects = append(store.projects, p)
+		store.memories[p+"-mem"] = "a memory the index does not have yet"
+	}
 	worker := NewWorker(NewClient(wedge.URL, "nomic-embed-text", 3), store, logger, time.Minute, dataDir)
 
 	for range inconclusiveStampsAfter - 1 {
@@ -785,10 +806,10 @@ func TestCheckAlive_DoesNotClobberExistingMarker(t *testing.T) {
 // test for the load-shaped hole #736 found in the e2e supersede/resolve cases.
 //
 // The probe here answers /api/embed promptly and does not answer "/" inside the
-// probe's own 2s deadline. That is not a broken endpoint: it is what a machine
-// too busy to schedule a two-second-old HTTP round trip looks like, which is
-// what "the full suite under load" is. The probe's own deadline is the only
-// reason the answer is missing.
+// probe's own deadline. That is not a broken endpoint: it is what a machine too
+// busy to schedule an old HTTP round trip looks like, which is what "the full
+// suite under load" is. The probe's own deadline is the only reason the answer
+// is missing — and it is shortened (see wedgedEndpoint) rather than sat out.
 //
 // It matters because a liveness probe is a GATE, and a gate that misreads a
 // slow machine as a dead endpoint makes the caller skip work it can do:
@@ -799,6 +820,12 @@ func TestCheckAlive_DoesNotClobberExistingMarker(t *testing.T) {
 // "0 candidate pairs" report for a pair the operator can see — and the daemon's
 // own sweep stands in the same place, so a stall takes out both writers.
 func TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer(t *testing.T) {
+	// The probe's deadline is the subject, so it is shortened rather than sat
+	// out (the reasoning is wedgedEndpoint's).
+	prev := aliveProbeTimeout
+	aliveProbeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { aliveProbeTimeout = prev })
+
 	// The release channel rather than r.Context(), for the reason
 	// TestEmbedSupersedeCorpusStopsAtItsBudget gives: a handler that never reads
 	// the body has no way to notice the client walking away, so waiting on the

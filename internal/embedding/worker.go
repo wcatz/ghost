@@ -124,13 +124,16 @@ func (w *Worker) checkAlive(ctx context.Context) Reachability {
 		return got
 	}
 
-	// Only the CONCLUSIVE answers, at any call site. A refusal is an answer and
-	// needs no corroboration, so a one-shot `ghost resolve` or `ghost supersede`
-	// pass stamps it too rather than leaving an operator with a refused endpoint
-	// and no timestamp until the next sweep. Reachable removes it. An
-	// inconclusive probe does neither here: it cannot end a real outage, and
-	// ending a stall into an outage is what the streak exists to prevent — see
-	// SweepOnce, which is the one caller on a schedule.
+	// Only the CONCLUSIVE answers, and only where the marker can exist at all.
+	// The blank-dataDir early return above is what confines this to the daemon:
+	// `embedSupersedeCorpus` builds its worker with "" precisely because the
+	// marker is the daemon's outage bookkeeping, and a one-shot pass has no
+	// outage to keep time, so no `ghost resolve` or `ghost supersede` run can
+	// reach this. Within the daemon a refusal needs no corroboration — it is an
+	// answer — so it stamps on the spot rather than waiting for a sweep. Reachable
+	// removes it. An inconclusive probe does neither: it cannot end a real
+	// outage, and turning a stall into one is what the streak exists to prevent,
+	// so see noteSweep.
 	markerPath := filepath.Join(w.dataDir, OllamaDownMarkerFilename)
 	switch got {
 	case Reachable:

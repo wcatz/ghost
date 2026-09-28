@@ -158,7 +158,15 @@ func (r Reachability) String() string {
 // is also why a timeout is reported as Inconclusive rather than Unreachable: at
 // this length a busy machine reaches it routinely, and a reachability answer
 // that flips on load is not a reachability answer.
-const aliveProbeTimeout = 2 * time.Second
+//
+// A var so a test can hand it milliseconds rather than sitting out the shipped
+// two, the same reason embedSupersedeCorpus's budget is a parameter and
+// maxOpencodeOutputLine is a var: a test that has to wait out the real one is a
+// test that does not run often enough to be trusted. The tests that need a probe
+// to MISS it lower this, and the tests that need it to arrive lower it too — so
+// the production value is the only one exercised by production, and every test
+// that lowers it says so.
+var aliveProbeTimeout = 2 * time.Second
 
 // Probe reports what one liveness check found: whether Ollama is reachable, and
 // if it is not, whether that is something it established or something that
