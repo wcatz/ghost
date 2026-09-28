@@ -219,9 +219,16 @@ func TestHarnessInvocationArgsAreGoldens(t *testing.T) {
 // Between them: CI keeps the belief honest, and a machine with codex installed
 // is the only place the belief is actually tested.
 // codexFeaturesFake builds a fake codex that answers `features list` with the
-// given rows and records every invocation, so a test can assert both what the
-// probe learned and how many times it ran. `rows` of nil makes `features list`
-// fail, which is the probe-failure case.
+// given rows and records BOTH the probe invocations and the argv of the real
+// `exec` invocation.
+//
+// Recording the exec argv is not optional decoration. Without it the filter
+// could be deleted outright and every test in the package would still pass: the
+// fakes echo back whatever Ghost hands them, so a probe test that only counts
+// warnings and probe calls says nothing about which keys the child actually
+// received. That was a real gap, found by an independent review that deleted the
+// filter and watched the suite stay green. codexPolicyArgvKeys below is what
+// closes it.
 func codexFeaturesFake(t *testing.T, rows string) string {
 	t.Helper()
 	// The log path is a file, not a Go variable, because the fake is a shell
@@ -234,8 +241,9 @@ func codexFeaturesFake(t *testing.T, rows string) string {
 	// would be a hole in the very policy these tests verify, and the hatch is the
 	// only sanctioned way to add a variable for one invocation.
 	t.Setenv("CODEX_PROBE_LOG", filepath.Join(t.TempDir(), "probes"))
+	t.Setenv("CODEX_EXEC_LOG", filepath.Join(t.TempDir(), "exec"))
 	t.Setenv("FAKE_FEATURE_ROWS", rows)
-	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_LOG,FAKE_FEATURE_ROWS")
+	t.Setenv("GHOST_PASSTHROUGH_ENV", "CODEX_PROBE_LOG,CODEX_EXEC_LOG,FAKE_FEATURE_ROWS")
 	return fakeHarnessPolicyBinary(t, "codex", `
 if [ "$1" = "features" ]; then
   printf 'probed\n' >> "$CODEX_PROBE_LOG"
@@ -243,6 +251,15 @@ if [ "$1" = "features" ]; then
   printf '%s' "$FAKE_FEATURE_ROWS"
   exit 0
 fi
+# The real turn: record every argument so a test can read the policy the child
+# was actually given. Each -c value lands on its own line because a
+# features.shell_tool=false pair must survive intact.
+for arg in "$@"; do
+  case "$arg" in
+    -c) ;;
+    *) printf '%s\n' "$arg" >> "$CODEX_EXEC_LOG" ;;
+  esac
+done
 printf '%s' 'KEEP'
 `)
 }
@@ -292,6 +309,12 @@ func TestCodexProbePassesEveryKeyWhenAllAreDeclared(t *testing.T) {
 	if logs.Len() != 0 {
 		t.Errorf("a codex declaring every key logged %q, want silence", logs.String())
 	}
+	// The argv the child received, not just the absence of a warning. A codex
+	// declaring every key must get every key: a filter that dropped declared keys
+	// would leave a tool on and still be silent.
+	if got := codexPolicyArgvKeys(t); !equalStrings(got, codexNoToolFeatureKeys) {
+		t.Errorf("child got feature keys %v, want all of %v", got, codexNoToolFeatureKeys)
+	}
 }
 
 // TestCodexProbeOmitsUndeclaredKeysAndWarnsOnce is the reason the probe exists.
@@ -320,12 +343,33 @@ func TestCodexProbeOmitsUndeclaredKeysAndWarnsOnce(t *testing.T) {
 			t.Errorf("warning does not name the missing key %q:\n%s", key, logs.String())
 		}
 	}
-	// Declared keys are still passed, and the non-feature restrictions are
-	// never filtered: `agents.enabled` and the top-level web_search are not
-	// feature keys, so `features list` says nothing about them.
+	// The argv is the assertion that matters. The warning text is a report; this
+	// is the effect. Both directions, because the filter could be deleted (all
+	// ten, silent policy claim) or inverted (only the missing ones, which
+	// disables nothing) and the warning assertions would be satisfied either way.
+	want := []string{"shell_tool", "unified_exec", "hooks", "tool_suggest", "multi_agent"}
+	if got := codexPolicyArgvKeys(t); !equalStrings(got, want) {
+		t.Errorf("child got feature keys %v, want only the five this codex declares %v", got, want)
+	}
 	if n := probeCallLog(t); n != 1 {
 		t.Errorf("probe ran %d times over 3 calls on one binary, want 1", n)
 	}
+}
+
+// equalStrings compares two string slices in order. Written rather than using
+// reflect.DeepEqual so a failure prints the two lists side by side rather than
+// dumping a diff of bools, and so an order change is reported: the argv order IS
+// the policy, and the golden checks it.
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestCodexProbeFailureFallsBackToEveryKeyAndWarnsOnce: a probe that cannot
@@ -350,6 +394,98 @@ func TestCodexProbeFailureFallsBackToEveryKeyAndWarnsOnce(t *testing.T) {
 	if strings.Contains(logs.String(), "WEAKER than on a current codex") {
 		t.Errorf("an unanswered probe was reported as a weaker POLICY, which claims the codex lacks features it was never asked about:\n%s", logs.String())
 	}
+	// The fallback is the FULL policy, and it has to be asserted on argv: an
+	// unanswered probe that quietly passed nothing would strip the policy while
+	// emitting the reassuring "unverified" warning, which is the worst of the two
+	// failure directions.
+	if got := codexPolicyArgvKeys(t); !equalStrings(got, codexNoToolFeatureKeys) {
+		t.Errorf("child got feature keys %v, want the whole policy %v after a failed probe", got, codexNoToolFeatureKeys)
+	}
+}
+
+// TestCodexProbeIsConfinedLikeEveryOtherChild: a diagnostic is still a child.
+// The probe runs `codex features list` on the user's machine, so it inherits
+// whatever environment and working directory the process happens to have unless
+// it goes through the same funnel as everything else — and an independent review
+// found that replacing harnessCommand with a raw exec.CommandContext passed the
+// whole suite, so nothing was watching.
+//
+// The consequence of getting that wrong is not subtle: a codex diagnostic process
+// carrying AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, the age/SOPS variables and
+// whatever kubeconfig resolves, running with Ghost's repository as its working
+// directory, with whatever tool surface codex enables on its own. opencode's
+// version probe has had this test since it was added; the codex probe is new here
+// and arrived without one.
+func TestCodexProbeIsConfinedLikeEveryOtherChild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script policy fake requires a POSIX shell")
+	}
+	resetCodexFeatureProbe(t)
+	captureCodexWarnings(t)
+	report := filepath.Join(t.TempDir(), "probe-report")
+	setHarnessPolicyParentEnv(t)
+	// The hatch is set after setHarnessPolicyParentEnv, which blanks it, and it
+	// carries the decoy credentials the probe must NOT see as well as the
+	// passthrough itself — so a probe that inherited the parent environment would
+	// carry them, which is what makes the assertion below meaningful.
+	t.Setenv("GHOST_PASSTHROUGH_ENV", "GITHUB_TOKEN,AWS_SECRET_ACCESS_KEY,GHOST_API_KEY,GHOST_DATABASE_URL,CODEX_PROBE_REPORT")
+	t.Setenv("CODEX_PROBE_REPORT", report)
+	bin := fakeHarnessPolicyBinary(t, "codex", `
+if [ "$1" = "features" ]; then
+  { printf 'CWD=%s\n' "$PWD"; printf '%s\n' "$@"; env; } > "$CODEX_PROBE_REPORT"
+  printf 'shell_tool stable true\n'
+  exit 0
+fi
+printf '%s' 'KEEP'
+`)
+
+	if _, _, err := (&CodexClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	seen, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("the probe did not report its environment: %v", err)
+	}
+	for _, leaked := range []string{
+		"GITHUB_TOKEN=github-secret",
+		"AWS_SECRET_ACCESS_KEY=aws-secret",
+		"GHOST_API_KEY=ghost-secret",
+		"GHOST_DATABASE_URL=postgres://secret",
+	} {
+		if strings.Contains(string(seen), leaked) {
+			t.Errorf("the codex probe inherited %s; a diagnostic is still a child and must go through harnessEnv", leaked)
+		}
+	}
+	// Its working directory must be inside the invocation's scratch root, not the
+	// repository the test was run from. A codex reading a rule or config file out
+	// of the cwd is exactly the discovery problem harnessCommand exists to
+	// prevent, and it is invisible in the argv.
+	cwd := ""
+	for _, line := range strings.Split(string(seen), "\n") {
+		if after, ok := strings.CutPrefix(line, "CWD="); ok {
+			cwd = after
+		}
+	}
+	if cwd == "" {
+		t.Fatalf("the probe reported no working directory:\n%s", seen)
+	}
+	if cwd == repoRootForProbeTest(t) {
+		t.Errorf("the codex probe ran in the repository root %s, so it could discover Ghost's own rules and config", cwd)
+	}
+}
+
+// repoRootForProbeTest returns the directory the test binary was run from, which
+// is what a probe that inherited its working directory would report. It is read
+// rather than hard-coded because `go test` runs each package in its own
+// directory, and the assertion is about "wherever the repository is", not one
+// path.
+func repoRootForProbeTest(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
 }
 
 // TestCodexProbeRunsOncePerBinaryIdentity is the cost half. A lifecycle run
@@ -599,6 +735,33 @@ func TestCodexProbeSuccessIsCachedIndefinitely(t *testing.T) {
 	if n := probeCallLog(t); n != 1 {
 		t.Errorf("a successful probe ran %d times, want 1: a positive answer is not subject to the retry interval", n)
 	}
+}
+
+// codexPolicyArgvKeys returns the `features.<key>=false` keys the fake codex
+// actually received on its `exec` invocation, in the order they arrived.
+//
+// This reads what reached the CHILD rather than what the code computed, which is
+// the whole point: the unit under test is the filter's effect on argv, and a
+// fake that echoes its input back proves nothing about that on its own.
+func codexPolicyArgvKeys(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(os.Getenv("CODEX_EXEC_LOG"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("read exec log: %v", err)
+	}
+	var keys []string
+	for _, arg := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		key, ok := strings.CutPrefix(arg, "features.")
+		if !ok {
+			continue
+		}
+		key, _, _ = strings.Cut(key, "=")
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // probeCallLog counts how many times the fake codex answered `features list`.

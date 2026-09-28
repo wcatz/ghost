@@ -722,7 +722,7 @@ func probeCodexUnknownFeatureKey(t *testing.T, bin string) {
 		t.Errorf("codex REJECTS an unrecognised -c key (%s) after a passing baseline, with "+
 			"the flags Ghost actually passes, so it fails CLOSED: %s. That makes the \"silently "+
 			"ignored / fail OPEN\" wording wrong in codexInvocationArgs, "+
-			"TestCodexFeatureKeysAreDeclaredNames and the CLAUDE.md internal/ai bullet, and "+
+			"TestCodexFeatureKeysAreDeclaredNames and the docs/invariants.md internal/ai bullet, and "+
 			"every one of those sites must be corrected to match.", unknownKey, unknownErr)
 	}
 
