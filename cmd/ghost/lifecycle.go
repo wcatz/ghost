@@ -1408,7 +1408,7 @@ withdrawn edge justified.
 // Printing ReassessResult.Withdrawn in a dry run would put "would withdraw 0"
 // above a list of three edges, because that field counts only invalidations that
 // actually landed.
-func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls int) string {
+func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls, retries int) string {
 	verb := "would withdraw"
 	causesVerb := "would sweep"
 	count := len(withdrawn)
@@ -1422,9 +1422,30 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	if res.CausesSweepFailed > 0 {
 		sweptNote = fmt.Sprintf(", %d causes sweep(s) FAILED (unknown)", res.CausesSweepFailed)
 	}
-	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN, %s %d, %s %d causes edge(s)%s (%d classify call(s))\n",
+	// A prediction the pass could not read is its own sentence, beside the sweep
+	// failures rather than inside them: no sweep ran, so "FAILED" would name a
+	// write that never happened — and "would sweep 0" for a read that never
+	// happened would tell an operator about to apply that there is nothing else
+	// to delete.
+	if res.CausesPredictionFailed > 0 {
+		sweptNote += fmt.Sprintf(", %d causes prediction(s) unavailable (read failed, unknown)", res.CausesPredictionFailed)
+	}
+	// Pairs the classifier never answered (#699). The count and the list are
+	// both here because the withdrawal lines below can look like the whole
+	// story: a pass that withdrew six vetoed edges and judged nothing else is a
+	// partial repair, and the edges it never reached have to be findable rather
+	// than countable. The wording names BOTH ways a pair reaches this list — a
+	// call that failed and a reply whose verdict count did not match the pairs
+	// asked about — because on the second one the harness is fine and sending
+	// the operator after the network would be a wrong lead printed by the
+	// report whose whole job is the partial state.
+	unjudgedNote := ""
+	if n := len(res.Unjudged); n > 0 {
+		unjudgedNote = fmt.Sprintf(", %d unjudged (no verdict: the classify call failed or answered with the wrong number of verdicts; their edges stand)", n)
+	}
+	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN%s, %s %d, %s %d causes edge(s)%s (%d classify call(s)%s)\n",
 		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
-		res.Unclassified, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls)
+		res.Unclassified, unjudgedNote, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls, retryNote(retries))
 	short := func(id string) string {
 		if len(id) > 8 {
 			return id[:8]
@@ -1457,15 +1478,27 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		// the veto rows it is the only deletion no model adjudicated. A sweep
 		// that ERRORED says "unknown" rather than a count, because the count is
 		// not knowable after a failed write and a 0 would read as "nothing else
-		// was deleted".
+		// was deleted" — and so does a dry-run row whose PREDICTION could not be
+		// read, which is the same mistake one step earlier.
 		swept := ""
 		switch {
 		case w.SweepFailed:
 			swept = "  [causes sweep FAILED — unknown]"
+		case w.PredictionUnknown:
+			swept = "  [causes edge — unknown: the prediction read failed]"
 		case w.CausesSwept > 0:
 			swept = fmt.Sprintf("  [+%d causes edge]", w.CausesSwept)
 		}
 		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]%s  %s\n", marker, short(w.NewerID), short(w.OlderID), by, swept, w.Reason)
+	}
+	// One line per unjudged edge, in the same shape as the withdrawn rows so a
+	// reader can tell at a glance which edges moved and which did not. The
+	// reason is the same in every row — no verdict exists — so it is the state,
+	// not a per-edge finding, and the pass exits non-zero for the rerun. It
+	// names both causes for the reason the summary does.
+	for _, u := range res.Unjudged {
+		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]\n",
+			short(u.NewerID), short(u.OlderID))
 	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")
@@ -1478,13 +1511,26 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 // not do and printed the same totals as a pass that found nothing to do reads
 // as "nothing was skipped", so the veto is on the report (#686) — and it is
 // printed by the one call below, so the report and the pass cannot drift.
-func supersedeReport(projectName string, res supersede.Result, verb string, calls int) string {
-	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s), %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
-		projectName, res.Candidates, calls, res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+//
+// A retried call is on the report too, and only when there was one: a pass that
+// had to re-ask a failed call is not the pass the summary describes, and a
+// harness that is flapping shows up here before it shows up as a failure.
+func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
+	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
 	if res.Vetoed == 0 {
 		return out
 	}
 	return out + fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
+}
+
+// retryNote is the ", N retried call(s)" clause the call counts share: empty
+// when nothing was retried, so an ordinary pass's line is unchanged.
+func retryNote(retries int) string {
+	if retries <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d retried after a failed call", retries)
 }
 
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
@@ -1533,7 +1579,7 @@ func runSupersede() {
 		// exit stays: each invalidation is its own transaction, so a failure on
 		// the Nth edge leaves N-1 already withdrawn and unreachable by a later
 		// pass. A repair that partly happened has to be visible as such.
-		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls()))
+		fmt.Print(supersedeReassessReport(projectName, res, apply, withdrawn, cls.Calls(), cls.Retries()))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -1557,7 +1603,7 @@ func runSupersede() {
 		}
 		return id
 	}
-	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls()))
+	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls(), cls.Retries()))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}

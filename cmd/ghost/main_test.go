@@ -1417,10 +1417,10 @@ func TestReassessSummaryLine(t *testing.T) {
 // reads as "nothing was skipped" (#686).
 func TestSupersedeReport(t *testing.T) {
 	dry := "proj: 4 candidate pairs in 1 classify call(s), 2 cached, 1 supersedes, 0 causes, 0 reclassified, would link\n"
-	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1); got != dry {
+	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1, 0); got != dry {
 		t.Errorf("supersedeReport() with nothing vetoed = %q, want %q", got, dry)
 	}
-	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1)
+	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1, 0)
 	if !strings.HasPrefix(got, dry) {
 		t.Errorf("supersedeReport() = %q, want the summary line first, unchanged", got)
 	}
@@ -1433,9 +1433,17 @@ func TestSupersedeReport(t *testing.T) {
 	// The report is mode-agnostic about the veto: a vetoed pair is never linked,
 	// so there is nothing for --apply to write either. The apply verb is the
 	// only thing that changes.
-	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0)
+	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0, 0)
 	if !strings.HasPrefix(apply, "proj: 1 candidate pairs in 0 classify call(s), 0 cached, 0 supersedes, 0 causes, 0 reclassified, linked\n") {
 		t.Errorf("supersedeReport() apply = %q, want the apply verb and the veto count", apply)
+	}
+	// A pass that had to re-ask a failed call says so (#699). The count is
+	// inside the call tally rather than a second sentence, because the calls and
+	// the retries are one fact: the retry IS a call, and the line that reports
+	// one without the other describes a pass nobody ran.
+	retried := supersedeReport("proj", supersede.Result{Candidates: 4, Confirmed: 1}, "would link", 3, 1)
+	if !strings.Contains(retried, "in 3 classify call(s), 1 retried after a failed call, 0 cached") {
+		t.Errorf("supersedeReport() = %q, want the retried call counted next to the calls it made", retried)
 	}
 }
 
@@ -1453,7 +1461,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	dry := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Neither: 1, Unclassified: 1,
 		Withdrawn: 0, CausesWithdrawn: 1, // what the pass predicts for a dry run
-	}, false, edges, 2)
+	}, false, edges, 2, 0)
 	for _, want := range []string{
 		// The per-outcome numbers add up to Loaded, the withdrawal count is the
 		// two edges below it rather than the (dry-run-zero) Withdrawn field, and
@@ -1481,7 +1489,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	apply := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 2, Vetoed: 1, Neither: 1, Withdrawn: 1, CausesWithdrawn: 1,
-	}, true, applied, 1)
+	}, true, applied, 1, 0)
 	if !strings.Contains(apply, "withdrew 1, swept 1 causes edge(s) (1 classify call(s))") {
 		t.Errorf("apply report does not count the withdrawal that landed and the edge swept with it:\n%s", apply)
 	}
@@ -1506,7 +1514,7 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	failReport := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 1, Neither: 1, Withdrawn: 1, CausesSweepFailed: 1,
-	}, true, failed, 1)
+	}, true, failed, 1, 0)
 	if !strings.Contains(failReport, "[causes sweep FAILED — unknown]") {
 		t.Errorf("a failed sweep must not be reported as a count:\n%s", failReport)
 	}
@@ -1515,6 +1523,51 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	if strings.Contains(failReport, "[+0 causes edge]") {
 		t.Errorf("a failed sweep printed a marker that says nothing was moved:\n%s", failReport)
+	}
+
+	// A dry-run row whose 'causes' PREDICTION could not be read is a different
+	// state from a failed sweep (no sweep ran) and a third from "there is
+	// nothing else to delete" — the report has to say which, or an operator about
+	// to apply is deciding about a deletion nobody looked for.
+	prediction := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 1, Vetoed: 1, CausesPredictionFailed: 1,
+	}, false, []supersede.WithdrawnEdge{
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true, PredictionUnknown: true},
+	}, 0, 0)
+	if !strings.Contains(prediction, "would withdraw 1") {
+		t.Errorf("a dry run whose prediction read failed reported no withdrawal at all:\n%s", prediction)
+	}
+	if !strings.Contains(prediction, "1 causes prediction(s) unavailable (read failed, unknown)") {
+		t.Errorf("the summary must count the unreadable predictions separately from the failed sweeps:\n%s", prediction)
+	}
+	if !strings.Contains(prediction, "[causes edge — unknown: the prediction read failed]") {
+		t.Errorf("the row must say the count is unknown rather than printing a 0:\n%s", prediction)
+	}
+	if strings.Contains(prediction, "causes sweep(s) FAILED") || strings.Contains(prediction, "withdrew ") {
+		t.Errorf("a dry run printed a marker it did not earn:\n%s", prediction)
+	}
+
+	// #699: a classify call that failed leaves its pairs UNJUDGED while the rows
+	// a rule settled still withdraw. The report has to name both, or a partial
+	// repair reads as a complete one — the withdrawal lines look like the whole
+	// story, and the edges that never reached a verdict would be invisible.
+	partial := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 3, Vetoed: 1, Withdrawn: 1,
+		Unjudged: []supersede.UnjudgedPair{
+			{NewerID: "5566778899aabbcc", OlderID: "445566778899aabb"},
+		},
+	}, true, []supersede.WithdrawnEdge{
+		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true, Written: true},
+	}, 2, 1)
+	for _, want := range []string{
+		"0 UNKNOWN, 1 unjudged (no verdict: the classify call failed or answered with the wrong number of verdicts; their edges stand), withdrew 1",
+		"(2 classify call(s), 1 retried after a failed call)",
+		"  withdrew     abcdef01 -> 98765432  [veto, no harness call]",
+		"  unjudged    55667788 -> 44556677  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]",
+	} {
+		if !strings.Contains(partial, want) {
+			t.Errorf("partial-repair report missing %q:\n%s", want, partial)
+		}
 	}
 }
 

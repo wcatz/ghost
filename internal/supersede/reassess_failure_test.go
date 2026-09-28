@@ -54,6 +54,50 @@ func (p *pairReplyProvider) Classify(_ context.Context, _, userContent string) (
 	return strings.Join(lines, "\n"), nil
 }
 
+// TestReassessRetriesAFailedClassifyCall: a batch whose first call fails and
+// whose retry answers is judged, and the pass applies every withdrawal that
+// verdict produced. The failure #699's rehearsal hit was one call in a project
+// of many, and the rerun a minute later withdrew 76 of 87 — so the retry is what
+// stands between a blip and a rerun an operator has to remember to make. The
+// count is reported, because a pass that needed one must not look like a pass
+// that did not.
+func TestReassessRetriesAFailedClassifyCall(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer, older := seedEdge(t, store, db,
+		"A restore that spanned two spindles took 41 minutes and the row count matched afterwards.",
+		"The restore path on one spindle is safe and takes under a minute.")
+
+	fp := &flakyProvider{resp: "NEITHER", fails: 1}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	var buf strings.Builder
+	cls.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	res, withdrawn, err := Reassess(ctx, store, cls, "p", true, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatalf("a first-call failure the retry answers must not fail the pass: %v", err)
+	}
+	if fp.calls != 2 {
+		t.Errorf("provider calls = %d, want 2 (the first attempt and its one retry)", fp.calls)
+	}
+	if res.Neither != 1 || res.Withdrawn != 1 {
+		t.Errorf("neither=%d withdrawn=%d, want 1 and 1: the retry's verdict is applied like any other", res.Neither, res.Withdrawn)
+	}
+	if cls.Retries() != 1 {
+		t.Errorf("Retries() = %d, want 1", cls.Retries())
+	}
+	if len(withdrawn) != 1 || !withdrawn[0].Written {
+		t.Errorf("withdrawn = %+v, want the edge the retry's verdict withdrew", withdrawn)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 0 {
+		t.Errorf("the edge survived: %d pair(s) remain", len(pairs))
+	}
+	if !strings.Contains(buf.String(), "retries=1") {
+		t.Errorf("the summary must count the retry:\n%s", buf.String())
+	}
+}
+
 // TestReassessReportsTheRepairItAlreadyMade pins the failure contract: a failed
 // invalidation returns the edges that DID land alongside the error, and the
 // summary is still logged. Each invalidation is its own transaction, so the
@@ -107,6 +151,343 @@ func TestReassessReportsTheRepairItAlreadyMade(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "failed=true") {
 		t.Errorf("the summary must say the pass failed:\n%s", buf.String())
+	}
+}
+
+// TestReassessAppliesVetoedWithdrawalsWhenABatchFails: #699's rehearsal lost
+// every withdrawal to one `opencode run` that exited 1 — including the edges the
+// deterministic veto had already settled, which needed no harness call at all and
+// are not the classifier's to decide. Those apply anyway: a withdrawal only puts
+// the older memory back into injection, which is the safe direction, and the
+// rerun a minute later withdrew 76 of 87. The pair the harness never answered is
+// reported unjudged with its edge left standing, and the pass still exits
+// non-zero so the rerun is asked for.
+func TestReassessAppliesVetoedWithdrawalsWhenABatchFails(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	openNewer, openOlder := seedEdge(t, store, db,
+		"The ingest service now runs Redis 7.2, revision a.",
+		"The ingest service runs Redis 6.2, revision a.")
+
+	fp := &flakyProvider{fails: 2} // the first attempt and its retry both fail
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	var buf strings.Builder
+	res, withdrawn, err := Reassess(ctx, store, cls, "p", true, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err == nil {
+		t.Fatal("a classify call that kept failing must still fail the pass, or a rerun is never asked for")
+	}
+	if !strings.Contains(err.Error(), "classify") {
+		t.Errorf("error %q must name the classify failure", err)
+	}
+	// The veto-settled edge is withdrawn: the veto is deterministic on the two
+	// note bodies, the classifier was never asked about it, and the withdrawal
+	// only puts the older memory back into ranked injection.
+	if res.Vetoed != 1 || res.Withdrawn != 1 {
+		t.Errorf("vetoed=%d withdrawn=%d, want 1 and 1: a failed harness call must not consume the rows a rule settled", res.Vetoed, res.Withdrawn)
+	}
+	if len(withdrawn) != 1 || withdrawn[0].NewerID != vetoNewer || withdrawn[0].OlderID != vetoOlder || !withdrawn[0].Written || !withdrawn[0].Vetoed {
+		t.Errorf("withdrawn = %+v, want the vetoed edge, marked written", withdrawn)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 0 {
+		t.Errorf("the vetoed edge survived: %d pair(s) remain", len(pairs))
+	}
+	assertUnsupersedeHistory(t, store, vetoOlder)
+	// The pair the harness never answered is named, not counted away, and its
+	// edge stands: nothing was decided about it.
+	if len(res.Unjudged) != 1 || res.Unjudged[0].NewerID != openNewer || res.Unjudged[0].OlderID != openOlder {
+		t.Errorf("Unjudged = %+v, want the one pair the classifier never judged", res.Unjudged)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{openNewer, openOlder}); len(pairs) != 1 {
+		t.Errorf("%d pair(s) remain on the unjudged edge, want 1 — an unanswered pair is not a withdrawal", len(pairs))
+	}
+	// Every edge the pass read is still accounted for, including the one it could
+	// not judge: a report whose per-outcome numbers do not sum to what it read is
+	// a report an operator cannot check.
+	total := res.Skipped + res.Vetoed + res.Confirmed + res.Neither + res.Causes +
+		res.Reversed + res.Unclassified + len(res.Unjudged)
+	if total != res.Loaded {
+		t.Errorf("per-outcome counters sum to %d but Loaded is %d (skipped=%d vetoed=%d confirmed=%d neither=%d causes=%d reversed=%d unknown=%d unjudged=%d)",
+			total, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed, res.Unclassified, len(res.Unjudged))
+	}
+	if !strings.Contains(buf.String(), "failed=true") {
+		t.Errorf("the summary must say the pass failed:\n%s", buf.String())
+	}
+}
+
+// unreadableLinksStore fails GetLinks, the read liveCausesPairs makes to predict
+// the 'causes' sweep. It is the one failure the classify failure has to survive
+// alongside: the pass has already recorded which pairs it could not judge, and
+// an exit that dropped that record would report the unjudged edges as nothing
+// happened at all.
+type unreadableLinksStore struct {
+	*memory.Store
+}
+
+func (unreadableLinksStore) GetLinks(context.Context, string) ([]memory.Link, error) {
+	return nil, errors.New("links table is locked")
+}
+
+// TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails: two failures
+// in one run are joined, not replaced, and the summary is still logged. The
+// unjudged edges are half of what the operator has to fix, and this is the exit
+// that would otherwise report neither their text nor the log that explains the
+// partial state. A dry run is where the read happens at all, so that is the mode
+// this is exercised in.
+func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	openNewer, openOlder := seedEdge(t, store, db,
+		"The ingest service now runs Redis 7.2, revision a.",
+		"The ingest service runs Redis 6.2, revision a.")
+	if err := store.CreateLink(ctx, vetoOlder, vetoNewer, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	fp := &flakyProvider{fails: 2}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	var buf strings.Builder
+	res, withdrawn, err := Reassess(ctx, unreadableLinksStore{Store: store}, cls, "p", false, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err == nil {
+		t.Fatal("a run that failed twice must fail once, whatever it managed in between")
+	}
+	if !strings.Contains(err.Error(), "links table is locked") {
+		t.Errorf("error %q does not carry the read failure", err)
+	}
+	if !strings.Contains(err.Error(), "classify") {
+		t.Errorf("error %q dropped the classify failure: the unjudged edge is half of what the operator has to fix", err)
+	}
+	if len(res.Unjudged) != 1 || res.Unjudged[0].NewerID != openNewer {
+		t.Errorf("Unjudged = %+v, want the pair the classifier never judged", res.Unjudged)
+	}
+	// The vetoed edge is still reported — the first failure must not take the
+	// free decisions with it — and its second deletion is unknown rather than a
+	// count the failed read never produced.
+	if len(withdrawn) != 1 || withdrawn[0].NewerID != vetoNewer || withdrawn[0].Written {
+		t.Fatalf("withdrawn = %+v, want the vetoed edge listed as an unwritten prediction", withdrawn)
+	}
+	if !withdrawn[0].PredictionUnknown {
+		t.Errorf("row = %+v, want PredictionUnknown: the read that predicts the sweep failed", withdrawn[0])
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 1 {
+		t.Errorf("a dry run withdrew the edge: %d pair(s) remain", len(pairs))
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{openNewer, openOlder}); len(pairs) != 1 {
+		t.Errorf("%d pair(s) remain on the unjudged edge, want 1", len(pairs))
+	}
+	if !strings.Contains(buf.String(), "supersede reassess") {
+		t.Errorf("this exit must still log the summary; a run with the most to explain logged nothing:\n%s", buf.String())
+	}
+	// And the summary must agree with the exit: the log is what an operator
+	// reads when the exit code has scrolled past, so a failed=true line on a
+	// successful run (or the reverse) is the same defect in either direction.
+	if !strings.Contains(buf.String(), "failed=true") {
+		t.Errorf("the summary claims a run that did not fail, on an exit that returns an error:\n%s", buf.String())
+	}
+}
+
+// TestReassessUnderApplyNeverReadsThePrediction: the apply path's sweep count
+// comes from the sweep itself, so the prediction read a dry run needs is not
+// made. The store here cannot answer GetLinks at all, which is what makes this
+// the test: a discarded read must not be able to fail a repair that completed,
+// and the count reported has to be the one the sweep observed.
+func TestReassessUnderApplyNeverReadsThePrediction(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	if err := store.CreateLink(ctx, vetoOlder, vetoNewer, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A classifier that never gets asked, so nothing else can fail the run: this
+	// is about the read, and the veto settles the only edge.
+	cls := NewRelationClassifier(&fakeProvider{resp: "SUPERSEDES | replaced: never"})
+	res, withdrawn, err := Reassess(ctx, unreadableLinksStore{Store: store}, cls, "p", true, discardLogger())
+	if err != nil {
+		t.Fatalf("an apply run must not fail on a read it never needed: %v", err)
+	}
+	if res.Withdrawn != 1 || len(withdrawn) != 1 {
+		t.Fatalf("withdrawn = %+v (count %d), want the vetoed edge", withdrawn, res.Withdrawn)
+	}
+	if !withdrawn[0].Written || !withdrawn[0].Vetoed {
+		t.Errorf("row = %+v, want the vetoed edge, marked written", withdrawn[0])
+	}
+	if withdrawn[0].PredictionUnknown || withdrawn[0].SweepFailed {
+		t.Errorf("row = %+v, want no unknown marker: the sweep ran and reported what it moved", withdrawn[0])
+	}
+	if withdrawn[0].CausesSwept != 1 || res.CausesWithdrawn != 1 {
+		t.Errorf("row swept %d and the result counted %d, want 1 each: the observed count is the only one an apply run reports",
+			withdrawn[0].CausesSwept, res.CausesWithdrawn)
+	}
+	if res.CausesPredictionFailed != 0 {
+		t.Errorf("CausesPredictionFailed = %d, want 0: an apply run never predicts", res.CausesPredictionFailed)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 0 {
+		t.Errorf("the vetoed edge survived the apply: %d pair(s) remain", len(pairs))
+	}
+	// The 'causes' edge went with it, and only InvalidateLink writes history for
+	// that relation, so the audit is unchanged.
+	causes, gerr := store.GetLinks(ctx, vetoOlder)
+	if gerr != nil {
+		t.Fatalf("GetLinks: %v", gerr)
+	}
+	for _, l := range causes {
+		if l.Relation == string(RelationCauses) {
+			t.Errorf("the 'causes' edge survived the withdrawal: %+v", l)
+		}
+	}
+}
+
+// TestReassessDryRunSaysAPredictionItCouldNotReadIsUnknown: the dry-run half of
+// the read failure. The pass still lists what it would withdraw, but a row whose
+// 'causes' prediction could not be read says UNKNOWN rather than 0: the report
+// derives its count from these rows, so returning none of them would print
+// "would withdraw 0" beside a "1 vetoed" and print nothing at all about a second
+// deletion nobody looked for. The error still returns.
+func TestReassessDryRunSaysAPredictionItCouldNotReadIsUnknown(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	if err := store.CreateLink(ctx, vetoOlder, vetoNewer, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	cls := NewRelationClassifier(&fakeProvider{resp: "SUPERSEDES | replaced: never"})
+	res, withdrawn, err := Reassess(ctx, unreadableLinksStore{Store: store}, cls, "p", false, discardLogger())
+	if err == nil {
+		t.Fatal("a dry run whose prediction read failed must say so, not exit clean")
+	}
+	if !strings.Contains(err.Error(), "links table is locked") {
+		t.Errorf("error %q does not carry the read failure", err)
+	}
+	if res.Withdrawn != 0 {
+		t.Errorf("Withdrawn = %d, want 0: a dry run writes nothing", res.Withdrawn)
+	}
+	// The row is still LISTED, or the report counts zero withdrawals above a
+	// non-zero vetoed count and the operator sees a contradiction instead of a
+	// preview.
+	if len(withdrawn) != 1 || withdrawn[0].NewerID != vetoNewer || withdrawn[0].Written || !withdrawn[0].Vetoed {
+		t.Fatalf("withdrawn = %+v, want the vetoed edge listed as an unwritten prediction", withdrawn)
+	}
+	if !withdrawn[0].PredictionUnknown {
+		t.Errorf("row = %+v, want PredictionUnknown: a count of second deletions nobody looked for is not 0", withdrawn[0])
+	}
+	if withdrawn[0].SweepFailed {
+		t.Errorf("row = %+v, want SweepFailed unset: no sweep ran, the PREDICTION is what could not be read", withdrawn[0])
+	}
+	if res.CausesPredictionFailed != 1 {
+		t.Errorf("CausesPredictionFailed = %d, want 1, and it must not be counted as a failed sweep", res.CausesPredictionFailed)
+	}
+	if res.CausesSweepFailed != 0 {
+		t.Errorf("CausesSweepFailed = %d, want 0: a dry run sweeps nothing, and a failed read is not a failed write", res.CausesSweepFailed)
+	}
+	if res.CausesWithdrawn != 0 {
+		t.Errorf("CausesWithdrawn = %d, want 0: an unknown prediction contributes no count", res.CausesWithdrawn)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{vetoNewer, vetoOlder}); len(pairs) != 1 {
+		t.Errorf("a dry run withdrew the edge: %d pair(s) remain", len(pairs))
+	}
+}
+
+// TestReassessDryRunWritesNothingWhenABatchFails: a dry run that hits the same
+// failure has the same report and the same non-zero exit, and still writes
+// nothing — the repair pass previews a deletion, so a preview that moved the
+// edge it was about to describe would leave the operator deciding about a
+// withdrawal that already happened.
+func TestReassessDryRunWritesNothingWhenABatchFails(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	openNewer, openOlder := seedEdge(t, store, db,
+		"The ingest service now runs Redis 7.2, revision a.",
+		"The ingest service runs Redis 6.2, revision a.")
+
+	fp := &flakyProvider{fails: 2}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	res, withdrawn, err := Reassess(ctx, store, cls, "p", false, discardLogger())
+	if err == nil {
+		t.Fatal("a classify call that kept failing must fail a dry run too, or a preview reports success over a project it never judged")
+	}
+	if res.Withdrawn != 0 {
+		t.Errorf("Withdrawn = %d, want 0: a dry run writes nothing", res.Withdrawn)
+	}
+	if len(withdrawn) != 1 || withdrawn[0].Written || !withdrawn[0].Vetoed {
+		t.Errorf("withdrawn = %+v, want the vetoed edge listed as a prediction, unwritten", withdrawn)
+	}
+	if len(res.Unjudged) != 1 || res.Unjudged[0].NewerID != openNewer {
+		t.Errorf("Unjudged = %+v, want the unjudged pair named in a dry run too", res.Unjudged)
+	}
+	for _, ids := range [][2]string{{vetoNewer, vetoOlder}, {openNewer, openOlder}} {
+		if pairs, _ := store.SupersedesWithin(ctx, ids[:]); len(pairs) != 1 {
+			t.Errorf("a dry run withdrew %v: %d pair(s) remain, want 1", ids, len(pairs))
+		}
+	}
+	if entries, herr := store.MemoryHistory(ctx, vetoOlder, 0); herr == nil {
+		for _, e := range entries {
+			if e.Phase == "unsupersede" {
+				t.Error("a dry run wrote an unsupersede history row: it withdrew nothing, so it has nothing to audit")
+				break
+			}
+		}
+	}
+}
+
+// TestReassessDryRunWritesNothingWhenARetryAnswers: the other half of "a dry run
+// writes nothing". A retried call that answers must change the verdicts the
+// preview reports and nothing else — the withdrawal is still a prediction, and
+// the pass still made no graph row.
+func TestReassessDryRunWritesNothingWhenARetryAnswers(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	vetoNewer, vetoOlder := seedEdge(t, store, db,
+		"The restore path was rewritten last month; the timings below are from the new implementation.",
+		"NEVER run the restore with source and target on the same spindle.")
+	openNewer, openOlder := seedEdge(t, store, db,
+		"The ingest service now runs Redis 7.2, revision a.",
+		"The ingest service runs Redis 6.2, revision a.")
+
+	fp := &flakyProvider{resp: "1: NEITHER", fails: 1} // one open pair, one retry
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	res, withdrawn, err := Reassess(ctx, store, cls, "p", false, discardLogger())
+	if err != nil {
+		t.Fatalf("a first-call failure the retry answers must not fail the pass: %v", err)
+	}
+	if res.Neither != 1 || len(res.Unjudged) != 0 {
+		t.Errorf("neither=%d unjudged=%d, want 1 and 0: the retry's verdict is the pass's verdict", res.Neither, len(res.Unjudged))
+	}
+	if res.Withdrawn != 0 {
+		t.Errorf("Withdrawn = %d, want 0: a dry run writes nothing", res.Withdrawn)
+	}
+	if len(withdrawn) != 2 {
+		t.Fatalf("withdrawn = %+v, want the vetoed and the NEITHER edge both listed as predictions", withdrawn)
+	}
+	for _, w := range withdrawn {
+		if w.Written {
+			t.Errorf("a dry run reported a withdrawal it did not make: %+v", w)
+		}
+	}
+	if len(res.Unjudged) != 0 {
+		t.Errorf("Unjudged = %+v, want none: the retry answered", res.Unjudged)
+	}
+	for _, ids := range [][2]string{{vetoNewer, vetoOlder}, {openNewer, openOlder}} {
+		if pairs, _ := store.SupersedesWithin(ctx, ids[:]); len(pairs) != 1 {
+			t.Errorf("a dry run withdrew %v: %d pair(s) remain, want 1", ids, len(pairs))
+		}
 	}
 }
 

@@ -551,6 +551,41 @@ func TestRunTreatsProviderOutageAsFatal(t *testing.T) {
 	}
 }
 
+// TestRunRetriesAFailedClassifyCall: the creation pass shares the classifier, so
+// it gets the one retry too, and this is its own test because what must NOT
+// change is its decision semantics — Run still writes nothing on a call that
+// keeps failing (TestRunTreatsProviderOutageAsFatal), and a call that fails once
+// is simply asked again. The retry is a transport repair, so the pass is
+// otherwise identical: the verdicts that come back are applied exactly as
+// before, and the retry is visible in the report rather than absorbed.
+func TestRunRetriesAFailedClassifyCall(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
+	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
+
+	fp := &flakyProvider{resp: "SUPERSEDES | replaced: it runs version 1.27", fails: 1}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, discardLogger())
+	if err != nil {
+		t.Fatalf("a first-call failure the retry answers must not abort the pass: %v", err)
+	}
+	if res.Created != 1 {
+		t.Errorf("Created = %d, want 1: the retry's verdict is applied like any other", res.Created)
+	}
+	if cls.Retries() != 1 {
+		t.Errorf("Retries() = %d, want 1", cls.Retries())
+	}
+	live, err := store.LinksByRelationSource(ctx, "p", string(RelationSupersedes), "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource: %v", err)
+	}
+	if len(live) != 1 {
+		t.Errorf("%d live link(s), want 1: the pass really wrote what the retry decided", len(live))
+	}
+}
+
 // TestRunClassifiesAllPairsInOneBatchCall pins the batching contract: Run
 // hands the whole candidate set to one ClassifyBatch call and lets the
 // classifier own chunking, instead of looping a call per pair.

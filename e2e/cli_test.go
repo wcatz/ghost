@@ -990,6 +990,50 @@ func TestCLIResolveSupersede(t *testing.T) {
 		}
 	})
 
+	t.Run("supersede --reassess survives a flaky harness", func(t *testing.T) {
+		s := newSandbox(t)
+		cs := s.mcpSession(t)
+		older := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay port is 2222",
+		}))
+		time.Sleep(1100 * time.Millisecond) // the orientation is by updated_at
+		newer := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging relay port is 3333 now",
+		}))
+		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the staging relay port is 2222")
+		s.mustRun("supersede", e2eProject, "--source", "opencode", "--threshold", "0.1", "--apply")
+		live := func() int {
+			return s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND source_id = ? AND target_id = ?`, newer, older)
+		}
+		if n := live(); n != 1 {
+			t.Fatalf("the fixture wrote %d supersedes link(s), want 1", n)
+		}
+
+		// One failed call, answered by the retry: the repair completes, the
+		// edge the verdict confirmed stands, and the report says it needed a
+		// retry — a pass that quietly re-asked would describe a run nobody made.
+		s.failHarnessCalls("supersede", 1)
+		ok := s.mustRun("supersede", e2eProject, "--reassess", "--apply", "--source", "opencode")
+		mustMatch(t, "reassess retry", ok.stdout, `1 still supersedes`)
+		mustMatch(t, "reassess retry", ok.stdout, `1 retried after a failed call`)
+		if n := live(); n != 1 {
+			t.Fatalf("a confirmed edge was withdrawn: %d left", n)
+		}
+
+		// A call and its retry both dead: the edge is left standing and NAMED,
+		// and the pass exits non-zero, because a repair that judged nothing and
+		// withdrew nothing is a partial one and must not read as a clean run.
+		s.failHarnessCalls("supersede", 2)
+		bad := s.mustFail("supersede", e2eProject, "--reassess", "--apply", "--source", "opencode")
+		mustMatch(t, "reassess failed call", bad.stdout, `1 unjudged`)
+		mustMatch(t, "reassess failed call", bad.stderr, `(?i)classify|exit status`)
+		if n := live(); n != 1 {
+			t.Fatalf("a classify call that failed withdrew the edge it never judged: %d left", n)
+		}
+	})
+
 	t.Run("supersede without a project is a usage error", func(t *testing.T) {
 		s := newSandbox(t)
 		s.mustFail("supersede")
