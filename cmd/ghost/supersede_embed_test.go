@@ -121,35 +121,85 @@ func TestRunSupersedeEmbedsTheCorpusItHasToSearch(t *testing.T) {
 	}
 }
 
-// TestSupersedeEmbedNoteSaysNothingWhenThereWasNothingToDo: the report line is
-// about work this run did, and a pass that found the index already current must
-// print nothing at all — an unconditional line would put "embedded 0 memories"
-// on every ordinary pass, where the answer to the operator's question is that
-// there was nothing to do.
-func TestSupersedeEmbedNoteSaysNothingWhenThereWasNothingToDo(t *testing.T) {
-	if note := supersedeEmbedNote(0); note != "" {
-		t.Errorf("a pass that embedded nothing printed %q", note)
+// TestSupersedeIndexNotesNamesTheRemedyThatApplies: the two lines the pass adds
+// about the vector index are one story, and the story has three endings. A pass
+// that cut ITSELF off on the pre-scan budget is not a daemon that is behind, and
+// an index nobody is filling at all has no worker to go and look at — so the
+// remedy in the line is the part that has to be right, and each shape is pinned.
+//
+// The scope of the claim is pinned here too: both lines are about NEW candidates,
+// because the reclassified count printed above them is not bounded by the scan.
+func TestSupersedeIndexNotesNamesTheRemedyThatApplies(t *testing.T) {
+	// Nothing to say: an ordinary pass finds every memory scorable and wrote
+	// nothing. An unconditional "0" line would bury the answer to the operator's
+	// question, which is that there was nothing to do.
+	if got := supersedeIndexNotes(supersedeIndexFacts{embeddingOn: true}); got != "" {
+		t.Errorf("an ordinary pass printed %q", got)
 	}
-	note := supersedeEmbedNote(2)
-	if !strings.Contains(note, "2") {
-		t.Errorf("the note does not count what it did: %q", note)
+
+	// Wrote some, finished the batch: the vectors are the work this run did, and
+	// the consequence is scoped to the scan.
+	note := supersedeIndexNotes(supersedeIndexFacts{embedded: 2, embeddingOn: true})
+	if !strings.Contains(note, "2 memories embedded for this pass") {
+		t.Errorf("the line does not count what it wrote: %q", note)
 	}
-	// And it must not read as an error: the vectors are there now, which is the
-	// whole point of doing the work inside the pass.
-	if !strings.Contains(strings.ToLower(note), "embedded") {
-		t.Errorf("the note does not say what it did: %q", note)
-	}
-	// The consequence is scoped to the vector scan, for the same reason
-	// supersedeUnscoredNote's is: a memory with no vector is proposed as no new
-	// candidate by nothing, but it can still be an endpoint of a pair
-	// re-proposed from an edge already in the graph, and these two lines are
-	// printed one after the other. The absolute form is false in this
-	// codebase's own vocabulary — Result.Candidates counts such a pair.
 	if !strings.Contains(note, "no new candidate by the vector scan") {
-		t.Errorf("the note does not scope its consequence to the scan: %q", note)
+		t.Errorf("the line does not scope its consequence to the scan: %q", note)
 	}
 	if strings.Contains(note, "not a candidate for anything") {
-		t.Errorf("the note claims an unvectorised memory is in no pair at all, which a reclassified edge contradicts: %q", note)
+		t.Errorf("the line claims an unvectorised memory is in no pair at all, which a reclassified edge contradicts: %q", note)
+	}
+
+	// Cut off by its own budget: the remedy is a re-run, and the worker is not
+	// named, because nothing here was waiting on the worker.
+	cut := supersedeIndexNotes(supersedeIndexFacts{
+		embedded: 40, unscored: 10, embeddingOn: true, budgetExpired: true,
+	})
+	if !strings.Contains(cut, "re-run `ghost supersede`") {
+		t.Errorf("a pass that stopped early does not say the batch continues: %q", cut)
+	}
+	if strings.Contains(cut, "ghost mcp status") {
+		t.Errorf("a pass that cut itself off sends the operator after a daemon that was never behind: %q", cut)
+	}
+	if !strings.Contains(cut, "10 memories had no vector") {
+		t.Errorf("the line does not count what the scan could not read: %q", cut)
+	}
+
+	// The daemon is behind, which is the ordinary remaining case.
+	behind := supersedeIndexNotes(supersedeIndexFacts{unscored: 143, embeddingOn: true})
+	if !strings.Contains(behind, "embedding worker") || !strings.Contains(behind, "ghost mcp status") {
+		t.Errorf("the line does not point at what fills the index: %q", behind)
+	}
+	// And with embedding off there is no worker to blame, which is a different
+	// message rather than the same one with a missing tail.
+	off := supersedeIndexNotes(supersedeIndexFacts{unscored: 2, embeddingOn: false})
+	if !strings.Contains(off, "embedding is disabled") {
+		t.Errorf("a pass with embedding off still points at the worker: %q", off)
+	}
+	if strings.Contains(off, "re-run `ghost supersede`") {
+		t.Errorf("a re-run cannot help when nothing is filling the index: %q", off)
+	}
+
+	// The consequence is stated in the same words wherever it appears, so the two
+	// lines cannot contradict each other or the count above them.
+	for _, f := range []supersedeIndexFacts{
+		{embedded: 2, embeddingOn: true},
+		{embedded: 1, embeddingOn: true},
+		{embedded: 40, unscored: 10, embeddingOn: true, budgetExpired: true},
+		{unscored: 1, embeddingOn: true},
+		{unscored: 1, embeddingOn: false},
+	} {
+		got := supersedeIndexNotes(f)
+		if strings.Contains(got, "in no pair this run considered") || strings.Contains(got, "not a candidate for anything") {
+			t.Errorf("%+v printed a claim the reclassify half can contradict: %q", f, got)
+		}
+	}
+	// Singular and plural both have to read as English: a report line is prose.
+	if one := supersedeIndexNotes(supersedeIndexFacts{embedded: 1, embeddingOn: true}); !strings.Contains(one, "1 memory embedded") {
+		t.Errorf("the singular line reads wrong: %q", one)
+	}
+	if one := supersedeIndexNotes(supersedeIndexFacts{unscored: 1, embeddingOn: true}); !strings.Contains(one, "1 memory had no vector") {
+		t.Errorf("the singular unscored line reads wrong: %q", one)
 	}
 }
 
@@ -253,11 +303,17 @@ func TestEmbedSupersedeCorpusStopsAtItsBudget(t *testing.T) {
 
 	const budget = 150 * time.Millisecond
 	start := time.Now()
-	embedded := embedSupersedeCorpus(context.Background(), cfg, store, "projy", budget, slog.New(slog.DiscardHandler))
+	embedded, expired := embedSupersedeCorpus(context.Background(), cfg, store, "projy", budget, slog.New(slog.DiscardHandler))
 	elapsed := time.Since(start)
 
 	if embedded != 0 {
 		t.Errorf("embedded %d against a stalled endpoint, want 0", embedded)
+	}
+	// The expiry is the fact the report needs: it is what makes this a pass that
+	// stopped early rather than a daemon that is behind, and the two have
+	// different remedies.
+	if !expired {
+		t.Error("the budget expired and the caller was not told, so the report would blame the worker")
 	}
 	// Generously over the budget, and nowhere near the client's 30s per request:
 	// a ceiling that only bites at the client timeout is not a ceiling.
@@ -327,40 +383,6 @@ func captureStdout(t *testing.T, fn func()) string {
 	out := <-done
 	_ = r.Close()
 	return out
-}
-
-// TestSupersedeUnscoredNoteNamesWhatThePassCouldNotRead: the two counts on a
-// report answer different questions, and only the second one closes the gap a
-// reader cannot see. "embedded 2" says what the run did; "2 had no vector when
-// the pass scanned" says how much of the project the totals beside it cover. A
-// pass that found every memory scorable says nothing at all, and one running
-// with embedding disabled has to name THAT rather than send the operator to a
-// worker that is not running.
-func TestSupersedeUnscoredNoteNamesWhatThePassCouldNotRead(t *testing.T) {
-	if note := supersedeUnscoredNote(0, true); note != "" {
-		t.Errorf("a pass that scored every memory printed %q", note)
-	}
-	note := supersedeUnscoredNote(2, true)
-	if !strings.Contains(note, "2") {
-		t.Errorf("the note does not count what was unscored: %q", note)
-	}
-	// It must name the CONSEQUENCE correctly and narrowly. The consequence is
-	// about NEW candidates: a memory with no vector cannot be proposed by the
-	// scan, but it CAN still turn up in a reclassified pair, because that half of
-	// the pass re-reads live edges from their link rows. Claiming the stronger
-	// "in no pair this run considered" is what would contradict the
-	// "N reclassified" line printed just above it.
-	if !strings.Contains(note, "proposed no new candidate") {
-		t.Errorf("the note does not say what an unscored memory means for the pass: %q", note)
-	}
-	if strings.Contains(note, "in no pair this run considered") {
-		t.Errorf("the note claims an unscored memory is in no pair at all, which a reclassified edge above it can contradict: %q", note)
-	}
-	// With embedding off, naming the worker is a dead end: nothing is running to
-	// keep the index current, and that is the thing to say.
-	if off := supersedeUnscoredNote(2, false); !strings.Contains(off, "embedding is disabled") {
-		t.Errorf("a pass with embedding off still points at the worker that maintains the index: %q", off)
-	}
 }
 
 // seedUnembeddedPair writes two memories into a fresh project at dbPath and
