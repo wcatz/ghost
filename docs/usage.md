@@ -98,12 +98,16 @@ axes that decide eligibility:
 - `keyword_reserved`, `took_slot_from` and `displaced_by` — a keyword-only hit can
   enter the result window even though its score is below the cut, and no score
   explains that; these say so, and name the row that lost its slot.
-- `floor_dropped` and `floor_score` — a candidate the vector similarity floor
-  removed before fusion, with the cosine that did it. Such a row also carries the
-  sentinels for a row nothing scored: `rrf_score: 0` and `status_factor: 1.0`,
-  because no demotion was ever applied to it. `row_project` still says whose row
-  it is, so a shared row is visible as one without the field that ranks anything
-  carrying a hypothetical.
+- `floor_dropped` and `floor_score` — the vector similarity floor cut this row's
+  **vector** contribution, and `floor_score` is the cosine that did it. This is a
+  statement about the vector leg, not about the row's fate: a row the keyword leg
+  also matched keeps its keyword term, stays in the answer, and reports a
+  non-zero `rrf_score`. Check `fts_rank` to tell the two apart — a negative
+  `fts_rank` means the floor removed the row outright, and that is the only case
+  where `rrf_score` is `0` and `status_factor` is `1.0`, because no demotion was
+  applied to a row nothing scored. `row_project` still says whose row it is, so a
+  shared row is visible as one without the field that ranks anything carrying a
+  hypothetical.
 - `superseded_by` and `near_duplicate_of` — the id of the specific memory behind
   each window-scoped demotion. The penalty counts beside them say how many, these
   say which.
@@ -121,9 +125,10 @@ rather than carrying a number nobody computed: `confidence_contribution`,
 off, not as `1.0` — `1.0` would read as "weighed and found neutral". The notes in
 the payload repeat this in words.
 
-The payload is bounded at 150 rows. A response that reached the budget carries a
-`truncation` object naming how many candidates were dropped; only excluded
-candidates are ever dropped, so every row in the answer is present.
+The payload is bounded at 150 **candidate** rows. A response that reached the budget
+carries a `truncation` object naming how many candidates were dropped; only excluded
+candidates are ever dropped, so every row in the answer is present, and `max_rows`
+reports what the payload actually carries rather than the budget it aimed for.
 
 Demotion only reorders what the legs already fetched: each leg pulls `limit*2` rows from the project plus `_global`, and `_global` rows count against that budget, so a project with fewer matches than the limit still gets `_global` rows filling the rest — demoted, but present. Session-start injection is unaffected by all of this: it ranks in SQL on two separate paths — `loadSessionContext` (`internal/mcpinit/hook.go`) builds the session-start digest and `Store.GetTopMemories` backs the MCP tool surface — neither reaches fusion, and both already filter resolved rows.
 

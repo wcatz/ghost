@@ -1095,13 +1095,31 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 	}
 	legs.vec = vecResults
 	filtered := filterVectorFloor(vecResults, p.MinSimilarity)
-	// A candidate the floor removed never reaches fusion, so nothing downstream
-	// can record why it is absent. It is a distinct, diagnosable outcome — "your
-	// query matched nothing strongly enough" — and it is invisible if only the
-	// surviving leg is kept, so the floor's own verdict is stamped here, at the
-	// only place that applies it. Explained, not asserted: explain reports
-	// whether the row was floor-dropped rather than inferring it from a missing
-	// vector rank, which is indistinguishable from a leg that never matched.
+	// The floor's own verdict, recorded here because this is the only place it is
+	// applied. Two facts live in it, and both would otherwise be re-derived in
+	// explain by calling filterVectorFloor a second time on the same input — the
+	// parallel computation this trace exists to remove, since a later change that
+	// adjusted the effective floor HERE would leave explain describing a floor the
+	// ranking no longer applied. ExplainOnly is the payload-level "the vector leg
+	// contributed nothing, so ranking fell back to the unweighted keyword base"
+	// note, which is a fact about no row and so has nowhere else to live.
+	//
+	// A candidate the floor removed from the VECTOR leg may still reach fusion on
+	// its keyword term, so nothing downstream can record that its vector
+	// contribution was cut. It is a distinct, diagnosable outcome — "your query
+	// matched the row on words but not closely enough on meaning" — and it is
+	// invisible if only the surviving leg is kept, so the floor's per-row verdict
+	// is stamped here, at the only place that applies it. Explained, not asserted:
+	// explain reports whether the row was floor-dropped rather than inferring it
+	// from a missing vector rank, which is indistinguishable from a leg that never
+	// matched.
+	if p.trace != nil {
+		p.trace.vectorFloor = floorVerdict{
+			explainOnly: len(filtered) == 0,
+			applied:     p.MinSimilarity,
+			dropped:     len(vecResults) - len(filtered),
+		}
+	}
 	if p.trace != nil && len(filtered) < len(vecResults) {
 		kept := make(map[string]bool, len(filtered))
 		for _, v := range filtered {
@@ -1117,13 +1135,15 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 				// The project travels with it: the row belongs to one whether or
 				// not it was eligible, and a floor-dropped row reporting no
 				// project at all would be indistinguishable from a row the legs
-				// never attributed to one. StatusFactor is deliberately left at the
-				// 1.0 default — no demotion RAN on this row — which keeps one
-				// meaning for the field across the whole payload. Whether this row
-				// is a shared one that WOULD be demoted is carried by row_project
-				// beside it, and floor_dropped says why nothing was applied; a
-				// hypothetical factor here would mean a row whose rrf_score is 0
-				// carries a number meant to be multiplied into it.
+				// never attributed to one.
+				//
+				// StatusFactor is deliberately NOT set here. A dual-leg row goes
+				// on to fusion and demoteStatus writes the real factor over
+				// whatever this left; a row the keyword leg never reached stops
+				// here with the 1.0 default, which is true of it — no demotion ran
+				// on a row nothing scored. Writing a hypothetical factor for the
+				// second case would also write one for the first, and it would be
+				// a multiplier beside an rrf_score of 0.
 				t.RowProject = v.ProjectID
 				t.ProjectMatch = p.ProjectID == "" || v.ProjectID == p.ProjectID
 			}

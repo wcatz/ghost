@@ -327,12 +327,12 @@ Which stage records what:
 
 | Stage | Records |
 |---|---|
-| `fuseCandidatePool` | each leg's 0-based rank, the vector cosine, the fused base |
-| `demoteStatus` | the status factor, and the score on both sides of its multiplication |
+| `fuseCandidatePool` | each leg's 0-based rank, and the vector cosine |
+| `demoteStatus` | the fused base and the status factor — the two sides of the one multiplication, so a reader can perform it |
 | `scopeEligiblePool` | the scope verdict, for the dropped candidates as well as the survivors |
 | `selectWindow` | the keyword reservation, naming both the promoted row and the row whose slot it took |
 | `decayRank` | the decay factor, the age, and the clock it was measured against |
-| `searchHybridLegs` | the vector floor's verdict, for a candidate fusion never scored |
+| `searchHybridLegs` | the vector floor's verdict: per-candidate, which vector contribution it cut, plus the leg-level fact that the floor let no match through at all |
 | `supersedeVerdicts` / `nearDuplicateVerdicts` | the penalty count and the id of the memory that decided it |
 
 Recording the scope verdict inside `scopeEligiblePool` — for the rows it drops as
@@ -348,9 +348,13 @@ contradicting the order it is explaining.
 
 ### Signals the ranking does not apply
 
-Four fields report a signal the search ranking does not act on: `confidence`,
-`provenance_weight`, `validity_state` and the three contributions beside them. The
-contributions are 0 and the weight is `"off"`, and one note per payload says so.
+Four fields report a contribution the search ranking does not act on:
+`confidence_contribution`, `provenance_contribution` and `validity_penalty` are
+`0`, and `provenance_weight` is `"off"` — a multiplier that does not exist
+reported as `1.0` would read as "weighed and found neutral". Beside them,
+`confidence`, `provenance` and `validity_state` report the row's own stored
+values, which is a different thing: those are readable, not applied. One note per
+payload says which is which.
 
 That is a deliberate choice, not a gap. A multiplier that does not exist reported
 as `1.0` reads as "provenance was weighed and found neutral", and a contribution
@@ -369,7 +373,9 @@ the #571 class of bug one layer up.
 
 ### Size budget
 
-An explanation is bounded at 150 rows (`explainMaxRows`). The candidate set is the
+An explanation is bounded at 150 CANDIDATE rows (`explainMaxRows`) — the answer is
+not part of the budget, because a caller that asked for a window needs it back. The
+candidate set is the
 union of both legs' results, so it grows with the caller's limit rather than with
 the corpus — each leg fetches `limit*2` — while the window itself is capped at 100
 by the tool, which is what makes a fixed row budget possible at all.

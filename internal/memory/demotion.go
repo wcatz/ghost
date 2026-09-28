@@ -208,14 +208,13 @@ func demoteStatus(pool []*hybridCandidate, p SearchParams) {
 	for _, c := range pool {
 		factor := statusDemotionFactor(c.resolved, c.projectID, p.ProjectID)
 		if t := p.trace.row(c.id); t != nil {
-			// Recorded on both sides of the multiplication: Base is what the
-			// legs contributed, Score is what the window was cut on. Reporting
-			// only the demoted number would make an explanation unable to show
-			// what the demotion cost, and reporting only the base would hide
-			// the number that decided membership.
+			// The base the legs contributed, with the factor applied to it. The
+			// product is not recorded: it is exactly Base × StatusFactor, and the
+			// payload note tells a reader to perform that multiplication. Two
+			// copies of one product is one more thing that can disagree with its
+			// own factors.
 			t.Base = c.score
 			t.StatusFactor = factor
-			t.Score = c.score * factor
 			t.RowProject = c.projectID
 			// A cross-project search has no bucket of its own, so every row
 			// matches it by definition — the same rule BucketUnexpected states

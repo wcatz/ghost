@@ -37,6 +37,28 @@ type searchTrace struct {
 	// ranking path never scored it — the vector floor removed it first, which
 	// is a recorded outcome, not a missing one.
 	rows map[string]*tracedCandidate
+	// vectorFloor is the vector leg's own verdict, recorded where the floor is
+	// applied. It is a fact about the LEG rather than about any row, so it has
+	// no per-row home: explain would otherwise call filterVectorFloor a second
+	// time on the same input to learn whether the leg survived at all, which is
+	// the one remaining parallel computation in the file.
+	vectorFloor floorVerdict
+}
+
+// floorVerdict is what the vector similarity floor decided, as the site that
+// applied it recorded it.
+type floorVerdict struct {
+	// explainOnly is the payload-level outcome: the floor let NO vector match
+	// through, so fusion ran on the unweighted keyword base and rrf_score
+	// reports that rather than a weighted sum.
+	explainOnly bool
+	// applied is the threshold the ranking used, as opposed to the one the
+	// caller configured. A stage that adjusts the effective floor must record
+	// the adjusted value here or the payload describes a floor nobody applied.
+	applied float32
+	// dropped counts the candidates the floor removed. Per-row reasons travel
+	// on tracedCandidate; this is the shape of the cut, for the note.
+	dropped int
 }
 
 // tracedCandidate is one candidate's standing as the ranking path left it.
@@ -49,9 +71,11 @@ type tracedCandidate struct {
 	// not score the row.
 	VectorScore float64
 	// Base is the fused score before status demotion: the RRF sum of the two
-	// legs' weighted rank terms. Score is Base after the status factor, which is
-	// the number window selection actually cut on.
-	Base, Score float64
+	// legs' weighted rank terms. The post-demotion score is deliberately not
+	// recorded — it is exactly Base × StatusFactor, the multiplication the
+	// payload note tells a reader to perform, and a second copy of a product is
+	// a second thing that can drift from its factors.
+	Base float64
 	// StatusFactor is the multiplicative resolved / project-scoped-_global
 	// demotion the fusion applied to Base. 1.0 means it applied none.
 	StatusFactor float64
@@ -77,8 +101,14 @@ type tracedCandidate struct {
 	TookSlotFrom    string
 	// DisplacedBy names the reserved row that took this row's window slot.
 	DisplacedBy string
-	// FloorDropped says the vector similarity floor removed the row before
-	// fusion ever scored it, and FloorScore is the cosine that did it.
+	// FloorDropped says the vector similarity floor removed this candidate's
+	// VECTOR CONTRIBUTION, and FloorScore is the cosine that did it.
+	//
+	// The stamp iterates the RAW vector leg, so it fires for every candidate the
+	// floor cut out of it — including one the keyword leg also retrieved, which
+	// goes on to be scored on its keyword term alone. The boolean is therefore
+	// about the vector leg, not about the row leaving the pool; FTSRank is what
+	// distinguishes the two cases.
 	FloorDropped bool
 	FloorScore   float64
 	// Decay and AgeDays are recorded for the rows decayRank ordered by. A row
@@ -149,20 +179,33 @@ func (tr *searchTrace) lookup(id string) (*tracedCandidate, bool) {
 // beside it, never silently.
 func clampScopeKeys(keys []string) []string {
 	const maxScopeKeys = 16
-	if len(keys) <= maxScopeKeys {
-		return keys
-	}
-	return keys[:maxScopeKeys]
+	// The copy is for the same reason clampAttribution makes one: the caller's
+	// slice is the searchTrace's own, so every row in the payload would otherwise
+	// share one backing array.
+	n := min(len(keys), maxScopeKeys)
+	out := make([]string, n)
+	copy(out, keys[:n])
+	return out
 }
 
 // clampAttribution bounds how many counterpart ids one row may name. A
 // near-duplicate cluster in a large store can name hundreds, and a supersede
 // chain a dozen; the count beside the list already says how many there are, so
 // cutting the rendered list loses no fact.
+//
+// The short cases return a COPY, not the trace's own slice. Every row in a
+// payload otherwise shares one backing array with the next — and, for the
+// attribution lists, with the trace itself — so a caller that sorted or appended
+// to one row's keys in place would silently rewrite every other row's. Copying
+// costs one small allocation per row on a diagnostic path and removes a class of
+// bug that no assertion on the values can catch.
 func clampAttribution(ids []string) []string {
 	const maxAttributed = 8
-	if len(ids) <= maxAttributed {
-		return ids
+	if len(ids) == 0 {
+		return nil
 	}
-	return ids[:maxAttributed]
+	n := min(len(ids), maxAttributed)
+	out := make([]string, n)
+	copy(out, ids[:n])
+	return out
 }
