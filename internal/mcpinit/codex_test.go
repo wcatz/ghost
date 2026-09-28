@@ -917,6 +917,104 @@ func TestRunCodex_TOMLRepairSurvivesMultilineString(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLRepairSurvivesAnUnterminatedMultilineString is the other
+// half of the multi-line case, and the one the first fix got wrong. Honouring a
+// multi-line string means a header inside it is content — but an opener that is
+// never closed would then hold the value open for every remaining line, so the
+// malformation rule could never fire again and every table below the typo would
+// be invisible to all three scanners. A [mcp_servers.ghost] table below the typo
+// would then read as absent, and init would append a SECOND copy of it.
+//
+// The ghost table is above the typo as well as below in the sub-cases, because
+// the same swallowing widens a span past the next header and drops that
+// server's keys — the other half of what the rule prevents.
+func TestRunCodex_TOMLRepairSurvivesAnUnterminatedMultilineString(t *testing.T) {
+	t.Run("ghost table below the typo", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+		seed := "# a user's own table\n" +
+			"[unrelated]\n" +
+			"description = '''\n" +
+			"a string the author never closed\n" +
+			"\n" +
+			"[mcp_servers.ghost]\n" +
+			"command = '/old/install/ghost'\n" +
+			"args = [\"mcp\", \"--stale\"]\n"
+		want := "# a user's own table\n" +
+			"[unrelated]\n" +
+			"description = '''\n" +
+			"a string the author never closed\n" +
+			"\n" +
+			codexMCPServerComment + "\n" +
+			"[mcp_servers.ghost]\n" +
+			"command = " + codexTOMLString(ghostBin) + "\n" +
+			"args = [\"mcp\"]\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := countCodexGhostHeaders(string(got)); n != 1 {
+			t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+		}
+		if string(got) != want {
+			t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+		}
+	})
+
+	t.Run("the next server's keys survive the ghost table above the typo", func(t *testing.T) {
+		home, _ := setupCodexTestEnv(t)
+		ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+		seed := "[mcp_servers.ghost]\n" +
+			"command = '/old/install/ghost'\n" +
+			"description = '''\n" +
+			"never closed\n" +
+			"\n" +
+			"[mcp_servers.other]\n" +
+			"command = \"/usr/bin/other\"\n" +
+			"args = [\"serve\"]\n"
+
+		if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		var out bytes.Buffer
+		if err := RunCodex(&out, false); err != nil {
+			t.Fatalf("RunCodex: %v", err)
+		}
+		got, err := os.ReadFile(codexConfigToml(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := countCodexGhostHeaders(string(got)); n != 1 {
+			t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+		}
+		if !strings.Contains(string(got), `command = "/usr/bin/other"`) {
+			t.Errorf("the neighbouring server's key was swept into the ghost table's span:\n%s", got)
+		}
+		if !strings.Contains(string(got), `args = ["serve"]`) {
+			t.Errorf("the neighbouring server's args were dropped:\n%s", got)
+		}
+		_ = ghostBin
+	})
+}
+
 // TestRunCodex_TOMLRepairKeepsCRLF pins that a repair does not leave a CRLF
 // config.toml with mixed line endings. The file is split on "\n", so every
 // preserved line keeps its "\r" while ghost's own key lines carry none — and a
@@ -968,6 +1066,55 @@ func TestRunCodex_TOMLRepairKeepsCRLF(t *testing.T) {
 	}
 	if n := bytes.Count(got, []byte("\n")); n != bytes.Count(got, []byte("\r\n")) {
 		t.Errorf("%d newlines but %d CRLFs, so the repair mixed endings:\n%q", n, bytes.Count(got, []byte("\r\n")), got)
+	}
+}
+
+// TestRunCodex_TOMLRepairNormalisesAMixedEndingFile pins what the repair does to
+// a config.toml that already carries both endings. The answer is that the whole
+// file becomes CRLF, because the join can only be one ending and the file's own
+// majority already says which. Pinned because the alternative reading — a mixed
+// file keeps its mix — is what the code was originally described as doing, and
+// it is not what it does: the CRs are stripped from every line and one ending is
+// joined back.
+func TestRunCodex_TOMLRepairNormalisesAMixedEndingFile(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	// Three CRLF lines and two bare-LF ones.
+	seed := "[mcp_servers.ghost]\r\n" +
+		"command = '/old/install/ghost'\r\n" +
+		"args = [\"mcp\", \"--stale\"]\n" +
+		"\r\n" +
+		"[mcp_servers.other]\n" +
+		"command = \"/usr/bin/other\"\n"
+	want := codexMCPServerComment + "\r\n" +
+		"[mcp_servers.ghost]\r\n" +
+		"command = " + codexTOMLString(ghostBin) + "\r\n" +
+		"args = [\"mcp\"]\r\n" +
+		"\r\n" +
+		"[mcp_servers.other]\r\n" +
+		"command = \"/usr/bin/other\"\r\n"
+
+	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	got, err := os.ReadFile(codexConfigToml(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+	if n, crlf := bytes.Count(got, []byte("\n")), bytes.Count(got, []byte("\r\n")); n != crlf {
+		t.Errorf("%d newlines but %d CRLFs, so the file is still mixed:\n%q", n, crlf, got)
 	}
 }
 

@@ -232,41 +232,69 @@ func codexValueComplete(value string) bool {
 	return complete
 }
 
-// codexInsideMultilineString reports whether value ends inside a TOML
-// multi-line string — one opened by three single quotes or three double quotes
-// — that has not been closed yet. It is the other half of codexScanValue, and
-// it is what separates a value that is open because it is MALFORMED from one
-// that is open because a multi-line string is still running. A malformed value
-// may be ended by the next table header — that header is the best available
-// evidence the value stopped — but a bracketed line inside a multi-line string
-// is content, and reading it as a header ends the ghost table's span early, so
-// the repair writes ghost's own `args` beside the user's and codex rejects the
-// file.
-func codexInsideMultilineString(value string) bool {
-	_, inside := codexScanValue(value)
-	return inside
+// codexMultilineStillOpen reports whether value ends inside a TOML multi-line
+// string — one opened by three single quotes or three double quotes — that
+// lines[i:] can still CLOSE.
+//
+// The closing clause is the whole content, and it is not optional. A header
+// line is allowed to end an open value only when that value is malformed,
+// because treating it as yet another line of the value hides every table below
+// the typo from all three scanners: the ghost table itself can become invisible,
+// so init appends a second copy of a table already in the file, or a
+// neighbouring server's keys get swept into the ghost span and dropped. A
+// multi-line string is NOT malformed — it runs to a later line by design — so a
+// bracketed line inside it is content and must not close it, or the repair
+// writes ghost's own `args` beside the user's and codex rejects the file.
+//
+// An opener with no closer anywhere in rest is the case that reconciles the
+// two, and it is decided the other way. codexScanValue cannot tell "a string
+// that will close" from "a typo that never will" at the point the rule is being
+// applied, so the question is put to the rest of the file instead: if the
+// delimiter it is waiting for is not on this line or any later one, the string
+// never closes, the value is malformed after all, and the next header ends it —
+// which is the pre-existing rule, restored for the only shape that earns it.
+func codexMultilineStillOpen(value string, rest []string) bool {
+	delim := codexOpenMultilineDelimiter(value)
+	if delim == "" {
+		return false
+	}
+	for _, line := range rest {
+		if strings.Contains(line, delim) {
+			return true
+		}
+	}
+	return false
 }
 
-// codexScanValue walks value once for brackets, strings and comments and
-// reports whether the value is finished and whether the walk stopped inside a
-// string. A value that ends inside a string is unfinished AND well formed, which
-// is the distinction codexInsideMultilineString exists to draw; every other
+// codexOpenMultilineDelimiter returns the triple-quote delimiter value is
+// waiting to close, or "" when value is not inside one. It is the second answer
+// of codexScanValue, read on its own because the delimiter is what the rest of
+// the file has to be searched for.
+func codexOpenMultilineDelimiter(value string) string {
+	_, delim := codexScanValue(value)
+	return delim
+}
+
+// codexScanValue walks value once for brackets, strings and comments and reports
+// whether the value is finished and which triple-quote delimiter it is waiting
+// for, if any. A value that ends inside one is unfinished AND well formed, which
+// is the distinction codexMultilineStillOpen exists to draw; every other
 // unfinished value is malformed.
-func codexScanValue(value string) (complete, insideString bool) {
+func codexScanValue(value string) (complete bool, openDelim string) {
 	depth := 0
 	for i := 0; i < len(value); i++ {
 		switch c := value[i]; c {
 		case '#':
 			if depth == 0 {
-				return true, false // the rest of the line is a comment, not a value
+				return true, "" // the rest of the line is a comment, not a value
 			}
 			for i < len(value) && value[i] != '\n' {
 				i++ // skip the comment, keeping any bracket depth
 			}
 		case '\'', '"':
-			end, open := codexStringEndOpen(value, i)
+			end, open, delim := codexStringEndOpen(value, i)
 			if open {
-				return false, true
+				return false, delim
 			}
 			i = end
 		case '[', '{':
@@ -274,11 +302,11 @@ func codexScanValue(value string) (complete, insideString bool) {
 		case ']', '}':
 			depth--
 			if depth < 0 {
-				return true, false // malformed; treat as self-contained
+				return true, "" // malformed; treat as self-contained
 			}
 		}
 	}
-	return depth == 0, false
+	return depth == 0, ""
 }
 
 // codexStringEnd returns the index of the quote closing the string that opens at
@@ -291,12 +319,13 @@ func codexScanValue(value string) (complete, insideString bool) {
 // they get the last index and carry on; codexScanValue is the one caller that
 // needs the other answer and asks for it through codexStringEndOpen.
 func codexStringEnd(value string, i int) int {
-	end, _ := codexStringEndOpen(value, i)
+	end, _, _ := codexStringEndOpen(value, i)
 	return end
 }
 
 // codexStringEndOpen returns the index of the quote closing the string that opens
-// at i, and whether the string is still open where value ends.
+// at i, whether the string is still open where value ends, and the triple-quote
+// delimiter it is waiting for when it is.
 //
 // A triple-quote delimiter (three single quotes, or three double quotes) is a
 // multi-line string in its own right: it runs until its own three quotes, across
@@ -306,9 +335,14 @@ func codexStringEnd(value string, i int) int {
 // unterminated one is not reported as open: the two are different TOML, and
 // reading a multi-line opener as an empty one-line string is what let a header
 // inside the string end the ghost table's span.
-func codexStringEndOpen(value string, i int) (end int, open bool) {
+//
+// The delimiter is returned so the caller can ask whether the string can still
+// close; being still-open is not by itself a licence to ignore a table header,
+// and see codexMultilineStillOpen.
+func codexStringEndOpen(value string, i int) (end int, open bool, delim string) {
 	quote := value[i]
 	if i+3 <= len(value) && value[i+1] == quote && value[i+2] == quote {
+		triple := value[i : i+3]
 		for j := i + 3; j+3 <= len(value); j++ {
 			if value[j] != quote {
 				continue
@@ -317,22 +351,22 @@ func codexStringEndOpen(value string, i int) (end int, open bool) {
 				continue // a backslash escapes the next byte inside """
 			}
 			if value[j] == quote && value[j+1] == quote && value[j+2] == quote {
-				return j + 2, false
+				return j + 2, false, ""
 			}
 		}
-		return len(value) - 1, true
+		return len(value) - 1, true, triple
 	}
 	for i++; i < len(value); i++ {
 		switch value[i] {
 		case quote:
-			return i, false
+			return i, false, ""
 		case '\\':
 			if quote == '"' {
 				i++ // the escaped byte cannot close the string
 			}
 		}
 	}
-	return len(value) - 1, false
+	return len(value) - 1, false, ""
 }
 
 // codexStripComment returns line with any "#" comment removed. A "#" inside a
@@ -432,13 +466,21 @@ func codexTableName(line string) string {
 // later line by design, so a bracketed line there is string content; letting it
 // close the value ends the ghost table's span in the middle of the user's own
 // text, and the repair then inserts a second `args` beside the first, which is
-// invalid TOML. codexInsideMultilineString is the test, and it is why the
-// malformation rule cannot be stated as "any header ends any open value".
+// invalid TOML.
+//
+// codexMultilineStillOpen is the test, and it carries the "that can still
+// close" clause on purpose. An opener with no closer anywhere in the file would
+// otherwise hold the value open for every remaining line, so the malformation
+// rule could never fire again and every table below the typo would be
+// invisible — the exact failure the rule exists to prevent, reached through the
+// fix for it. So the bypass is available only while the delimiter is still
+// somewhere ahead; once it is not, this is a malformed value and the next
+// header ends it, as it always did.
 func codexValueContinuationLines(lines []string) map[int]bool {
 	continuation := make(map[int]bool)
 	value, open := "", false
 	for i, line := range lines {
-		if open && (codexInsideMultilineString(value) || !codexHeaderClosesValue(line)) {
+		if open && (codexMultilineStillOpen(value, lines[i:]) || !codexHeaderClosesValue(line)) {
 			continuation[i] = true
 			value += "\n" + line
 			if codexValueComplete(value) {
@@ -1081,8 +1123,15 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	// not while the CRs were part of the compared text — so a CRLF config was
 	// rewritten on every single run.
 	//
-	// A file with no CRLF anywhere, or one carrying both, joins on "\n" and
-	// keeps whatever the split found, which is what it did before.
+	// ANY CRLF in the file makes the whole file CRLF, and a file that already
+	// carries both endings is NORMALISED rather than preserved. That is a
+	// decision, not an accident of the test: a mixed file is one an editor
+	// already rewrote once, and there is no way to join it back together without
+	// picking an ending for the lines ghost owns. Picking the one the majority
+	// of the file already uses is the choice that leaves the user's own bytes
+	// closest to what they had, and it means the file stops being mixed — which
+	// is strictly better than it was, and better than a repair that keeps adding
+	// to the mix. A file with no CRLF at all is left entirely alone, as before.
 	eol := "\n"
 	crlf := bytes.Contains(existing, []byte("\r\n"))
 	if crlf {

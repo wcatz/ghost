@@ -443,7 +443,22 @@ func TestMultiProcessSharedDatabase(t *testing.T) {
 		// the join entirely — which is the path the reaper exists for. A
 		// cleanup runs on every exit, and this one was registered after the
 		// temp dir's, so it runs BEFORE the directory is removed.
-		t.Cleanup(func() { <-reaper })
+		//
+		// Bounded, because that same Fatalf is the case where joining is least
+		// safe: the child the reaper is waiting on is the one that hung, so an
+		// unbounded wait would replace a 60-second failure with a hang until
+		// the package's own go test timeout, and the temp dir would never be
+		// removed. The reaper has one job — write the stop barrier so the load
+		// cannot outlive the process meant to release it — and it does that the
+		// moment the process is gone, so a wait that expires says the process
+		// never went away, which is the fact the failure is about.
+		t.Cleanup(func() {
+			select {
+			case <-reaper:
+			case <-time.After(30 * time.Second):
+				t.Log("the rotation backstop did not finish: the maintenance process never exited")
+			}
+		})
 	} else {
 		// No maintenance process is coming to end the load, so end it here.
 		writeBarrier(t, paths.barrier, "stop")

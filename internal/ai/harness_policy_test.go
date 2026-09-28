@@ -434,6 +434,48 @@ func TestGooseIsolationNamesTheDirectoryItCouldNotProbe(t *testing.T) {
 	}
 }
 
+// TestGooseIsolationCarriesASymlinkedConfigRoot is the other half of the
+// not-a-directory check, and the reason that check has to exclude symlinks.
+// The leaf probe is Lstat, so a link to a real directory reports IsDir false —
+// and ~/.config/goose symlinked into a dotfiles repository is an ordinary setup,
+// the one the Lstat leaf probe exists so the link can be CARRIED rather than
+// followed. A check that refuses on IsDir alone breaks every reflect, resolve
+// and supersede classification through the goose harness on those machines, and
+// calls a working directory broken.
+func TestGooseIsolationCarriesASymlinkedConfigRoot(t *testing.T) {
+	home := t.TempDir()
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "config.yaml"), []byte("mode: smart\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("this host cannot create a symlink: %v", err)
+	}
+
+	// No XDG_CONFIG_HOME, so the first candidate root is the one under test.
+	isolated := t.TempDir()
+	if err := linkGooseConfigDirs(isolated, []string{"HOME=" + home}, home); err != nil {
+		t.Fatalf("a symlinked ~/.config/goose was refused: %v", err)
+	}
+	// Carried as itself, so the isolated copy resolves to the user's directory
+	// rather than to a copy that can drift from it.
+	carried := filepath.Join(isolated, ".config", "goose")
+	got, err := os.ReadFile(filepath.Join(carried, "config.yaml"))
+	if err != nil {
+		t.Fatalf("the symlinked config root was not carried into the isolated home: %v", err)
+	}
+	if string(got) != "mode: smart\n" {
+		t.Errorf("carried config.yaml = %q, want the user's own file", got)
+	}
+	if resolved, err := filepath.EvalSymlinks(carried); err != nil || resolved != real {
+		t.Errorf("the carried path resolves to %q (err %v), want the user's own %q", resolved, err, real)
+	}
+}
+
 // TestGooseIsolationRefusesAConfigRootThatIsAFile: the leaf probe succeeded, so
 // nothing asked whether what it found was a directory. A plain file at
 // ~/.config/goose was then carried into the isolated home as itself and the

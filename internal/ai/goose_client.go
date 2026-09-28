@@ -337,10 +337,9 @@ func firstExistingAncestor(path, stop string, probe func(string) (os.FileInfo, e
 // linkGooseConfigDirsWith takes two probes because the leaf and the walk need
 // different ones, and that difference is the point rather than an accident. The
 // leaf is probed WITHOUT following symlinks, so a symlinked config directory is
-// not followed to somewhere else; it is reported as not-a-directory, which
-// routes it to the copy fallback and leaves the link where the user put it. The
-// walk resolves symlinks, so a symlinked home or ~/.config is seen as the
-// directory it is.
+// not followed to somewhere else: the link itself is carried, and the user keeps
+// the link they arranged. The walk resolves symlinks, so a symlinked home or
+// ~/.config is seen as the directory it is.
 func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProbe, walkProbe func(string) (os.FileInfo, error)) error {
 	if harnessEnvValue(env, "XDG_CONFIG_HOME") != "" {
 		// An absolute path the child reads directly; HOME plays no part.
@@ -377,8 +376,9 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProb
 			// Treating a symlink as the fault instead would fail every goose
 			// call on those machines — and name a perfectly good directory as
 			// broken. The leaf probe above stays Lstat, so a symlinked config
-			// DIRECTORY is carried as itself rather than followed; see the
-			// not-a-directory branch below for what that costs.
+			// DIRECTORY is carried as itself rather than followed; the
+			// not-a-directory branch below is written to refuse only a genuine
+			// non-directory for the same reason.
 			ancestor, info, ancestorErr := firstExistingAncestor(source, homeDir, walkProbe)
 			switch {
 			case ancestorErr != nil:
@@ -392,7 +392,7 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProb
 				return fmt.Errorf("goose isolated config %s: %s is not a directory", source, ancestor)
 			}
 			continue
-		} else if !info.IsDir() {
+		} else if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 			// The probe ANSWERED, so nothing below would ever ask whether what
 			// it found was a directory. A plain file at the config root is then
 			// carried into the isolated home as itself and the call reports
@@ -407,13 +407,19 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProb
 			// not a directory is a root nobody can read, and continuing on the
 			// others would finish the loop on partial information.
 			//
-			// The leaf probe is Lstat, so a symlink to a real directory is
-			// refused here as not being one. That is the cost of probing the
-			// leaf without following links, and it is the setup the copy
-			// fallback exists for — refusing is what routes such a root to the
-			// copy rather than to a link, since carrying the link itself is
-			// exactly what the Lstat leaf probe is for. A symlinked $HOME or
-			// ~/.config one level up is unaffected: the walk resolves those.
+			// A SYMLINK is not refused, and the exclusion is the point of the
+			// clause. The leaf probe is Lstat, so a link to a real directory
+			// reports IsDir false — and ~/.config/goose symlinked into a dotfiles
+			// repository is an ordinary setup, the very one the Lstat leaf probe
+			// exists so the link can be CARRIED rather than followed. Refusing it
+			// would fail every reflect, resolve and supersede classification
+			// through the goose harness on those machines, and would name a
+			// working directory as broken. So a link falls through to
+			// carryGooseConfigDir, which links the isolated copy at the source:
+			// the child resolves the chain and the user keeps their link, which
+			// is how this behaved before the check existed. A link is also NOT
+			// routed to the copy fallback — that one is reached only after
+			// os.Symlink fails, and nothing here fails.
 			return fmt.Errorf("goose isolated config %s: %s is not a directory", source, source)
 		}
 		// After the probe, so the isolated home does not gain a
