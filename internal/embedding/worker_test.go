@@ -27,12 +27,12 @@ import (
 // last is what a busy machine looks like, so `Inconclusive` has to be the answer
 // for it — a false Unreachable is a caller told to skip work it could do.
 func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
-	// The wedge below is only reached by a probe that runs out of time, so the
-	// deadline is shortened (wedgedEndpoint's reasoning) rather than sat out.
-	prev := aliveProbeTimeout
-	aliveProbeTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { aliveProbeTimeout = prev })
-
+	// The two ANSWERED cases run first, on the shipped deadline, so nothing here
+	// can turn a probe that should have succeeded into a flake on a loaded
+	// machine. Only the wedge needs the budget lowered, and it is lowered just
+	// for it (see shortProbeDeadline for why the value is not as small as it
+	// could be).
+	//
 	// Refused: nothing is listening. localhost:0 is the same shape the
 	// unreachable-client tests use above, and it fails at connect rather than
 	// waiting, so the probe's own deadline is not what ends it.
@@ -56,7 +56,8 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 		t.Errorf("Probe at a 200 = %v, want Reachable", got)
 	}
 
-	// The wedge. Released when the probe's own deadline has passed, so the test
+	// The wedge, now that every answered case has been checked on the shipped
+	// deadline. Released when the probe's own deadline has passed, so the test
 	// costs one probe and not the client's 30s embed timeout.
 	release := make(chan struct{})
 	wedged := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +65,11 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 	}))
 	defer wedged.Close()
 	defer close(release)
+	restore := setProbeDeadline(t, wedgeProbeDeadline)
 	if got := NewClient(wedged.URL, "m", 3).Probe(context.Background()); got != Inconclusive {
 		t.Errorf("Probe at an endpoint that misses the deadline = %v, want Inconclusive", got)
 	}
+	restore()
 
 	// And Alive, the two-valued form the diagnostic callers keep, reads a stall
 	// as not-reachable — the conservative direction, since a health line that
@@ -77,6 +80,41 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 	}
 }
 
+// setProbeDeadline sets aliveProbeTimeout and returns a function restoring the
+// value it replaced (the shipped 2s, in any test that has not already lowered
+// it). Pass the returned function to t.Cleanup when the whole test runs at one
+// budget; call it directly, or call setProbeDeadline again, when a test walks
+// its probes through more than one kind of endpoint — restoring the shipped 2s
+// and calling that "short" is how a later wedge step quietly costs fourteen
+// seconds instead of twenty milliseconds.
+//
+// aliveProbeTimeout is package-global, so the value applies to EVERY probe in the
+// test, including the ones meant to ANSWER. That makes the choice a property of
+// the test rather than a matter of taste:
+//
+//   - wedgeProbeDeadline, for a step where the probe is supposed to miss. Cheap,
+//     because nothing in that step can pass or fail on a probe that should have
+//     answered.
+//   - answeringProbeDeadline, for a step that needs the probe to SUCCEED.
+//     Deliberately loose: a tight budget turns a loaded machine into a failed
+//     probe, which is the same false-outage misreading this change removes in
+//     production, reappearing in the harness as a flake instead of a bug. 500ms
+//     is ~100x a loopback round trip and 4x under the shipped 2s (a value this
+//     repository itself documents as routinely missed under load), so the suite
+//     stays seconds rather than minutes.
+func setProbeDeadline(t *testing.T, d time.Duration) (restore func()) {
+	t.Helper()
+	prev := aliveProbeTimeout
+	aliveProbeTimeout = d
+	return func() { aliveProbeTimeout = prev }
+}
+
+// wedgeProbeDeadline is for a step whose probe is meant to miss.
+const wedgeProbeDeadline = 20 * time.Millisecond
+
+// answeringProbeDeadline is for a step whose probe must arrive.
+const answeringProbeDeadline = 500 * time.Millisecond
+
 // wedgedEndpoint is an endpoint that accepts the connection and never answers,
 // which is what a hung Ollama and a firewall-dropped remote URL both look like.
 // Released when the test ends, so a probe that gives up on its own deadline does
@@ -85,14 +123,6 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 // request context).
 func wedgedEndpoint(t *testing.T) *httptest.Server {
 	t.Helper()
-	// The wedge is only ever REACHED by a probe that runs out of time, so this
-	// test's whole subject is the probe's own deadline — the shipped two seconds
-	// would make it a two-second test per sweep for no extra signal. The value is
-	// still an order of magnitude above a local round trip, so a probe that CAN
-	// answer still does.
-	prev := aliveProbeTimeout
-	aliveProbeTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { aliveProbeTimeout = prev })
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Only the LIVENESS PROBE wedges. /api/embed is refused immediately, so
@@ -127,6 +157,7 @@ func wedgedEndpoint(t *testing.T) *httptest.Server {
 // timestamp.
 func TestCheckAlive_StampsTheMarkerOnARepeatedlyInconclusiveProbe(t *testing.T) {
 	srv := wedgedEndpoint(t)
+	t.Cleanup(setProbeDeadline(t, wedgeProbeDeadline))
 	dataDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	// No unembedded memories, so each sweep costs one probe and nothing else —
@@ -182,6 +213,7 @@ func TestCheckAlive_StampsTheMarkerOnARepeatedlyInconclusiveProbe(t *testing.T) 
 // interval.
 func TestSweepOnce_OneTickDoesNotStampTheMarker(t *testing.T) {
 	srv := wedgedEndpoint(t)
+	t.Cleanup(setProbeDeadline(t, wedgeProbeDeadline))
 	dataDir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	store := newMockStore()
@@ -208,6 +240,7 @@ func TestSweepOnce_OneTickDoesNotStampTheMarker(t *testing.T) {
 // written once and left).
 func TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive(t *testing.T) {
 	srv := wedgedEndpoint(t)
+	t.Cleanup(setProbeDeadline(t, wedgeProbeDeadline))
 
 	// A real outage already on record. A stall must not clear it: the endpoint
 	// has not been shown to be back.
@@ -259,16 +292,27 @@ func TestCheckAlive_ForgetsInconclusiveStreakOnAnAnsweredProbe(t *testing.T) {
 	}
 	worker := NewWorker(NewClient(wedge.URL, "nomic-embed-text", 3), store, logger, time.Minute, dataDir)
 
+	setProbeDeadline(t, wedgeProbeDeadline)
 	for range inconclusiveStampsAfter - 1 {
 		worker.SweepOnce(context.Background())
 	}
-	// The endpoint comes back: the count is spent.
+	// The endpoint comes back, and from here the probe runs on the loose budget.
+	// This sweep has to be read as Reachable and the whole test turns on it: a
+	// wedge-sized budget applied to a probe meant to answer is a flake waiting
+	// for a busy machine, which is the misreading this change removes in
+	// production reintroduced in the harness.
+	setProbeDeadline(t, answeringProbeDeadline)
 	worker.client = NewClient(ok.URL, "nomic-embed-text", 3)
 	worker.SweepOnce(context.Background())
 	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
 		t.Fatalf("the marker survived an answered sweep: err=%v", err)
 	}
-	// And it goes back to not answering: this is a FIRST inconclusive again.
+	// And it goes back to not answering: this is a FIRST inconclusive again, and
+	// that is only true if the answered sweep above really spent the streak. The
+	// wedge budget is set AGAIN rather than the shipped value restored, because
+	// 2s here would make this one sweep cost 1 + len(projects) full deadlines —
+	// fourteen seconds to assert a marker is absent.
+	setProbeDeadline(t, wedgeProbeDeadline)
 	worker.client = NewClient(wedge.URL, "nomic-embed-text", 3)
 	worker.SweepOnce(context.Background())
 	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
@@ -821,10 +865,12 @@ func TestCheckAlive_DoesNotClobberExistingMarker(t *testing.T) {
 // own sweep stands in the same place, so a stall takes out both writers.
 func TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer(t *testing.T) {
 	// The probe's deadline is the subject, so it is shortened rather than sat
-	// out (the reasoning is wedgedEndpoint's).
-	prev := aliveProbeTimeout
-	aliveProbeTimeout = 20 * time.Millisecond
-	t.Cleanup(func() { aliveProbeTimeout = prev })
+	// out — see shortProbeDeadline for the value and why it is not smaller. Every
+	// probe in this test is against the wedge except the embed itself, and that
+	// one has the client's own 30s budget, so nothing here is narrowed to 500ms
+	// that is meant to answer.
+	restore := setProbeDeadline(t, wedgeProbeDeadline)
+	t.Cleanup(restore)
 
 	// The release channel rather than r.Context(), for the reason
 	// TestEmbedSupersedeCorpusStopsAtItsBudget gives: a handler that never reads
