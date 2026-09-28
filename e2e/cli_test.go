@@ -565,9 +565,14 @@ func TestCLISurface(t *testing.T) {
 		// The flag that matters differs per command, and each parser treats an
 		// unknown one as an error: silently ignoring --aply would write the
 		// default file and leave the user believing it went where they asked.
+		// The would-be targets live in this test's own temp dir, never a shared
+		// /tmp path, so a leftover file cannot fail the assertion below.
+		scratch := t.TempDir()
+		backupTarget := filepath.Join(scratch, "should-not-be-written.db")
+		exportTarget := filepath.Join(scratch, "should-not-be-written.jsonl")
 		for _, args := range [][]string{
-			{"backup", "--ou", "/tmp/should-not-be-written.db"},
-			{"export", "--outt", "/tmp/should-not-be-written.jsonl"},
+			{"backup", "--ou", backupTarget},
+			{"export", "--outt", exportTarget},
 			{"history", id, "--limitt", "2"},
 			{"obsidian", "export", "--ou", filepath.Join(s.t.TempDir(), "vault")},
 		} {
@@ -575,8 +580,8 @@ func TestCLISurface(t *testing.T) {
 			mustMatch(t, "unknown flag for ghost "+strings.Join(args, " "), r.stderr, "(?i)unknown|needs a value")
 		}
 		// And nothing was written on the way out.
-		mustNotExist(t, "the mistyped backup target", "/tmp/should-not-be-written.db")
-		mustNotExist(t, "the mistyped export target", "/tmp/should-not-be-written.jsonl")
+		mustNotExist(t, "the mistyped backup target", backupTarget)
+		mustNotExist(t, "the mistyped export target", exportTarget)
 	})
 
 	_ = id

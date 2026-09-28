@@ -72,6 +72,13 @@ func newV16Store(t *testing.T, contents []string) *sandbox {
 	// store a v16 one; the DROP INDEX lines are there because a stale index over
 	// a dropped table would make the v17 step's CREATE INDEX a no-op on paper
 	// and leave the absence assertion below passing for the wrong reason.
+	// The MCP server that wrote the rows is still running (its session closes
+	// only at cleanup), and its background workers can hold the write lock. Close
+	// it first: the downgrade below writes the file directly, and a live server
+	// behind it made the fixture SQLITE_BUSY on a busy CI runner.
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close the fixture's MCP session: %v", err)
+	}
 	downgrade(s, t)
 
 	// Read the content back THROUGH the store, and check it is what was written.
@@ -109,7 +116,7 @@ func newV16Store(t *testing.T, contents []string) *sandbox {
 // with the schema instead of pinning one release.
 func downgrade(s *sandbox, t *testing.T) {
 	t.Helper()
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(s.dbPath()))
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(s.dbPath())+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		t.Fatalf("open the fixture write-write: %v", err)
 	}
@@ -326,7 +333,7 @@ func TestUpgradeRefusesANewerStore(t *testing.T) {
 	// build might have dropped — so a refusal that ran the DDL would leave
 	// evidence behind.
 	future := 9999
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(s.dbPath()))
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(s.dbPath())+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		t.Fatalf("open the store: %v", err)
 	}
