@@ -285,6 +285,72 @@ func TestExplainReportsValidityAndSaysNoPenaltyIsApplied(t *testing.T) {
 	}
 }
 
+// TestExplainProjectMatchDistinguishesASharedRow: a _global row is admitted by
+// the legs' project predicate, so it can be INSIDE a project-scoped answer — and
+// it must report project_match=false while saying which project it does belong
+// to. Reporting it as a match would hide the one fact that explains why a shared
+// row shows up in a project's results at all, and reporting it as excluded would
+// contradict the window it is sitting in.
+func TestExplainProjectMatchDistinguishesASharedRow(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	if err := store.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+	const needle = "the compaction schedule runs on the first sunday of each month"
+	live := createTestMemory(t, store, ctx, needle)
+	shared, err := store.Create(ctx, "_global", Memory{
+		Category: "fact", Content: needle, Source: "manual", Importance: 0.8, Tags: []string{"test"},
+	})
+	if err != nil {
+		t.Fatalf("Create(_global): %v", err)
+	}
+	for _, id := range []string{live, shared} {
+		if err := store.StoreEmbedding(ctx, id, []float32{0.8, 0.6}, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding(%s): %v", id, err)
+		}
+	}
+
+	ex, err := store.ExplainSearch(ctx, "test-proj", needle, []float32{0.8, 0.6}, 5)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	rows := explainRowByID(ex)
+	if !rows[shared].Included {
+		t.Fatalf("the shared row is not in the answer, so this fixture cannot test an admitted "+
+			"non-matching row: %+v", ex.Rows)
+	}
+	if rows[shared].ProjectMatch {
+		t.Errorf("an admitted _global row reports project_match=true in a project search: %+v", rows[shared])
+	}
+	if rows[shared].RowProject != "_global" {
+		t.Errorf("row_project = %q, want _global — the field that makes project_match checkable",
+			rows[shared].RowProject)
+	}
+	if rows[shared].StatusFactor != globalDemotionFactor {
+		t.Errorf("the shared row's status_factor = %v, want %v: that factor is what demotes it, and "+
+			"project_match=false without it would be a claim nothing acted on",
+			rows[shared].StatusFactor, globalDemotionFactor)
+	}
+	if !rows[live].ProjectMatch || rows[live].RowProject != "test-proj" {
+		t.Errorf("the project's own row reports project_match=%v row_project=%q, want true / test-proj",
+			rows[live].ProjectMatch, rows[live].RowProject)
+	}
+
+	// The same search with no project: nothing to match against, so every row
+	// matches — the rule BucketUnexpected states for the assembler, applied
+	// where the project is known.
+	cross, err := store.ExplainSearch(ctx, "", needle, []float32{0.8, 0.6}, 5)
+	if err != nil {
+		t.Fatalf("ExplainSearch(cross-project): %v", err)
+	}
+	for _, row := range cross.Rows {
+		if !row.ProjectMatch {
+			t.Errorf("a cross-project search reports row %s as project_match=false, but it expressed no "+
+				"project of its own for a row to fail to match", row.ID)
+		}
+	}
+}
+
 // TestExplainReportsConfidenceAndProvenanceAsNotApplied: both are readable
 // columns and neither is multiplied by anything. Reporting the column alone
 // would read as "this contributed 0.9 of score"; reporting a contribution would

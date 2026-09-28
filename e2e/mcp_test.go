@@ -1084,13 +1084,21 @@ func TestMCPLifecycles(t *testing.T) {
 				found = true
 			}
 			// The axes an agent reads to decide WHICH signal to trust have to be
-			// populated on every row, including the sentinels: an included row
-			// is by definition in the searched project and unopposed by scope,
-			// and a row that states no validity reads as unset rather than
-			// absent.
-			if r.Included && (!r.ProjectMatch || !r.ScopeMatched) {
-				t.Fatalf("row %s is in the answer but reports project_match=%v scope_matched=%v",
-					r.ID, r.ProjectMatch, r.ScopeMatched)
+			// populated on every row, including the sentinels. Two invariants, and
+			// only two: a row in the answer passed scope narrowing, so it is
+			// scope-matched; and a row in the answer belongs either to the searched
+			// project or to _global, which the legs admit by the shared-row
+			// predicate and status_factor then demotes — so project_match=false
+			// with row_project="_global" is a legitimate admitted row, NOT a
+			// contradiction.
+			if r.Included && !r.ScopeMatched {
+				t.Fatalf("row %s is in the answer but reports scope_matched=false, which is the "+
+					"verdict that decided membership", r.ID)
+			}
+			if r.Included && !r.ProjectMatch && r.RowProject != "_global" {
+				t.Fatalf("row %s is in the answer but reports project_match=false for row_project=%q, "+
+					"which is neither the searched project nor the shared-row predicate",
+					r.ID, r.RowProject)
 			}
 			if r.RowProject == "" {
 				t.Fatalf("row %s carries no row_project, so project_match=%v cannot be checked",

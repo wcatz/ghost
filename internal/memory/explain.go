@@ -266,12 +266,9 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	// removed never reached fusion, so it is in neither the window nor the
 	// trace's scored rows, and without the raw leg it would be invisible — a
 	// distinct outcome ("your query matched nothing strongly enough") reported
-	// as silence. Everything else below is read from the trace.
+	// as silence. Its SCORE reaches the payload through the trace (floor_score,
+	// stamped where the floor is applied), so nothing is re-read from it here.
 	fts, rawVec := legs.fts, legs.vec
-	rawScore := make(map[string]float64, len(rawVec))
-	for _, v := range rawVec {
-		rawScore[v.MemoryID] = float64(v.Score)
-	}
 	finalRank := make(map[string]int, len(final))
 	for i, m := range final {
 		finalRank[m.ID] = i + 1
@@ -378,8 +375,13 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			// Unreachable while the trace covers every leg row, which it does: the
 			// floor site stamps the rows fusion never saw. Kept because a nil
 			// dereference in a diagnostic path is a worse failure than a
-			// conservative row, and the sentinels say exactly that.
+			// conservative row, and the sentinels say exactly that. StatusFactor
+			// is 1.0 rather than left at 0, which is the trace's own sentinel for
+			// "no demotion was applied" and is a value the ranking can actually
+			// produce — a 0 there would both invent a factor and fire the note
+			// below about a demotion this payload never applied.
 			row.FTSRank, row.VectorRank, row.VectorScore = -1, -1, -1
+			row.StatusFactor = 1.0
 			row.AgeDays = ageDays(m.CreatedAt, now)
 			row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
 			row.ProjectMatch, row.ScopeMatched = true, true
