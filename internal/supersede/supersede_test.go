@@ -84,14 +84,19 @@ func TestSelectCandidates(t *testing.T) {
 	older := add(t, store, db, "postgres runs version 14", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
 	_ = add(t, store, db, "grafana listens on port 80", []float32{0, 0, 1}, "2026-06-01 00:00:00")
 
-	cands, err := SelectCandidates(ctx, store, "p", 0.9)
+	sel, err := SelectCandidates(ctx, store, "p", 0.9)
 	if err != nil {
 		t.Fatalf("SelectCandidates: %v", err)
 	}
-	if len(cands) != 1 {
-		t.Fatalf("want exactly 1 candidate (the postgres pair), got %d: %+v", len(cands), cands)
+	if len(sel.Candidates) != 1 {
+		t.Fatalf("want exactly 1 candidate (the postgres pair), got %d: %+v", len(sel.Candidates), sel.Candidates)
 	}
-	c := cands[0]
+	// Three memories, three vectors: nothing here is unscored, and the count is
+	// what lets a caller tell a complete scan from a partial one.
+	if sel.Unscored != 0 {
+		t.Errorf("Unscored = %d over a corpus where every memory has a vector", sel.Unscored)
+	}
+	c := sel.Candidates[0]
 	if c.NewerID != newer || c.OlderID != older {
 		t.Errorf("wrong orientation: newer=%s older=%s (want newer=%s older=%s)", c.NewerID, c.OlderID, newer, older)
 	}
@@ -100,6 +105,45 @@ func TestSelectCandidates(t *testing.T) {
 	// the older creation (#641).
 	if c.NewerCreatedAt != "2026-07-10 00:00:00" || c.OlderCreatedAt != "2026-01-01 00:00:00" {
 		t.Errorf("candidate created_at = (%q, %q), want (2026-07-10 00:00:00, 2026-01-01 00:00:00)", c.NewerCreatedAt, c.OlderCreatedAt)
+	}
+}
+
+// TestRunCountsMemoriesItCouldNotScore pins the fact that makes a pass's totals
+// checkable: a memory with no vector is proposed as no new candidate by the scan,
+// so the pairs a pass finds fresh are bounded by the part of the project it could
+// read, and the caller is told how much of the project that was. Without the
+// count, "0 candidate pairs" over a corpus nobody had finished indexing reads
+// exactly like the same line over a corpus with nothing similar in it — which is
+// how #716 looked like a fixture problem for as long as it did.
+//
+// The memory whose vector is missing is the NEAR-DUPLICATE half of a pair the
+// store could otherwise have proposed, so the count cannot be satisfied by a
+// note that was never a candidate anyway.
+func TestRunCountsMemoriesItCouldNotScore(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	_ = add(t, store, db, "postgres upgraded to 16", []float32{1, 0, 0}, "2026-07-10 00:00:00")
+	older := add(t, store, db, "postgres runs version 14", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// The vector row is what the embedding worker writes, so dropping it is
+	// exactly the state a save leaves behind for as long as the worker takes to
+	// notice — no row, not a row of the wrong width.
+	if _, err := db.ExecContext(ctx, `DELETE FROM memory_embeddings WHERE memory_id = ?`, older); err != nil {
+		t.Fatalf("drop the older memory's vector: %v", err)
+	}
+
+	cls := &mockClassifier{verdict: func(string, string) Relation { return RelationNeither }}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Unscored != 1 {
+		t.Errorf("Result.Unscored = %d, want 1: the memory with no vector is proposed as no new candidate, so the pairs this pass found fresh are bounded by the part of the project the scan could read", res.Unscored)
+	}
+	// And it is a count of what the scan could not read, not a failure: the pass
+	// still completes, and the pair it did find is still proposed.
+	if res.Candidates != 0 {
+		t.Errorf("Result.Candidates = %d, want 0: with one endpoint unvectorised the pair cannot be found", res.Candidates)
 	}
 }
 
@@ -354,6 +398,59 @@ func TestRunSkipsUnchangedExistingLink(t *testing.T) {
 		if call.Newer == "reversed the NATS decision back to Postgres LISTEN/NOTIFY" {
 			t.Errorf("Classify should not have been called for the unchanged existing-link pair, but was called with newer=%q older=%q", call.Newer, call.Older)
 		}
+	}
+}
+
+// TestRunUnscoredMemoriesCanStillAppearInAReclassifiedPair is the coupling the
+// report's wording rests on, pinned so nobody "simplifies" it back into a
+// falsehood.
+//
+// Result.Unscored counts project memories the SCAN could not score. The
+// reclassify half of the pass reads live 'supersedes' edges from their link rows
+// and never looks at a vector, so one of those same memories can still be an
+// endpoint of a pair this run considered — which is exactly what a model change
+// produces, since retiring the old vectors makes every memory in the project
+// unscored while the edges written under the old model are still in the graph and
+// still need re-judging. A report sentence reading "in no pair this run
+// considered" would then contradict its own "1 reclassified" line.
+func TestRunUnscoredMemoriesCanStillAppearInAReclassifiedPair(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer := add(t, store, db, "the relay drains the queue in under a minute now", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, "the relay takes about forty minutes to drain", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+
+	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	// A model change: the vectors are retired, so GetEmbedding returns nil for
+	// both memories and the scan can score neither. The edge, however, is still
+	// live and its endpoint was edited after it was written, so the reclassify
+	// half proposes it.
+	if _, err := db.ExecContext(ctx, `DELETE FROM memory_embeddings WHERE memory_id IN (?, ?)`, newer, older); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`, newer, older); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = '2026-07-15 00:00:00' WHERE id = ?`, older); err != nil {
+		t.Fatal(err)
+	}
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Unscored != 2 {
+		t.Errorf("Result.Unscored = %d, want 2: a model change retires every vector, so the scan can score neither memory", res.Unscored)
+	}
+	// The pair the run DID consider is made of exactly those two unscored
+	// memories. This is the fact the report's sentence has to stay narrower than.
+	if res.Candidates != 1 {
+		t.Errorf("Result.Candidates = %d, want 1: the live edge is re-proposed from its link row, with no vector involved", res.Candidates)
+	}
+	if cls.batchCalls == 0 {
+		t.Error("the reclassified pair was never classified")
 	}
 }
 

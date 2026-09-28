@@ -43,12 +43,12 @@ func TestSelectCandidatesSkipsScopeConflictingPair(t *testing.T) {
 	addScoped(t, store, db, "the service database pool timeout", []float32{1, 0, 0}, "2026-07-01 00:00:00", envScope("development"))
 	addScoped(t, store, db, "the service database pool timeout", []float32{0.99, 0.02, 0}, "2026-01-01 00:00:00", envScope("production"))
 
-	cands, err := SelectCandidates(ctx, store, "p", 0.9)
+	sel, err := SelectCandidates(ctx, store, "p", 0.9)
 	if err != nil {
 		t.Fatalf("SelectCandidates: %v", err)
 	}
-	if len(cands) != 0 {
-		t.Errorf("scope-conflicting pair proposed for classification: %+v", cands)
+	if len(sel.Candidates) != 0 {
+		t.Errorf("scope-conflicting pair proposed for classification: %+v", sel.Candidates)
 	}
 }
 
@@ -69,20 +69,20 @@ func TestSelectCandidatesFindsCompatiblePairBelowConflictingOnes(t *testing.T) {
 			[]float32{1, 0.02 * float32(i+1)}, "2026-01-01 00:00:00", envScope("development"))
 	}
 
-	cands, err := SelectCandidates(ctx, store, "p", 0.70)
+	sel, err := SelectCandidates(ctx, store, "p", 0.70)
 	if err != nil {
 		t.Fatalf("SelectCandidates: %v", err)
 	}
 	found := false
-	for _, c := range cands {
+	for _, c := range sel.Candidates {
 		if c.NewerID == newer && c.OlderID == older {
 			found = true
 		}
 	}
 	if !found {
 		t.Errorf("the compatible same-scope pair was not proposed: the scope filter ran after the "+
-			"candidate cut, so the budget of %d was spent on conflicting rows ranked above it (cands=%+v)",
-			maxNeighbors, cands)
+			"candidate cut, so the budget of %d was spent on conflicting rows ranked above it (candidates=%+v)",
+			maxNeighbors, sel.Candidates)
 	}
 }
 
@@ -209,11 +209,11 @@ func TestSelectCandidatesRefusesConflictingNeighbourFromUnscopedStore(t *testing
 		{MemoryID: prod, Score: 0.99, Scope: envScope("production")},
 	}}
 
-	cands, err := SelectCandidates(ctx, store2, "p", 0.9)
+	sel, err := SelectCandidates(ctx, store2, "p", 0.9)
 	if err != nil {
 		t.Fatalf("SelectCandidates: %v", err)
 	}
-	if len(cands) != 0 {
-		t.Errorf("a store that ignores the scope argument must not get its conflicting row proposed: %+v", cands)
+	if len(sel.Candidates) != 0 {
+		t.Errorf("a store that ignores the scope argument must not get its conflicting row proposed: %+v", sel.Candidates)
 	}
 }

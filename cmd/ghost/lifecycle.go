@@ -15,6 +15,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
@@ -1651,6 +1652,168 @@ func retryNote(retries int) string {
 	return fmt.Sprintf(", %d retried after a failed call", retries)
 }
 
+// supersedeEmbedBound is how many memories one `ghost supersede` pass will embed
+// for itself. It is the embedding worker's own project batch today, and stays a
+// separate number on purpose: a daemon's backfill and an operator's wait are
+// different problems, and a pass that had to embed a whole corpus would be doing
+// the first one inside a command the second is blocked on. The rows past the
+// bound are the sweep's — this is a pass making the corpus it is about to read
+// searchable, not a backfill.
+const supersedeEmbedBound = 50
+
+// supersedeEmbedBudget is the whole pre-scan's time budget, and it exists
+// because the bound alone is not a bound on TIME. The client allows 30s per
+// request, so 50 memories against an endpoint that answers its liveness probe and
+// then stalls every embed is half an hour of blocking before the candidate scan
+// starts, with nothing printed for any of it.
+//
+// A minute, which is generous on purpose: a healthy local endpoint embeds a short
+// memory in tens of milliseconds, so 50 rows here are seconds, and the budget is
+// only reached by an endpoint that is slow per memory or slow on one of them. A
+// ceiling this low that a healthy machine could hit would be a budget that
+// silently truncated ordinary work, so the arithmetic is checked against the slow
+// case instead: 50 rows at just over a second each, which is several times a real
+// embed.
+//
+// Running out is not a failure, and it is not silent either — the pass says it
+// stopped early and that a re-run continues the batch (see supersedeIndexNotes).
+// That is the whole reason the ceiling can be this low, and it is also why the
+// cause is reported rather than left to be inferred: a pass that cut itself off is
+// not a daemon that is behind, and the two have different remedies.
+const supersedeEmbedBudget = time.Minute
+
+// supersedeIndexFacts is everything the report has to say about the vector index
+// behind the pass: what this run wrote, how much of the project it could not
+// read, and which cause applies to the part it could not read.
+//
+// One struct and one formatter rather than two notes taking a growing list of
+// numbers, because the facts are not independent: a budget that expires makes
+// BOTH lines different, and a boolean threaded through two signatures is how they
+// would drift.
+type supersedeIndexFacts struct {
+	// embedded is what this pass wrote itself, before the scan.
+	embedded int
+	// unscored is what the scan could not read at all (Result.Unscored).
+	unscored int
+	// embeddingOn is the config's embedding.enabled.
+	embeddingOn bool
+	// budgetExpired is that this pass ran out of its own pre-scan budget.
+	budgetExpired bool
+}
+
+// supersedeIndexNotes renders the two lines that make the candidate totals
+// readable, and prints nothing at all for a pass that found every memory scorable
+// and had nothing to write — an ordinary pass's answer to the operator's question
+// is that there was nothing to do, which an unconditional "0" line would bury.
+//
+// Both lines are scoped to the NEW candidates the vector scan proposes, and say
+// so in the same words, because the two are printed one after the other and the
+// reclassified count above them is NOT bounded by the scan: the reclassify half
+// works from link rows and reads no vector, so a memory with no vector can still
+// appear in a pair this run considered.
+func supersedeIndexNotes(f supersedeIndexFacts) string {
+	var b strings.Builder
+	if f.embedded > 0 || f.budgetExpired {
+		b.WriteString(supersedeEmbeddedNote(f))
+	}
+	if f.unscored > 0 {
+		b.WriteString(supersedeUnscoredNote(f))
+	}
+	return b.String()
+}
+
+// supersedeEmbeddedNote reports the vectors this pass had to produce before it
+// could read the corpus, and what it means when it did not finish: a re-run
+// continues the batch, which is the remedy, and naming the worker instead would
+// send the operator after a daemon that was never behind.
+func supersedeEmbeddedNote(f supersedeIndexFacts) string {
+	if f.budgetExpired {
+		return fmt.Sprintf("  %d %s embedded for this pass, then its %s pre-scan budget ran out — re-run `ghost supersede` to continue the batch; the rest are not waiting on anything\n",
+			f.embedded, plural(f.embedded, "memory", "memories"), supersedeEmbedBudget)
+	}
+	return fmt.Sprintf("  %d %s embedded for this pass — they had no vector yet, and a note with no vector is proposed as no new candidate by the vector scan\n",
+		f.embedded, plural(f.embedded, "memory", "memories"))
+}
+
+// supersedeUnscoredNote reports the part of the project the scan could not read,
+// and points at the remedy that actually applies to it. Three of them, and
+// choosing wrong is worse than silence: this pass cut itself off (re-run it), the
+// daemon is behind (it fills the index, and `ghost mcp status` reports coverage),
+// or embedding is off (nothing is filling the index at all, and there is no worker
+// to go and look at).
+func supersedeUnscoredNote(f supersedeIndexFacts) string {
+	subject := fmt.Sprintf("%d %s had no vector when the pass scanned, so they proposed no new candidate pairs (edges already in the graph are re-judged from the link, not the vector)",
+		f.unscored, plural(f.unscored, "memory", "memories"))
+	switch {
+	case f.budgetExpired:
+		return "  " + subject + " — this pass stopped early; re-run `ghost supersede` to continue the batch\n"
+	case !f.embeddingOn:
+		return "  " + subject + " — embedding is disabled, so nothing is keeping the vector index up to date\n"
+	default:
+		return "  " + subject + " — the index is filled by the embedding worker in `ghost mcp`, and `ghost mcp status` reports its coverage\n"
+	}
+}
+
+// plural picks the noun that agrees with n, so a report line reads as English
+// at 1 and at 143.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// embedSupersedeCorpus embeds the memories of projectID that have no vector yet,
+// and returns how many it wrote and whether its own budget ran out first.
+//
+// It runs before the candidate scan, and only when embedding is enabled: with
+// embedding off there is no vector index to fill.
+//
+// WHY a pass does this at all: `supersede` is the one lifecycle phase whose
+// NEW-candidate mechanism IS the vector index — the pair is proposed by cosine —
+// so a memory it has no vector for is proposed as no new candidate by that scan
+// (supersede.SelectCandidates skips it, though an edge already in the graph is
+// re-proposed from its link row, with no vector involved). Those vectors are
+// written by the embedding worker, which lives in `ghost mcp`: another process,
+// on its own schedule, running only if a server is up. A user who saves two notes
+// and runs the pass in the same breath therefore gets "0 candidate pairs" — a
+// clean report for a pair that was in front of them, with nothing anywhere saying
+// the index had not caught up. That window is short, and it is also exactly when
+// a supersession is most likely to be wanted, so the pass closes it itself instead
+// of leaving the answer to a daemon's timing (#716).
+//
+// It is the worker's own code (embedding.Worker.EmbedPending) rather than a
+// second implementation, so the two cannot drift on what "unembedded" means, on
+// the identity a vector is stamped with, or on what happens when the endpoint is
+// down. The worker is built with no data dir: the Ollama-down marker is the
+// daemon's outage bookkeeping, and a one-shot pass has no outage to keep time.
+//
+// budget bounds the whole call, and it is a parameter so a test can hand this a
+// few milliseconds against a stalling endpoint: the ceiling is the property, and a
+// test that has to sit out the production one is a test that does not run.
+//
+// budgetExpired is read from the DERIVED context, and only while the caller's own
+// context is still alive: a parent cancelled underneath the pass is a shutdown,
+// not a budget, and the report must not offer "re-run this command" for a process
+// that is being told to stop.
+//
+// What the pass could NOT read is counted by the scan instead
+// (Result.Unscored), because that is where the fact is true: a bound reached, a
+// budget that ran out, an endpoint that did not answer, and a vector written under
+// another model all end up as the same honest count, where a report derived from
+// the embed call could only ever be a guess.
+func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory.Store, projectID string, budget time.Duration, logger *slog.Logger) (int, bool) {
+	if !cfg.Embedding.Enabled {
+		return 0, false
+	}
+	bounded, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	client := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
+	embedded := embedding.NewWorker(client, store, logger, 0, "").EmbedPending(bounded, projectID, supersedeEmbedBound)
+	expired := bounded.Err() != nil && ctx.Err() == nil
+	return embedded, expired
+}
+
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
 // half of staleness-aware ranking. It proposes newer→older 'supersedes' links
 // over the project's live memories (cosine-similar candidates, a deterministic
@@ -1668,6 +1831,13 @@ func retryNote(retries int) string {
 // default; the --withdraw report also names the `ghost resolve --reassess --apply`
 // step that clears a resolution a withdrawn edge caused, which is the half of
 // this repair the graph cannot do on its own.
+//
+// Which leaves the creation path, and the one thing it does before any of that is
+// embed the project's memories that have no vector yet (embedSupersedeCorpus).
+// It has to: candidates are proposed by cosine, and those vectors are written by
+// the embedding worker in another process, so a pass started seconds after a save
+// would otherwise report an empty result for a corpus the operator can see (#716).
+// The other two modes read no vectors, which is why the pre-scan sits after them.
 func runSupersede() {
 	projectName, source, apply, reassess, threshold, withdrawPairs, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
@@ -1732,6 +1902,14 @@ func runSupersede() {
 		return
 	}
 
+	// The corpus the scan is about to read, made readable first: the vectors it
+	// needs are normally written by the embedding worker inside `ghost mcp`, and
+	// this pass cannot wait on another process to notice a save (see
+	// embedSupersedeCorpus). It is the only phase here that has to do this, and
+	// it happens after the two repair modes have returned, because neither of them
+	// reads the vector index at all.
+	embedded, budgetExpired := embedSupersedeCorpus(ctx, cfg, store, projectID, supersedeEmbedBudget, logger)
+
 	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -1743,6 +1921,10 @@ func runSupersede() {
 		verb = "linked"
 	}
 	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls(), cls.Retries()))
+	fmt.Print(supersedeIndexNotes(supersedeIndexFacts{
+		embedded: embedded, unscored: res.Unscored,
+		embeddingOn: cfg.Embedding.Enabled, budgetExpired: budgetExpired,
+	}))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}
