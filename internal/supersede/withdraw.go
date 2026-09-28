@@ -332,12 +332,13 @@ func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref 
 	// single fold match is one row, so it is not ambiguous either.
 	//
 	// Two fold matches and no byte-exact one means the ref is a THIRD casing
-	// ("aBc") of ids that differ only in letter case. That is a genuine dead end
-	// and this message says so: the SQL match is case-insensitive, so no spelling
-	// the caller can type reaches either row, and a remedy that named a command
-	// would be naming a step that cannot open this one. Naming a remedy also
-	// belongs to the caller, not here — this text is returned verbatim by
-	// ghost_link_withdraw to an agent that may have no shell at all.
+	// ("aBc") of ids that differ only in letter case. No casing OF THIS REF reaches
+	// either row, which is what makes it unaddressable — the two stored spellings
+	// do reach them, one row each, and that is why the message LISTS them instead
+	// of naming a remedy: the reader's next keystroke is a copy of one of them, and
+	// a command name would only send them somewhere that folds the spelling away
+	// again. Naming a remedy also belongs to the caller — this text is returned
+	// verbatim by ghost_link_withdraw to an agent that may have no shell at all.
 	var folded []string
 	for _, id := range ids {
 		if strings.EqualFold(id, ref) {
