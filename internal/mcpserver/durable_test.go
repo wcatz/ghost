@@ -20,7 +20,7 @@ import (
 // issue, and every surface must carry all of them.
 
 // durableGuidanceGolden is the issue's rule and its three examples, verbatim.
-// Both surfaces state it in their own words, so the test asserts the CLAIM set
+// Every surface states it in its own words, so the test asserts the CLAIM set
 // rather than one shared paragraph: what must not be lost is the rule and the
 // two-sided example, not a particular sentence.
 var durableGuidanceGolden = []string{
@@ -52,12 +52,12 @@ func saveToolDescription(t *testing.T, session *mcp.ClientSession, tool string) 
 	return ""
 }
 
-// TestDurableGuidanceStatesTheRuleOnBothSaveSurfaces pins the guidance an
+// TestDurableGuidanceStatesTheRuleOnEverySaveSurface pins the guidance an
 // agent reads BEFORE it saves. The server instructions are the session-level
 // contract and a tool description is what a client puts in front of the model
 // at the call site; an agent that reads only one of them still has to learn
 // that a memory is durable knowledge and not a restatement of the code.
-func TestDurableGuidanceStatesTheRuleOnBothSaveSurfaces(t *testing.T) {
+func TestDurableGuidanceStatesTheRuleOnEverySaveSurface(t *testing.T) {
 	_, session := newCapSession(t)
 
 	// Both memory-writing save tools are here, not just the project one: the
@@ -80,7 +80,7 @@ func TestDurableGuidanceStatesTheRuleOnBothSaveSurfaces(t *testing.T) {
 }
 
 // TestSaveGuidanceSaysGhostOnlyGuides pins the boundary the issue draws: Ghost
-// guides, it does not judge the save. Both surfaces have to say so, or an agent
+// guides, it does not judge the save. Every surface has to say so, or an agent
 // reads the rule as a filter it will be caught bypassing — and the
 // deterministic hint below becomes a promise it must not make.
 func TestSaveGuidanceSaysGhostOnlyGuides(t *testing.T) {
