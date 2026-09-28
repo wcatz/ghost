@@ -41,7 +41,8 @@ type MemorySpec struct {
 	// consumes (newer -> older), written through store.CreateLink with the same
 	// relation and source `ghost supersede --apply` uses. Empty on the headline
 	// dataset, whose corpus holds no supersession edge at all.
-	Supersedes []string `json:"supersedes,omitempty"`}
+	Supersedes []string `json:"supersedes,omitempty"`
+}
 
 // QuerySpec is one dataset query. Rel maps memory Keys to graded relevance.
 type QuerySpec struct {

@@ -59,8 +59,8 @@ func TestBenchRegressionFloors(t *testing.T) {
 	// The old gate was `hybrid.NDCG10 >= vector.NDCG10` on a 0.017 point
 	// estimate, which fails on a 0.001 dataset edit while the interval still
 	// excludes zero. The intervals are logged because they are the result: on the
-	// committed v2 dataset hybrid beats vector by +0.0171 [+0.0020, +0.0325] and
-	// fts by +0.0689 [+0.0468, +0.0921].
+	// committed v2 dataset hybrid beats vector by +0.0179 [+0.0028, +0.0335] and
+	// fts by +0.0686 [+0.0466, +0.0919].
 	for _, leg := range []string{CondVector, CondFTS} {
 		ci, err := CompareFusion(r[CondHybrid], r[leg])
 		if err != nil {

@@ -109,11 +109,11 @@ func CompareFusion(hybrid, leg Result) (PairDiff, error) {
 // protects. Measured on the committed v2 dataset (220 graded queries, paired, 95%
 // percentile bootstrap, 20k resamples, fixed PCG seed pair):
 //
-//	hybrid - vector-only   mean +0.0171   CI [+0.0020, +0.0325]
-//	hybrid - fts-only      mean +0.0689   CI [+0.0468, +0.0921]
+//	hybrid - vector-only   mean +0.0179   CI [+0.0028, +0.0335]
+//	hybrid - fts-only      mean +0.0686   CI [+0.0466, +0.0919]
 //
 // So fusion is genuinely ahead of both legs here, and ahead of the vector leg by
-// 0.0020 at the interval's lower edge — under half of one query's worth of
+// 0.0028 at the interval's lower edge — under half of one query's worth of
 // margin (1/220 = 0.0045). The old gate was `hybrid.NDCG10 >= vector.NDCG10` on
 // that 0.017 point estimate, which is the same claim with none of the
 // uncertainty: a dataset edit worth 0.001 tripped it while the evidence said

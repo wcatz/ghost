@@ -31,7 +31,7 @@ func sweepFixture(t *testing.T) (*memory.Store, []Query) {
 // tinySweepFixture is a four-memory corpus with two queries, for the sweep
 // behaviours that are about the CODEPATH (which point is the reference, what
 // happens when there is none) rather than about this corpus's ranking. The
-// committed dataset's 547 embeddings are the expensive part of this package and
+// committed dataset's 551 embeddings are the expensive part of this package and
 // both of those properties hold over four memories exactly as well.
 func tinySweepFixture(t *testing.T) (*memory.Store, []Query) {
 	t.Helper()
@@ -156,10 +156,10 @@ func TestSweepGrid(t *testing.T) {
 // One test because one seed is the expensive part; and the four-memory fixture,
 // NOT the committed corpus, which is a budget decision rather than a shortcut.
 // Measured on this machine with `go test -race ./internal/bench -count=1`: the
-// committed 547-memory corpus puts this package's test binary at 471s on this
+// committed 551-memory corpus puts this package's test binary at 471s on this
 // branch (478s on origin/main, before the commits that brought the ceiling
 // problem in), against Go's 600s per-binary default — so ~130s is all the headroom
-// there is. A second full seed of 547 memories plus a six-point sweep measured
+// there is. A second full seed of 551 memories plus a six-point sweep measured
 // 15s without -race; at this tree's race factor that is ~230s, which added to
 // 471s is the timeout. Nothing here is corpus-dependent: which point is the
 // reference, that the interval is the one recomputed from the same two Results,

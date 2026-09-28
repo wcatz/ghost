@@ -58,9 +58,13 @@ func instant(t *testing.T, key, field string, s *string) time.Time {
 // and not about whichever rows happen to rank near it.
 func TestBuiltinDatasetCarriesValidityIntoRetrieval(t *testing.T) {
 	ds, vecs := loadTestdataDataset(t)
-	store := newBenchStore(t)
+	// The connection as well as the store: this branch's Seed takes the db so it
+	// can backdate created_at, which is not something the store's API can do, and
+	// the headline dataset is seeded through the same call. The test's assertions
+	// are unchanged; only the fixture construction follows Seed's signature.
+	store, db := newBenchStoreWithDB(t)
 	ctx := context.Background()
-	if _, err := Seed(ctx, store, ds, vecs); err != nil {
+	if _, err := Seed(ctx, store, db, ds, vecs); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -143,7 +147,7 @@ func stampInstant(t *testing.T, s string) time.Time {
 // duplicated a state would leave the coverage exactly as it was while making the
 // corpus bigger for the graded conditions, which is cost without signal. The
 // fifth state — unset, meaning no claim at all — is not asserted, because the
-// other 547 rows are it.
+// other 551 rows are it.
 func TestValidityFixtureCoversEveryStage2State(t *testing.T) {
 	ds, _ := loadTestdataDataset(t)
 	now := time.Now().UTC()

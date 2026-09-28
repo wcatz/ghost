@@ -39,12 +39,6 @@ func TestLoadJSONL(t *testing.T) {
 	}
 }
 
-func newBenchStore(t *testing.T) *memory.Store {
-	t.Helper()
-	store, _ := newBenchStoreWithDB(t)
-	return store
-}
-
 // newBenchStoreWithDB returns the store and the connection behind it, which
 // Seed needs: backdating created_at is not something a store can be asked to do
 // through its API, and seeding a corpus with real ages is the whole point of the

@@ -275,7 +275,7 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 	}
 
 	// The headline corpus is deliberately NOT re-seeded and re-measured here.
-	// It is 547 memories with 768-dim vectors, six other tests already load it,
+	// It is 551 memories with 768-dim vectors, six other tests already load it,
 	// and a seventh load put this package over CI's 10-minute timeout. The
 	// comparison's validity is asserted where the corpus already is, and more
 	// directly: TestDecayDoesNotPerturbGradedBench measures that decay does not

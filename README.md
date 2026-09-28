@@ -240,7 +240,11 @@ GhostMem publishes reproducible retrieval and end-to-end results with the harnes
 
 - **LongMemEval-S retrieval:** hybrid Recall@5 **93.0%** and Recall@10 **97.3%** on the 470 answerable questions.
 - **End-to-end LongMemEval-S:** **96.2%** blended accuracy across 500 questions with the documented DeepSeek v4 Pro generator and judge.
-- **`ghost bench`:** hybrid NDCG@10 **0.818** on 220 graded queries and 551 memories.Different generators and judges make cross-system scores directional rather than strictly comparable. Full tables, methodology, caveats, and reproduction commands are in [`docs/benchmarks.md`](docs/benchmarks.md).
+- **`ghost bench`:** hybrid NDCG@10 **0.818** on 220 graded queries and 551 memories, ahead of the vector leg by 0.018 (paired 95% CI [+0.003, +0.034]) and of the keyword leg by 0.069 — both intervals printed by `ghost bench` itself.
+- **What that table cannot see:** the no-answer false-positive rate is **1.000** at the shipped similarity floor in every condition (**0.875** for the shipped hybrid path at a 0.50 cosine, against the keyword leg's **0.625**), and on a separate graded corpus carrying ages and `supersedes` edges the shipped ranking paths read **0.214** R@1 against **0.571** with both off. Both are in [`docs/benchmarks.md`](docs/benchmarks.md) rather than in this list, because they are the same measurement's limits and not separate achievements.
+
+Different generators and judges make cross-system scores directional rather than strictly comparable. Full tables, methodology, caveats, and reproduction commands are in [`docs/benchmarks.md`](docs/benchmarks.md).
+
 ## Project status
 
 GhostMem is a solo project used for real infrastructure work. The project intentionally favors a small, readable system:

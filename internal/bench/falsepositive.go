@@ -470,7 +470,7 @@ func floorRow(rows *[]FloorCount, floor float32) *FloorCount {
 //
 // A report with nothing measured returns nothing rather than a table of zeros: a
 // caller whose no-answer set came back empty (a run with no negatives in it) would
-// otherwise get "mean top cosine 0.000 vs 0.740" and "costs 0/220", which reads as
+// otherwise get "mean top cosine 0.000 vs 0.741" and "costs 0/220", which reads as
 // a perfect abstention result rather than as a missing measurement.
 func FormatFalsePositives(rep FalsePositiveReport, condition string) string {
 	if rep.Queries == 0 {
