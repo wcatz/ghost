@@ -258,7 +258,7 @@ func TestSupersedeReassessFollowupNeverPrintsTheUnscopedRepair(t *testing.T) {
 // words both as "a comma" contradicts itself: it says the file is the only way and
 // that nothing can name the id. It must also not point at a file that names
 // nothing, since writeReassessTargets omits a newline-bearing id and
-// readOnlySelectors then refuses the whole list — the operator's run of the
+// readRefSelectors then refuses the whole list — the operator's run of the
 // printed repair would fail.
 func TestSupersedeReassessFollowupSaysNoSurfaceCanNameANewlineID(t *testing.T) {
 	got := supersedeReassessFollowup("myproj", []string{"two\nlines"}, "")
@@ -330,7 +330,7 @@ func TestWriteReassessTargetsHeaderNamesBothBuckets(t *testing.T) {
 }
 
 // writeReassessTargets refuses a set it cannot name, rather than writing a list
-// readOnlySelectors rejects — the file is a --only-file INPUT, so a file that
+// readRefSelectors rejects — the file is a --only-file INPUT, so a file that
 // names nothing is not a degraded list, it is a list the repair refuses.
 func TestWriteReassessTargetsRefusesASetItCannotName(t *testing.T) {
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
@@ -362,12 +362,12 @@ func TestWriteReassessTargetsIsReadableAsOnlyFile(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(path), "supersede-reassess-myproj-") {
 		t.Errorf("file name %q must name the project and the repair", filepath.Base(path))
 	}
-	got, err := readOnlySelectors(path)
+	got, err := readRefSelectors("--only-file", path)
 	if err != nil {
 		t.Fatalf("the file resolve is pointed at must parse: %v", err)
 	}
 	if len(got) != len(ids) {
-		t.Fatalf("readOnlySelectors = %v, want %v", got, ids)
+		t.Fatalf("readRefSelectors = %v, want %v", got, ids)
 	}
 	for i := range ids {
 		if got[i] != ids[i] {

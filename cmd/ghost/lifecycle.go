@@ -15,6 +15,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
@@ -1787,7 +1788,21 @@ type resolveArgs struct {
 	// onlyFile is the path as typed, kept for the report line that names the
 	// file the selectors came from.
 	onlyFile string
+	// mark and markFile name the memories to stamp resolved_at (#714), in the
+	// same forms --only/--only-file take: a comma-separated list, or one id or
+	// prefix per line in a file. They are separate fields rather than a mode
+	// enum over one list because the two halves of a repair are both about
+	// memories and an operator who gave both has asked for a command this
+	// parser refuses outright — a state worth a field each and an explicit
+	// check, not a mode whose value nobody can read.
+	mark     []string
+	markFile string
 }
+
+// hasMark reports whether the command line asked for a targeted mark. It is a
+// method rather than a repeated len() test so the dispatch, the parser's
+// refusal and the report cannot each spell the condition differently.
+func (a resolveArgs) hasMark() bool { return len(a.mark) > 0 || a.markFile != "" }
 
 // runSupersedeWithdraw implements `ghost supersede <project> --withdraw <source>
 // <target> [--apply]`: the operator's own withdrawal of the named edges.
@@ -1899,24 +1914,33 @@ func shortID(id string) string {
 // the report and change no decision. A scope flag that yields NO selector is also
 // an error rather than an absent scope: `--only "$IDS"` with IDS unset is a
 // routine shell mistake, and an unscoped `--apply` is the one repair outcome
-// that must never happen by accident. Extracted from runResolve so the argv
+// that must never happen by accident.
+//
+// --mark/--mark-file name the memories to stamp resolved_at, and are refused
+// with --reassess for the reason --withdraw is (#714): the two are the two
+// directions of the same stamp, and a command asking for both would have two
+// dry-run answers. They take the same comma-separated list and the same
+// one-per-line file as --only/--only-file, and the reader is told which of the
+// two repairs they asked for twice. Extracted from runResolve so the argv
 // contract is unit-testable without os.Exit.
 func parseResolveArgs(args []string) (resolveArgs, error) {
 	var out resolveArgs
-	// addOnly records the comma-separated selectors one flag value carries, and
+	// addRefs records the comma-separated selectors one flag value carries, and
 	// refuses a value that yields none — so the check is the same whether the
-	// value arrived as "--only x" or "--only=x", and neither can leave the scope
-	// silently empty.
-	addOnly := func(value string) error {
+	// value arrived as "--only x" or "--only=x", and neither can leave the list
+	// silently empty. It is one function for both flags because the only
+	// difference between them is which field the refs land in, and a second copy
+	// would be a second place for the empty-value refusal to be forgotten.
+	addRefs := func(flag string, dst *[]string, value string) error {
 		added := 0
 		for _, part := range strings.Split(value, ",") {
 			if part = strings.TrimSpace(part); part != "" {
-				out.only = append(out.only, part)
+				*dst = append(*dst, part)
 				added++
 			}
 		}
 		if added == 0 {
-			return errors.New("--only requires at least one memory id or prefix")
+			return fmt.Errorf("%s requires at least one memory id or prefix", flag)
 		}
 		return nil
 	}
@@ -1926,6 +1950,35 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 			out.apply = true
 		case args[i] == "--reassess":
 			out.reassess = true
+		case args[i] == "--mark" && i+1 < len(args):
+			if err := addRefs("--mark", &out.mark, args[i+1]); err != nil {
+				return resolveArgs{}, err
+			}
+			i++
+		case strings.HasPrefix(args[i], "--mark="):
+			if err := addRefs("--mark", &out.mark, strings.TrimPrefix(args[i], "--mark=")); err != nil {
+				return resolveArgs{}, err
+			}
+		case args[i] == "--mark":
+			return resolveArgs{}, errors.New("--mark requires at least one memory id or prefix")
+		case args[i] == "--mark-file" && i+1 < len(args):
+			// The raw value is stored, the trimmed one is what is checked: a
+			// path may legitimately contain a space, and an empty or blank one
+			// is the unset-variable mistake that must not become a request that
+			// names every memory in the project.
+			if strings.TrimSpace(args[i+1]) == "" {
+				return resolveArgs{}, errors.New("--mark-file requires a path")
+			}
+			out.markFile = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--mark-file="):
+			v := strings.TrimPrefix(args[i], "--mark-file=")
+			if strings.TrimSpace(v) == "" {
+				return resolveArgs{}, errors.New("--mark-file requires a path")
+			}
+			out.markFile = v
+		case args[i] == "--mark-file":
+			return resolveArgs{}, errors.New("--mark-file requires a path")
 		case args[i] == "--project":
 			if i+1 >= len(args) {
 				return resolveArgs{}, errors.New("--project requires a value")
@@ -1950,12 +2003,12 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 		case strings.HasPrefix(args[i], "--source="):
 			out.source = strings.TrimPrefix(args[i], "--source=")
 		case args[i] == "--only" && i+1 < len(args):
-			if err := addOnly(args[i+1]); err != nil {
+			if err := addRefs("--only", &out.only, args[i+1]); err != nil {
 				return resolveArgs{}, err
 			}
 			i++
 		case strings.HasPrefix(args[i], "--only="):
-			if err := addOnly(strings.TrimPrefix(args[i], "--only=")); err != nil {
+			if err := addRefs("--only", &out.only, strings.TrimPrefix(args[i], "--only=")); err != nil {
 				return resolveArgs{}, err
 			}
 		case args[i] == "--only":
@@ -1987,6 +2040,18 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 			return resolveArgs{}, fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
+	if len(out.mark) > 0 || out.markFile != "" {
+		if out.reassess {
+			return resolveArgs{}, errors.New("--mark stamps the memories you name and --reassess re-judges the ones ALREADY resolved; run them as two commands")
+		}
+		if len(out.only) > 0 || out.onlyFile != "" {
+			// Unreachable in practice — --only is refused without --reassess, and
+			// --mark is refused with it — but a parser that can produce a state
+			// it cannot explain is a parser whose next flag will produce one it
+			// can, and the message costs a line.
+			return resolveArgs{}, errors.New("--mark stamps the memories you name and --only/--only-file scope the repair pass; run them as two commands")
+		}
+	}
 	if len(out.only) > 0 || out.onlyFile != "" {
 		if !out.reassess {
 			return resolveArgs{}, errors.New("--only/--only-file scope the repair pass: use them with --reassess")
@@ -1995,11 +2060,18 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 	return out, nil
 }
 
-// readOnlySelectors reads a --only-file: one memory id or 8+ character hex
-// prefix per line, '#' starting a comment, blank lines ignored. A comment is a
-// WHOLE line starting with '#' (after optional leading space), which is what an
-// annotated file looks like, and the id is taken verbatim from the rest of the
-// line.
+// readRefSelectors reads a --only-file or a --mark-file: one memory id or 8+
+// character prefix per line, '#' starting a comment, blank lines ignored. A
+// comment is a WHOLE line starting with '#' (after optional leading space), which
+// is what an annotated file looks like, and the id is taken verbatim from the rest
+// of the line.
+//
+// flag is the spelling as typed, and it is the only thing that differs between the
+// two callers: the format, the comment rule and every refusal are the same, and a
+// second reader would be a second place for the two to disagree about which ids a
+// file can name. It appears in the error messages because an operator who passed
+// --mark-file and was told "read --only-file" would be sent to debug a flag they
+// did not type.
 //
 // It used to strip from the first '#' anywhere, including mid-line, on the
 // premise that a selector can never contain one — an id is hex, and so is a
@@ -2013,11 +2085,12 @@ func parseResolveArgs(args []string) (resolveArgs, error) {
 // A file that yields no selectors is an error rather than an unscoped run. The
 // operator pointed the pass at a file, and judging the whole project because
 // the file turned out to be empty is the one outcome that must never happen by
-// accident.
-func readOnlySelectors(path string) ([]string, error) {
+// accident — and for --mark the same emptiness would otherwise be a mark of
+// nothing, which reads as a completed no-op rather than as the refusal it is.
+func readRefSelectors(flag, path string) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read --only-file %s: %w", path, err)
+		return nil, fmt.Errorf("read %s %s: %w", flag, path, err)
 	}
 	var out []string
 	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
@@ -2043,7 +2116,7 @@ func readOnlySelectors(path string) ([]string, error) {
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("--only-file %s names no memory ids or prefixes", path)
+		return nil, fmt.Errorf("%s %s names no memory ids or prefixes", flag, path)
 	}
 	return out, nil
 }
@@ -2058,6 +2131,17 @@ Flags:
   --reassess      Re-judge memories that are ALREADY resolved and, with --apply,
                   clear resolved_at on the ones that now come back KEEP. This is
                   how a wrong resolution is repaired.
+  --mark ids      Stamp resolved_at on THESE memories, on your say-so: a
+                  comma-separated list of memory ids, or of 8+ character
+                  prefixes. Nothing is classified, so no harness is called and
+                  nothing is billed. A full id is taken as given whatever its
+                  shape (an imported one can hold a space, a dash or a '#'); an
+                  ambiguous prefix is refused with the matches listed, and a
+                  memory already resolved is reported as a no-op. --source is
+                  not used. Cannot be combined with --reassess (they are the two
+                  directions of the same stamp; run them as two commands).
+  --mark-file p   With --mark: the same list, read from a file, one id or prefix
+                  per line. For a list too long to type on one line.
   --only ids      With --reassess: judge only these memories — a comma-separated
                   list of memory ids, or of 8+ character hex prefixes of them.
                   A full id is taken as given whatever its shape (an imported
@@ -2089,7 +2173,195 @@ for good reasons. "ghost supersede <project> --reassess --apply" prints the
 exact --only command that repairs what its withdrawal left resolved. Scoping
 narrows which memories are judged and nothing else — a live 'supersedes' edge, a
 correction pairing and the KEEP cache all still hold a judged row back.
+
+--mark is the other repair, and the one for a memory no pass will propose: an
+operator who has read a newer note in the same project saying the older one's fix
+landed knows the older one is finished, and nothing in the pass can see that — the
+note may hold no resolution keyword at all. --mark names the memories instead of
+asking a model about them, which is also why it needs no harness and no --source.
+It writes the same resolved_at the pass writes, through the same store path, so
+it also writes the 'resolve' history row every writer appends — with YOU as the
+performer, which is the only resolve row in the database that can say a person
+decided it rather than a classifier. It also drops the row's KEEP cache entry, so
+the pass does not report the row as cached-KEEP and bring it straight back after
+any edit. The inverse is --reassess --only, and every --mark report prints the
+exact command for the memories it just stamped.
 `
+
+// runResolveMark implements `ghost resolve <project> --mark <ids> [--apply]`:
+// the operator's own mark of the memories they name (#714).
+//
+// It is a named function because runResolve calls os.Exit on every error path,
+// and this one is worth driving on its own: it is the only mode of `ghost
+// resolve` that never asks a model anything, so the report's whole content is
+// what the operator named and what became of it.
+//
+// The report is printed BEFORE the error is raised and the non-zero exit stays,
+// and the two are not in tension here: the write is one transaction over the
+// whole request, so an error is a rollback and the report is saying "none of
+// these moved" rather than describing a partial mark. A refusal — an ambiguous
+// ref, a memory another project owns — writes nothing at all, so there is no
+// partial mark to report there either.
+func runResolveMark(parsed resolveArgs, apply bool) {
+	projectName := parsed.project
+	// The list is read here rather than in the parser because it is file IO:
+	// parseResolveArgs stays a pure function of argv, and a missing or unreadable
+	// file is a usage error an operator can act on. The union is built into a
+	// fresh slice so the file's lines cannot land in the parsed args' backing
+	// array.
+	refs := append([]string{}, parsed.mark...)
+	if parsed.markFile != "" {
+		fromFile, ferr := readRefSelectors("--mark-file", parsed.markFile)
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", ferr)
+			os.Exit(1)
+		}
+		refs = append(refs, fromFile...)
+	}
+
+	_, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
+	defer store.Close() //nolint:errcheck
+	ctx := context.Background()
+	projectID := resolveProjectOrExit(ctx, store, projectName)
+
+	// The performer on the 'resolve' history row. Not a harness name: nothing was
+	// classified here, and recording the calling harness would make the one row
+	// that can say a person decided this look like a model's verdict — which is
+	// the whole reason this write is a supported command rather than SQL.
+	res, err := resolve.Mark(ctx, store, resolve.MarkRequest{
+		ProjectID:  projectID,
+		Refs:       refs,
+		Provenance: memory.Provenance{Agent: markPerformer},
+		Apply:      apply,
+	}, logger)
+	fmt.Print(resolveMarkReport(projectName, res, apply))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// markPerformer is the `agent` value on the history row an operator's mark
+// writes. It names the KIND of performer, not a person: the column's vocabulary
+// elsewhere is harness source tokens, and inventing a per-user identity here
+// would put an unverified claim in a column whose whole purpose is being
+// trustworthy. "operator" says what a reader of the history actually needs to
+// know — this stamp was a person's decision, and no classifier was asked.
+const markPerformer = "operator"
+
+// resolveMarkReport renders the --mark result: the one-line summary, one row per
+// named memory carrying its own text, and the command that undoes the whole
+// request.
+//
+// The per-memory row is the point of the pass. An operator burying a memory has
+// to be able to confirm from the output that it was the one they meant, which is
+// the same reason the withdrawal report prints the memory its edge was burying —
+// and a memory buried by mistake is invisible afterwards, so the check has to
+// happen here or not at all.
+//
+// Every row carries a marker rather than being left to the absence of one, for
+// the same reason the withdrawal report has four: a row this call did not stamp
+// is one of four different things, and a report that grouped them as "not marked"
+// would claim a state the reader cannot act on. "already resolved" is the issue's
+// no-op, "pinned" and "standing category" are the store's guard, and "FAILED" is
+// this run's own broken write.
+func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) string {
+	// A request that named nothing says nothing. It always came with an error — a
+	// refused ref is the only way to get here, and a refusal writes nothing at
+	// all — so a header reading "0 named, marked resolved 0" above that error is
+	// a report about a corpus nobody asked about, printed as though it were the
+	// answer. The same rule supersedeWithdrawReport follows, for the same reason.
+	if res.Resolved == 0 {
+		return ""
+	}
+	verb := "would mark resolved"
+	count := 0
+	for _, m := range res.Memories {
+		if m.AlreadyResolved || m.Pinned || m.ExemptCategory {
+			continue
+		}
+		count++
+	}
+	if apply {
+		verb = "marked resolved"
+		count = res.Marked
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category\n",
+		projectName, res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory)
+	for _, m := range res.Memories {
+		marker := "would mark"
+		switch {
+		case m.Marked:
+			marker = "marked"
+		case m.MarkFailed:
+			marker = "FAILED"
+		case m.AlreadyResolved:
+			// The issue's no-op, and it is not a success: nothing was written on
+			// this row's account, including no history row, because a history row
+			// records a write and no write happened.
+			marker = "already resolved"
+		case m.Pinned:
+			marker = "pinned"
+		case m.ExemptCategory:
+			marker = "standing category"
+		}
+		fmt.Fprintf(&b, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, firstLine(m.Content, 70))
+	}
+	if !apply && count > 0 {
+		b.WriteString("\nRe-run with --apply to stamp these resolved.\n")
+	}
+	// The inverse, and only under --apply: a dry run stamped nothing, so naming
+	// a repair for it would be a command for a change that has not happened.
+	//
+	// It is rendered by internal/followup, the same renderer the supersede
+	// repairs use, so the two halves of a repair cannot print different commands
+	// for the same situation — and that renderer quotes a project name holding a
+	// space or a metacharacter, which is what makes the command run at all.
+	if apply {
+		if stamped := markStampedIDs(res.Memories); len(stamped) > 0 {
+			cmd, viaFileOnly, unnameable := followup.ResolveCommand(projectName, stamped)
+			if cmd != "" {
+				fmt.Fprintf(&b, "\nTo put any of these back into session injection, clear the stamp on exactly them:\n  %s\n", cmd)
+			}
+			if len(viaFileOnly) > 0 {
+				// Named rather than dropped, for internal/followup's reason: `--only`
+				// splits on commas, so an id holding one is not nameable by that flag
+				// however it is quoted, and an operator told nothing would run the
+				// command above, clear fewer memories than this run stamped, and
+				// report a repair that did not happen.
+				fmt.Fprintf(&b, "  (%d id(s) hold a comma, which --only cannot carry, so they are named here; put each on\n"+
+					"   its own line in a file and use --only-file)\n", len(viaFileOnly))
+				for _, id := range viaFileOnly {
+					fmt.Fprintf(&b, "    %s\n", id)
+				}
+			}
+			if len(unnameable) > 0 {
+				fmt.Fprintf(&b, "  (%d id(s) hold a newline, which no --only or --only-file form can carry, so they stay\n"+
+					"   resolved until the row is rewritten — delete and re-save the memory)\n", len(unnameable))
+				for _, id := range unnameable {
+					fmt.Fprintf(&b, "    %q\n", id)
+				}
+			}
+		}
+	}
+	return b.String()
+}
+
+// markStampedIDs is the ids THIS call stamped, in the order they were reported.
+// Only stamped rows: the follow-up is for memories this run buried, and a row
+// that was already resolved before it ran is not something the command would
+// change — naming it would send the operator to clear a stamp an earlier pass
+// owns.
+func markStampedIDs(rows []resolve.MarkedMemory) []string {
+	out := make([]string, 0, len(rows))
+	for _, m := range rows {
+		if m.Marked {
+			out = append(out, m.ID)
+		}
+	}
+	return out
+}
 
 // resolveSummaryLine renders the one-line resolve result, including the
 // deterministic KEEP vetoes and the UNKNOWN verdicts that remain eligible for a
@@ -2169,13 +2441,24 @@ func runResolve() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
 		os.Exit(1)
 	}
-	projectName, source, apply, reassess := parsed.project, parsed.source, parsed.apply, parsed.reassess
+	projectName, apply, reassess := parsed.project, parsed.apply, parsed.reassess
 	if projectName == "" {
 		fmt.Fprint(os.Stderr, resolveUsage)
 		os.Exit(1)
 	}
 
-	source, err := detectPhaseSource(source)
+	// --mark is dispatched BEFORE the harness is detected or spawned, and that
+	// ordering is the feature rather than an optimisation: it judges nothing, so
+	// a machine that cannot spawn a CLI harness at all can still repair its
+	// corpus, nothing is billed, and a --source the caller passed has nothing to
+	// override. Every other mode reaches this point needing a classifier, so it
+	// pays for one.
+	if parsed.hasMark() {
+		runResolveMark(parsed, apply)
+		return
+	}
+
+	source, err := detectPhaseSource(parsed.source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -2203,7 +2486,7 @@ func runResolve() {
 		// args' backing array.
 		only := append([]string{}, parsed.only...)
 		if parsed.onlyFile != "" {
-			fromFile, ferr := readOnlySelectors(parsed.onlyFile)
+			fromFile, ferr := readRefSelectors("--only-file", parsed.onlyFile)
 			if ferr != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", ferr)
 				os.Exit(1)

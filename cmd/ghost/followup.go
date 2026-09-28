@@ -123,7 +123,7 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 	// The file line is printed only when the file can name something, which is
 	// `len(ids) > len(unnameable)`: writeReassessTargets omits the newline-bearing
 	// ids rather than writing two half-ids, so a file holding only those names no
-	// selector at all and readOnlySelectors refuses it — pointing the operator at
+	// selector at all and readRefSelectors refuses it — pointing the operator at
 	// it would be pointing at a command that cannot run.
 	fileHoldsSomething := path != "" && len(unnameable) < len(ids)
 	if fileHoldsSomething {
@@ -236,7 +236,7 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 	head, viaFileOnly, unnameable := resolveFollowupCommand(projectName, ids)
 	if len(unnameable) == len(ids) {
 		// Nothing this file could name. Writing it anyway produces a list
-		// readOnlySelectors refuses with "names no memory ids or prefixes", and the
+		// readRefSelectors refuses with "names no memory ids or prefixes", and the
 		// report would point the operator at a command that cannot run. The ids are
 		// named in the report instead, which is the only place they can be.
 		return "", fmt.Errorf("no id in this set is nameable through --only-file: all %d hold a newline", len(ids))
@@ -250,7 +250,7 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 	// a newline is one no surface can name, and calling that a comma says the
 	// file is the answer when the file is not carrying it.
 	// The format is unchanged otherwise, because this file is a --only-file input
-	// and readOnlySelectors reads one id per line whatever the comment says.
+	// and readRefSelectors reads one id per line whatever the comment says.
 	switch {
 	case head != "":
 		fmt.Fprintf(&b, "# %s\n", head)

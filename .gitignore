@@ -54,3 +54,6 @@ eval/cycle/results/
 
 __pycache__/
 *.pyc
+
+# Local command sandbox (per-session XDG/HOME roots)
+.sandbox/

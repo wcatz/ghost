@@ -45,25 +45,18 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/memref"
 )
 
-// minRefLen is the shortest PREFIX a caller may pass. A full id is always
-// accepted whatever its length or shape, because it names one row and the store
-// holds it; a prefix has to be an identity rather than a class, and below this
-// length it names a large slice of any corpus. Ids are hex(randomblob(16)), so
-// eight characters is the first length at which a prefix of a real corpus is
-// usually one row — and a corpus where it is not is answered with the ambiguity
-// listing, which says so and asks for more characters.
-const minRefLen = 8
-
-// maxRefMatches caps how many ids an ambiguity refusal names. The point of the
-// list is to let the reader type more characters, which the first few entries
-// are enough to do; a corpus where one 8-character prefix names hundreds of ids
-// would otherwise turn a refusal into a wall of them.
-const maxRefMatches = 10
+// The ref rules are NOT here. A ref is a full id or an 8-or-more-character
+// prefix of one, matched literally and case-insensitively inside the project
+// plus _global; an ambiguous ref is a refusal listing the matches, never a
+// choice. `ghost resolve --mark` (#714) names memories by ref through the same
+// query and the same refusals, and two copies of these rules would eventually
+// disagree about which id one spelling addresses — so they live in
+// internal/memref, and the two callers share them.
 
 // WithdrawStore is the subset of *memory.Store a targeted withdrawal needs;
 // narrowed for testability. Nothing here judges an edge: the store is asked what
@@ -290,95 +283,12 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		short(sourceID), short(targetID), projectID, intoSuffix(into))
 }
 
-// resolveRef turns one ref into a memory id in the project.
-//
-// A ref is matched as a LITERAL PREFIX of a memory id, which is what lets one
-// query answer both forms: a full id of any shape matches itself, so an id an
-// imported artifact wrote verbatim — `ghost import` preserves the ids it reads,
-// and nothing about an id column says they are hex — is nameable, while 8 or
-// more characters of one is the shortest prefix that can serve as an identity
-// (below it, a prefix names a large slice of any corpus, and a large slice is
-// not a decision).
-//
-// The length floor applies to a PREFIX only. A ref the store holds verbatim is a
-// full id whatever its length or shape, and refusing one would be a dead end on
-// an imported corpus — so the two forms are told apart by comparing the match
-// with the ref rather than by inspecting the ref's characters, which is what
-// would reject an imported id for not being hex.
-//
-// An ambiguous ref is refused with the matches listed. The alternative is
-// choosing which memory to delete a link from, which is not a decision this
-// function may make.
-//
-// The refusals say which of the two forms failed, because they fail for
-// different reasons and a reader who pasted a full id needs to be told that the
-// store does not hold it, not that the string they pasted is malformed.
+// resolveRef turns one ref into a memory id in the project, through the shared
+// rules in internal/memref. It stays a named function so the two call sites in
+// resolvePair read as what they are — the SOURCE and the TARGET — and so `which`
+// reaches the refusal.
 func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref string) (string, error) {
-	ids, err := store.MemoryIDsByIDPrefix(ctx, projectID, ref)
-	if err != nil {
-		return "", err
-	}
-	// Byte-exact first, at any length. `memories.id` is a BINARY-unique key, so at
-	// most one stored id can equal the ref — which makes the spelling the caller
-	// typed decisive rather than a guess, and it is what lets a short full id that
-	// also happens to prefix a longer one resolve rather than be refused as
-	// ambiguous. This is the reading that makes the repair performable: a store
-	// holding both "abc" and "ABC" still names ONE of them per spelling.
-	for _, id := range ids {
-		if id == ref {
-			return id, nil
-		}
-	}
-	// Then case-folded, for a ref spelled in a case the store does not hold. A
-	// single fold match is one row, so it is not ambiguous either.
-	//
-	// Two fold matches and no byte-exact one means the ref is a THIRD casing
-	// ("aBc") of ids that differ only in letter case. No casing OF THIS REF reaches
-	// either row, which is what makes it unaddressable — the two stored spellings
-	// do reach them, one row each, and that is why the message LISTS them instead
-	// of naming a remedy: the reader's next keystroke is a copy of one of them, and
-	// a command name would only send them somewhere that folds the spelling away
-	// again. Naming a remedy also belongs to the caller — this text is returned
-	// verbatim by ghost_link_withdraw to an agent that may have no shell at all.
-	var folded []string
-	for _, id := range ids {
-		if strings.EqualFold(id, ref) {
-			folded = append(folded, id)
-		}
-	}
-	switch len(folded) {
-	case 0:
-		// No case-insensitive match either: the prefix rules below decide.
-	case 1:
-		return folded[0], nil
-	default:
-		return "", fmt.Errorf("the %s ref %q matches %d memories whose stored ids differ only in letter case (%s), and it is spelled as neither: ids are matched case-insensitively here, so this ref cannot address either of them",
-			which, ref, len(folded), strings.Join(folded, ", "))
-	}
-	if utf8.RuneCountInString(ref) < minRefLen {
-		// Deliberately WITHOUT the match list. A ref this short names a slice of
-		// the project rather than a row, and printing that slice would turn a
-		// refusal into a dump of the project's id set — the one answer here that
-		// hands out what the caller could not otherwise enumerate.
-		return "", fmt.Errorf("the %s ref %q is %d character(s), too short to be a prefix of an id — a prefix needs %d or more, or the full id",
-			which, ref, utf8.RuneCountInString(ref), minRefLen)
-	}
-	switch len(ids) {
-	case 0:
-		return "", fmt.Errorf("no memory in project %s has an id starting with %q (%s)", projectID, ref, which)
-	case 1:
-		return ids[0], nil
-	}
-	// Every match is named, because the answer to an ambiguity is more characters
-	// and the reader has to know what to type — up to the cap, so a pathological
-	// corpus cannot turn a refusal into a wall of ids.
-	shown, suffix := ids, ""
-	if len(shown) > maxRefMatches {
-		suffix = fmt.Sprintf(", and %d more", len(ids)-maxRefMatches)
-		shown = shown[:maxRefMatches]
-	}
-	return "", fmt.Errorf("the %s ref %q is ambiguous in project %s: %s%s — pass more characters of the id to choose one",
-		which, ref, projectID, strings.Join(shown, ", "), suffix)
+	return memref.Resolve(ctx, store, projectID, which, ref)
 }
 
 // intoSuffix names the live edges that DO point at a target, for the refusal
@@ -398,18 +308,9 @@ func intoSuffix(links []memory.Link) string {
 		" — withdraw that pair as well, or note that the other edge still buries it)"
 }
 
-// short is the report's id form: the first eight CHARACTERS, which is what every
-// Ghost report prints and therefore what an operator will have on screen.
-//
-// By characters, not bytes, and that is the whole point of the function. Ids are
-// not necessarily hex — `ghost import` writes an artifact's ids verbatim — so
-// `id[:8]` on a 16-byte CJK id returns the first two runes plus two bytes of the
-// third: invalid UTF-8 in a report line, and a string the prefix query can never
-// match even with a rune bound. The report would then print a ref that cannot
-// address the row it names, which is the one thing this feature promises to avoid.
+// short is the report's id form, measured in CHARACTERS. The rules and the
+// reasoning are in internal/memref, which every surface that names a memory by
+// ref reports through.
 func short(id string) string {
-	if n := utf8.RuneCountInString(id); n > 8 {
-		return string([]rune(id)[:8])
-	}
-	return id
+	return memref.Short(id)
 }
