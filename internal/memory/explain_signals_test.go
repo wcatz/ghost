@@ -954,6 +954,130 @@ func TestExplainNamesBothSidesOfTheKeywordReservation(t *testing.T) {
 	}
 }
 
+// TestExplainSaysTheBaseIsUnweightedWhenTheVectorLegAddsNothing covers the note
+// that tells a reader rrf_score is the UNWEIGHTED keyword base, from both of the
+// ranking path's exits that can trigger it.
+//
+// The two causes have different remedies — no embedding to consult, or an
+// embedding nothing was close enough to — and a reader cannot tell them apart from
+// the numbers, so the note has to fire for each. It is a subtest pair rather than
+// two functions because they are the same claim from the same flag, and the
+// failure mode being guarded is precisely that one exit sets it and the other
+// does not.
+//
+// The no-query-vector case is here because that path returns from searchHybridLegs
+// BEFORE any floor is applied, so a verdict recorded only at the floor is a verdict
+// it never produces. That was a live regression: the note vanished for exactly the
+// deployments most likely to want it, since an absent or failing embedder is the
+// common case and a small rrf_score there is a differently-weighted number rather
+// than a weak match.
+func TestExplainSaysTheBaseIsUnweightedWhenTheVectorLegAddsNothing(t *testing.T) {
+	const wantBaseNote = "no vector matches survived"
+
+	// Both cases assert the same three things: the note is present, the cause is
+	// named by something (a note on one exit, floor_dropped on the other), and
+	// rrf_score really is the plain keyword term the note claims — so the note
+	// cannot pass by being decoration. causeNote is the note that SHOULD appear,
+	// and empty means the cause is carried per-row and the named note must be
+	// absent: a payload that blamed a missing embedder when the embedder worked
+	// and the floor was strict would send an operator to the wrong setting.
+	assertUnweighted := func(t *testing.T, ex SearchExplain, causeNote string) {
+		t.Helper()
+		if !hasExplainNote(ex.Notes, wantBaseNote) {
+			t.Errorf("notes = %v, want the unweighted-base note: rrf_score here is the UNWEIGHTED keyword base, "+
+				"and without the note a small one is indistinguishable from a weak vector match", ex.Notes)
+		}
+		if causeNote == "" {
+			if hasExplainNote(ex.Notes, "no query embedding available") {
+				t.Errorf("notes = %v, want NO missing-embedder note: this search had a query embedding and the "+
+					"floor refused every match, so blaming the embedder sends the reader to the wrong setting",
+					ex.Notes)
+			}
+		} else if !hasExplainNote(ex.Notes, causeNote) {
+			t.Errorf("notes = %v, want the note naming the cause (%q) as well: a base note alone does not say "+
+				"whether to configure an embedder or lower the floor", ex.Notes, causeNote)
+		}
+		var included int
+		for _, row := range ex.Rows {
+			if !row.Included {
+				continue
+			}
+			included++
+			// keywordOnlyParams leaves the FTS weight at 1 and zeroes the vector
+			// weight, so the fused score is the plain 1/(K+rank+1) of the keyword
+			// leg. The weighted hybrid form is a different number, and reporting it
+			// is the failure the note exists to stop.
+			want := 1.0 / (60 + float64(row.FTSRank) + 1)
+			if math.Abs(row.RRFScore-want) > 1e-12 {
+				t.Errorf("row %s reports rrf_score = %v, want 1/(60+%d+1) = %v: with no vector contribution "+
+					"the base is the unweighted keyword term, and the note above claims exactly that",
+					row.ID, row.RRFScore, row.FTSRank, want)
+			}
+			if row.VectorRank != -1 || row.VectorScore != -1 {
+				t.Errorf("row %s reports vector_rank = %d and vector_score = %v, want the -1 sentinels: the "+
+					"vector leg contributed nothing, which is a fact about the leg and not a zero score: %+v",
+					row.ID, row.VectorRank, row.VectorScore, row)
+			}
+		}
+		if included == 0 {
+			t.Error("no row is included, so the base this note describes was never reported")
+		}
+	}
+
+	t.Run("no query vector", func(t *testing.T) {
+		store, ctx := setupTestStore(t)
+		createTestMemory(t, store, ctx, "the compaction schedule runs on the first sunday of each month")
+
+		// A nil query vector, not an empty slice: no embedder configured, or an
+		// EmbedQuery that failed. Both reach searchHybridLegs this way.
+		ex, err := store.ExplainSearch(ctx, "test-proj", "compaction schedule sunday", nil, 5)
+		if err != nil {
+			t.Fatalf("ExplainSearch(nil query vector): %v", err)
+		}
+		assertUnweighted(t, ex, "no query embedding available")
+	})
+
+	t.Run("the floor refused every match", func(t *testing.T) {
+		store, ctx := setupTestStore(t)
+		// An embedding exists and the vector leg returns the row, and the FLOOR is
+		// what removes it — the other exit. The embedding is deliberately not the
+		// query vector, so its cosine is 0.8 and the threshold can sit between the
+		// two: an identical embedding would score 1.0 and no floor above 1 would be
+		// a threshold anyone would configure.
+		id := createTestMemory(t, store, ctx, "the compaction schedule runs on the first sunday of each month")
+		if err := store.StoreEmbedding(ctx, id, []float32{0.8, 0.6}, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+		store.SetVectorMinSimilarity(0.9) // above the 0.8 cosine
+
+		ex, err := store.ExplainSearch(ctx, "test-proj", "compaction schedule sunday", []float32{1, 0}, 5)
+		if err != nil {
+			t.Fatalf("ExplainSearch: %v", err)
+		}
+		// Guard the fixture: the floor must be what emptied the leg, or this
+		// subtest is the nil case wearing a different name.
+		row, ok := explainRowByID(ex)[id]
+		if !ok {
+			t.Fatalf("the matched row is missing from the explanation: %+v", ex.Rows)
+		}
+		if !row.FloorDropped || row.FloorScore <= 0 || row.FloorScore >= 0.9 {
+			t.Fatalf("the row reports floor_dropped=%v floor_score=%v, want true and a cosine under the 0.9 "+
+				"threshold: the FLOOR is what must have emptied the leg here, or this is not the second exit: %+v",
+				row.FloorDropped, row.FloorScore, row)
+		}
+		// vector_rank is -1 here, and deliberately: the floor strips the term
+		// before fusion, so the row reaches the window on its keyword score alone
+		// and carries no vector rank. That is the same -1 the no-embedder case
+		// reports, which is precisely why floor_dropped and floor_score are what
+		// distinguish the two, and why this subtest checks the cause per-row.
+		if row.VectorRank != -1 {
+			t.Errorf("vector_rank = %d, want -1: the floor removes the term before fusion, so the row is scored "+
+				"on its keyword leg alone", row.VectorRank)
+		}
+		assertUnweighted(t, ex, "")
+	})
+}
+
 func hasExplainNote(notes []string, substr string) bool {
 	for _, n := range notes {
 		if strings.Contains(n, substr) {

@@ -37,28 +37,22 @@ type searchTrace struct {
 	// ranking path never scored it — the vector floor removed it first, which
 	// is a recorded outcome, not a missing one.
 	rows map[string]*tracedCandidate
-	// vectorFloor is the vector leg's own verdict, recorded where the floor is
-	// applied. It is a fact about the LEG rather than about any row, so it has
-	// no per-row home: explain would otherwise call filterVectorFloor a second
-	// time on the same input to learn whether the leg survived at all, which is
-	// the one remaining parallel computation in the file.
-	vectorFloor floorVerdict
-}
-
-// floorVerdict is what the vector similarity floor decided, as the site that
-// applied it recorded it.
-type floorVerdict struct {
-	// explainOnly is the payload-level outcome: the floor let NO vector match
-	// through, so fusion ran on the unweighted keyword base and rrf_score
-	// reports that rather than a weighted sum.
-	explainOnly bool
-	// applied is the threshold the ranking used, as opposed to the one the
-	// caller configured. A stage that adjusts the effective floor must record
-	// the adjusted value here or the payload describes a floor nobody applied.
-	applied float32
-	// dropped counts the candidates the floor removed. Per-row reasons travel
-	// on tracedCandidate; this is the shape of the cut, for the note.
-	dropped int
+	// keywordOnlyBase says the vector leg contributed nothing to the fused score,
+	// so the base is the UNWEIGHTED keyword term 1/(K+rank+1) rather than a
+	// weighted hybrid sum. It is a fact about the leg rather than about any row, so
+	// it has no per-row home: explain would otherwise call filterVectorFloor a
+	// second time on the same input to learn whether the leg survived at all, which
+	// is the one remaining parallel computation in the file.
+	//
+	// TWO exits set it, for the same reason. searchHybridLegs returns early when
+	// queryVec is nil — no embedder, or an embed failure, which is the common
+	// deployment — and that return happens before any floor is applied, so a
+	// verdict recorded only at the floor is one this path never produces. The
+	// floor site sets it when the floor removed every match. Only searchHybridLegs
+	// writes it, because only it reaches a vector leg; a reader that grows a second
+	// entry point has to stamp it there too, or the flag silently reads false and
+	// the note it drives disappears for that path.
+	keywordOnlyBase bool
 }
 
 // tracedCandidate is one candidate's standing as the ranking path left it.

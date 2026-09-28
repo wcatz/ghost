@@ -1084,6 +1084,18 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 	// unweighted keyword score to preserve the historical FTS-only ordering
 	// and explain-mode score contract.
 	if queryVec == nil {
+		// The verdict is stamped HERE as well as at the floor below, because this
+		// path returns before the floor is ever applied and a verdict recorded only
+		// where the floor runs is a verdict this path never produces. It matters
+		// most here: an absent or failing embedder is the common deployment, and
+		// the note that says rrf_score is the unweighted keyword base is the only
+		// thing telling a reader that a small score is a differently-weighted one
+		// rather than a weak match. Both exits set the same flag for the same
+		// reason — the vector leg contributed nothing to the fused base — so the
+		// reader is told which base it is looking at either way.
+		if p.trace != nil {
+			p.trace.keywordOnlyBase = true
+		}
 		final, err := s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
 		return final, legs, err
 	}
@@ -1096,13 +1108,13 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 	legs.vec = vecResults
 	filtered := filterVectorFloor(vecResults, p.MinSimilarity)
 	// The floor's own verdict, recorded here because this is the only place it is
-	// applied. Two facts live in it, and both would otherwise be re-derived in
-	// explain by calling filterVectorFloor a second time on the same input — the
-	// parallel computation this trace exists to remove, since a later change that
-	// adjusted the effective floor HERE would leave explain describing a floor the
-	// ranking no longer applied. ExplainOnly is the payload-level "the vector leg
-	// contributed nothing, so ranking fell back to the unweighted keyword base"
-	// note, which is a fact about no row and so has nowhere else to live.
+	// applied, and because a verdict recorded only here is one the nil-query-vector
+	// path above never produces. It would otherwise be re-derived in explain by
+	// calling filterVectorFloor a second time on the same input — the parallel
+	// computation this trace exists to remove, since a later change that adjusted
+	// the effective floor HERE would leave explain describing a floor the ranking
+	// no longer applied. The verdict is a fact about the LEG rather than about any
+	// row, so it has no per-row home.
 	//
 	// A candidate the floor removed from the VECTOR leg may still reach fusion on
 	// its keyword term, so nothing downstream can record that its vector
@@ -1114,11 +1126,7 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 	// from a missing vector rank, which is indistinguishable from a leg that never
 	// matched.
 	if p.trace != nil {
-		p.trace.vectorFloor = floorVerdict{
-			explainOnly: len(filtered) == 0,
-			applied:     p.MinSimilarity,
-			dropped:     len(vecResults) - len(filtered),
-		}
+		p.trace.keywordOnlyBase = len(filtered) == 0
 	}
 	if p.trace != nil && len(filtered) < len(vecResults) {
 		kept := make(map[string]bool, len(filtered))

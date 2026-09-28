@@ -357,12 +357,17 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	// score is 1/(K+rank+1). Reporting the weighted form there would show a
 	// number 0.3x the one that actually ranked the results.
 	//
-	// The verdict is the ranking path's own, recorded at the floor site — NOT a
-	// second filterVectorFloor call on the same input. Re-applying the floor here
-	// is the one remaining parallel computation in this file, and it would
-	// quietly describe a floor the ranking no longer applies the moment a stage
-	// adjusts the effective threshold before calling it.
-	if p.trace.vectorFloor.explainOnly {
+	// The verdict is the ranking path's own, NOT a second filterVectorFloor call
+	// on the same input. Re-applying the floor here would be the one remaining
+	// parallel computation in this file, and it would quietly describe a floor the
+	// ranking no longer applies the moment a stage adjusts the effective threshold
+	// before calling it.
+	//
+	// The flag is set on both of the ranking path's exits, so it is true for the
+	// nil-query-vector case as well as the floor-refused-everything case — a search
+	// that never had an embedding reports an unweighted base too, and saying so is
+	// the only way a reader can tell that base apart from a weak vector match.
+	if p.trace.keywordOnlyBase {
 		ex.Notes = append(ex.Notes, "no vector matches survived — ranking used the unweighted FTS base score, so rrf_score reports that base rather than a weighted sum")
 	}
 
