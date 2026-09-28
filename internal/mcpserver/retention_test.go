@@ -314,3 +314,74 @@ func TestGhostMemorySearch_RefusesAnUnknownTier(t *testing.T) {
 		t.Errorf("refusal does not name the vocabulary: %q", text)
 	}
 }
+
+// TestGhostSaveGlobal_RoundTripsTheRetentionTier: the second save tool writes a
+// memory too, and a tier one of the two save tools honoured while the other
+// ignored it is a tier an agent cannot rely on. A global memory is the
+// archetypal durable one, so this is where `persistent` is most worth saying.
+func TestGhostSaveGlobal_RoundTripsTheRetentionTier(t *testing.T) {
+	store := testStore(t)
+	srv := New(store, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), "test")
+	session := connectedClient(t, srv)
+	ctx := context.Background()
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_save_global",
+		Arguments: map[string]any{
+			"content":   "yesterday's standup notes are in the shared drive, not in this repo",
+			"retention": memory.RetentionSession,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_save_global: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("error result: %+v", result.Content)
+	}
+	mems, err := store.GetAll(ctx, "_global", 50)
+	if err != nil {
+		t.Fatalf("GetAll(_global): %v", err)
+	}
+	var saved *memory.Memory
+	for i := range mems {
+		if strings.HasPrefix(mems[i].Content, "yesterday's standup notes") {
+			saved = &mems[i]
+		}
+	}
+	if saved == nil {
+		t.Fatalf("the global memory is not in the store: %+v", mems)
+	}
+	if saved.Retention != memory.RetentionSession {
+		t.Errorf("stored retention = %q, want %q", saved.Retention, memory.RetentionSession)
+	}
+	if !strings.Contains(toolText(t, result), memory.RetentionSession) {
+		t.Errorf("the result does not report the tier: %q", toolText(t, result))
+	}
+
+	// And the same refusal as the other save, from the same vocabulary.
+	refused := callExpectingErrorText(t, session, "ghost_save_global", map[string]any{
+		"content":   "a global memory whose tier is a typo",
+		"retention": "eventually",
+	})
+	if !strings.Contains(refused, "persistent") || !strings.Contains(refused, "eventually") {
+		t.Errorf("the refusal does not name the value and the vocabulary: %q", refused)
+	}
+}
+
+// callExpectingErrorText is the same call as a test's existing error assertion,
+// kept as a function here because a handler refusal reaches this suite in either
+// of two shapes: an error result, or a protocol error. Which one is a property
+// of the SDK's schema validation rather than of the product, so a test that
+// pinned one shape would break on it.
+func callExpectingErrorText(t *testing.T, session *mcp.ClientSession, name string, args map[string]any) string {
+	t.Helper()
+	ctx := context.Background()
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
+	if err != nil {
+		return err.Error()
+	}
+	if !res.IsError {
+		t.Fatalf("%s: expected a refusal, got %s", name, toolText(t, res))
+	}
+	return toolText(t, res)
+}

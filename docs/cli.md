@@ -268,6 +268,8 @@ A near-duplicate save **raises** the surviving row's tier and never lowers it, s
 
 A `session` row is never removed automatically. It is a candidate for `ghost prune` and nothing else.
 
+A tier is set by a save (`ghost_memory_save`, `ghost_save_global`) and there is no update path: restating a memory with `retention: persistent` folds into the existing row and raises it, which is how a memory that is already stored becomes keep-forever. A save that finds no near-duplicate stores its own new row, so restating a memory in substantially different words creates a second row rather than retiering the first.
+
 ### `ghost prune`
 
 ```bash

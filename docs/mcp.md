@@ -14,7 +14,7 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Memory | `ghost_memory_delete` | Delete one memory by ID |
 | Memory | `ghost_memory_pin` | Pin or unpin a memory |
 | Memory | `ghost_memory_promote` | Promote a project memory to `_global` |
-| Memory | `ghost_save_global` | Save a memory that applies to all projects |
+| Memory | `ghost_save_global` | Save a memory that applies to all projects; takes the same `retention` argument |
 | Memory | `ghost_resolve` | Mark resolved evidence after source-matched classification |
 | Memory | `ghost_resolve_mark` | Stamp `resolved_at` on memories you name |
 | Memory | `ghost_link_withdraw` | Withdraw one named wrong `supersedes` edge |
@@ -48,6 +48,8 @@ Nothing an agent writes is excluded from `ghost reflect` by its `source`: seeds 
 | `persistent` | A decision, a constraint, a preference the user would be annoyed to lose. | Nothing for retrieval; exempt from consolidation, supersede, resolve and pruning, and from the ranking demotions those passes cause. |
 
 An unknown value is refused in the caller's own words, naming all three, and nothing is written. On a near-duplicate save the tier **raises** the existing row and never lowers it, so a `persistent` save protects the row a later consolidation would absorb rather than only the copy it stored; the result message says which row carries it. Nothing removes a `session` memory on a timer — `ghost prune` is the only command that does, it is a dry run until `--apply`, and no lifecycle pass, hook or scheduler calls it. See [Retention tiers](cli.md#retention-tiers) for the full rules, including the `expires_at` and grace semantics.
+
+`ghost_save_global` takes the same argument. There is no update path: a tier is set by a save, and on a near-duplicate save it RAISES the existing row rather than lowering it, so restating a memory as keep-forever protects the row that is already there.
 
 `ghost_memory_search` and `ghost_memories_list` take the same three values as a `retention` filter, and both refuse an unknown one rather than ignoring it. The search filter is applied before the result window closes, so a matching row ranked below the window still takes a slot; an answer that found rows and withheld them all reports `reason=all_out_of_retention`.
 

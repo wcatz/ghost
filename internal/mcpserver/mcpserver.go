@@ -1990,6 +1990,12 @@ func (s *Server) registerTools() {
 		Importance any `json:"importance,omitempty" jsonschema:"Importance, a number 0.0-1.0 (e.g. 0.8). Default 0.8"`
 		Tags       any `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
 		validityArgs
+		// Retention here for the same reason it is on ghost_memory_save: this is the
+		// other surface that writes a memory, and a tier one of the two save tools
+		// honoured while the other ignored it is a tier an agent cannot rely on. A
+		// global memory is the archetypal durable one, so `persistent` is the
+		// interesting value here.
+		Retention string `json:"retention,omitempty" jsonschema:"How long this memory is wanted: session, project (the default) or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning). An unknown value is refused, and a near-duplicate save RAISES the existing row's tier rather than lowering it."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -2010,6 +2016,10 @@ func (s *Server) registerTools() {
 		}
 		if !memory.IsValidCategory(args.Category) {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
+		}
+		retention, err := memory.NormalizeRetention(args.Retention)
+		if err != nil {
+			return nil, nil, err
 		}
 		importance, err := defaultImportanceArg(args.Importance, 0.8)
 		if err != nil {
@@ -2042,6 +2052,7 @@ func (s *Server) registerTools() {
 		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, "_global", args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{
 			Provenance: prov,
 			Validity:   fields.Validity,
+			Retention:  retention,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
@@ -2074,6 +2085,12 @@ func (s *Server) registerTools() {
 		// cross-project case. Advisory only — the id above is already written,
 		// and it follows the fold notice because both describe the stored
 		// result, and the fold notice names the row that actually answered.
+		if args.Retention != "" {
+			msg += fmt.Sprintf(" — retention %s", retention)
+			if duplicateOf != "" {
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
+			}
+		}
 		msg += repoFactHint(args.Content)
 		if globalTruncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
