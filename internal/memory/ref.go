@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"unicode/utf8"
 )
 
 // MemoryIDsByIDPrefix returns the ids of the memories in projectID whose id
@@ -29,7 +30,15 @@ import (
 //
 // prefix is matched as LITERAL TEXT of its own length, not as a LIKE pattern, so
 // neither SQL wildcard can widen the search, and case-insensitively because ids
-// are hex and memIDKey already compares them that way. The match is therefore
+// are hex and memIDKey already compares them that way.
+//
+// The bound is a RUNE COUNT, not a byte length, and that is not pedantry: the id
+// column is TEXT and SQLite's substr() slices by CHARACTER, so a ref holding a
+// multi-byte rune ("日本" is 6 bytes, 2 characters) would be compared against the
+// first six CHARACTERS of every id and could never match — a false negative that
+// refuses an id the store really has, and refuses it while claiming no memory has
+// it. The two lengths agree for the hex ids Ghost mints, which is exactly why the
+// bug would survive a normal test. The match is therefore
 // not served by the primary-key index; a withdrawal is a one-off operator action
 // over a project's memories, not a retrieval path, so the scan is the right
 // trade. A prefix that matches nothing returns an empty slice and no error —
@@ -44,7 +53,7 @@ func (s *Store) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix strin
 		WHERE (project_id = ? OR project_id = ?)
 		  AND lower(substr(id, 1, ?)) = lower(?)
 		ORDER BY id
-	`, projectID, GlobalProjectID, len(prefix), prefix)
+	`, projectID, GlobalProjectID, utf8.RuneCountInString(prefix), prefix)
 	if err != nil {
 		return nil, fmt.Errorf("memory ids by prefix: %w", err)
 	}

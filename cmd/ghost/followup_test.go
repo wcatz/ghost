@@ -300,6 +300,35 @@ func TestSupersedeReassessFollowupSeparatesFileOnlyFromUnnameable(t *testing.T) 
 	}
 }
 
+// The mixed set: an empty command with comma ids AND newline ids. The header must
+// not claim every id holds a comma — the newline id is omitted from the file a few
+// lines later, so that claim is false about a row the file does not carry.
+func TestWriteReassessTargetsHeaderNamesBothBuckets(t *testing.T) {
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
+	path, err := writeReassessTargets("myproj", []string{"one,two", "three\nfour"}, "ghost supersede --withdraw --apply")
+	if err != nil {
+		t.Fatalf("writeReassessTargets: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	head := string(raw)
+	if strings.Contains(head, "every one of them holds a comma") {
+		t.Errorf("the header claims every id holds a comma, which is false for the newline id:\n%s", head)
+	}
+	if !strings.Contains(head, "1 hold a comma") || !strings.Contains(head, "1 hold a newline") {
+		t.Errorf("the header must name both buckets and their counts:\n%s", head)
+	}
+	// And the file carries the id it can, and omits the one it cannot.
+	if !strings.Contains(head, "\none,two\n") {
+		t.Errorf("the comma-bearing id is missing from the file:\n%s", head)
+	}
+	if strings.Contains(head, "three") {
+		t.Errorf("the newline-bearing id was written into a one-id-per-line file:\n%s", head)
+	}
+}
+
 // writeReassessTargets refuses a set it cannot name, rather than writing a list
 // readOnlySelectors rejects — the file is a --only-file INPUT, so a file that
 // names nothing is not a degraded list, it is a list the repair refuses.

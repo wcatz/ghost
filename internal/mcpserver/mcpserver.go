@@ -867,6 +867,15 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	if cmd == "" && len(viaFileOnly) == 0 && len(unnameable) == 0 {
 		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
 	}
+	// Invalidating a live edge changes what the context resource serves: the
+	// supersede ranking guard demotes an edge's target while the edge stands, so
+	// ghost://project/<id>/context is stale the moment this call returns. Every
+	// other mutating handler in this file pushes that update after its write, and
+	// this was the only write path that did not — a client subscribed to the
+	// resource would keep serving a ranking the withdrawal just invalidated.
+	if res.Withdrawn > 0 {
+		s.notifyProjectResource(ctx, resolvedProjectID, "context")
+	}
 	return sb.String(), nil
 }
 

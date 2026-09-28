@@ -254,14 +254,17 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 	switch {
 	case head != "":
 		fmt.Fprintf(&b, "# %s\n", head)
-	case len(viaFileOnly) > 0:
-		fmt.Fprintf(&b, "# No --only command can name these ids: every one of them holds a comma,\n"+
-			"# which --only splits on. This file is the only surface that can, so run\n"+
-			"# `ghost resolve <project> --reassess --only-file <this file> --apply`.\n")
 	default:
-		fmt.Fprintf(&b, "# No --only command can name these ids (some hold a comma, which --only splits on, and\n"+
-			"# none of those are nameable any other way). The ids this file CAN name are below; run\n"+
-			"# `ghost resolve <project> --reassess --only-file <this file> --apply`.\n")
+		// One arm, not two. An empty command with comma ids AND newline ids reaches
+		// here, and the two-word claim that "every one of them holds a comma" is
+		// false for the newline id — which the loop below deliberately omits and the
+		// trailing comment then admits is not below. So the header says what is true
+		// about both buckets: the ids it can carry are below, and the run is scoped
+		// to them.
+		fmt.Fprintf(&b, "# No --only command can name some of these ids: %d hold a comma, which --only\n"+
+			"# splits on, and %d hold a newline, which no form can carry. The ids this file CAN name\n"+
+			"# are below; run `ghost resolve <project> --reassess --only-file <this file> --apply`.\n",
+			len(viaFileOnly), len(unnameable))
 	}
 	if len(viaFileOnly) > 0 {
 		fmt.Fprintf(&b, "# (%d id(s) below hold a comma and are not in that command; --only cannot carry them,\n"+

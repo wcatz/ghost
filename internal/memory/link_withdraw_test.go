@@ -203,3 +203,30 @@ func upperHex(s string) string {
 	}
 	return string(out)
 }
+
+// The prefix bound is a RUNE COUNT, because memories.id is TEXT and SQLite's
+// substr() slices by character. A byte length makes a multi-byte ref compare
+// against the first N CHARACTERS of every id, which can never be equal — a false
+// negative that refuses an id the store really holds, and refuses it while saying
+// no memory has that id. The hex ids Ghost mints have byte length == rune count,
+// so only a non-ASCII id can catch this, and `ghost import` writes ids verbatim.
+func TestMemoryIDsByIDPrefixFindsANonASCIID(t *testing.T) {
+	store := linkTestStore(t)
+	ctx := context.Background()
+	const japanese = "日本語-メモ"
+	if _, _, _, err := store.ImportMemory(ctx, PortableMemory{
+		ID: japanese, ProjectID: "p1", Category: "fact",
+		Content: "An imported note whose id is not ASCII.", Source: "mcp",
+	}, ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	for _, prefix := range []string{japanese, "日本語"} {
+		got, err := store.MemoryIDsByIDPrefix(ctx, "p1", prefix)
+		if err != nil {
+			t.Fatalf("MemoryIDsByIDPrefix(%q): %v", prefix, err)
+		}
+		if len(got) != 1 || got[0] != japanese {
+			t.Errorf("MemoryIDsByIDPrefix(%q) = %q, want [%s]", prefix, got, japanese)
+		}
+	}
+}
