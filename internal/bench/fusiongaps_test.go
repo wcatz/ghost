@@ -38,25 +38,75 @@ func TestFormatFusionGapsLabelsTheCaseBehindTheLeg(t *testing.T) {
 		t.Errorf("a leg the fused condition is level with is not labelled not separable:\n%s", out)
 	}
 	// The footnote's rule and the cells must agree: no row may carry a label
-	// that contradicts its own interval.
+	// that contradicts its own interval. The numbers are located by POSITION from
+	// the start of the numeric block, and a row that should be numeric but is not
+	// FAILS — the earlier version of this loop indexed cells[2]/cells[3], which
+	// are the condition name and the mean, and `continue`d on the parse error, so
+	// every row was skipped and the two assertions below were unreachable. A check
+	// that can be disabled by a format change is not a check.
+	rows, checked := 0, 0
 	for _, line := range strings.Split(out, "\n") {
 		if !strings.HasPrefix(line, "fused - ") {
 			continue
 		}
-		cells := strings.Fields(line)
-		lo, err1 := strconv.ParseFloat(cells[2], 64)
-		hi, err2 := strconv.ParseFloat(cells[3], 64)
-		if err1 != nil || err2 != nil {
+		rows++
+		if strings.Contains(line, "not comparable") {
+			// A refusal carries no interval, so it must not also carry a verdict.
+			if strings.Contains(line, "ahead of") || strings.Contains(line, "behind the") ||
+				strings.Contains(line, "not separable") {
+				t.Errorf("a refused row also carries a verdict: %q", line)
+			}
 			continue
 		}
+		// fused | - | <condition> | mean | lo | hi | n | verdict...
+		cells := strings.Fields(line)
+		if len(cells) < 7 {
+			t.Errorf("row has %d fields, too few for mean, lo, hi, a count and a verdict: %q", len(cells), line)
+			continue
+		}
+		// The mean is parsed to hold the three-number block in place (a row whose
+		// mean cell is not a number is a broken row) and then checked against the
+		// verdict's direction, which is the claim the label makes.
+		mean, err1 := strconv.ParseFloat(cells[3], 64)
+		lo, err2 := strconv.ParseFloat(cells[4], 64)
+		hi, err3 := strconv.ParseFloat(cells[5], 64)
+		if err1 != nil || err2 != nil || err3 != nil {
+			t.Errorf("row does not carry three numbers where they belong (%v %v %v): %q", err1, err2, err3, line)
+			continue
+		}
+		if n, err := strconv.Atoi(cells[6]); err != nil || n != 3 {
+			t.Errorf("row reports %q queries, want the 3 it was given: %q", cells[6], line)
+		}
+		if lo > hi {
+			t.Errorf("row prints an inverted interval: %q", line)
+		}
+		checked++
 		separable := lo > 0 || hi < 0
-		labelledTie := strings.Contains(line, "not separable from the leg")
-		if separable && labelledTie {
-			t.Errorf("row is separable ([%s, %s]) and labelled a tie: %q", cells[2], cells[3], line)
+		isTie := strings.Contains(line, "not separable from the leg")
+		isAhead := strings.Contains(line, "ahead of the leg")
+		isBehind := strings.Contains(line, "behind the leg")
+		switch {
+		case separable && isTie:
+			t.Errorf("row is separable ([%s, %s]) and labelled a tie: %q", cells[4], cells[5], line)
+		case !separable && !isTie:
+			t.Errorf("row is not separable ([%s, %s]) and not labelled a tie: %q", cells[4], cells[5], line)
+		case isAhead && !separable:
+			t.Errorf("row is labelled ahead of the leg and its interval does not exclude zero: %q", line)
+		case isBehind && !separable:
+			t.Errorf("row is labelled behind the leg and its interval does not exclude zero: %q", line)
+		case isAhead && isBehind:
+			t.Errorf("row carries two opposing verdicts: %q", line)
+		case isAhead && mean <= 0:
+			t.Errorf("row is labelled ahead of the leg with a non-positive mean %+.4f: %q", mean, line)
+		case isBehind && mean >= 0:
+			t.Errorf("row is labelled behind the leg with a non-negative mean %+.4f: %q", mean, line)
 		}
-		if !separable && !labelledTie {
-			t.Errorf("row is not separable ([%s, %s]) and not labelled a tie: %q", cells[2], cells[3], line)
-		}
+	}
+	if rows != 2 {
+		t.Errorf("parsed %d comparison rows, want 2", rows)
+	}
+	if checked != 2 {
+		t.Errorf("verified the label against the interval on %d rows, want 2 — a row was skipped, so the check is not running", checked)
 	}
 }
 
