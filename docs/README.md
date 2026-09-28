@@ -13,7 +13,7 @@ GhostMem's documentation is split by audience. Start with the page that matches 
 ## Understanding GhostMem
 
 - [Architecture](architecture.md) — runtime modes, package boundaries, data flow, schema, search, and release build details for contributors.
-- [Invariants](invariants.md) — the package map and the conventions that must not drift; the long form of what `CLAUDE.md` summarises.
+- [Invariants](invariants.md) — the package map and the load-bearing rules a change must not break; read the bullets for the packages you touch.
 - [Benchmarks and methodology](benchmarks.md) — reproducible retrieval, end-to-end, staleness, and parameter-sweep results.
 - [Roadmap](ROADMAP.md) — planning notes and future work; this is not a delivery commitment.
 
