@@ -54,6 +54,50 @@ func (p *pairReplyProvider) Classify(_ context.Context, _, userContent string) (
 	return strings.Join(lines, "\n"), nil
 }
 
+// TestReassessRetriesAFailedClassifyCall: a batch whose first call fails and
+// whose retry answers is judged, and the pass applies every withdrawal that
+// verdict produced. The failure #699's rehearsal hit was one call in a project
+// of many, and the rerun a minute later withdrew 76 of 87 — so the retry is what
+// stands between a blip and a rerun an operator has to remember to make. The
+// count is reported, because a pass that needed one must not look like a pass
+// that did not.
+func TestReassessRetriesAFailedClassifyCall(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer, older := seedEdge(t, store, db,
+		"A restore that spanned two spindles took 41 minutes and the row count matched afterwards.",
+		"The restore path on one spindle is safe and takes under a minute.")
+
+	fp := &flakyProvider{resp: "NEITHER", fails: 1}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	var buf strings.Builder
+	cls.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	res, withdrawn, err := Reassess(ctx, store, cls, "p", true, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatalf("a first-call failure the retry answers must not fail the pass: %v", err)
+	}
+	if fp.calls != 2 {
+		t.Errorf("provider calls = %d, want 2 (the first attempt and its one retry)", fp.calls)
+	}
+	if res.Neither != 1 || res.Withdrawn != 1 {
+		t.Errorf("neither=%d withdrawn=%d, want 1 and 1: the retry's verdict is applied like any other", res.Neither, res.Withdrawn)
+	}
+	if cls.Retries() != 1 {
+		t.Errorf("Retries() = %d, want 1", cls.Retries())
+	}
+	if len(withdrawn) != 1 || !withdrawn[0].Written {
+		t.Errorf("withdrawn = %+v, want the edge the retry's verdict withdrew", withdrawn)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 0 {
+		t.Errorf("the edge survived: %d pair(s) remain", len(pairs))
+	}
+	if !strings.Contains(buf.String(), "retries=1") {
+		t.Errorf("the summary must count the retry:\n%s", buf.String())
+	}
+}
+
 // TestReassessReportsTheRepairItAlreadyMade pins the failure contract: a failed
 // invalidation returns the edges that DID land alongside the error, and the
 // summary is still logged. Each invalidation is its own transaction, so the

@@ -1417,10 +1417,10 @@ func TestReassessSummaryLine(t *testing.T) {
 // reads as "nothing was skipped" (#686).
 func TestSupersedeReport(t *testing.T) {
 	dry := "proj: 4 candidate pairs in 1 classify call(s), 2 cached, 1 supersedes, 0 causes, 0 reclassified, would link\n"
-	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1); got != dry {
+	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1, 0); got != dry {
 		t.Errorf("supersedeReport() with nothing vetoed = %q, want %q", got, dry)
 	}
-	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1)
+	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1, 0)
 	if !strings.HasPrefix(got, dry) {
 		t.Errorf("supersedeReport() = %q, want the summary line first, unchanged", got)
 	}
@@ -1433,9 +1433,17 @@ func TestSupersedeReport(t *testing.T) {
 	// The report is mode-agnostic about the veto: a vetoed pair is never linked,
 	// so there is nothing for --apply to write either. The apply verb is the
 	// only thing that changes.
-	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0)
+	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0, 0)
 	if !strings.HasPrefix(apply, "proj: 1 candidate pairs in 0 classify call(s), 0 cached, 0 supersedes, 0 causes, 0 reclassified, linked\n") {
 		t.Errorf("supersedeReport() apply = %q, want the apply verb and the veto count", apply)
+	}
+	// A pass that had to re-ask a failed call says so (#699). The count is
+	// inside the call tally rather than a second sentence, because the calls and
+	// the retries are one fact: the retry IS a call, and the line that reports
+	// one without the other describes a pass nobody ran.
+	retried := supersedeReport("proj", supersede.Result{Candidates: 4, Confirmed: 1}, "would link", 3, 1)
+	if !strings.Contains(retried, "in 3 classify call(s), 1 retried after a failed call, 0 cached") {
+		t.Errorf("supersedeReport() = %q, want the retried call counted next to the calls it made", retried)
 	}
 }
 

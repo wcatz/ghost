@@ -173,6 +173,21 @@ type judgedEdge struct {
 	NewerID string
 }
 
+// retryReporter is the optional retry tally a Classifier may carry.
+// RelationClassifier counts the calls it repeated; a Classifier that decides
+// verdicts itself (a test mock) has no such method, and the count is then zero —
+// nothing is invented for a mock.
+type retryReporter interface{ Retries() int }
+
+// retriesOf reports how many calls cls repeated after a failure, or 0 for a
+// Classifier that does not count them.
+func retriesOf(cls Classifier) int {
+	if r, ok := cls.(retryReporter); ok {
+		return r.Retries()
+	}
+	return 0
+}
+
 // Reassess re-judges every live 'supersedes'/'llm' edge in the project with the
 // current rules and returns the edges the pass withdrew, or would withdraw with
 // --apply. A dry run (apply=false) writes nothing.
@@ -393,7 +408,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
 			"reversed", res.Reversed, "unknown", res.Unclassified, "withdrawn", res.Withdrawn,
 			"causes_withdrawn", res.CausesWithdrawn, "causes_sweep_failed", res.CausesSweepFailed,
-			"failed", fail != nil)
+			"retries", retriesOf(cls), "failed", fail != nil)
 	}
 	if fail != nil {
 		return res, withdrawn, fail

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/resolve"
 )
@@ -46,16 +47,18 @@ type classifyProvider interface {
 // *ai.CLIProvider or *ai.SourceProvider), which any CLI harness — a `claude`,
 // `opencode`, `codex`, or `goose` subprocess — can satisfy.
 type RelationClassifier struct {
-	client    classifyProvider
-	batchSize int          // 0 means classifyBatchSize
-	calls     int          // provider calls made; see Calls
-	logger    *slog.Logger // optional; receives unparseable-verdict diagnostics
+	client     classifyProvider
+	batchSize  int           // 0 means classifyBatchSize
+	calls      int           // provider calls made; see Calls
+	retries    int           // calls a retry repeated; see Retries
+	retryDelay time.Duration // wait before a repeat; see SetRetryDelay
+	logger     *slog.Logger  // optional; receives unparseable-verdict diagnostics
 }
 
 // NewRelationClassifier wraps a classifyProvider (typically *ai.CLIProvider
 // or *ai.SourceProvider) as a Classifier.
 func NewRelationClassifier(client classifyProvider) *RelationClassifier {
-	return &RelationClassifier{client: client, batchSize: classifyBatchSize}
+	return &RelationClassifier{client: client, batchSize: classifyBatchSize, retryDelay: classifyRetryDelay}
 }
 
 // classifyRubric is the shared judgment rubric: the four verdicts, their
@@ -123,6 +126,83 @@ const classifyBatchSystemPrompt = classifyRubric + classifyBatchInstructions
 // the verdict contract. Tests override batchSize on RelationClassifier.
 const classifyBatchSize = 8
 
+// classifyRetryDelay is how long a failed classify call waits before its one
+// retry. Short on purpose: a classify call costs seconds to a minute, so a
+// second one is affordable, and the wait only has to outlast the blip that
+// failed the first (#699 measured one `opencode run` exiting 1 in a real
+// rehearsal, with the rerun a minute later answering normally). It is a short
+// pause before a re-ask, not a backoff schedule — a harness that is really down
+// must still fail the call.
+const classifyRetryDelay = 2 * time.Second
+
+// waitBeforeRetry waits d, or returns ctx.Err() if the context is done first. A
+// non-positive d is no wait at all, which is how a test injects a zero delay
+// rather than paying the shipped one.
+func waitBeforeRetry(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// call issues one classify request, re-issuing it once after retryDelay if it
+// fails. A harness process that exits 1 is the transient failure this absorbs:
+// the pass is retried rather than abandoned, because one dead call in a project
+// of many otherwise costs the whole project's pass (and, on the repair path,
+// every withdrawal the veto had already settled — see Reassess). ONE retry, not
+// a schedule: a harness that is genuinely down stays as fatal as it was, and the
+// second error is returned unchanged so each caller keeps its own semantics (Run
+// aborts; Reassess applies what a rule settled and reports the rest unjudged).
+//
+// The wait is context-bounded, so a cancelled run does not sleep and re-spawn to
+// be told the same thing; both the failure and the interruption stay matchable
+// with errors.Is, because which one a caller is looking for is its own business.
+//
+// An UNPARSEABLE reply is not retried here: it is produced by a call that
+// succeeded, and it is the caller's to count and re-ask (ClassifyBatch's
+// single-pair fallback, and Run's Unclassified counter).
+func (h *RelationClassifier) call(ctx context.Context, systemPrompt, userContent string) (string, error) {
+	for attempt := 1; ; attempt++ {
+		// Counted per ATTEMPT, so a repeated call is counted: it is a spawn, and
+		// it is billed.
+		h.calls++
+		resp, err := h.client.Classify(ctx, systemPrompt, userContent)
+		if err == nil {
+			return resp, nil
+		}
+		if attempt > 1 {
+			return "", err
+		}
+		if werr := waitBeforeRetry(ctx, h.retryDelay); werr != nil {
+			return "", fmt.Errorf("%w (retry interrupted: %w)", err, werr)
+		}
+		h.retries++
+		if h.logger != nil {
+			h.logger.Warn("supersede: classify call failed; retrying once",
+				"delay", h.retryDelay, "error", err)
+		}
+	}
+}
+
+// SetRetryDelay sets the wait before a failed call's single retry. Non-positive
+// means no wait. Production never calls it; it exists so a test exercises the
+// retry without paying classifyRetryDelay.
+func (h *RelationClassifier) SetRetryDelay(d time.Duration) { h.retryDelay = d }
+
+// Retries reports how many classify calls this classifier repeated after a
+// failure — the retries themselves, whether or not the repeat answered. It is
+// counted separately from Calls because a pass that needed a retry is a
+// different fact from a pass that made the calls it planned, and a harness that
+// is flapping shows up here first.
+func (h *RelationClassifier) Retries() int { return h.retries }
+
 // Classify asks the classifier to judge the relationship between the pair's
 // newer and older note. Every call goes through one CLI-harness provider, so
 // there is no fallback distinction for callers to withhold.
@@ -133,12 +213,11 @@ const classifyBatchSize = 8
 // caller to count (Run increments Result.Unclassified) rather than defaulting
 // silently to NEITHER, which would mask a broken prompt as uneventful traffic.
 // Transport failures — a dead harness, an outage — are plain errors and stay
-// fatal to the pass.
+// fatal to the pass once the one retry (call) has been spent.
 func (h *RelationClassifier) Classify(ctx context.Context, pair Candidate) (Relation, error) {
-	h.calls++
 	content := "OLDER " + createdLabel(pair.OlderCreatedAt) + ": " + quoteData(pair.OlderContent) +
 		"\nNEWER " + createdLabel(pair.NewerCreatedAt) + ": " + quoteData(pair.NewerContent)
-	result, err := h.client.Classify(ctx, classifySystemPrompt, content)
+	result, err := h.call(ctx, classifySystemPrompt, content)
 	if err != nil {
 		return "", err
 	}
@@ -554,9 +633,10 @@ func splitNumberedLine(line string) (int, string, bool) {
 }
 
 // Calls reports how many provider classify calls this classifier has made,
-// including the lone-tail and any single-pair fallback calls.
-// One batched call covers up to batchSize pairs, so compare this against the
-// pair count to see the batching win.
+// including the lone-tail and any single-pair fallback calls, and including a
+// call a retry repeated (the repeat is a real call, and a pass that paid for it
+// paid for it). One batched call covers up to batchSize pairs, so compare this
+// against the pair count to see the batching win.
 func (h *RelationClassifier) Calls() int { return h.calls }
 
 // SetLogger attaches a logger for unparseable-verdict diagnostics. It is
@@ -576,7 +656,7 @@ func (h *RelationClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 // single-pair path for that chunk: one ignored numbering convention must not
 // silently drop real supersessions, and the fallback is bounded (at most one
 // extra call per pair, only for a fully unparseable chunk). A transport error
-// stays fatal, as in Classify.
+// stays fatal — after the one retry call makes first — as in Classify.
 //
 // A chunk that parses only partially — some numbered lines present, others
 // missing or garbled — is NOT retried: those pairs stay Relation("") and are
@@ -627,10 +707,10 @@ func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidat
 }
 
 // classifyChunk issues one batched call for a chunk of two or more pairs and
-// maps its numbered reply lines onto verdicts.
+// maps its numbered reply lines onto verdicts. The call itself goes through
+// call, so a chunk gets the same one retry as the single-pair path.
 func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidate) ([]Relation, error) {
-	h.calls++
-	resp, err := h.client.Classify(ctx, classifyBatchSystemPrompt, formatBatchContent(chunk))
+	resp, err := h.call(ctx, classifyBatchSystemPrompt, formatBatchContent(chunk))
 	if err != nil {
 		return nil, err
 	}

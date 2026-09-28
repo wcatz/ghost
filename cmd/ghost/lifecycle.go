@@ -1478,13 +1478,26 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 // not do and printed the same totals as a pass that found nothing to do reads
 // as "nothing was skipped", so the veto is on the report (#686) — and it is
 // printed by the one call below, so the report and the pass cannot drift.
-func supersedeReport(projectName string, res supersede.Result, verb string, calls int) string {
-	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s), %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
-		projectName, res.Candidates, calls, res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+//
+// A retried call is on the report too, and only when there was one: a pass that
+// had to re-ask a failed call is not the pass the summary describes, and a
+// harness that is flapping shows up here before it shows up as a failure.
+func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
+	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
 	if res.Vetoed == 0 {
 		return out
 	}
 	return out + fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
+}
+
+// retryNote is the ", N retried call(s)" clause the call counts share: empty
+// when nothing was retried, so an ordinary pass's line is unchanged.
+func retryNote(retries int) string {
+	if retries <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d retried after a failed call", retries)
 }
 
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
@@ -1557,7 +1570,7 @@ func runSupersede() {
 		}
 		return id
 	}
-	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls()))
+	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls(), cls.Retries()))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}

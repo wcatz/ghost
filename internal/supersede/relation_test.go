@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
 )
@@ -239,9 +241,124 @@ func TestRelationClassifierUnparseableResponseIsFatal(t *testing.T) {
 
 func TestRelationClassifierPropagatesProviderError(t *testing.T) {
 	cls := NewRelationClassifier(&fakeProvider{err: errors.New("api down")})
+	cls.SetRetryDelay(0) // the retry is exercised on its own; this is about the error
 	_, err := cls.Classify(context.Background(), Candidate{NewerContent: "newer", OlderContent: "older"})
 	if err == nil {
 		t.Fatal("want error propagated from provider, got nil")
+	}
+}
+
+// flakyProvider fails its first fails calls and then answers resp, so a retry
+// that succeeds and a retry that gives up are both reachable from one fixture.
+// The failure is a real class, not an invented one: a real-store rehearsal of
+// `ghost supersede --reassess --apply` lost the whole pass to one `opencode
+// run` that exited 1, and the rerun a minute later answered normally (#699).
+type flakyProvider struct {
+	resp  string
+	fails int
+	calls int
+}
+
+func (f *flakyProvider) Classify(_ context.Context, _, _ string) (string, error) {
+	f.calls++
+	if f.calls <= f.fails {
+		return "", fmt.Errorf("opencode run: exit status %d", f.calls)
+	}
+	return f.resp, nil
+}
+
+// TestRelationClassifierRetriesOneFailedCall: a transient harness failure is
+// re-asked once, so the pair is judged from the reply the harness DID give. The
+// failure that cost #699's rehearsal was one call in a project of many, and the
+// pass had to survive it rather than abandon the whole project over one blip.
+func TestRelationClassifierRetriesOneFailedCall(t *testing.T) {
+	fp := &flakyProvider{resp: "1: NEITHER\n2: NEITHER", fails: 1}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(time.Millisecond)
+	var buf strings.Builder
+	cls.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	pairs := []Candidate{
+		{NewerContent: "n1", NewerCreatedAt: "2026-09-02 00:00:00", OlderContent: "o1", OlderCreatedAt: "2026-01-01 00:00:00"},
+		{NewerContent: "n2", OlderContent: "o2"},
+	}
+	start := time.Now()
+	got, err := cls.ClassifyBatch(context.Background(), pairs)
+	if err != nil {
+		t.Fatalf("a first-call failure the retry answers must not fail the pass: %v", err)
+	}
+	if len(got) != 2 || got[0] != RelationNeither || got[1] != RelationNeither {
+		t.Fatalf("got %v, want [neither neither] from the retry's reply", got)
+	}
+	if fp.calls != 2 {
+		t.Errorf("provider calls = %d, want 2 (the first attempt and its one retry)", fp.calls)
+	}
+	if cls.Calls() != 2 {
+		t.Errorf("Calls() = %d, want 2: a repeated call is a call, and the pass's cost is reported in calls", cls.Calls())
+	}
+	if cls.Retries() != 1 {
+		t.Errorf("Retries() = %d, want 1", cls.Retries())
+	}
+	// The wait is the injected one, not a constant the test cannot reach: a
+	// retry seam that ignored its own delay would be a retry seam nobody could
+	// test. A timer never fires early, so the bound is one-sided.
+	if elapsed := time.Since(start); elapsed < time.Millisecond {
+		t.Errorf("the retry waited %s, want at least the injected 1ms — the delay is not being honoured", elapsed)
+	}
+	if !strings.Contains(buf.String(), "retrying once") {
+		t.Errorf("the retry must be logged, or a pass that needed one is invisible:\n%s", buf.String())
+	}
+}
+
+// TestRelationClassifierGivesUpAfterOneRetry: ONE retry, not a schedule. A
+// harness that is genuinely down has to stay exactly as fatal as it was, so the
+// second failure is returned to the caller and a third call is never made.
+func TestRelationClassifierGivesUpAfterOneRetry(t *testing.T) {
+	fp := &flakyProvider{fails: 2}
+	cls := NewRelationClassifier(fp)
+	cls.SetRetryDelay(0)
+	_, err := cls.ClassifyBatch(context.Background(), []Candidate{
+		{NewerContent: "a", OlderContent: "a"},
+		{NewerContent: "b", OlderContent: "b"},
+	})
+	if err == nil {
+		t.Fatal("two failed attempts must fail the call, or a dead harness is indistinguishable from a blip")
+	}
+	if !strings.Contains(err.Error(), "exit status 2") {
+		t.Errorf("the error must carry the retry's own failure, got: %v", err)
+	}
+	if fp.calls != 2 {
+		t.Errorf("provider calls = %d, want exactly 2 — one attempt and one retry", fp.calls)
+	}
+	if cls.Retries() != 1 {
+		t.Errorf("Retries() = %d, want 1", cls.Retries())
+	}
+}
+
+// TestRelationClassifierDoesNotRetryACancelledCall: a cancelled run must not
+// spend another harness spawn to be told the same thing, and the interruption
+// has to be visible in the error rather than swallowed into a silent second
+// attempt that fails identically.
+func TestRelationClassifierDoesNotRetryACancelledCall(t *testing.T) {
+	fp := &flakyProvider{fails: 1}
+	cls := NewRelationClassifier(fp)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := cls.ClassifyBatch(ctx, []Candidate{
+		{NewerContent: "a", OlderContent: "a"},
+		{NewerContent: "b", OlderContent: "b"},
+	})
+	if err == nil {
+		t.Fatal("a cancelled call must fail")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error %v does not report the cancellation", err)
+	}
+	if fp.calls != 1 {
+		t.Errorf("provider calls = %d, want 1: a cancelled context is not retried", fp.calls)
+	}
+	if cls.Retries() != 0 {
+		t.Errorf("Retries() = %d, want 0: the retry was never attempted", cls.Retries())
 	}
 }
 
