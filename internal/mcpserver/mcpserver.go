@@ -24,6 +24,7 @@ import (
 	"github.com/wcatz/ghost/internal/provider"
 	"github.com/wcatz/ghost/internal/repo"
 	"github.com/wcatz/ghost/internal/resolve"
+	"github.com/wcatz/ghost/internal/supersede"
 )
 
 // Embedder generates vector embeddings for text. Optional — when nil, search falls back to FTS only.
@@ -238,6 +239,17 @@ type resolveCapableStore interface {
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
+}
+
+// linkCapableStore narrows provider.MemoryStore's concrete backing store to what
+// ghost_link_withdraw needs: the ref resolution, the live-edge read scoped to
+// the project that owns the edge, the target-text read the result quotes, and
+// the invalidation that writes the `unsupersede` history row. None of it is on
+// provider.MemoryStore, so s.store is type-asserted to this interface at call
+// time; *memory.Store satisfies it — the same shape resolveCapableStore and
+// historyCapableStore take.
+type linkCapableStore interface {
+	supersede.WithdrawStore
 }
 
 // historyCapableStore narrows provider.MemoryStore's concrete backing store to the
@@ -717,6 +729,51 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	s.notifyResourceUpdated(ctx, "ghost://memories/global")
 	return fmt.Sprintf("Memory promoted to global scope (id: %s).", memoryID), nil
+}
+
+// withdrawSupersedesLink is the handler behind ghost_link_withdraw. It is the
+// same core `ghost supersede --withdraw` calls (internal/supersede.Withdraw), so
+// an agent and an operator repairing an edge take the same path, resolve the
+// same refs, and leave the same `unsupersede` history row.
+//
+// Unlike the CLI it does not preview: an agent calls a tool to make a change, and
+// a tool whose answer is "here is what I would do" is one call the agent has to
+// remember to make twice. The graph is the thing that survives being wrong about
+// it — the edge is soft-invalidated, not deleted, and a later pass that still
+// judges the pair a supersession re-creates it.
+//
+// The result names the memory the edge was burying and the step that un-hides it,
+// because a caller that sees "withdrew 1 edge" and no more has been told the
+// repair finished when half of it has.
+func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID, targetID string) (string, error) {
+	if projectID == "" || sourceID == "" || targetID == "" {
+		return "", fmt.Errorf("project_id, source_id and target_id are required")
+	}
+	resolvedProjectID, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
+	if resolvedProjectID == "" {
+		return "", fmt.Errorf("project %q not found", projectID)
+	}
+	ws, ok := s.store.(linkCapableStore)
+	if !ok {
+		return "", fmt.Errorf("ghost_link_withdraw: store does not support link withdrawal")
+	}
+	res, err := supersede.Withdraw(ctx, ws, resolvedProjectID, []supersede.WithdrawPair{{Source: sourceID, Target: targetID}}, true, s.logger)
+	if err != nil {
+		return "", fmt.Errorf("ghost_link_withdraw: %w", err)
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Withdrew %d of %d named supersedes link(s).\n", res.Withdrawn, res.Resolved)
+	for _, l := range res.Links {
+		fmt.Fprintf(&sb, "  %s -> %s  [%s]  %s\n", shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, firstLine(l.TargetText, 70))
+	}
+	sb.WriteString("\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of " +
+		"ranked injection until `ghost resolve " + projectID + " --reassess --apply` clears it (that pass honours a " +
+		"live edge as a floor, which is why the edge has to go first). Say so rather than telling the user the memory is back.")
+	return sb.String(), nil
 }
 
 // purgeDeletedMemoryHistory answers ghost_memory_delete for an id whose row is
@@ -1603,6 +1660,32 @@ func (s *Server) registerTools() {
 			fmt.Fprintf(&sb, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}}}, nil, nil
+	})
+
+	// ghost_link_withdraw — remove one named 'supersedes' edge.
+	type linkWithdrawArgs struct {
+		ProjectID string `json:"project_id" jsonschema:"Project name the superseding memory belongs to (required for ownership check)"`
+		SourceID  string `json:"source_id" jsonschema:"ID of the SUPERSEDING memory — the newer note the edge points FROM. A full id, or 8 or more hex characters of one."`
+		TargetID  string `json:"target_id" jsonschema:"ID of the SUPERSEDED memory — the older note the edge points AT, the one being buried. A full id, or 8 or more hex characters of one."`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_link_withdraw",
+		Title:       "Withdraw a supersedes link",
+		Description: "Withdraw ONE wrong 'supersedes' link, naming the newer memory it points from and the older memory it points at. Use it when a supersession is wrong for a reason no classifier can see — the newer note is not a replacement of the older one at all, or the 'newer' note is the stale one. The link is not informational: ranking demotes its target and resolve's supersedes piggyback stamps resolved_at on it, so a wrong edge takes a live memory out of every later session, and a repair path is the only way to undo it — the `ghost supersede --reassess` CLI pass withdraws only what the current rules reject, so an edge they still accept needs this. ids may be full memory ids or unambiguous 8-or-more-hex-character prefixes of one, as every Ghost report abbreviates them. A pair with no live link is an error and nothing is written; an ambiguous prefix is refused with the matches listed rather than guessed at. The withdrawal writes the 'unsupersede' history row, so the audit shows the claim and the withdrawal, and it is soft — a later pass that still judges the pair a supersession re-creates the edge. It does NOT un-bury the target by itself: the resolved_at the edge caused stays until `ghost resolve <project> --reassess --apply` clears it, and the result says so. Do not use this to retire a memory — the target stays searchable and editable, which is the point.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(true),
+			IdempotentHint:  false,
+			OpenWorldHint:   boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args linkWithdrawArgs) (*mcp.CallToolResult, any, error) {
+		msg, err := s.withdrawSupersedesLink(ctx, args.ProjectID, args.SourceID, args.TargetID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+		}, nil, nil
 	})
 
 	// ghost_task_list — list project tasks.

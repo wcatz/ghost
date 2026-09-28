@@ -411,6 +411,48 @@ func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, 
 	return links, rows.Err()
 }
 
+// SupersedesLinksInto returns the live 'supersedes' edges whose TARGET is
+// memoryID and whose source endpoint belongs to projectID.
+//
+// It is the read a targeted withdrawal decides on, and it answers two questions
+// with one query: whether the exact edge the operator named is live, and — when
+// it is not — which edges DO point at that memory, so a refusal can name them
+// instead of leaving the reader to grep the graph.
+//
+// The project predicate is on the edge's SOURCE, matching
+// LinksByRelationSource: a 'supersedes' edge is written newer→older, so the
+// source is the memory the project owns, and a target that has been promoted to
+// `_global` or moved by `ghost project merge` does not move the edge out of the
+// project's reach. An edge another project owns is neither withdrawable from
+// here nor visible through here, which is what keeps a project-scoped call from
+// reporting (or changing) a graph that is not its own.
+func (s *Store) SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]Link, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT l.source_id, l.target_id, l.relation, l.strength, l.source, l.created_at, l.invalidated_at
+		FROM memory_links l
+		JOIN memories m ON m.id = l.source_id
+		WHERE l.relation = 'supersedes' AND l.invalidated_at IS NULL
+		  AND m.project_id = ? AND l.target_id = ?
+	`, projectID, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("supersedes links into: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var links []Link
+	for rows.Next() {
+		var l Link
+		if err := rows.Scan(&l.SourceID, &l.TargetID, &l.Relation, &l.Strength, &l.Source, &l.CreatedAt, &l.InvalidatedAt); err != nil {
+			return nil, err
+		}
+		links = append(links, l)
+	}
+	return links, rows.Err()
+}
+
 // InvalidateLink soft-invalidates a link (Zep-style: never delete, mark
 // invalid with a timestamp so history is preserved). It returns how many links
 // it moved out of the live set, so a caller can report an actual graph change

@@ -393,8 +393,8 @@ func TestShellQuoteDispatch(t *testing.T) {
 
 func TestGhostPermissions_Complete(t *testing.T) {
 	// Verify the canonical list has the expected count.
-	if len(ghostPermissions) != 20 {
-		t.Errorf("expected 20 ghost permissions, got %d", len(ghostPermissions))
+	if len(ghostPermissions) != 21 {
+		t.Errorf("expected 21 ghost permissions, got %d", len(ghostPermissions))
 	}
 
 	// All should start with the correct prefix.

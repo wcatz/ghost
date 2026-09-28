@@ -1312,19 +1312,36 @@ func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provi
 	return sp, nil
 }
 
+// supersedePair is one `--withdraw <source-id> <target-id>` pair as it was typed,
+// before the refs are resolved. Source is the superseding memory (a
+// 'supersedes' edge is written newer→older) and Target the superseded one.
+type supersedePair struct{ source, target string }
+
 // parseSupersedeArgs parses `ghost supersede`'s arguments (everything after
 // the subcommand word). Hand-rolled, matching the historical loop exactly:
 // value flags accept both "--flag value" and "--flag=value", positionals set
 // the project (last one wins — --project assigns the same way), a
 // non-numeric --threshold keeps the default, --reassess selects the repair
-// pass over the edges already in the graph (issue #686), and any other flag is
-// an unknown-flag error (which the caller prints and exits on). The project may
-// come from --project, which takes the NEXT argument verbatim — a dash-leading
-// name such as -x or --odd is a name, not a flag — so the lifecycle coordinator
-// can emit one uniform form for every project; a valueless --project is an
-// error. Extracted from runSupersede so the argv contract is unit-testable
-// without os.Exit.
-func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, err error) {
+// pass over the edges already in the graph (issue #686), --withdraw names the
+// edges to remove outright, and any other flag is an unknown-flag error (which
+// the caller prints and exits on). The project may come from --project, which
+// takes the NEXT argument verbatim — a dash-leading name such as -x or --odd is
+// a name, not a flag — so the lifecycle coordinator can emit one uniform form
+// for every project; a valueless --project is an error. Extracted from
+// runSupersede so the argv contract is unit-testable without os.Exit.
+//
+// --withdraw takes TWO operands and is refused alongside --reassess, for the two
+// reasons that are load-bearing rather than stylistic. Its operands are
+// consumed by the flag, so they can never be mistaken for the positional
+// project — which is the trap a bare-word project makes of any operand this
+// parser does not claim, and the reason the pair is read inside the flag's own
+// clause instead of being collected as positionals. Neither operand may look
+// like a flag, so `--withdraw <id> --apply` is a missing operand rather than a
+// pair whose target is the string "--apply"; a ref is hex, and `isHexRef`
+// refuses anything else anyway. And a command that re-judged every edge AND
+// removed named ones would have two dry-run answers, so the reader is told which
+// of the two repairs they asked for twice.
+func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, withdraw []supersedePair, err error) {
 	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
 	for i := 0; i < len(args); i++ {
 		switch {
@@ -1332,16 +1349,21 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			apply = true
 		case args[i] == "--reassess":
 			reassess = true
+		case args[i] == "--withdraw" && i+2 < len(args) && !strings.HasPrefix(args[i+1], "-") && !strings.HasPrefix(args[i+2], "-"):
+			withdraw = append(withdraw, supersedePair{source: args[i+1], target: args[i+2]})
+			i += 2
+		case args[i] == "--withdraw":
+			return "", "", false, false, 0, nil, fmt.Errorf("--withdraw needs a source id and a target id: --withdraw <source-id> <target-id>")
 		case args[i] == "--project":
 			if i+1 >= len(args) {
-				return "", "", false, false, 0, errors.New("--project requires a value")
+				return "", "", false, false, 0, nil, errors.New("--project requires a value")
 			}
 			project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
 			project = strings.TrimPrefix(args[i], "--project=")
 			if project == "" {
-				return "", "", false, false, 0, errors.New("--project requires a value")
+				return "", "", false, false, 0, nil, errors.New("--project requires a value")
 			}
 		case args[i] == "--threshold" && i+1 < len(args):
 			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
@@ -1360,10 +1382,13 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 		case !strings.HasPrefix(args[i], "-"):
 			project = args[i]
 		default:
-			return "", "", false, false, 0, fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, 0, nil, fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
-	return project, source, apply, reassess, threshold, nil
+	if len(withdraw) > 0 && reassess {
+		return "", "", false, false, 0, nil, errors.New("--withdraw removes the edges you name and --reassess re-judges every edge in the graph; run them as two commands")
+	}
+	return project, source, apply, reassess, threshold, withdraw, nil
 }
 
 // supersedeUsage is the help for `ghost supersede`: stderr when the project
@@ -1377,6 +1402,13 @@ Flags:
                       --apply, withdraw the ones that no longer hold. This is how a
                       wrong supersession is repaired. --threshold is not used: there
                       are no candidates to select.
+  --withdraw <source-id> <target-id>
+                      Withdraw the ONE supersedes link from source-id to target-id,
+                      which may be a full memory id or an unambiguous prefix of one
+                      (8 or more hex characters). Repeatable. --apply writes the
+                      unsupersede history row; without it nothing is written.
+                      --source and --threshold are not used: nothing is classified.
+                      Cannot be combined with --reassess (run them as two commands).
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
@@ -1397,10 +1429,18 @@ session (--source overrides; otherwise detected from the environment and process
 ancestry — an undetectable caller is an error, never a fallback to a different
 harness). The harness owns its authentication and billing.
 
-Withdrawing an edge (--reassess --apply) writes the unsupersede history row and
-leaves the resolution it may have caused in place: resolve treats a live edge as
-a floor, so that resolution becomes clearable only now. The run therefore prints
-its own follow-up — the exact
+--withdraw is the other repair, and the one for an edge the rules still accept:
+--reassess withdraws what the current rubric rejects, so a pair that is wrong for
+a reason no rubric can see (the newer note is not a replacement of the older one
+at all) keeps its edge and buries its target. --withdraw removes the edge you
+name, on your say-so, without asking a model. It settles the WHOLE request before
+writing anything, so a pair that names no live edge withdraws none of them, and
+an ambiguous prefix is a refusal listing the matches rather than a guess.
+
+Withdrawing an edge (--withdraw --apply, or --reassess --apply) writes the
+unsupersede history row and leaves the resolution it may have caused in place:
+resolve treats a live edge as a floor, so that resolution becomes clearable only
+now. BOTH runs therefore print their own follow-up — the exact
 
   ghost resolve <project> --reassess --only <those ids> --apply
 
@@ -1409,6 +1449,55 @@ its own follow-up — the exact
 --reassess": an unscoped repair re-judges every resolved memory in the project,
 not only the ones this withdrawal orphaned.
 `
+
+// supersedeWithdrawReport renders the --withdraw result: the count, then one line
+// per named edge carrying the memory it was burying, and the step that un-hides
+// it. The per-edge row is the point of the pass — an operator withdrawing an
+// edge they believe is wrong has to be able to confirm from the output that it
+// was the right edge, which is why the target's own first line is on it and not
+// only its id.
+//
+// Three markers, because under --apply a row can be neither of the two the other
+// modes use: a concurrent pass withdrew the edge first, so this run did not move
+// it. Calling that "withdrew" would claim a deletion that did not happen.
+func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, apply bool) string {
+	// A request that named no edge says nothing. It always came with an error —
+	// a refused pair is the only way to get here — and a header reading "0
+	// supersedes edge(s) named, withdrew 0" above that error is a report about a
+	// graph nobody asked about, printed as though it were the answer.
+	if res.Resolved == 0 {
+		return ""
+	}
+	verb, count := "would withdraw", res.Resolved
+	if apply {
+		verb, count = "withdrew", res.Withdrawn
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: %d supersedes edge(s) named, %s %d\n", projectName, res.Resolved, verb, count)
+	for _, l := range res.Links {
+		marker := "would withdraw"
+		if apply {
+			marker = "already gone"
+			if l.Withdrawn {
+				marker = "withdrew   "
+			}
+		}
+		// The edge's own source column, because it decides the follow-up: only a
+		// 'supersedes'/'llm' edge is one resolve's piggyback ever stamps on
+		// account of.
+		fmt.Fprintf(&b, "  %s  %s -> %s  [%s, strength %.2f]  %s\n",
+			marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, l.Strength, firstLine(l.TargetText, 70))
+	}
+	if !apply {
+		b.WriteString("\nRe-run with --apply to withdraw these edges.\n")
+	}
+	// The half of the repair that is easy to miss, printed by the one call below
+	// so the report and the pass cannot drift. The wording is mode-neutral on
+	// purpose — a dry run has withdrawn nothing yet, and a sentence in the wrong
+	// tense there would be claiming a deletion the run did not make.
+	fmt.Fprintf(&b, "\nThe edge is only half the repair. A target it buried is still stamped\nresolved and stays out of ranked injection until:\n  ghost resolve %s --reassess --apply\nThat pass honours a live edge as a floor, which is why the edge has to go first.\n", projectName)
+	return b.String()
+}
 
 // supersedeReassessReport renders the --reassess result: the per-outcome counts,
 // then one line per edge the pass withdrew or would withdraw. The list is the
@@ -1459,12 +1548,6 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN%s, %s %d, %s %d causes edge(s)%s (%d classify call(s)%s)\n",
 		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
 		res.Unclassified, unjudgedNote, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls, retryNote(retries))
-	short := func(id string) string {
-		if len(id) > 8 {
-			return id[:8]
-		}
-		return id
-	}
 	for _, w := range withdrawn {
 		// Three markers, because under --apply a row can be neither of the two
 		// the other modes use: a concurrent pass withdrew the supersedes edge
@@ -1502,7 +1585,7 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		case w.CausesSwept > 0:
 			swept = fmt.Sprintf("  [+%d causes edge]", w.CausesSwept)
 		}
-		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]%s  %s\n", marker, short(w.NewerID), short(w.OlderID), by, swept, w.Reason)
+		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]%s  %s\n", marker, shortID(w.NewerID), shortID(w.OlderID), by, swept, w.Reason)
 	}
 	// One line per unjudged edge, in the same shape as the withdrawn rows so a
 	// reader can tell at a glance which edges moved and which did not. The
@@ -1511,7 +1594,7 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	// names both causes for the reason the summary does.
 	for _, u := range res.Unjudged {
 		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]\n",
-			short(u.NewerID), short(u.OlderID))
+			shortID(u.NewerID), shortID(u.OlderID))
 	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")
@@ -1555,8 +1638,15 @@ func retryNote(retries int) string {
 // reversed verdict is reported and refused, never written (#641); a pair whose
 // older note states a rule the newer note never retires is vetoed for free
 // (#686). See docs/benchmarks.md Phase 3.
+//
+// --withdraw and --reassess are the two repair modes, and they are dispatched
+// before anything else because --withdraw makes NO harness call: it is the
+// operator's own judgement, so a machine with no detectable calling harness can
+// still repair an edge, and nothing about it is billed. Both are dry-run by
+// default and both print the `ghost resolve --reassess --apply` step that clears
+// a resolution a withdrawn edge caused.
 func runSupersede() {
-	projectName, source, apply, reassess, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
+	projectName, source, apply, reassess, threshold, withdrawPairs, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
 		os.Exit(1)
@@ -1566,17 +1656,22 @@ func runSupersede() {
 		os.Exit(1)
 	}
 
-	source, err := detectPhaseSource(source)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
+
+	if len(withdrawPairs) > 0 {
+		runSupersedeWithdraw(ctx, store, logger, projectName, projectID, withdrawPairs, apply)
+		return
+	}
+
+	source, err := detectPhaseSource(source)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 	applyPhaseModel(cfg.CLI.ModelSupersede, source)
 	provider, err := buildClassifyProviderForSource(cfg, source)
 	if err != nil {
@@ -1624,12 +1719,6 @@ func runSupersede() {
 	if apply {
 		verb = "linked"
 	}
-	short := func(id string) string {
-		if len(id) > 8 {
-			return id[:8]
-		}
-		return id
-	}
 	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls(), cls.Retries()))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
@@ -1647,11 +1736,11 @@ func runSupersede() {
 	for _, c := range classified {
 		switch c.Relation {
 		case supersede.RelationSupersedes:
-			fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
+			fmt.Printf("  %s  supersedes  %s\n", shortID(c.NewerID), shortID(c.OlderID))
 		case supersede.RelationCauses:
-			fmt.Printf("  %s  causes  %s\n", short(c.OlderID), short(c.NewerID))
+			fmt.Printf("  %s  causes  %s\n", shortID(c.OlderID), shortID(c.NewerID))
 		case supersede.RelationReversed:
-			fmt.Printf("  %s  reversed, not written: %s supersedes it\n", short(c.NewerID), short(c.OlderID))
+			fmt.Printf("  %s  reversed, not written: %s supersedes it\n", shortID(c.NewerID), shortID(c.OlderID))
 		}
 	}
 	if !apply && res.WouldWriteLinks() {
@@ -1676,6 +1765,47 @@ type resolveArgs struct {
 	// onlyFile is the path as typed, kept for the report line that names the
 	// file the selectors came from.
 	onlyFile string
+}
+
+// runSupersedeWithdraw implements `ghost supersede <project> --withdraw <source>
+// <target> [--apply]`: the operator's own withdrawal of the named edges.
+//
+// It is a named function because runSupersede ends in os.Exit, and this path is
+// worth driving on its own: the report is printed before the error is raised and
+// the non-zero exit stays, so a request of several pairs where one write failed
+// reports the edges that did land (each invalidation is its own transaction and
+// a later pass will not see them again) rather than reporting nothing about a
+// repair that partly happened. A refusal — an ambiguous ref, a pair with no live
+// edge — writes nothing at all, so there is no partial withdrawal to report.
+func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog.Logger, projectName, projectID string, pairs []supersedePair, apply bool) {
+	res, err := supersede.Withdraw(ctx, store, projectID, toWithdrawPairs(pairs), apply, logger)
+	fmt.Print(supersedeWithdrawReport(projectName, res, apply))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// toWithdrawPairs maps the parsed command line onto the core's request, so the
+// argv shape and the domain shape stay separate types.
+func toWithdrawPairs(pairs []supersedePair) []supersede.WithdrawPair {
+	out := make([]supersede.WithdrawPair, 0, len(pairs))
+	for _, p := range pairs {
+		out = append(out, supersede.WithdrawPair{Source: p.source, Target: p.target})
+	}
+	return out
+}
+
+// shortID is the report form of a memory id: its first eight characters, which
+// is the form every Ghost report prints and therefore the form an operator has
+// on screen when they paste one into --withdraw. Ids are longer than 8 only
+// because they are random, so the truncation is presentation and never a
+// lookup key — the one path that resolves an id prefix does its own matching.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // parseResolveArgs parses `ghost resolve`'s arguments (everything after the
@@ -1963,13 +2093,6 @@ func runResolve() {
 	cls := resolve.NewResolutionClassifier(provider)
 	cls.SetLogger(logger)
 
-	short := func(id string) string {
-		if len(id) > 8 {
-			return id[:8]
-		}
-		return id
-	}
-
 	if reassess {
 		// The scope is read here rather than in the parser because it is file
 		// IO: parseResolveArgs stays a pure function of argv, and a missing or
@@ -1993,7 +2116,7 @@ func runResolve() {
 		fmt.Print(reassessSummaryLine(projectName, res, apply, len(reKept), cls.Calls()))
 		fmt.Print(reassessMissLines(res))
 		for _, m := range reKept {
-			fmt.Printf("  %s  [%s]  %s\n", short(m.ID), m.Category, firstLine(m.Content, 70))
+			fmt.Printf("  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
 		}
 		if !apply && len(reKept) > 0 {
 			fmt.Println("\nRe-run with --apply to return these to session injection.")
@@ -2012,7 +2135,7 @@ func runResolve() {
 			res.Superseded, res.Corrected, res.Confirmed)
 	}
 	for _, m := range confirmed {
-		fmt.Printf("  %s  [%s]  %s\n", short(m.ID), m.Category, firstLine(m.Content, 70))
+		fmt.Printf("  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
 	}
 	if !apply && res.Confirmed+res.Superseded+res.Corrected > 0 {
 		fmt.Println("\nRe-run with --apply to mark these resolved.")
