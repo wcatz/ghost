@@ -47,9 +47,18 @@ func TightenPermissions(dbPath string) {
 	// Only the configured DataDir. dbPath may name a database in an eval
 	// scratch tree, a test temp dir, or anywhere a user's environment pointed
 	// at, and the directory holding it is not Ghost's to chmod.
-	if dir := filepath.Dir(dbPath); isDataDir(dir) {
-		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
-			chmodTighten(dir, info)
+	dataDir := filepath.Dir(dbPath)
+	// Which route each file below takes is decided here, once, by whether the
+	// database sits in that directory. Inside it the parent is 0700, so staging
+	// the swap fchmodNoFollow closes needs write access only the owner has, and
+	// the name-based call is both safe there and the one that does not open a
+	// second descriptor on SQLite's sidecars. Outside it — eval, bench,
+	// maintenance, scratch — the parent is the user's own, so nothing stops a
+	// rename and every file goes through the descriptor.
+	inDataDir := isDataDir(dataDir)
+	if inDataDir {
+		if info, err := os.Lstat(dataDir); err == nil && info.IsDir() {
+			chmodTighten(dataDir, info)
 		}
 	}
 	// The database and the two files SQLite maintains beside it. A database
@@ -81,9 +90,12 @@ func TightenPermissions(dbPath string) {
 			}
 			continue
 		}
-		// The database through a descriptor, the two files SQLite maintains
-		// beside it by name: see fchmodNoFollow for why the split is there.
-		if i == 0 {
+		// The database always goes through a descriptor. The two files SQLite
+		// maintains beside it do too whenever the database is NOT in the
+		// configured data directory; inside it, where the 0700 parent already
+		// makes the swap unstageable, they keep the name-based call — see
+		// fchmodNoFollow for why the descriptor is not used on them there.
+		if i == 0 || !inDataDir {
 			chmodTighten(name, info)
 		} else {
 			chmodByName(name, info)
@@ -151,15 +163,29 @@ func chmodTighten(path string, info os.FileInfo) {
 // curiosity rather than a case, and the alternative — a write-only fallback —
 // would put the name back in the path and reopen the window this closes.
 //
-// It is used for the DATABASE only. The -wal and -shm files keep the
-// name-based chmod, and that is not an oversight: OpenDB calls this pass from
-// inside the open, before the connection is established, and opening either of
-// them read-only at that point changes what a later write records — measured
-// with the e2e suite, where a save after a delete stopped writing its history
-// row at all once this ran on all three files. They are also the files the
-// reasoning above does not reach: SQLite creates and replaces them itself, it
-// will not use a symlinked one, and a swap there cannot outlive the database
-// file the next open validates.
+// Where it is NOT used, and why. The -wal and -shm files beside a database in
+// the configured data directory keep the name-based chmod. The precondition is
+// a live connection that has just created them: the session hook's
+// bumpSessionCount calls the pass with its rwDSN handle still open and its
+// uncheckpointed session counter sitting in that -wal, and opening a sidecar
+// read-only at that point changes what a later write records. The e2e suite
+// caught it as a save whose history row was never written at all — not a wrong
+// mode, missing data. Bisected to the open rather than to O_NOFOLLOW: an
+// O_RDONLY open with no NOFOLLOW reproduces it, os.Chmod does not, and
+// hardening the database alone does not.
+//
+// Two things bound the cost of that. The name-based route is only taken where
+// the parent is the 0700 data directory, so the swap this closes is not
+// stageable there in the first place; outside it, every file takes the
+// descriptor. And the sidecars are the files the reasoning above does not much
+// reach: SQLite creates and replaces them itself, it will not use a symlinked
+// one, and a swap beside the database cannot outlive the database file the
+// next open validates.
+//
+// Note this is the one place in the pass that walks the NAME, so it is also
+// the one place a chmod can land on a file Ghost does not own. That is why the
+// name-based route is scoped to the data directory rather than being the
+// default.
 func fchmodNoFollow(path string, mode os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -172,10 +198,12 @@ func fchmodNoFollow(path string, mode os.FileMode) error {
 	return f.Close()
 }
 
-// chmodByName is the name-based chmod TightenPermissions still uses for the
-// database's -wal and -shm, kept separate from chmodTighten so the reason
-// above sits on the choice rather than in a comment nobody reading the caller
-// will find. Being subtractive, like the descriptor path: it can only narrow.
+// chmodByName is the name-based chmod TightenPermissions uses for a database's
+// -wal and -shm when they are in the configured data directory, kept separate
+// from chmodTighten so the reason sits on the choice rather than in a comment
+// nobody reading the caller finds. Subtractive like the descriptor path — it can
+// only narrow — and the two-resolution race is the trade fchmodNoFollow
+// documents, taken only where the 0700 parent makes it unstageable.
 func chmodByName(path string, info os.FileInfo) {
 	perm := info.Mode().Perm()
 	tightened := perm &^ permsGroupOther
