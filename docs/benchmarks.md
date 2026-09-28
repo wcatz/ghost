@@ -249,17 +249,19 @@ Note what those two suites are *not* measuring: a version chain is hand-built st
 
 ### Decay re-selection (evaluated, NOT default)
 
-`SearchParams.DecayReselect` (default **false**) keeps the top `limit*2` by base score, then selects the top `limit` by `base × decay` — the fix for "a fresh memory ranked below the pure-base cut is never rescued." Probed via `TestDecayReselectProbe` (`GHOST_BENCH_PROBE=1`):
+`SearchParams.DecayReselect` (default **false**) keeps the top `limit*2` by base score, then selects the top `limit` by `base × decay` — the fix for "a fresh memory ranked below the pure-base cut is never rescued." Probed via `TestDecayReselectProbe` (`GHOST_BENCH_PROBE=1`, which reports the trap suite as its two classes because one of them cannot move — see the note under the table):
 
 ```text
-                  graded hybrid NDCG@10   staleness fresh-found/wins   trap correct-wins
-reselect=false    0.818                   1.000 / 1.000                0.929
-reselect=true     0.818                   0.938 / 0.938                0.929
+                  graded hybrid NDCG@10   staleness fresh-found/wins   trap never-decay   trap decaying
+reselect=false    0.818                   1.000 / 1.000                0.929              0.417
+reselect=true     0.818                   0.938 / 0.938                0.929              0.417
 ```
 
-The trap column is the recency-trap fixture's **never-decay half**, and it has to be: since #561 that fixture also carries decaying-category scenarios, whose decay factor is below 1.0 and which therefore move under a wider window by design. Pooling the halves would report the feature working where the probe's question is whether it regresses anything, and the never-decay half is the only one that can answer that — its factor is exactly 1.0, so `base × decay == base` and a wider window cannot rescue or sink anything there. The numbers above are unchanged by the split, which is the point: they were already the never-decay half's.
+The trap fixture is reported as its two classes, and the split matters more than the numbers do. `decayRank` multiplies base by `DecayFactor(category, …)`, which is exactly 1.0 for every never-decay category — so on those scenarios `base × decay == base`, the second sort is a stable no-op, and taking the top `limit*2` by base before re-selecting the top `limit` by base returns the same set in the same order. **The never-decay half cannot move under this flag whatever the ranker does**, so that column is arithmetic rather than evidence; it is printed as the check that the flag is not silently reaching a corpus that cannot express the question. The decaying half is the one that *can* move, and it happens to be flat too (0.417 both ways) — a measurement this time, though a weak one on 12 probes.
 
-**Verdict: not defaultable.** The wider base window **regresses staleness** — `default_branch` (both probes) and `vpn_solution` (state probe) lose the fresh version entirely — while graded and trap stay flat. Ship gate requires staleness not to regress; the flag stays off by default and is available for future experiments behind `SearchParams.DecayReselect`. Reorder-only membership (relevance owns the cut) remains the shipped behavior.
+So the verdict below rests on the two columns that are real: the graded NDCG is unchanged, and the staleness suite — the one with a seed of decayed, superseded versions to reorder — loses probes. A verdict quoted as "graded and trap stay flat" is resting one third on a tautology, which is worth saying rather than leaving the reader to find it.
+
+**Verdict: not defaultable.** The wider base window **regresses staleness** — `default_branch` (both probes) and `vpn_solution` (state probe) lose the fresh version entirely — while the graded NDCG and both trap classes stay flat. Ship gate requires staleness not to regress; the flag stays off by default and is available for future experiments behind `SearchParams.DecayReselect`. Reorder-only membership (relevance owns the cut) remains the shipped behavior.
 
 ## Phase 3b — maintenance-state suite (report-only)
 

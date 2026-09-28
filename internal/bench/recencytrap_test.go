@@ -23,6 +23,19 @@ func loadTrapTestdata(t *testing.T) []TrapScenario {
 	return scenarios
 }
 
+// decayingScenarios is the complement: the scenarios the shipped decay factor can
+// reorder, which is the half that can MOVE under a parameter that changes the
+// window the decay reorders.
+func decayingScenarios(scenarios []TrapScenario) []TrapScenario {
+	var out []TrapScenario
+	for _, sc := range scenarios {
+		if categoryDecays(sc.effectiveCategory()) {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
 // neverDecayScenarios is the never-decay half of the trap fixture: the
 // scenarios whose category the shipped decay factor never penalises. Every
 // claim that decay leaves the trap score untouched is a claim about THESE
