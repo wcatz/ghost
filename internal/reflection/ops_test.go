@@ -806,8 +806,12 @@ func TestReaderComplaintWithholdsAValueFromTheReasonToo(t *testing.T) {
 // folded token, and its cost is a second Detect call on every fragment in every
 // complaint. What must not regress is the other direction — a real stored id
 // reaching a diagnostic, which happens on every unknown-id refusal that is
-// merely a typo rather than an attack. A stored id is 32 hex characters, under
-// every floor in the detector, so it must pass through untouched; if a future
+// merely a typo rather than an attack. A stored id must pass through untouched,
+// for two separate reasons the detector's own constants give: it is 32 hex
+// characters, which is under the two bare-hex floors (cardanoKeyMinRun 68,
+// longHexFloor 132) though ABOVE assignedSecretFloor (20) — so "it is short"
+// is not the general answer either — and it carries no provider prefix and no
+// `key: value` assignment, which is what every other rule needs. If a future
 // rule widened enough to catch one, this fails and the fix belongs in the rule
 // rather than in the gate.
 func TestClipOpTextStillGatesARealId(t *testing.T) {

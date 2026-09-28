@@ -201,25 +201,36 @@ func safeTierError(err error) string {
 // call site — see previewContent for why. The detection runs BEFORE the clip, so
 // a value that straddles the boundary is judged whole.
 func clipOpText(s string) string {
-	// Probed in all THREE spellings, and none of the three is redundant.
-	// secret.Detect matches a value shape in the spelling it is given, and the
-	// rules do not agree on a case: `gh[pousr]_` needs the lower literal, while
-	// `AKIA|ASIA|ABIA|ACCA`+16 upper, `AGE-SECRET-KEY-1…` and `AIza…` likewise —
-	// so folding in one direction cannot cover the other, and folding DOWN a
-	// lower-case AKIA is a no-op, which is how it reached this function in the
-	// first place.
+	// Probed in all THREE spellings — as written, lower-cased, upper-cased — and
+	// the first two folds are what cover the case-SENSITIVE rules. secret.Detect
+	// matches a value shape in the spelling it is given, and those rules split by
+	// literal case: `gh[pousr]_` is lower, `AKIA|ASIA|ABIA|ACCA`+16 and
+	// `AGE-SECRET-KEY-1…` are upper, so no single fold reaches both and each fold
+	// is a no-op on a fragment already in that case.
 	//
-	// Both directions are reachable from model text. The parser upper-cases a
-	// supersession's target so it coincides with the stored spelling
-	// (hex(randomblob) renders upper-case), which HIDES a `gh[pousr]_` token from
-	// an original-case-only probe; and the free-form drop tail and the verb are
-	// taken in the spelling the model wrote, which HIDES an `AKIA…` token from a
-	// lower-fold-only probe. A credential is a credential in any case, and this
-	// function's only question is whether the fragment is safe to print.
+	// Both directions are reachable from model text, which is why both are probed.
+	// The parser upper-cases a supersession's target so it coincides with the
+	// stored spelling (hex(randomblob) renders upper-case), which HIDES a
+	// `gh[pousr]_` token from an as-written-only probe; and the free-form drop tail
+	// and the verb are taken in the spelling the model wrote, which HIDES a
+	// lower-case `AKIA…` from a lower-fold-only probe.
 	//
-	// A stored id is 32 hex characters and matches none of the three (no rule
-	// needs 32 hex, and it carries none of the prefixes), so the extra probes
-	// withhold nothing a diagnostic needs.
+	// KNOWN RESIDUAL, stated rather than implied closed: the MIXED-case literals
+	// — google-api-key `AIza…`, pypi `pypi-AgEIcHlwaS5vcmc…`, JWT `eyJ…`, PuTTY
+	// `PuTTY-User-Key-File-` — match only the as-written probe. A model that
+	// re-spells one of them differently (`aizasyd-…`) is caught by none of the
+	// three. Folding cannot fix that without lower-casing the rules themselves,
+	// which would change what internal/secret matches everywhere it is called —
+	// including the write boundary, where a re-spelled credential must be judged
+	// the same way. It is a gap in the rules, not in this probe set, and closing
+	// it is a change to internal/secret with its own callers.
+	//
+	// A stored id trips none of the three, for two separate reasons the detector's
+	// own constants give: 32 hex characters is under the two bare-hex floors
+	// (cardanoKeyMinRun 68, longHexFloor 132) though ABOVE assignedSecretFloor (20) —
+	// so "it is short" is not the general answer either — and it carries no provider
+	// prefix and no `key: value` assignment, which is what every remaining rule
+	// needs.
 	if finding, ok := secret.Detect(s); ok {
 		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(s))
 	}
