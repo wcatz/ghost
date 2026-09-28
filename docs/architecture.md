@@ -534,7 +534,7 @@ memory has none, so re-running the step cannot double them.
 | `save` | `Create`, `Upsert` (new row or linked copy), the decision companion memory, the shipped seeds | the row as inserted |
 | `merge` | `Upsert`'s near-duplicate fold | the target after its importance and access count were raised |
 | `update` | `UpdateMemory` | the edited row (a content change may also clear `resolved_at`) |
-| `reflect` | `ReplaceNonManual` — reuse, rewrite and fresh insert alike, including a verbatim re-emission that leaves every recorded column identical (see below) | the row as the consolidation left it |
+| `reflect` | `ReplaceNonManual` — a rewrite, a reuse that restated a field, or a fresh insert | the row as the consolidation left it |
 | `resolve` / `unresolve` | `SetResolved` / `ClearResolved` | the row with the new `resolved_at`, or without it |
 | `supersede` | `CreateLink` with a `supersedes` edge, when the edge becomes active | the **target**'s state, `related_id` naming the superseding memory |
 | `unsupersede` | `InvalidateLink` on a `supersedes` edge, when a live edge is withdrawn — by the repair pass or by `--withdraw` / `ghost_link_withdraw` | the target's state again — a withdrawal is a change, and a history that shows a claim and no withdrawal reads as though it is still live |
@@ -580,21 +580,79 @@ repeating the previous state would record that nothing happened, at the cost of 
 row per recall. `Touch` (`access_count`, `last_accessed`), `TogglePin` and the
 resolve KEEP cache are in that class.
 
-Two writers deliberately break that rule, for the same reason: the row is not a
-state change but a record that a *pass* ran over this memory, or that a *claim*
-now stands against it, and neither is visible in the row's own columns. A
-consolidation that re-emits a memory verbatim — retention rather than
-consolidation, see `reusePreservesAge` — appends a `reflect` row byte-identical
-to the previous version, because "which reflection run touched this" is the
-question the table exists to answer, and a memory no reflection has confirmed is
-indistinguishable from one that has. A `supersedes` edge moves none of the
-target's columns but does change its standing — "this is no longer current" —
-and an audit blind to that is blind to the corpus's main staleness signal. Both
-cost a slot under the cap below, which is what bounds them; neither is a licence
-to repeat. The `supersede` row in particular is written when the edge *becomes*
-active and not on every re-link, because `ghost supersede` re-writes a pair on
-every pass whose endpoint moved, and a re-write of a live edge records no run and
-asserts no new claim.
+One writer deliberately breaks that rule, because the row is not a state change
+but a record that a *claim* now stands against a memory, which is not visible in
+the row's own columns. A `supersedes` edge moves none of the target's columns but
+does change its standing — "this is no longer current" — and an audit blind to
+that is blind to the corpus's main staleness signal. It costs a slot under the
+cap below, which is what bounds it; it is not a licence to repeat. The
+`supersede` row in particular is written when the edge *becomes* active and not
+on every re-link, because `ghost supersede` re-writes a pair on every pass whose
+endpoint moved, and a re-write of a live edge records no run and asserts no new
+claim.
+
+**A consolidation that re-emits a memory verbatim no longer breaks it
+([#727](https://github.com/wcatz/ghost/issues/727)), which reverses a rule this
+section previously stated.** It used to append a `reflect` row byte-identical to
+the previous version, on the reasoning that "which reflection run touched this"
+is the question the table exists to answer. The measurement said otherwise.
+About fifteen hours after the v17 upgrade, a real store held 3,340 history rows
+of which **2,669 (80%) were `reflect` re-emissions**; one memory already had 17
+versions of itself, and each run wrote 140 rows inside a single second. At that
+rate the per-memory cap of 50 began evicting real events — saves, updates,
+supersede and unsupersede, resolve — within about two days, and the 20,000-row
+store cap within about four, so `as_of` and `ghost history` lost exactly the
+events they exist for. The same write also set `updated_at = datetime('now')` on
+rows it did not change, and that timestamp is not only a freshness hint:
+
+- **`ghost supersede` orients each candidate pair by `updated_at`.** Once every
+  row reflect had merely looked at shared one timestamp, the newer-versus-older
+  direction came from the id tie-break instead of from either memory's age. A
+  `REVERSED` verdict is *refused* rather than flipped, so a pair oriented the
+  wrong way costs a classify call on every pass and is never written: a dry run
+  on the measured store logged dozens of refusals on pairs whose `created_at`
+  order was never in doubt.
+- **`--skip-unchanged` fingerprints the consolidatable set by `updated_at`**
+  (`reflection.InputSignature`, which carries it as a change proxy). An
+  all-keep apply therefore moved a field the gate reads, so the fingerprint
+  stops describing the corpus and starts describing when reflect last ran. On
+  a corpus nothing else touches this is self-cancelling rather than visible:
+  `runReflect` records the fingerprint *after* the apply, so the stamps it
+  wrote are already in the stored value and the next round matches and skips
+  (measured — `TestRunReflectSkipUnchangedSkipsAfterAnAllKeepApply` records
+  both halves). It matters when anything else moves the corpus in between, and
+  a pin or a `PromoteToGlobal` does exactly that: the gate is then invalidated
+  by reflect having done nothing, and the next round pays for a full-corpus
+  consolidation. Fixing it at the source is what makes the fingerprint mean
+  "the corpus", which is the only thing a fingerprint can mean.
+
+The rule now is that a re-emission that leaves **content, category, importance,
+tags and scope** unchanged is a no-op: no `UPDATE`, so `updated_at` stays where
+the memory last really changed, and no history row, because there is no new state
+to record. `reuseChangesNothing` decides it, comparing every field the reuse
+`UPDATE` would write. A change to **any** of them is a real update and is recorded
+as before. The comparison is by value rather than by the bytes `json.Marshal`
+produced for each side — a row saved untagged holds `"null"` where a keep that
+normalises nil to an empty list holds `"[]"`, and both read back as the same empty
+list, so comparing the column text would report a difference on every run of an
+untagged corpus. A stored value that cannot be read counts as *changed*, never as
+unchanged, so a broken `tags` column is repaired loudly rather than skipped
+quietly.
+
+"Which run last looked at this memory" is no longer a question the change log
+answers, deliberately: it is not state, and the run itself is already in
+`lifecycle.log`. One consequence is worth stating because it is a narrowing
+rather than a fix — a memory written before v17 and thereafter only ever carried
+through keeps no version at all, so an `as_of` read reports it in `Unknown` for as
+long as nothing changes it. That is the honest answer (the store cannot say what
+it said at T because nothing ever wrote a version of it) and `Unknown`'s
+disclosure is designed for exactly this, but before this change such a memory
+acquired a version merely by being looked at.
+
+The already-flooded stores are not repaired by this: the byte-identical
+consecutive `reflect` rows on disk are still there. A one-time cleanup that drops
+a version equal to the one before it is a **separate follow-up**, and it should be
+a reported, dry-run-first command rather than an automatic migration.
 
 Two more writers can produce a row byte-identical to the previous version
 without meaning to, and neither earns a special case: `UpdateMemory` called with

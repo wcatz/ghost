@@ -561,9 +561,18 @@ func TestMemoriesAsOfFindsAMemoryTheStoreHasSinceDeleted(t *testing.T) {
 // The gap is the common case, not an edge case. recordBaselineHistoryTx runs only
 // from UpdateMemory, and every other first write on a pre-v17 memory appends a row
 // dated to that write — so a resolve pass, a supersede, a delete or a reflection
-// reuse shortly after the upgrade is enough. A memory that vanishes from the answer
-// with nothing said is worse than one reported as a gap: the reader has no way to
-// tell a short set from a complete one.
+// rewrite shortly after the upgrade is enough. A memory that vanishes from the
+// answer with nothing said is worse than one reported as a gap: the reader has no
+// way to tell a short set from a complete one.
+//
+// It is a reflection REWRITE rather than a reuse, and that is #727's doing: a
+// verbatim re-emission writes nothing, so a pre-v17 memory the lifecycle only ever
+// carries through keeps no version and stays in Unknown for as long as nothing
+// changes it. That is the honest answer — the store cannot say what it said at T
+// because nothing ever wrote a version of it, and the content it does report comes
+// from the live row, which the re-emission left alone. It is still a change from
+// before #727, where such a memory acquired a version purely by being looked at,
+// and it is the one cost this trades against the flood.
 func TestMemoriesAsOfReportsAMemoryWhoseFirstVersionIsAfterT(t *testing.T) {
 	const content = "a memory written before the history table existed"
 
@@ -607,9 +616,9 @@ func TestMemoriesAsOfReportsAMemoryWhoseFirstVersionIsAfterT(t *testing.T) {
 				t.Fatalf("InvalidateLink: %v", err)
 			}
 		}},
-		{name: "reflect reuse", first: func(t *testing.T, s *Store, id string) {
+		{name: "reflect rewrite", first: func(t *testing.T, s *Store, id string) {
 			if _, err := s.ReplaceNonManual(context.Background(), testProject, []Memory{{
-				Category: "fact", Content: content, Source: "mcp", Importance: 0.5,
+				Category: "fact", Content: content + ", restated", Source: "mcp", Importance: 0.5,
 			}}, ""); err != nil {
 				t.Fatalf("ReplaceNonManual: %v", err)
 			}

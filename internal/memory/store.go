@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	pathpkg "path"
 	"path/filepath"
 	"slices"
@@ -4680,12 +4681,16 @@ func (s *Store) CurrentTimestamp(ctx context.Context) (string, error) {
 }
 
 // replaceCandidate is a stored row ReplaceNonManual may delete, or an emitted
-// memory may reuse in place: the identity it would reuse, plus the stored text
-// and category the reuse decision is made from.
+// memory may reuse in place: the identity it would reuse, plus the stored state
+// the two reuse decisions are made from — reusePreservesAge reads the text and
+// category, and reuseChangesNothing (below) reads all five recorded fields.
 type replaceCandidate struct {
-	id       string
-	content  string
-	category string
+	id         string
+	content    string
+	category   string
+	importance float64
+	tags       string
+	scope      sql.NullString
 }
 
 // reusePreservesAge reports whether a reused row is unchanged by this replace
@@ -4717,6 +4722,79 @@ type replaceCandidate struct {
 // decides this.
 func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 	return stored.content == emitted.Content && stored.category == emitted.Category
+}
+
+// reuseChangesNothing reports whether this replace leaves the reused row exactly
+// as it found it — the emission restates every field the row records, so there
+// is no write to make (#727).
+//
+// It is a STRICTER question than reusePreservesAge, and the two are separate on
+// purpose. reusePreservesAge asks whether the row is the same knowledge with the
+// same age, which decides created_at and source; this asks whether anything at
+// all moves, which decides whether the pass writes the row and records it. A
+// reweight, a retag or a stated scope passes the first and fails the second,
+// because each of those is a change to what the memory says about itself.
+//
+// The five fields are the ones the reuse UPDATE writes, which is what makes this
+// predicate checkable against the statement rather than against a reading of
+// "unchanged": anything the UPDATE would assign, this compares. source and
+// created_at are not here because the unchanged branch does not assign them.
+//
+// A value that cannot be read counts as CHANGED, never as unchanged. The safe
+// direction is the loud one — a tags column that is not a JSON list makes the
+// pass write the row and record it, where treating it as equal would leave a
+// value the caller asked for unrecorded and its timestamp unmoved.
+func reuseChangesNothing(stored replaceCandidate, emitted Memory) bool {
+	return stored.content == emitted.Content &&
+		stored.category == emitted.Category &&
+		stored.importance == float64(emitted.Importance) &&
+		sameTags(stored.tags, emitted.Tags) &&
+		scopeUnchanged(stored.scope, emitted.Scope)
+}
+
+// sameTags compares the stored tags column with an emission's list by VALUE
+// rather than by the bytes json.Marshal produced for each.
+//
+// The bytes are not a stable spelling of the same list. A row saved with no tags
+// holds "null" and a keep that normalises nil to an empty list holds "[]", and
+// the two read back identically — GetByIDs hands both to the caller as the same
+// empty list — so comparing the column text would report a difference on every
+// run of a corpus whose memories were saved untagged, and a pass that reported a
+// difference writes the row and stamps it touched. That is the whole defect
+// #727 removes, reached by a different road.
+//
+// An unreadable column is not equal (see reuseChangesNothing).
+func sameTags(stored string, emitted []string) bool {
+	var parsed []string
+	if err := json.Unmarshal([]byte(stored), &parsed); err != nil {
+		return false
+	}
+	if len(parsed) != len(emitted) {
+		return false
+	}
+	for i := range parsed {
+		if parsed[i] != emitted[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// scopeUnchanged reports whether the emission's scope leaves the stored scope
+// alone, which is the reuse UPDATE's own COALESCE rule read as a predicate.
+//
+// An emission that states no scope never changes the column — reflection has no
+// machine-readable scope, so every memory it emits arrives with none, and
+// "unchanged" is the answer the UPDATE already gives it. A stated scope is
+// compared through parseScope, because that is how every reader in the codebase
+// reads the column: a value it cannot parse is no scope, so a stored column that
+// decodes to nothing equals an emission that states nothing, and an emission
+// that states something is a change the UPDATE applies.
+func scopeUnchanged(stored sql.NullString, emitted map[string]string) bool {
+	if len(emitted) == 0 {
+		return true
+	}
+	return maps.Equal(parseScope(stored), emitted)
 }
 
 // takeReusableRow removes and returns the row an emitted memory should reuse
@@ -5017,7 +5095,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// irrelevant, because every reused row was re-stamped created_at = now
 	// anyway; now it decides the age that survives.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, content, category FROM memories
+		SELECT id, content, category, importance, tags, scope FROM memories
 		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
 		ORDER BY created_at, id
 	`, projectID)
@@ -5027,7 +5105,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	var candidates []replaceCandidate
 	for rows.Next() {
 		var c replaceCandidate
-		if err := rows.Scan(&c.id, &c.content, &c.category); err != nil {
+		if err := rows.Scan(&c.id, &c.content, &c.category, &c.importance, &c.tags, &c.scope); err != nil {
 			rows.Close() //nolint:errcheck
 			return nil, fmt.Errorf("scan replaceable memory: %w", err)
 		}
@@ -5077,8 +5155,10 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 
 	// Content -> reusable rows. Concurrent rows are excluded: they are kept
 	// as they are, never claimed by an emitted memory. The whole stored row
-	// travels, not just its ID, because whether a reuse counts as a rewrite
-	// also needs the stored category (reusePreservesAge below).
+	// travels, not just its ID, because the reuse decisions read the stored
+	// state rather than the emission alone — reusePreservesAge needs the
+	// category, and reuseChangesNothing needs every field the reuse UPDATE
+	// writes.
 	reusable := make(map[string][]replaceCandidate)
 	for _, c := range candidates {
 		if concurrent[c.id] {
@@ -5118,10 +5198,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// mint their own ids and collide with nothing; and every statement here runs
 	// inside one transaction that already holds the write lock, so no other writer
 	// can see the interval.
-	// reflected is every row this pass wrote, collected so the history appends
+	// reflected is every row this pass WROTE, collected so the history appends
 	// happen in one place at the end: the ids of the fresh inserts are only known
 	// as they are made, and interleaving the two statements per row would triple
-	// the statement count for no gain.
+	// the statement count for no gain. A verbatim re-emission leaves the list
+	// (#727) — it is not a write, so there is no version to record.
 	var reflected []string
 	reused := 0
 	// successorOf maps the ids this pass consumed to the row that now holds
@@ -5150,8 +5231,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// clear-the-scope operation anywhere in the API, so nothing can
 			// express "deliberately unscoped" and the ambiguity is not
 			// hiding a real case.
-			// One exception (issue #623): reusePreservesAge, below.
-			if reusePreservesAge(stored, m) {
+			// Two exceptions: reusePreservesAge (#623) below, and
+			// reuseChangesNothing (#727), which skips the write entirely.
+			switch {
+			case reuseChangesNothing(stored, m):
+				// A verbatim re-emission is not a write (#727). The row keeps
+				// its updated_at, and the pass records no version of it, because
+				// there is no new state to record. Measured on a real store, the
+				// row-per-run this replaced was 80% of memory_history and put
+				// both caps days from evicting real events; updated_at became
+				// "the last reflect that saw this row", which is what supersede
+				// orients a candidate pair by and what --skip-unchanged's
+				// fingerprint carries. Which run touched it is not state, and
+				// the run is already in lifecycle.log.
+			case reusePreservesAge(stored, m):
 				// Unchanged re-emission, not a rewrite: the row keeps its
 				// created_at and its source, and only the fields reflection
 				// actually restated move. See reusePreservesAge.
@@ -5164,17 +5257,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
 					return nil, fmt.Errorf("update retained memory: %w", err)
 				}
-			} else if _, err := tx.ExecContext(ctx, `
-				UPDATE memories
-				SET category = ?, content = ?, importance = ?, source = 'reflection', tags = ?,
-				    scope = COALESCE(?, scope),
-				    created_at = datetime('now'), updated_at = datetime('now')
-				WHERE id = ?
-			`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
-				return nil, fmt.Errorf("update reused memory: %w", err)
+				reflected = append(reflected, id)
+			default:
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE memories
+					SET category = ?, content = ?, importance = ?, source = 'reflection', tags = ?,
+					    scope = COALESCE(?, scope),
+					    created_at = datetime('now'), updated_at = datetime('now')
+					WHERE id = ?
+				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
+					return nil, fmt.Errorf("update reused memory: %w", err)
+				}
+				reflected = append(reflected, id)
 			}
 			reused++
-			reflected = append(reflected, id)
 			for _, replaced := range m.ReplacesIDs {
 				successorOf[replaced] = id
 			}
@@ -5257,9 +5353,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		stmt.Close() //nolint:errcheck
 	}
 
-	// One append for every row this pass wrote, reused and fresh alike: from
-	// outside, a reflection rewrite and the row it rewrote are the same event,
-	// and phaseReflect is what answers "which consolidation run touched this".
+	// One append for every row this pass actually WROTE, reused and fresh
+	// alike: from outside, a reflection rewrite and the row it rewrote are the
+	// same event, and phaseReflect is what answers "which consolidation run
+	// changed this". A verbatim re-emission is not in reflected (#727): it wrote
+	// nothing, and a version row records the state a write left behind.
 	if err := appendHistoryForIDsTx(ctx, tx, reflected, phaseReflect, Provenance{}); err != nil {
 		return nil, err
 	}
