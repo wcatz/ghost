@@ -299,13 +299,23 @@ func (w *Worker) SweepOnce(ctx context.Context) {
 			return
 		}
 		// Belt and braces for an endpoint that answered at the top of this sweep
-		// and stopped answering since: the batch's own re-probe already reported
-		// it, so stop here rather than starting the next project against an
-		// endpoint that is about to cost another 30s. This project's work is
-		// finished; the rest waits for the next tick.
+		// and has not answered since. The batch's own re-probe is the evidence —
+		// a batch really did attempt an embed — and it is the only thing that can
+		// produce one, because a gate probe with no work behind it collapses to
+		// "nothing to act on" (see EmbedPending's second return). So we stop here
+		// rather than starting the next project against an endpoint that is about
+		// to cost another 30s. This project's work is finished; the rest waits for
+		// the next tick.
+		//
+		// The line says what was DECIDED and names the verdict rather than
+		// diagnosing the endpoint, because the two are not the same event: an
+		// Unreachable means nothing is listening, an Inconclusive means this
+		// machine did not get an answer in time, which is a reason to look at
+		// load. Calling both "stopped answering" would make the second look like
+		// the first, which is the misreading this whole change is about.
 		if _, last := w.processProject(ctx, p.ID); last != Reachable {
-			w.logger.Info("embed: endpoint stopped answering mid-sweep; stopping here",
-				"project_id", p.ID, "reachability", last.String())
+			w.logger.Info("embed: endpoint did not answer; ending this sweep here",
+				"project_id", p.ID, "reachability", last.String(), "next_attempt", "next tick")
 			return
 		}
 	}
