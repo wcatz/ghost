@@ -49,9 +49,9 @@ type Worker struct {
 	inconclusive int
 }
 
-// inconclusiveStampsAfter is how many consecutive SWEEPS must fail to answer
-// before the down-since marker is written for an endpoint that is not REFUSING
-// connections.
+// inconclusiveStampsAfter is how many consecutive sweep TICKS must fail to
+// answer before the down-since marker is written for an endpoint that is not
+// REFUSING connections.
 //
 // One observation is not enough, and the asymmetry is the point: a probe that
 // missed its own 2s deadline is far more often a busy machine than a dead
@@ -64,20 +64,25 @@ type Worker struct {
 // request did not come back", never like a refusal. Those then report "Ollama
 // unreachable" with no duration beside it, forever.
 //
-// So the marker follows the SIGNAL rather than a single probe: consecutive
-// sweeps that all went unanswered is a pattern, and any sweep that answers
-// SPENDS the streak (see SweepOnce), so a stall spread over minutes cannot
-// accumulate into an outage that was never established.
+// So the marker follows the SIGNAL rather than a single probe: consecutive ticks
+// that all went unanswered is a pattern, and any tick that answers SPENDS the
+// streak (see SweepOnce), so a stall spread over minutes cannot accumulate into
+// an outage that was never established.
 //
-// It counts SWEEPS, and that is the whole difficulty — the count is advanced
-// once per `SweepOnce`, never per probe, because `SweepOnce` probes at the top
+// It counts TICKs, and that is the whole difficulty — the count is advanced once
+// per `SweepOnce` call, never per probe, because `SweepOnce` probes at the top
 // AND `EmbedPending` re-probes after every failed embed, so a wedged endpoint
 // can produce a dozen probes inside one tick. Counting probes would satisfy the
 // threshold within a single tick and stamp the marker on exactly the busy
-// machine the streak exists to protect against. Three sweeps is about six
-// minutes at the daemon's 2-minute interval (cmd/ghost/mcp.go) — the shortest
-// real outage worth reporting a duration for, against a busy machine never
-// reporting one.
+// machine the streak exists to protect against.
+//
+// A tick counts whether or not the sweep gets PAST its gate, and that is what
+// keeps the duration reachable for a hung endpoint at all: `SweepOnce` gates
+// strictly and skips every project, but it still probes once and still calls
+// noteSweep, so the clock runs for as long as the hang lasts. Three ticks is
+// three worker intervals, so at the daemon's 2 minutes (cmd/ghost/mcp.go) the
+// shortest hang this reports a duration for is about six minutes: the shortest
+// real outage worth a duration line, against a busy machine never getting one.
 const inconclusiveStampsAfter = 3
 
 // NewWorker creates a background embedding worker. dataDir is the ghost data
@@ -245,10 +250,32 @@ func (w *Worker) safeSweepOnce(ctx context.Context) {
 // worker's SCHEDULED observation of the endpoint, so it is the one that feeds
 // the down-since streak (noteSweep) — see inconclusiveStampsAfter for why the
 // count is per sweep and not per probe.
+//
+// Its GATE is strict, on anything but Reachable, and that is the opposite of
+// EmbedPending's on purpose. The two callers of the same body want different
+// things from an unanswered probe. A one-shot pass (`ghost supersede`) and a
+// save-driven processProject have no second chance: skipping there is what made
+// #736 report a clean "0 candidate pairs" for a pair the operator could see. The
+// daemon has a second chance two minutes later, and its own probe has already
+// told it everything it needs to know.
+//
+// The cost is why this cannot simply inherit the lenient gate. A hung endpoint —
+// accepts connections, never answers — would otherwise be walked through every
+// project, and each project pays its own probe plus up to 30s for an
+// EmbedDocument on the client's blanket timeout: 2 + 2·P + 32·P_pending seconds
+// for a sweep that exists to make vectors. Worse, SweepOnce runs INSIDE
+// Worker.Run's select loop and projectCh is buffered at 16 with non-blocking
+// sends, so a sweep taking half a minute per project silently drops the save
+// notifications the worker exists to service. The daemon's answer to a busy
+// machine is to skip this tick, not to spend it.
+//
+// The streak is still counted, so a hung endpoint still accrues the outage clock
+// noteSweep maintains: the strictness changes what the sweep DOES, not what it
+// concludes about the endpoint.
 func (w *Worker) SweepOnce(ctx context.Context) {
 	got := w.checkAlive(ctx)
 	w.noteSweep(got)
-	if got == Unreachable {
+	if got != Reachable {
 		return
 	}
 	projects, err := w.store.ListProjects(ctx)
@@ -260,7 +287,16 @@ func (w *Worker) SweepOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		w.processProject(ctx, p.ID)
+		// Belt and braces for an endpoint that answered at the top of this sweep
+		// and stopped answering since: the batch's own re-probe already reported
+		// it, so stop here rather than starting the next project against an
+		// endpoint that is about to cost another 30s. This project's work is
+		// finished; the rest waits for the next tick.
+		if _, last := w.processProject(ctx, p.ID); last != Reachable {
+			w.logger.Info("embed: endpoint stopped answering mid-sweep; stopping here",
+				"project_id", p.ID, "reachability", last.String())
+			return
+		}
 	}
 }
 
@@ -314,16 +350,26 @@ const projectBatch = 50
 // not an outage, and skipping the batch on it is what made the index depend on
 // the machine's mood: `ghost supersede` calls this to fill the corpus it is
 // about to scan (issue #716), so a stall here left it reporting a clean
-// "0 candidate pairs" for a pair the operator could see, and the daemon's own
-// sweep stopped filling the index for the same reason at the same moment. The
-// cost of trying is bounded and small — one request, capped by the client's own
-// timeout, and the loop below stops at the first failure — so the two errors are
-// not symmetric and this is the one worth making.
-func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) int {
+// "0 candidate pairs" for a pair the operator could see. The cost of trying is
+// bounded and small — one request, capped by the client's own timeout, and the
+// loop below stops at the first failure — so the two errors are not symmetric
+// and this is the one worth making.
+//
+// `SweepOnce` gates STRICTLY on the same probe, for the cost reason its own
+// comment gives. This leniency is for the callers with no second chance, and a
+// caller that has one should keep it.
+//
+// The second return is the endpoint's LAST answer in this call, and it exists so
+// that a caller walking several projects can reuse the verdict the batch's own
+// re-probe already paid for rather than probing again: a healthy endpoint makes
+// it Reachable, an unanswered one keeps whatever the re-probe found. It is not a
+// summary of the batch's work — the count is that.
+func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) (int, Reachability) {
 	// Check whether Ollama is really not there, which is a different question
 	// from whether it answered quickly (see the doc comment above).
-	if w.checkAlive(ctx) == Unreachable {
-		return 0
+	got := w.checkAlive(ctx)
+	if got == Unreachable {
+		return 0, got
 	}
 	if limit <= 0 {
 		limit = projectBatch
@@ -335,20 +381,24 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 	ids, err := w.store.UnembeddedMemoryIDs(ctx, projectID, w.client.Identity(), limit)
 	if err != nil {
 		w.logger.Error("embed: list unembedded", "error", err, "project_id", projectID)
-		return 0
+		return 0, got
 	}
 
 	if len(ids) == 0 {
-		return 0
+		return 0, got
 	}
 
 	w.logger.Info("embedding memories", "project_id", projectID, "count", len(ids))
 
 	embedded, failed := 0, 0
 	var lastErr error
+	// The verdict as of the most recent evidence: the gate's answer until an
+	// embed proves the endpoint is answering, and whatever the re-probe found
+	// after that.
+	got = Reachable
 	for _, id := range ids {
 		if ctx.Err() != nil {
-			return embedded
+			return embedded, got
 		}
 
 		content, err := w.store.GetMemoryContent(ctx, id)
@@ -367,14 +417,14 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 			// so: the batch is already part-done, so a second request at a
 			// machine that is not answering is 30s each for nothing, and a stall
 			// is as good a reason to stop as an outage.
-			if got := w.checkAlive(ctx); got != Reachable {
+			if got = w.checkAlive(ctx); got != Reachable {
 				// The verdict is named because the two are not the same event and
 				// this line is where a reader works out which one happened: an
 				// outage is the endpoint's, an inconclusive is this machine's, and
 				// the second is a reason to look at load rather than at Ollama.
 				w.logger.Info("ollama unavailable, pausing embedding",
 					"embedded", embedded, "reachability", got.String())
-				return embedded
+				return embedded, got
 			}
 			continue
 		}
@@ -396,9 +446,11 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 	if embedded > 0 {
 		w.logger.Info("embedding batch complete", "project_id", projectID, "embedded", embedded)
 	}
-	return embedded
+	return embedded, got
 }
 
-func (w *Worker) processProject(ctx context.Context, projectID string) {
-	w.EmbedPending(ctx, projectID, projectBatch)
+// processProject is the sweep's per-project body, and it passes the endpoint's
+// last answer back so SweepOnce can act on it.
+func (w *Worker) processProject(ctx context.Context, projectID string) (int, Reachability) {
+	return w.EmbedPending(ctx, projectID, projectBatch)
 }

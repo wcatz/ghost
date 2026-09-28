@@ -53,6 +53,155 @@ func TestProbeDeadlineIsRestored(t *testing.T) {
 	runOne("the_probe_test", TestProbe_DistinguishesAnOutageFromASlowMachine)
 }
 
+// hungEndpoint is a wedged liveness probe plus a COUNTED /api/embed, so a test
+// can say how many embed attempts a sweep actually made. The two properties are
+// separate on purpose: the wedge is what makes a probe inconclusive, and the
+// count is the evidence that a sweep spent its budget talking to a machine that
+// was not answering.
+func hungEndpoint(t *testing.T) (url string, embeds func() int) {
+	t.Helper()
+	release := make(chan struct{})
+	var mu sync.Mutex
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			<-release
+		case "/api/embed":
+			mu.Lock()
+			n++
+			mu.Unlock()
+			http.Error(w, "embedding backend unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+	return srv.URL, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+}
+
+// TestSweepOnce_AHungEndpointMakesNoEmbedAttempts is the cost half of the gate,
+// and it is the half that is easy to trade away. The tri-state work made
+// EmbedPending's gate LENIENT, which is what fixes #736 — but a lenient gate at
+// the top of SweepOnce means a genuinely hung Ollama (accepts connections,
+// never answers) is walked through EVERY project, and each one pays a probe, up
+// to 30s for an EmbedDocument on the client's blanket timeout, and a re-probe.
+// That is 2 + 2·P + 32·P_pending seconds for a sweep whose whole job is to make
+// vectors, against ~2s on main, and it blocks Worker.Run's select loop for all
+// of it: projectCh is buffered at 16 with non-blocking sends, so save
+// notifications past 16 are dropped while the sweep is stuck.
+//
+// The daemon does not need the lenient gate. It retries in two minutes, and its
+// own top-level probe already told it what it needed to know; only the two
+// per-save / one-shot callers need to proceed on an inconclusive probe, and they
+// reach the same body through EmbedPending.
+//
+// So the assertion is on the thing that actually costs: ZERO embed attempts, and
+// one probe's worth of time. Three projects each holding a pending row, against
+// the shipped behaviour's three.
+func TestSweepOnce_AHungEndpointMakesNoEmbedAttempts(t *testing.T) {
+	t.Cleanup(setProbeDeadline(t, wedgeProbeDeadline))
+	url, embeds := hungEndpoint(t)
+
+	store := newMockStore()
+	for _, p := range []string{"proj-a", "proj-b", "proj-c"} {
+		store.projects = append(store.projects, p)
+		store.memories[p+"-mem"] = "a memory the index does not have yet"
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	worker := NewWorker(NewClient(url, "nomic-embed-text", 3), store, logger, time.Minute, t.TempDir())
+
+	started := time.Now()
+	worker.SweepOnce(context.Background())
+	elapsed := time.Since(started)
+
+	if n := embeds(); n != 0 {
+		t.Errorf("a sweep against an endpoint that never answered made %d embed attempt(s), want 0: "+
+			"the daemon retries in %v anyway, and paying the client's %v per-request timeout per project "+
+			"blocks the save notifications this worker is supposed to be servicing", n,
+			worker.interval, 30*time.Second)
+	}
+	// One probe, not one per project. The deadline is lowered, so the bound is
+	// generous in probe terms and tight in project terms: three probes would
+	// exceed it even with no embed attempted at all.
+	if budget := 4 * wedgeProbeDeadline; elapsed > budget {
+		t.Errorf("a sweep against an endpoint that never answered took %v, want under %v "+
+			"(roughly one probe deadline, not one per project)", elapsed, budget)
+	}
+}
+
+// TestSweepOnce_StopsWhenTheEndpointDiesMidSweep covers the endpoint that
+// ANSWERS at the top of the sweep and stops answering afterwards, which the
+// strict top-level gate cannot see. Without the per-project check, the first
+// project's batch notices, gives up, and the sweep walks on to the second and
+// third — each paying the 30s per-request timeout that batch just declined to
+// pay once.
+//
+// So the stub answers exactly one liveness probe and wedges from the second, with
+// three projects holding a pending row each, and the assertion is that only the
+// FIRST was touched. The embed counter is the same instrument as in the test
+// above, because the claim is about cost: one batch's worth of attempts, not
+// three.
+func TestSweepOnce_StopsWhenTheEndpointDiesMidSweep(t *testing.T) {
+	// Loose enough that the answering probe reliably arrives. This test's FIRST
+	// probe is meant to succeed, and one that failed on a loaded machine would
+	// return from the strict gate and assert the same thing for the wrong reason.
+	t.Cleanup(setProbeDeadline(t, answeringProbeDeadline))
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	probes, embeds := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			// Healthy for the sweep's own gate, gone for everything after it.
+			mu.Lock()
+			probes++
+			n := probes
+			mu.Unlock()
+			if n > 1 {
+				<-release
+			}
+			w.WriteHeader(http.StatusOK)
+		case "/api/embed":
+			// Refused rather than wedged, so the batch fails fast and the cost
+			// of a missed stop is attempts rather than 30s a piece.
+			mu.Lock()
+			embeds++
+			mu.Unlock()
+			http.Error(w, "embedding backend unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+
+	store := newMockStore()
+	for _, p := range []string{"proj-a", "proj-b", "proj-c"} {
+		store.projects = append(store.projects, p)
+		store.memories[p+"-mem"] = "a memory the index does not have yet"
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), store, logger, time.Minute, t.TempDir())
+
+	worker.SweepOnce(context.Background())
+
+	if embeds > 1 {
+		t.Errorf("the endpoint stopped answering after the first project, and the sweep still made %d "+
+			"embed attempt(s) across 3 projects; want at most the first project's", embeds)
+	}
+}
+
 // TestProbe_DistinguishesAnOutageFromASlowMachine is the unit-level statement
 // of the same distinction TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer
 // makes at the worker: the three answers come from three different situations,
@@ -954,7 +1103,7 @@ func TestEmbedPending_EmbedsWhenTheLivenessProbeDoesNotAnswer(t *testing.T) {
 	client := NewClient(srv.URL, "test-model", 3)
 	worker := NewWorker(client, store, logger, time.Minute, dataDir)
 
-	if n := worker.EmbedPending(context.Background(), "proj-a", 10); n != 1 {
+	if n, _ := worker.EmbedPending(context.Background(), "proj-a", 10); n != 1 {
 		t.Errorf("EmbedPending wrote %d vector(s), want 1: a probe that missed its own deadline is not evidence that nothing is listening, and the caller is left with a corpus it could have read", n)
 	}
 	// And the outage marker is the other half of the same misreading: a stall

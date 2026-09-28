@@ -1812,7 +1812,11 @@ func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory
 	bounded, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	client := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
-	embedded := embedding.NewWorker(client, store, logger, 0, "").EmbedPending(bounded, projectID, supersedeEmbedBound)
+	// The endpoint's last answer is not what this caller reports: the pass
+	// already carries the honest count of what it could not read in
+	// Result.Unscored, and the scan is where that fact is true (see the comment
+	// above). Only the count is wanted here.
+	embedded, _ := embedding.NewWorker(client, store, logger, 0, "").EmbedPending(bounded, projectID, supersedeEmbedBound)
 	expired := bounded.Err() != nil && ctx.Err() == nil
 	return embedded, expired
 }
