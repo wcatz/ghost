@@ -143,11 +143,16 @@ func TestTieredFailureLogWithholdsTheRejectedLine(t *testing.T) {
 }
 
 // TestTieredFailureLogKeepsATransportFailure is the other half, and the reason
-// safeTierError is not readerComplaintForLog: the common error on that line is a
-// harness that died, and its message carries no model text. A log that said
-// "<withheld: *errors.errorString>" for "opencode run: signal: killed" would be
-// strictly worse than useless, and this is the line an operator reads to tell a
-// dead harness from a refused answer.
+// safeTierError is not readerComplaintForLog: the other error on that line is a
+// harness that died, and a log reading "<withheld: *errors.errorString>" for
+// "opencode run: signal: killed" would be strictly worse than useless to the
+// operator who has to tell a dead harness from a refused answer.
+//
+// The scripted error is a bare transport message and carries no model text —
+// which is convenient here and NOT a property of the class: internal/ai builds
+// real harness errors from the child's own output, so a real one can carry the
+// model's answer (see safeTierError). The test pins the DECISION, which is that
+// a non-refusal is not redacted, not that a non-refusal is value-free.
 func TestTieredFailureLogKeepsATransportFailure(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -167,7 +172,7 @@ func TestTieredFailureLogKeepsATransportFailure(t *testing.T) {
 		t.Errorf("a transport failure was withheld from the log, so an operator cannot tell it from a refusal:\n%s", logged)
 	}
 	if strings.Contains(logged, "withheld") {
-		t.Errorf("a transport failure carries no model text and should not be redacted:\n%s", logged)
+		t.Errorf("a non-refusal was redacted; safeTierError withholds a reader complaint and nothing else:\n%s", logged)
 	}
 }
 
