@@ -202,17 +202,24 @@ func stampPhaseRows(t *testing.T, s *Store, memoryID, phase, recordedAt string) 
 	}
 }
 
-// versionsAtOrBefore counts a memory's versions recorded at or before a bound. It
-// is the side of the bound a fixture has to be able to state, and asserting it is
-// what turns "the test failed" into "the fixture put the row on the wrong side" —
-// without it the same three assertions fail for a reason the reader cannot see.
-func versionsAtOrBefore(t *testing.T, s *Store, memoryID, cutoff string) int {
+// versionsAtOrBefore counts a memory's versions of ONE PHASE recorded at or before
+// a bound. It is the side of the bound a fixture has to be able to state, and
+// asserting it is what turns "the test failed" into "the fixture put the row on the
+// wrong side" — without it the same three assertions fail for a reason the reader
+// cannot see.
+//
+// The phase is a parameter because an unscoped count is a false alarm waiting to
+// happen: it would also count the save row, whose stamp is whatever the clock said,
+// and the compaction never looks at that row. A guard that trips on a row the repair
+// does not read is a guard about the clock, which is the fragility this exists to
+// remove. Scoped, it says exactly the thing it is there to say.
+func versionsAtOrBefore(t *testing.T, s *Store, memoryID, phase, cutoff string) int {
 	t.Helper()
 	var n int
 	if err := s.db.QueryRow(
-		`SELECT count(*) FROM memory_history WHERE memory_id = ? AND recorded_at <= ?`,
-		memoryID, cutoff).Scan(&n); err != nil {
-		t.Fatalf("read how many of %s's versions sit at or before %q: %v", memoryID, cutoff, err)
+		`SELECT count(*) FROM memory_history WHERE memory_id = ? AND phase = ? AND recorded_at <= ?`,
+		memoryID, phase, cutoff).Scan(&n); err != nil {
+		t.Fatalf("read how many of %s's %s versions sit at or before %q: %v", memoryID, phase, cutoff, err)
 	}
 	return n
 }
@@ -878,10 +885,15 @@ func TestCompactHistoryLeavesTheRestatementACurrentWriterStillMakes(t *testing.T
 	// the assertions below are true ONLY because those rows are newer than the bound:
 	// leave them on the clock and the test passes on a machine that reads 17:15 on
 	// the day #727 shipped and fails on every machine that reads anything earlier.
+	//
+	// Only the two re-tag versions are stamped and only they are counted. The save
+	// row keeps the clock's stamp deliberately: the compaction never reads it, so
+	// asserting anything about it would be the same wall-clock dependency with an
+	// extra step.
 	stampPhaseRows(t, s, target, phaseReflect, postFixReflectAt)
-	if n := versionsAtOrBefore(t, s, target, reflectNoOpCutoff); n != 0 {
-		t.Fatalf("%d of this memory's versions are recorded at or before the bound %q, so the "+
-			"assertions below would be about a pre-#727 row rather than about the row a current "+
+	if n := versionsAtOrBefore(t, s, target, phaseReflect, reflectNoOpCutoff); n != 0 {
+		t.Fatalf("%d of this memory's re-tag versions are recorded at or before the bound %q, so "+
+			"the assertions below would be about a pre-#727 row rather than about the row a current "+
 			"build writes on purpose", n, reflectNoOpCutoff)
 	}
 
