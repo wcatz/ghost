@@ -21,6 +21,15 @@ import (
 // and mean nothing. What the two distributions do with each other is reported,
 // never asserted; see the comment inside for why that line must stay unset.
 func TestFalsePositiveReport(t *testing.T) {
+	// Parallel: this test seeds and searches the immutable headline corpus and only
+	// reads it, and at 60-130s under -race it is one of the five that decide whether
+	// this package fits Go's 600s per-binary default — a budget it had already
+	// spent down to ~10s when #677 added a sixth corpus-wide test, not a budget that
+	// rows cost. There is no shared state to order against — the
+	// package-level values are embedded bytes and one constant floor slice, and no
+	// bench test sets an env var or the default logger — so the only thing running
+	// these together buys is the overlap. Measured, in the commit that added this.
+	t.Parallel()
 	ds, vecs, err := BuiltinDataset()
 	if err != nil {
 		t.Fatalf("BuiltinDataset: %v", err)
@@ -42,9 +51,9 @@ func TestFalsePositiveReport(t *testing.T) {
 		}
 	}
 
-	store := newBenchStore(t)
+	store, db := newBenchStoreWithDB(t)
 	ctx := context.Background()
-	graded, err := Seed(ctx, store, ds, vecs)
+	graded, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -52,7 +61,19 @@ func TestFalsePositiveReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NegativeQueries: %v", err)
 	}
-	rep, err := FalsePositives(ctx, store, noAnswer, graded)
+	// The no-answer set is measured by the RUNNER, per condition, and the
+	// hybrid condition's measurement is what this report is built on: one
+	// search per query rather than one per query per report.
+	all := append(append([]Query{}, graded...), noAnswer...)
+	results, err := Run(ctx, store, all)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	measured := NoAnswerFor(results, CondHybrid)
+	if len(measured) != len(noAnswer) {
+		t.Fatalf("runner measured %d no-answer queries, fixture has %d", len(measured), len(noAnswer))
+	}
+	rep, err := FalsePositives(measured, PerQueryFor(results, CondHybrid))
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
@@ -105,7 +126,83 @@ func TestFalsePositiveReport(t *testing.T) {
 	if rep.NoAnswerMax < rep.MeanTop {
 		t.Errorf("no-answer maximum %.3f is below the mean %.3f", rep.NoAnswerMax, rep.MeanTop)
 	}
-	t.Logf("no-answer queries against the graded corpus:\n%s", FormatFalsePositives(rep))
+
+	// The deep report and the per-condition table describe the SAME run of the
+	// shipped path, so their floor rows have to be the same numbers: Results is a
+	// mean per query and Rate a fraction in both. A sum in one and a mean in the
+	// other reads as "240 results per query" against a window of 10.
+	sum := SummarizeNoAnswer(CondHybrid, measured)
+	if len(sum.Floors) != len(rep.Floors) {
+		t.Fatalf("the two reports have %d and %d floor rows", len(sum.Floors), len(rep.Floors))
+	}
+	for i := range sum.Floors {
+		if sum.Floors[i] != rep.Floors[i] {
+			t.Errorf("floor %.2f: per-condition table says %+v, deep report says %+v",
+				sum.Floors[i].Floor, sum.Floors[i], rep.Floors[i])
+		}
+	}
+	if rep.Floors[len(rep.Floors)-1].Results > scoreK {
+		t.Errorf("floor %.2f reports %.2f results per query, more than the %d-row window",
+			rep.Floors[len(rep.Floors)-1].Floor, rep.Floors[len(rep.Floors)-1].Results, scoreK)
+	}
+	t.Logf("no-answer queries against the graded corpus:\n%s", FormatFalsePositives(rep, CondHybrid))
+}
+
+// measureNoAnswers runs a set of no-answer queries through the shipped hybrid
+// path and returns their measurements, which is what the runner hands the report.
+// Tests that only care about the report build their input this way rather than
+// searching again, so the report and the per-condition rate are always the same
+// numbers.
+func measureNoAnswers(t *testing.T, store *memory.Store, noAnswer []Query) []NoAnswerQuery {
+	t.Helper()
+	ctx := context.Background()
+	rank := func(q Query) ([]string, error) {
+		results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(results))
+		for i, m := range results {
+			ids[i] = m.ID
+		}
+		return ids, nil
+	}
+	out := make([]NoAnswerQuery, 0, len(noAnswer))
+	for _, q := range noAnswer {
+		m, err := measureNoAnswer(ctx, store, q, rank)
+		if err != nil {
+			t.Fatalf("measure %s: %v", q.Name, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// answerableScores returns the runner's per-query scores for the shipped hybrid
+// path over a small query set, which is what FalsePositives reads for its
+// answerable contrast. It runs the same condition Run does, so the contrast and
+// the graded table come off one search.
+func answerableScores(t *testing.T, store *memory.Store, answerable []Query) []QueryScore {
+	t.Helper()
+	if len(answerable) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	res, err := runCondition(ctx, store, CondHybrid, answerable, func(q Query) ([]string, error) {
+		results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(results))
+		for i, m := range results {
+			ids[i] = m.ID
+		}
+		return ids, nil
+	})
+	if err != nil {
+		t.Fatalf("answerable scores: %v", err)
+	}
+	return res.PerQuery
 }
 
 // vectorMemory is one row of a store built to order search deliberately: the
@@ -185,7 +282,7 @@ func TestFalsePositivesScoresKeywordOnlyResults(t *testing.T) {
 	// Every row in this fixture sits at or above the lowest floor, so every
 	// returned result has to clear it. Counting fewer means one of them was
 	// scored as a non-match.
-	rep, err := FalsePositives(ctx, store, []Query{q}, nil)
+	rep, err := FalsePositives(measureNoAnswers(t, store, []Query{q}), answerableScores(t, store, nil))
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
@@ -283,9 +380,21 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	ctx := context.Background()
 	q := Query{Name: "n1", ProjectID: project, Text: "fleet scheduler", Vector: unitVector(1)}
 
-	results, cosines, top, err := scoredWindow(ctx, store, q)
+	results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
 	if err != nil {
-		t.Fatalf("scoredWindow: %v", err)
+		t.Fatalf("hybrid: %v", err)
+	}
+	ranked := make([]string, len(results))
+	for i, m := range results {
+		ranked[i] = m.ID
+	}
+	cosines, err := resultCosines(ctx, store, q.Vector, ranked)
+	if err != nil {
+		t.Fatalf("resultCosines: %v", err)
+	}
+	var top float64
+	for _, c := range cosines {
+		top = math.Max(top, float64(c))
 	}
 	for _, m := range results {
 		if m.ID == ids["globalbest"] {
@@ -296,10 +405,10 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("vector leg: %v", err)
 	}
-	if len(legBest) == 0 || legBest[0].Score <= top {
+	if len(legBest) == 0 || float64(legBest[0].Score) <= top {
 		t.Fatalf("fixture no longer separates the readings: leg best %.4f, window top %.4f", legBest[0].Score, top)
 	}
-	if want := float32(0.90 - 0*0.001); top != want {
+	if want := 0.90 - 0*0.001; math.Abs(top-want) > 1e-6 {
 		t.Errorf("top = %.4f, want %.4f — the best cosine among the returned rows, not the leg's best hit (%.4f), which is not in the window",
 			top, want, legBest[0].Score)
 	}
@@ -312,31 +421,45 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	// definitions rather than between two kinds of query. Reading this store's
 	// answerable side off the leg's ranking instead of the window would report
 	// 0.99 against the no-answer set's own window reading.
-	answerable := Query{Name: "a1", ProjectID: project, Text: "fleet scheduler", Vector: unitVector(1)}
-	rep, err := FalsePositives(ctx, store, []Query{{Name: "n1", ProjectID: project, Text: "nothing matches this", Vector: unitVector(1)}}, []Query{answerable})
+	// Graded, because the answerable scores the report reads are the runner's
+	// per-query record and the runner only records a query it scored — a query
+	// with an empty rel is measured as a no-answer query instead. The committed
+	// corpus's answerable set is graded, so this is the faithful shape.
+	answerable := Query{
+		Name: "a1", ProjectID: project, Text: "fleet scheduler", Vector: unitVector(1),
+		Rel: Relevance{ids["live00"]: 1},
+	}
+	noAnswer := []Query{{Name: "n1", ProjectID: project, Text: "nothing matches this", Vector: unitVector(1)}}
+	rep, err := FalsePositives(measureNoAnswers(t, store, noAnswer), answerableScores(t, store, []Query{answerable}))
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}
-	if rep.AnswerableTop != float64(top) {
+	if math.Abs(rep.AnswerableTop-top) > 1e-6 {
 		t.Errorf("AnswerableTop = %.4f, want %.4f — the answerable contrast must be scored over the returned window like the no-answer set, not over the vector leg's ranking (%.4f)",
 			rep.AnswerableTop, top, legBest[0].Score)
 	}
 }
 
-// TestCountAboveFloorIsStrict pins the boundary rule directly, which the corpus
-// cannot do: real cosines essentially never land exactly on 0.3/0.4/0.5, so this
-// is the only place the strictness is enforced. A floor at 0.3 keeps a candidate
-// scored above it, and drops one sitting on it — the same rule
+// TestCountHitsAboveFloorIsStrict pins the boundary rule directly, which the
+// corpus cannot do: real cosines essentially never land exactly on 0.3/0.4/0.5,
+// so this is the only place the strictness is enforced. A floor at 0.3 keeps a
+// candidate scored above it, and drops one sitting on it — the same rule
 // memory.filterVectorFloor applies, and the one NoAnswerMax/Unseparable is
-// measured against.
-func TestCountAboveFloorIsStrict(t *testing.T) {
-	results := []memory.Memory{{ID: "on"}, {ID: "above"}, {ID: "below"}, {ID: "unscored"}}
-	cosines := map[string]float32{"on": 0.3, "above": 0.30001, "below": 0.29999}
-	if got := countAboveFloor(cosines, results, 0.3); got != 1 {
-		t.Errorf("countAboveFloor(0.3) = %d, want 1: only the row strictly above the floor counts, and an unscored row counts as no match", got)
+// measured against. A returned row with no score in the map is not counted
+// either: it has no comparable cosine, which reads as 0, below every floor.
+func TestCountHitsAboveFloorIsStrict(t *testing.T) {
+	cosines := map[string]float32{"on": 0.3, "above": 0.30001, "below": 0.29999, "unscored": 0}
+	if got := countHitsAboveFloor(cosines, 0.3); got != 1 {
+		t.Errorf("countHitsAboveFloor(0.3) = %d, want 1: only the row strictly above the floor counts, and an unscored row counts as no match", got)
 	}
-	if got := countAboveFloor(cosines, results, 0.29999); got != 2 {
-		t.Errorf("countAboveFloor(0.29999) = %d, want 2 (the row on 0.3 and the one above it)", got)
+	if got := countHitsAboveFloor(cosines, 0.29999); got != 2 {
+		t.Errorf("countHitsAboveFloor(0.29999) = %d, want 2 (the row on 0.3 and the one above it)", got)
+	}
+	// A row the caller was shown but whose vector could not be scored must not
+	// be counted as a match, which is the whole reason the report scores rows
+	// from their own stored vectors rather than from a leg's list.
+	if got := countHitsAboveFloor(map[string]float32{}, 0.0); got != 0 {
+		t.Errorf("countHitsAboveFloor over no scored rows = %d, want 0", got)
 	}
 }
 
@@ -354,9 +477,9 @@ func TestFalsePositivesUnseparableCountsExactTies(t *testing.T) {
 		key: "only", content: "The only memory in this store.", category: "fact", vec: unitVector(1),
 	}})
 	q := unitVector(1)
-	rep, err := FalsePositives(context.Background(), store,
-		[]Query{{Name: "n1", ProjectID: project, Text: "anything", Vector: q}},
-		[]Query{{Name: "a1", ProjectID: project, Text: "only memory", Vector: q, Rel: Relevance{"x": 1}}})
+	noAnswer := []Query{{Name: "n1", ProjectID: project, Text: "anything", Vector: q}}
+	rep, err := FalsePositives(measureNoAnswers(t, store, noAnswer),
+		answerableScores(t, store, []Query{{Name: "a1", ProjectID: project, Text: "only memory", Vector: q, Rel: Relevance{"x": 1}}}))
 	if err != nil {
 		t.Fatalf("FalsePositives: %v", err)
 	}

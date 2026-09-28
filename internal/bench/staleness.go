@@ -68,13 +68,40 @@ type ProbeOutcome struct {
 	FreshTop1  bool // newest is the overall top result
 }
 
-// StalenessSummary aggregates outcomes for one probe type.
+// StalenessSummary aggregates outcomes for one probe type. ProbeType "all" is the
+// whole run and is produced by stalenessAll rather than by this function, so a
+// caller reading the per-type rows cannot pick up the aggregate by accident.
 type StalenessSummary struct {
 	ProbeType  string
 	Probes     int
 	FreshFound int
 	FreshWins  int
 	FreshTop1  int
+}
+
+// stalenessAll aggregates every probe into one row, so the headline the docs
+// quote has a row of its own that names all three outcomes. Fresh-wins alone is
+// the weakest of the three: it says the newest version outranks its stale
+// siblings SOMEWHERE in the window, which is compatible with the caller being
+// shown the stale one — an agent reads the top result, and on the committed
+// fixture fresh-wins is 1.000 while fresh@1 is 0.583 on state probes and 0.458 on
+// premise ones. Publishing the first without the second is the claim #561 called
+// overstated.
+func stalenessAll(outcomes []ProbeOutcome) StalenessSummary {
+	all := StalenessSummary{ProbeType: "all"}
+	for _, o := range outcomes {
+		all.Probes++
+		if o.FreshFound {
+			all.FreshFound++
+		}
+		if o.FreshWins {
+			all.FreshWins++
+		}
+		if o.FreshTop1 {
+			all.FreshTop1++
+		}
+	}
+	return all
 }
 
 // RunStaleness seeds every scenario's versions into one shared store (all
@@ -228,11 +255,15 @@ func SummarizeStaleness(outcomes []ProbeOutcome) []StalenessSummary {
 }
 
 // FormatStaleness renders the summary table plus every failing probe, so the
-// report names exactly which facts search got wrong.
+// report names exactly which facts search got wrong. The all-probes row goes
+// last and is the row a reader should quote: it is the only one that covers every
+// probe, and it carries fresh@1 next to fresh-wins so the two cannot be quoted
+// apart.
 func FormatStaleness(outcomes []ProbeOutcome) string {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "%-10s %7s %12s %12s %10s\n", "probe", "n", "fresh-found", "fresh-wins", "fresh@1")
-	for _, s := range SummarizeStaleness(outcomes) {
+	rows := append(SummarizeStaleness(outcomes), stalenessAll(outcomes))
+	for _, s := range rows {
 		n := float64(s.Probes)
 		fmt.Fprintf(&b, "%-10s %7d %12.3f %12.3f %10.3f\n",
 			s.ProbeType, s.Probes, float64(s.FreshFound)/n, float64(s.FreshWins)/n, float64(s.FreshTop1)/n)
