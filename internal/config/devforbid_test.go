@@ -308,3 +308,149 @@ func TestCheckDevDataDirHandlesAPathThatDoesNotExist(t *testing.T) {
 		t.Errorf("CheckDevDataDir = %v, want nil: an unresolvable listing is not the data directory", err)
 	}
 }
+
+// withBuildVersion sets the version the RESOLVERS judge this build by (the
+// string cmd/ghost hands over from its own `version` var) and restores it, so
+// one test cannot leave the next one believing it is a release.
+func withBuildVersion(t *testing.T, v string) {
+	t.Helper()
+	prev := BuildVersion()
+	SetBuildVersion(v)
+	t.Cleanup(func() { SetBuildVersion(prev) })
+}
+
+// TestTheResolversRefuseAListedDirectoryOnADevBuild is the structural half of
+// #721: the check lives INSIDE config.DataDirPath, so it is not the callers that
+// remember to ask. A path that only writes a marker, a pid file or a log still
+// resolves the data directory, and every one of those used to reach a forbidden
+// directory that way — so the invariant is asserted on the resolver itself, and
+// a future caller of DataDir or DataDirPath is covered by having used it.
+func TestTheResolversRefuseAListedDirectoryOnADevBuild(t *testing.T) {
+	withBuildVersion(t, devVersion)
+	root := t.TempDir()
+	dataHome := filepath.Join(root, "data")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv(DevForbidDataDirEnv, filepath.Join(dataHome, "ghost"))
+
+	if _, err := DataDirPath(); err == nil {
+		t.Error("DataDirPath = nil, want a refusal on a development build")
+	} else if !strings.Contains(err.Error(), DevForbidDataDirEnv) {
+		t.Errorf("the refusal does not name %s: %v", DevForbidDataDirEnv, err)
+	}
+
+	// The creating resolver is the one that could leave a phantom directory in
+	// the store the variable protects: DataDir MkdirAll's, and it has to be
+	// AFTER the check, not before it.
+	if _, err := DataDir(); err == nil {
+		t.Error("DataDir = nil, want a refusal on a development build")
+	}
+	for _, path := range []string{
+		filepath.Join(dataHome, "ghost"),
+		filepath.Join(dataHome, "ghost", "scratch"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("the refused resolver created %s, want nothing created (stat error: %v)", path, err)
+		}
+	}
+}
+
+// TestTheResolversRefuseWithoutAWiredBuildVersion is the unwired case, which is
+// the one a default decides. Every other test here names the version it is
+// testing; this one calls no setter at all, so it is what a binary whose
+// dispatch has not run (and a caller that has not wired the version) actually
+// gets. A default that read as a release would leave the rule off for exactly
+// that binary, silently.
+func TestTheResolversRefuseWithoutAWiredBuildVersion(t *testing.T) {
+	root := t.TempDir()
+	dataHome := filepath.Join(root, "data")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv(DevForbidDataDirEnv, filepath.Join(dataHome, "ghost"))
+
+	if _, err := DataDir(); err == nil {
+		t.Errorf("DataDir = nil with the default build version, want a refusal: the default must be the GUARDED side")
+	}
+	if _, err := DataDirPath(); err == nil {
+		t.Errorf("DataDirPath = nil with the default build version, want a refusal: the default must be the GUARDED side")
+	}
+}
+
+// TestTheResolversIgnoreTheVariableOnAReleaseBuild is why the variable can be
+// exported into a developer's shell: the same listed directory, on the version
+// the release ldflags stamp, is created and returned.
+func TestTheResolversIgnoreTheVariableOnAReleaseBuild(t *testing.T) {
+	withBuildVersion(t, "0.39.0")
+	root := t.TempDir()
+	dataHome := filepath.Join(root, "data")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv(DevForbidDataDirEnv, filepath.Join(dataHome, "ghost"))
+
+	want := filepath.Join(dataHome, "ghost")
+	got, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir on a release build = %v, want the directory", err)
+	}
+	if got != want {
+		t.Errorf("DataDir = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("DataDir did not create %s: %v", want, err)
+	}
+	// And the non-creating one, which is what the read-only paths use.
+	t.Setenv(DevForbidDataDirEnv, filepath.Join(root, "somewhere-else"))
+	if got, err := DataDirPath(); err != nil {
+		t.Errorf("DataDirPath on a release build = %v, want the path", err)
+	} else if got != want {
+		t.Errorf("DataDirPath = %q, want %q", got, want)
+	}
+}
+
+// TestTheResolversDoNothingWithoutTheVariable is the state every user is in by
+// default, and the reason this change is safe for the rest of the tree: with the
+// variable unset the resolvers are exactly what they always were.
+func TestTheResolversDoNothingWithoutTheVariable(t *testing.T) {
+	withBuildVersion(t, devVersion)
+	root := t.TempDir()
+	dataHome := filepath.Join(root, "data")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", root, err)
+	}
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv(DevForbidDataDirEnv, "")
+
+	want := filepath.Join(dataHome, "ghost")
+	got, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir = %v, want the directory", err)
+	}
+	if got != want {
+		t.Errorf("DataDir = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("DataDir did not create %s: %v", want, err)
+	}
+}
+
+// TestTheDefaultBuildVersionIsADevelopmentBuild pins the direction an unwired
+// build falls. `SetBuildVersion` is called by cmd/ghost's dispatch, and a
+// default that read as a RELEASE would leave the guard off for every caller that
+// has not wired it — a rule that is off until something remembers to turn it on.
+func TestTheDefaultBuildVersionIsADevelopmentBuild(t *testing.T) {
+	prev := BuildVersion()
+	SetBuildVersion("0.39.0")
+	if got := BuildVersion(); got != "0.39.0" {
+		t.Fatalf("BuildVersion() = %q after setting 0.39.0", got)
+	}
+	SetBuildVersion(prev)
+	if prev != "dev" {
+		t.Errorf("the default build version is %q, want \"dev\"", prev)
+	}
+}

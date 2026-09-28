@@ -1008,6 +1008,22 @@ var envOverrides = []envOverride{
 // DataDirPath returns the ghost data directory path WITHOUT creating it, so
 // callers that must not leave a phantom directory behind (the stop hook's
 // no-LLM skip, marker reads) can still locate the store.
+//
+// It is also where the GHOST_DEV_FORBID_DATA_DIR refusal happens (#721), and
+// that placement is the whole mechanism rather than a convenience: EVERY path
+// into the data directory goes through this function or through DataDir, so
+// putting the check here is what makes "no path can reach the forbidden
+// directory" a property of the tree instead of a rule each caller has to
+// remember. A first version guarded the store-opening entry points and missed
+// four paths that resolve the directory without opening a store — scratch
+// Reap's root, the lifecycle failure marker's write and clear, and the marker
+// read on every session start — and three of those wrote or deleted a file named
+// after a project the code had been told it cannot resolve.
+//
+// So the callers' obligation is the ordinary one: handle the error. The
+// fail-open paths (the hook and the marker bookkeeping) already returned on a
+// data-dir error of any kind, which is why a refusal needs no new handling
+// there at all.
 func DataDirPath() (string, error) {
 	dataHome := os.Getenv("XDG_DATA_HOME")
 	if dataHome == "" {
@@ -1017,8 +1033,36 @@ func DataDirPath() (string, error) {
 		}
 		dataHome = filepath.Join(home, ".local", "share")
 	}
-	return filepath.Join(dataHome, "ghost"), nil
+	dir := filepath.Join(dataHome, "ghost")
+	// Before any creation: DataDir MkdirAll's this path, and a refusal that
+	// arrived afterwards would leave the phantom directory the variable exists
+	// to protect.
+	if err := CheckDevDataDir(buildVersion, dir); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
+
+// buildVersion is this binary's version — the string the release ldflags stamp
+// into main.version, and "dev" for a plain `go build`. DataDirPath needs it and
+// config cannot import cmd, so cmd/ghost hands it over once from its dispatch
+// (SetBuildVersion), the same route memory.SetDetectRemote takes.
+//
+// The default is "dev" because that is the guarded side: a caller that has not
+// wired the version yet is a development build, and is refused rather than
+// allowed. It is read from a single goroutine (the process start) and by the
+// hook paths, which are one process per fire, so it is a plain var rather than
+// an atomic.
+var buildVersion = "dev"
+
+// SetBuildVersion tells the config package which build it is part of, so the
+// GHOST_DEV_FORBID_DATA_DIR refusal applies to development builds only.
+func SetBuildVersion(v string) { buildVersion = v }
+
+// BuildVersion returns the version the data-directory check judges this build
+// by. It exists for the tests that need the guarded side without going through
+// a dispatch, and for a caller that wants to report which build answered.
+func BuildVersion() string { return buildVersion }
 
 // DataDir returns the ghost data directory, creating it if needed.
 func DataDir() (string, error) {

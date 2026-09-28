@@ -5,10 +5,12 @@ package e2e
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -73,6 +75,21 @@ func namesIn(t *testing.T, dir string) []string {
 		out = append(out, e.Name())
 	}
 	return out
+}
+
+// seedLifecycleFailure writes the marker `ghost lifecycle` would have written for
+// a failed reflect phase, keyed by the project's NAME. The reader looks for this
+// project's id first and its name second (markerCandidates), and the alert shows
+// when the marker's project matches either — so a name-keyed marker is one the
+// session start really does find, which the control leg in the test proves.
+func seedLifecycleFailure(t *testing.T, s *sandbox, project string) {
+	t.Helper()
+	body := fmt.Sprintf(`{"project":%q,"phases_failed":["reflect"],"error":"the reflect phase failed","at":%q,"version":1}`,
+		project, time.Now().UTC().Format(time.RFC3339))
+	path := filepath.Join(s.dataDir(), "lifecycle-last-failure-"+project+".json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("seed the lifecycle failure marker: %v", err)
+	}
 }
 
 // TestDevBuildRefusesAForbiddenDataDir is the end-to-end shape of the rule: a
@@ -177,5 +194,129 @@ func TestDevBuildRefusesAForbiddenDataDir(t *testing.T) {
 	}
 	if got := backupsIn(t, s.dataDir()); len(got) == 0 {
 		t.Error("with the variable unset the open took no pre-migration backup, so the fixture proved nothing")
+	}
+}
+
+// TestLifecycleRunCreatesNothingInAForbiddenDataDir is the second end-to-end
+// shape, and the one an independent review found by driving real binaries: the
+// lifecycle's own flow reaches the data directory four ways that never open a
+// store — scratch.Reap's root, the per-run start stamp, the failure marker its
+// phase refusals write, and the marker the next session reads. A dev build that
+// ran the whole flow had left a `scratch/` directory and a marker file named
+// after a project nothing had resolved.
+//
+// GHOST_SCRATCH_DIR is removed from the child environment on purpose: the
+// sandbox sets it so no harness child can write to a real data dir, and with it
+// set the scratch root never resolves the data directory at all — which is
+// exactly why a reproduction that left it in place saw nothing here.
+func TestLifecycleRunCreatesNothingInAForbiddenDataDir(t *testing.T) {
+	s := newSandbox(t)
+	cs := s.mcpSession(t)
+	call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "a memory the refused lifecycle must not migrate",
+		"category":   "architecture",
+	})
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close the fixture's MCP session: %v", err)
+	}
+	// Bind before the downgrade, and the order matters: `ghost project bind`
+	// reaches the store through bootstrap(), so binding a v17 fixture would
+	// migrate it back to the current schema and leave the refusal nothing to
+	// prove.
+	s.mustRun("project", "bind", e2eProject, s.work)
+	downgradeToV17(s, t)
+
+	before := mustReadFile(t, s.dbPath())
+	beforeNames := namesIn(t, s.dataDir())
+	withoutEnv(s, "GHOST_SCRATCH_DIR")
+	s.env = append(s.env, config.DevForbidDataDirEnv+"="+s.dataDir())
+
+	// The exit code is not the claim: no auto phase is enabled in the sandbox,
+	// so this run may well succeed while having done nothing. The claim is the
+	// filesystem, so it is the filesystem that is asserted.
+	s.run("lifecycle", e2eProject)
+
+	if got := namesIn(t, s.dataDir()); strings.Join(got, ",") != strings.Join(beforeNames, ",") {
+		t.Errorf("the refused lifecycle changed the data directory: before %v, after %v", beforeNames, got)
+	}
+	for _, name := range []string{"scratch", "lifecycle.log"} {
+		if _, err := os.Stat(filepath.Join(s.dataDir(), name)); !os.IsNotExist(err) {
+			t.Errorf("the refused lifecycle created %s in the forbidden data dir (stat error: %v)", name, err)
+		}
+	}
+	if matches, _ := filepath.Glob(filepath.Join(s.dataDir(), "lifecycle-*")); len(matches) != 0 {
+		t.Errorf("the refused lifecycle wrote lifecycle files: %v", matches)
+	}
+	if got := stampOf(t, s.dbPath()); got != 17 {
+		t.Errorf("the refused lifecycle left the store at user_version %d, want 17 (unchanged)", got)
+	}
+	after := mustReadFile(t, s.dbPath())
+	if !bytes.Equal(after, before) {
+		t.Error("the refused lifecycle changed the store's bytes: it migrated the file")
+	}
+
+	// The control, in the same store with the variable off: the same command
+	// creates the scratch root. Without this leg every assertion above would
+	// also pass against a flow that writes nothing on this fixture at all.
+	withoutEnv(s, config.DevForbidDataDirEnv)
+	s.run("lifecycle", e2eProject)
+	if _, err := os.Stat(filepath.Join(s.dataDir(), "scratch")); err != nil {
+		t.Errorf("with the variable unset the lifecycle created no scratch root, so the fixture proved nothing: %v", err)
+	}
+}
+
+// TestSessionStartHookTouchesNothingInAForbiddenDataDir is the third shape. The
+// SessionStart hook is the busiest reader of the data directory in the tree —
+// the digest, the global memories, the session-count bump, the lifecycle-failure
+// alert and its age-based self-clean — and it runs on every session of every
+// host. It must fail open: an empty block, no store read, and nothing written.
+func TestSessionStartHookTouchesNothingInAForbiddenDataDir(t *testing.T) {
+	s := newSandbox(t)
+	cs := s.mcpSession(t)
+	call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "a memory the refused session start must not read",
+		"category":   "architecture",
+	})
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close the fixture's MCP session: %v", err)
+	}
+	// Bind before the downgrade, for the reason the lifecycle test states.
+	s.mustRun("project", "bind", e2eProject, s.work)
+	downgradeToV17(s, t)
+
+	// A lifecycle-failure marker already on disk, so the alert path — the one
+	// that READS the data directory on every session start, and that deletes an
+	// aged marker through ClearLifecycleFailure — is the path under test. It is
+	// seeded as a file rather than produced by a failing lifecycle because a run
+	// with every auto phase disabled has no failure to record, and enabling one
+	// would make this test depend on a harness child it is not about.
+	seedLifecycleFailure(t, s, e2eProject)
+	// The control, before anything is measured: with the variable unset, this
+	// same hook on this same store renders the memory and alerts on the marker.
+	// Without it, an empty digest and a silent alert would be indistinguishable
+	// from a project that never resolved — and the hook's own job is neither.
+	control := s.mustRunStdin(sessionStartPayload("claude-code", s.work), "hook", "session-start", "--source", "claude-code")
+	mustContain(t, "the control session start", control.stdout, "a memory the refused session start must not read")
+	mustContain(t, "the control session start", control.stdout, "Ghost maintenance alert")
+
+	before := mustReadFile(t, s.dbPath())
+	beforeNames := namesIn(t, s.dataDir())
+	withoutEnv(s, "GHOST_SCRATCH_DIR")
+	s.env = append(s.env, config.DevForbidDataDirEnv+"="+s.dataDir())
+
+	r := s.mustRunStdin(sessionStartPayload("claude-code", s.work), "hook", "session-start", "--source", "claude-code")
+	mustNotContain(t, "the refused session start", r.stdout, "a memory the refused session start must not read")
+	mustNotContain(t, "the refused session start", r.stdout, "Ghost context")
+
+	if got := namesIn(t, s.dataDir()); strings.Join(got, ",") != strings.Join(beforeNames, ",") {
+		t.Errorf("the refused session start changed the data directory: before %v, after %v", beforeNames, got)
+	}
+	if got := stampOf(t, s.dbPath()); got != 17 {
+		t.Errorf("the refused session start left the store at user_version %d, want 17 (unchanged)", got)
+	}
+	if after := mustReadFile(t, s.dbPath()); !bytes.Equal(after, before) {
+		t.Error("the refused session start changed the store's bytes")
 	}
 }

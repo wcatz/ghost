@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/wcatz/ghost/internal/mcpinit"
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/repo"
 )
@@ -114,6 +114,12 @@ func backupSubcommand(word string, given bool) (sub string, routable bool) {
 // that answered like neither. A help request is not a usage error and stays 0.
 const exitUsage = 2
 
+// applyBuildVersion hands this binary's version to the config package, which is
+// where the GHOST_DEV_FORBID_DATA_DIR refusal is decided (#721). It is a named
+// function because the wiring is a fact worth asserting: a guard applied with a
+// different version than the binary reports is a guard nobody can reason about.
+func applyBuildVersion() { config.SetBuildVersion(version) }
+
 // dispatchCommand routes one invocation to its subcommand and returns the
 // exit code. Subcommands that exit on their own (every failure path) never
 // return here. A command line this cannot route is not one of them: it ends in
@@ -128,14 +134,12 @@ func dispatchCommand(argv []string) int {
 	// server, the lifecycle hooks and every CLI subcommand, so a single line
 	// covers the whole binary.
 	memory.SetDetectRemote(repo.DetectRemote)
-	// The build version, for the same reason and by the same route: the
-	// GHOST_DEV_FORBID_DATA_DIR guard decides whether this is a release build,
-	// and internal/mcpinit's entry points (the hook dispatch, the installers,
-	// the status check) are reached from here rather than from a dozen callers
-	// who would each have to pass it down (#721). The hooks read it rather than
-	// taking it as an argument precisely so the hook contract does not grow a
-	// parameter every host's wiring would have to pass.
-	mcpinit.SetBuildVersion(version)
+	// The build version, for the same reason and by the same route: config's
+	// data-directory resolvers decide whether this is a release build, and every
+	// path into the data directory reaches them from here — the CLI, the MCP
+	// server, the lifecycle hooks (#721). One line covers the whole binary, and
+	// the value is the same `version` the binary prints.
+	applyBuildVersion()
 
 	if len(argv) > 0 {
 		switch argv[0] {

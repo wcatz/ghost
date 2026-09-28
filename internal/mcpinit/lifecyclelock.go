@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -53,10 +54,11 @@ func pidInFile(pidPath string) int {
 func AcquireLifecycleLock(project string) (func(), bool, error) {
 	noop := func() {}
 
-	// The guard fails the claim, which is this function's own answer to a store
-	// it cannot read: a lifecycle that cannot see the project has nothing to
-	// lock, and the caller warns and continues (#721).
-	dataDir, err := guardedDataDir()
+	// A GHOST_DEV_FORBID_DATA_DIR refusal fails the claim, which is this
+	// function's own answer to a store it cannot read: a lifecycle that cannot
+	// see the project has nothing to lock, and the caller warns and continues
+	// (#721).
+	dataDir, err := config.DataDir()
 	if err != nil {
 		return noop, true, fmt.Errorf("locate data dir: %w", err)
 	}

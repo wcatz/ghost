@@ -191,11 +191,12 @@ func runSessionStart(data []byte, stdout io.Writer) {
 	// session, not starting a new one. Bumping on every fire inflated the
 	// displayed session number well past the user's actual session count.
 	if projectID != "" && (input.Source == "" || input.Source == "startup") {
-		// guardedDataDir, so a forbidden data dir takes this fire's one
+		// A GHOST_DEV_FORBID_DATA_DIR refusal (#721) takes this fire's one
 		// deliberate write with it rather than bumping a counter in a store a
-		// development build must not touch (#721). The existing `err == nil`
-		// branch is the fail-open: no counter, no session blocked.
-		if dataDir, err := guardedDataDir(); err == nil {
+		// development build must not touch. The `err == nil` branch is the
+		// fail-open, and it is how the path already answered every data-dir
+		// failure: no counter, no session blocked.
+		if dataDir, err := config.DataDir(); err == nil {
 			if n := bumpSessionCount(filepath.Join(dataDir, "ghost.db"), projectID); n > 0 {
 				interactionCount = n
 			}
@@ -214,7 +215,10 @@ func runSessionStart(data []byte, stdout io.Writer) {
 // second time: the two entry points load once and hand the same value to both
 // halves of the digest.
 func loadGlobals(cfg *config.Config) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
-	dataDir, err := guardedDataDir()
+	// config.DataDir is where a GHOST_DEV_FORBID_DATA_DIR refusal comes from
+	// (#721); this function's answer to any data-dir error is silence, which is
+	// also the hook's fail-open answer.
+	dataDir, err := config.DataDir()
 	if err != nil {
 		return
 	}
@@ -448,9 +452,9 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 	cfg := config.LoadForHook()
 	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd, cfg)
 	if projectID != "" {
-		// The same guard as the Claude Code session start above, for opencode's
-		// equivalent render (#721).
-		if dataDir, err := guardedDataDir(); err == nil {
+		// The same fail-open as the Claude Code session start above, for
+		// opencode's equivalent render.
+		if dataDir, err := config.DataDir(); err == nil {
 			if n := bumpSessionCount(filepath.Join(dataDir, "ghost.db"), projectID); n > 0 {
 				interactionCount = n
 			}
@@ -469,10 +473,10 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 // store rather than the loaders above — the loaders rank the LIVE rows, which is
 // the one thing a past reading cannot do.
 func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
-	// A question about the past still opens a store, so the data-dir guard
-	// applies to it as to every other open (#721); an empty block is what a
-	// missing store already renders.
-	dataDir, err := guardedDataDir()
+	// A question about the past still resolves the data directory, so a
+	// GHOST_DEV_FORBID_DATA_DIR refusal reaches it as it does every other read
+	// (#721); an empty block is what a missing store already renders.
+	dataDir, err := config.DataDir()
 	if err != nil {
 		return ""
 	}
@@ -798,7 +802,7 @@ type sessionMemory struct {
 // states: the session-start path reads the config once and hands the same value
 // to both halves of the digest.
 func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
-	dataDir, err := guardedDataDir()
+	dataDir, err := config.DataDir()
 	if err != nil {
 		return // a refused data dir reads exactly as no store: no DB access, no blocked session (#721)
 	}

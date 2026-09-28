@@ -870,18 +870,26 @@ $ echo $?
 1
 ```
 
-**Every path that opens a store honors it** — the CLI subcommands, `ghost mcp`,
-`ghost mcp init`, and the read-only `ghost export` / dry-run `ghost import`. Two
-paths behave differently, and both are deliberate:
+**Every path into the data directory honors it**, because the check runs where
+the directory is *resolved* rather than at each command that opens a store. That
+covers the CLI subcommands, `ghost mcp`, `ghost mcp init`, the read-only
+`ghost export` and dry-run `ghost import` — and also the paths that only write
+bookkeeping into the directory: the scratch root a lifecycle run reaps, the
+lifecycle-failure marker a run writes or clears, the per-project start stamp, the
+Obsidian mirror's pid file, and the marker read on every session start. Nothing
+is created, migrated, written or deleted in a refused directory, and a command
+that resolved nothing does not fall back to a raw name and write there anyway.
+
+Two paths behave differently, and both are deliberate:
 
 - **The hook paths fail open.** A SessionStart/Stop hook, and the `ghost context`
-  render opencode's plugin spawns, open the store read-only and already answer
-  every failure by rendering an empty block; a refused directory is one more
-  such failure. The session is never blocked, no database is opened, and nothing
-  is written beside it — so a development session simply has no context, while
-  the release Ghost in the same session keeps serving the real store. A
-  development build that is refused the store is not a broken session, it is the
-  outcome the variable asked for.
+  render opencode's plugin spawns, read the store and already answer every
+  failure by rendering an empty block; a refused directory is one more such
+  failure. The session is never blocked, no database is opened, and nothing is
+  written beside it — so a development session simply has no context, while the
+  release Ghost in the same session keeps serving the real store. A development
+  build that is refused the store is not a broken session, it is the outcome the
+  variable asked for.
 - **`ghost mcp status` reports it.** The status report's job is to say what is
   wrong, so a refused directory appears as a failed line naming the variable,
   and the run exits non-zero.

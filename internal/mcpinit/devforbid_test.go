@@ -22,14 +22,14 @@ const devBuild = "dev"
 // touch.
 const releaseBuild = "0.39.0"
 
-// withBuildVersion sets the build version mcpinit judges against and restores
-// the previous one, so one test cannot leave the next one believing it is a
-// release.
+// withBuildVersion sets the build version the DATA-DIRECTORY RESOLVERS judge by
+// (config owns both, since the refusal happens there — #721) and restores the
+// previous one, so one test cannot leave the next one believing it is a release.
 func withBuildVersion(t *testing.T, version string) {
 	t.Helper()
-	prev := buildVersion
-	SetBuildVersion(version)
-	t.Cleanup(func() { SetBuildVersion(prev) })
+	prev := config.BuildVersion()
+	config.SetBuildVersion(version)
+	t.Cleanup(func() { config.SetBuildVersion(prev) })
 }
 
 // storeAt writes a store at dir/ghost.db and returns the path, so a test can
@@ -249,8 +249,8 @@ func TestTheSessionContextHookFailsOpenOnAForbiddenDataDir(t *testing.T) {
 	work := realPath(t, filepath.Join(root, "work"))
 	// HOME and the config roots, so the hook's other lookups (the Obsidian
 	// mirror's opt-in, the scratch root) stay inside this test's tree.
+	setHome(t, root)
 	for _, kv := range [][2]string{
-		{"HOME", root},
 		{"XDG_CONFIG_HOME", filepath.Join(root, "config")},
 		{"XDG_CACHE_HOME", filepath.Join(root, "cache")},
 		{"XDG_DATA_HOME", dataHome},
@@ -332,8 +332,8 @@ func TestTheSessionContextHookRendersTheStoreOnAReleaseBuild(t *testing.T) {
 	// temp dir short (Windows) — the digest comes back empty and this control
 	// fails for a reason that has nothing to do with the guard.
 	work := realPath(t, mkdirAll(t, filepath.Join(root, "work")))
+	setHome(t, root)
 	for _, kv := range [][2]string{
-		{"HOME", root},
 		{"XDG_CONFIG_HOME", filepath.Join(root, "config")},
 		{"XDG_CACHE_HOME", filepath.Join(root, "cache")},
 		{"XDG_DATA_HOME", dataHome},
@@ -383,8 +383,8 @@ func TestMCPStatusReportsAForbiddenDataDirWithoutOpeningIt(t *testing.T) {
 	dbPath := storeAt(t, dataDir)
 	stampToV17(t, dbPath)
 
+	setHome(t, root)
 	for _, kv := range [][2]string{
-		{"HOME", root},
 		{"XDG_CONFIG_HOME", filepath.Join(root, "config")},
 		{"XDG_CACHE_HOME", filepath.Join(root, "cache")},
 		{"XDG_DATA_HOME", dataHome},
@@ -435,8 +435,8 @@ func TestMCPStatusDoesNotMentionTheVariableWhenItIsNotSet(t *testing.T) {
 	dataHome := filepath.Join(root, "data")
 	dataDir := filepath.Join(dataHome, "ghost")
 	storeAt(t, dataDir)
+	setHome(t, root)
 	for _, kv := range [][2]string{
-		{"HOME", root},
 		{"XDG_CONFIG_HOME", filepath.Join(root, "config")},
 		{"XDG_CACHE_HOME", filepath.Join(root, "cache")},
 		{"XDG_DATA_HOME", dataHome},
@@ -453,55 +453,159 @@ func TestMCPStatusDoesNotMentionTheVariableWhenItIsNotSet(t *testing.T) {
 	}
 }
 
-// TestTheBuildVersionSetterRoundTrips keeps the wiring honest in the other
-// direction: mcpinit's fallback is the same "dev" a plain `go build` carries, so
-// a caller that forgets to set the version gets the guarded behaviour rather
-// than the unguarded one, and a test that sets it gets it back. A default that
-// was not a development build would quietly disable the rule for every build
-// that never called the setter.
-func TestTheBuildVersionSetterRoundTrips(t *testing.T) {
-	prev := buildVersion
-	SetBuildVersion("0.39.0")
-	if buildVersion != "0.39.0" {
-		t.Fatalf("buildVersion = %q after setting 0.39.0", buildVersion)
+// markerStore builds a store holding one project, and returns the data
+// directory and the project id. The project exists so resolveMarkerProject
+// SUCCEEDS: the marker paths' own guard used to sit there, and a fixture whose
+// project never resolved would reach the fallback under a broken guard for a
+// reason that has nothing to do with the guard.
+func markerStore(t *testing.T) (dataDir, projectID string) {
+	t.Helper()
+	root := t.TempDir()
+	dataDir = filepath.Join(root, "data", "ghost")
+	work := realPath(t, mkdirAll(t, filepath.Join(root, "work")))
+	dbPath := storeAt(t, dataDir)
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath))
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
 	}
-	SetBuildVersion(prev)
-	if buildVersion != prev {
-		t.Fatalf("buildVersion = %q after restoring %q", buildVersion, prev)
+	store := memory.NewStore(db, nil)
+	projectID = "e2e-dev-guard"
+	if err := store.EnsureProject(context.Background(), projectID, work, projectID); err != nil {
+		t.Fatalf("ensure the project: %v", err)
 	}
-	if prev != "dev" {
-		t.Errorf("mcpinit's default build version is %q, want \"dev\": an unset version must be the guarded one", prev)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the store: %v", err)
+	}
+	setHome(t, root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(root, "data"))
+	t.Setenv(config.DevForbidDataDirEnv, dataDir)
+	return dataDir, projectID
+}
+
+// TestWriteLifecycleFailureTouchesNothingInAForbiddenDataDir covers the marker
+// writer's own fallback: resolveMarkerProject returns "" for a data directory it
+// cannot read, and the writer then substitutes the raw project name and writes
+// the marker anyway — so guarding the resolve alone left the write reachable,
+// and the file it produced was named after a value nothing had resolved. A
+// forbidden data directory has to mean the whole function does nothing.
+func TestWriteLifecycleFailureTouchesNothingInAForbiddenDataDir(t *testing.T) {
+	withBuildVersion(t, devBuild)
+	dataDir, projectID := markerStore(t)
+	before := dirEntries(t, dataDir)
+
+	if err := WriteLifecycleFailure(projectID, []string{"reflect"}, "the phase refused"); err == nil {
+		t.Error("WriteLifecycleFailure = nil, want the refusal it reports to its caller")
+	}
+	if got := dirEntries(t, dataDir); strings.Join(got, ",") != strings.Join(before, ",") {
+		t.Errorf("the refused write changed the data directory: before %v, after %v", before, got)
+	}
+	// Named explicitly, because the fallback is what used to happen here: a
+	// marker under the RAW project name is the file that must not exist.
+	for _, name := range []string{
+		projectMarkerFile(projectID),
+		projectMarkerFile("ghost"),
+		lifecycleMarkerPrefix + "-*.json",
+		legacyMarkerFile,
+	} {
+		if _, err := filepath.Glob(filepath.Join(dataDir, name)); err == nil {
+			if matches, _ := filepath.Glob(filepath.Join(dataDir, name)); len(matches) != 0 {
+				t.Errorf("the refused write left %v in the forbidden data directory", matches)
+			}
+		}
+	}
+
+	// The control: the same call on a release build records the marker, so the
+	// assertions above are about the guard and not about a store that cannot
+	// resolve a project.
+	withBuildVersion(t, releaseBuild)
+	if err := WriteLifecycleFailure(projectID, []string{"reflect"}, "the phase refused"); err != nil {
+		t.Fatalf("WriteLifecycleFailure on a release build = %v, want the marker written", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, projectMarkerFile(projectID))); err != nil {
+		t.Errorf("the release build wrote no marker: %v", err)
 	}
 }
 
-// TestDataDirGuardedByBuildVersionIsTheHookDefault documents, in a test, the
-// single seam every hook-side store read goes through: a forbidden directory
-// yields an error rather than a path, and the hook's existing fail-open handling
-// of a data-dir error is what turns that into an empty session. A future caller
-// that reached past the guard for a store would be reaching past this.
-func TestDataDirGuardedByBuildVersionIsTheHookDefault(t *testing.T) {
-	withBuildVersion(t, devBuild)
-	root := t.TempDir()
-	dataHome := filepath.Join(root, "data")
-	for _, kv := range [][2]string{
-		{"HOME", root},
-		{"XDG_DATA_HOME", dataHome},
-		{config.DevForbidDataDirEnv, filepath.Join(dataHome, "ghost")},
-	} {
-		t.Setenv(kv[0], kv[1])
-	}
-	if _, err := guardedDataDir(); err == nil {
-		t.Error("guardedDataDir = nil, want the refusal the hook paths fail open on")
-	}
+// TestClearLifecycleFailureTouchesNothingInAForbiddenDataDir is the removal
+// half, and it is the one that can destroy something: the marker is already on
+// disk, so a dev build that honoured the variable only for the resolve would
+// still delete a record the release build wrote.
+func TestClearLifecycleFailureTouchesNothingInAForbiddenDataDir(t *testing.T) {
 	withBuildVersion(t, releaseBuild)
-	dir, err := guardedDataDir()
+	dataDir, projectID := markerStore(t)
+	if err := WriteLifecycleFailure(projectID, []string{"reflect"}, "a failure to heal"); err != nil {
+		t.Fatalf("seed the marker: %v", err)
+	}
+	marker := filepath.Join(dataDir, projectMarkerFile(projectID))
+	before, err := os.ReadFile(marker)
 	if err != nil {
-		t.Fatalf("guardedDataDir on a release build = %v, want the directory", err)
+		t.Fatalf("read the seeded marker: %v", err)
 	}
-	if want := filepath.Join(dataHome, "ghost"); dir != want {
-		t.Errorf("guardedDataDir = %q, want %q", dir, want)
+	beforeNames := dirEntries(t, dataDir)
+
+	withBuildVersion(t, devBuild)
+	_ = ClearLifecycleFailure(projectID)
+
+	after, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("the refused clear removed the marker: %v", err)
 	}
-	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("the release build's guardedDataDir did not create the data dir: %v", err)
+	if !bytes.Equal(after, before) {
+		t.Error("the refused clear changed the marker's bytes")
+	}
+	if got := dirEntries(t, dataDir); strings.Join(got, ",") != strings.Join(beforeNames, ",") {
+		t.Errorf("the refused clear changed the data directory: before %v, after %v", beforeNames, got)
+	}
+}
+
+// TestReadLifecycleFailureTouchesNothingInAForbiddenDataDir is the read the
+// session-start hook does before anything else looks at the store: it runs on
+// every session, and its age-based self-clean calls ClearLifecycleFailure, so a
+// read that reached a forbidden directory could also delete there.
+func TestReadLifecycleFailureTouchesNothingInAForbiddenDataDir(t *testing.T) {
+	withBuildVersion(t, releaseBuild)
+	dataDir, projectID := markerStore(t)
+	if err := WriteLifecycleFailure(projectID, []string{"reflect"}, "a failure the next session must see"); err != nil {
+		t.Fatalf("seed the marker: %v", err)
+	}
+	// The control, first: on a release build this marker IS read, so the
+	// silence asserted below is the guard and not an unreadable file.
+	if alert := lifecycleFailureAlert(projectID, projectID); alert == "" {
+		t.Fatal("a release build's session start showed no alert for a marker it can read")
+	}
+	beforeNames := dirEntries(t, dataDir)
+
+	withBuildVersion(t, devBuild)
+	if alert := lifecycleFailureAlert(projectID, projectID); alert != "" {
+		t.Errorf("the refused session start alerted on a marker in a forbidden data dir: %q", alert)
+	}
+	if got := readLifecycleFailure(projectID, projectID); got != nil {
+		t.Errorf("readLifecycleFailure = %+v, want nil for a forbidden data dir", got)
+	}
+	if got := dirEntries(t, dataDir); strings.Join(got, ",") != strings.Join(beforeNames, ",") {
+		t.Errorf("the refused read changed the data directory: before %v, after %v", beforeNames, got)
+	}
+}
+
+// TestTouchLifecycleStartTouchesNothingInAForbiddenDataDir is the fourth marker
+// path, and the one `ghost lifecycle` runs on every start: a refusal has to mean
+// no stamp file, and the error is a warning the caller already prints.
+func TestTouchLifecycleStartTouchesNothingInAForbiddenDataDir(t *testing.T) {
+	withBuildVersion(t, devBuild)
+	dataDir, projectID := markerStore(t)
+	before := dirEntries(t, dataDir)
+
+	if err := TouchLifecycleStart(projectID); err == nil {
+		t.Error("TouchLifecycleStart = nil, want the refusal it reports to its caller")
+	}
+	if got := dirEntries(t, dataDir); strings.Join(got, ",") != strings.Join(before, ",") {
+		t.Errorf("the refused stamp changed the data directory: before %v, after %v", before, got)
+	}
+	if _, err := filepath.Glob(filepath.Join(dataDir, lifecycleLastStartFile(projectID)+"*")); err == nil {
+		if matches, _ := filepath.Glob(filepath.Join(dataDir, lifecycleLastStartFile(projectID)+"*")); len(matches) != 0 {
+			t.Errorf("the refused stamp left %v in the forbidden data directory", matches)
+		}
 	}
 }
