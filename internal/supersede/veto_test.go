@@ -348,6 +348,84 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 	}
 }
 
+// TestNamesRetirementCoversEveryInflection pins the shape of retireMarkers from
+// both sides at once. A marker that recognises only the past tense recognises
+// the note people actually write ("we dropped the rule") and misses the note
+// they write when the change is current ("we drop the rule"), which leaves the
+// veto standing on a genuine supersession — a false veto, and the direction that
+// costs recall. A marker written as a bare stem with no right boundary does the
+// opposite: it fires on "dropdown" and "relaxation", so a newer note about
+// neither passes a pair the veto should have settled for free.
+//
+// The forms are spelled out rather than generated from a stem, because
+// "drop", "relax", "loosen" and "lift" do not take a silent e: a stem/suffix
+// cross product asserts the non-words "drope" and "droped" instead of the
+// forms a note actually contains. A hand-written word list is what rotted in the
+// first place — the previous one was checked against the past tense, which is
+// the one form every marker already had.
+func TestNamesRetirementCoversEveryInflection(t *testing.T) {
+	// The real four-way inflections, base first.
+	verbs := []struct {
+		word  string
+		forms []string
+	}{
+		{"retire", []string{"retire", "retires", "retired", "retiring"}},
+		{"remove", []string{"remove", "removes", "removed", "removing"}},
+		{"replace", []string{"replace", "replaces", "replaced", "replacing"}},
+		{"supersede", []string{"supersede", "supersedes", "superseded", "superseding"}},
+		{"drop", []string{"drop", "drops", "dropped", "dropping"}},
+		{"deprecate", []string{"deprecate", "deprecates", "deprecated", "deprecating"}},
+		{"relax", []string{"relax", "relaxes", "relaxed", "relaxing"}},
+		{"loosen", []string{"loosen", "loosens", "loosened", "loosening"}},
+		{"lift", []string{"lift", "lifts", "lifted", "lifting"}},
+		{"waive", []string{"waive", "waives", "waived", "waiving"}},
+	}
+	// drop, deprecate, relax, loosen, lift and waive are the six the bare
+	// present-tense form was missing from; the other four already had all four.
+	for _, v := range verbs {
+		for _, form := range v.forms {
+			if !namesRetirement(form) {
+				t.Errorf("namesRetirement(%q) = false, want true: it is a way to retire %q, and a veto that misses it stands on a genuine supersession (costs recall)", form, v.word)
+			}
+		}
+	}
+
+	// Each of these is one stem plus a suffix that is not an inflection, so a
+	// marker that matched on the stem alone would recognise it. They have to
+	// stay unrecognised, or a note about a UI control or a policy term lets a
+	// standing rule through to the classifier for free.
+	nearMiss := []string{
+		"dropdown",   // drop + "down"
+		"droplet",    // drop + "let"
+		"liftoff",    // lift + "off"
+		"looseners",  // loosen + "ers"
+		"waiver",     // waiv + "er"
+		"relaxation", // relax + "ation"
+	}
+	for _, w := range nearMiss {
+		if namesRetirement(w) {
+			t.Errorf("namesRetirement(%q) = true, want false: it is not a way to retire a rule, so recognising it lets a note that retires nothing through the veto (costs precision)", w)
+		}
+	}
+}
+
+// TestVetoSupersedeStillFiresOnANearMissWord is the user-visible half of the
+// near-miss contract. namesRetirement matching "dropdown" is only interesting
+// because it drops the veto, and the veto is what settles the pair — so this
+// pins the outcome the operator sees, not the regex that produces it.
+func TestVetoSupersedeStillFiresOnANearMissWord(t *testing.T) {
+	rule := "NEVER merge on Fridays; the release is cut on Tuesdays instead."
+	for _, newer := range []string{
+		"The settings page has a dropdown for the merge window.",
+		"There is a long relaxation period before the canary gate promotes.",
+		"The waiver form lives in the ops repo.",
+	} {
+		if reason, vetoed := VetoSupersede(Candidate{OlderContent: rule, NewerContent: newer}); !vetoed {
+			t.Errorf("newer note %q let the pair through (reason %q), but it retires nothing: the older note's rule still binds", newer, reason)
+		}
+	}
+}
+
 // TestVetoSupersedeReasonNamesTheFiredPattern: the reason is what a log line and
 // the CLI report carry, so it has to say which signal fired — resolve.VetoKeep
 // returns the same way.
