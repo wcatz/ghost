@@ -244,11 +244,14 @@ func TestStalenessDecayProof(t *testing.T) {
 // the corpus declares no `supersedes` edge at all, and the demote is a hard no-op
 // unless an edge joins two rows inside one window. A measurement here would have
 // cost a whole pass over 551 memories to re-derive a fact about the fixture, and
-// this package's test binary has been within a couple of hundred seconds of Go's
-// 600s per-binary default — #677's four rows took it over, and it came back only
-// because five tests were made concurrent (see the budget note in sweep_test.go
-// for the measured figures and the CI job that failed at 600.038s). The
-// ranking-state suite is where the demote is measured against edges that exist.
+// this package's CI budget for loading the corpus is spent: a corpus-wide test
+// costs ~10s and the package was within ~10s of Go's 600s per-binary default
+// when #677 added a sixth corpus-wide test, which is what failed `build-and-test`
+// at 600.038s. It fits again only because five tests were made concurrent. The
+// measured figures are in the budget note on the sweep's pairing test, and this
+// file states the same cause once, here, rather than restating a number that
+// drifts. The ranking-state suite is where the demote is measured against edges
+// that exist.
 func TestDecayDoesNotPerturbGradedBench(t *testing.T) {
 	// Parallel: this test seeds and searches the immutable headline corpus and only
 	// reads it, and at 60-130s under -race it is one of the five that decide whether

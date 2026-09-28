@@ -224,11 +224,20 @@ func FormatRankedState(runs []RankedStateRun) string {
 	b.WriteString("  supersede demote are both live here; on the headline table both are inert.\n\n")
 	fmt.Fprintf(&b, "%-20s %-12s %7s %7s %8s %8s\n", "configuration", "condition", "R@1", "R@5", "MRR@10", "NDCG@10")
 	printed := 0
+	// graded is the query count of the first run this loop ACTUALLY prints, and it
+	// is the footer's only source. Reading runs[0] instead was a panic waiting for
+	// a caller: the loop skips a run with fewer than three conditions, so a slice
+	// whose first entry is incomplete and whose second is not printed the second
+	// and then indexed runs[0].Result[0] out of range. RankedStateRun is exported,
+	// so a hand-built slice reaches it. The footer has to describe the run the
+	// table above it describes.
+	graded := 0
 	for _, run := range runs {
 		if len(run.Result) < 3 {
 			continue
 		}
 		if printed == 0 {
+			graded = run.Result[0].Queries
 			for _, ref := range run.Result[:2] {
 				fmt.Fprintf(&b, "%-20s %-12s %7.3f %7.3f %8.3f %8.3f\n",
 					"reference (no params)", ref.Condition, ref.Recall1, ref.Recall5, ref.MRR10, ref.NDCG10)
@@ -289,7 +298,7 @@ func FormatRankedState(runs []RankedStateRun) string {
 		}
 		b.WriteString("\n")
 	}
-	fmt.Fprintf(&b, "\n%d graded queries. The two single legs take no SearchParams, so they are the\n", runs[0].Result[0].Queries)
+	fmt.Fprintf(&b, "\n%d graded queries. The two single legs take no SearchParams, so they are the\n", graded)
 	b.WriteString("same in every configuration and are printed once. Answer rank 1 is the top result.\n")
 	return b.String()
 }
