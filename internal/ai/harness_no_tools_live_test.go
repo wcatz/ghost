@@ -84,39 +84,53 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
 
-	// The REAL goose configuration, carried into the isolated config root the
-	// same way configureGooseIsolation carries it — so that the ONLY difference
-	// from a production call is GOOSE_MODE.
+	// The REAL goose configuration, carried by CALLING PRODUCTION'S OWN CARRY, so
+	// the file set and the errors are the ones a real reflect call produces.
 	//
-	// This is the point of the test and it took a second attempt to get right. A
-	// fresh XDG_CONFIG_HOME seeded with nothing but `GOOSE_MODE: auto` cannot
-	// work: harnessEnv drops GOOSE_PROVIDER__API_KEY, OPENAI_API_KEY and
+	// This is the point of the test and it took three attempts to get right. A
+	// fresh XDG_CONFIG_HOME seeded with nothing but `GOOSE_MODE: auto` cannot work:
+	// harnessEnv drops GOOSE_PROVIDER__API_KEY, OPENAI_API_KEY and
 	// ANTHROPIC_API_KEY, and setting XDG_CONFIG_HOME makes linkGooseConfigDirs
 	// return early, so the child gets no config at all. `goose run` then fails on
-	// authentication, and that failure is indistinguishable from "chat mode
-	// breaks the goose backend" — the one question this test exists to answer.
-	// A test that can only fail is worse than no test.
-	sourceDir := liveGooseConfigDir(t)
-	if sourceDir == "" {
+	// authentication, and that failure is indistinguishable from "chat mode breaks
+	// the goose backend" — the one question this test exists to answer. A test
+	// that can only fail is worse than no test.
+	//
+	// Naming two files was the second attempt and it was wrong in the way this
+	// repo has been bitten before: production carries the whole directory, so a
+	// machine whose run depends on settings.json — or on anything else in there —
+	// would still have failed here, and with the same misleading message. A list
+	// of names is also a second copy of a policy that already exists, so it drifts.
+	//
+	// The roots are the ones the CHILD would resolve, in production's order (see
+	// liveGooseConfigRoots), and a carry failure is a test failure rather than a
+	// skip: carrying the config is the precondition for the turn meaning anything,
+	// and a permission error there is a fact about this machine, not a reason to
+	// report nothing.
+	roots := liveGooseConfigRoots(t)
+	if len(roots) == 0 {
 		t.Skip("no real goose config root to carry credentials from; run this where `goose configure` has been done")
 	}
-	carried := 0
-	for _, name := range []string{"config.yaml", "secrets.yaml"} {
-		data, err := os.ReadFile(filepath.Join(sourceDir, name))
-		if err != nil {
-			continue
-		}
-		configRoot := filepath.Join(root, "config")
-		if err := os.MkdirAll(filepath.Join(configRoot, "goose"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(configRoot, "goose", name), data, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		carried++
+	carriedRoot := filepath.Join(root, "config", "goose")
+	if err := os.MkdirAll(carriedRoot, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if carried == 0 {
-		t.Skipf("no config.yaml or secrets.yaml under %s; nothing would authenticate", sourceDir)
+	for _, source := range roots {
+		// Copy rather than link: the child is given a path under this test's own
+		// temp root, and a symlink to a real user file would outlive the test if
+		// anything read it afterwards. copyGooseConfigDir is the same code path
+		// production takes when a symlink is refused, so the skipped-file list it
+		// returns is the same one production would log.
+		skipped, err := copyGooseConfigDir(source, carriedRoot)
+		if err != nil {
+			t.Fatalf("carry goose config from %s: %v", source, err)
+		}
+		if len(skipped) > 0 {
+			t.Logf("carry from %s skipped %v, exactly as production would log it", source, skipped)
+		}
+	}
+	if !liveGooseConfigPresent(carriedRoot) {
+		t.Skipf("no config.yaml or secrets.yaml under %v; nothing would authenticate", roots)
 	}
 	// A decoy in the PARENT's environment, so a passing turn is attributable to
 	// the child's GOOSE_MODE rather than to an inherited "auto". This is the
@@ -157,41 +171,75 @@ func TestLiveGooseRunsATurnInChatMode(t *testing.T) {
 	}
 }
 
-// liveGooseHomeDir finds the home a real `goose configure` wrote to, or "" when
-// there is not one. Read from the PARENT's environment deliberately: the test
-// replaces HOME for the child, so it has to know the real one before it does.
+// liveGooseConfigRoots returns every config root the CHILD would resolve, in the
+// order production resolves them.
 //
-// The layout goose documents on Linux and macOS is ~/.config/goose; the other
-// platforms' roots are checked too so the test is not quietly Linux-only, and a
-// home that is merely unreadable is reported as not-found rather than asserted.
-func liveGooseConfigDir(t *testing.T) string {
+// The order is the point, and it is not a detail. linkGooseConfigDirsWith returns
+// immediately when XDG_CONFIG_HOME is set, so in production an inherited
+// XDG_CONFIG_HOME decides where the config comes from and no home-relative root is
+// consulted at all. A helper that probed the home first would hand back a stale
+// ~/.config/goose on a machine whose XDG_CONFIG_HOME points elsewhere, the test
+// would copy that and repoint XDG_CONFIG_HOME at the copy, and the child would
+// authenticate against the wrong config — failing for a reason that has nothing
+// to do with chat mode. So XDG_CONFIG_HOME goes first, matching the early return
+// exactly.
+//
+// Every home-relative root that exists is returned, not the first hit: production
+// carries all of them, so a macOS host with both ~/.config/goose and
+// ~/Library/Application Support/goose populated gets both, and using one would
+// again be a difference from production.
+func liveGooseConfigRoots(t *testing.T) []string {
 	t.Helper()
+	// An inherited XDG_CONFIG_HOME is absolute and the child reads it directly, so
+	// it is the only root that matters when it is set.
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		path := filepath.Join(xdg, "goose")
+		if liveGooseIsDir(path) {
+			return []string{path}
+		}
+		return nil
+	}
 	// gooseHomeConfigRelPaths, not a list spelled out here: it is the same list
-	// configureGooseIsolation uses to decide which roots to carry, so a test
-	// spelling its own would test a platform this build does not support — and
-	// would pass on one machine and skip on another.
-	for _, root := range []string{os.Getenv("HOME"), os.Getenv("USERPROFILE")} {
-		if root == "" {
+	// configureGooseIsolation uses to decide what to carry, so a test spelling its
+	// own would test a platform this build does not support and would pass on one
+	// machine and skip on another.
+	var roots []string
+	seen := make(map[string]bool)
+	for _, home := range []string{os.Getenv("HOME"), os.Getenv("USERPROFILE")} {
+		if home == "" {
 			continue
 		}
 		for _, rel := range gooseHomeConfigRelPaths {
-			path := filepath.Join(append([]string{root}, rel...)...)
-			if info, err := os.Stat(path); err == nil && info.IsDir() {
-				return path
+			path := filepath.Join(append([]string{home}, rel...)...)
+			// HOME and USERPROFILE name the same directory on a POSIX host, so
+			// without this a path is carried twice — which would look like two
+			// roots in the log and read as two configurations.
+			if liveGooseIsDir(path) && !seen[path] {
+				seen[path] = true
+				roots = append(roots, path)
 			}
 		}
 	}
-	// An inherited XDG_CONFIG_HOME is an absolute path the child reads directly,
-	// so the child finds the REAL config without any copy — which is what the
-	// `info -v` probe wants (it is about precedence, not credentials) and what
-	// the turn test does not, since there the decoy in the copied file has to be
-	// the only thing the env var is beating.
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		if info, err := os.Stat(filepath.Join(xdg, "goose")); err == nil && info.IsDir() {
-			return filepath.Join(xdg, "goose")
+	return roots
+}
+
+func liveGooseIsDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// liveGooseConfigPresent reports whether a carried root holds what a turn needs
+// to authenticate: config.yaml (the provider and model) or secrets.yaml (the
+// key). Either alone is enough, so this is an OR rather than a requirement for
+// both — a user whose key is in the keyring and whose config names the provider
+// has the first, and a file-based one has both.
+func liveGooseConfigPresent(dir string) bool {
+	for _, name := range []string{"config.yaml", "secrets.yaml"} {
+		if info, err := os.Stat(filepath.Join(dir, name)); err == nil && info.Mode().IsRegular() {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 // gooseLiveTurnTimeout bounds the live turn. Longer than a probe because this one
