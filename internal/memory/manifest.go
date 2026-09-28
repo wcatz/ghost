@@ -6,11 +6,13 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -108,12 +110,15 @@ func FileSHA256(path string) (string, error) {
 // loudly instead of one that is silently treated as absent — which would turn a
 // damaged sidecar into an unverified backup that still looked fine.
 //
-// The path is classified with an Lstat before the create, which the snapshot
-// beside it also does and for the same reason: this open has no O_EXCL, because
-// the manifest is replaced rather than refused, and without O_NOFOLLOW a symlink
-// at this path would be written THROUGH. That is not a hypothetical for a --out
-// destination: a backup directory is a plausible place to put a link, and the
-// target would be truncated, overwritten with a manifest and narrowed to 0600.
+// The path is classified with an Lstat before the create, and ENFORCED by
+// O_NOFOLLOW on the open (see manifestOpenFlags). Both are needed and they are
+// not the same thing: the snapshot beside it gets atomicity for free from
+// O_EXCL, so its Lstat and its claim are one step, whereas replacing means no
+// O_EXCL here, and the Lstat alone would be a stat-then-create pair with a
+// window in it. A link at this path is not a hypothetical for a --out
+// destination — a backup directory is a plausible place to put one — and what
+// follows it would be the target truncated, overwritten with a manifest and
+// narrowed to 0600: a file the user never named.
 func writeBackupManifest(dest string, counts BackupCounts, at time.Time) (string, error) {
 	path := ManifestPath(dest)
 	sum, err := FileSHA256(dest)
@@ -146,19 +151,29 @@ func writeBackupManifest(dest string, counts BackupCounts, at time.Time) (string
 	// snapshot is closed here too, on the replacing path as well as the
 	// creating one.
 	// Classified before the create, for the reason reserveBackupPath classifies
-	// the snapshot: this open has no O_EXCL (the manifest is replaced, not
-	// refused) and no O_NOFOLLOW, so a symlink already at this path would be
-	// followed and its TARGET truncated, rewritten and chmod'ed to 0600 — Ghost
-	// clobbering and narrowing a file the user never named, through a --out
-	// directory they chose. A dangling link is the worst case of all: a
-	// stat-based check reads it as absent.
+	// the snapshot — but the classification is NOT the defence here, and the
+	// difference is load-bearing. reserveBackupPath's create is O_EXCL, so its
+	// Lstat and its claim are one atomic step with no window between them; this
+	// open cannot be O_EXCL, because a manifest is replaced rather than refused
+	// and O_EXCL would refuse exactly the case the replace exists to serve. The
+	// enforcement is therefore the flag in manifestOpenFlags (O_NOFOLLOW), and
+	// the Lstat is here so the refusal says which case it is rather than
+	// reporting ELOOP to a reader who has no idea what a symlink at this path
+	// means.
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return "", fmt.Errorf("refusing to write the manifest to %s, which is not a regular file", path)
 	} else if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("check the manifest path %s: %w", path, err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, manifestOpenFlags, 0o600)
 	if err != nil {
+		// The window the Lstat cannot close. A link planted between the
+		// classification and this open is refused by the kernel rather than
+		// followed, and saying so is more use than "too many levels of
+		// symbolic links" to someone who did not know a link was involved.
+		if errors.Is(err, syscall.ELOOP) {
+			return "", fmt.Errorf("refusing to write the manifest to %s, which became a symlink and I will not write through it", path)
+		}
 		return "", fmt.Errorf("create manifest %s: %w", path, err)
 	}
 	if err := f.Chmod(0o600); err != nil {
