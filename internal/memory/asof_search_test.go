@@ -82,6 +82,72 @@ func TestCandidatesAsOfMatchesTheTextTheVersionHeld(t *testing.T) {
 	}
 }
 
+// TestCandidatesAsOfCannotResurrectARedactedCredential: the two features
+// interact in the direction that matters, and nothing in either one's own tests
+// covers it. #656 redacts a credential on the way INTO a history row, which is the
+// only place Ghost keeps text it no longer holds anywhere else — and #647's read is
+// a new way to ask for that text by instant. A memory whose pre-edit wording held
+// a credential is redacted in the version row, so a read at the instant of that
+// version returns the redaction, never the value. The write path refuses such
+// content outright now, which is why the fixture goes in through CreateFromCorpus:
+// a pre-guard row is the only way one exists, and the point of the test is that
+// even a row that does exist cannot be read back out.
+func TestCandidatesAsOfCannotResurrectARedactedCredential(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	credential := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
+
+	id, err := s.CreateFromCorpus(ctx, testProject, Memory{
+		Category: "fact", Importance: 0.5, Source: "onboarding",
+		Content: "the deploy key is " + credential,
+	})
+	if err != nil {
+		t.Fatalf("CreateFromCorpus: %v", err)
+	}
+	// The rotation is what files a version row holding the OLD text, which is the
+	// copy an as_of read would otherwise hand back. Both rows are stamped apart so
+	// the read lands BETWEEN them: within one second they share a timestamp, and a
+	// read at or after the rotation would return the new text and prove nothing
+	// about the old one.
+	if err := s.UpdateMemory(ctx, testProject, id, strPtr("the deploy key was rotated"), nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	stamps := make([]string, len(entries))
+	for i := range stamps {
+		stamps[i] = asOfStampSave
+	}
+	if len(stamps) > 1 {
+		stamps[len(stamps)-1] = asOfStampLate
+	}
+	stampHistory(t, s, id, stamps...)
+
+	set, err := s.MemoriesAsOf(ctx, testProject, asOfAt(t, "2027-01-15 00:00:00"))
+	if err != nil {
+		t.Fatalf("MemoriesAsOf between the writes: %v", err)
+	}
+	row, ok := asOfContentByID(t, set)[id]
+	if !ok {
+		t.Fatalf("the memory is absent from the read, want its pre-rotation version: %v", asOfContentByID(t, set))
+	}
+	if strings.Contains(row.Content, credential) {
+		t.Errorf("the read returns the credential verbatim: the redaction lives in the history row, " +
+			"and a read that handed the value back would resurrect it through a surface the " +
+			"redaction path never sees")
+	}
+	// The positive half, because "the credential is absent" is also what an EMPTY
+	// content would satisfy. The redacted text says what was removed and keeps
+	// nothing of the value.
+	if !strings.Contains(row.Content, "<redacted:") {
+		t.Errorf("the read returns %q, want the redaction marker: the pre-rotation version is the "+
+			"one the read is about, so an unmarked answer would mean the wrong version was returned",
+			row.Content)
+	}
+}
+
 // TestCandidatesAsOfDoesNotDependOnMemoryProvenance: schema v18 added
 // memory_provenance — the append-only EVIDENCE table, several rows per memory,
 // answering "who or what supports this memory". A historical read must neither
