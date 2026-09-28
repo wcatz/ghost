@@ -377,7 +377,7 @@ runs before the final window closure.
 Request
   ├─1 retrieve     Candidates() -> widened, untrimmed rows
   ├─2 validity     drop expired or not-yet-valid rows
-  ├─3 predicates   project, category, and scope verdicts
+  ├─3 predicates   project, category, retention, and scope verdicts
   ├─4 provenance   bounded multiplier
   ├─5 conflicts    supersede reorders; contradicts is recorded
   ├─6 dedup        duplicate and near-duplicate ordering
@@ -391,7 +391,7 @@ Request
 |---|---|---|
 | 1 retrieve | Search legs and passive policies are separate | `memory.Candidates` returns a wider set, scoring facts, statuses, and edges; it supports query and passive modes |
 | 2 validity | columns are not exposed by `Memory` | parse and drop `valid_until < Now` or `valid_from > Now`; `verified_at` is a flag only |
-| 3 predicates | category and scope post-filter the closed window | apply category and scope before closure; project membership remains in SQL and is recorded as a per-row verdict, not a second filter |
+| 3 predicates | category and scope post-filter the closed window | apply category, retention and scope before closure; project membership remains in SQL and is recorded as a per-row verdict, not a second filter |
 | 4 provenance | no consumer | ship the stage with multiplier `1.0`; define NULL and non-NULL confidence semantics before any multiplier changes |
 | 5 conflicts | supersede and demotion helpers exist | supersede reorders; `contradicts` pairs are recorded and not acted on in v1; `elaborates` groups without removing |
 | 6 dedup | demotion helpers exist | duplicate and near-duplicate edges reorder; session-start global slices retain their explicit drop policy |
@@ -440,10 +440,10 @@ caller-supplied.
 
 Stage 2 drops a row when either validity boundary is outside the request
 clock. A null boundary is unset. An unparseable value is not a valid claim
-and is surfaced in the trace. Stage 3 applies category and `ScopeMatches` over
-the widened set. Project membership is enforced by the SQL legs; stage 3
-records the project verdict for every row but does not turn an unexpected
-bucket into a second drop predicate.
+and is surfaced in the trace. Stage 3 applies category, retention and
+`ScopeMatches` over the widened set. Project membership is enforced by the SQL
+legs; stage 3 records the project verdict for every row but does not turn an
+unexpected bucket into a second drop predicate.
 
 Stage 4 is present but inert in v1. `Confidence` is writable through the store
 and may be non-NULL in existing rows, so the contract distinguishes NULL from
@@ -609,7 +609,7 @@ blocks remain free of a relevance banner. Empty copy is reason-specific:
 | `all_invalid` | says the found rows were withheld as out of date |
 | `all_dedup_dropped`, `all_diversity_capped`, `all_over_budget` | identifies the limit and suggests raising it |
 | `vector_backend_unavailable` | says keyword-only retrieval may be less complete |
-| category/scope reasons | names the filter that excluded the rows |
+| category/retention/scope reasons | names the filter that excluded the rows |
 
 An empty result that was windowed receives the single note:
 
@@ -738,7 +738,7 @@ Rerouting hybrid through the assembler has these effects:
 |---|---|
 | 1 retrieve | changes IDs and order because the candidate pool is wider than today's closed window |
 | 2 validity | no effect on the current corpus; validity fixtures make it a membership change |
-| 3 predicates | no effect without category or scope predicates |
+| 3 predicates | no effect without category, retention or scope predicates |
 | 4 provenance | no effect while the multiplier is `1.0` |
 | 5 conflicts | widens the set on which supersede reordering occurs; a reorder before the trim can change final membership |
 | 6 dedup | has the same wider-reorder effect; `DropDemotedLosers` is false for search |
@@ -792,7 +792,10 @@ func ScopeContradicts(map[string]string, map[string]string) bool
 func BucketUnexpected(string, string) bool
 ```
 
-Stage 2 uses the two validity leaves. Stage 3 uses `ScopeContradicts` only;
+Stage 2 uses the two validity leaves. The metric has no category or retention
+leaf: the production stage applies category, retention and scope, but the
+metric composes the four leaves below, so the stage-3 leaf it composes is still
+`ScopeContradicts` only — a tier or category drop has no leaf to fail, and
 project buckets are already constrained by SQL. The metric composes all four
 leaves with `ResolvedAt` so a leaked row remains measurable. `Decision.Reason`
 corroborates a leak; it is not the source of the metric because exclusion
