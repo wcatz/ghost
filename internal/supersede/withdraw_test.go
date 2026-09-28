@@ -544,6 +544,105 @@ func TestWithdrawChainsIntoResolveReassess(t *testing.T) {
 	}
 }
 
+// TestWithdrawMarksTheRowsAFailedWriteNeverReached: a partial repair has to be
+// visible as one. The edges before the failure are gone and cannot be un-gone, so
+// the count and the list come back with the error; and the edges AFTER it were
+// never touched, so they are still live. Marking those as anything else — a
+// withdrawal, or a concurrent pass's — is a claim about a graph change that did
+// not happen, on rows the run never reached.
+// The failingStore above is #688's, reused here: it is the same seam this needs —
+// one InvalidateLink call in three fails — and a second copy in this package would
+// be two names for one fake.
+func TestWithdrawMarksTheRowsAFailedWriteNeverReached(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	a, b, target := seedTwoEdges(t, store, db)
+	third := add(t, store, db, "A third note, superseded by a fourth the pass also proposes.", []float32{1, 0, 0, 0}, "2026-08-01 00:00:00")
+	fourth := add(t, store, db, "A fourth note that supersedes the third one only briefly.", []float32{0, 1, 0, 0}, "2026-02-01 00:00:00")
+	if err := store.CreateLink(ctx, third, fourth, string(RelationSupersedes), 0.91, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Withdraw(ctx, &failingStore{Store: store, failAt: 2}, "p", []WithdrawPair{
+		{Source: a, Target: target},
+		{Source: b, Target: target},
+		{Source: third, Target: fourth},
+	}, true, discardLogger())
+	if err == nil {
+		t.Fatal("a failed write reported success")
+	}
+	if res.Withdrawn != 1 {
+		t.Errorf("withdrawn = %d, want 1: only the first write landed", res.Withdrawn)
+	}
+	if len(res.Links) != 3 {
+		t.Fatalf("links = %d, want all 3 reported", len(res.Links))
+	}
+	if !res.Links[0].Withdrawn {
+		t.Error("the row whose write landed is not marked withdrawn")
+	}
+	if !res.Links[1].WithdrawalFailed {
+		t.Error("the row whose write failed is not marked FAILED")
+	}
+	if res.Links[1].Withdrawn {
+		t.Error("the failed row claims a withdrawal that did not happen")
+	}
+	if !res.Links[2].NotAttempted {
+		t.Error("the row after the failure is not marked as never attempted")
+	}
+	if res.Links[2].Withdrawn {
+		t.Error("a row this run never reached claims a withdrawal")
+	}
+	// And the graph agrees with the markers: the third edge is still live.
+	if n := liveEdgeCount(t, store, fourth); n != 1 {
+		t.Errorf("live edges into the third target = %d, want 1: it was never reached", n)
+	}
+}
+
+// TestWithdrawRefusesAShortRefWithoutDumpingTheProject: a ref shorter than the
+// floor names a SLICE of the project's ids, and an error message that lists that
+// slice is a dump of what the caller could not otherwise enumerate. The refusal
+// says the ref is too short and prints no ids at all.
+func TestWithdrawRefusesAShortRefWithoutDumpingTheProject(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	// Twenty memories sharing a one-character prefix, so the slice is a slice.
+	for i := 0; i < 20; i++ {
+		pinID(t, db, "z"+string(rune('a'+i))+strings.Repeat("0", 30), "A note whose id starts with z.")
+	}
+	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "zz", Target: "z" + "a" + strings.Repeat("0", 30)}}, true, discardLogger())
+	if err == nil {
+		t.Fatal("a two-character ref was accepted")
+	}
+	if !strings.Contains(err.Error(), "too short to be a prefix") {
+		t.Errorf("the refusal does not say the ref is too short: %v", err)
+	}
+	if strings.Contains(err.Error(), strings.Repeat("0", 30)) {
+		t.Errorf("the refusal listed the project's ids, which is a dump of what the caller could not enumerate: %v", err)
+	}
+}
+
+// TestWithdrawResolvesAnExactShortIDThatPrefixesALongerOne: the floor applies to
+// a PREFIX, and "abc" is a full id that happens to prefix a longer one. Refusing
+// it as ambiguous would contradict the rule the docs state, and would make an
+// imported id unnameable by prefix collision.
+func TestWithdrawResolvesAnExactShortIDThatPrefixesALongerOne(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	exact := pinID(t, db, "abc", "An imported note with a three character id.")
+	pinID(t, db, "abcdef", "An imported note whose id extends the other one.")
+	if err := store.CreateLink(ctx, exact, pinID(t, db, "abcd", "The note the three character id supersedes."), string(RelationSupersedes), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "abc", Target: "abcd"}}, true, discardLogger())
+	if err != nil {
+		t.Fatalf("an exact full id was not resolved: %v", err)
+	}
+	if res.Withdrawn != 1 || res.Links[0].SourceID != exact {
+		t.Errorf("withdrawn=%d links=%+v, want the exact-id edge withdrawn", res.Withdrawn, res.Links)
+	}
+}
+
 // hasUnsupersedeHistory reports whether the memory carries an `unsupersede` row.
 func hasUnsupersedeHistory(t *testing.T, store *memory.Store, id string) bool {
 	t.Helper()

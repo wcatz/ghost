@@ -1457,9 +1457,12 @@ not only the ones this withdrawal orphaned.
 // was the right edge, which is why the target's own first line is on it and not
 // only its id.
 //
-// Three markers, because under --apply a row can be neither of the two the other
-// modes use: a concurrent pass withdrew the edge first, so this run did not move
-// it. Calling that "withdrew" would claim a deletion that did not happen.
+// Four markers, because under --apply a row can be in none of the two states the
+// other modes use. A concurrent pass withdrew the edge first, so this run moved
+// nothing: "already gone", because claiming a withdrawal would claim a deletion
+// that did not happen. Or an earlier row's write failed and this one was never
+// reached, so the edge is STILL LIVE: "not reached", which is the marker a reader
+// must not mistake for either of the others.
 func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, apply bool) string {
 	// A request that named no edge says nothing. It always came with an error —
 	// a refused pair is the only way to get here — and a header reading "0
@@ -1477,9 +1480,15 @@ func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, a
 	for _, l := range res.Links {
 		marker := "would withdraw"
 		if apply {
-			marker = "already gone"
-			if l.Withdrawn {
+			switch {
+			case l.Withdrawn:
 				marker = "withdrew   "
+			case l.NotAttempted:
+				marker = "not reached"
+			case l.WithdrawalFailed:
+				marker = "FAILED    "
+			default:
+				marker = "already gone"
 			}
 		}
 		// The edge's own source column, because it decides the follow-up: only a

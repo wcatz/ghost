@@ -89,6 +89,34 @@ func TestSupersedeWithdrawReportNamesNothing(t *testing.T) {
 	}
 }
 
+// TestSupersedeWithdrawReportDistinguishesTheRowsItNeverReached: under --apply
+// a row can be in four states, and three of them are claims about the graph. A
+// row the run never reached is still LIVE, so it must not read as "already
+// gone" — that would tell the operator a concurrent pass removed an edge this
+// run never touched.
+func TestSupersedeWithdrawReportDistinguishesTheRowsItNeverReached(t *testing.T) {
+	res := supersede.WithdrawResult{
+		Resolved:  3,
+		Withdrawn: 1,
+		Links: []supersede.WithdrawnLink{
+			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", LinkSource: "llm", Withdrawn: true},
+			{SourceID: "11112222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF1", LinkSource: "llm", WithdrawalFailed: true},
+			{SourceID: "22222222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF2", LinkSource: "llm", NotAttempted: true},
+		},
+	}
+	out := supersedeWithdrawReport("ghost", res, true)
+	if !strings.Contains(out, "not reached") {
+		t.Errorf("a row the run never reached is not marked as such:\n%s", out)
+	}
+	if !strings.Contains(out, "FAILED") {
+		t.Errorf("the row whose write failed is not marked:\n%s", out)
+	}
+	// Exactly one row may claim "already gone", and this run has no such row.
+	if n := strings.Count(out, "already gone"); n != 0 {
+		t.Errorf("%d row(s) claim another pass removed them, and none did:\n%s", n, out)
+	}
+}
+
 // TestSupersedeWithdrawReportDryRun: a preview has to say what it would do, in
 // the past tense it did not use, and point at the flag that does it.
 func TestSupersedeWithdrawReportDryRun(t *testing.T) {

@@ -58,6 +58,12 @@ import (
 // listing, which says so and asks for more characters.
 const minRefLen = 8
 
+// maxRefMatches caps how many ids an ambiguity refusal names. The point of the
+// list is to let the reader type more characters, which the first few entries
+// are enough to do; a corpus where one 8-character prefix names hundreds of ids
+// would otherwise turn a refusal into a wall of them.
+const maxRefMatches = 10
+
 // WithdrawStore is the subset of *memory.Store a targeted withdrawal needs;
 // narrowed for testability. Nothing here judges an edge: the store is asked what
 // is live and is asked to invalidate, and the decision is the caller's.
@@ -100,6 +106,14 @@ type WithdrawnLink struct {
 	LinkSource string  // the edge's own `source` column
 	Strength   float32 // the edge's stored similarity, as written
 	Withdrawn  bool    // this call moved it out of the live set
+	// WithdrawalFailed marks the row whose own write errored, and NotAttempted
+	// the rows after it, which this run never reached because each invalidation
+	// is its own transaction. They are separate states because a report that
+	// described either as "already gone" would be claiming a concurrent pass
+	// removed an edge this run did not touch — and for a not-attempted row that
+	// edge is still live.
+	WithdrawalFailed bool
+	NotAttempted     bool
 }
 
 // WithdrawResult summarizes a request. Resolved counts the pairs that named a
@@ -170,7 +184,14 @@ func Withdraw(ctx context.Context, store WithdrawStore, projectID string, pairs 
 		n, err := store.InvalidateLink(ctx, res.Links[i].SourceID, res.Links[i].TargetID, string(RelationSupersedes))
 		if err != nil {
 			// The edges before this one are gone and cannot be un-gone, so the
-			// count and the list go back WITH the error.
+			// count and the list go back WITH the error — and the list says WHICH
+			// rows those are. The rows after this one were never reached, so they
+			// are marked rather than left to be read as edges something else
+			// removed.
+			res.Links[i].WithdrawalFailed = true
+			for j := i + 1; j < len(res.Links); j++ {
+				res.Links[j].NotAttempted = true
+			}
 			return res, fmt.Errorf("withdraw supersedes link %s→%s: %w", res.Links[i].SourceID, res.Links[i].TargetID, err)
 		}
 		if n == 0 {
@@ -296,28 +317,40 @@ func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref 
 	if err != nil {
 		return "", err
 	}
-	switch len(ids) {
-	case 1:
-		if len(ref) < minRefLen && !strings.EqualFold(ids[0], ref) {
-			// A short ref that is not itself an id names a slice rather than a
-			// row, and this project happens to hold exactly one id in that slice.
-			// In a larger corpus the same ref would be ambiguous, so accepting it
-			// would make the answer depend on the size of the project.
-			return "", fmt.Errorf("the %s ref %q matches memory %s, but %d character(s) is too short to be a prefix of one — a prefix needs %d or more",
-				which, ref, short(ids[0]), len(ref), minRefLen)
+	// The exact match wins before anything else, whatever the ref's length. It is
+	// the only reading under which the ref names ONE row, so a short full id that
+	// also happens to prefix a longer one resolves rather than being refused as
+	// ambiguous — which is what "the floor applies to a prefix" means. Ids are
+	// unique, so this cannot itself be ambiguous.
+	for _, id := range ids {
+		if strings.EqualFold(id, ref) {
+			return id, nil
 		}
-		return ids[0], nil
-	case 0:
-		if len(ref) < minRefLen {
-			return "", fmt.Errorf("no memory in project %s has the id %q, and %d character(s) is too short to be a prefix of one — a prefix needs %d or more",
-				projectID, ref, len(ref), minRefLen)
-		}
-		return "", fmt.Errorf("no memory in project %s has an id starting with %q (%s)", projectID, ref, which)
 	}
-	// Every match is named, because the answer to an ambiguity is more
-	// characters and the reader has to know what to type.
-	return "", fmt.Errorf("the %s ref %q is ambiguous in project %s: %s — pass more characters of the id to choose one",
-		which, ref, projectID, strings.Join(ids, ", "))
+	if len(ref) < minRefLen {
+		// Deliberately WITHOUT the match list. A ref this short names a slice of
+		// the project rather than a row, and printing that slice would turn a
+		// refusal into a dump of the project's id set — the one answer here that
+		// hands out what the caller could not otherwise enumerate.
+		return "", fmt.Errorf("the %s ref %q is %d character(s), too short to be a prefix of an id — a prefix needs %d or more, or the full id",
+			which, ref, len(ref), minRefLen)
+	}
+	switch len(ids) {
+	case 0:
+		return "", fmt.Errorf("no memory in project %s has an id starting with %q (%s)", projectID, ref, which)
+	case 1:
+		return ids[0], nil
+	}
+	// Every match is named, because the answer to an ambiguity is more characters
+	// and the reader has to know what to type — up to the cap, so a pathological
+	// corpus cannot turn a refusal into a wall of ids.
+	shown, suffix := ids, ""
+	if len(shown) > maxRefMatches {
+		suffix = fmt.Sprintf(", and %d more", len(ids)-maxRefMatches)
+		shown = shown[:maxRefMatches]
+	}
+	return "", fmt.Errorf("the %s ref %q is ambiguous in project %s: %s%s — pass more characters of the id to choose one",
+		which, ref, projectID, strings.Join(shown, ", "), suffix)
 }
 
 // intoSuffix names the live edges that DO point at a target, for the refusal
