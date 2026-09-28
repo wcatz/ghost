@@ -1,6 +1,10 @@
 package reflection
 
-import "github.com/wcatz/ghost/internal/memory"
+import (
+	"sort"
+
+	"github.com/wcatz/ghost/internal/memory"
+)
 
 // The input accounting (#684).
 //
@@ -65,11 +69,34 @@ type AccountDrop struct {
 	Guarded   bool
 }
 
+// Why a row is gone. Two reasons, and the difference is the whole point: the
+// first is a loss, the second is a deduplication, and a report that cannot tell
+// them apart is the defect #684 is about.
+const (
+	// deletedNoCarrier: nothing in the result carries this row's text, so the
+	// replace deletes it. A merge folded it away, a drop named it, a post-filter
+	// removed the emission that was carrying it, or the SQLite tier absorbed a
+	// near-duplicate.
+	deletedNoCarrier = "no surviving output carries this row"
+	// deletedDuplicate: the text IS in the result, and another input with the same
+	// bytes is the stored row the reuse claims. Nothing is lost — the knowledge
+	// is in the project either way — but this row is gone, and reporting it as
+	// merely carried is how a caller ends up looking for a memory that is not
+	// there under either of the two ids it was saved as.
+	deletedDuplicate = "an identical row is reused in its place"
+)
+
+// AccountDeleted is one input row an apply removes, and why.
+type AccountDeleted struct {
+	ID     string
+	Reason string
+}
+
 // InputAccounting is every input id of one consolidation, in the buckets the
 // report prints. The five fields that name ids and the two counts partition the
 // input set: Merges, Refusals, Rewrites and Drops name the ids an operation
 // touched, Kept and Passed are the counts of the ids a keep named and of the ids
-// nothing named, and Absent is the ids no surviving output carries.
+// nothing named, and Deleted is the rows an apply removes.
 type InputAccounting struct {
 	// Inputs is the number of distinct input ids, which is what the report's
 	// total is and what the buckets have to add up to.
@@ -78,19 +105,113 @@ type InputAccounting struct {
 	Refusals []Refusal
 	Rewrites []AccountRewrite
 	Drops    []AccountDrop
-	// Kept are the ids an explicit `keep` named and the result still carries.
+	// Kept are the ids an explicit `keep` named whose stored row the replace
+	// reuses in place.
 	Kept []string
-	// Passed are the ids no operation named and the result still carries — the
-	// pass-through, which for the LLM tier is every input the harness ignored and
-	// for the SQLite tier is every input it did not absorb.
+	// Passed are the ids no operation named whose stored row the replace reuses in
+	// place — the pass-through, which for the LLM tier is every input the harness
+	// ignored and for the SQLite tier is every input it did not absorb.
 	Passed []string
-	// Absent are the ids no operation named and no surviving output carries.
-	// Nothing in the report protects them: ReplaceNonManual deletes every
-	// replaceable row the emitted set does not account for, so these are the rows
-	// this round removes. They are a small bucket on the LLM path (a post-filter
-	// removed the row that carried them) and the whole of a SQLite tier's
-	// absorptions, which name no ids and so are in no other bucket.
-	Absent []string
+	// Deleted are the rows an apply removes, each with the reason. This is the
+	// bucket that makes the section an AUDIT: the others say what survived, and
+	// an id that is in none of them is a row an operator still believes they have.
+	//
+	// It is decided by the replace's own reuse pass rather than by whether the
+	// row's text is in the result, because reuse is content-keyed and claims ONE
+	// row per emission: two byte-identical inputs both have their text in the
+	// result, and only one of them is still there afterwards. Keying on the text
+	// called both of them carried, which is the same confusion in the opposite
+	// direction — a row reported as kept that the apply deleted.
+	Deleted []AccountDeleted
+}
+
+// claimCandidate is one stored row the project replace may still claim: the
+// input id, and the two stored fields takeReusableRow's pick reads.
+type claimCandidate struct {
+	id       string
+	category string
+	created  string
+}
+
+// emission is one row the project replace is handed: the text and category it
+// claims a stored row by.
+type emission struct {
+	content  string
+	category string
+}
+
+// claimedRows mirrors the reuse pass in `ReplaceNonManual`: each emission claims
+// one stored row with byte-identical content — the one in the same category,
+// else the oldest — and every input row left in a bucket when the pass ends is
+// deleted by the same transaction. So the answer to "is this row still here?" is
+// a CLAIM, not a membership test on the text, and the two answers differ exactly
+// when several rows carry the same bytes.
+//
+// The emission ORDER does not matter to the outcome, and that is worth knowing
+// rather than assuming: two emissions can only compete for one row if they share
+// its content, and then either the category match claims it or the bucket's first
+// row does, so the row is claimed under both orders. That is also why
+// `--promote-globals` is not a parameter here. A cross-project candidate is
+// written to `_global` instead of the project, so a project emission list would
+// be shorter — but an input's own pass-through is always project-scoped (a
+// verbatim emission states no scope), so every input no operation named is
+// accounted for by the project replace under both settings. A NAMED input is the
+// one a promotion could change the fate of, and a named input is owned by its own
+// line rather than by this bucket.
+//
+// The rule is duplicated rather than shared because the store's version runs
+// against an open transaction and returns rows to the caller; a second
+// implementation of "which same-content row survives" is only acceptable while
+// something checks the two against each other on a real store, which
+// TestReflectSummaryNamesTheRowAnIdenticalTwinReuses and its two siblings do —
+// each asserts that the id the section reports as deleted is the id the store
+// stopped holding.
+func claimedRows(input []memory.Memory, emitted []emission) map[string]bool {
+	reusable := make(map[string][]claimCandidate, len(input))
+	for _, m := range input {
+		reusable[m.Content] = append(reusable[m.Content], claimCandidate{
+			id: m.ID, category: m.Category, created: m.CreatedAt,
+		})
+	}
+	// The store's candidate query is `ORDER BY created_at, id` and takeReusableRow
+	// takes the FIRST of what is left, so this order decides which same-content
+	// row survives a deduplication. It is not the caller's read order — the
+	// consolidator's input is whatever GetAll returned, which is by importance.
+	for content, bucket := range reusable {
+		sorted := append([]claimCandidate(nil), bucket...)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			if sorted[i].created != sorted[j].created {
+				return sorted[i].created < sorted[j].created
+			}
+			return sorted[i].id < sorted[j].id
+		})
+		reusable[content] = sorted
+	}
+	claimed := make(map[string]bool, len(input))
+	for _, e := range emitted {
+		bucket := reusable[e.content]
+		if len(bucket) == 0 {
+			// A fresh insert: nothing to claim, and the emission's row is new.
+			continue
+		}
+		pick := 0
+		for i, c := range bucket {
+			if c.category == e.category {
+				pick = i
+				break
+			}
+		}
+		// memIDKey, because the walk below looks its claims up the same way and a
+		// map keyed by the raw id would report every row as unclaimed. The stored
+		// spelling is upper-case hex, so this is not visible on a real store — it
+		// is the same normalise-on-both-sides rule memIDKey exists for, and a
+		// hand-built input with a lower-case id is enough to break it.
+		claimed[memIDKey(bucket[pick].id)] = true
+		// The full slice expression, because the store's version does the same:
+		// without it this appends into the bucket's own backing array.
+		reusable[e.content] = append(bucket[:pick:pick], bucket[pick+1:]...)
+	}
+	return claimed
 }
 
 // AccountInputs partitions the result's input ids into the buckets a report
@@ -98,9 +219,14 @@ type InputAccounting struct {
 // nothing here decides anything — the drop guard has already run, and `guarded`
 // is its verdict, carried so a line can say what became of the ids it names.
 //
-// It describes the RESULT, which is what the report is about: whether a row
-// survived is a question about result.Memories, and the content cap the caller
-// applies on its way to the store is reported on its own line.
+// It describes what an apply DOES with the rows, which is the only question that
+// makes a bucket named "kept" or "passed through" worth reading. Two things it
+// cannot see, both reported by the apply path itself: a proposal dropped at the
+// write boundary for holding a credential is dropped after this section is
+// printed (see `dropCredentialProposals`), and a row saved during the round trip
+// is preserved untouched rather than claimed or deleted (see the `preserved`
+// count `ApplyReflection` returns). Everything else follows from the result and
+// the input.
 func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []DroppedGuarded) InputAccounting {
 	present := make(map[string]bool, len(result.Memories))
 	for _, m := range result.Memories {
@@ -154,6 +280,17 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 		r.IDs = storedIDs(r.IDs)
 		acc.Refusals = append(acc.Refusals, r)
 	}
+	// The rows the replace will reuse, decided before the walk so a bucket can say
+	// "still here" only of a row that is still here.
+	rows := make([]memory.Memory, 0, len(order))
+	for _, key := range order {
+		rows = append(rows, byID[key])
+	}
+	emitted := make([]emission, 0, len(result.Memories))
+	for _, m := range result.Memories {
+		emitted = append(emitted, emission{content: m.Content, category: m.Category})
+	}
+	claimed := claimedRows(rows, emitted)
 
 	// Which operation owns an id. The four lists are disjoint by the parser's own
 	// rule — an id takes exactly one operation — except that a supersession is
@@ -223,14 +360,26 @@ func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []Dro
 			// and counting it as either would misreport what the model asked for.
 			continue
 		}
-		switch content := byID[key].Content; {
-		case !present[content]:
-			acc.Absent = append(acc.Absent, byID[key].ID)
-		case kept[key]:
-			acc.Kept = append(acc.Kept, byID[key].ID)
-		default:
-			acc.Passed = append(acc.Passed, byID[key].ID)
+		row := byID[key]
+		if claimed[key] {
+			// The row the reuse claimed: updated in place, its id, embedding,
+			// links and age intact. That is what "carried through" has to mean.
+			if kept[key] {
+				acc.Kept = append(acc.Kept, row.ID)
+			} else {
+				acc.Passed = append(acc.Passed, row.ID)
+			}
+			continue
 		}
+		reason := deletedNoCarrier
+		if present[row.Content] {
+			// The text IS written to the project — by another row with the same
+			// bytes, which is the one the reuse claimed. Nothing is lost, this row
+			// is, and saying only "carried" would be the same confusion as calling a
+			// loss a deduplication.
+			reason = deletedDuplicate
+		}
+		acc.Deleted = append(acc.Deleted, AccountDeleted{ID: row.ID, Reason: reason})
 	}
 	return acc
 }

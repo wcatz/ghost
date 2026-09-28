@@ -106,13 +106,14 @@ type Replacement struct {
 // only thing that accepts a deletion; this exists so a reader of the result can
 // see the claim at all, which an obsolete drop otherwise never did.
 //
-// Successor is a FIELD rather than part of Reason, and that is load-bearing
-// rather than tidier: the id inside a formatted reason is the one the response
-// wrote, and the op parser upper-cases a supersession's target before it can
-// compare it — while a stored id is `hex(randomblob(16))`, 32 lower-case hex
-// digits. A report that printed the reason verbatim would therefore quote a key
-// the database does not hold, on every real store and not only when a model
-// mistypes one. AccountInputs resolves this field to the stored spelling.
+// Successor is a FIELD rather than part of Reason, and that is structural rather
+// than tidier: an id inside a formatted sentence cannot be resolved to the row it
+// names without re-parsing prose, and the ids a report prints are keys an
+// operator looks rows up by. (The parser does happen to upper-case a
+// supersession's target, which coincides with the stored spelling because
+// SQLite's `hex(randomblob(16))` renders upper-case — so today the raw value
+// would usually have been right. "Usually" is not a reason to leave the two
+// spellings of the same id in one string.) AccountInputs resolves it.
 type Drop struct {
 	ID     string
 	Reason string

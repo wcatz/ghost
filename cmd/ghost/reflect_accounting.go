@@ -8,6 +8,29 @@ import (
 	"github.com/wcatz/ghost/internal/reflection"
 )
 
+// reflectRun is what the section needs to know about one round: the round itself,
+// and the two flags a reader asked for. A struct rather than positional
+// parameters because two of them are booleans with opposite effects on the same
+// line, and swapping them at a call site is a silent lie about rows.
+//
+// It deliberately does NOT carry `--promote-globals`. A cross-project candidate
+// is written to _global instead of the project, so the project replace sees one
+// emission fewer — but an input no operation named is always carried by its own
+// pass-through, which is project-scoped (a verbatim emission states no scope), so
+// its row is accounted for the same way under both settings, and a named input is
+// owned by its own line. The flag cannot change this section, and
+// TestReflectSummaryIsTheSameUnderPromoteGlobals says so out loud.
+type reflectRun struct {
+	input   reflection.ReflectionInput
+	result  reflection.ReflectionResult
+	guarded []reflection.DroppedGuarded
+	// allowDrops says whether a row the drop guard flagged is re-added or deleted,
+	// so a drop line can state which.
+	allowDrops bool
+	// full is the display flag: the memory text whole rather than truncated.
+	full bool
+}
+
 // reportInputAccounting prints the section that accounts for every input id of a
 // consolidation, and it is the reason a dry run is worth reading (#684).
 //
@@ -25,6 +48,15 @@ import (
 // line under the header is what reconciles the two: it names the ids the header
 // counted.
 //
+// The two count lines are about ROWS, not about text, and that is a distinction
+// the section had to be taught. `ReplaceNonManual` reuses stored rows by
+// byte-identical content and claims ONE per emission, so two inputs holding the
+// same bytes both have their text in the result and only one of them is still
+// there afterwards. Keying on the text said "passed through" about the row the
+// apply deleted, which is this report's own defect pointed the other way; the
+// Deleted bucket below is decided by the reuse pass instead, and a duplicate says
+// so in as many words.
+//
 // The same section is printed for a dry run and for an apply, and it is printed
 // BEFORE the write, so the two are the same report and a dry run previews it
 // exactly rather than approximately. That is also why a merge line names no
@@ -40,11 +72,11 @@ import (
 //
 // It is called only where the result is non-empty, which is not incidental: the
 // empty-set guard returns before any write, and a section printed there would
-// report every input as absent and say the replace deletes it — describing a
+// report every input as deleted and say the replace removes it — describing a
 // deletion that no run performs.
-func reportInputAccounting(w io.Writer, input reflection.ReflectionInput, result reflection.ReflectionResult, guarded []reflection.DroppedGuarded, allowDrops, full bool) {
-	limit := reflectTextLimit(full, reflectProposalLimit)
-	acc := reflection.AccountInputs(input, result, guarded)
+func reportInputAccounting(w io.Writer, run reflectRun) {
+	limit := reflectTextLimit(run.full, reflectProposalLimit)
+	acc := reflection.AccountInputs(run.input, run.result, run.guarded)
 
 	// Discarded on purpose, as for every other report on this path: a write that
 	// fails cannot be reported through the same failed write, and the report
@@ -73,7 +105,7 @@ func reportInputAccounting(w io.Writer, input reflection.ReflectionInput, result
 		if !m.In {
 			line += "; the merged text is not in this result"
 		}
-		_, _ = fmt.Fprintln(w, line+guardClause(m.Guarded, allowDrops, "source"))
+		_, _ = fmt.Fprintln(w, line+guardClause(m.Guarded, run.allowDrops, "source"))
 	}
 
 	_, _ = fmt.Fprintf(w, "Refused by the grounding check (%d):\n", refused)
@@ -91,7 +123,7 @@ func reportInputAccounting(w io.Writer, input reflection.ReflectionInput, result
 		if !rw.In {
 			line += "; the replacement is not in this result"
 		}
-		_, _ = fmt.Fprintln(w, line+guardClause(boolCount(rw.Guarded), allowDrops, "row"))
+		_, _ = fmt.Fprintln(w, line+guardClause(boolCount(rw.Guarded), run.allowDrops, "row"))
 	}
 
 	_, _ = fmt.Fprintf(w, "Dropped (%d, each audited by the drop guard):\n", len(acc.Drops))
@@ -101,31 +133,31 @@ func reportInputAccounting(w io.Writer, input reflection.ReflectionInput, result
 			outcome = "nothing in the result carries it"
 		}
 		// The reason and its successor are rendered from the structured fields, so
-		// the id on the line is the resolved one: the response's own spelling of a
-		// supersession target is upper-cased by the parser, and a stored id is
-		// 32 lower-case hex digits.
+		// the id on the line is the one resolved from the input rather than the
+		// one the response spelled — `memIDKey` accepts any case, and the parser
+		// normalises only the successor target.
 		reason := d.Reason
 		if d.Successor != "" {
 			reason += " " + d.Successor
 		}
-		_, _ = fmt.Fprintf(w, "  %s reason: %s — %s%s\n", d.ID, reason, outcome, guardClause(boolCount(d.Guarded), allowDrops, "row"))
+		_, _ = fmt.Fprintf(w, "  %s reason: %s — %s%s\n", d.ID, reason, outcome, guardClause(boolCount(d.Guarded), run.allowDrops, "row"))
 	}
 
-	// The only bucket that is not an operation and not a count of untouched
-	// rows: inputs nothing named and nothing carries. On the LLM path it is
-	// empty or one row a post-filter removed the carrier for, and on the SQLite
-	// tier — which names no ids at all — it is every duplicate the tier absorbed.
-	// Those rows are the ones this round deletes, so the section says so rather
-	// than leaving the reader to infer it from a merge that is not there.
-	absent := fmt.Sprintf("Absent from the result (%d)", len(acc.Absent))
-	if len(acc.Absent) > 0 {
-		absent += " — nothing in this result carries them, so an apply deletes the stored row:"
+	// The rows this round removes, and the only bucket that is not an operation
+	// and not a count of rows still there. Each line says WHY, because the two
+	// reasons are different outcomes: a row nothing carries is a loss, and a row
+	// whose identical twin was reused is a deduplication whose knowledge is still
+	// in the project. Collapsing them is the confusion #684 is about, in the
+	// direction the reader would not expect.
+	deleted := fmt.Sprintf("Deleted (%d)", len(acc.Deleted))
+	if len(acc.Deleted) > 0 {
+		deleted += " — rows this round removes from the project:"
 	} else {
-		absent += ":"
+		deleted += ":"
 	}
-	_, _ = fmt.Fprintln(w, absent)
-	for _, id := range acc.Absent {
-		_, _ = fmt.Fprintf(w, "  %s\n", id)
+	_, _ = fmt.Fprintln(w, deleted)
+	for _, d := range acc.Deleted {
+		_, _ = fmt.Fprintf(w, "  %s  %s\n", d.ID, d.Reason)
 	}
 
 	_, _ = fmt.Fprintf(w, "Kept verbatim: %d    Passed through (not named): %d\n", len(acc.Kept), len(acc.Passed))

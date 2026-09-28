@@ -106,17 +106,17 @@ The report ends with an accounting of every input id, printed the same way for a
 ```text
 Inputs (7) accounted for; every count below is ids, so they add up to it:
 Merges (3):
-  new <- 01J8Z…02, 01J8Z…03, 01J8Z…04   (48 B from 141 B)
+  new <- A1B2…02, A1B2…03, A1B2…04   (48 B from 141 B)
 Refused by the grounding check (0):
 Rewrites (1):
-  01J8Z…05 -> the ledger ingests through the bastion on port 2222, never 22
+  A1B2…05 -> the ledger ingests through the bastion on port 2222, never 22
 Dropped (1, each audited by the drop guard):
-  01J8Z…06 reason: obsolete — nothing in the result carries it; the drop guard re-added 1 row verbatim
-Absent from the result (0):
+  A1B2…06 reason: obsolete — nothing in the result carries it; the drop guard re-added 1 row verbatim
+Deleted (0):
 Kept verbatim: 1    Passed through (not named): 1
 ```
 
-Every input id appears in exactly one line or one count, every count is a count of ids, and every id is quoted in the spelling the database holds — the parser accepts a lower-cased id from a model that mistyped it, and an id an operator copies out of the report is the key they look the row up by — a merge may name any number of sources, so `Merges (3)` above is three ids folded into one row, and the numbers add up to the input total. That is the check a reviewer can make in one line, and the reason an input a merge consumed can no longer disappear from the report. A merge line names no successor id because the merged row does not exist until `--apply` writes it; `ghost history <id>` shows the `related_id` that names it. `Absent from the result` is the input set nothing carried — a post-filter removed the row that was carrying one, or the offline SQLite tier absorbed a duplicate, since that tier names no ids — and those rows are the ones an apply deletes. A line the drop guard overrode says so, rather than leaving a drop to be read as a deletion that did not happen. A `superseded by` reason names the successor it replaces, so that id is quoted on the drop line and accounted for by its own count — the accounting is per input id, not per mention.
+Every input id appears in exactly one line or one count, and every count is a count of ids — a merge may name any number of sources, so `Merges (3)` above is three ids folded into one row, and the numbers add up to the input total. Every id is quoted in the spelling the database holds: the parser accepts any case (`memIDKey` compares case-insensitively) and normalises only a drop's successor target, so a response that spelled an id differently would otherwise put a key on the page that looks up nothing. That quoted-id discipline is what makes the count arithmetic checkable, and the reason an input a merge consumed can no longer disappear from the report. A merge line names no successor id because the merged row does not exist until `--apply` writes it; `ghost history <id>` shows the `related_id` that names it. `Deleted` is the set of rows an apply removes, one line each with the reason, and it is counted by the replace's own reuse pass rather than by asking whether the row's text is still in the result: reuse is content-keyed and claims **one** row per emission, so two inputs holding the same bytes both have their text in the result and only one of them is still there afterwards. A row nothing carries is a loss; a row whose identical twin was reused is a deduplication, and the knowledge is still in the project either way. That is the whole of the offline SQLite tier's absorptions, which name no ids and so appeared in no bucket of any report. A line the drop guard overrode says so, rather than leaving a drop to be read as a deletion that did not happen. A `superseded by` reason names the successor it replaces, so that id is quoted on the drop line and accounted for by its own count — the accounting is per input id, not per mention.
 
 CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
 

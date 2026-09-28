@@ -1041,7 +1041,13 @@ func runReflect() {
 	// above says what the corpus became, and this says what became of the rows
 	// the run was given, which is the only place a merge is distinguishable from
 	// a loss.
-	reportInputAccounting(os.Stdout, input, result, guardedDrops, allowDrops, parsed.full)
+	reportInputAccounting(os.Stdout, reflectRun{
+		input:      input,
+		result:     result,
+		guarded:    guardedDrops,
+		allowDrops: allowDrops,
+		full:       parsed.full,
+	})
 
 	// What the response claimed it disposed of, and whether the claimed
 	// replacement survived into the result. See reportDisposedClaims.

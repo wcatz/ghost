@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,18 +19,16 @@ import (
 // section that replaces it: every input id appears in exactly one line or one
 // count, and a line kind that stops being printed fails the accounting.
 
-var storedIDPattern = regexp.MustCompile(`\b[0-9a-f]{32}\b`)
+var storedIDPattern = regexp.MustCompile(`\b[0-9A-F]{32}\b`)
 
 // accountingID is a stored-id-shaped name for a fixture memory, and the shape is
-// load-bearing rather than cosmetic: Ghost's ids are `hex(randomblob(16))`, so
-// they are 32 LOWER-CASE hex digits. A fixture spelled in ULID-shaped upper case
-// hides every case defect in the report — the op parser upper-cases a
-// supersession's target before comparing it, and against an upper-case fixture
-// that rewrite is a no-op, so the one place a line could quote a key the
-// database does not hold would print the right thing by accident. The `cafe`
-// prefix is here for the same reason one notch down: an all-digit id is
-// unchanged by a case conversion too.
-func accountingID(n int) string { return fmt.Sprintf("cafe%028x", n) }
+// load-bearing rather than cosmetic. Ghost's ids are `hex(randomblob(16))`, which
+// SQLite renders as 32 UPPER-CASE hex digits — measured on a real store, not read
+// off the schema, because two of the three spellings this file once used were
+// wrong in opposite directions and both hid a case defect. The `CAFE` prefix is
+// here for the same reason one notch down: an all-digit id is unchanged by a case
+// conversion, so it cannot tell a resolved id from a raw one either.
+func accountingID(n int) string { return fmt.Sprintf("CAFE%028X", n) }
 
 // reflectRoundForTest runs the real LLM tier — prompt, op parser, grounding
 // check, post-filters — and then the drop guard, returning the result and the
@@ -56,7 +55,9 @@ func reflectRoundForTest(t *testing.T, input reflection.ReflectionInput, reply f
 func accountingSection(t *testing.T, input reflection.ReflectionInput, result reflection.ReflectionResult, guarded []reflection.DroppedGuarded, allowDrops, full bool) string {
 	t.Helper()
 	var out strings.Builder
-	reportInputAccounting(&out, input, result, guarded, allowDrops, full)
+	reportInputAccounting(&out, reflectRun{
+		input: input, result: result, guarded: guarded, allowDrops: allowDrops, full: full,
+	})
 	return out.String()
 }
 
@@ -185,7 +186,7 @@ func assertAccountsFor(t *testing.T, section string, fixtures []accountFixture, 
 		"Refused by the grounding check (",
 		"Rewrites (",
 		"Dropped (",
-		"Absent from the result (",
+		"Deleted (",
 	} {
 		sum += countReported(t, section, header)
 	}
@@ -392,9 +393,398 @@ func TestReflectSummaryAccountsForTheSQLiteTierAbsorptions(t *testing.T) {
 	t.Logf("section:\n%s", section)
 
 	assertAccountsFor(t, section, fixtures, accountingIDs(absent), nil, nil, accountingIDs(longer, other))
-	if !strings.Contains(section, "Absent from the result (1)") {
-		t.Errorf("an input the result does not carry is not reported as absent:\n%s", section)
+	if !strings.Contains(section, "Deleted (1)") {
+		t.Errorf("an input the result does not carry is not reported as deleted:\n%s", section)
 	}
+	// A loss, not a deduplication: nothing in the result carries these bytes, so
+	// no identical row was reused in its place. The two reasons are different
+	// outcomes and the section has to be able to tell them.
+	if !strings.Contains(section, absent.id+"  no surviving output carries this row") {
+		t.Errorf("a row nothing carries is not reported as a loss:\n%s", section)
+	}
+	if strings.Contains(section, "an identical row is reused in its place") {
+		t.Errorf("a row nothing carries is reported as a duplicate, which says the knowledge survived:\n%s", section)
+	}
+}
+
+// The four tests below run a REAL tier over a REAL store and then check the
+// report against what the replace actually did, which is the only thing that
+// makes a claim about rows sound. `present` used to be keyed by content text
+// alone, so two byte-identical inputs both read as "carried" — while
+// `ReplaceNonManual` claims exactly ONE of them, because reuse is content-keyed
+// and every unclaimed candidate is deleted. The report then said "passed
+// through" about a row the apply had removed, which is the one thing this section
+// exists to stop saying.
+
+// storeRound seeds a project, runs a tier over its own rows, renders the
+// accounting, applies it through the real write boundary, and returns the section
+// with the ids the store holds afterwards.
+//
+// The last value is the point. A report's account of which rows an apply removes
+// is only worth having if something compares it with the rows the apply removed,
+// and the only thing that knows is the store.
+type storeRoundResult struct {
+	// fixtures are the seeded rows with the ids the STORE gave them, so the
+	// printed-id scan in assertAccountsFor runs against the real keys.
+	fixtures []accountFixture
+	// categories maps each of those ids to the category it was seeded with, which
+	// the reuse pick is decided by.
+	categories map[string]string
+	// ids are the stored ids in seeding order, for a reply that names one.
+	ids       []string
+	result    reflection.ReflectionResult
+	section   string
+	surviving map[string]bool
+}
+
+// seedRow is a row for storeRound: content, and the category to store it under.
+// An empty category is "fact", so a test that does not care writes only content.
+type seedRow struct {
+	// id and createdAt pin a row's place in the claim order, which is
+	// (created_at, id) — the store's candidate order. A row that leaves them to
+	// the store cannot be used to pin WHICH row the replace keeps, because the
+	// consolidator's input order is GetAll's `importance DESC, created_at DESC`
+	// and the two are not the same order. Set both and the row is imported, which
+	// is the only way a caller can choose an id at all.
+	id        string
+	createdAt string
+	content   string
+	category  string
+}
+
+func (s seedRow) storedCategory() string {
+	if s.category == "" {
+		return "fact"
+	}
+	return s.category
+}
+
+// storeRound runs the offline SQLite tier when reply is nil, and the real LLM
+// tier with a canned reply otherwise. promoteGlobals is off, which is the
+// default and the case where the cross-project candidates are folded into the
+// project before the replace.
+func storeRound(t *testing.T, project string, seeded []seedRow, reply func(ids []string) string) storeRoundResult {
+	t.Helper()
+	store, ctx := newReflectStore(t, project)
+	out := storeRoundResult{categories: map[string]string{}, surviving: map[string]bool{}}
+	for _, f := range seeded {
+		id := f.id
+		if id == "" {
+			created, err := store.Create(ctx, project, memory.Memory{
+				Category: f.storedCategory(), Content: f.content, Importance: 0.6, Source: "mcp", Tags: []string{"accounting"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			id = created
+		} else {
+			if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
+				ID: id, ProjectID: project, Category: f.storedCategory(),
+				Content: f.content, Source: "mcp", CreatedAt: f.createdAt,
+			}, memory.ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
+				t.Fatalf("ImportMemory(%s): %v", id, err)
+			}
+		}
+		out.ids = append(out.ids, id)
+		out.fixtures = append(out.fixtures, accountFixture{id: id, content: f.content})
+		out.categories[id] = f.storedCategory()
+	}
+	input := reflectInputFor(t, store, project)
+
+	var result reflection.ReflectionResult
+	var guarded []reflection.DroppedGuarded
+	if reply == nil {
+		var err error
+		if result, err = reflection.NewSQLiteConsolidator().Consolidate(ctx, input); err != nil {
+			t.Fatalf("Consolidate: %v", err)
+		}
+		guarded = reflection.AuditGuardedDrops(input, result)
+		if len(guarded) > 0 {
+			result.Memories = append(result.Memories, reflection.RetainGuardedDrops(guarded)...)
+		}
+	} else {
+		result, guarded = reflectRoundForTest(t, input, func() string { return reply(out.ids) }, false)
+	}
+	out.result = result
+
+	out.section = accountingSection(t, input, result, guarded, false, false)
+	projectMems, globalMems := splitByScope(result.Memories)
+	if _, _, _, _, _, _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, nil); err != nil {
+		t.Fatalf("applyReflection: %v", err)
+	}
+	after, err := store.GetAll(ctx, project, -1)
+	if err != nil {
+		t.Fatalf("GetAll after apply: %v", err)
+	}
+	for _, m := range after {
+		out.surviving[m.ID] = true
+	}
+	return out
+}
+
+// splitBySurvival is the ground truth every duplicate test asserts against, read
+// from the store rather than from the accounting: the ids the replace removed
+// and the ids it left. deleted is what the section must report as its Deleted
+// lines; passed is what it must count as carried.
+func (r storeRoundResult) splitBySurvival() (deleted, passed []string) {
+	for _, f := range r.fixtures {
+		if r.surviving[f.id] {
+			passed = append(passed, f.id)
+			continue
+		}
+		deleted = append(deleted, f.id)
+	}
+	return deleted, passed
+}
+
+// contentOf is the text behind a stored id, for a fixture that talks about rows
+// rather than ids.
+func (r storeRoundResult) contentOf(id string) string {
+	for _, f := range r.fixtures {
+		if f.id == id {
+			return f.content
+		}
+	}
+	return ""
+}
+
+// deletedLinesQuoted are the ids on the section's Deleted lines, and reading them
+// is a check assertAccountsFor cannot make: that helper asks whether the quoted
+// ids are a subset of the accounted set with the right counts, and an id that
+// belongs in one bucket but is printed in another of the SAME SIZE passes it. A
+// claim pass that picked the wrong row of an identical pair prints exactly that —
+// the right count and the wrong ids.
+func deletedLinesQuoted(section string) []string {
+	var ids []string
+	inBlock := false
+	for _, line := range strings.Split(section, "\n") {
+		if strings.HasPrefix(line, "Deleted (") {
+			inBlock = true
+			continue
+		}
+		if !inBlock {
+			continue
+		}
+		if !strings.HasPrefix(line, "  ") {
+			break
+		}
+		ids = append(ids, storedIDsQuoted(line)...)
+	}
+	return ids
+}
+
+// assertDeletedLinesAreTheRemovedRows is the invariant every store-backed test
+// shares: the ids on the Deleted lines are the ids the store stopped holding, no
+// more and no fewer. The section's own arithmetic cannot catch a wrong row of an
+// identical pair, and the store is the only thing that knows which one it was.
+func assertDeletedLinesAreTheRemovedRows(t *testing.T, section string, removed []string) {
+	t.Helper()
+	quoted := deletedLinesQuoted(section)
+	if len(quoted) != len(removed) {
+		t.Fatalf("the section's Deleted lines name %v, want the %d row(s) the store removed (%v):\n%s",
+			quoted, len(removed), removed, section)
+	}
+	got := append([]string(nil), quoted...)
+	want := append([]string(nil), removed...)
+	sort.Strings(got)
+	sort.Strings(want)
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("the section names %s as deleted where the store removed %s:\n%s", got[i], want[i], section)
+		}
+	}
+}
+
+// byte-identical inputs, no operation naming either of them, one emission
+// between them. The content IS in the result, so the pre-claim accounting called
+// both "passed through"; the store claims one row for the emission and deletes
+// the other, so one of them was a lie.
+func TestReflectSummaryNamesTheRowAnIdenticalTwinReuses(t *testing.T) {
+	const text = "the relay rolls back to the previous firmware over the serial console"
+	out := storeRound(t, "twin", []seedRow{
+		{content: text},
+		{content: text},
+		{content: "the ingest pipeline writes run manifests under /var/lib/ghost"},
+	}, nil)
+	t.Logf("section:\n%s", out.section)
+
+	deleted, passed := out.splitBySurvival()
+	if len(deleted) != 1 {
+		t.Fatalf("the store removed %v, want exactly one of the identical pair: the reuse is content-keyed, so one row is claimed and one is deleted", deleted)
+	}
+	if len(passed) != 2 {
+		t.Fatalf("the store kept %v, want the surviving twin and the unrelated row", passed)
+	}
+	assertAccountsFor(t, out.section, out.fixtures, deleted, nil, nil, passed)
+	assertDeletedLinesAreTheRemovedRows(t, out.section, deleted)
+	// The reason, because "deleted" and "deduplicated" are different outcomes
+	// and the row's text is still in the corpus either way.
+	if !strings.Contains(out.section, "an identical row is reused in its place") {
+		t.Errorf("the deleted row is not reported as a duplicate rather than a loss:\n%s", out.section)
+	}
+}
+
+// TestReflectSummaryNamesEveryRowAnIdenticalTripletLoses is the same claim with
+// a count: three identical inputs and one emission, so the store claims one and
+// deletes two.
+func TestReflectSummaryNamesEveryRowAnIdenticalTripletLoses(t *testing.T) {
+	const text = "the relay rolls back to the previous firmware over the serial console"
+	out := storeRound(t, "triplet", []seedRow{
+		{content: text},
+		{content: text},
+		{content: text},
+	}, nil)
+	t.Logf("section:\n%s", out.section)
+
+	deleted, passed := out.splitBySurvival()
+	if len(deleted) != 2 || len(passed) != 1 {
+		t.Fatalf("the store kept %v and removed %v, want one claimed and two deleted", passed, deleted)
+	}
+	assertAccountsFor(t, out.section, out.fixtures, deleted, nil, nil, passed)
+	assertDeletedLinesAreTheRemovedRows(t, out.section, deleted)
+	if !strings.Contains(out.section, "Deleted (2)") {
+		t.Errorf("the section does not report both absorbed rows:\n%s", out.section)
+	}
+}
+
+// TestReflectSummaryReusesTheCategoryThatMatchesAndTheOldestRow covers both
+// halves of takeReusableRow's pick, in one fixture built so that neither can pass
+// by accident. Two texts, each held twice:
+//
+//   - one pair in two categories, so the claim is decided by the category the
+//     consolidation emitted. The fallback would take the oldest row instead, and
+//     this pair is arranged so the oldest is the OTHER category — otherwise the
+//     category rule and the fallback agree and the test proves nothing.
+//   - one pair in one category, so the claim falls to the oldest. The
+//     consolidator's input order is `importance DESC, created_at DESC`, which is
+//     the REVERSE of the claim order, so a claim pass that trusted the caller's
+//     read order would keep the newest of the pair and this test would fail.
+//
+// A report that names the wrong row of a pair is the defect this whole change is
+// about, so both halves are checked against the store rather than against the
+// accounting's own reasoning.
+func TestReflectSummaryReusesTheCategoryThatMatchesAndTheOldestRow(t *testing.T) {
+	// Different enough not to pair with each other: the tier groups by token
+	// overlap, and these two share nothing.
+	const twinText = "the relay rolls back to the previous firmware over the serial console"
+	const pairText = "the ledger ingest writes a run manifest under /var/lib/ghost"
+
+	gotchaRow := seedRow{id: accountingID(11), createdAt: "2026-01-02 00:00:00", category: "gotcha", content: twinText}
+	factRow := seedRow{id: accountingID(12), createdAt: "2026-01-01 00:00:00", category: "fact", content: twinText}
+	olderRow := seedRow{id: accountingID(13), createdAt: "2026-01-01 00:00:00", category: "gotcha", content: pairText}
+	newerRow := seedRow{id: accountingID(14), createdAt: "2026-01-03 00:00:00", category: "gotcha", content: pairText}
+
+	out := storeRound(t, "picks", []seedRow{gotchaRow, factRow, olderRow, newerRow}, nil)
+	t.Logf("section:\n%s", out.section)
+
+	if len(out.result.Memories) != 2 {
+		t.Fatalf("the tier emitted %d rows for two pairs, want 2: %+v", len(out.result.Memories), out.result.Memories)
+	}
+	// The emission's category is the first of the pair the tier read, which is the
+	// newest row of each pair (input order is created_at DESC). So the twin pair
+	// emits `gotcha` and the older of the two gotcha rows is the one the claim
+	// order puts first.
+	emitted := map[string]string{}
+	for _, m := range out.result.Memories {
+		if m.Content == twinText {
+			emitted[twinText] = m.Category
+		} else {
+			emitted[pairText] = m.Category
+		}
+	}
+	if emitted[twinText] != gotchaRow.category {
+		t.Fatalf("the twin pair emitted %s, not %s — the fixture no longer exercises the category rule: %+v",
+			emitted[twinText], gotchaRow.category, out.result.Memories)
+	}
+
+	deleted, passed := out.splitBySurvival()
+	if len(deleted) != 2 || len(passed) != 2 {
+		t.Fatalf("the store kept %v and removed %v, want two of each", passed, deleted)
+	}
+	survivor := map[string]string{}
+	for _, id := range passed {
+		survivor[out.contentOf(id)] = out.categories[id]
+	}
+	if got := survivor[twinText]; got != gotchaRow.category {
+		t.Errorf("the twin pair's surviving row is %s, want the %s row the emission carried: the claim must prefer the category match over the oldest",
+			got, gotchaRow.category)
+	}
+	if got := out.categories[passed[0]]; out.contentOf(passed[0]) == pairText && got != olderRow.category {
+		t.Errorf("the same-category pair's surviving row is %s, want the older %s: the claim order is (created_at, id), not the order the caller read the corpus in",
+			got, olderRow.category)
+	}
+	assertAccountsFor(t, out.section, out.fixtures, deleted, nil, nil, passed)
+	assertDeletedLinesAreTheRemovedRows(t, out.section, deleted)
+}
+
+// TestReflectSummaryKeepsBothRowsAnIdenticalPairCarries is the LLM tier's
+// version of the same collision, and the answer is different: the response kept
+// one of the pair and the pass-through emitted the other, so there are two
+// emissions for two rows and the store claims both. Nothing is deleted, and a
+// report that called this a dedup would be inventing one.
+func TestReflectSummaryKeepsBothRowsAnIdenticalPairCarries(t *testing.T) {
+	const text = "the relay rolls back to the previous firmware over the serial console"
+	out := storeRound(t, "keptpair", []seedRow{
+		{content: text},
+		{content: text},
+	}, func(ids []string) string {
+		return fmt.Sprintf(`{"learned_context":"ctx","ops":["keep %s"]}`, ids[0])
+	})
+	t.Logf("section:\n%s", out.section)
+
+	deleted, passed := out.splitBySurvival()
+	if len(deleted) != 0 || len(passed) != 2 {
+		t.Fatalf("the store removed %v and kept %v, want both rows kept: the keep and the pass-through are two emissions for two rows", deleted, passed)
+	}
+	// The kept id is named by the response, so it is a count; the pass-through
+	// is the other one.
+	assertAccountsFor(t, out.section, out.fixtures, nil, nil, []string{out.ids[0]}, []string{out.ids[1]})
+	assertDeletedLinesAreTheRemovedRows(t, out.section, deleted)
+	if !strings.Contains(out.section, "Deleted (0)") {
+		t.Errorf("a round that deletes nothing must say so:\n%s", out.section)
+	}
+}
+
+// TestReflectSummaryIsTheSameUnderPromoteGlobals pins a flag that does NOT reach
+// this section, and the reason is not obvious enough to leave in a comment.
+//
+// A cross-project candidate is written to `_global` instead of the project, so
+// the project replace really does receive one emission fewer. It cannot change
+// what this section says, because an input no operation named is always carried by
+// its own pass-through — and a pass-through is a verbatim emission, which states
+// no scope, so it is project-scoped whatever the flag does. A named input is the
+// one a promotion could change the fate of, and a named input is owned by its own
+// line rather than by the Deleted bucket.
+//
+// The test is here because the flag was a parameter in the first draft of this
+// change and turned out to be dead weight: a reader who cannot see the
+// elimination has no way to tell an argument from a guess.
+func TestReflectSummaryIsTheSameUnderPromoteGlobals(t *testing.T) {
+	// The merge text classifies as cross-project, so the emission goes on the
+	// _global path under the flag and is folded into the project without it.
+	const mergeText = "across all repos the relay exports a signed run manifest nightly"
+	sourceA := accountFixture{accountingID(97), "the relay writes a signed manifest for the ledger nightly"}
+	sourceB := accountFixture{accountingID(98), "the ledger reads the signed manifest the relay writes"}
+	// A project row already holding the candidate's exact bytes, and that the
+	// response never mentions — so its fate is the pass-through's to decide.
+	twin := accountFixture{accountingID(99), mergeText}
+	fixtures := []accountFixture{sourceA, sourceB, twin}
+	input := accountingInput(t, fixtures...)
+
+	result, guarded := reflectRoundForTest(t, input, func() string {
+		return fmt.Sprintf(`{"learned_context":"ctx","ops":["merge %s,%s -> %s"]}`, sourceA.id, sourceB.id, mergeText)
+	}, false)
+	if len(result.Memories) != 2 || result.Memories[0].Scope != "global" {
+		t.Skipf("the fixture did not produce a cross-project candidate, so it exercises nothing: %+v", result.Memories)
+	}
+
+	section := accountingSection(t, input, result, guarded, false, false)
+	t.Logf("section:\n%s", section)
+	// The merge consumed the two named sources, and the twin is not named by the
+	// response and its own pass-through reuses its row: nothing is deleted under
+	// either setting.
+	assertAccountsFor(t, section, fixtures, accountingIDs(sourceA, sourceB), nil, nil, []string{twin.id})
+	assertDeletedLinesAreTheRemovedRows(t, section, nil)
 }
 
 // TestReflectFullPrintsUntruncatedText pins --full against the compact default
@@ -440,23 +830,22 @@ func resultCarries(result reflection.ReflectionResult, content string) bool {
 }
 
 // TestReflectSummaryPrintsTheStoredIDSpelling pins the id the report quotes to
-// the spelling the DATABASE holds. The op parser strips the prompt's `id:` label
-// and trims, and `memIDKey` compares case-insensitively, so a response may spell
-// an id any way it likes — but the drop's successor target is upper-cased on the
-// way in, so a model that shouts an id would otherwise have its operation line
-// print `ABCDEF…` where the store holds `abcdef…`. These ids are the keys the
-// report asks an operator to look rows up by, and a copied id that does not
-// match the store is the one kind of typo this section cannot afford.
+// the spelling the DATABASE holds. `memIDKey` compares case-insensitively, so a
+// response may spell an id any way it likes and the parser accepts it — and the
+// parser normalises only one of them, a drop's successor target. Everything else
+// is recorded exactly as the model wrote it, so a report that echoed the record
+// would print a key the store does not hold: these ids are what an operator
+// copies out of the report to look a row up by.
 func TestReflectSummaryPrintsTheStoredIDSpelling(t *testing.T) {
 	source := accountFixture{accountingID(91), "the ledger syncs from the relay export directory"}
 	unnamed := accountFixture{accountingID(92), "the ingest pipeline writes run manifests under /var/lib/ghost"}
 	fixtures := []accountFixture{source, unnamed}
 	input := accountingInput(t, fixtures...)
 
-	// The harness answers with the id shouted, which the parser accepts. One id
-	// takes exactly one operation, so this is the rewrite alone and the other
-	// fixture is the pass-through.
-	shouted := strings.ToUpper(source.id)
+	// The harness answers with the id lower-cased, which the parser accepts and
+	// does NOT normalise for a rewrite. One id takes exactly one operation, so this
+	// is the rewrite alone and the other fixture is the pass-through.
+	shouted := strings.ToLower(source.id)
 	result, guarded := reflectRoundForTest(t, input, func() string {
 		return fmt.Sprintf(`{"learned_context":"ctx","ops":["rewrite %s -> the ledger syncs from the relay export directory nightly"]}`, shouted)
 	}, false)
@@ -473,6 +862,48 @@ func TestReflectSummaryPrintsTheStoredIDSpelling(t *testing.T) {
 	}
 	if strings.Contains(section, shouted) {
 		t.Errorf("the report quotes the response's spelling of the id, which the database does not hold:\n%s", section)
+	}
+}
+
+// TestReflectSummaryResolvesADropAndItsSuccessorFromTheInput covers the two ids a
+// drop line can carry, and the second one the parser happens to normalise. A
+// `superseded by` target IS upper-cased by the parser, so on a store whose ids
+// are upper-case hex the raw spelling coincides with the stored one — the
+// resolution is what keeps it that way by construction rather than by a coincidence
+// of SQLite's `hex()` and a caller's `ToUpper`, and the test drives both fields
+// with a result built by hand so it is the resolution under test rather than the
+// parser.
+func TestReflectSummaryResolvesADropAndItsSuccessorFromTheInput(t *testing.T) {
+	dropped := accountFixture{accountingID(95), "the ledger syncs from the relay export staging directory"}
+	successor := accountFixture{accountingID(96), "the ledger syncs from the relay export directory"}
+	fixtures := []accountFixture{dropped, successor}
+	input := accountingInput(t, fixtures...)
+
+	result := reflection.ReflectionResult{
+		Memories: []reflection.ReflectMemory{{Category: "fact", Content: successor.content}},
+		Replacements: []reflection.Replacement{
+			{ID: strings.ToLower(dropped.id), Text: successor.content},
+		},
+		Drops: []reflection.Drop{{
+			ID:        strings.ToLower(dropped.id),
+			Reason:    "superseded by",
+			Successor: strings.ToLower(successor.id),
+		}},
+	}
+	// The successor is a keep, so the parser would have recorded it; hand-built
+	// results skip the tier, and this test is about the rendering.
+	result.Kept = []string{strings.ToLower(successor.id)}
+
+	section := accountingSection(t, input, result, nil, false, false)
+	t.Logf("section:\n%s", section)
+
+	if !strings.Contains(section, dropped.id+" reason: superseded by "+successor.id) {
+		t.Errorf("the drop line does not quote the stored spelling of either id:\n%s", section)
+	}
+	for _, wrong := range []string{strings.ToLower(dropped.id), strings.ToLower(successor.id)} {
+		if strings.Contains(section, wrong) {
+			t.Errorf("the report quotes %s, a spelling the database does not hold:\n%s", wrong, section)
+		}
 	}
 }
 
@@ -590,17 +1021,17 @@ func TestReflectSummaryNamesARepeatedInputIDOnce(t *testing.T) {
 	input := accountingInput(t, one, two, one)
 
 	var out strings.Builder
-	reportInputAccounting(&out, input, reflection.ReflectionResult{}, nil, false, false)
+	reportInputAccounting(&out, reflectRun{input: input})
 	section := out.String()
 	t.Logf("section:\n%s", section)
 
 	if got := countReported(t, section, "Inputs ("); got != 2 {
 		t.Errorf("the section reports %d inputs, want the 2 distinct ids:\n%s", got, section)
 	}
-	// Both rows are named by nothing and carried by nothing, so they are the
-	// absent pair — and named once each.
-	if got := countReported(t, section, "Absent from the result ("); got != 2 {
-		t.Errorf("Absent from the result (%d), want 2:\n%s", got, section)
+	// Both rows are named by nothing and carried by nothing, so an apply removes
+	// both — and each is named once.
+	if got := countReported(t, section, "Deleted ("); got != 2 {
+		t.Errorf("Deleted (%d), want 2:\n%s", got, section)
 	}
 	quoted := storedIDsQuoted(section)
 	if len(quoted) != 2 {
