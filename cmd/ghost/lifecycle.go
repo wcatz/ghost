@@ -2029,6 +2029,10 @@ Flags:
                   how a wrong resolution is repaired.
   --only ids      With --reassess: judge only these memories — a comma-separated
                   list of memory ids, or of 8+ character hex prefixes of them.
+                  A full id is taken as given whatever its shape (an imported
+                  one can hold a space or a dash); the hex rule is about a
+                  prefix. An id holding a comma cannot be named here, because
+                  this list is comma-separated — use --only-file for it.
   --only-file p   With --reassess: the same, read from a file: one id or prefix
                   per line, where '#' starts a comment. For a list too long to
                   type on one line.

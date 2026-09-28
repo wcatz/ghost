@@ -47,9 +47,19 @@ func TestWithdrawnTargetsIsEmptyForNoWithdrawal(t *testing.T) {
 // is the half that actually clears resolved_at.
 func TestResolveFollowupCommandIsCopyable(t *testing.T) {
 	ids := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
-	want := "ghost resolve myproj --reassess --only aaaaaaaa1111111111111111111111,bbbbbbbb2222222222222222222222 --apply"
-	if got := resolveFollowupCommand("myproj", ids); got != want {
+	// The ids are quoted, and a POSIX shell concatenates adjacent quoted words, so
+	// --only receives ONE argument holding "a,b" — which is what parseResolveArgs
+	// splits on. Quoting them is not a formality: `ghost import` writes an
+	// artifact's ids verbatim, so an id can hold a space or a shell
+	// metacharacter, and unquoted one word-splits into selectors the repair
+	// refuses (or executes, when pasted).
+	want := "ghost resolve myproj --reassess --only 'aaaaaaaa1111111111111111111111','bbbbbbbb2222222222222222222222' --apply"
+	got, viaFile := resolveFollowupCommand("myproj", ids)
+	if got != want {
 		t.Errorf("resolveFollowupCommand() = %q, want %q", got, want)
+	}
+	if len(viaFile) != 0 {
+		t.Errorf("ordinary ids were pushed to the file form: %v", viaFile)
 	}
 }
 
@@ -66,17 +76,17 @@ func TestResolveFollowupCommandQuotesAnAwkwardProjectName(t *testing.T) {
 		project string
 		want    string
 	}{
-		{"plain", "myproj", "ghost resolve myproj --reassess --only aaaaaaaa1111111111111111111111 --apply"},
-		{"dotted and dashed", "platform-ops.v2", "ghost resolve platform-ops.v2 --reassess --only aaaaaaaa1111111111111111111111 --apply"},
-		{"with a space", "my proj", "ghost resolve --project 'my proj' --reassess --only aaaaaaaa1111111111111111111111 --apply"},
-		{"leading dash", "-myproj", "ghost resolve --project '-myproj' --reassess --only aaaaaaaa1111111111111111111111 --apply"},
-		{"looks like a flag", "--apply", "ghost resolve --project '--apply' --reassess --only aaaaaaaa1111111111111111111111 --apply"},
-		{"single quote", "o'brien proj", `ghost resolve --project 'o'\''brien proj' --reassess --only aaaaaaaa1111111111111111111111 --apply`},
-		{"shell metacharacters", "a; rm -rf /", "ghost resolve --project 'a; rm -rf /' --reassess --only aaaaaaaa1111111111111111111111 --apply"},
-		{"substitution", "$(id)", "ghost resolve --project '$(id)' --reassess --only aaaaaaaa1111111111111111111111 --apply"},
+		{"plain", "myproj", "ghost resolve myproj --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
+		{"dotted and dashed", "platform-ops.v2", "ghost resolve platform-ops.v2 --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
+		{"with a space", "my proj", "ghost resolve --project 'my proj' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
+		{"leading dash", "-myproj", "ghost resolve --project '-myproj' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
+		{"looks like a flag", "--apply", "ghost resolve --project '--apply' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
+		{"single quote", "o'brien proj", `ghost resolve --project 'o'\''brien proj' --reassess --only 'aaaaaaaa1111111111111111111111' --apply`},
+		{"shell metacharacters", "a; rm -rf /", "ghost resolve --project 'a; rm -rf /' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
+		{"substitution", "$(id)", "ghost resolve --project '$(id)' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := resolveFollowupCommand(tc.project, ids); got != tc.want {
+			if got, _ := resolveFollowupCommand(tc.project, ids); got != tc.want {
 				t.Errorf("resolveFollowupCommand(%q) = %q, want %q", tc.project, got, tc.want)
 			}
 		})
@@ -93,7 +103,11 @@ func TestPrintedFollowupRuns(t *testing.T) {
 		t.Run(project, func(t *testing.T) {
 			ids := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
 			// argv[2:], exactly as main hands the parser a command's own words.
-			words := shellSplit(t, resolveFollowupCommand(project, ids))
+			line, viaFile := resolveFollowupCommand(project, ids)
+			if len(viaFile) != 0 {
+				t.Fatalf("these ids are not comma-bearing, so none may need the file form: %v", viaFile)
+			}
+			words := shellSplit(t, line)
 			if len(words) < 2 || words[1] != "resolve" {
 				t.Fatalf("the printed command does not start with the command word: %v", words)
 			}
@@ -162,7 +176,7 @@ func shellSplit(t *testing.T, line string) []string {
 func TestSupersedeReassessFollowupNamesTheCommandAndTheFile(t *testing.T) {
 	ids := []string{"aaaaaaaa1111111111111111111111"}
 	got := supersedeReassessFollowup("myproj", ids, "/data/ghost/scratch/supersede-reassess-myproj-20260927T220356Z.ids")
-	if !strings.Contains(got, "ghost resolve myproj --reassess --only aaaaaaaa1111111111111111111111 --apply") {
+	if !strings.Contains(got, "ghost resolve myproj --reassess --only 'aaaaaaaa1111111111111111111111' --apply") {
 		t.Errorf("the follow-up must print the exact command:\n%s", got)
 	}
 	if !strings.Contains(got, "/data/ghost/scratch/supersede-reassess-myproj-20260927T220356Z.ids") {
@@ -184,6 +198,16 @@ func TestSupersedeReassessFollowupNamesTheCommandAndTheFile(t *testing.T) {
 	}
 	if blank := supersedeReassessFollowup("myproj", nil, ""); blank != "" {
 		t.Errorf("with nothing withdrawn there is no follow-up, got %q", blank)
+	}
+	// A comma-bearing id is not nameable by `--only`, so the command omits it — and
+	// a block that listed the id and then printed a command without it, without
+	// saying so, is the one lie this block must not tell.
+	commy := supersedeReassessFollowup("myproj", []string{"aaaaaaaa1111111111111111111111", "imported,note"}, "/data/x.ids")
+	if !strings.Contains(commy, "hold a comma") || !strings.Contains(commy, "--only cannot carry") {
+		t.Errorf("the follow-up does not say the command omits a comma-bearing id:\n%s", commy)
+	}
+	if strings.Contains(commy, "--only 'aaaaaaaa1111111111111111111111','imported,note'") {
+		t.Errorf("the follow-up printed a command carrying an id --only cannot name:\n%s", commy)
 	}
 }
 

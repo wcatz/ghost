@@ -1193,7 +1193,10 @@ func TestCLISupersedeReassessFeedsResolveReassess(t *testing.T) {
 	// the operator does not have to work out the second half themselves.
 	s.setHarnessAnswer("supersede", "NEITHER")
 	repair := s.mustRun("supersede", e2eProject, "--source", "opencode", "--reassess", "--apply")
-	want := "ghost resolve " + e2eProject + " --reassess --only " + older + " --apply"
+	// The ids are quoted: `ghost import` writes an artifact's ids verbatim, so an
+	// id is caller-supplied text like a project name, and a POSIX shell
+	// concatenates adjacent quoted words — so --only still receives one argument.
+	want := "ghost resolve " + e2eProject + " --reassess --only '" + older + "' --apply"
 	mustContain(t, "supersede --reassess --apply", repair.stdout, want)
 	if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links WHERE relation = 'supersedes' AND source_id = ? AND invalidated_at IS NULL`, newer); n != 0 {
 		t.Fatalf("the reassess did not withdraw the edge")

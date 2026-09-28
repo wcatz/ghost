@@ -75,7 +75,12 @@ func withdrawnTargets(withdrawn []supersede.WithdrawnEdge) []string {
 // The renderer is internal/followup's, because the MCP tool answers the same
 // question and the quoting here is what decides whether the command RUNS: one
 // implementation, two surfaces, no way for them to drift on the part that matters.
-func resolveFollowupCommand(projectName string, ids []string) string {
+//
+// The second return is the ids the command cannot carry (those holding a comma);
+// supersedeReassessFollowup turns it into a line, because a command that silently
+// named fewer memories than the block above lists would be the one lie this block
+// must not tell.
+func resolveFollowupCommand(projectName string, ids []string) (string, []string) {
 	return followup.ResolveCommand(projectName, ids)
 }
 
@@ -111,13 +116,23 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		"resolutions those edges justified. One that no live 'supersedes' edge still\n" +
 		"holds can now be cleared; one another edge still holds is reported as still\n" +
 		"asserted rather than cleared. Nothing outside this list is judged:\n")
-	fmt.Fprintf(&b, "  %s\n", resolveFollowupCommand(projectName, ids))
+	cmd, viaFileOnly := resolveFollowupCommand(projectName, ids)
+	fmt.Fprintf(&b, "  %s\n", cmd)
 	if path != "" {
 		// Quoted for the same reason as the project name, and because the path
 		// is not Ghost's to control: $GHOST_SCRATCH_DIR and a data directory
 		// under a spaced path both reach it.
 		fmt.Fprintf(&b, "  (the same ids are in %s, for `ghost resolve --project %s --reassess --only-file %s --apply`)\n",
 			path, shellQuote(projectName), shellQuote(path))
+	}
+	if len(viaFileOnly) > 0 {
+		// `--only` splits on commas, so an id holding one is not nameable by that
+		// flag however it is quoted, and the command above leaves it out rather
+		// than splitting it into selectors that name nothing. The file is the only
+		// surface that can carry it — it reads one id per line and never splits —
+		// so this is a warning about which line above to run, not a lost id.
+		fmt.Fprintf(&b, "  (%d id(s) hold a comma, which --only cannot carry, so the command above leaves them out;\n"+
+			"   they are in the file and the file is the only way to name them)\n", len(viaFileOnly))
 	}
 	return b.String()
 }
@@ -159,7 +174,17 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 		return "", err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n", resolveFollowupCommand(projectName, ids))
+	// The header carries the command, and a comma-bearing id makes that command
+	// name fewer ids than the list below — so the header says so rather than
+	// letting the operator compare the two and wonder which was dropped. The
+	// format is unchanged otherwise, because this file is a --only-file input and
+	// readOnlySelectors reads one id per line whatever the comment says.
+	head, viaFileOnly := resolveFollowupCommand(projectName, ids)
+	fmt.Fprintf(&b, "# %s\n", head)
+	if len(viaFileOnly) > 0 {
+		fmt.Fprintf(&b, "# (%d id(s) below hold a comma and are not in that command; --only cannot carry them,\n"+
+			"#  which is what this file is for)\n", len(viaFileOnly))
+	}
 	fmt.Fprintf(&b, "# Written by `%s`: the targets of the edges it\n", writtenBy)
 	b.WriteString("# withdrew, one id per line. Use with `ghost resolve <project> --reassess --only-file`.\n")
 	for _, id := range ids {

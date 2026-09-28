@@ -50,11 +50,43 @@ func shellQuote(s string) string {
 // a bare `ghost resolve my proj …` would be two positionals and a repair that
 // refuses; rendering a name holding a shell metacharacter bare would execute it.
 // --project takes its value verbatim, which is also why a dash-leading name works
-// there and not as a bare positional.
-func ResolveCommand(projectName string, ids []string) string {
+// there and not as a bare positional. The ids are quoted for the same reason and
+// with the same rule, because an id is caller-supplied text too (see the loop).
+//
+// It also returns the ids the command cannot carry, which is not a defensive
+// nicety: `--only` takes a COMMA-separated list and splits on commas, so an id
+// holding one is not nameable by that flag however it is quoted — the quoting
+// makes it one shell word, and the parser then splits it into two selectors that
+// name nothing. Rendering it anyway would produce a command that runs, judges the
+// wrong rows and reports a repair that did not happen. `ghost import` writes an
+// artifact's ids verbatim and ImportMemory refuses only an empty one, so such an
+// id is real. Those ids go in the --only-file instead, which reads one per line
+// and never splits.
+func ResolveCommand(projectName string, ids []string) (cmd string, viaFileOnly []string) {
 	project := projectName
 	if !bareShellWord.MatchString(projectName) {
 		project = "--project " + shellQuote(projectName)
 	}
-	return fmt.Sprintf("ghost resolve %s --reassess --only %s --apply", project, strings.Join(ids, ","))
+	// The ids are quoted for the same reason the project is, and it is NOT a
+	// formality: `ghost import` writes an artifact's ids verbatim and
+	// ImportMemory refuses only an empty one, so an id can hold a space, a `;` or a
+	// backtick. Unquoted, such an id word-splits into selectors the repair then
+	// refuses — and pasted into a shell, it executes. A POSIX shell concatenates
+	// adjacent quoted words, so `--only 'a','b'` is ONE argument holding "a,b",
+	// which is exactly what parseResolveArgs splits on.
+	quoted := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if strings.Contains(id, ",") {
+			viaFileOnly = append(viaFileOnly, id)
+			continue
+		}
+		quoted = append(quoted, shellQuote(id))
+	}
+	if len(quoted) == 0 {
+		// Every id needs the file, so a command naming none would look like an
+		// unscoped repair — the very thing scoping exists to avoid. It is printed
+		// without --only and the caller must say the file is the only way to run it.
+		return fmt.Sprintf("ghost resolve %s --reassess --apply", project), viaFileOnly
+	}
+	return fmt.Sprintf("ghost resolve %s --reassess --only %s --apply", project, strings.Join(quoted, ",")), viaFileOnly
 }

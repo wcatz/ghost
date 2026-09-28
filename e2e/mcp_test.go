@@ -146,10 +146,24 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		// project's other notes make the scan propose more than one pair. The
 		// claude backend takes bare stdout, so a numbered batch parses.
 		s.setHarnessAnswer("supersede", "SUPERSEDES | replaced: the forty minute drain was the two-worker backlog")
-		s.mustRun("supersede", e2eProject, "--source", "claude-code", "--threshold", "0.1", "--apply")
-		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links
-			WHERE relation = 'supersedes' AND invalidated_at IS NULL AND source_id = ? AND target_id = ?`, newer, older); n != 1 {
-			t.Fatalf("the creation pass left %d edge(s) between these two notes, want 1", n)
+		// The creation pass, retried a bounded number of times, because the
+		// candidate scan reads every memory's embedding from the stub endpoint and
+		// a read that fails leaves that memory with no similarity candidates BY
+		// DESIGN (internal/supersede.SelectCandidates) — so one transient read
+		// failure proposes nothing and the pass reports a clean no-op. The
+		// failure message carries the pass's own report, so a genuine failure (a
+		// verdict the parser refuses, a write error) is still diagnosable from
+		// the output rather than hidden behind the retry.
+		const attempts = 3
+		for attempt := 1; ; attempt++ {
+			created := s.mustRun("supersede", e2eProject, "--source", "claude-code", "--threshold", "0.1", "--apply")
+			if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_links
+				WHERE relation = 'supersedes' AND invalidated_at IS NULL AND source_id = ? AND target_id = ?`, newer, older); n == 1 {
+				break
+			} else if attempt == attempts {
+				t.Fatalf("the creation pass left %d edge(s) between these two notes, want 1, after %d attempts:\n%s",
+					n, attempts, created.stdout+created.stderr)
+			}
 		}
 		before, _ := s.harnessLog("claude")
 

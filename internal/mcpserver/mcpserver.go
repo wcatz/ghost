@@ -816,12 +816,27 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	// this string is the tool's whole answer, and a clause addressed to the
 	// implementer inside it reads as an instruction to the agent reading it. That
 	// guidance lives in this function's doc comment instead.
+	cmd, viaFileOnly := followup.ResolveCommand(projectID, targets)
 	fmt.Fprintf(&sb, "\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of\n"+
 		"ranked injection until a SCOPED repair clears it. There is no MCP tool for that repair, so it is a CLI\n"+
 		"command — an agent with no shell cannot run it, and should say so rather than reach for ghost_resolve,\n"+
-		"which is the forward pass and would stamp more memories resolved:\n  %s\n",
-		followup.ResolveCommand(projectID, targets))
+		"which is the forward pass and would stamp more memories resolved:\n  %s\n", cmd)
 	sb.WriteString("That pass honours a live edge as a floor, which is why the edge has to go first.")
+	if len(viaFileOnly) > 0 {
+		// Named rather than omitted, because this surface writes no --only-file and
+		// the command cannot carry these ids at all: `--only` splits on commas, so
+		// an id holding one becomes two selectors that name nothing however it is
+		// quoted. An agent told nothing would run the command above, judge fewer
+		// memories than this call orphaned, and report a repair that did not
+		// happen. The id is given verbatim so a person can put it in a file
+		// themselves — one id per line, and readOnlySelectors never splits.
+		fmt.Fprintf(&sb, "\n%d of those id(s) hold a comma, which --only cannot carry, so the command above omits them:\n",
+			len(viaFileOnly))
+		for _, id := range viaFileOnly {
+			fmt.Fprintf(&sb, "  %s\n", id)
+		}
+		sb.WriteString("They are repairable, but only through `ghost resolve --reassess --only-file`, with one id per line.")
+	}
 	return sb.String(), nil
 }
 

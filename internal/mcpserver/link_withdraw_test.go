@@ -86,7 +86,7 @@ func TestLinkWithdrawRemovesTheNamedEdge(t *testing.T) {
 	// `ghost_resolve` is the FORWARD pass — it stamps resolved_at on confirmed
 	// evidence — and takes no id selector, so an agent pointed at it would bury MORE
 	// memories and pay a harness call for it.
-	want := followup.ResolveCommand("test-project", []string{older})
+	want, _ := followup.ResolveCommand("test-project", []string{older})
 	if !strings.Contains(msg, want) {
 		t.Errorf("the result does not carry the scoped repair command %q: %q", want, msg)
 	}
@@ -227,7 +227,7 @@ func TestLinkWithdrawSaysSoWhenAConcurrentPassTookTheEdge(t *testing.T) {
 	if !strings.Contains(msg, older) {
 		t.Errorf("the repair command does not name the target (%s): %q", older, msg)
 	}
-	if !strings.Contains(msg, "ghost resolve test-project --reassess --only "+older+" --apply") {
+	if !strings.Contains(msg, "ghost resolve test-project --reassess --only '"+older+"' --apply") {
 		t.Errorf("the result does not carry the scoped repair for the taken edge: %q", msg)
 	}
 	if !strings.Contains(msg, older[:8]) {
@@ -287,5 +287,63 @@ func TestLinkWithdrawRegisteredAsATool(t *testing.T) {
 	}
 	if found.Description == "" {
 		t.Error("ghost_link_withdraw has no description")
+	}
+}
+
+// An id holding a comma cannot be named by `--only` at all: the parser splits its
+// value on commas, so however the id is quoted it becomes two selectors that name
+// nothing. Rendering it would hand the agent a command that runs and judges the
+// wrong rows, and this surface writes no --only-file — so the ids are named here
+// and the agent is told the file form is the only way to reach them.
+func TestLinkWithdrawNamesAnIDThatOnlyTheFileFormCanCarry(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	// An imported artifact writes its ids verbatim, so a memory's id is whatever
+	// the file said. The seeding helper names its own ids, so this one is renamed
+	// through the store to make the pair a real edge pointing at it.
+	// The edge points at an id an import brought in, and that id holds a comma:
+	// `ghost import` writes an artifact's ids verbatim and ImportMemory refuses
+	// only an empty one, so this is what such a row looks like in a real store.
+	commy := "imported,note"
+	ctx := context.Background()
+	// ImportMemory checks the project exists, and Create does not, so the
+	// project is made first — which is also what ResolveProject would find.
+	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
+		ID: commy, ProjectID: "test-project", Category: "fact",
+		Content: "The restore path needs two spindles to be safe.", Source: "mcp",
+	}, memory.ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	newer, err := store.Create(ctx, "test-project", memory.Memory{
+		Category: "fact", Content: "The restore path is safe on one spindle.", Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create(newer): %v", err)
+	}
+	if err := store.CreateLink(ctx, newer, commy, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	msg, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, commy)
+	if err != nil {
+		t.Fatalf("withdrawSupersedesLink: %v", err)
+	}
+	if !strings.Contains(msg, "hold a comma") {
+		t.Errorf("the result does not say the id needs the file form: %q", msg)
+	}
+	if !strings.Contains(msg, commy) {
+		t.Errorf("the result does not name the id that only the file can carry: %q", msg)
+	}
+	if !strings.Contains(msg, "--only-file") {
+		t.Errorf("the result does not point at the surface that can carry it: %q", msg)
+	}
+	// And the command it printed must not carry it, or the agent runs something
+	// that judges the wrong rows.
+	for _, line := range strings.Split(msg, "\n") {
+		if strings.Contains(line, "--only ") && strings.Contains(line, commy) {
+			t.Errorf("the printed command carries a comma-bearing id: %q", line)
+		}
 	}
 }
