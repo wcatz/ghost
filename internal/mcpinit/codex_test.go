@@ -1124,6 +1124,56 @@ func TestRunCodex_TOMLRepairNormalisesAMixedEndingFile(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLAppendBacksUpThePreGhostFile pins the path that makes the
+// .bak worth having. The first init APPENDS a ghost table, so on that run the
+// file on disk is the user's config.toml before Ghost ever touched it — and if
+// the backup were taken only on a later repair, every .bak would already
+// contain a ghost table (a repair can only find one) and the pre-ghost copy
+// would never exist at all. The commonest damage, a first merge that went
+// wrong, is what would then have nothing to restore.
+func TestRunCodex_TOMLAppendBacksUpThePreGhostFile(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+	path := codexConfigToml(home)
+
+	seed := "# the user's own file\n[unrelated]\nmodel = \"gpt-5\"\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	// The table really was appended, so this is the append path and not the
+	// repair one.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "[mcp_servers.ghost]") {
+		t.Fatalf("the table was not appended, so this is not the append path:\n%s", got)
+	}
+	if strings.Contains(string(got), "[mcp_servers.ghost]\n"+codexMCPServerComment) {
+		t.Fatalf("the file already carried the table, so this is not the append path:\n%s", got)
+	}
+
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("the first init left no .bak beside the user's config.toml: %v", err)
+	}
+	if string(bak) != seed {
+		t.Errorf(".bak = %q, want the pre-ghost file %q", bak, seed)
+	}
+	if strings.Contains(string(bak), "mcp_servers") {
+		t.Error(".bak already mentions the ghost server, so it is not the pre-ghost file")
+	}
+	_ = ghostBin
+}
+
 // TestRunCodex_TOMLRepairBacksUpOnce pins that a repair of a user's
 // config.toml keeps their pre-ghost file beside it, the same way a save of
 // settings.json does. The repair rewrites lines inside the user's own file, and

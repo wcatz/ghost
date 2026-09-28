@@ -1214,17 +1214,21 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		out = append(out, "") // the registered file ends with a newline
 	}
 
-	// The user's pre-ghost file, kept once. The repair rewrites lines inside a
-	// file the user also edits by hand, and the copy that predates ghost is the
-	// only way back if this pass is wrong about what the file said. The backup
-	// is written O_EXCL and never rolled forward, for the reason
-	// writeBackupOnce gives: a second repair would otherwise overwrite the only
-	// pristine copy with ghost's own output. Nothing is created when the table
-	// was absent, because then there was no ghost block to have damaged.
-	if found {
-		if err := writeBackupOnce(path+".bak", existing); err != nil {
-			return false, err
-		}
+	// The user's pre-ghost file, kept once, on BOTH paths. That the append path
+	// is the one that matters is the whole point: this is the first init, so
+	// `existing` is the config.toml the user had before Ghost ever touched it,
+	// and that is the only copy worth having. Backing up only the repair path
+	// would mean the .bak never held a pre-ghost file at all — the bytes there
+	// would already contain a ghost table, because a repair can only find one —
+	// so the commonest damage, a first merge that went wrong, would have nothing
+	// to restore.
+	//
+	// O_EXCL and never rolled forward, for the reason writeBackupOnce gives: a
+	// later run would otherwise overwrite the only pristine copy with Ghost's own
+	// output. A file that did not exist before this run has nothing to copy, and
+	// the code above returned before reaching here.
+	if err := writeBackupOnce(path+".bak", existing); err != nil {
+		return false, err
 	}
 
 	if err := writeFileAtomic(path, []byte(strings.Join(out, eol)), 0644); err != nil {
