@@ -223,48 +223,116 @@ func parseCodexTOMLStringArray(val string) []string {
 // A comment ends the value only at depth 0, where the value is finished anyway.
 // Deeper in a bracket the comment is skipped and the scan carries on, because
 // the closing bracket usually sits on a later line.
+//
+// It is codexScanValue's first answer read on its own; the two come from one walk
+// because a multi-line string makes the second answer load-bearing, and two walks
+// of the same value could disagree about where it ended.
 func codexValueComplete(value string) bool {
+	complete, _ := codexScanValue(value)
+	return complete
+}
+
+// codexInsideMultilineString reports whether value ends inside a TOML
+// multi-line string — one opened by three single quotes or three double quotes
+// — that has not been closed yet. It is the other half of codexScanValue, and
+// it is what separates a value that is open because it is MALFORMED from one
+// that is open because a multi-line string is still running. A malformed value
+// may be ended by the next table header — that header is the best available
+// evidence the value stopped — but a bracketed line inside a multi-line string
+// is content, and reading it as a header ends the ghost table's span early, so
+// the repair writes ghost's own `args` beside the user's and codex rejects the
+// file.
+func codexInsideMultilineString(value string) bool {
+	_, inside := codexScanValue(value)
+	return inside
+}
+
+// codexScanValue walks value once for brackets, strings and comments and
+// reports whether the value is finished and whether the walk stopped inside a
+// string. A value that ends inside a string is unfinished AND well formed, which
+// is the distinction codexInsideMultilineString exists to draw; every other
+// unfinished value is malformed.
+func codexScanValue(value string) (complete, insideString bool) {
 	depth := 0
 	for i := 0; i < len(value); i++ {
 		switch c := value[i]; c {
 		case '#':
 			if depth == 0 {
-				return true // the rest of the line is a comment, not a value
+				return true, false // the rest of the line is a comment, not a value
 			}
 			for i < len(value) && value[i] != '\n' {
 				i++ // skip the comment, keeping any bracket depth
 			}
 		case '\'', '"':
-			i = codexStringEnd(value, i)
+			end, open := codexStringEndOpen(value, i)
+			if open {
+				return false, true
+			}
+			i = end
 		case '[', '{':
 			depth++
 		case ']', '}':
 			depth--
 			if depth < 0 {
-				return true // malformed; treat as self-contained
+				return true, false // malformed; treat as self-contained
 			}
 		}
 	}
-	return depth == 0
+	return depth == 0, false
 }
 
 // codexStringEnd returns the index of the quote closing the string that opens at
 // i, or the last index of value when the string is unterminated. Inside a basic
 // "..." string a backslash escapes the next byte, so an escaped quote does not
 // close it; inside a literal '...' string nothing is escaped.
+//
+// It reports only where the closing quote is. A value still inside a multi-line
+// string is a question codexStripComment and the key-name readers do not ask, so
+// they get the last index and carry on; codexScanValue is the one caller that
+// needs the other answer and asks for it through codexStringEndOpen.
 func codexStringEnd(value string, i int) int {
+	end, _ := codexStringEndOpen(value, i)
+	return end
+}
+
+// codexStringEndOpen returns the index of the quote closing the string that opens
+// at i, and whether the string is still open where value ends.
+//
+// A triple-quote delimiter (three single quotes, or three double quotes) is a
+// multi-line string in its own right: it runs until its own three quotes, across
+// as many lines as the author wrote, so a value carrying only its opener is
+// UNFINISHED rather than malformed — which is the whole reason this function
+// exists. A single-line quoted string cannot span lines at all, so an
+// unterminated one is not reported as open: the two are different TOML, and
+// reading a multi-line opener as an empty one-line string is what let a header
+// inside the string end the ghost table's span.
+func codexStringEndOpen(value string, i int) (end int, open bool) {
 	quote := value[i]
+	if i+3 <= len(value) && value[i+1] == quote && value[i+2] == quote {
+		for j := i + 3; j+3 <= len(value); j++ {
+			if value[j] != quote {
+				continue
+			}
+			if quote == '"' && j > i+2 && value[j-1] == '\\' {
+				continue // a backslash escapes the next byte inside """
+			}
+			if value[j] == quote && value[j+1] == quote && value[j+2] == quote {
+				return j + 2, false
+			}
+		}
+		return len(value) - 1, true
+	}
 	for i++; i < len(value); i++ {
 		switch value[i] {
 		case quote:
-			return i
+			return i, false
 		case '\\':
 			if quote == '"' {
 				i++ // the escaped byte cannot close the string
 			}
 		}
 	}
-	return len(value) - 1
+	return len(value) - 1, false
 }
 
 // codexStripComment returns line with any "#" comment removed. A "#" inside a
@@ -358,11 +426,19 @@ func codexTableName(line string) string {
 // server's keys get swept into the ghost span and dropped. codexHeaderClosesValue
 // draws the line between that and a nested array element, which is bracketed
 // exactly like a header.
+//
+// One open value is NOT malformed, and the header rule must not reach it. A
+// value inside a multi-line string is unfinished because the string runs to a
+// later line by design, so a bracketed line there is string content; letting it
+// close the value ends the ghost table's span in the middle of the user's own
+// text, and the repair then inserts a second `args` beside the first, which is
+// invalid TOML. codexInsideMultilineString is the test, and it is why the
+// malformation rule cannot be stated as "any header ends any open value".
 func codexValueContinuationLines(lines []string) map[int]bool {
 	continuation := make(map[int]bool)
 	value, open := "", false
 	for i, line := range lines {
-		if open && !codexHeaderClosesValue(line) {
+		if open && (codexInsideMultilineString(value) || !codexHeaderClosesValue(line)) {
 			continuation[i] = true
 			value += "\n" + line
 			if codexValueComplete(value) {
@@ -996,7 +1072,28 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		return false, fmt.Errorf("read config.toml: %w", err)
 	}
 
+	// The file's own line ending decides the join below, and the split strips
+	// the "\r" that goes with it. A repair that split on "\n" and joined on
+	// "\n" left every line ghost does not own with its CR and every line it
+	// does without one: still valid TOML, and a document whose real shape no
+	// editor will show. Stripping here rather than at the join also lets the
+	// "already current" check below see a CRLF file as current, which it could
+	// not while the CRs were part of the compared text — so a CRLF config was
+	// rewritten on every single run.
+	//
+	// A file with no CRLF anywhere, or one carrying both, joins on "\n" and
+	// keeps whatever the split found, which is what it did before.
+	eol := "\n"
+	crlf := bytes.Contains(existing, []byte("\r\n"))
+	if crlf {
+		eol = "\r\n"
+	}
 	lines := strings.Split(string(existing), "\n")
+	if crlf {
+		for i, line := range lines {
+			lines[i] = strings.TrimSuffix(line, "\r")
+		}
+	}
 
 	// A ghost entry written as a dotted or inline key is invisible to the
 	// line-wise merge: appending a table next to it would give codex a
@@ -1057,7 +1154,20 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		out = append(out, "") // the registered file ends with a newline
 	}
 
-	if err := writeFileAtomic(path, []byte(strings.Join(out, "\n")), 0644); err != nil {
+	// The user's pre-ghost file, kept once. The repair rewrites lines inside a
+	// file the user also edits by hand, and the copy that predates ghost is the
+	// only way back if this pass is wrong about what the file said. The backup
+	// is written O_EXCL and never rolled forward, for the reason
+	// writeBackupOnce gives: a second repair would otherwise overwrite the only
+	// pristine copy with ghost's own output. Nothing is created when the table
+	// was absent, because then there was no ghost block to have damaged.
+	if found {
+		if err := writeBackupOnce(path+".bak", existing); err != nil {
+			return false, err
+		}
+	}
+
+	if err := writeFileAtomic(path, []byte(strings.Join(out, eol)), 0644); err != nil {
 		return false, fmt.Errorf("write config.toml: %w", err)
 	}
 	if found {

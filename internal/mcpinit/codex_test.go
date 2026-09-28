@@ -865,6 +865,163 @@ func TestRunCodex_TOMLRepairKeepsNestedArray(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLRepairSurvivesMultilineString is the #608 case. A TOML
+// multi-line string — three single quotes, or three double quotes — runs until
+// its own closing delimiter, so a line inside one that happens to start with
+// '[' is string CONTENT and not a table header. Read as a header it ends the
+// ghost table's span early, and the repair then writes ghost's own `args` into a
+// span that already has one — a second args line, which is invalid TOML and
+// makes codex reject the whole file.
+func TestRunCodex_TOMLRepairSurvivesMultilineString(t *testing.T) {
+	for _, delim := range []string{"'''", `"""`} {
+		t.Run(delim, func(t *testing.T) {
+			home, _ := setupCodexTestEnv(t)
+			ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+			seed := "[mcp_servers.ghost]\n" +
+				"command = '/old/install/ghost'\n" +
+				"description = " + delim + "\n" +
+				"[not_a_table]\n" +
+				delim + "\n" +
+				"args = [\"mcp\", \"--stale\"]\n"
+			want := codexMCPServerComment + "\n" +
+				"[mcp_servers.ghost]\n" +
+				"command = " + codexTOMLString(ghostBin) + "\n" +
+				"description = " + delim + "\n" +
+				"[not_a_table]\n" +
+				delim + "\n" +
+				"args = [\"mcp\"]\n"
+
+			if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCodex(&out, false); err != nil {
+				t.Fatalf("RunCodex: %v", err)
+			}
+			got, err := os.ReadFile(codexConfigToml(home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != want {
+				t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+			}
+			if n := countCodexGhostHeaders(string(got)); n != 1 {
+				t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+			}
+		})
+	}
+}
+
+// TestRunCodex_TOMLRepairKeepsCRLF pins that a repair does not leave a CRLF
+// config.toml with mixed line endings. The file is split on "\n", so every
+// preserved line keeps its "\r" while ghost's own key lines carry none — and a
+// document with two endings in it is one a reviewer cannot read and an editor
+// will rewrite. The repair is not the place to convert the file, so it keeps
+// the ending the file already had.
+func TestRunCodex_TOMLRepairKeepsCRLF(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	seed := "[mcp_servers.ghost]\r\n" +
+		"command = '/old/install/ghost'\r\n" +
+		"args = [\"mcp\", \"--stale\"]\r\n" +
+		"\r\n" +
+		"[mcp_servers.other]\r\n" +
+		"command = \"/usr/bin/other\"\r\n"
+	want := codexMCPServerComment + "\r\n" +
+		"[mcp_servers.ghost]\r\n" +
+		"command = " + codexTOMLString(ghostBin) + "\r\n" +
+		"args = [\"mcp\"]\r\n" +
+		"\r\n" +
+		"[mcp_servers.other]\r\n" +
+		"command = \"/usr/bin/other\"\r\n"
+
+	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	got, err := os.ReadFile(codexConfigToml(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+	// Named on its own, because "the whole file matches" already fails for a
+	// file that kept CRLF everywhere: what this pins is that no line ENDING
+	// changed, and a bare-LF repair of a CRLF file would look identical to a
+	// correct one in every other respect.
+	if i := strings.IndexByte(string(got), '\n'); i > 0 && got[i-1] != '\r' {
+		t.Errorf("the first line lost its CR, so the repair mixed endings:\n%q", got)
+	}
+	if n := bytes.Count(got, []byte("\n")); n != bytes.Count(got, []byte("\r\n")) {
+		t.Errorf("%d newlines but %d CRLFs, so the repair mixed endings:\n%q", n, bytes.Count(got, []byte("\r\n")), got)
+	}
+}
+
+// TestRunCodex_TOMLRepairBacksUpOnce pins that a repair of a user's
+// config.toml keeps their pre-ghost file beside it, the same way a save of
+// settings.json does. The repair rewrites lines inside the user's own file, and
+// the one copy of it that predates ghost is the only way back if the rewrite is
+// wrong about what the file said.
+func TestRunCodex_TOMLRepairBacksUpOnce(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+	path := codexConfigToml(home)
+
+	seed := "[mcp_servers.ghost]\n" +
+		"command = '/old/install/ghost'\n" +
+		"args = [\"mcp\", \"--stale\"]\n"
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("the repair left no .bak beside the user's config.toml: %v", err)
+	}
+	if string(bak) != seed {
+		t.Errorf(".bak = %q, want the pre-ghost file %q", bak, seed)
+	}
+	if !strings.Contains(string(bak), "'/old/install/ghost'") {
+		t.Error(".bak is not the file as it was before the repair, so it cannot be a way back")
+	}
+	_ = ghostBin
+
+	// A second run must not roll the backup forward over the first one: the
+	// only pristine copy is the pre-ghost one, and ghost's own output is not a
+	// way back to it.
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("second RunCodex: %v", err)
+	}
+	again, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("read .bak after the second run: %v", err)
+	}
+	if string(again) != seed {
+		t.Errorf(".bak was rolled forward to ghost's own output:\n%q", again)
+	}
+}
+
 // TestRunCodex_TOMLRepairSurvivesMalformedValue pins what happens when a value
 // never closes. A stray unterminated value must not make the repair swallow the
 // rest of config.toml, delete a different MCP server's keys, or hide the ghost
