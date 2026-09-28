@@ -1497,6 +1497,25 @@ func TestSupersedeReassessReport(t *testing.T) {
 	if !strings.Contains(apply, "  already gone  abcdef01 -> 98765432") {
 		t.Errorf("apply report mislabels the edge a concurrent pass withdrew first:\n%s", apply)
 	}
+
+	// A sweep that failed says "unknown" — on the row and in the summary — and
+	// never a count, because after a failed write the count is not knowable and
+	// a 0 would read as "nothing else was deleted".
+	failed := []supersede.WithdrawnEdge{
+		{NewerID: edges[1].NewerID, OlderID: edges[1].OlderID, Reason: edges[1].Reason, Written: true, SweepFailed: true},
+	}
+	failReport := supersedeReassessReport("proj", supersede.ReassessResult{
+		Loaded: 1, Neither: 1, Withdrawn: 1, CausesSweepFailed: 1,
+	}, true, failed, 1)
+	if !strings.Contains(failReport, "[causes sweep FAILED — unknown]") {
+		t.Errorf("a failed sweep must not be reported as a count:\n%s", failReport)
+	}
+	if !strings.Contains(failReport, "1 causes sweep(s) FAILED (unknown)") {
+		t.Errorf("the summary must count the failed sweeps separately from the swept ones:\n%s", failReport)
+	}
+	if strings.Contains(failReport, "[+0 causes edge]") {
+		t.Errorf("a failed sweep printed a marker that says nothing was moved:\n%s", failReport)
+	}
 }
 
 // TestParseSupersedeArgs pins `ghost supersede` argv parsing: same shapes as

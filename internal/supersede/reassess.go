@@ -86,6 +86,12 @@ type ReassessResult struct {
 	// --apply it can read lower than the dry run's prediction — the same
 	// relationship Withdrawn has to the list of rows.
 	CausesWithdrawn int
+	// CausesSweepFailed counts the rows whose 'causes' sweep errored, where the
+	// number of edges that went is UNKNOWN. It is reported separately from
+	// CausesWithdrawn because "swept 0" and "could not tell" are different
+	// sentences, and an operator who read "would sweep 1" in the dry run needs
+	// the second one.
+	CausesSweepFailed int
 }
 
 // WithdrawnEdge is one edge the pass withdrew, or would withdraw under --apply.
@@ -105,9 +111,19 @@ type WithdrawnEdge struct {
 	Vetoed bool
 	// CausesSwept counts the 'causes' edges this row's withdrawal also dropped,
 	// because a withdrawal that removes a second graph row and does not say so
-	// is a report the operator cannot decide from. It is 0 for a CAUSES verdict,
-	// which sweeps nothing.
+	// is a report the operator cannot decide from. It is the PREDICTION in a dry
+	// run and what the sweep MOVED under --apply. Read it as "the store moved no
+	// live row" rather than "there was nothing to move": for a non-supersedes
+	// relation InvalidateLink swallows a RowsAffected error and returns (0, nil)
+	// with the write already committed (internal/memory/links.go), so 0 is the
+	// count the store could confirm, not a promise about the graph. When the
+	// sweep FAILED, SweepFailed is set instead — that state is unknown, and
+	// reporting it as 0 would tell an operator who saw "would sweep 1" in the
+	// dry run that nothing else was deleted.
 	CausesSwept int
+	// SweepFailed marks the row whose 'causes' sweep errored, so the report
+	// says "unknown" where the truth is unknown instead of "0".
+	SweepFailed bool
 	// Written is true only when --apply actually invalidated the edge, so a
 	// dry-run list can never be read as a change that happened.
 	Written bool
@@ -350,15 +366,23 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			// InvalidateLink writes no history row for a non-supersedes
 			// relation, so this leaves the audit exactly as Run leaves it.
 			n, err := store.InvalidateLink(ctx, w.OlderID, w.NewerID, string(RelationCauses))
-			// The row already carries the prediction; what actually moved is the
-			// observed count, and a failed sweep leaves it at zero because
-			// nothing is known to have moved.
-			w.CausesSwept = int(n)
-			withdrawn[len(withdrawn)-1] = w
 			if err != nil {
+				// The count is not taken on this path: a definite number would be
+				// a statement about the graph nobody can make after a failed
+				// write, and the PREDICTION that is in the field is not a count
+				// of what moved. The row says the outcome is unknown instead —
+				// the report prints that in place of any count — and the summary
+				// counts the failures, so the report and the exit status agree.
+				w.CausesSwept = 0
+				w.SweepFailed = true
+				withdrawn[len(withdrawn)-1] = w
+				res.CausesSweepFailed++
 				fail = fmt.Errorf("withdraw causes link %s→%s: %w", w.OlderID, w.NewerID, err)
 				break
 			}
+			// What actually moved, not what the row predicted.
+			w.CausesSwept = int(n)
+			withdrawn[len(withdrawn)-1] = w
 			res.CausesWithdrawn += int(n)
 		}
 	}
@@ -368,7 +392,8 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
 			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
 			"reversed", res.Reversed, "unknown", res.Unclassified, "withdrawn", res.Withdrawn,
-			"causes_withdrawn", res.CausesWithdrawn, "failed", fail != nil)
+			"causes_withdrawn", res.CausesWithdrawn, "causes_sweep_failed", res.CausesSweepFailed,
+			"failed", fail != nil)
 	}
 	if fail != nil {
 		return res, withdrawn, fail

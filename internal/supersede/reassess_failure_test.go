@@ -139,6 +139,40 @@ func TestReassessKeepsTheRowWhoseCausesSweepFailed(t *testing.T) {
 	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 0 {
 		t.Errorf("the supersedes edge is still live: %d pair(s)", len(pairs))
 	}
+	// The sweep's outcome is UNKNOWN after a failed write, and the row has to say
+	// that rather than report a count: a definite 0 would tell an operator who
+	// read "would sweep 1" in the dry run that nothing else was deleted, which
+	// is the one reading this pass cannot afford.
+	if len(withdrawn) != 1 {
+		t.Fatalf("withdrawn = %+v, want one row", withdrawn)
+	}
+	if !withdrawn[0].SweepFailed {
+		t.Errorf("row = %+v, want SweepFailed set: the sweep errored, so the count is unknown", withdrawn[0])
+	}
+	if withdrawn[0].CausesSwept != 0 {
+		t.Errorf("row reports CausesSwept = %d, want 0 alongside SweepFailed — a failed sweep has no observed count", withdrawn[0].CausesSwept)
+	}
+	if res.CausesSweepFailed != 1 {
+		t.Errorf("CausesSweepFailed = %d, want 1", res.CausesSweepFailed)
+	}
+	if res.CausesWithdrawn != 0 {
+		t.Errorf("CausesWithdrawn = %d, want 0: a failed sweep is counted as failed, not as swept", res.CausesWithdrawn)
+	}
+	// And the edge really is still there, which is why the answer is "unknown"
+	// and not "0, nothing to move".
+	causes, err := store.GetLinks(ctx, older)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	live := false
+	for _, l := range causes {
+		if l.Relation == string(RelationCauses) {
+			live = true
+		}
+	}
+	if !live {
+		t.Error("the 'causes' edge is gone, so the fixture no longer exercises a failed sweep")
+	}
 }
 
 // TestReassessSweepsTheOtherRelationOnASelfContradictingVerdict: Run's contract
