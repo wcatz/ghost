@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -40,7 +41,37 @@ type Worker struct {
 	logger   *slog.Logger
 	interval time.Duration
 	dataDir  string
+
+	// mu guards inconclusive, which checkAlive carries between probes.
+	mu sync.Mutex
+	// inconclusive counts consecutive probes that did not answer. It is the
+	// evidence a single probe cannot be: see inconclusiveStampsAfter.
+	inconclusive int
 }
+
+// inconclusiveStampsAfter is how many consecutive probes must fail to answer
+// before the down-since marker is written for an endpoint that is not REFUSING
+// connections.
+//
+// One probe is not enough, and the asymmetry is the point: a probe that missed
+// its own 2s deadline is far more often a busy machine than a dead endpoint,
+// and a marker written on the first of those is reported by `ghost mcp status`
+// for as long as the machine stays busy. But a marker written only on a
+// conclusive refusal is a regression in the other direction (#287's
+// diagnostic), because the endpoints that need it least are the ones that
+// answer fastest: a wedged accept loop, a remote or tunnelled URL whose packets
+// a firewall drops, and a host that has stopped scheduling all look like "the
+// request did not come back", never like a refusal. Those then report
+// "Ollama unreachable" with no duration beside it, forever.
+//
+// So the marker follows the SIGNAL rather than the single probe: three
+// unanswered probes in a row is a pattern, and a streak is spent by any
+// answered probe (see checkAlive), so a stall spread over minutes cannot
+// accumulate into an outage that was never established. Three is roughly two
+// sweep intervals at the daemon's 2 minutes (cmd/ghost/mcp.go), so the
+// shortest real outage this can report is about six minutes — which is the
+// trade a duration line is worth, against a busy machine never reporting one.
+const inconclusiveStampsAfter = 3
 
 // NewWorker creates a background embedding worker. dataDir is the ghost data
 // directory (config.DataDir()) where the Ollama-down marker file (see
@@ -63,15 +94,20 @@ func NewWorker(client *Client, store memoryStore, logger *slog.Logger, interval 
 // that `ghost mcp status` reads to report outage duration, returning the
 // tri-state the probe found.
 //
-// The marker is the reason this is not a bool. It is written when the endpoint
-// is established to be Unreachable — a non-200, or a refused connection — and
-// removed once Ollama answers Reachable again (only if one doesn't already
-// exist, so a still-down Ollama doesn't keep resetting its own "down since"
-// clock on every poll). An Inconclusive probe leaves it exactly as it found it,
-// in BOTH directions: starting an outage clock on a timeout reports an outage
-// that was never established, and `ghost mcp status` goes on reporting it, with
-// a start time, for as long as the machine stays busy; ending one the same way
-// hides a real outage for a poll.
+// The marker is the reason this is not a bool, and it is written on EITHER of
+// the two negative answers — but for different evidence, which is what
+// inconclusiveStampsAfter is for. A conclusive Unreachable writes it at once
+// (only if one doesn't already exist, so a still-down Ollama doesn't keep
+// resetting its own "down since" clock on every poll). An Inconclusive writes it
+// only once several have gone unanswered in a row, because a single one is a
+// busy machine far more often than a dead endpoint, and the endpoints a refusal
+// never describes — a wedged accept loop, a dropped remote URL — are exactly
+// the ones that need the duration (see the constant for the full argument).
+//
+// Reachable removes it and SPENDS the streak, so a machine that stalls twice and
+// then answers starts the next stall from zero, and a stall spread over minutes
+// cannot accumulate into an outage that was never established. An inconclusive
+// probe never removes it: not answering is not evidence the outage is over.
 //
 // A blank dataDir (set by callers that don't care about the marker) disables
 // this bookkeeping and behaves exactly like calling client.Probe(ctx)
@@ -79,17 +115,30 @@ func NewWorker(client *Client, store memoryStore, logger *slog.Logger, interval 
 // debug level and never changes the reported reachability.
 func (w *Worker) checkAlive(ctx context.Context) Reachability {
 	got := w.client.Probe(ctx)
+
+	// The streak is tracked whether or not there is a marker path, so a worker
+	// built without one behaves identically on this axis rather than
+	// accumulating a count nothing reads.
+	w.mu.Lock()
+	if got == Inconclusive {
+		w.inconclusive++
+	} else {
+		w.inconclusive = 0
+	}
+	streak := w.inconclusive
+	w.mu.Unlock()
+
 	if w.dataDir == "" {
 		return got
 	}
 
 	markerPath := filepath.Join(w.dataDir, OllamaDownMarkerFilename)
-	switch got {
-	case Reachable:
+	switch {
+	case got == Reachable:
 		if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
 			w.logger.Debug("embed: remove ollama-down marker", "error", err)
 		}
-	case Unreachable:
+	case got == Unreachable || streak >= inconclusiveStampsAfter:
 		if _, err := os.Stat(markerPath); os.IsNotExist(err) {
 			ts := time.Now().UTC().Format(time.RFC3339)
 			if err := os.WriteFile(markerPath, []byte(ts), 0o600); err != nil {

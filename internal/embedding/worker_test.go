@@ -71,18 +71,76 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 	}
 }
 
-// TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive is the other
-// half of the same fix, on the file `ghost mcp status` reads. A probe that did
-// not answer must neither START an outage clock (a marker written here is
-// reported, with this timestamp, for as long as the machine stays busy) nor END
-// a real one (the marker's own case is that it is written once and left).
-func TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive(t *testing.T) {
+// wedgedEndpoint is an endpoint that accepts the connection and never answers,
+// which is what a hung Ollama and a firewall-dropped remote URL both look like.
+// Released when the test ends, so a probe that gives up on its own deadline does
+// not wedge the fake (the same reason
+// TestEmbedSupersedeCorpusStopsAtItsBudget releases rather than waits on the
+// request context).
+func wedgedEndpoint(t *testing.T) *httptest.Server {
+	t.Helper()
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-release
 	}))
-	defer srv.Close()
-	defer close(release)
+	t.Cleanup(func() {
+		close(release)
+		srv.Close()
+	})
+	return srv
+}
+
+// TestCheckAlive_StampsTheMarkerOnARepeatedlyInconclusiveProbe is the second
+// half of the tri-state's contract, and the review finding that found it: a
+// single inconclusive probe must not start an outage clock, but an endpoint that
+// NEVER answers is the case #287's marker was built for, and a rule that never
+// stamps on inconclusive loses the down-since duration for exactly that
+// configuration — a wedged accept loop, a remote URL behind a dropping firewall
+// — which reports "Ollama unreachable" forever with no duration beside it.
+//
+// So the marker follows the SIGNAL rather than a single probe: consecutive
+// probes that did not answer, and not a momentary stall among them, are the
+// evidence. The count is what separates the two, and this test is the difference
+// between them — one probe writes nothing, and the third writes a real
+// timestamp.
+func TestCheckAlive_StampsTheMarkerOnARepeatedlyInconclusiveProbe(t *testing.T) {
+	srv := wedgedEndpoint(t)
+	dataDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	worker := NewWorker(NewClient(srv.URL, "nomic-embed-text", 3), newMockStore(), logger, time.Minute, dataDir)
+
+	for probe := 1; probe < inconclusiveStampsAfter; probe++ {
+		if got := worker.checkAlive(context.Background()); got != Inconclusive {
+			t.Fatalf("probe %d = %v, want Inconclusive", probe, got)
+		}
+		if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
+			t.Fatalf("probe %d wrote the down-since marker for an endpoint that has not answered once: err=%v", probe, err)
+		}
+	}
+
+	if got := worker.checkAlive(context.Background()); got != Inconclusive {
+		t.Fatalf("probe %d = %v, want Inconclusive", inconclusiveStampsAfter, got)
+	}
+	since, err := os.ReadFile(markerPath(dataDir))
+	if err != nil {
+		t.Fatalf("an endpoint that never answered left no down-since marker after %d probes: %v", inconclusiveStampsAfter, err)
+	}
+	ts, err := time.Parse(time.RFC3339, string(since))
+	if err != nil {
+		t.Fatalf("marker %q is not RFC3339: %v", since, err)
+	}
+	if age := time.Since(ts); age < 0 || age > 10*time.Second {
+		t.Errorf("marker timestamp %v is not close to now (age %v)", ts, age)
+	}
+}
+
+// TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive is the other
+// half: a probe that did not answer must neither START an outage clock (a
+// marker written here is reported, with this timestamp, for as long as the
+// machine stays busy) nor END a real one (the marker's own case is that it is
+// written once and left).
+func TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive(t *testing.T) {
+	srv := wedgedEndpoint(t)
 
 	// A real outage already on record. A stall must not clear it: the endpoint
 	// has not been shown to be back.
@@ -103,6 +161,38 @@ func TestCheckAlive_LeavesTheMarkerAloneWhenTheProbeIsInconclusive(t *testing.T)
 	}
 	if string(data) != real {
 		t.Errorf("marker = %q, want unchanged %q: a probe that did not answer is not evidence the outage is over", data, real)
+	}
+}
+
+// TestCheckAlive_ForgetsInconclusiveStreakOnAnAnsweredProbe is what keeps the
+// streak a streak: a machine that stalls twice and then answers is a busy
+// machine, and its two slow probes must not carry into the next outage's count,
+// or a stall spread over a longer window is indistinguishable from a hang.
+func TestCheckAlive_ForgetsInconclusiveStreakOnAnAnsweredProbe(t *testing.T) {
+	wedge := wedgedEndpoint(t)
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ok.Close()
+
+	dataDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	worker := NewWorker(NewClient(wedge.URL, "nomic-embed-text", 3), newMockStore(), logger, time.Minute, dataDir)
+
+	for probe := 1; probe < inconclusiveStampsAfter; probe++ {
+		worker.checkAlive(context.Background())
+	}
+	// The endpoint comes back: the count is spent.
+	worker.client = NewClient(ok.URL, "nomic-embed-text", 3)
+	if got := worker.checkAlive(context.Background()); got != Reachable {
+		t.Fatalf("checkAlive = %v, want Reachable once the endpoint answers", got)
+	}
+	// And it goes back to not answering: this is a FIRST inconclusive again.
+	worker.client = NewClient(wedge.URL, "nomic-embed-text", 3)
+	worker.checkAlive(context.Background())
+	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
+		t.Errorf("the marker was stamped %d probes into a SECOND stall, so the first stall's count carried over: err=%v",
+			inconclusiveStampsAfter, err)
 	}
 }
 
