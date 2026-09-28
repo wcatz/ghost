@@ -2,10 +2,26 @@
 # NEWER memory shares the probe's keywords but is the wrong answer. A blanket
 # age-only recency prior that promotes newest-wins blindly will demote the
 # correct old fact below the fresh distractor. correct-wins = correct outranks
-# every trap. This is the gate a time-decay default must survive: the fixtures
-# are `fact` category (never-decay), so decay cannot touch them — the reason
-# category-aware decay can ship on where a blanket recency prior could not. See
+# every trap. This is the gate a time-decay default must survive. See
 # docs/benchmarks.md.
+#
+# `category` is optional and defaults to `fact`, a never-decay class: the
+# original fourteen scenarios below carry no field and are unchanged. That is
+# the frontier's claim — decay cannot touch them, which is why category-aware
+# decay can ship on by default. It is also the limit of that claim, because it
+# says nothing about the categories decay actually reorders, so the scenarios
+# after the marker carry a DECAYING category and are the cost.
+#
+# Two shapes of decaying scenario, and the difference is what is measured:
+#   * the distractor shares the probe's discriminating terms, so a fresh row
+#     competes with the old correct one for the top slot and decay decides which
+#     wins. The score that produces is the COST of defaulting decay, and it is
+#     reported rather than asserted — an old memory losing to a fresh one in the
+#     same category is decay working as designed, and the number is what a reader
+#     needs in order to weigh it.
+#   * the old correct memory is `pinned`, which pins its decay factor at 1.0. It
+#     must still win, because pinning is the one control a user has over a
+#     category that decays. That one is asserted.
 {"name":"mainnet_magic","correct":{"content":"Mainnet network magic is 764824073.","age_days":600},"traps":[{"content":"Preview network magic is 2, used for the preview testnet only.","age_days":8},{"content":"Preprod network magic is 1 for the preprod testnet.","age_days":5}],"probes":[{"text":"what is the mainnet network magic number"}]}
 {"name":"pool_ticker","correct":{"content":"Our production stake pool ticker is DUCK.","age_days":500},"traps":[{"content":"Registered a throwaway test pool with ticker TEST on preprod for CI.","age_days":6}],"probes":[{"text":"what is our production pool ticker"}]}
 {"name":"yaml_indent","correct":{"content":"YAML files use two-space indentation everywhere; never change it.","age_days":420},"traps":[{"content":"Added a new .editorconfig setting for four-space indentation in Python scripts.","age_days":10}],"probes":[{"text":"what indentation do our YAML files use"}]}
@@ -20,3 +36,30 @@
 {"name":"node_version","correct":{"content":"Production cardano-node runs version 10.1.4.","age_days":120},"traps":[{"content":"Testing cardano-node 10.2.0-rc1 on a preview relay before mainnet rollout.","age_days":4}],"probes":[{"text":"what cardano-node version runs in production"}]}
 {"name":"backup_target","correct":{"content":"Database backups go to the S3 bucket ghost-backups-prod.","age_days":410},"traps":[{"content":"Created a scratch bucket ghost-backups-test for validating a restore procedure.","age_days":8}],"probes":[{"text":"where do production database backups go"}]}
 {"name":"tls_domain","correct":{"content":"The production API is served at api.blinklabs.io.","age_days":480},"traps":[{"content":"Stood up a staging endpoint api-staging.blinklabs.io for pre-release testing.","age_days":9}],"probes":[{"text":"what is the production API domain"}]}
+# --- decaying categories, competing distractors -------------------------------
+# Same shape as the fourteen above, in a category decay actually reorders. Each
+# distractor shares the probe's discriminating terms with the correct memory, so
+# a fresh row competes for the top slot and decay decides. The score is the cost
+# of that competition, and it is reported rather than asserted: an old
+# memory in a decaying category losing to a fresh one in the SAME category is
+# decay working as designed, not a defect, and the number is what a reader needs
+# in order to weigh it.
+{"name":"replica_method","category":"decision","correct":{"content":"We decided the analytics replica is fed by Postgres logical replication rather than a nightly dump.","age_days":520},"traps":[{"content":"Drafted a design note proposing a nightly logical dump to keep the analytics replica current.","age_days":4}],"probes":[{"text":"how is the analytics replica kept current"}]}
+{"name":"reindex_replace","category":"gotcha","correct":{"content":"Reindexing in the IDE wipes the go.mod replace directives; re-add them afterwards.","age_days":430},"traps":[{"content":"The IDE now prompts before reindexing, asking whether to keep the local replace directives.","age_days":6}],"probes":[{"text":"what happens to the replace directives after a reindex"}]}
+{"name":"base_image","category":"dependency","correct":{"content":"The Dockerfile pins Debian 12 as its base image; Debian 11 is no longer pulled.","age_days":610},"traps":[{"content":"Evaluated switching the base image to Ubuntu 24.04 in a scratch branch but did not adopt it.","age_days":5}],"probes":[{"text":"which base image does the Dockerfile pin"}]}
+{"name":"writer_model","category":"architecture","correct":{"content":"Exactly one process may write to the memory database: the MCP server owns the write lock and every other process only reads.","age_days":700},"traps":[{"content":"Prototyped a sharded layout so several processes could write to the memory database at once, without adopting it.","age_days":3}],"probes":[{"text":"how many processes may write to the memory database"}]}
+{"name":"provenance_block","category":"pattern","correct":{"content":"Every write path stamps a provenance block so the append-only history can name the agent that made the change.","age_days":380},"traps":[{"content":"Backfilled provenance for the rows written before the history table existed, and logged which ones were touched.","age_days":7}],"probes":[{"text":"why does every write path stamp a provenance block"}]}
+{"name":"journal_deadlock","category":"gotcha","correct":{"content":"Changing the SQLite journal mode inside an open transaction deadlocks the connection; busy_timeout is pinned at 5000ms.","age_days":250},"traps":[{"content":"A test switched its journal_mode to MEMORY to isolate the run from the WAL writer.","age_days":9}],"probes":[{"text":"what deadlocks when a test changes the sqlite journal mode"}]}
+{"name":"runner_label","category":"dependency","correct":{"content":"The default CI job is scheduled onto the ubuntu-24.04 runner label, which carries every toolchain preinstalled.","age_days":450},"traps":[{"content":"Added an ubuntu-22.04 runner label for the legacy integration job.","age_days":6}],"probes":[{"text":"which runner label does the default ci job get"}]}
+# --- decaying categories, pinned correct memory -------------------------------
+# `pinned: true` on the OLD correct memory. A pinned row's decay factor is
+# exactly 1.0 at any age, so these are the fixture's answer to "an old-but-correct
+# memory in a decaying category must still win": it wins because the user pinned
+# it, which is the one control production offers against a category that decays.
+# Named in recencytrap_test.go's trapMustWinScenarios; renaming one without
+# updating that list fails the test, and an empty list fails it too.
+{"name":"vault_one_way","category":"decision","pinned":true,"correct":{"content":"We decided the vault mirror is one-way: nothing is ever written back out of it.","age_days":600},"traps":[{"content":"Filed an issue asking for a reverse sync that would import edits out of the vault.","age_days":5}],"probes":[{"text":"does anything get written back out of the vault"}]}
+{"name":"link_graph_use","category":"architecture","pinned":true,"correct":{"content":"The link graph is kept for the vault export and for supersedes ranking; it is not a ranking bonus.","age_days":500},"traps":[{"content":"Removed the graph-expansion ranking bonus after a kill experiment on the benchmark.","age_days":4}],"probes":[{"text":"what is the link graph still kept for"}]}
+{"name":"dry_run_default","category":"pattern","pinned":true,"correct":{"content":"Every destructive subcommand previews its plan and needs an explicit apply before it writes.","age_days":330},"traps":[{"content":"Added a grace window to the session cleanup subcommand so old entries linger.","age_days":8}],"probes":[{"text":"do the destructive subcommands write on the first run"}]}
+{"name":"pool_deadlock","category":"gotcha","pinned":true,"correct":{"content":"The connection pool is pinned to a single connection, so a query inside an open transaction deadlocks.","age_days":700},"traps":[{"content":"Raised the driver busy timeout from 1000ms to 5000ms after a flaky test.","age_days":10}],"probes":[{"text":"why does a query inside an open transaction deadlock"}]}
+{"name":"sqlite_driver","category":"dependency","pinned":true,"correct":{"content":"The only SQLite driver is the pure-Go modernc.org/sqlite; cgo is not enabled anywhere in the build.","age_days":180},"traps":[{"content":"Pinned the modernc.org/libc runtime to v1.62.2 for the arm64 build.","age_days":7}],"probes":[{"text":"which sqlite driver is compiled in"}]}

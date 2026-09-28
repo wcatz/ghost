@@ -179,23 +179,51 @@ func (w *Worker) EmbedOne(ctx context.Context, memoryID string) {
 	}
 }
 
-func (w *Worker) processProject(ctx context.Context, projectID string) {
+// projectBatch is how many memories one project sweep embeds. Bounded because
+// a sweep runs unattended over a whole store, and a model change can leave every
+// row in a project unembedded at once.
+const projectBatch = 50
+
+// EmbedPending embeds up to limit of a project's memories that have no vector in
+// this client's identity, and returns how many it wrote. It is the worker's
+// per-project body, exported so a caller that must READ the vector index to do
+// its job can fill it in the same process, synchronously, instead of waiting for
+// a daemon that may never be running.
+//
+// That caller is `ghost supersede` (see cmd/ghost/lifecycle.go): its candidate
+// scan proposes a pair by cosine, so a memory with no vector is not a candidate
+// for anything, and the vectors are written by the worker inside `ghost mcp` —
+// a different, long-lived process. A pass started seconds after a save would
+// otherwise report an empty result for a corpus the user could see, with nothing
+// anywhere saying the index had not caught up. The rule in supersede's
+// SelectCandidates is right and stays; what changes is that the pass no longer
+// has to guess whether the index is ready before it reads it.
+//
+// Best effort, exactly as the sweep is: an unreachable endpoint, a model that is
+// not pulled, or a failed write leaves that memory unembedded, and the caller's
+// own skip rule handles it — so nothing here is an error. The bound keeps a
+// first pass after a model change from embedding a whole corpus in one go; the
+// rest is the sweep's work, and the caller reports what it did not embed.
+func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) int {
 	// Check if Ollama is alive first.
 	if !w.checkAlive(ctx) {
-		return
+		return 0
+	}
+	if limit <= 0 {
+		limit = projectBatch
 	}
 
 	// Asking for this client's own identity is what makes a model change
 	// self-healing: rows whose vector was written by another model come back
 	// here and are re-embedded in bounded batches, off the startup path.
-	ids, err := w.store.UnembeddedMemoryIDs(ctx, projectID, w.client.Identity(), 50)
+	ids, err := w.store.UnembeddedMemoryIDs(ctx, projectID, w.client.Identity(), limit)
 	if err != nil {
 		w.logger.Error("embed: list unembedded", "error", err, "project_id", projectID)
-		return
+		return 0
 	}
 
 	if len(ids) == 0 {
-		return
+		return 0
 	}
 
 	w.logger.Info("embedding memories", "project_id", projectID, "count", len(ids))
@@ -204,7 +232,7 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 	var lastErr error
 	for _, id := range ids {
 		if ctx.Err() != nil {
-			return
+			return embedded
 		}
 
 		content, err := w.store.GetMemoryContent(ctx, id)
@@ -221,7 +249,7 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			// If Ollama went down mid-batch, stop.
 			if !w.checkAlive(ctx) {
 				w.logger.Info("ollama unavailable, pausing embedding", "embedded", embedded)
-				return
+				return embedded
 			}
 			continue
 		}
@@ -243,4 +271,9 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 	if embedded > 0 {
 		w.logger.Info("embedding batch complete", "project_id", projectID, "embedded", embedded)
 	}
+	return embedded
+}
+
+func (w *Worker) processProject(ctx context.Context, projectID string) {
+	w.EmbedPending(ctx, projectID, projectBatch)
 }

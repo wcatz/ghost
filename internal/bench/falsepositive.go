@@ -124,52 +124,6 @@ func resultCosines(ctx context.Context, store *memory.Store, queryVec []float32,
 	return cosines, nil
 }
 
-// countAboveFloor counts the results whose cosine is strictly above floor. It is
-// a function rather than a loop so the boundary rule has a test of its own: real
-// cosines essentially never land exactly on a floor, so the rule cannot be pinned
-// through the corpus, only stated (see FalsePositiveFloors) and asserted here.
-func countAboveFloor(cosines map[string]float32, results []memory.Memory, floor float32) int {
-	above := 0
-	for _, m := range results {
-		if cosines[m.ID] > floor {
-			above++
-		}
-	}
-	return above
-}
-
-// scoredWindow runs the production search for one query and scores every row it
-// returns with that row's true cosine, together with the best of them.
-//
-// Scoring the returned window rather than the vector leg's own top-k is what
-// makes the two halves of the report comparable: "the score of the best thing
-// this query would show you" is one definition, and both the no-answer set and
-// the answerable contrast have to measure it the same way or the gap between
-// them means nothing. The two can genuinely differ — the keyword reservation
-// admits a row the vector leg ranked far down, and that row is what the caller is
-// shown.
-func scoredWindow(ctx context.Context, store *memory.Store, q Query) ([]memory.Memory, map[string]float32, float32, error) {
-	results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	ids := make([]string, len(results))
-	for i, m := range results {
-		ids[i] = m.ID
-	}
-	cosines, err := resultCosines(ctx, store, q.Vector, ids)
-	if err != nil {
-		return nil, nil, 0, err
-	}
-	var top float32
-	for _, c := range cosines {
-		if c > top {
-			top = c
-		}
-	}
-	return results, cosines, top, nil
-}
-
 // FloorCount is what one candidate floor would mean for the no-answer set.
 type FloorCount struct {
 	Floor float32
@@ -179,6 +133,178 @@ type FloorCount struct {
 	// clearing it — an abstention rule at this floor would have to refuse
 	// Queries of the Queries measured to be right every time.
 	Queries int
+	// Rate is Queries as a fraction of the queries measured, which is the
+	// number the report prints: the false-positive rate AT THIS FLOOR. A count
+	// is not comparable across conditions with different query counts, and
+	// Rate beside Queries is what says so out loud.
+	Rate float64
+}
+
+// NoAnswerSummary is one condition's no-answer measurement, aggregated.
+type NoAnswerSummary struct {
+	Condition string
+	Queries   int // no-answer queries measured
+	// MeanResults is the mean number of results returned per query, at scoreK
+	// with no similarity floor configured — today always a full window.
+	MeanResults float64
+	// MeanTop is the mean best returned cosine. It is the score-graded half of
+	// the rate: with the floor at 0 every query is a false positive, so the
+	// rate alone says only that Ghost never abstains, and the mean says how
+	// confident the answers it returned anyway were.
+	MeanTop float64
+	// MaxTop is the highest cosine any no-answer query produced, so it is the floor
+	// that would refuse every one of them. Printed per condition because the legs do
+	// not agree on it, and it is the only per-condition number that can be read as an
+	// abstention threshold rather than as a distribution.
+	MaxTop float64
+	// Floors is one row per configured floor, in FalsePositiveFloors order.
+	Floors []FloorCount
+}
+
+// measureNoAnswer runs one no-answer query through a condition and scores every
+// row it returns with that row's own cosine (see resultCosines for why the score
+// has to come from the stored vector rather than from the leg's own list).
+func measureNoAnswer(ctx context.Context, store *memory.Store, q Query, rank rankFn) (NoAnswerQuery, error) {
+	ranked, err := rank(q)
+	if err != nil {
+		return NoAnswerQuery{}, err
+	}
+	cosines, err := resultCosines(ctx, store, q.Vector, ranked)
+	if err != nil {
+		return NoAnswerQuery{}, err
+	}
+	var top float32
+	for _, c := range cosines {
+		if c > top {
+			top = c
+		}
+	}
+	return NoAnswerQuery{
+		Name: q.Name, Flavor: q.Flavor, Results: len(ranked),
+		Top: float64(top), Cosines: cosines,
+	}, nil
+}
+
+// SummarizeNoAnswer aggregates one condition's no-answer measurements. Every
+// returned row is scored from its own vector, so the floor rows are counts over
+// real scores rather than over a position.
+func SummarizeNoAnswer(condition string, measured []NoAnswerQuery) NoAnswerSummary {
+	sum := NoAnswerSummary{Condition: condition, Queries: len(measured)}
+	if len(measured) == 0 {
+		return sum
+	}
+	rows := make([]FloorCount, len(FalsePositiveFloors))
+	for i, floor := range FalsePositiveFloors {
+		rows[i] = FloorCount{Floor: floor}
+	}
+	n := float64(len(measured))
+	for _, m := range measured {
+		sum.MeanResults += float64(m.Results)
+		sum.MeanTop += m.Top
+		if m.Top > sum.MaxTop {
+			sum.MaxTop = m.Top
+		}
+		for i, floor := range FalsePositiveFloors {
+			hits := countHitsAboveFloor(m.Cosines, floor)
+			rows[i].Results += float64(hits)
+			if hits > 0 {
+				rows[i].Queries++
+			}
+		}
+	}
+	sum.MeanResults /= n
+	sum.MeanTop /= n
+	for i := range rows {
+		rows[i].Results /= n
+		rows[i].Rate = float64(rows[i].Queries) / n
+	}
+	sum.Floors = rows
+	return sum
+}
+
+// countHitsAboveFloor is how many of a query's returned rows clear floor. It is
+// a named function because the same rule is counted two ways in this package —
+// per floor for the rate (does the query leak at all at this floor) and per row
+// for the results-per-query count — and both must use the same strict
+// comparison or the two tables disagree.
+func countHitsAboveFloor(cosines map[string]float32, floor float32) int {
+	hits := 0
+	for _, c := range cosines {
+		if c > floor {
+			hits++
+		}
+	}
+	return hits
+}
+
+// FormatNoAnswer renders the per-condition false-positive table, printed
+// directly under the graded table. The rate columns are per FLOOR, not per
+// shipped setting: `search.min_similarity` ships 0, which refuses nothing, so a
+// single "rate at the shipped floor" column would read 1.000 everywhere and say
+// only that Ghost never abstains. The floors are what make the column graded —
+// they are the band a floor would have to live in — and the mean top cosine is
+// what says how wrong the rows actually were.
+func FormatNoAnswer(summaries []NoAnswerSummary) string {
+	measured := make([]NoAnswerSummary, 0, len(summaries))
+	for _, s := range summaries {
+		if s.Queries > 0 {
+			measured = append(measured, s)
+		}
+	}
+	if len(measured) == 0 {
+		return ""
+	}
+
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "\nno-answer queries (n=%d, nothing in the corpus answers these; report-only, no gate)\n", measured[0].Queries)
+	b.WriteString("  A FALSE POSITIVE is a result returned for a query with no answer, and the false-positive rate is\n")
+	b.WriteString("  the share of queries with at least one returned row above that cosine floor. search.min_similarity\n")
+	b.WriteString("  ships 0, which refuses nothing, so at the shipped setting the rate is 1.000 in every condition;\n")
+	b.WriteString("  the floors below are the graded reading, and they are the band an abstention rule would live in.\n\n")
+	fmt.Fprintf(&b, "  %-14s %8s %11s %8s", "condition", "results", "mean top", "max top")
+	for _, f := range measured[0].Floors {
+		fmt.Fprintf(&b, " %11s", fmt.Sprintf("rate @%.2f", f.Floor))
+	}
+	b.WriteString("\n")
+	for _, s := range measured {
+		// Each row prints its OWN floor set and its own query count, so a
+		// condition that measured a different number of queries cannot inherit
+		// the first row's column headers.
+		fmt.Fprintf(&b, "  %-14s %8.1f %11.3f %8.3f", s.Condition, s.MeanResults, s.MeanTop, s.MaxTop)
+		for _, f := range s.Floors {
+			fmt.Fprintf(&b, " %11.3f", f.Rate)
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// NoAnswerFor returns one condition's no-answer measurement from a completed
+// run, or nil when that condition measured none. It is the seam between the
+// runner (which measured all three conditions) and the deeper report (which is
+// about the shipped hybrid path), so the two tables cannot describe two
+// different searches.
+func NoAnswerFor(results []Result, condition string) []NoAnswerQuery {
+	for _, r := range results {
+		if r.Condition == condition {
+			return r.NoAnswer
+		}
+	}
+	return nil
+}
+
+// PerQueryFor returns one condition's per-query scores from a completed run, or
+// nil when that condition scored nothing. It is the answerable half of the same
+// seam NoAnswerFor is the no-answer half of: the abstention report's answerable
+// contrast reads the shipped path's best returned cosine out of here rather than
+// searching for it a second time.
+func PerQueryFor(results []Result, condition string) []QueryScore {
+	for _, r := range results {
+		if r.Condition == condition {
+			return r.PerQuery
+		}
+	}
+	return nil
 }
 
 // FlavorStat is one flavor of no-answer query, kept apart because the two are
@@ -220,10 +346,21 @@ type FalsePositiveReport struct {
 	Floors  []FloorCount
 }
 
-// FalsePositives runs the production search for every no-answer query and, for
-// contrast, does the same for every answerable one. Each returned row is scored
-// with its own true cosine (see resultCosines), so a row that reached the window
-// on the keyword leg alone is measured rather than assumed to be a non-match.
+// FalsePositives is the deeper half of the no-answer report: the answerable
+// contrast, the per-flavor split, the maximum a floor would have to clear, and
+// what that floor costs. The no-answer half it reports is taken from the runner's
+// own measurement of the shipped hybrid path (Result.NoAnswer) rather than
+// searched a second time, so the two tables cannot describe two different runs.
+//
+// Each returned row was scored with its own true cosine (see resultCosines), so
+// a row that reached the window on the keyword leg alone is measured rather than
+// assumed to be a non-match.
+//
+// answerable must be the per-query record of a run over GRADED queries
+// (Result.PerQuery via PerQueryFor): the runner only records a query it scored,
+// and a query with an empty relevance map is a no-answer measurement instead. The
+// committed corpus's answerable set is graded, so the two arguments come from one
+// Run.
 //
 // One caveat worth stating, because it is the difference between this report and
 // the shipped flag: production applies a configured floor to the vector leg
@@ -231,24 +368,19 @@ type FalsePositiveReport struct {
 // "results above a floor" rows here score every returned row against the floor
 // anyway, which is a stricter diagnostic reading — it answers "how strong are the
 // results a caller actually receives", not "what would the flag do".
-func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerable []Query) (FalsePositiveReport, error) {
+func FalsePositives(noAnswer []NoAnswerQuery, answerable []QueryScore) (FalsePositiveReport, error) {
 	rep := FalsePositiveReport{Queries: len(noAnswer), Answerable: len(answerable)}
 	if len(noAnswer) == 0 {
 		return rep, nil
 	}
 
 	var sumResults, sumTop float64
-	answerableTops := make([]float64, 0, len(answerable))
 	byFlavor := map[string]*FlavorStat{}
 	for _, q := range noAnswer {
-		results, cosines, top, err := scoredWindow(ctx, store, q)
-		if err != nil {
-			return FalsePositiveReport{}, fmt.Errorf("no-answer query %q: %w", q.Name, err)
-		}
-		sumResults += float64(len(results))
-		sumTop += float64(top)
-		if float64(top) > rep.NoAnswerMax {
-			rep.NoAnswerMax = float64(top)
+		sumResults += float64(q.Results)
+		sumTop += q.Top
+		if q.Top > rep.NoAnswerMax {
+			rep.NoAnswerMax = q.Top
 		}
 		stat := byFlavor[q.Flavor]
 		if stat == nil {
@@ -256,10 +388,10 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 			byFlavor[q.Flavor] = stat
 		}
 		stat.Queries++
-		stat.MeanResults += float64(len(results))
-		stat.MeanTop += float64(top)
+		stat.MeanResults += float64(q.Results)
+		stat.MeanTop += q.Top
 		for _, floor := range FalsePositiveFloors {
-			above := countAboveFloor(cosines, results, floor)
+			above := countHitsAboveFloor(q.Cosines, floor)
 			row := floorRow(&rep.Floors, floor)
 			row.Results += float64(above)
 			if above > 0 {
@@ -271,17 +403,24 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 	rep.MeanResults = sumResults / n
 	rep.MeanTop = sumTop / n
 	rep.Flavors = flavorStats(byFlavor)
+	for i := range rep.Floors {
+		// Results is a MEAN (results per query), not a sum, and Rate is a
+		// fraction — the same two numbers SummarizeNoAnswer reports, so the deep
+		// table and the per-condition table cannot disagree about one condition.
+		rep.Floors[i].Results /= n
+		rep.Floors[i].Rate = float64(rep.Floors[i].Queries) / n
+	}
 
 	// The answerable contrast measures the same thing the no-answer set does —
 	// the best cosine among the rows production would return — so the two
-	// distributions differ only in whether the corpus has an answer.
+	// distributions differ only in whether the corpus has an answer. It is read
+	// off the runner's own per-query scores (QueryScore.TopCosine, taken from the
+	// shipped hybrid condition) rather than searched for a second time: same
+	// search, same definition, and one fewer full pass over the corpus.
+	answerableTops := make([]float64, 0, len(answerable))
 	for _, q := range answerable {
-		_, _, top, err := scoredWindow(ctx, store, q)
-		if err != nil {
-			return FalsePositiveReport{}, fmt.Errorf("answerable query %q: %w", q.Name, err)
-		}
-		answerableTops = append(answerableTops, float64(top))
-		rep.AnswerableTop += float64(top)
+		answerableTops = append(answerableTops, q.TopCosine)
+		rep.AnswerableTop += q.TopCosine
 	}
 	if len(answerable) > 0 {
 		rep.AnswerableTop /= float64(len(answerable))
@@ -324,10 +463,21 @@ func floorRow(rows *[]FloorCount, floor float32) *FloorCount {
 	return &(*rows)[len(*rows)-1]
 }
 
-// FormatFalsePositives renders the no-answer baseline.
-func FormatFalsePositives(rep FalsePositiveReport) string {
+// FormatFalsePositives renders the abstention baseline for one condition. The
+// header names the condition because the per-condition false-positive table above
+// it reports all three, and a reader must not take the numbers here for a
+// property of the legs as well as of the shipped path.
+//
+// A report with nothing measured returns nothing rather than a table of zeros: a
+// caller whose no-answer set came back empty (a run with no negatives in it) would
+// otherwise get "mean top cosine 0.000 vs 0.741" and "costs 0/220", which reads as
+// a perfect abstention result rather than as a missing measurement.
+func FormatFalsePositives(rep FalsePositiveReport, condition string) string {
+	if rep.Queries == 0 {
+		return fmt.Sprintf("\nabstention baseline (%s path): not measured, no no-answer queries in this run\n", condition)
+	}
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "\nno-answer queries (n=%d, nothing in the corpus answers these; report-only, no gate)\n", rep.Queries)
+	fmt.Fprintf(&b, "\nabstention baseline (%s path, the shipped ranking)\n", condition)
 	fmt.Fprintf(&b, "  results returned per query   %.1f (window %d, no similarity floor configured)\n", rep.MeanResults, scoreK)
 	fmt.Fprintf(&b, "  mean top cosine             %.3f  vs %.3f for the %d answerable queries\n",
 		rep.MeanTop, rep.AnswerableTop, rep.Answerable)
@@ -339,9 +489,9 @@ func FormatFalsePositives(rep FalsePositiveReport) string {
 			fmt.Fprintf(&b, "  %-12s %4d %16.1f %12.3f\n", f.Flavor, f.Queries, f.MeanResults, f.MeanTop)
 		}
 	}
-	fmt.Fprintf(&b, "\n  %-8s %14s %16s\n", "floor", "results/query", "queries w/ hit")
+	fmt.Fprintf(&b, "\n  %-8s %14s %18s %8s\n", "floor", "results/query", "queries w/ hit", "rate")
 	for _, f := range rep.Floors {
-		fmt.Fprintf(&b, "  %-8.2f %14.2f %10d/%-5d\n", f.Floor, f.Results/float64(rep.Queries), f.Queries, rep.Queries)
+		fmt.Fprintf(&b, "  %-8.2f %14.2f %10d/%-5d %8.3f\n", f.Floor, f.Results, f.Queries, rep.Queries, f.Rate)
 	}
 	return b.String()
 }

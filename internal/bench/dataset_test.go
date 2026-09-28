@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"os"
 	"strings"
@@ -38,7 +39,11 @@ func TestLoadJSONL(t *testing.T) {
 	}
 }
 
-func newBenchStore(t *testing.T) *memory.Store {
+// newBenchStoreWithDB returns the store and the connection behind it, which
+// Seed needs: backdating created_at is not something a store can be asked to do
+// through its API, and seeding a corpus with real ages is the whole point of the
+// ranking-state suite.
+func newBenchStoreWithDB(t *testing.T) (*memory.Store, *sql.DB) {
 	t.Helper()
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
@@ -46,7 +51,7 @@ func newBenchStore(t *testing.T) *memory.Store {
 	}
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	t.Cleanup(func() { _ = store.Close() })
-	return store
+	return store, db
 }
 
 func TestSeedAndRun(t *testing.T) {
@@ -67,7 +72,8 @@ func TestSeedAndRun(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	queries, err := Seed(ctx, newBenchStore(t), ds, vecs)
+	store, db := newBenchStoreWithDB(t)
+	queries, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
@@ -94,13 +100,15 @@ func TestSeedValidation(t *testing.T) {
 	}
 
 	t.Run("missing memory vector", func(t *testing.T) {
-		_, err := Seed(ctx, newBenchStore(t), base, Vectors{"q": {1}})
+		store, db := newBenchStoreWithDB(t)
+		_, err := Seed(ctx, store, db, base, Vectors{"q": {1}})
 		if err == nil || !strings.Contains(err.Error(), "fixture vector for memory") {
 			t.Fatalf("want missing-memory-vector error, got %v", err)
 		}
 	})
 	t.Run("missing query vector", func(t *testing.T) {
-		_, err := Seed(ctx, newBenchStore(t), base, Vectors{"a": {1}})
+		store, db := newBenchStoreWithDB(t)
+		_, err := Seed(ctx, store, db, base, Vectors{"a": {1}})
 		if err == nil || !strings.Contains(err.Error(), "fixture vector for query") {
 			t.Fatalf("want missing-query-vector error, got %v", err)
 		}
@@ -108,7 +116,8 @@ func TestSeedValidation(t *testing.T) {
 	t.Run("unknown relevance key", func(t *testing.T) {
 		ds := base
 		ds.Queries = []QuerySpec{{Name: "q", Text: "x", Rel: map[string]int{"nope": 1}}}
-		_, err := Seed(ctx, newBenchStore(t), ds, Vectors{"a": {1}, "q": {1}})
+		store, db := newBenchStoreWithDB(t)
+		_, err := Seed(ctx, store, db, ds, Vectors{"a": {1}, "q": {1}})
 		if err == nil || !strings.Contains(err.Error(), "unknown memory key") {
 			t.Fatalf("want unknown-key error, got %v", err)
 		}
@@ -119,7 +128,8 @@ func TestSeedValidation(t *testing.T) {
 			{Key: "a", Category: "fact", Content: "x"},
 			{Key: "a", Category: "fact", Content: "y"},
 		}
-		_, err := Seed(ctx, newBenchStore(t), ds, Vectors{"a": {1}, "q": {1}})
+		store, db := newBenchStoreWithDB(t)
+		_, err := Seed(ctx, store, db, ds, Vectors{"a": {1}, "q": {1}})
 		if err == nil || !strings.Contains(err.Error(), "duplicate memory key") {
 			t.Fatalf("want duplicate-key error, got %v", err)
 		}

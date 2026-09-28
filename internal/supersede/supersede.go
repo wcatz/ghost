@@ -142,10 +142,36 @@ type vectorStore interface {
 	MarkSupersedeNeither(ctx context.Context, projectID string, checks map[[2]string]memory.SupersedeCheck) error
 }
 
+// Selection is what one candidate scan read: the ordered pairs it proposes, and
+// how many of the project's memories it could not score at all. Both are needed
+// by a caller that reports the pass, because "0 candidate pairs" means two very
+// different things over a fully indexed corpus and a partly indexed one, and
+// only the scan can tell them apart.
+type Selection struct {
+	Candidates []Candidate
+	// Unscored counts the memories skipped for want of a usable vector: none at
+	// all yet, or one written under a different model, width or task prefix
+	// (memory.Store.GetEmbedding returns nil for both). The pairs THIS scan
+	// proposes are therefore bounded by the part of the project it could score,
+	// and a caller that does not report this number reports a total that
+	// silently omits part of it.
+	//
+	// It is about the scan, not the run: a memory counted here can still be an
+	// endpoint of a pair Run re-proposes, because the reclassify half re-reads
+	// live 'supersedes' edges from their link rows and never looks at a vector.
+	// A caller must therefore scope what it lost to "proposed no new candidate",
+	// never "was in no pair this run considered" — after a model change retires
+	// every vector in a project, both halves describe the same corpus and only
+	// one of the two sentences is true.
+	Unscored int
+}
+
 // SelectCandidates returns the deduped ordered candidate pairs for a project:
 // memories whose cosine similarity is at least threshold, oriented newer→older
 // by updated_at. A pair is emitted once regardless of which endpoint surfaced
-// it. Memories without embeddings are skipped (no similarity signal).
+// it. Memories without embeddings are skipped (no similarity signal) and counted
+// in Selection.Unscored, so the caller can say that part of the project was not
+// read rather than reporting a smaller corpus as if it were the whole one.
 //
 // A pair whose endpoints' scopes conflict is never emitted. The classifier
 // cannot see the difference: it is handed the two note bodies and nothing else,
@@ -171,10 +197,11 @@ type vectorStore interface {
 // a number that reads as "nothing was skipped", which is worse than no number.
 // Run's reclassify filter can see its own pairs and logs each refusal; on the
 // fresh path a refusal shows up as a candidate the pass never spends a call on.
-func SelectCandidates(ctx context.Context, store vectorStore, projectID string, threshold float32) ([]Candidate, error) {
+func SelectCandidates(ctx context.Context, store vectorStore, projectID string, threshold float32) (Selection, error) {
+	var sel Selection
 	mems, err := store.GetAll(ctx, projectID, 100000)
 	if err != nil {
-		return nil, fmt.Errorf("load memories: %w", err)
+		return sel, fmt.Errorf("load memories: %w", err)
 	}
 	byID := make(map[string]memory.Memory, len(mems))
 	for _, m := range mems {
@@ -186,16 +213,19 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 	for _, m := range mems {
 		vec, err := store.GetEmbedding(ctx, m.ID)
 		if err != nil || len(vec) == 0 {
-			continue // no usable embedding → no similarity candidates. A nil
+			sel.Unscored++ // no usable embedding → no similarity candidates. A nil
 			// vector with no error is a memory whose vector belongs to another
 			// vector space (see memory.Store.GetEmbedding); comparing it would
 			// propose pairs from a cosine between two spaces, and each confirmed
-			// one costs a classify call and writes a demoting edge.
+			// one costs a classify call and writes a demoting edge. It is counted
+			// because the memory is then in NO pair this pass could find, and a
+			// total that does not say so reads as a smaller corpus.
+			continue
 		}
 		// +1 because the memory itself is its own nearest neighbor.
 		neighbors, err := store.SearchVectorScoped(ctx, projectID, vec, maxNeighbors+1, m.Scope)
 		if err != nil {
-			return nil, fmt.Errorf("search vector for %s: %w", m.ID, err)
+			return sel, fmt.Errorf("search vector for %s: %w", m.ID, err)
 		}
 		for _, n := range neighbors {
 			if n.MemoryID == m.ID || n.Score < threshold {
@@ -224,7 +254,8 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			})
 		}
 	}
-	return cands, nil
+	sel.Candidates = cands
+	return sel, nil
 }
 
 // orient returns (newer, older) by updated_at — the same freshness signal
@@ -266,6 +297,23 @@ type Result struct {
 	// did not do and reports the same totals as one that found nothing to do
 	// reads as "nothing was skipped".
 	Vetoed int
+	// Unscored counts the project's memories the candidate scan could not score
+	// at all, for want of a usable vector — none yet, or one written under
+	// another model, width or task prefix. The pairs the pass proposed as NEW
+	// candidates are therefore bounded by the part of the project the scan could
+	// read, and a caller that reports them without this one reports a partial
+	// scan in the voice of a complete one. It is the difference between "this
+	// project holds no near-duplicate pair" and "this pass could not read all of
+	// it", and the vectors it is waiting for belong to the embedding worker.
+	//
+	// Only the NEW candidates. A counted memory can still be an endpoint of a
+	// reclassified pair, because that half of the pass works from link rows and
+	// reads no vector — so Reclassified, and the Candidates total that mixes
+	// both halves, are NOT bounded by what the scan could score, and neither is
+	// any verdict counted over such a pair. A report that claims such a memory
+	// is "in no pair this run considered" is wrong the first time a model change
+	// retires a project's vectors and an edited edge comes back for re-judging.
+	Unscored int
 	// ReclassifiedNoWrite counts the reclassify pairs whose --apply effect is
 	// purely destructive: a reversal and a NEITHER both only invalidate the
 	// links they find, so neither re-links the pair.
@@ -367,10 +415,19 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // timestamps are the only signal it has to tell a re-saved stale claim from a
 // genuine later update.
 func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Classified, error) {
-	fresh, err := SelectCandidates(ctx, store, projectID, threshold)
+	sel, err := SelectCandidates(ctx, store, projectID, threshold)
 	if err != nil {
 		return Result{}, nil, err
 	}
+	fresh := sel.Candidates
+	// Carried into Result, which is what the caller reports from: the pass's
+	// totals cover only the memories it could score, and the ones it could not
+	// are the whole difference between "this project holds no near-duplicate
+	// pair" and "this pass could not read all of this project". Nothing in the
+	// pass can fix that — the vectors belong to the embedding worker — but a
+	// caller that knows the number can say so instead of implying a complete
+	// scan over a corpus it never saw.
+	res := Result{Unscored: sel.Unscored}
 	freshKeys := make(map[[2]string]bool, len(fresh))
 	for _, c := range fresh {
 		freshKeys[[2]string{c.NewerID, c.OlderID}] = true
@@ -425,7 +482,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		})
 	}
 
-	res := Result{Candidates: len(all)}
+	res.Candidates = len(all)
 
 	// Existence re-check before any LLM spend: the stop hook spawns
 	// reflect and supersede for the same session, and reflect's

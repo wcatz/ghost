@@ -13,17 +13,40 @@ import (
 // flag off (default) vs on. Report-only — the ship decision is manual until
 // a default flips. Run with GHOST_BENCH_PROBE=1. (FTS/vector ablations do
 // not pass through decayRank, so only hybrid is graded here.)
+//
+// The trap column is reported for BOTH classes of the fixture, and the split is
+// the point rather than tidiness. decayRank multiplies base by
+// DecayFactor(category, ...), which is exactly 1.0 for every never-decay
+// category — so for those scenarios base*decay == base, the second sort is a
+// stable no-op, and taking the top limit*2 by base before re-selecting the top
+// limit by base returns the same set in the same order. **The never-decay half
+// therefore CANNOT move under this flag whatever the ranker does**: that column
+// is arithmetic, not evidence, and reading it as a regression signal reads a
+// tautology. It is printed because it is the check that the flag is not silently
+// reaching a corpus that cannot express the question.
+//
+// The decaying half is the half that CAN move, and since #561 it is the half that
+// exists for the purpose: an old correct memory whose factor is well below 1.0
+// can be rescued by the wider window or lost by it. Its before/after is the
+// informative column, so both are printed and labelled.
 func TestDecayReselectProbe(t *testing.T) {
 	if os.Getenv("GHOST_BENCH_PROBE") == "" {
 		t.Skip("set GHOST_BENCH_PROBE=1 to run the decay-reselect probe")
 	}
 	ctx := context.Background()
 	stale := loadStalenessTestdata(t)
-	traps := loadTrapTestdata(t)
+	all := loadTrapTestdata(t)
+	traps := []struct {
+		label string
+		set   []TrapScenario
+	}{
+		{"never-decay", neverDecayScenarios(all)},
+		{"decaying", decayingScenarios(all)},
+	}
 
 	ds, vecs := loadTestdataDataset(t)
-	store := newBenchStore(t)
-	queries, err := Seed(ctx, store, ds, vecs)
+	store, db := newBenchStoreWithDB(t)
+	queries, err := Seed(ctx, store, db, ds, vecs)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -49,11 +72,13 @@ func TestDecayReselectProbe(t *testing.T) {
 		t.Logf("staleness fresh-found=%.3f fresh-wins=%.3f",
 			staleFound(so), freshWins(so))
 
-		to, err := RunRecencyTrap(ctx, traps, p)
-		if err != nil {
-			t.Fatalf("trap: %v", err)
+		for _, h := range traps {
+			to, err := RunRecencyTrap(ctx, h.set, p)
+			if err != nil {
+				t.Fatalf("trap %s: %v", h.label, err)
+			}
+			t.Logf("trap correct-wins (%s, n=%d)=%.3f", h.label, len(h.set), TrapCorrectWins(to))
 		}
-		t.Logf("trap correct-wins=%.3f", TrapCorrectWins(to))
 	}
 
 	run(false)
