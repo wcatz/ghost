@@ -496,31 +496,45 @@ func TestGooseIsolationCarriesASymlinkedConfigRoot(t *testing.T) {
 // other side of the same branch, and neither test passes if the two are merged
 // into a single "not a directory" test.
 func TestGooseIsolationRefusesABrokenSymlinkedConfigRoot(t *testing.T) {
-	cases := map[string]func(t *testing.T, dir string) string{
-		"a link to a regular file": func(t *testing.T, dir string) string {
-			target := filepath.Join(dir, "elsewhere.yaml")
-			if err := os.WriteFile(target, []byte("mode: smart\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			link := filepath.Join(dir, "goose")
-			if err := os.Symlink(target, link); err != nil {
-				t.Skipf("this host cannot create a symlink: %v", err)
-			}
-			return link
+	cases := map[string]struct {
+		stage func(t *testing.T, dir string) string
+		// wantTarget is the base name the message must carry, "" when the case
+		// has no readable target to name.
+		wantTarget string
+	}{
+		"a link to a regular file": {
+			stage: func(t *testing.T, dir string) string {
+				target := filepath.Join(dir, "elsewhere.yaml")
+				if err := os.WriteFile(target, []byte("mode: smart\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				link := filepath.Join(dir, "goose")
+				if err := os.Symlink(target, link); err != nil {
+					t.Skipf("this host cannot create a symlink: %v", err)
+				}
+				return link
+			},
+			// FileInfo.Name() from the stat is the base name of the path the
+			// stat was GIVEN, which is the link — so a message built from it
+			// names "goose" twice and never the file that is actually wrong.
+			wantTarget: "elsewhere.yaml",
 		},
-		"a link whose target moved": func(t *testing.T, dir string) string {
-			link := filepath.Join(dir, "goose")
-			if err := os.Symlink(filepath.Join(dir, "gone"), link); err != nil {
-				t.Skipf("this host cannot create a symlink: %v", err)
-			}
-			return link
+		"a link whose target moved": {
+			stage: func(t *testing.T, dir string) string {
+				link := filepath.Join(dir, "goose")
+				if err := os.Symlink(filepath.Join(dir, "gone"), link); err != nil {
+					t.Skipf("this host cannot create a symlink: %v", err)
+				}
+				return link
+			},
+			wantTarget: "gone",
 		},
 	}
 
-	for name, stage := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
-			link := stage(t, t.TempDir())
+			link := tc.stage(t, t.TempDir())
 			if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -539,6 +553,21 @@ func TestGooseIsolationRefusesABrokenSymlinkedConfigRoot(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), leaf) {
 				t.Errorf("error %q does not name the path (%s)", err, leaf)
+			}
+			if tc.wantTarget != "" && !strings.Contains(err.Error(), tc.wantTarget) {
+				t.Errorf("error %q does not name what the link points at (%s), so it names a path that is not the broken one", err, tc.wantTarget)
+			}
+			// A sentinel, not a wrapped platform error. For a link whose target
+			// moved, os.Stat fails ENOENT while the path in the message is the
+			// LINK, which is present — so wrapping that errno would make this
+			// read as "merely unpopulated" and errors.Is as a missing path, the
+			// misreading the walk branch two dozen lines up is written to
+			// prevent and its own test pins against.
+			if !errors.Is(err, errGooseConfigBrokenLink) {
+				t.Errorf("error %q does not wrap errGooseConfigBrokenLink, so a caller cannot tell this from any other isolation failure", err)
+			}
+			if errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("error %q reads as 'not there' when the link is present and something else is missing", err)
 			}
 			if _, err := os.Lstat(filepath.Join(isolated, ".config", "goose")); !os.IsNotExist(err) {
 				t.Errorf("the broken link was carried into the isolated home anyway, Lstat err = %v", err)

@@ -271,6 +271,19 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 	return linkGooseConfigDirsWith(home, env, homeDir, os.Lstat, os.Stat)
 }
 
+// errGooseConfigBrokenLink reports a candidate config root that is a symlink
+// nothing can read a directory through — a link to a regular file, or one whose
+// target has moved.
+//
+// It is a sentinel rather than a wrapped platform error on purpose. For a
+// dangling link os.Stat fails with ENOENT, and the path in the message is the
+// LINK, which is present; wrapping that errno would make
+// errors.Is(err, fs.ErrNotExist) true for a path that exists, which is the
+// misreading the wording above firstExistingAncestor exists to prevent and
+// which TestGooseIsolationNamesTheDirectoryItCouldNotProbe pins against. The
+// errno is still in the message, as text — it is the diagnosis, not a contract.
+var errGooseConfigBrokenLink = errors.New("config root is a symlink that does not resolve to a directory")
+
 // linkGooseConfigDirsWith takes the probe as a parameter so a test can state a
 // classification instead of arranging one. Arranging the interesting case is
 // not possible everywhere: Windows reports "a file where a directory belongs"
@@ -419,11 +432,30 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProb
 			// A carried link is NOT routed to the copy fallback: that one is
 			// reached only after os.Symlink fails, and nothing here fails.
 			followed, followErr := walkProbe(source)
+			// The target is read for the MESSAGE, and read before the branch
+			// because the dangling case is the one that most needs it: the link
+			// is present and its target is not, so "the link points at X" is the
+			// whole diagnosis. It is also the fact a dotfiles user needs — which
+			// path in their repository is no longer where the link says it is.
+			//
+			// It cannot come from followed.Name(), which is the base name of the
+			// path the stat was GIVEN — the link itself — so a message built from
+			// it would name the same path twice and never what is broken.
+			linkTarget := ""
+			if t, lerr := os.Readlink(source); lerr == nil {
+				linkTarget = t
+			}
 			switch {
 			case followErr != nil:
-				return fmt.Errorf("goose isolated config %s: cannot read %s through the link: %w", source, source, followErr)
+				if linkTarget != "" {
+					return fmt.Errorf("goose isolated config %s: %w (it points at %s): %v", source, errGooseConfigBrokenLink, linkTarget, followErr)
+				}
+				return fmt.Errorf("goose isolated config %s: %w: %v", source, errGooseConfigBrokenLink, followErr)
 			case !followed.IsDir():
-				return fmt.Errorf("goose isolated config %s: %s is a link to %s, which is not a directory", source, source, followed.Name())
+				if linkTarget != "" {
+					return fmt.Errorf("goose isolated config %s: %w (it points at %s)", source, errGooseConfigBrokenLink, linkTarget)
+				}
+				return fmt.Errorf("goose isolated config %s: %w", source, errGooseConfigBrokenLink)
 			}
 		} else if !info.IsDir() {
 			// The probe ANSWERED, so nothing below would ever ask whether what
