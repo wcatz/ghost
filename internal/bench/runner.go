@@ -24,6 +24,18 @@ type Query struct {
 	Flavor    string
 }
 
+// QueryScore is one graded query's score under one condition. It is kept per
+// query rather than only as a mean because a comparison between two conditions
+// has to be PAIRED — the same query under each — to have any power. An unpaired
+// comparison of two means over 220 queries carries a confidence interval an
+// order of magnitude wider than the difference being claimed, which is what made
+// a 0.017 margin look like a result.
+type QueryScore struct {
+	Name string
+	NDCG float64
+	MRR  float64
+}
+
 // Result holds aggregate metrics for one search condition over a query set.
 type Result struct {
 	Condition string
@@ -33,6 +45,11 @@ type Result struct {
 	Recall10  float64
 	MRR10     float64
 	NDCG10    float64
+	// PerQuery holds this condition's score for every scored query, in
+	// query-set order. A slice rather than a map because the pairing is
+	// positional and a map would let a missing or duplicated key line two
+	// different queries up and report a difference between them.
+	PerQuery []QueryScore
 	// NoAnswer holds what this condition returned for the query set's
 	// no-answer queries — the ones with an empty relevance map, which are
 	// undefined for every ratio above and are therefore measured instead of
@@ -130,6 +147,11 @@ func runCondition(ctx context.Context, store *memory.Store, name string, queries
 		sumR10 += RecallAtK(ranked, q.Rel, 10)
 		sumMRR += ReciprocalRankAtK(ranked, q.Rel, 10)
 		sumNDCG += NDCGAtK(ranked, q.Rel, 10)
+		res.PerQuery = append(res.PerQuery, QueryScore{
+			Name: q.Name,
+			NDCG: NDCGAtK(ranked, q.Rel, 10),
+			MRR:  ReciprocalRankAtK(ranked, q.Rel, 10),
+		})
 	}
 	if res.Queries > 0 {
 		n := float64(res.Queries)
