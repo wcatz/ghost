@@ -262,34 +262,13 @@ func TestRankedStateSuiteIsNotInert(t *testing.T) {
 		t.Error("the shipped configuration lost no probe relative to the demote alone, so decay and the demote do not interact on this corpus")
 	}
 
-	// The headline table, same four configurations, one number. The assertion is
-	// that the four are EQUAL — that the headline corpus is still the inert
-	// reference this suite is compared against. It is deliberately not an
-	// assertion that they equal 0.818: pinning the value here would duplicate
-	// TestBenchRegressionFloors' floors, and the claim this suite needs is the
-	// invariance, not the level.
-	headline, hvecs := loadTestdataDataset(t)
-	hstore, hdb := newSeedingStore(t)
-	t.Cleanup(func() { _ = hstore.Close() })
-	hqueries, err := Seed(ctx, hstore, hdb, headline, hvecs)
-	if err != nil {
-		t.Fatalf("seed headline: %v", err)
-	}
-	var headlineNDCG []float64
-	for _, run := range runs {
-		res, err := RunRankedState(ctx, hstore, hqueries, run.Config.Params)
-		if err != nil {
-			t.Fatalf("headline %s: %v", run.Config.Label, err)
-		}
-		headlineNDCG = append(headlineNDCG, res[2].NDCG10)
-	}
-	for i := 1; i < len(headlineNDCG); i++ {
-		if headlineNDCG[i] != headlineNDCG[0] {
-			t.Errorf("headline hybrid NDCG@10 moved under %s (%.4f vs %.4f): the headline corpus now carries state, "+
-				"so it is no longer the inert reference this suite is compared against", runs[i].Config.Label, headlineNDCG[i], headlineNDCG[0])
-		}
-	}
-	t.Logf("headline hybrid NDCG@10, all four configurations: %.4f (inert, as intended)", headlineNDCG[0])
+	// The headline corpus is deliberately NOT checked here. It is 547 memories
+	// with 768-dim vectors, and seeding it a seventh time (six other tests
+	// already do) to re-prove a property another test owns put this package over
+	// CI's 10-minute timeout. The claim lives where the corpus is already
+	// loaded: TestDecayDoesNotPerturbGradedBench now runs all four
+	// configurations over it and asserts the four are equal, so the comparison
+	// cannot rot either.
 }
 
 // rankMoved reports whether a configuration changed either of the two columns the
