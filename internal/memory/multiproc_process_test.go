@@ -302,9 +302,10 @@ func truncate(s string) string {
 // The invariants, none of which is "nothing crashed":
 //
 //   - every process exits successfully, and no SQLITE_BUSY or
-//     SQLITE_BUSY_SNAPSHOT reaches any of them. Nothing in this test retries a
-//     database error, so a pass is evidence that the documented 5s busy timeout
-//     on its own carried the contention rather than that a backoff hid it.
+//     SQLITE_BUSY_SNAPSHOT reaches any of them. The test retries nothing; the
+//     save path absorbs exactly one BEGIN refusal by design (Store.beginWrite),
+//     so a pass means the documented 5s busy timeout plus that one attempt
+//     carried the contention, not that an unbounded backoff hid it.
 //   - every write a process reported successful left a row, checked afterwards
 //     against a fresh handle by id. A writer that gave up under contention is a
 //     lost memory, and a lost memory is invisible until much later.
