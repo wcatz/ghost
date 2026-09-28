@@ -774,7 +774,6 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 			// The 0-based rank, recorded where fusion read the leg's order —
 			// the same order RRF awarded from, so the two cannot disagree.
 			t.FTSRank = rank
-			t.Scored = true
 		}
 	}
 	for rank, scored := range vecResults {
@@ -783,7 +782,6 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 		if t := p.trace.row(scored.MemoryID); t != nil {
 			t.VectorRank = rank
 			t.VectorScore = float64(scored.Score)
-			t.Scored = true
 		}
 		// Only fill in scope from the vector leg when the keyword leg did not
 		// supply it: both describe the same row, so they agree, and a nil map
@@ -1119,17 +1117,15 @@ func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, q
 				// The project travels with it: the row belongs to one whether or
 				// not it was eligible, and a floor-dropped row reporting no
 				// project at all would be indistinguishable from a row the legs
-				// never attributed to one.
+				// never attributed to one. StatusFactor is deliberately left at the
+				// 1.0 default — no demotion RAN on this row — which keeps one
+				// meaning for the field across the whole payload. Whether this row
+				// is a shared one that WOULD be demoted is carried by row_project
+				// beside it, and floor_dropped says why nothing was applied; a
+				// hypothetical factor here would mean a row whose rrf_score is 0
+				// carries a number meant to be multiplied into it.
 				t.RowProject = v.ProjectID
 				t.ProjectMatch = p.ProjectID == "" || v.ProjectID == p.ProjectID
-				// StatusFactor comes from the same function demoteStatus uses
-				// rather than a hardcoded 1.0, because 1.0 beside
-				// project_match=false is the one combination this row cannot be: a
-				// shared row in a project search IS status-demoted, it simply never
-				// got far enough for the demotion to run. Reporting the factor that
-				// applies to the row is what a reader needs; "nothing was done" is
-				// true of the scoring and misleading about the row.
-				t.StatusFactor = statusDemotionFactor(v.Resolved, v.ProjectID, p.ProjectID)
 			}
 		}
 	}

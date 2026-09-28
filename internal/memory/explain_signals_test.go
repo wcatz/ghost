@@ -385,14 +385,18 @@ func TestExplainProjectMatchDistinguishesASharedRow(t *testing.T) {
 	}
 }
 
-// TestExplainFloorDroppedSharedRowKeepsItsStatusFactor: a candidate the vector
-// floor removes never reaches fusion, so no demotion ever runs on it — and the
-// floor site is therefore the only place its status can be recorded. Getting
-// that wrong produces the one combination a reader cannot act on: a shared row
-// that is not a project match and reports status_factor=1.0, which reads as
-// "this is a _global row and nothing was done about it" when the demotion is
-// precisely what would have happened.
-func TestExplainFloorDroppedSharedRowKeepsItsStatusFactor(t *testing.T) {
+// TestExplainFloorDroppedSharedRowReportsNoAppliedDemotion: a candidate the
+// vector floor removes never reaches fusion, so no demotion ever runs on it — and
+// the floor site is therefore the only place it can be recorded.
+//
+// The assertion is that status_factor stays 1.0, which looks wrong until the
+// alternative is priced: a hypothetical factor beside an rrf_score of 0 invites an
+// agent to multiply a number that ranks nothing, and gives the field a second
+// meaning inside one payload while the jsonschema description, docs/usage.md and
+// the ExplainRow doc all say it is the factor the ranking used. The shared-row
+// fact travels on row_project, and floor_dropped is what says nothing was applied
+// — two fields that each mean one thing, rather than one that means two.
+func TestExplainFloorDroppedSharedRowReportsNoAppliedDemotion(t *testing.T) {
 	store, ctx := setupTestStore(t)
 	if err := store.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
 		t.Fatalf("EnsureProject(_global): %v", err)
@@ -438,14 +442,18 @@ func TestExplainFloorDroppedSharedRowKeepsItsStatusFactor(t *testing.T) {
 			"_global: it belongs to no searched project however the floor judged it",
 			row.ProjectMatch, row.RowProject)
 	}
-	// The whole point: the factor that WOULD have applied, from the one function
-	// the fusion uses. A hardcoded 1.0 here is the "claim nothing acted on" the
-	// field's doc rules out.
-	if row.StatusFactor != globalDemotionFactor {
-		t.Errorf("the floor-dropped shared row's status_factor = %v, want %v: the demotion never RAN on "+
-			"this row, but it is the factor that applies to it, and 1.0 beside project_match=false "+
-			"reads as a demotion that was considered and declined",
-			row.StatusFactor, globalDemotionFactor)
+	// The one-meaning contract: no demotion ran, so the applied factor is 1.0,
+	// and the shared-row fact is on row_project rather than smuggled into a
+	// multiplier meant for a score that does not exist.
+	if row.StatusFactor != 1.0 {
+		t.Errorf("the floor-dropped row's status_factor = %v, want 1.0: no demotion was applied to it, "+
+			"and reporting the factor it WOULD carry puts a multiplier beside an rrf_score of 0 — the field "+
+			"is documented, in the jsonschema description and in docs/usage.md, as the factor the ranking used",
+			row.StatusFactor)
+	}
+	if row.RRFScore != 0 {
+		t.Errorf("a never-scored row reports rrf_score = %v, want 0: fusion gave it no score, and a "+
+			"non-zero one would claim otherwise", row.RRFScore)
 	}
 	// And the payload must not claim a demotion it never applied. Every row
 	// fusion actually scored here is a live project row, so nothing was

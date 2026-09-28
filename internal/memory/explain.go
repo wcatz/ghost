@@ -40,15 +40,17 @@ type ExplainRow struct {
 	VectorRank  int     `json:"vector_rank"`  // -1 when the vector leg had no match
 	VectorScore float64 `json:"vector_score"` // cosine; -1 when absent
 	RRFScore    float64 `json:"rrf_score"`    // base before decay: 1/(K+rank+1) when no vector leg fused, the weighted sum otherwise
-	// StatusFactor is the multiplicative resolved/_global demotion — 1.0, 0.5 or
-	// 0.25 — applied to rrf_score before the cut; 1.0 means neither applies.
+	// StatusFactor is the multiplicative resolved/_global demotion the ranking
+	// APPLIED to rrf_score before the cut — 1.0, 0.5 or 0.25, and 1.0 when neither
+	// applies.
 	//
-	// For a row the ranking never scored (the vector floor removed it, so no
-	// demotion ever ran on it) it is the factor that WOULD apply to that row,
-	// from the same function the fusion uses. A hardcoded 1.0 there would pair
-	// with project_match=false on a shared row into the one combination a reader
-	// cannot act on — a project row that is not a match, and was not demoted for
-	// it. "No demotion ran" is true of the scoring and misleading about the row.
+	// 1.0 also covers a row the ranking never scored: the vector floor removed it
+	// before fusion, so no demotion ran on it at all. The field means one thing
+	// everywhere for that reason — reporting the factor a never-scored row WOULD
+	// carry puts a multiplier beside an rrf_score of 0, and the payload's own
+	// contract says every number in it is one the ranking used. Whether such a row
+	// is a shared one is carried by row_project beside it, and floor_dropped is
+	// the field that says nothing was applied.
 	StatusFactor         float64 `json:"status_factor"`
 	DecayFactor          float64 `json:"decay_factor"`           // category/age multiplier applied to the base
 	AgeDays              float64 `json:"age_days"`               //
@@ -384,20 +386,19 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			// Unreachable while the trace covers every leg row, which it does: the
 			// floor site stamps the rows fusion never saw. Kept because a nil
 			// dereference in a diagnostic path is a worse failure than a
-			// conservative row. Both axes come from the one decision function
-			// rather than from hardcoded values, so a fallback row reports what the
-			// ranking WOULD have decided about it: project_match=false beside
-			// status_factor=1.0 is the combination a reader cannot act on, and it is
-			// exactly what a _global row in a project search would get wrong.
+			// conservative row. StatusFactor stays at its 1.0 default — no demotion
+			// ran on a row nothing scored — so the field means one thing across the
+			// whole payload; the project axis is still stamped from the hydrated
+			// row, because project_match is a statement about the row and not about
+			// whether it was scored.
 			row.FTSRank, row.VectorRank, row.VectorScore = -1, -1, -1
 			row.AgeDays = ageDays(m.CreatedAt, now)
 			row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
 			row.RowProject = m.ProjectID
 			row.ProjectMatch = p.ProjectID == "" || m.ProjectID == p.ProjectID
-			row.StatusFactor = statusDemotionFactor(m.ResolvedAt != nil, m.ProjectID, p.ProjectID)
 			row.ScopeMatched = true
 		}
-		statusDemoted = statusDemoted || (t != nil && t.Scored && row.StatusFactor != 1.0)
+		statusDemoted = statusDemoted || row.StatusFactor != 1.0
 
 		// Validity is reported, never applied: the search ranking does not read
 		// it, so the state is the row's own currency and the penalty is zero
@@ -434,12 +435,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		ex.Rows = append(ex.Rows, row)
 	}
 	if statusDemoted {
-		// Only a row fusion actually SCORED can set the flag, so this sentence is
-		// only ever a claim about rows whose score was multiplied. A row the
-		// vector floor removed carries a status factor too — it would be demoted —
-		// but nothing multiplied its rrf_score, and a note saying otherwise is a
-		// claim about a decision the ranking never made.
-		ex.Notes = append(ex.Notes, "status_factor is applied to the fused score inside window selection, before the cut: multiply rrf_score by status_factor for the score the window actually ranked on (decay_factor then multiplies that). A candidate the vector floor removed before fusion carries a status_factor too — the factor that would apply to it — but nothing multiplied its rrf_score, which is absent there")
+		ex.Notes = append(ex.Notes, "status_factor is applied to the fused score inside window selection, before the cut: multiply rrf_score by status_factor for the score the window actually ranked on (decay_factor then multiplies that)")
 	}
 	// The budget is applied last, so it sees every row the diagnosis produced,
 	// and the marker is attached before the notes so it reads first: a note list

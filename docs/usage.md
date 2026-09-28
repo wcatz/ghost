@@ -98,6 +98,12 @@ axes that decide eligibility:
 - `keyword_reserved`, `took_slot_from` and `displaced_by` — a keyword-only hit can
   enter the result window even though its score is below the cut, and no score
   explains that; these say so, and name the row that lost its slot.
+- `floor_dropped` and `floor_score` — a candidate the vector similarity floor
+  removed before fusion, with the cosine that did it. Such a row also carries the
+  sentinels for a row nothing scored: `rrf_score: 0` and `status_factor: 1.0`,
+  because no demotion was ever applied to it. `row_project` still says whose row
+  it is, so a shared row is visible as one without the field that ranks anything
+  carrying a hypothetical.
 - `superseded_by` and `near_duplicate_of` — the id of the specific memory behind
   each window-scoped demotion. The penalty counts beside them say how many, these
   say which.

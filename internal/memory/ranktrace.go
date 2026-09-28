@@ -48,14 +48,6 @@ type tracedCandidate struct {
 	// VectorScore is the cosine the vector leg measured, or -1 when that leg did
 	// not score the row.
 	VectorScore float64
-	// Scored says fusion reached this candidate and gave it a fused score, which
-	// is what demoteStatus then acted on. It is the distinction the payload needs
-	// between a factor the ranking APPLIED and the factor that merely applies to
-	// a row: a floor-dropped candidate carries a status factor (it is a shared
-	// row and would be demoted) but no score was ever multiplied by it, so a note
-	// reading "multiply rrf_score by status_factor" is only true of the scored
-	// rows.
-	Scored bool
 	// Base is the fused score before status demotion: the RRF sum of the two
 	// legs' weighted rank terms. Score is Base after the status factor, which is
 	// the number window selection actually cut on.
