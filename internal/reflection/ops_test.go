@@ -739,6 +739,26 @@ func TestReaderComplaintWithholdsAValueFromTheReasonToo(t *testing.T) {
 		})
 	}
 
+	// The mirror direction, and the one a lower-fold-only gate misses. The
+	// free-form drop tail is probed in the spelling the MODEL WROTE, so a
+	// lower-case AKIA key — which secret.Detect only recognises upper-cased,
+	// since its rule is `(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}` — reaches the gate
+	// with neither the original nor the lower-folded spelling matching. The
+	// superseded-by case below is the same token in the other position: the parser
+	// upper-cases that one, so it IS caught there. Both directions are reachable,
+	// which is what makes the gate's third probe load-bearing.
+	t.Run("free-form drop reason holding a lower-case upper-only token", func(t *testing.T) {
+		const akia = "akiaiosfodnn7example"
+		err := opErr(t, opInput(), `{"ops":["drop `+opID1+` reason: the deploy token is `+akia+`"]}`)
+		if err == nil {
+			t.Fatal("a free-form drop reason was accepted")
+		}
+		safe := readerComplaintForLog(err)
+		if strings.Contains(strings.ToUpper(safe), strings.ToUpper(akia)) {
+			t.Errorf("safe rendering carries an upper-only-shaped token the lower fold missed:\n%s", safe)
+		}
+	})
+
 	// A third site, and the one a reader is most likely to assume is covered by
 	// the other two: a `superseded by` TARGET. It is a different executeOps
 	// branch from the unknown id above, quoting a different fragment, and

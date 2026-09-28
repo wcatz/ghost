@@ -201,22 +201,35 @@ func safeTierError(err error) string {
 // call site — see previewContent for why. The detection runs BEFORE the clip, so
 // a value that straddles the boundary is judged whole.
 func clipOpText(s string) string {
-	// Probed in BOTH cases, and neither probe is redundant. secret.Detect matches
-	// value shapes in the spelling it is given, and the two directions are not
-	// symmetric: `ghp_…` is only recognised lower-cased, `AKIA…` only upper-cased.
-	// The parser also upper-cases a supersession's target so it coincides with the
-	// stored spelling (hex(randomblob) renders upper-case), so a model whose
-	// hallucinated target IS a token arrives here already folded — and a single
-	// probe in the original case missed exactly the fragment that fold created.
-	// A credential is a credential in either case, and this function's only
-	// question is whether the fragment is safe to print, so it asks in both.
-	// A stored id (32 hex characters) matches neither, so this withholds nothing
-	// the diagnostics actually need.
+	// Probed in all THREE spellings, and none of the three is redundant.
+	// secret.Detect matches a value shape in the spelling it is given, and the
+	// rules do not agree on a case: `gh[pousr]_` needs the lower literal, while
+	// `AKIA|ASIA|ABIA|ACCA`+16 upper, `AGE-SECRET-KEY-1…` and `AIza…` likewise —
+	// so folding in one direction cannot cover the other, and folding DOWN a
+	// lower-case AKIA is a no-op, which is how it reached this function in the
+	// first place.
+	//
+	// Both directions are reachable from model text. The parser upper-cases a
+	// supersession's target so it coincides with the stored spelling
+	// (hex(randomblob) renders upper-case), which HIDES a `gh[pousr]_` token from
+	// an original-case-only probe; and the free-form drop tail and the verb are
+	// taken in the spelling the model wrote, which HIDES an `AKIA…` token from a
+	// lower-fold-only probe. A credential is a credential in any case, and this
+	// function's only question is whether the fragment is safe to print.
+	//
+	// A stored id is 32 hex characters and matches none of the three (no rule
+	// needs 32 hex, and it carries none of the prefixes), so the extra probes
+	// withhold nothing a diagnostic needs.
 	if finding, ok := secret.Detect(s); ok {
 		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(s))
 	}
 	if lower := strings.ToLower(s); lower != s {
 		if finding, ok := secret.Detect(lower); ok {
+			return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(s))
+		}
+	}
+	if upper := strings.ToUpper(s); upper != s {
+		if finding, ok := secret.Detect(upper); ok {
 			return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(s))
 		}
 	}
