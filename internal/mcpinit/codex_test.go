@@ -1075,7 +1075,7 @@ func TestRunCodex_TOMLRepairKeepsCRLF(t *testing.T) {
 // reading — a mixed file keeps its mix — is what the code was originally
 // described as doing, and it is not what it does.
 //
-// The fixture is ONE CRLF line against FIVE bare-LF ones, so it also pins WHICH
+// The fixture is ONE CRLF line against SIX bare-LF ones, so it also pins WHICH
 // rule: a majority rule picks LF for this fixture, and the test then fails
 // because `want` is all-CRLF. The rule is presence, on the reasoning in
 // installCodexMCP — a config carrying any CRLF was written by something on
@@ -1084,7 +1084,7 @@ func TestRunCodex_TOMLRepairNormalisesAMixedEndingFile(t *testing.T) {
 	home, _ := setupCodexTestEnv(t)
 	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
-	// One CRLF, five LF.
+	// One CRLF, six LF.
 	seed := "[mcp_servers.ghost]\r\n" +
 		"command = '/old/install/ghost'\n" +
 		"args = [\"mcp\", \"--stale\"]\n" +
