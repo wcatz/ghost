@@ -290,7 +290,7 @@ The dry run is the same transaction as the apply, rolled back instead of committ
 
 **Nothing in Ghost runs this for you.** No lifecycle pass, no hook, no scheduler calls it. A prune removes memories, so it happens when a person asks for it, and the default run asks first.
 
-One consequence worth knowing: `ghost export` / `ghost import` do not carry the tier, so a memory that made the round trip comes back as `project` — consolidatable, and never pruned. An artifact is a file that arrived from somewhere, and a tier is a claim about a memory's owner rather than part of its text.
+Two consequences worth knowing, both the same reason: a tier is a claim about a memory's owner rather than part of its text, and nothing that replays text carries one. `ghost export` / `ghost import` do not carry it, so a memory that made the round trip comes back as `project` — consolidatable, and never pruned. And a memory a consolidation WRITES is a `project` row: merging three facts into one does not make the result keep-forever, because a tier the model never chose is not a protection. `ghost reflect --restore` revives a deleted memory as `project` for the same reason — neither the snapshot nor the change log records a tier, so there is nothing to restore one from.
 
 ## Project operations
 
