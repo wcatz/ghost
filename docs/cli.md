@@ -27,7 +27,7 @@ $ echo $?
 2
 ```
 
-The same shape applies at every level: `ghost mcp nope` and `ghost project` (no subcommand) exit `2` the same way, `ghost frobnicate` names the top level and shows the command list, and bare `ghost` reports that no command was given. A command group with a default action is the one exception — bare `ghost mcp` starts the server, because that is what every MCP client spawns.
+The same shape applies at every level: `ghost mcp nope` and `ghost project` (no subcommand) exit `2` the same way, `ghost frobnicate` names the top level and shows the command list, and bare `ghost` reports that no command was given. Two command groups have a default action — bare `ghost mcp` starts the server and bare `ghost backup` takes the snapshot — because both bare forms are invocations a user is told to type.
 
 A word after a command that takes an *operand* is not a subcommand and is never reported as an unknown one: `ghost history <memory-id>`, `ghost reflect <project>` and `ghost import <file>` all take the word as the thing they were asked about, and their own parsers report an operand they cannot use — a missing memory id (`ghost history`), a second project (`ghost resolve`), a file that is not there (`ghost import`), an unknown flag. `ghost reflect` is the exception among those parsers and keeps its historical behaviour: given two positionals it consolidates the last one, without a diagnostic. An unknown **flag** is not a routing error either, and never exits `2` — the command was found, so what answers the flag is that command's own parser: `ghost bench --wat` and `ghost upgrade --wat` reject the flag — an unknown flag and an unknown argument respectively — and exit `1`, while `ghost reflect --wat` ignores an unknown flag, as it always has.
 
@@ -315,6 +315,7 @@ The command prints the path, the file size, and the row count of each table it c
 
 ```text
 backed up ~/.local/share/ghost/ghost.db.backup-20260926T153207Z (204800 bytes)
+  manifest:     ~/.local/share/ghost/ghost.db.backup-20260926T153207Z.manifest.json
   projects:     1
   memories:     4
   memory_links: 1
@@ -329,7 +330,100 @@ The file is created at `0600` **before** a byte of the snapshot is written to it
 
 A vacuum that fails removes its own reservation, so a retry is not blocked by an empty leftover this run created.
 
-To restore: stop Ghost, remove `ghost.db`, `ghost.db-wal` and `ghost.db-shm` from the data directory, move the snapshot in as `ghost.db`, and start Ghost again. Ghost migrates the restored file on the next open, taking a pre-migration copy first.
+To restore: run [`ghost backup verify`](#ghost-backup-verify) on the copy first, then stop Ghost, remove `ghost.db`, `ghost.db-wal` and `ghost.db-shm` from the data directory, move the snapshot in as `ghost.db`, and start Ghost again. Ghost migrates the restored file on the next open, taking a pre-migration copy first.
+
+#### The sidecar manifest
+
+Every backup also writes `<snapshot>.manifest.json` beside the snapshot, and the report names it:
+
+```json
+{
+  "manifest_version": 1,
+  "schema_version": 18,
+  "created_at": "2026-09-26T15:32:07Z",
+  "database": "ghost.db.backup-20260926T153207Z",
+  "bytes": 204800,
+  "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "counts": {
+    "projects": 1,
+    "memories": 4,
+    "memory_links": 1,
+    "tasks": 1,
+    "decisions": 1
+  }
+}
+```
+
+`manifest_version` is the shape of this document and moves only when a field changes meaning; `schema_version` is the database schema the snapshot was written at, and is what a restore is checked against. `counts` are the same five numbers the report printed, counted from the snapshot, so the two can never disagree about what a backup holds.
+
+`bytes` and `sha256` are the point of the file. A copy that opens is not much of a promise — SQLite will open a file whose header was never finalised, and every row count will read correctly out of one. The hash is the only thing that notices a change to bytes the database does not read, which is why it is recorded at backup time rather than computed on demand.
+
+The manifest is at `0600` before a byte of it is written, like the snapshot: it is a full description of the memory database, and a description is not something to leave at the width a create-then-chmod would pass through. The mode is set with an explicit `chmod` as well as through the open, because the open mode applies only to a file being *created* — and a manifest is replaced rather than refused, so the replacing path is the one where it would otherwise keep whatever width something else gave it. The path is classified with an `Lstat` before the create, which the snapshot beside it also does, and enforced with `O_NOFOLLOW` on the open. Both, because replacing means no `O_EXCL`: the snapshot gets atomicity for free — `O_EXCL` is the claim, so its `Lstat` and its create are one step — whereas a link planted in the window between this `Lstat` and this open would otherwise be written *through*, and its target truncated, overwritten and narrowed. On Windows there is no `O_NOFOLLOW` to enforce it and the `Lstat` is the whole of the defence, so that window is not closed there; creating a symlink on Windows needs a privilege it does not have on unix, which is a reason the exposure is smaller and not a fix.
+
+Unlike the snapshot, the manifest *is* replaced rather than refused. It is derived from the snapshot beside it, so a manifest found at that path belongs to an earlier backup of a file that has since been deleted. Nothing is lost: the snapshot it described is gone, and it is the snapshot, not its manifest, that a backup is.
+
+A **pre-migration** copy — the `<db>.pre-migrate-<unix>` file an upgrade takes before touching the schema — is written with **no** manifest. `ghost backup verify` still checks one, and says so; see below.
+
+### `ghost backup verify`
+
+Checks a backup before you restore it, and exits non-zero if the file cannot be vouched for:
+
+```bash
+ghost backup verify ~/.local/share/ghost/ghost.db.backup-20260926T153207Z
+```
+
+It reads the file it is given and the manifest beside it, and it does **not** open the database in your data directory — so running it can neither migrate that store nor seed its builtin rows. That is the property that matters, and it is the one that is true: the moment a user reaches for this command is the moment they are least sure what state their own store is in, and a check that quietly changed it would be the worst possible answer. It is equally safe against a copy on another machine and against a copy of a store this binary has never seen.
+
+The narrower wording is deliberate. SQLite builds the WAL index of a database that is already in WAL mode, so a hand copy of a live `ghost.db` can acquire a `-wal` and a `-shm` beside it during a verify. They are empty — a read-only connection writes nothing to them — and Ghost's read-only constructor cannot be narrowed to stop it without breaking every other reader in the tree.
+
+Four checks, all reported, in the order they run:
+
+| Check | What it answers | What only it can see |
+|---|---|---|
+| `sha256` | Is this byte-for-byte the file the manifest describes? | Anything at all in bytes the database does not read: a flipped header field. |
+| `integrity check` | Is the file a database SQLite considers structurally sound? | A torn or half-written page. SQLite's answer is printed as it stands — every finding it names, not just the first, and how many were left out of a capped report. |
+| `schema version` | Will this build open this file? | Whether the file is from a newer Ghost (a downgrade to restore — refused, upgrade first) or an older one (restorable; the next open migrates it). |
+| `row counts` | Does the file hold what the manifest says it holds? | A snapshot that lost rows, which a successful open and a matching hash between them would not. |
+
+`sha256` runs first because it is the only check that needs nothing but the path. A truncated copy, a file appended to, and a file that is not a database at all are all cases where the digest is the most informative thing that can be said — and a truncated file has no schema to read, so the other three checks cannot run at all. The size is compared before the digest, so a copy that is short is named as the size change it plainly is rather than as a 64-character hash to diff by hand.
+
+Every check that can run does run, and one that cannot reports as `skipped` rather than being dropped. A run that stopped at the first failure would answer "this is not a backup" to a file whose only problem is a manifest it cannot read — a different claim, and the wrong one to hand someone deciding whether to keep looking. A run that could not finish at all still prints the findings it did reach, and says `not checked` in place of a row count nobody read: "no rows" would be a claim about the file, and this report must never make one it did not check.
+
+The first line is the verdict, and there are three of them:
+
+| Verdict | Meaning |
+|---|---|
+| `verified` | Every check ran and every one passed. |
+| `checked` | Nothing failed, but something did not run. |
+| `refusing` | A check failed, or the file could not be checked at all. Exits non-zero. |
+
+```text
+verified ~/.local/share/ghost/ghost.db.backup-20260926T153207Z: 204800 bytes, 1 project, 4 memories, 1 link, 1 task and 1 decision
+  sha256           ok       matches the manifest's sha256 9f86d081884c…
+  integrity check  ok       SQLite reports the file is structurally sound
+  schema version   ok       the file is at schema v18, this Ghost reads v18
+  row counts       ok       the file holds the 1 project, 4 memories, 1 link, 1 task and 1 decision the manifest records
+```
+
+A file with **no manifest** beside it is not refused, and does not get the word `verified` either. A pre-migration copy — taken by an upgrade before it touched the schema — is written without one, and it is exactly the copy a user wants to check after a bad upgrade. It is reported as `checked`, with the two manifest-derived checks marked `skipped`:
+
+```text
+checked ~/.local/share/ghost/ghost.db.pre-migrate-1758800000: 204800 bytes, 1 project, 4 memories, 1 link, 1 task and 1 decision
+  sha256           skipped  no manifest to compare against
+  integrity check  ok       SQLite reports the file is structurally sound
+  schema version   ok       the file is at schema v17 and this Ghost reads v18 — it is restorable, and the next open migrates it
+  row counts       skipped  no manifest to compare against; the file holds 1 project, 4 memories, 1 link, 1 task and 1 decision
+  (no manifest at ~/.local/share/ghost/ghost.db.pre-migrate-1758800000.manifest.json, so the hash and the recorded counts were not checked)
+```
+
+Both outputs above are what the command prints, verbatim, including the column widths.
+
+Note the `schema version` line: a pre-migration copy is **always** at a lower version than the build that wrote it, because that is what "before the migration" means. So this case is not an accident of the example, and it is why an older file passes. `OpenDB` refuses a file from a newer Ghost outright, so that direction is a real failure and the message says to upgrade; an older file is what every restore of a pre-migration copy produces, and the next ordinary open migrates it.
+
+A manifest that is *present but unreadable* **is** a refusal, and the report says so in those words rather than calling it absent — that is damage, not a missing optional file, and treating it as absent would send the reader looking for a file that is sitting right there. The report also never states a size or a row count it did not measure: a run that stopped early says `not checked` rather than `0 bytes` or `no rows`, because the zero value of a size is a 0-byte file and the zero value of a row count is an empty database.
+
+Verify **before** restoring, not after: it is the difference between restoring a copy and finding out afterwards that it was never the copy you thought. The restore procedure itself is above, under [`ghost backup`](#ghost-backup).
+
 
 ### `ghost export`
 
@@ -349,14 +443,16 @@ ghost export --out - | head -3
 The file is JSON Lines: one self-describing object per line, opened by a header line carrying the schema version.
 
 ```json
-{"type":"header","schema_version":1}
+{"type":"header","schema_version":2}
 {"type":"project","project":{"id":"p1","path":"/src/p1","name":"one","repo_remote":"github.com/wcatz/one","created_at":"…","updated_at":"…"}}
 {"type":"memory","memory":{"id":"…","project_id":"p1","category":"gotcha","content":"…","importance":0.5,"source":"manual","pinned":false,"created_at":"…","scope":{"environment":"production"}}}
 {"type":"task","task":{"id":"…","project_id":"p1","title":"…","status":"pending","priority":2}}
 {"type":"decision","decision":{"id":"…","project_id":"p1","title":"…","decision":"…","rationale":"…","status":"active"}}
 ```
 
-A memory record carries every column of the row that describes the memory: category, importance, access count, pin state, source, tags, created/updated timestamps, `resolved_at`, the validity triple (`valid_from`, `valid_until`, `verified_at`), the provenance fields (`agent`, `session_id`, `source_ref`, `confidence`) and `scope`. A project record carries its id, path, name, repository remote and timestamps.
+A memory record carries every column of the row that describes the memory: category, importance, access count, pin state, source, tags, created/updated timestamps, `resolved_at`, the validity triple (`valid_from`, `valid_until`, `verified_at`), the provenance fields (`agent`, `session_id`, `source_ref`, `confidence`) and `scope`. Since artifact schema v2 it also carries `evidence`, the list of `memory_provenance` records backing that memory — every agent that reported it and what each said. A restore that kept the row and dropped the evidence would report "supported by 0 observations" about a fact two agents had already reported, which is the one thing that table exists to prevent. A project record carries its id, path, name, repository remote and timestamps.
+
+The header's `schema_version` is the *artifact* format version, not the database schema version: an artifact is a file that outlives the Ghost that wrote it, and its meaning is the shape of its records. A build reads a range rather than one version, and refuses a file outside it — a newer one is records whose fields it cannot interpret, and an older one would be a file written under rules that no longer hold.
 
 Two exports of an unchanged database are **byte-identical**: projects come first, then memories, tasks and decisions, each in id order, and the header carries no timestamp. An artifact can therefore be diffed against the previous one, and a diff shows only what changed in the store.
 

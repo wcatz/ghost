@@ -149,6 +149,7 @@ It is a plain SQLite file. You can inspect, back up, move, or delete it without 
 ```bash
 ghost backup                                  # consistent snapshot of the live database
 ghost backup --out ~/backups/ghost.db.snap    # safe while a session is running
+ghost backup verify ~/backups/ghost.db.snap   # check a copy before you restore it
 
 ghost export --out ghost-export.jsonl          # readable, diffable JSONL
 ghost import ghost-export.jsonl                # dry run; --apply to write
@@ -156,7 +157,9 @@ ghost import ghost-export.jsonl                # dry run; --apply to write
 
 `ghost import` is dry-run by default over a **read-only** connection — the preview cannot migrate or seed the store — and never overwrites a record whose id already exists. Imported memories are stamped `source = "onboarding"` and unpinned whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules; add `--trust-provenance` when the artifact is your own export.
 
-`ghost backup` uses SQLite's online `VACUUM INTO`, so it takes a consistent snapshot of a WAL database that a live MCP server is writing to — copying `ghost.db` by hand can capture a torn state or lose whatever its `-wal` file held. It refuses to replace an existing file and prints the row count of each table it copied, so a restore can be checked.
+`ghost backup` uses SQLite's online `VACUUM INTO`, so it takes a consistent snapshot of a WAL database that a live MCP server is writing to — copying `ghost.db` by hand can capture a torn state or lose whatever its `-wal` file held. It refuses to replace an existing file, and prints the row count of each table it copied so a restore can be checked.
+
+Every backup also writes a sidecar manifest beside the snapshot — `<snapshot>.manifest.json` — recording the schema version, the row count of each table, the size, and a SHA-256 of the snapshot. `ghost backup verify <file>` checks a copy against it before you rely on it: the hash, SQLite's own `integrity check`, the schema version against this build, and the recorded row counts. It does not open the database in your data directory, so it can neither migrate nor seed your live store, and it exits non-zero on a file it cannot vouch for. A copy with no manifest beside it — a pre-migration backup, for instance — is reported as *checked* rather than *verified*, with the two manifest-derived checks marked skipped, so an unrun check is never read as a passed one.
 
 `ghost export` writes one JSON object per line — projects, memories, tasks and decisions, every column of each, with a schema-version header — and two exports of an unchanged database are byte-identical, so the file can be diffed. `ghost import` is dry-run by default, never overwrites a record whose id already exists, and holds imported content to the same length cap and validation as a normal save. See [the CLI reference](docs/cli.md#backup-export-and-import) for the format and the restore procedure.
 

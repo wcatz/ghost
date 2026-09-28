@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/repo"
@@ -42,10 +43,12 @@ type commandGroup struct {
 	// in path's own usage text (obsidian registers one usage for both of its
 	// modes), which TestCommandGroupsMatchTheUsageTable holds it to.
 	subs []string
-	// defaultAction marks the group whose bare invocation runs its own action
-	// instead of reporting a missing subcommand: `ghost mcp` starts the MCP
-	// server, which is what every client spawns. It is the only one, and the
-	// field is why "no subcommand given" is not a blanket rule.
+	// defaultAction marks a group whose bare invocation runs its own action
+	// instead of reporting a missing subcommand. There are two, and each is one
+	// because its bare form is an invocation a user is told to type: `ghost mcp`
+	// starts the MCP server, which is what every client spawns, and
+	// `ghost backup` takes the snapshot. The field is why "no subcommand given"
+	// is not a blanket rule.
 	defaultAction bool
 }
 
@@ -56,10 +59,49 @@ type commandGroup struct {
 // fails that test rather than reproducing #691 for the new group.
 var commandGroups = []commandGroup{
 	{path: "mcp", subs: []string{"init", "status"}, defaultAction: true},
+	{path: "backup", subs: []string{"verify"}, defaultAction: true},
 	{path: "maintenance", subs: []string{"status", "clean-scratch"}},
 	{path: "obsidian", subs: []string{"export", "sync"}},
 	{path: "opencode", subs: []string{"cleanup-sessions"}},
 	{path: "project", subs: []string{"bind", "delete", "merge"}},
+}
+
+// backupSubcommand classifies the word after `ghost backup`, the one place a
+// group's subcommand word and its command's own flags share a position.
+//
+// It returns routable=false only for a word that is neither the subcommand nor a
+// flag: `ghost backup veriy` is a command line that cannot be acted on, and the
+// caller answers it with the usage error that names the word, rather than with
+// the backup's own "unknown argument" — which would report a flag problem for a
+// mistyped verb.
+//
+// A flag-shaped word is the command's own and is always routable. That is the
+// case every other group gets for free because they have no flags: `ghost backup
+// --out x` is the common invocation, and reading `--out` as a subcommand would
+// turn a working command into a usage error over its most-used flag.
+//
+// An EMPTY word is given rather than absent, and is refused rather than taken for
+// the bare invocation, for the reason the mcp group refuses the same shape: a
+// wrapper running `ghost backup "$SUB"` with an unset $SUB passes one, and
+// answering that with a backup over a path nobody chose would be the exit-0
+// failure #691 is about.
+//
+// It is a function rather than three lines inline because both branches end in a
+// run* that exits the process, so a test cannot reach them through the dispatch —
+// and the decision they make is the whole of what `ghost backup …` is for.
+//
+// Note that the unroutable word is reported by the group, not by the backup's own
+// parser. `parseBackupArgs` would also reject it, as an unknown argument, but its
+// message names a flag and the reader mistyped a verb.
+func backupSubcommand(word string, given bool) (sub string, routable bool) {
+	switch {
+	case word == "verify":
+		return word, true
+	case given && !strings.HasPrefix(word, "-"):
+		return word, false
+	default:
+		return "", true
+	}
 }
 
 // exitUsage is the exit code for a command line the CLI cannot act on: an
@@ -147,6 +189,14 @@ func dispatchCommand(argv []string) int {
 			runUpgrade(argv[1:])
 			return 0
 		case "backup":
+			sub, routable := backupSubcommand(subArg(argv, 1))
+			switch {
+			case !routable:
+				return usageError("backup", sub, true, backupUsage)
+			case sub == "verify":
+				runBackupVerify(argv[2:])
+				return 0
+			}
 			runBackup()
 			return 0
 		case "export":
@@ -302,7 +352,11 @@ Commands:
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
                               --sweep grid-searches the fusion parameters
   backup [--out <path>]       Snapshot the live database — consistent, safe
-                               while the MCP server runs; prints path and row counts
+                               while the MCP server runs; prints path, row
+                               counts and the sidecar manifest it wrote
+  backup verify <file>        Check a backup before restoring it: sha256 against
+                               its manifest, SQLite's integrity_check, the schema
+                               version, and the recorded row counts
   export [--project <name>]   Write memories, tasks, decisions and projects as JSONL
     [--out <file.jsonl>]      (--out - for stdout; embeddings are not exported)
   import <file.jsonl> [--apply] [--trust-provenance]

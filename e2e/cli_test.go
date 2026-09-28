@@ -117,6 +117,7 @@ var cliCommands = []cliCommand{
 	{path: "opencode", help: "Usage: ghost opencode", coveredBy: "TestCLISurface/opencode cleanup-sessions"},
 	{path: "opencode cleanup-sessions", help: "Usage: ghost opencode", coveredBy: "TestCLISurface/opencode cleanup-sessions"},
 	{path: "backup", help: "Usage: ghost backup", coveredBy: "TestCLIBackup"},
+	{path: "backup verify", help: "Usage: ghost backup verify", coveredBy: "TestCLIBackupVerifyRestore"},
 	{path: "export", help: "Usage: ghost export", coveredBy: "TestCLIExportImport"},
 	{path: "history", help: "Usage: ghost history", coveredBy: "TestCLIHistory"},
 	{path: "import", help: "Usage: ghost import", coveredBy: "TestCLIExportImport"},
