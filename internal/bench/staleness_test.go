@@ -162,9 +162,13 @@ func TestDecayDoesNotPerturbGradedBench(t *testing.T) {
 // prior could not be. With SupersedeDemote on and ground-truth supersedes links
 // seeded, staleness fresh-wins should reach ~1.0; the trap suite (whose
 // distractors are NOT supersession pairs, so no links exist) is untouched.
+//
+// The trap column is the never-decay half of the fixture: "the demote does not
+// touch the trap" is a claim about scenarios decay cannot reorder either, so
+// mixing in the decaying ones (#561) would attribute their movement to demote.
 func TestSupersedeDemoteClearsFrontier(t *testing.T) {
 	stale := loadStalenessTestdata(t)
-	traps := loadTrapTestdata(t)
+	traps := neverDecayScenarios(loadTrapTestdata(t))
 	ctx := context.Background()
 
 	p := memory.DefaultSearchParams()

@@ -1,11 +1,13 @@
 package bench
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -18,6 +20,19 @@ import (
 // will fail these once its weight is high enough to promote the fresh
 // distractor — which is exactly the bound this suite measures. See
 // docs/benchmarks.md Phase 3.
+//
+// The suite spans two kinds of category, and the split is the measurement. A
+// scenario whose category the shipped decay factor never penalises (fact,
+// preference, convention) cannot be moved by age at all, so its score is the
+// same whether decay is on or off — which is exactly why category-aware decay
+// can ship on by default. A scenario in a DECAYING category (decision, gotcha,
+// dependency at tau 30; architecture, pattern at tau 45) is the case that
+// invariant hides: the correct memory is old enough to be multiplied down and
+// the distractor is fresh enough not to be. Reporting only the never-decay half
+// (as this suite did until #561) measures a ranking path decay never takes, so
+// the 0.929 that justified the default said nothing about the categories the
+// default actually reorders. The report therefore prints the two classes apart
+// and never pools them into one number.
 
 // TrapVersion is a memory with a controlled age.
 type TrapVersion struct {
@@ -27,12 +42,55 @@ type TrapVersion struct {
 
 // TrapScenario: the correct answer is old; traps are newer distractors.
 type TrapScenario struct {
-	Name    string        `json:"name"`
+	Name string `json:"name"`
+	// Category is the category every memory in this scenario is stored under,
+	// which decides whether decay can move the correct answer. Empty means
+	// "fact": the never-decay class the fixture was written in, kept as the
+	// default so the original scenarios needed no edit to keep meaning what
+	// they meant.
+	Category string `json:"category,omitempty"`
+	// Pinned pins the scenario's CORRECT memory only. A pinned row carries a
+	// decay factor of exactly 1.0 at any age (memory.DecayFactor), which is the
+	// one production escape hatch from a decaying category, so the fixture
+	// measures it: a pinned old-but-correct memory has to outrank a fresh
+	// UNPINNED distractor in the same category. Traps are never pinned — a
+	// pinned distractor would not be a trap.
+	Pinned  bool          `json:"pinned,omitempty"`
 	Correct TrapVersion   `json:"correct"`
 	Traps   []TrapVersion `json:"traps"`
 	Probes  []struct {
 		Text string `json:"text"`
 	} `json:"probes"`
+}
+
+// neverDecayCategory is the category a scenario without an explicit one is
+// seeded under. It is the class the shipped decay factor exempts
+// (memory.DecayFactor returns 1.0 for it at any age), so an unlabelled scenario
+// measures the ranking path decay does not touch.
+const neverDecayCategory = "fact"
+
+// effectiveCategory is the scenario's category, defaulted.
+func (s TrapScenario) effectiveCategory() string {
+	if s.Category == "" {
+		return neverDecayCategory
+	}
+	return s.Category
+}
+
+// decayProbeAgeDays is the age at which a category is asked whether decay could
+// ever penalise it. memory.DecayFactor returns 1.0 for every category at age 0
+// (nothing is old enough to be multiplied down), so a zero-age probe cannot
+// tell the classes apart; 1000 days puts every decaying category on its floor
+// (0.3 for pattern/architecture, 0.15 for the rest) while the exempt three stay
+// at exactly 1.0. The question is asked of the SHIPPED factor rather than of a
+// list of names kept here, so a category that starts or stops decaying is
+// reclassified by the code that decides it.
+const decayProbeAgeDays = 1000.0
+
+// categoryDecays reports whether the shipped category-aware time decay would
+// ever reorder a row in this category.
+func categoryDecays(category string) bool {
+	return memory.DecayFactor(category, false, decayProbeAgeDays) < 1.0
 }
 
 // LoadTrapScenarios reads trap scenarios, one JSON per line.
@@ -57,14 +115,27 @@ func LoadTrapScenarios(r io.Reader) ([]TrapScenario, error) {
 // TrapOutcome is the judgment for one probe.
 type TrapOutcome struct {
 	Scenario     string
-	CorrectFound bool // the correct (old) memory was retrieved at all
-	CorrectWins  bool // correct outranks every trap present in the results
+	Category     string // the scenario's effective category
+	Decays       bool   // whether the shipped decay factor can reorder this class
+	CorrectFound bool   // the correct (old) memory was retrieved at all
+	CorrectWins  bool   // correct outranks every trap present in the results
+	CorrectTop1  bool   // correct is the overall top result
 }
 
-// RunRecencyTrap seeds every scenario (correct + traps) into one shared store
-// with backdated created_at, probes with SearchHybridParams over the FTS path
-// (mirroring the staleness suite), and judges whether the correct old memory
-// outranks its newer distractors.
+// RunRecencyTrap seeds every scenario (correct + traps) with backdated
+// created_at, probes with SearchHybridParams over the FTS path (mirroring the
+// staleness suite), and judges whether the correct old memory outranks its newer
+// distractors. Each scenario is stored under its own category, so the suite
+// spans both the never-decay and the decaying classes.
+//
+// The two classes are seeded into SEPARATE projects, which is what keeps the two
+// numbers independent. They share a store (a scenario's own distractors are its
+// clutter, and that is the contest being judged) but not a project: pooling them
+// would make each class's window depend on how many scenarios the OTHER class
+// happens to contribute, so adding the decaying fixtures silently moved a
+// never-decay scenario's correct memory out of the top-10 window. Splitting by
+// class is also what keeps the never-decay score the number the published
+// frontier quotes — same fourteen scenarios, same project, same window.
 func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.SearchParams) ([]TrapOutcome, error) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
@@ -73,9 +144,21 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer store.Close() //nolint:errcheck
 
-	const project = "recencytrap"
-	if err := store.EnsureProject(ctx, project, "/bench/recencytrap", project); err != nil {
-		return nil, err
+	projects := map[bool]string{}
+	projectFor := func(category string) (string, error) {
+		decays := categoryDecays(category)
+		project, ok := projects[decays]
+		if !ok {
+			project = "recencytrap"
+			if decays {
+				project = "recencytrap-decaying"
+			}
+			projects[decays] = project
+			if err := store.EnsureProject(ctx, project, "/bench/"+project, project); err != nil {
+				return "", err
+			}
+		}
+		return project, nil
 	}
 
 	type seeded struct {
@@ -83,9 +166,16 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 		trapIDs   []string
 	}
 	seed := make([]seeded, len(scenarios))
+	scenarioProject := make([]string, len(scenarios))
 	for i, sc := range scenarios {
+		category := sc.effectiveCategory()
+		project, err := projectFor(category)
+		if err != nil {
+			return nil, err
+		}
+		scenarioProject[i] = project
 		cid, err := store.Create(ctx, project, memory.Memory{
-			Category: "fact", Content: sc.Correct.Content, Importance: 0.7, Source: "mcp",
+			Category: category, Content: sc.Correct.Content, Importance: 0.7, Source: "mcp",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("seed %s correct: %w", sc.Name, err)
@@ -93,10 +183,19 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 		if err := backdate(ctx, db, cid, sc.Correct.AgeDays); err != nil {
 			return nil, err
 		}
+		if sc.Pinned {
+			// Through the production writer rather than a raw UPDATE, so the
+			// pin is set the way a user's `ghost_memory_save {pin: true}` sets
+			// it and the history row the benchmark seeds is the one it would
+			// really produce.
+			if err := store.TogglePin(ctx, cid, true); err != nil {
+				return nil, fmt.Errorf("pin %s correct: %w", sc.Name, err)
+			}
+		}
 		var tids []string
 		for j, tv := range sc.Traps {
 			tid, err := store.Create(ctx, project, memory.Memory{
-				Category: "fact", Content: tv.Content, Importance: 0.7, Source: "mcp",
+				Category: category, Content: tv.Content, Importance: 0.7, Source: "mcp",
 			})
 			if err != nil {
 				return nil, fmt.Errorf("seed %s trap%d: %w", sc.Name, j, err)
@@ -111,8 +210,9 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 
 	var outcomes []TrapOutcome
 	for i, sc := range scenarios {
+		category := sc.effectiveCategory()
 		for _, probe := range sc.Probes {
-			results, err := store.SearchHybridParams(ctx, project, probe.Text, nil, scoreK, p)
+			results, err := store.SearchHybridParams(ctx, scenarioProject[i], probe.Text, nil, scoreK, p)
 			if err != nil {
 				return nil, fmt.Errorf("trap %s: %w", sc.Name, err)
 			}
@@ -122,9 +222,10 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 			}
 			// A correct memory that beats every retrieved trap "wins"; the
 			// judge reuses judgeProbe with correct as the "fresh" role.
-			found, wins, _ := judgeProbe(ranked, seed[i].correctID, seed[i].trapIDs)
+			found, wins, top1 := judgeProbe(ranked, seed[i].correctID, seed[i].trapIDs)
 			outcomes = append(outcomes, TrapOutcome{
-				Scenario: sc.Name, CorrectFound: found, CorrectWins: wins,
+				Scenario: sc.Name, Category: category, Decays: categoryDecays(category),
+				CorrectFound: found, CorrectWins: wins, CorrectTop1: top1,
 			})
 		}
 	}
@@ -132,7 +233,8 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 }
 
 // TrapCorrectWins is the fraction of probes where the correct old memory
-// outranked every trap.
+// outranked every trap. It pools the never-decay and decaying classes, so it is
+// only comparable with another pooled number — see TrapSummary for the split.
 func TrapCorrectWins(outcomes []TrapOutcome) float64 {
 	if len(outcomes) == 0 {
 		return 0
@@ -144,4 +246,169 @@ func TrapCorrectWins(outcomes []TrapOutcome) float64 {
 		}
 	}
 	return float64(wins) / float64(len(outcomes))
+}
+
+// TrapSummary is one row of the trap report: a category, or one of the two
+// pooled classes. The two class rows are what the report is read for, and they
+// are deliberately kept apart — a pooled score lets the never-decay half carry
+// the decaying half, which is the mistake #561 found.
+type TrapSummary struct {
+	Category    string
+	Decays      bool
+	Probes      int
+	Found       int
+	CorrectWins float64
+	CorrectTop1 float64
+}
+
+// Pooled row labels. They are rows in the report rather than categories, so
+// they cannot collide with one: a scenario's category is validated as one on
+// the way in, and these are the labels the aggregation appends itself.
+const (
+	trapDecayingLabel   = "decaying (pooled)"
+	trapNeverDecayLabel = "never-decay (pooled)"
+	trapAllLabel        = "all probes"
+)
+
+// SummarizeTrap aggregates outcomes by category, then appends the two pooled
+// class rows and an all-probes row. Order is fixture-independent — decaying
+// categories alphabetically, then never-decay ones, then the pools — so adding
+// a scenario does not reshuffle the table.
+func SummarizeTrap(outcomes []TrapOutcome) []TrapSummary {
+	byCategory := map[string]*TrapSummary{}
+	for _, o := range outcomes {
+		s := byCategory[o.Category]
+		if s == nil {
+			s = &TrapSummary{Category: o.Category, Decays: o.Decays}
+			byCategory[o.Category] = s
+		}
+		s.Probes++
+		if o.CorrectFound {
+			s.Found++
+		}
+		if o.CorrectWins {
+			s.CorrectWins++
+		}
+		if o.CorrectTop1 {
+			s.CorrectTop1++
+		}
+	}
+	var out []TrapSummary
+	for _, decays := range []bool{true, false} {
+		for _, name := range sortedCategories(byCategory, decays) {
+			out = append(out, poolTrap(poolTrapMatch{name: name, decays: decays}, byCategory))
+		}
+	}
+	for _, p := range []poolTrapMatch{
+		{classOnly: true, decays: true, name: trapDecayingLabel},
+		{classOnly: true, decays: false, name: trapNeverDecayLabel},
+		{anyClass: true, name: trapAllLabel},
+	} {
+		if s := poolTrap(p, byCategory); s.Probes > 0 {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// poolTrapMatch selects which category rows a pooled row sums: one named
+// category, every category of one decay class (classOnly), or — with anyClass,
+// the only mode that ignores both — all of them.
+type poolTrapMatch struct {
+	name      string
+	decays    bool
+	classOnly bool
+	anyClass  bool
+}
+
+// poolTrap sums the matching category rows' counts and divides them by the
+// probe count, so a pooled row is a real ratio rather than an average of ratios
+// (which would weight a one-probe category like a twenty-probe one).
+func poolTrap(match poolTrapMatch, byCategory map[string]*TrapSummary) TrapSummary {
+	pool := TrapSummary{Category: match.name, Decays: match.decays}
+	for name, s := range byCategory {
+		switch {
+		case match.anyClass:
+		case match.classOnly:
+			if s.Decays != match.decays {
+				continue
+			}
+		default:
+			if name != match.name || s.Decays != match.decays {
+				continue
+			}
+		}
+		pool.Probes += s.Probes
+		pool.Found += s.Found
+		pool.CorrectWins += s.CorrectWins
+		pool.CorrectTop1 += s.CorrectTop1
+	}
+	if pool.Probes > 0 {
+		pool.CorrectWins /= float64(pool.Probes)
+		pool.CorrectTop1 /= float64(pool.Probes)
+	}
+	return pool
+}
+
+// sortedCategories lists the category names in a stable order: the decaying
+// ones first, each group alphabetical, so a new category appears in a
+// predictable place rather than at the mercy of map iteration.
+func sortedCategories(byCategory map[string]*TrapSummary, decays bool) []string {
+	var out []string
+	for name, s := range byCategory {
+		if s.Decays == decays {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// FormatTrap renders the trap report for the pair of runs made with decay off
+// and on. Two outcome sets rather than one so the column that matters — the
+// delta — is measured rather than assumed, and so a suite in which decay is
+// inert (every scenario in a never-decay category) reads as a column of zeros
+// instead of looking like a healthy invariance.
+func FormatTrap(off, on []TrapOutcome) string {
+	offRows := SummarizeTrap(off)
+	onByCategory := map[string]TrapSummary{}
+	for _, r := range SummarizeTrap(on) {
+		onByCategory[r.Category] = r
+	}
+
+	var b bytes.Buffer
+	b.WriteString("recency trap: the OLD memory is the correct answer, the NEWER ones are distractors.\n")
+	b.WriteString("wins = the old correct memory outranks every distractor in the window; @1 = it is the top result.\n\n")
+	fmt.Fprintf(&b, "%-22s %-7s %4s %10s %10s %9s %10s\n",
+		"category", "decays", "n", "wins(off)", "wins(on)", "delta", "@1(on)")
+	for _, r := range offRows {
+		other := onByCategory[r.Category]
+		fmt.Fprintf(&b, "%-22s %-7s %4d %10.3f %10.3f %+9.3f %10.3f\n",
+			r.Category, trapDecaysLabel(r), r.Probes, r.CorrectWins, other.CorrectWins,
+			other.CorrectWins-r.CorrectWins, other.CorrectTop1)
+	}
+	total := 0
+	if all, ok := onByCategory[trapAllLabel]; ok {
+		total = all.Probes
+	}
+	fmt.Fprintf(&b, "\n%d probes. Report-only: the never-decay row is the frontier's claim, the decaying rows are its cost.\n", total)
+	return b.String()
+}
+
+// trapDecaysLabel renders a row's decay class, distinguishing the all-probes
+// row (which spans both) from the two pooled rows (which are each one class).
+func trapDecaysLabel(r TrapSummary) string {
+	switch r.Category {
+	case trapAllLabel:
+		return "mixed"
+	case trapDecayingLabel:
+		return "yes"
+	case trapNeverDecayLabel:
+		return "no"
+	default:
+		if r.Decays {
+			return "yes"
+		}
+		return "no"
+	}
 }
