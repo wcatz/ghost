@@ -88,9 +88,10 @@ type memOp struct {
 // The reason and the ids stay in both, because they are the diagnostic and an id
 // is not content — but "the reason" is not automatically safe, since three
 // reasons quote a model-supplied fragment (parseOpLine's unreadable drop tail
-// and unknown verb, executeOps' hallucinated id) across seven clipOpText call
-// sites. Those go through
-// clipOpText, which runs the same value-shape gate previewContent applies, so a
+// and unknown verb, executeOps' hallucinated id). Every one of them is routed
+// through clipOpText — six call sites, eight invocations, since the
+// not-carried-forward supersession passes three fragments at once — which runs
+// the same value-shape gate previewContent applies, so a
 // `drop <id> reason: <a credential>` refusal withholds the credential in the log
 // rendering too. What reaches a log is therefore the reason MINUS any fragment
 // the gate caught, not the reason unconditionally.
