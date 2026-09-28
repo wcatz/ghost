@@ -23,8 +23,9 @@ import (
 // memories have no vectors.
 //
 // The candidate scan scores a pair by cosine, so a memory it has no vector for
-// is not a candidate for anything (internal/supersede.SelectCandidates) — a
-// correct rule, applied to a state that is simply not there yet. The vectors are
+// is proposed as no new candidate by that scan
+// (internal/supersede.SelectCandidates) — a correct rule, applied to a state that
+// is simply not there yet. The vectors are
 // written by the embedding worker, and that worker lives in `ghost mcp`: a
 // long-lived daemon this one-shot pass has no part in. A user who saves two
 // notes and runs the pass in the same breath therefore gets a clean, empty

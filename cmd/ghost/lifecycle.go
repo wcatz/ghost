@@ -1695,8 +1695,8 @@ const supersedeEmbedBound = 50
 // counted by the scan instead (Result.Unscored, via supersedeUnscoredNote),
 // because that is where the fact is true: a bound reached, an endpoint that did
 // not answer, and a vector written under another model all end up as the same
-// honest count of memories in no pair, where a report derived from the embed
-// call could only ever be a guess.
+// honest count of memories the scan proposed nothing for, where a report derived
+// from the embed call could only ever be a guess.
 func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory.Store, projectID string, logger *slog.Logger) int {
 	if !cfg.Embedding.Enabled {
 		return 0
