@@ -3,8 +3,10 @@ package memory
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -211,6 +213,64 @@ func setupTestStore(t *testing.T) (*Store, context.Context) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	return store, ctx
+}
+
+// TestGetByIDsBatchesPastSQLiteVariableLimit is the #608 nit. GetByIDs built a
+// single IN list with one placeholder per id, so a request wide enough to pass
+// SQLite's SQLITE_MAX_VARIABLE_NUMBER (32766 on the version this tree links,
+// and 999 on older builds) came back as an error rather than as rows. The
+// callers pass a candidate WINDOW and a pool, so the width is the caller's
+// fetch limit rather than anything Ghost chose — and a hydration that errors
+// is a retrieval that returns nothing, which reads as "no memories" rather
+// than as a failure.
+//
+// The ids asked for here mostly do not exist, and that is the point: the bug is
+// the statement being refused, not a row being missed. The second half seeds
+// real rows across a chunk boundary so a fix that batches but drops the tail
+// cannot pass.
+func TestGetByIDsBatchesPastSQLiteVariableLimit(t *testing.T) {
+	store, ctx := setupTestStore(t)
+
+	t.Run("more ids than SQLite has variables", func(t *testing.T) {
+		const n = 40000
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = "no-such-memory-" + strconv.Itoa(i)
+		}
+		got, err := store.GetByIDs(ctx, ids)
+		if err != nil {
+			t.Fatalf("GetByIDs over %d ids: %v", n, err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d rows for %d ids that name nothing, want none", len(got), n)
+		}
+	})
+
+	t.Run("every row comes back across chunk boundaries", func(t *testing.T) {
+		// More than the chunk size and more than the old 999 default, so the
+		// rows land in at least three statements.
+		const n = 1200
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = createTestMemory(t, store, ctx, fmt.Sprintf("memory number %d", i))
+		}
+		got, err := store.GetByIDs(ctx, ids)
+		if err != nil {
+			t.Fatalf("GetByIDs over %d ids: %v", n, err)
+		}
+		if len(got) != n {
+			t.Fatalf("got %d rows, want all %d", len(got), n)
+		}
+		seen := make(map[string]bool, len(got))
+		for _, m := range got {
+			seen[m.ID] = true
+		}
+		for _, id := range ids {
+			if !seen[id] {
+				t.Errorf("row %s was dropped, so a chunk boundary lost rows", id)
+			}
+		}
+	})
 }
 
 func createTestMemory(t *testing.T, store *Store, ctx context.Context, content string) string {
