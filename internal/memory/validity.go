@@ -5,20 +5,39 @@ import (
 )
 
 // This is the ONE rule that names a memory's validity state. It lives here, in
-// the package that owns the columns, because two consumers now read it:
+// the package that owns the columns, because every consumer of that answer now
+// reads it rather than re-deriving it:
 //
-//   - internal/assemble's validity stage, which DROPS a row outside its window
-//     (internal/assemble/validity.go delegates here rather than keeping a copy),
-//     and
+//   - internal/assemble, at THREE call sites, which between them cover every
+//     surface a reader can see a validity state on. readValidity is stage 2, the
+//     one that DROPS a row outside its window; ValidityStateOf is what the
+//     browsing surfaces use, having run no stages; ValidityLabel renders the
+//     state onto a listing. All three are in internal/assemble/validity.go and all
+//     three call here.
 //   - explain mode, which reports the state of a row the search returned
 //     (internal/memory/explain.go).
 //
 // A second copy would be a second answer to "may this row be used", free to
 // drift from the first the moment either is edited: a search that explains a row
 // as "valid" while the assembler drops it as "expired" is exactly the #571 class
-// of bug, one layer up. The states are exported because the assembler's stage
-// records them into its trace and renders them into an answer, and those
-// spellings are part of that surface's contract.
+// of bug, one layer up. The two copies this had did not merely duplicate each
+// other — they disagreed, because the assembler's treated a stamp of
+// 0001-01-01 00:00:00 as unreadable (it lands on the zero time, which a failed
+// parse also produces) while this one reads it as a real boundary, and it expires
+// the row. TestValidityStateOfAgreesWithTheOneRule in internal/assemble holds the
+// three call sites to this answer, including on that value.
+//
+// ONE reader deliberately does not agree, and it is not this rule: readableStampPtr
+// in internal/memory/store.go treats the zero instant as no lower bound stated,
+// because its callers compose a SUCCESSOR's window out of a source's and inheriting
+// a year-1 start would date the successor before it existed. That is a different
+// question — "which bounds does the replacement inherit?" rather than "is this row
+// retired?" — and it is documented on that function and pinned by
+// TestReplaceNonManualDoesNotTreatTheZeroInstantAsAStatedWindow.
+//
+// The states are exported because the assembler's stage records them into its
+// trace and renders them into an answer, and those spellings are part of that
+// surface's contract.
 const (
 	// ValidityUnset is the state of a row that states nothing about its own
 	// currency: no window and no verification. It is the state of every memory

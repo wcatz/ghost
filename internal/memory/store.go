@@ -2792,14 +2792,32 @@ func readableStampPtr(s sql.NullString) *string {
 	if !s.Valid {
 		return nil
 	}
-	// A zero time is not readable either, even though ParseStamp reports it ok:
-	// time.Parse succeeds on "0001-01-01 00:00:00" and yields the zero time, while
-	// the reader that consumes the column — assemble.parseStampPtr — maps
-	// t.IsZero() to nil, so readValidity records it in `unparseable` and stage 2
-	// emits validity_unparseable. Readable here has to mean readable by the reader
-	// the rule exists to satisfy, not by ParseStamp alone, or this function and
-	// the renderer disagree about exactly one value and the store believes it
-	// carries a claim stage 2 says it does not.
+	// A zero time is not a stated window here, even though ParseStamp reports it
+	// as readable: time.Parse succeeds on "0001-01-01 00:00:00" and yields the
+	// zero time. The reason is NOT that the readers disagree — it used to be, and
+	// that was the original justification, but #583 removed it: assemble's
+	// parseStampPtr now reads through ParseStamp, so readValidity, ValidityStateOf
+	// and ValidityLabel all treat a zero-instant stamp as a real boundary, and a
+	// row carrying one is read as a complete window. Citing that here would leave
+	// one value with two documented answers, which is what this branch exists to
+	// end.
+	//
+	// The reason that survives is what this function is FOR. Its callers are
+	// ReplaceNonManual's, which compose the SUCCESSOR's window out of the sources'
+	// windows, and a successor is a different memory written later. A source whose
+	// lower bound is the zero instant almost always carries it as a "no lower
+	// bound" artefact — a hand-edited artifact, a restored snapshot, a row written
+	// by something that filled the column with an epoch — and inheriting it would
+	// stamp the successor with a valid_from of year 1: a claim that it was true
+	// from a moment before the memory that says so existed. So this reader treats
+	// the zero instant as no lower bound stated, and says which value it is
+	// reading.
+	//
+	// That is a deliberate DIVERGENCE from the state rule, not agreement with it.
+	// The difference is between two questions — "is this row retired?" and "which
+	// bounds does the memory replacing it inherit?" — and the zero instant answers
+	// them differently. Anyone narrowing either rule has to reckon with this one;
+	// TestReplaceNonManualDoesNotTreatTheZeroInstantAsAStatedWindow pins it.
 	if at, ok := ParseStamp(s.String); !ok || at.IsZero() {
 		return nil
 	}
