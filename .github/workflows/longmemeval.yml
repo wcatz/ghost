@@ -151,11 +151,12 @@ jobs:
     # The margin is 60 minutes (360 - 300), and -embed-deadline charges ONLY
     # time inside remote embed calls, so those 60 minutes must cover what the
     # budget does not: setup (checkout, Go, the ~277MB dataset download, the
-    # Ollama install and model pull — 70s in run 36501751853 with the dataset
-    # already cached), the per-question SQLite ingest and search that is not an
-    # embed call, and the save step's tar + upload of a cache that grows with
-    # every dispatch. Overrun it and the cancellation the deadline exists to
-    # prevent happens anyway.
+    # Ollama install and model pull), the per-question SQLite ingest and search
+    # that is not an embed call, and the save step's tar + upload of a cache
+    # that grows with every dispatch. Run 36501751853 spent ~70s on setup with a
+    # dataset cache MISS — the download alone took 5s — so treat that as a floor
+    # for the margin, not a typical figure. Overrun it and the cancellation the
+    # deadline exists to prevent happens anyway.
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7.0.1
