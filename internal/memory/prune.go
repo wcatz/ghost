@@ -156,17 +156,28 @@ type PruneReport struct {
 // A recorded access is the strongest signal and is preferred when it exists.
 // Nothing in production writes last_accessed (Store.Touch has no caller), so
 // what is left is the newest of the row's own stamps: the last write, or the
-// expiry a write REFRESHED. max() rather than another COALESCE term because
+// expiry a write REFRESHED. That preference is a KNOWN limit rather than a
+// settled reading, and it is stated HERE because this is the COALESCE it
+// describes. A row holding an OLD non-NULL last_accessed shadows a refreshed
+// expires_at entirely, which has TWO consequences and the second is the one a
+// reader of the report will notice. The grace consequence: a fold's renewal does
+// not reach the grace for that row. The REPORT consequence: the basis is then the
+// old read rather than the expiry, so printPruneRow's "is it the expiry?" test
+// fails and the row carries a third stamp beside a second one that says the same
+// instant. It is dormant for the same reason the preference is, and it is written
+// down rather than left for the first surface that records a read to discover.
+//
+// It is max() over the three rather than another COALESCE term because
 // created_at is NOT NULL, so a trailing term is unreachable — and the newest of
-// the three is the question, not the first one present. The expiry belongs there
-// because a fold is a write that extends a session row's life (raiseRetentionTx)
-// while deliberately leaving updated_at alone, and without this term a row
-// reinforced a moment ago was prunable the instant its fresh expiry arrived: the
-// grace was measured from a stamp the fold never moved (#772). Every term but
-// last_accessed is in the one layout Ghost writes, so the max is a text
-// comparison between like shapes; a hand-set value in another shape sorts by its
-// own characters, which errs towards the newer stamp and so towards keeping the
-// row.
+// the three is the question, not the first one present. The expiry belongs in the
+// max because a fold is a write that extends a session row's life
+// (raiseRetentionTx) while deliberately leaving updated_at alone, and without it
+// a row reinforced a moment ago was prunable the instant its fresh expiry
+// arrived: the grace was measured from a stamp the fold never moved (#772).
+// Every term but last_accessed is in the one layout Ghost writes, so the max is a
+// text comparison between like shapes; a hand-set value in another shape sorts
+// by its own characters, which errs towards the newer stamp and so towards
+// keeping the row.
 const pruneActivitySQL = "COALESCE(last_accessed, max(updated_at, created_at, expires_at))"
 
 // prunePredicate is the candidate predicate, and the DELETE runs the identical
@@ -194,12 +205,8 @@ const pruneActivitySQL = "COALESCE(last_accessed, max(updated_at, created_at, ex
 // A value set by hand in another shape does not match, which leaves the row in the
 // store rather than taking it out.
 //
-// The last_accessed preference is a KNOWN limit rather than a settled reading: a
-// row holding an OLD non-NULL last_accessed shadows a refreshed expires_at
-// entirely, so a fold's renewal would not reach the grace for that row. It is
-// dormant — nothing in production writes the column (Store.Touch has no caller) —
-// and it is stated here rather than left to be found by the first surface that
-// records a read.
+// The last_accessed preference is a KNOWN limit, stated on pruneActivitySQL above
+// where the COALESCE it describes lives.
 //
 // pinned = 0 is the fifth term, and it sits in the predicate rather than in Go
 // for the same reason the tier does: a pin is decided by the same statement that
