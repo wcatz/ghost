@@ -71,14 +71,17 @@
               width: calc(var(--h) * 1.1493); left: calc(var(--h) * -0.1616); top: calc(var(--h) * -0.2065);
               /* the canvas carries faint near-transparent pixels everywhere; clip them so no glow outlines the canvas */
               clip-path: inset(11.5% 18.9% 22.5% 13.7%); }
-  .hero-ghost { --h: 128px; margin: 0 auto 26px; display: block; animation: float 5s ease-in-out infinite; }
+  .hero-ghost { --h: 128px; margin: 0 auto 26px; display: block; animation: float 4.5s ease-in-out infinite; }
   .hero-ghost { filter: drop-shadow(0 14px 28px rgba(79,209,197,.28)) drop-shadow(0 0 36px rgba(124,108,255,.30)); }
   .hero-ghost::after {
     content: ""; position: absolute; left: 12%; right: 12%; bottom: -18px; height: 12px; border-radius: 50%;
-    background: radial-gradient(closest-side, rgba(0,0,0,.55), transparent); animation: shadow 5s ease-in-out infinite;
+    background: radial-gradient(closest-side, rgba(0,0,0,.55), transparent); animation: shadow 4.5s ease-in-out infinite;
   }
-  @keyframes shadow { 0%,100% { transform: scaleX(1); opacity: .9; } 50% { transform: scaleX(.8); opacity: .55; } }
-  @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+  @keyframes shadow { 0%,100% { transform: translateY(0) scaleX(1); opacity: .9; } 50% { transform: translateY(16px) scaleX(.7); opacity: .45; } }
+  @keyframes float {
+    0%,100% { transform: translateY(0) rotate(-2deg); }
+    50%     { transform: translateY(-16px) rotate(2deg); }
+  }
   .pill {
     display: inline-block; padding: 5px 14px; border-radius: 999px;
     border: 1px solid var(--card-edge); background: var(--bg-soft);
