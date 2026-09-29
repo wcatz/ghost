@@ -2621,9 +2621,12 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 		//
 		// The callers that exist are the corpus seeders, which replay a row they
 		// already hold, and a test restoring a shape. `Store.RestoreSnapshot` is
-		// NOT one of them: it writes through its own INSERT ... SELECT, which does
-		// not name the column, so a restored row takes the DEFAULT — the same
+		// NOT one of them: its fresh INSERT is an INSERT ... SELECT, which does not
+		// name the column, so a RE-CREATED row takes the DEFAULT — the same
 		// "the change log holds no tier" answer as everything else in that path.
+		// Its UPDATE is a different answer and is not about expiry at all: it omits
+		// the column, so it leaves a live row's own expiry alone rather than
+		// clearing it. See docs/invariants.md's retention-tiers bullet.
 		expires = *m.ExpiresAt
 	}
 
