@@ -52,7 +52,7 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 		// One transaction for the edge and its history row: a supersedes edge
 		// with no record of it, or a record of one that was never written, are
 		// both states this call must not be able to commit.
-		tx, err := s.db.BeginTx(ctx, nil)
+		tx, _, err := s.beginWrite(ctx, "create-link")
 		if err != nil {
 			return fmt.Errorf("begin create link: %w", err)
 		}
@@ -96,7 +96,7 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 		return nil
 	}
 
-	_, err := s.db.ExecContext(ctx, linkInsertSQL,
+	_, err := s.execGuardedWrite(ctx, "create-link-autocommit", linkInsertSQL,
 		sourceID, targetID, relation, strength, source)
 	if err != nil {
 		return fmt.Errorf("create link: %w", err)
@@ -178,7 +178,7 @@ func (s *Store) MarkLinkScanned(ctx context.Context, memoryID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execGuardedWrite(ctx, "mark-link-scanned", `
 		INSERT INTO link_scans (memory_id) VALUES (?)
 		ON CONFLICT(memory_id) DO UPDATE SET scanned_at = datetime('now')
 	`, memoryID)
@@ -470,7 +470,7 @@ func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation
 	defer s.mu.Unlock()
 
 	if relation != "supersedes" {
-		res, err := s.db.ExecContext(ctx, linkInvalidateSQL, sourceID, targetID, relation)
+		res, err := s.execGuardedWrite(ctx, "invalidate-link", linkInvalidateSQL, sourceID, targetID, relation)
 		if err != nil {
 			return 0, fmt.Errorf("invalidate link: %w", err)
 		}
@@ -489,7 +489,7 @@ func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation
 	// live. The edge and its row share a transaction, and the row is written only
 	// when the edge was live — the same guard the UPDATE applies, so a re-run
 	// that changes nothing records nothing.
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "invalidate-link")
 	if err != nil {
 		return 0, fmt.Errorf("begin invalidate link: %w", err)
 	}

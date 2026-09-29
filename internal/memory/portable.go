@@ -611,7 +611,7 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	// created_at/updated_at default to now, so a record with no timestamp in the
 	// artifact (a hand-written one) gets the current time rather than the
 	// epoch — and an artifact written by this format always has one.
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.execGuardedWrite(ctx, "import-project", `
 		INSERT INTO projects (id, path, name, repo_remote, created_at, updated_at)
 		VALUES (?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')),
 		                   COALESCE(NULLIF(?, ''), datetime('now')))
@@ -824,7 +824,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// imported memory cannot land without its origin. phaseImport rather than
 	// phaseSave because the artifact is a file that arrived from somewhere, and
 	// the audit has to be able to tell those rows apart from Ghost's own saves.
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "import")
 	if err != nil {
 		return false, false, downgraded, fmt.Errorf("import memory %s: begin tx: %w", m.ID, err)
 	}
@@ -986,7 +986,7 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 		}
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.execGuardedWrite(ctx, "import-task", `
 		INSERT INTO tasks (id, project_id, title, description, status, priority,
 			blocked_by, branch, pr_number, notes, created_at, updated_at, completed_at)
 		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, 0), NULLIF(?, ''),
@@ -1083,7 +1083,7 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 
 	alts, _ := json.Marshal(d.Alternatives)
 	tags, _ := json.Marshal(d.Tags)
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.execGuardedWrite(ctx, "import-decision", `
 		INSERT INTO decisions (id, project_id, title, decision, alternatives, rationale,
 			status, superseded_by, tags, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?,

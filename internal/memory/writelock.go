@@ -35,9 +35,12 @@ import (
 // measured at the two instants that decide whether a concurrent writer waits.
 type WriteLockSample struct {
 	// Op names the write path: "upsert" for a save, "update" for an edit,
-	// "replace" and "reflect-apply" for the lifecycle batches. A distribution
-	// is per operation, because a save and a consolidation hold the lock for
-	// different reasons and one number for both says nothing about either.
+	// "create" for a plain insert, "replace" and "reflect-apply" for the
+	// lifecycle batches, and one kebab-case name per remaining write
+	// transaction (every one of them goes through beginWrite, so the set is
+	// whatever the callers pass). A distribution is per operation, because a
+	// save and a consolidation hold the lock for different reasons and one
+	// number for both says nothing about either.
 	Op string
 	// Wait is how long the caller waited for the write lock: the whole of
 	// BeginTx, which is where SQLite's busy handler spends the wait. It is
@@ -156,32 +159,12 @@ func (w writeLock) reportLost(op string) {
 // closed, the context is done or the file is not a database will fail the same
 // way a second time, and reporting it immediately is what lets the caller say
 // what is actually wrong.
+//
+// The transaction it returns is the one beginGuardedWrite opened, so a write
+// refused for a newer store (#746) reports through this same seam and cannot be
+// reached by a path that skipped the check.
 func (s *Store) beginWrite(ctx context.Context, op string) (*sql.Tx, writeLock, error) {
-	start := time.Now()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err == nil {
-		return tx, writeLock{wait: time.Since(start), took: time.Now()}, nil
-	}
-	if !isLockContention(err) || ctx.Err() != nil {
-		// ctx.Err() is asked as well as the classification: a caller that gave
-		// up does not get a second budget spent finding out.
-		return nil, writeLock{}, err
-	}
-	// The refusal is reported only once the outcome is known, because a
-	// transaction that gets the lock on the second attempt has one wait (both
-	// attempts) and one hold, and reporting the first refusal separately would
-	// count it twice in the distribution it exists to describe.
-	tx, err = s.db.BeginTx(ctx, nil)
-	if err != nil {
-		lost := writeLock{wait: time.Since(start), retried: true}
-		lost.reportLost(op)
-		return nil, writeLock{}, err
-	}
-	// Wait spans BOTH attempts, which is what a writer's budget actually
-	// covered. Reporting only the successful attempt's would make the fleet's
-	// wait distribution read as if the contention were shorter than it is,
-	// which is the number this seam exists to report.
-	return tx, writeLock{wait: time.Since(start), took: time.Now(), retried: true}, nil
+	return s.beginGuardedWrite(ctx, op)
 }
 
 // isLockContention reports whether err is SQLite refusing the write lock, which
