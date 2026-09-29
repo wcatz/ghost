@@ -72,26 +72,34 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 		"the shipped help (historyUsage)": "So three fields of an as_of answer can move",
 		"docs/cli.md's compact section":   "Three fields do move",
 	}
-	// The restore target is the ANCHOR, and the half that makes it one — "this
-	// repair will NOT remove" — must be stated wherever the target is. Dropping it
-	// states the wrong claim rather than a vaguer one: on a store with this damage
-	// the last writer that moved the stamp is a no-op reflect, which IS the row the
-	// removal takes, so naming that as the target names a row the repair deletes.
-	// A review found exactly that sentence, written as "the last writer that moved
-	// the stamp", in the as_of paragraph this PR adds.
-	anchorNotRemovable := map[string]string{
-		"the shipped help (historyUsage)": "the recorded time of its ANCHOR: the newest version this repair will NOT remove whose writer moved the stamp",
-		"docs/cli.md's compact section":   "its anchor: the newest version this repair will **not** remove whose writer moved the stamp",
+	// The restore target is the ANCHOR, and the anchor's definition is the DAMAGE
+	// predicate: the newest version that does not ITSELF REPEAT the version before
+	// it, whose writer moved the stamp. Two earlier wordings were wrong and are the
+	// reason each claim below is separate:
+	//
+	//   - "the newest version this repair will NOT remove" names the REMOVAL rule,
+	//     which is the damage rule plus the newest-version and deleted-memory
+	//     guards. Read literally it selects a memory's NEWEST pre-#727 no-op
+	//     reflect — the very row that moved the stamp — because the delete spares
+	//     it. A review caught that, and this test's own anchors were asserting it.
+	//   - "the last writer that moved the stamp" is worse still: on a store with
+	//     this damage those are the no-op reflects, most of which ARE removed.
+	//
+	// The guards are excluded from the definition, and a version spared by either
+	// can still be the anchor — so "not removable" is neither necessary nor the
+	// test. Each claim is separate because one satisfied another and the mutation
+	// passed on a surface whose definition was wrong.
+	anchorDamageDefinition := map[string]string{
+		"the shipped help (historyUsage)": "its ANCHOR: the newest version that\n              does not itself repeat the version before it whose writer moved the\n              stamp in the same statement that filed it",
+		"docs/cli.md's compact section":   "The anchor is the newest version that does not itself repeat the version before it",
 	}
-	// The anchor's DEFINITION, which is a different claim from the sentence above
-	// and needs its own needle. Asserting only the as_of paragraph's copy let a
-	// mutation of the definition pass, because the two say the same thing and the
-	// paragraph's satisfied the check — which is the definition being wrong while
-	// the test is green. The definition is the one a reader is sent to, so it is
-	// pinned in its own right.
-	anchorDefinition := map[string]string{
-		"the shipped help (historyUsage)": "its ANCHOR — the newest version this repair will NOT remove AND whose WRITER moved updated_at in the same statement that filed it",
-		"docs/cli.md's compact section":   "**The anchor is the newest version this repair will NOT remove whose WRITER moved `updated_at` in the same statement that filed it**",
+	anchorRemovalDefinition := map[string]string{
+		"the shipped help (historyUsage)": "its ANCHOR — the newest version\n                                 this repair will NOT remove AND whose WRITER moved\n                                 updated_at in the same statement that filed it",
+		"docs/cli.md's compact section":   "",
+	}
+	anchorGuardsExcluded := map[string]string{
+		"the shipped help (historyUsage)": "a memory's NEWEST version is spared, and a deleted memory's history is left alone, and a version spared by either can still be the anchor",
+		"docs/cli.md's compact section":   "The two retention guards — a memory's newest version is spared, and a deleted memory's history is left alone — are **not** part of the anchor's definition",
 	}
 	// Claims each surface must make, in its own words.
 	perSurface := map[string]map[string]string{
@@ -159,17 +167,30 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 			t.Errorf("%s does not state that THREE fields of an as_of answer can move rather than two: no %q",
 				surface.name, needle)
 		}
-		if needle := anchorDefinition[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
-			t.Errorf("%s does not define the anchor with BOTH halves — the not-removable one and the "+
-				"stamp-moving-writer one: no %q. Either half alone names a different row: without "+
-				"not-removable it is the last writer that moved the stamp, which on a store with this "+
-				"damage is a no-op reflect the repair deletes.",
+		// The removal-rule wording is asserted on the help only, and only because the
+		// help's --fix-updated-at block still carries it. The doc's definition was
+		// corrected, so requiring it there would be requiring the bug back. Keeping
+		// the help's copy pinned means the two surfaces cannot drift apart silently
+		// the next time either block is edited — which is how the help ended up
+		// contradicting itself in the first place.
+		if needle := anchorRemovalDefinition[surface.name]; needle != "" && !strings.Contains(flat, squashSpace(needle)) {
+			t.Errorf("the help's --fix-updated-at block no longer defines the anchor with the removal "+
+				"rule: no %q. That wording is what this paragraph corrects, and if it goes away the two "+
+				"statements of the anchor should be reconciled rather than one silently dropped.",
+				needle)
+		}
+		if needle := anchorGuardsExcluded[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
+			t.Errorf("%s does not say the retention guards are NOT the anchor's definition: no %q. "+
+				"Defining the anchor as \"the newest version this repair will NOT remove\" is wrong: the "+
+				"newest version is spared, and a version spared by a guard is still the anchor when it "+
+				"repeats nothing.",
 				surface.name, needle)
 		}
-		if needle := anchorNotRemovable[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
-			t.Errorf("%s does not name the restore target as the anchor with its not-removable half: no %q. "+
-				"\"the last writer that moved the stamp\" is the wrong target on a store with this damage, "+
-				"because that writer is one of the no-op reflects being removed.",
+		if needle := anchorDamageDefinition[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
+			t.Errorf("%s does not name the restore target as the anchor defined by the DAMAGE predicate "+
+				"(the newest version that does not itself repeat the version before it): no %q. The "+
+				"removal rule is a DIFFERENT predicate and naming it selects a memory's newest no-op "+
+				"reflect, which is the row that moved the stamp.",
 				surface.name, needle)
 		}
 		for claim, needle := range perSurface[surface.name] {

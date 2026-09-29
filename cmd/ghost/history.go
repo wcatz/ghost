@@ -249,11 +249,14 @@ source the memory held once that write landed.
               unresolved may read as merely saved for an instant whose reflect
               flood has been compacted away. --fix-updated-at moves because the
               stamp repair IS a write to the live row's UpdatedAt, and it moves it
-              BACKWARD to the recorded time of its ANCHOR: the newest version this
-              repair will NOT remove whose writer moved the stamp in the same
-              statement that filed it. On a store carrying this damage the anchor
-              is strictly earlier than the last writer that moved the stamp, since
-              the pre-#727 no-op reflects are themselves the rows being removed.
+              BACKWARD to the recorded time of its ANCHOR: the newest version that
+              does not itself repeat the version before it whose writer moved the
+              stamp in the same statement that filed it. That 'repeats' test is the
+              DAMAGE rule, not the whole removal rule: a memory's NEWEST version is
+              spared, and a deleted memory's history is left alone, and a version
+              spared by either can still be the anchor. So the anchor is not
+              necessarily earlier than the last write that moved the stamp -- where
+              the newest no-op reflect is spared, it IS the anchor.
               That is what the flag is for, and it is the field that visibly
               changes. So three fields of an as_of answer can move, for those two
               reasons. A DELETED memory is left out of both repairs entirely, so
