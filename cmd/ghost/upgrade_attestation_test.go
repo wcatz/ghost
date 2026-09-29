@@ -541,11 +541,15 @@ func TestUpgradeSaysSoWhenItSkipsTheAttestationBeforeTheCutover(t *testing.T) {
 		var warn strings.Builder
 		streams := upgradeStreams{out: io.Discard, err: &warn}
 		// The floor is below the release, so the upgrade actually proceeds and
-		// reaches the attestation check. The warning names the RELEASE being
-		// installed, not this argument, which is why the assertion below is
-		// against the tag and not against the string here.
-		if _, err := performUpgrade(context.Background(), streams, "0.41.0", upgradeOptions{}, au.deps(t, target)); err != nil {
+		// reaches the attestation check; see the sibling subtest for why that is
+		// not automatic. The warning names the RELEASE being installed, not this
+		// argument, which is why the assertion is against the tag.
+		installed, err := performUpgrade(context.Background(), streams, "0.41.0", upgradeOptions{}, au.deps(t, target))
+		if err != nil {
 			t.Fatalf("performUpgrade on a pre-cutover release: %v", err)
+		}
+		if installed != preAttestationTag[1:] {
+			t.Fatalf("installed version = %q, want %q: the upgrade did not run, so the warning below is not being observed where it is written", installed, preAttestationTag[1:])
 		}
 		got := warn.String()
 		if got == "" {
@@ -564,12 +568,28 @@ func TestUpgradeSaysSoWhenItSkipsTheAttestationBeforeTheCutover(t *testing.T) {
 	t.Run("a genuinely verified release is silent", func(t *testing.T) {
 		binary := []byte("pretend executable")
 		au := newAttestedUpgrade(t, attestedTag, binary)
+		// Both of these, or this subtest proves nothing. Without the bundle the
+		// fake attestations service answers 404, Check returns AttestationAbsent
+		// and the run is REFUSED — so it would fail rather than pass, but for a
+		// reason that has nothing to do with silence. Without a floor below the
+		// release, decideUpgrade answers upgradeCurrent, performUpgrade returns
+		// "Already up to date" and never reaches checkAttestation at all, so warn
+		// would be empty no matter what the warning code does — which is exactly
+		// the way this subtest looked green while asserting nothing.
+		au.attestThisRelease(t, attestedTag)
 		target := installedGhost(t, "the old binary")
 
 		var warn strings.Builder
 		streams := upgradeStreams{out: io.Discard, err: &warn}
-		if _, err := performUpgrade(context.Background(), streams, strings.TrimPrefix(attestedTag, "v"), upgradeOptions{}, au.deps(t, target)); err != nil {
+		installed, err := performUpgrade(context.Background(), streams, "0.42.0", upgradeOptions{}, au.deps(t, target))
+		if err != nil {
 			t.Fatalf("performUpgrade on an attested release: %v", err)
+		}
+		// The check the subtest was silently skipping: that the install really
+		// happened, so an empty warn is the absence of a warning rather than the
+		// absence of a run.
+		if installed != "0.43.0" {
+			t.Fatalf("installed version = %q, want 0.43.0: the upgrade did not run, so this subtest never reached the attestation check it is a control for", installed)
 		}
 		if got := warn.String(); got != "" {
 			t.Errorf("a release whose bundle verified printed %q, so the pre-cutover warning is not keyed on anything real", got)
