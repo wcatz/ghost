@@ -11,19 +11,22 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// The producer side of the release-authenticity contract. `ghost upgrade`
-// refuses to install a release it cannot attribute to this repository's
-// release workflow (#694), which is only meaningful if the release actually
-// publishes an attestation for every asset a user can download. The
-// attestation itself is minted by actions/attest-build-provenance inside
+// The producer side of the release-authenticity contract (#694). The client
+// half — `ghost upgrade` verifying the Sigstore bundle this workflow mints
+// before it unpacks anything — is not in this checkout: nothing in
+// `internal/selfupdate` reads an attestation yet, and docs/cli.md says so. What
+// this test guards is the half the client will depend on, namely that the
+// release publishes a bundle for EVERY asset a user can download, under the
+// SAN and with the materials the verifier needs.
+//
+// The attestation is minted by actions/attest-build-provenance inside
 // .github/workflows/release.yml, so nothing in the Go build fails when a step
 // is deleted from that workflow — only this test does.
 //
 // These assertions are deliberately about the SHAPE of the workflow, not about
-// whether GitHub accepted an upload: a release that silently stopped
-// attesting would otherwise still pass every check in this package, because
-// the client treats "no attestation" as an expected state for pre-cutover
-// releases.
+// whether GitHub accepted an upload. A release that silently stopped attesting
+// would leave every client-side check unsatisfiable, and the failure would
+// surface to users as a refused upgrade rather than as a build break.
 
 // attestAction is the action that mints the Sigstore bundle. Its ref is
 // asserted separately because it is the one `uses:` in the release path that
