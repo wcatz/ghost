@@ -4849,10 +4849,35 @@ func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 // direction is the loud one — a tags column that is not a JSON list makes the
 // pass write the row and record it, where treating it as equal would leave a
 // value the caller asked for unrecorded and its timestamp unmoved.
+//
+// importance is compared at the EMISSION's precision, and that is the whole
+// reason this predicate is not a plain ==. Memory.Importance is a float32, the
+// column is a float64, and the READ already narrows the column into a Memory
+// (scanMemories), so that is the precision at which anything downstream can tell
+// one value from another. Upsert's strengthen
+// (`SET importance = MIN(1.0, importance + importance * 0.2)`) computes that
+// increment in SQLite's own float64 — it moved there in #655, where it was Go
+// arithmetic on a float32 and the column therefore held a float32-exact value —
+// so a folded row usually holds a value float32 cannot name: 0.55 strengthens to
+// 0.6600000187754631, which widens to 0.6600000262260437. Comparing the two at
+// full width therefore reported a change on a row that had not moved, so every
+// applied reflect appended a byte-identical version of it and stamped it touched
+// — the whole of #727 reinstated for every strengthened memory (15 of 1,170 on
+// the store it was measured on) #750.
+//
+// So the stored value is NARROWED to the emission's precision and the two are
+// then equal. That is the only lossy direction, and what it loses is one float32
+// ULP: an emission of 0.66 reads as equal to a row holding 0.6600000187754631.
+// No reader can observe that, because every reader narrows this column the same
+// way the emission does, and a reweight is a different float32, which no
+// rounding of the stored value imitates. The float64 the column holds is left
+// alone rather than rounded, because a no-op is a no-op — a write here would
+// replace a fold's exact value with the emission's widening of it and change
+// nothing else.
 func reuseChangesNothing(stored replaceCandidate, emitted Memory) bool {
 	return stored.content == emitted.Content &&
 		stored.category == emitted.Category &&
-		stored.importance == float64(emitted.Importance) &&
+		float32(stored.importance) == emitted.Importance &&
 		sameTags(stored.tags, emitted.Tags) &&
 		scopeUnchanged(stored.scope, emitted.Scope)
 }
