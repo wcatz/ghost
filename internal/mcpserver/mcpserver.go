@@ -1634,6 +1634,10 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
+		// The NAME is kept for the not-registered sentence below, because the id
+		// ResolveProject returns for an unknown name is "" and the message has to
+		// name what the caller asked for rather than nothing.
+		asked := args.ProjectID
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
@@ -1696,13 +1700,29 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		memories, err := s.projectContextMemories(ctx, args.ProjectID, args.Limit)
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(memories.Items) > 0 {
-			sb.WriteString("## Memories\n\n")
-			sb.WriteString(projectContextItems(memories.Items))
+		// An UNRESOLVED project has no rows to select, and it must not borrow
+		// another project's. `ResolveProject` answers an unknown name with `("", "",
+		// nil)`, so the old loader was handed "" and read
+		// `project_id = '' OR project_id = '_global'` — which listed the GLOBAL rows
+		// under a `## Memories` heading for a project that does not exist, and
+		// only fell through to the not-registered sentence when the store happened
+		// to hold no globals. The assembler refuses a project context with no
+		// project, so without this the same call became an error. An error is worse
+		// than the old inconsistency: a caller cannot act on "something went
+		// wrong" by saving a memory to the project it named.
+		//
+		// So the case is answered, and answered the same way whatever else the
+		// store holds — which is the half the old behaviour varied on.
+		var memories assemble.Result
+		if args.ProjectID != "" {
+			memories, err = s.projectContextMemories(ctx, args.ProjectID, args.Limit)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(memories.Items) > 0 {
+				sb.WriteString("## Memories\n\n")
+				sb.WriteString(projectContextItems(memories.Items))
+			}
 		}
 
 		learned, err := s.store.GetLearnedContext(ctx, args.ProjectID)
@@ -1731,7 +1751,10 @@ func (s *Server) registerTools() {
 			case exists:
 				text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
 			default:
-				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. Call ghost_memory_save to create it.", args.ProjectID)
+				// `asked`, not the resolved id: for an unresolved name the id is
+				// "", and a message reading `Project "" is not registered` names
+				// nothing the caller can act on.
+				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. Call ghost_memory_save to create it.", asked)
 			}
 		}
 

@@ -68,7 +68,14 @@ func projectContextBudget(projectID string, limit int) assemble.Budget {
 		// a project slice at `limit` plus a `_global` slice at `limit` would admit
 		// twice the rows the caller asked for, and the tool's argument says "max
 		// memories to return".
-		IncludeGlobal: true,
+		//
+		// NOT set when the bucket IS `_global`, because that is not a union: the
+		// bucket already reads exactly those rows, and the flag would only trip
+		// both seams' overlap refusal — a policy that fetches `_global` while
+		// admitting it — on a request that asks for nothing more. So
+		// `project_id: "_global"` is a supported call here, which it was before
+		// the move and is the same listing `ghost://memories/global` serves.
+		IncludeGlobal: projectID != memory.GlobalProjectID,
 		MaxItems:      limit,
 		OverFetch:     limit * 2,
 		Order:         memory.OrderDecay,

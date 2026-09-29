@@ -22,6 +22,22 @@ import (
 // import's error path instead of the branch under test.
 func newValiditySession(t *testing.T) (*Server, *mcp.ClientSession) {
 	t.Helper()
+	return validityServerFor(t, newValidityStore(t))
+}
+
+// validityServerFor wraps a store in a Server and connects a client to it, so a
+// test can seed rows and then reach the SAME store through the tool.
+func validityServerFor(t *testing.T, st *memory.Store) (*Server, *mcp.ClientSession) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(st, logger, "test")
+	return srv, connectedClient(t, srv)
+}
+
+// newValidityStore is the store behind newValiditySession, for a test that needs
+// to seed rows directly and then read them back through the same handle.
+func newValidityStore(t *testing.T) *memory.Store {
+	t.Helper()
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
@@ -30,14 +46,18 @@ func newValiditySession(t *testing.T) (*Server, *mcp.ClientSession) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	st := memory.NewStore(db, logger)
 	ctx := context.Background()
+	// `_global` is created by seeding rather than by EnsureProject, and the global
+	// rows in these fixtures carry a foreign key onto it.
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
 	if err := st.EnsureProject(ctx, "vproj", t.TempDir(), "vproj"); err != nil {
 		t.Fatalf("EnsureProject vproj: %v", err)
 	}
 	if err := st.EnsureProject(ctx, "bare", t.TempDir(), "bare"); err != nil {
 		t.Fatalf("EnsureProject bare: %v", err)
 	}
-	srv := New(st, logger, "test")
-	return srv, connectedClient(t, srv)
+	return st
 }
 
 // saveValidityRow saves one memory through the real ghost_memory_save tool with
@@ -227,6 +247,215 @@ func TestTheProjectContextSkipsTheNearDuplicateReorderUnderTheCap(t *testing.T) 
 // positionOf is the index of id's first occurrence in backticks, or -1. The ids
 // Ghost mints are unique, so a substring search cannot collide with content.
 func positionOf(text, id string) int { return strings.Index(text, "`"+id+"`") }
+
+// TestTheProjectContextAnswersAnUnresolvedProjectRatherThanFailing is a
+// regression test for a review finding, and the finding was right.
+//
+// `ResolveProject` returns `("", "", nil)` for a name no `projects` row matches.
+// The old loader was handed that empty id and read
+// `project_id = ” OR project_id = '_global'`, so it fell through to the
+// not-registered sentence when the store held no globals — and, when the store
+// DID hold globals, listed them under a `## Memories` heading for a project that
+// does not exist. Both are answers; the migration's answer was neither, because
+// `validateRequest` refuses a project-context request with no project and the
+// tool turned that refusal into an error.
+//
+// So the unresolved case is answered explicitly, and the same test pins BOTH
+// halves of what used to vary: the sentence is the not-registered one whatever
+// else the store holds, and it is not an error. An error here is strictly worse
+// than the old inconsistency: a caller cannot act on "something went wrong" by
+// saving a memory to the project.
+func TestTheProjectContextAnswersAnUnresolvedProjectRatherThanFailing(t *testing.T) {
+	_, session := newValiditySession(t)
+	// Globals in the store, which is the case the old loader answered with a
+	// listing rather than the sentence.
+	saveValidityRow(t, session, "vproj: a project memory", nil)
+	if _, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ghost_save_global",
+		Arguments: map[string]any{"content": "a cross-project preference", "category": "preference"},
+	}); err != nil {
+		t.Fatalf("save_global: %v", err)
+	}
+
+	out := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": "no-such-project",
+	}))
+	if !strings.Contains(out, "is not registered with Ghost yet") {
+		t.Errorf("an unresolved project did not get the not-registered sentence:\n%s", out)
+	}
+	// The sentence has to name what the caller ASKED for. `ResolveProject` answers
+	// an unknown name with "", so quoting the resolved id produces
+	// `Project "" is not registered` — which names nothing the caller can act on,
+	// and which reads as though Ghost had a project with an empty name.
+	if !strings.Contains(out, `"no-such-project"`) {
+		t.Errorf("the not-registered sentence does not name the requested project:\n%s", out)
+	}
+	if strings.Contains(out, "## Memories") {
+		t.Errorf("an unresolved project rendered a memory listing; those rows belong to a different project, and a "+
+			"heading naming this one is a claim the block never made:\n%s", out)
+	}
+}
+
+// TestTheProjectContextServesTheGlobalProjectItself: the other half of the same
+// finding.
+//
+// `IncludeGlobal` is the union `project_id = ? OR project_id = '_global'`, and a
+// request whose bucket IS `_global` is not asking for a union — that bucket
+// already reads exactly those rows. Setting the flag unconditionally made both
+// seams' overlap refusal fire on it (`Bucket == _global` and a policy that
+// includes it), so `ghost_project_context` with `project_id: '_global'` was
+// REFUSED. It is a supported call: the old loader answered it with the global
+// rows, and the `ghost://memories/global` resource is the same listing.
+func TestTheProjectContextServesTheGlobalProjectItself(t *testing.T) {
+	_, session := newValiditySession(t)
+	if _, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ghost_save_global",
+		Arguments: map[string]any{"content": "a cross-project preference", "category": "preference"},
+	}); err != nil {
+		t.Fatalf("save_global: %v", err)
+	}
+	out := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": memory.GlobalProjectID,
+	}))
+	if strings.Contains(out, "does not support candidate retrieval") {
+		t.Fatalf("a project-context read of _global was refused outright:\n%s", out)
+	}
+	if !strings.Contains(out, "a cross-project preference") {
+		t.Errorf("a project-context read of _global did not list the global rows:\n%s", out)
+	}
+}
+
+// TestTheProjectContextKeepsTheOriginLabelOnAGlobalRowInAMixedBlock is a parity
+// check on a field the goldens cannot see: every row in that fixture is
+// `source='manual'`, and a manual row renders NO origin label at all. So the one
+// field of the item line the migration could plausibly have broken is the one
+// nothing was watching.
+//
+// The risk is real and specific. `memory.CanonicalOriginSourceForProject` scopes
+// its legacy-seed rewrite to the GLOBAL project, so a row's own project id decides
+// whether a builtin's shipped sentence is corrected — and a `_global` row read
+// through a PROJECT bucket is exactly the shape where the two ids could be
+// confused. `Item.Line` reads `i.ProjectID` (the row's own) and the old
+// `formatMemories` read `m.ProjectID` (also the row's own), so they must agree;
+// this asserts the rendered bytes against the renderer they replaced rather than
+// against a string, because the string is the thing under test.
+func TestTheProjectContextKeepsTheOriginLabelOnAGlobalRowInAMixedBlock(t *testing.T) {
+	st := newValidityStore(t)
+	// A global row Ghost itself wrote, which is the only shape that renders a label.
+	if _, err := st.CreateWithIDFromCorpus(context.Background(), memory.GlobalProjectID, "gorigin", memory.Memory{
+		Category: "preference", Content: "a preference the user typed once", Source: "mcp", Importance: 0.9,
+	}); err != nil {
+		t.Fatalf("seed global: %v", err)
+	}
+	// The same shipped seed text, once as a GLOBAL row and once as a PROJECT row.
+	// `CanonicalOriginSourceForProject` rewrites a `manual` global row carrying
+	// that exact sentence to `builtin`, and deliberately does NOT rewrite a project
+	// row carrying it — a project row with the shipped words is the user's own
+	// material, and misattributing it would both invent an origin and take away
+	// the "no agent recorded" marker that says the row is untagged.
+	//
+	// This is the half that makes the mixed bucket dangerous, and it is why the
+	// test is not satisfied by a row that merely HAS a label: the label's
+	// correctness depends on the row's OWN project, and a `_global` row read
+	// through a project bucket is precisely where that could be lost.
+	//
+	// The text comes from the store's own seed rather than a literal here, so the
+	// test cannot drift from the sentence the correction keys on: if that sentence
+	// changed, the precondition below fails instead of the test quietly exercising
+	// a string nothing recognises.
+	seedText := shippedSeedText(t, st)
+	if got := memory.CanonicalOriginSourceForProject(memory.GlobalProjectID, "manual", seedText); got != "builtin" {
+		t.Fatalf("fixture precondition: the store no longer rewrites the shipped seed text for a global row (got %q), "+
+			"so this test would pass without exercising the scoping at all", got)
+	}
+	if got := memory.CanonicalOriginSourceForProject("vproj", "manual", seedText); got != "manual" {
+		t.Fatalf("fixture precondition: a project row holding the shipped words is no longer left alone (got %q)", got)
+	}
+	for _, r := range []struct{ id, project string }{
+		{"gseed", memory.GlobalProjectID},
+		{"pseed", "vproj"},
+	} {
+		if _, err := st.CreateWithIDFromCorpus(context.Background(), r.project, r.id, memory.Memory{
+			Category: "preference", Content: seedText, Source: "manual", Importance: 0.9,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", r.id, err)
+		}
+	}
+	_, session := validityServerFor(t, st)
+
+	// What the renderer this migration replaced would have produced, row for row.
+	// One project at a time, because ListMemories takes a single project and an
+	// empty one matches nothing.
+	byID := map[string]string{}
+	var replaced []memory.Memory
+	for _, project := range []string{"vproj", memory.GlobalProjectID} {
+		rows, err := st.ListMemories(context.Background(), project, "", "", 10)
+		if err != nil {
+			t.Fatalf("ListMemories %s: %v", project, err)
+		}
+		replaced = append(replaced, rows...)
+	}
+	for _, line := range strings.Split(formatMemories(replaced), "\n") {
+		if i := strings.Index(line, "`"); i >= 0 {
+			if j := strings.Index(line[i+1:], "`"); j >= 0 {
+				byID[line[i+1:i+1+j]] = strings.TrimSpace(line)
+			}
+		}
+	}
+	// The seeded row is in there too, and it is not one of the three this test
+	// compares; only the three fixture rows need a line.
+	for _, id := range []string{"gorigin", "gseed", "pseed"} {
+		if _, ok := byID[id]; !ok {
+			t.Fatalf("fixture precondition: the replaced renderer printed no line for %s:\n%s", id, formatMemories(replaced))
+		}
+	}
+
+	got := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": "vproj",
+	}))
+	for _, id := range []string{"gorigin", "gseed", "pseed"} {
+		want, ok := byID[id]
+		if !ok {
+			t.Fatalf("fixture precondition: the replaced renderer printed no line for %s", id)
+		}
+		if !strings.Contains(got, want) {
+			t.Errorf("a row rendered differently than the renderer this migration replaced.\n"+
+				"%s: the replaced renderer ---\n%s\n--- the assembled block ---\n%s", id, want, got)
+		}
+	}
+	// Spelled out, because the byte comparison above would also pass if BOTH
+	// renderers were wrong the same way, and this is the assertion that says which
+	// way is right: the global seed is attributed to the builtin, the project copy
+	// of the same words is not.
+	if !strings.Contains(got, "`gseed` (0.9 source=builtin)") {
+		t.Errorf("the global seed row is not attributed to the builtin; its OWN project is what decides that, and a "+
+			"global row read through a project bucket is where it can be lost:\n%s", got)
+	}
+	if !strings.Contains(got, "`pseed` (0.9)") || strings.Contains(got, "`pseed` (0.9 source=builtin)") {
+		t.Errorf("a PROJECT row holding the shipped words was attributed to the builtin; it is the user's own material:\n%s", got)
+	}
+}
+
+// shippedSeedText is the sentence Ghost ships as a global seed, read back from the
+// store's own seeding rather than written out here — so the fixture cannot drift
+// from the string `CanonicalOriginSourceForProject` keys on.
+func shippedSeedText(t *testing.T, st *memory.Store) string {
+	t.Helper()
+	if err := st.SeedGlobalMemories(context.Background()); err != nil {
+		t.Fatalf("SeedGlobalMemories: %v", err)
+	}
+	rows, err := st.ListMemories(context.Background(), memory.GlobalProjectID, "", "", 10)
+	if err != nil {
+		t.Fatalf("ListMemories: %v", err)
+	}
+	for _, m := range rows {
+		if m.Source == "builtin" {
+			return m.Content
+		}
+	}
+	t.Fatal("the store seeded no builtin global row, so there is no shipped seed text to copy")
+	return ""
+}
 
 // TestProjectContextLoadDoesNotScaleWithStoreSize is the bounded-window check, in
 // the shape of TestSessionStartLoadDoesNotScaleWithStoreSize.
