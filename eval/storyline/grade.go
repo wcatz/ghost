@@ -233,7 +233,7 @@ func finalBlockCarries(res *Result, want Record) Check {
 // behind rather than a check that always passes: a report line for a measurement
 // nobody took is a number with no evidence behind it, and it is the one output
 // this module is not allowed to produce.
-func judgedCheck(res *Result, followed bool, verdict string) Check {
+func judgedCheck(followed bool, verdict string) Check {
 	name := "judge:followed-reversal"
 	if followed {
 		return Check{name, true, strings.TrimSpace(verdict)}

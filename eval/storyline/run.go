@@ -264,7 +264,7 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		res.Checks = append(res.Checks, judgedCheck(res, ok, verdict))
+		res.Checks = append(res.Checks, judgedCheck(ok, verdict))
 	}
 	return res, nil
 }
