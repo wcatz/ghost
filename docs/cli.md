@@ -773,7 +773,7 @@ ghost history compact --before 2026-10-01              # widen the bound (see be
 A version row is removed **only** when it records the same state as the row before
 it of the same memory, in rowid order, compared over every column a version stores:
 `content`, `category`, `importance`, `resolved_at` and `source`; and only when it is
-a `reflect` version recorded before the bound. Five things always stay:
+a `reflect` version recorded before the bound. Six things always stay:
 
 - a memory's **first** version — the only statement of what it said, with nothing
   to duplicate;
@@ -786,7 +786,13 @@ a `reflect` version recorded before the bound. Five things always stay:
 - any row carrying a `related_id` or `merged_content` — it is the thread a reader
   follows from one memory's past into its successor's, not a statement about this
   one;
-- any version recorded at or after the bound.
+- any version recorded at or after the bound;
+- **every version of a memory that has since been deleted.** A deleted memory has
+  no live row, so an `as_of` read of it takes the age it measures from the version
+  that answers — and removing a version from it would change what a past read
+  computes, for a memory nobody can edit and nobody can restore. Its history is
+  frozen the moment it is deleted, so this costs nothing: the flood it would have
+  cleaned up is never written to again.
 
 `save`, `update` and `baseline` are never compacted even though they record a state
 and nothing else, and the reason is a real one rather than caution: `ghost memory
@@ -826,20 +832,57 @@ The default does **not** warn. A command whose zero configuration printed a warn
 would train its reader to skip the one that matters.
 
 `--fix-updated-at` is a second, separate repair, behind its own flag. Each live
-memory's `updated_at` becomes the `recorded_at` of its **anchor** — the newest
-version this repair will *not* remove — and only where a version that changed
-nothing sits **above** that anchor
-— that version is the evidence a reflection run moved the stamp, and without it a
-stamp the history cannot account for belongs to some other writer. The bound reaches
-this gate too, for the same reason it reaches the delete: a version this repair
-would not remove is not a version it may treat as proof that a reflection ran. It moves **only
-backward** — the damage moved a stamp forward, so the repair undoes that — and a
-memory whose stamp is already at or before the target, or which no version explains,
-is left exactly as it is. Both stamps are read through the store's own layouts and
-the restored one is written in the layout the store writes, so a whole-day value on
-either side is readable and never written back. A memory whose stamp no layout reads
-is left alone and counted separately (`stamps unreadable`), because a row this run
-could not repair is a row whose supersede orientation is still wrong.
+memory's `updated_at` becomes the `recorded_at` of its **anchor**, and only where a
+version that changed nothing sits **above** that anchor — that version is the
+evidence a reflection run moved the stamp, and without it a stamp the history
+cannot account for belongs to some other writer. The bound reaches this gate too,
+for the same reason it reaches the delete: a version this repair would not remove
+is not a version it may treat as proof that a reflection ran.
+
+**The anchor is the newest version whose WRITER moved `updated_at` in the same
+statement that filed it** — `save`, `update` or `reflect` — and it is *not* the
+newest version that changed its recorded state. Those two are different questions.
+A `ghost resolve` changes `resolved_at` and says in as many words that it leaves
+`updated_at` alone; a duplicate save that folds changes `importance` and moves
+nothing. Answering with either would set a memory's stamp to an instant the store
+never held on that column at all, and on a real store this did so for 49 of 288
+restored stamps. `ghost history compact --fix-updated-at` therefore skips over them
+both and lands on the last write that really moved the stamp. A version a
+deliberate writer filed *and* moved the stamp is still an anchor: that is what
+`save`/`update`/`reflect` membership means, and `TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow`
+pins the interleaving.
+
+A memory whose history holds **no** version written by such a writer has no anchor
+at all, and the answer is to leave its stamp exactly where it is and say so. A
+pre-#727 memory is the case: it has no `save` version, so if its next writer was an
+unresolve its only recorded version is one whose writer moved no stamp. Its no-op
+reflect flood is still removed — the version removal never depended on there being a
+stamp to move — and the report counts the row separately as
+`no recorded stamp write`, so a report of `0 updated_at restored` beside a store full
+of removed versions cannot be read as a finished repair. It is a different count from
+`unreadable` on purpose: an unreadable stamp is a value that exists and no layout
+reads, and this is a value whose *author* does not exist anywhere in the table.
+
+It moves **only backward** — the damage moved a stamp forward, so the repair undoes
+that — and a memory whose stamp is already at or before the target is left as it
+is. Both stamps are read through the store's own layouts and the restored one is
+written in the layout the store writes, so a whole-day value on either side is
+readable and never written back. A memory whose stamp no layout reads is left alone
+and counted separately (`stamps unreadable`), because a row this run could not
+repair is a row whose supersede orientation is still wrong.
+
+For a memory that is still **live**, neither repair changes what an `as_of` read
+of it returns. Its `content`, `category`, `importance`, `resolved_at`, `source`,
+`project_id`, `created_at` and supersede edges are all read from the live row or
+from a version carrying the same state, so a read of the same instant gives the
+same answer after the repair as before it. Two metadata fields do move, and only
+because they *name* which version answered: `VersionRecordedAt` and `VersionPhase`
+can now describe an earlier, equivalent version — a memory that was resolved and
+unresolved, or folded, may read as merely saved for an instant whose reflect flood
+has been compacted away. Nothing a historical read is *for* changes; the
+attribution does. A **deleted** memory is excluded from both repairs instead, so
+for one of those the fields do not move at all — which is why the exclusion is a
+scope rule rather than a retention one.
 
 Because the stamp repair needs that evidence, pass both flags in the **same** run:
 `ghost history compact --apply --fix-updated-at`. An earlier run that already

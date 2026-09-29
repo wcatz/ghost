@@ -236,7 +236,8 @@ func historyNewestVersionSQL(memoryID string) string {
 // historyRemovableRowSQL is the full predicate, and it is what #730 deletes by:
 // a row that recorded exactly what the row before it of the same memory recorded,
 // is not that memory's newest version, was recorded before the cutoff, names no
-// other memory, and is of a phase whose only content is the state it recorded.
+// other memory, and is of a phase whose only content is the state it recorded —
+// and which does not belong to a memory that has since been deleted.
 //
 // The newest-version guard is the same rule pruneHistoryTx already applies to its
 // per-memory trim: "Ranking by rowid DESC also means the predicate can never take
@@ -264,45 +265,86 @@ func historyNewestVersionSQL(memoryID string) string {
 // such row per memory, never the last, which is also why a store running the
 // lifecycle does not re-grow what was pruned: the rows it adds are all newer than
 // any cutoff, so they are outside the repair entirely.
+//
+// The tombstone guard is the second retention rule, and it is here rather than in
+// historyRemovableLikeSQL because it answers the same question the newest-version
+// guard answers — is this row something the repair removes? — and the answer is no
+// for a deleted memory. The reason is as_of rather than this file: with no
+// `memories` row, asOfCreatedAt falls back to the ANSWERING version's recorded_at
+// for the age a historical listing measures, so removing a version from a deleted
+// memory changes what a past read computes. A live memory is unaffected — its
+// created_at answers, and its as_of metadata moves to an earlier EQUIVALENT
+// version, which docs/invariants.md and docs/cli.md both say in as many words. A
+// memory's history is frozen the moment it is deleted, so nothing will ever write
+// there again: the flood this command cleans up stays where it is, at no cost.
+//
+// It is stable under the deletion, which is what the fixed-point argument on
+// CompactHistory needs: it reads the memory's NEWEST version, and no removable row
+// is ever the newest, so removing rows cannot promote a different one into being
+// newest and cannot un-retire a memory.
 func historyRemovableRowSQL(outer string) string {
 	return historyRemovableLikeSQL(outer) +
-		" AND " + outer + ".rowid <> " + historyNewestVersionSQL(outer+".memory_id")
+		" AND " + outer + ".rowid <> " + historyNewestVersionSQL(outer+".memory_id") +
+		" AND NOT " + tombstonedMemorySQL(outer+".memory_id")
 }
 
-// stampMovingPhases are the phases whose writer moves a LIVE memory's updated_at
-// in the same statement that files the version. Three, and each one is a site
-// rather than an inference:
+// stampMovingPhases are the phases whose writer moves a LIVE memory's updated_at in
+// the same STATEMENT that files the version. Three, and every one of their writers
+// is enumerated below, because membership here is a claim about code and a claim
+// about code is the kind that goes stale without anything failing.
 //
-//   - phaseSave — Store.Create's INSERT, whose updated_at is the column default.
-//   - phaseUpdate — UpdateMemoryWithOptions, the `tags = ?, updated_at =
-//     datetime('now')` statement (store.go).
-//   - phaseReflect — ReplaceNonManual's reusePreservesAge and reuse-with-tags
-//     branches, the two `updated_at = datetime('now')` statements there.
+// The rule is that EVERY writer of a listed phase does it, not that one of them
+// does. A phase with a single writer that moves the column and a second that does
+// not would make the version's own phase an unreliable witness: the anchor would
+// land on a row whose writer left the stamp alone, and the repair would set the
+// stamp to a time the store never held. So the audit is per phase and per writer:
 //
-// phaseSave cannot actually produce a state-identical row (a save is a memory's
-// first version, and the first version has no predecessor) and is in the set
-// because it is true rather than because it is load-bearing.
+//   - phaseSave — five writers, all INSERTs that omit updated_at and therefore take
+//     the column default `datetime('now')` (schema.go): Store.insertMemory behind
+//     Create and CreateFromCorpus, seedMemoryTx, both of UpsertWithOptions' insert
+//     branches, and RecordDecision's companion memory. The version is appended in
+//     the transaction that ran the INSERT.
+//   - phaseUpdate — one writer, UpdateMemoryWithOptions, whose UPDATE ends
+//     `tags = ?, updated_at = datetime('now')` (store.go), with the version
+//     appended in the same transaction.
+//   - phaseReflect — three writers, all in ReplaceNonManual: the reusePreservesAge
+//     branch and the default reuse branch, each an UPDATE ending
+//     `updated_at = datetime('now')`, and the fresh INSERT, which omits the column
+//     and takes the default. One append for all three at the end, in the same
+//     transaction. The reuseChangesNothing branch (#727) files no version at all,
+//     so it is not a writer of this phase.
 //
-// Every OTHER phase files a version without touching a live memory's stamp:
-// MarkResolved changes resolved_at and says in as many words that it deliberately
-// leaves updated_at alone, CreateLink writes no memories row at all, and Upsert's
-// fold files phaseMerge with the folded text and moves nothing. That is what
-// stampMovingPhases is FOR, and getting it wrong in the permissive direction is a
-// silent permanent loss of the repair: a state-identical supersede row treated as
-// an anchor closes the gate for that memory for good, and a report that then says
-// "0 updated_at restored" is the same wrong answer as never having run.
-// TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards runs every
-// phase outside this set and pins that none of them closes the gate.
+// Every OTHER phase files a version without touching a live memory's stamp, and
+// five of the nine CHANGE a column this table records, which is what makes the list
+// necessary rather than merely tidy:
 //
-// Two of them also move NO updated_at while being a deliberate change to what the
-// reader is told, and the difference matters to `ghost supersede`, which orients a
-// candidate pair by updated_at: a link and a resolve are recorded, and neither is
-// evidence about a memory's freshness.
+//   - setResolvedStampTx (SetResolved and MarkResolved) and ClearResolved write
+//     `resolved_at` and say in as many words that updated_at is deliberately left
+//     alone.
+//   - Upsert's fold writes `importance = MIN(1.0, importance + ?)` and files
+//     phaseMerge with the wording it dropped.
+//   - CreateLink writes no memories row at all, and files supersede/unsupersede.
+//   - RestoreSnapshot and ImportMemory write their rows from a snapshot and an
+//     artifact; their versions are the memory's first.
+//   - Delete files the tombstone, and removes the row.
+//
+// Getting this list wrong in the permissive direction is a silent permanent loss of
+// the repair: a state-identical supersede row treated as an anchor closes the gate
+// for that memory for good, and a report that then says "0 updated_at restored" is
+// the same wrong answer as never having run. Getting it wrong in the OTHER
+// direction invents a stamp, which is worse and is what the state-change reading
+// this replaced did — 49 of 288 restored stamps on one real store were set to an
+// instant the store had never held. TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards
+// runs every phase outside this set and pins that none of them closes the gate;
+// TestCompactHistoryFixUpdatedAtAnchorsOnAStampMoveNotOnAStateChange drives the two
+// writers that change a recorded column through their real API and pins that
+// neither becomes the answer.
 var stampMovingPhases = []string{phaseSave, phaseUpdate, phaseReflect}
 
-// historyRemovableLikeSQL is historyRemovableRowSQL WITHOUT the newest-version
-// guard, and the two are one function apart on purpose: the guard is a RETENTION
-// rule and the rest is a DAMAGE rule, and --fix-updated-at needs them apart.
+// historyRemovableLikeSQL is historyRemovableRowSQL WITHOUT the two retention
+// guards, and the split between them is deliberate: the guards are RETENTION rules
+// and the rest is a DAMAGE rule, and --fix-updated-at needs the damage rule on its
+// own.
 //
 // A memory's newest version is spared from removal because it is the statement of
 // what the memory says now. That says nothing about whether the row is a record of
@@ -311,8 +353,8 @@ var stampMovingPhases = []string{phaseSave, phaseUpdate, phaseReflect}
 // evidence the stamp was moved; a newest version that is a deliberate retag is a
 // deliberate change, and it is an anchor. The guard cannot tell those two apart —
 // it declines both — so the anchor has to be found without it, and spelling the
-// two predicates as one function plus one conjunct is what keeps the anchor from
-// silently acquiring the guard on the next change.
+// two predicates as one function plus two conjuncts is what keeps the anchor from
+// silently acquiring a guard on the next change.
 //
 // Reading it the other way — the newest row is always an anchor — is not a
 // stricter version of the same rule, it is a dead one: a removable row is by
@@ -324,6 +366,24 @@ func historyRemovableLikeSQL(outer string) string {
 		" AND " + outer + ".phase IN (" + placeholders(len(compactablePhases())) + ")" +
 		" AND " + outer + ".recorded_at < ?" +
 		" AND " + outer + ".related_id IS NULL AND " + outer + ".merged_content IS NULL"
+}
+
+// tombstonedMemorySQL is true for a memory whose NEWEST version is a `delete`
+// tombstone and false for every other memory, and the COALESCE is what keeps the
+// false case a fact rather than an unknown: a memory with no recorded version at all
+// answers NULL, and `NOT NULL` is NULL, so the guard would exclude rows by the
+// accident of there being nothing to compare rather than by the fact that the memory
+// is retired. A memory with no version is outside this predicate for a stronger
+// reason, and the guard should say so for its own reason.
+//
+// It reads the newest version by rowid rather than by recorded_at, like every other
+// newest-version lookup here: recorded_at is second-precision, so a pass that writes
+// several versions in one transaction leaves ordering by it a coin toss. The lookup
+// is the same sub-select historyNewestVersionSQL names, so "newest" means one thing
+// across the file.
+func tombstonedMemorySQL(memoryIDExpr string) string {
+	return "COALESCE((SELECT t.phase FROM memory_history t WHERE t.rowid = " +
+		historyNewestVersionSQL(memoryIDExpr) + "), '') = '" + phaseDelete + "'"
 }
 
 // A compaction statement and its arguments are built by ONE function each, because
@@ -404,10 +464,10 @@ func compactCandidatesStmt(projectID, cursor, cutoff string) (string, []any) {
 	// see a sibling FROM item.
 	evidence := `COALESCE((SELECT max(r.rowid) FROM memory_history r
 	        WHERE r.memory_id = h.memory_id AND r.project_id = ? AND ` + historyRemovableRowSQL("r") + `), 0)`
-	// The anchor: the newest version that is NOT something the repair would remove and
-	// NOT a row whose writer moved no stamp.
+	// The anchor: the newest version this repair will NOT remove whose WRITER moved
+	// a live memory's updated_at in the same statement that filed it.
 	//
-	// Both halves are needed and neither is the other. The FIRST is the blocker
+	// Both halves are needed and neither is the other. The first is the blocker
 	// (TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow): a row
 	// that records the state of its predecessor is invisible to
 	// `NOT historyEqualPredecessorSQL` whatever else is true of it, and a
@@ -416,47 +476,58 @@ func compactCandidatesStmt(projectID, cursor, cutoff string) (string, []any) {
 	// reading the anchor skipped over both, so a pre-#727 no-op reflect row
 	// beneath a retag read as proof that a reflection had moved a stamp it had not.
 	//
-	// The SECOND is the regression that first half introduced
-	// (TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards): a
-	// `supersede` version is also state-identical, and also not removable, and
-	// CreateLink moves no live memory's updated_at, so as an anchor it closed the
-	// gate for that memory permanently. stampMovingPhases is the list that says
-	// which writers moved the stamp; a state-identical row of any other phase is
-	// transparent, because it is not evidence about a memory's freshness at all.
+	// The second is what replaced the state-change half this used to carry, and it
+	// replaced it because a change of state is not a change of stamp. Five of the
+	// nine phases outside stampMovingPhases change a column this table records —
+	// SetResolved writes resolved_at, Upsert's fold writes importance, a restore
+	// writes the snapshot's text — and none of them touches updated_at, so under
+	// the state-change reading any of them became the answer and the repair set a
+	// memory's stamp to an instant the store never held on either column. 49 of 288
+	// restored stamps on one real store, and one memory's first version was an
+	// unresolve (a pre-v17 memory, which has no earlier version to compare against
+	// and so passed the comparison trivially) with seven no-op reflects above it
+	// whose stamp was "restored" to the moment that row was written.
+	//
+	// There is nothing else to check it against, and that is the reason for the
+	// phase list rather than a cleverer predicate: `memory_history` records no
+	// updated_at at all, so a version row cannot be compared with the stamp it is
+	// supposed to account for. The only evidence a stamp write happened is the
+	// identity of the writer, and the writer is what the phase names.
+	//
+	// A memory whose history holds no such row has no anchor, and COALESCE turns
+	// that into a zero the caller can report. The stamp is left exactly as it is,
+	// and it is counted under a name of its own rather than as an unreadable stamp:
+	// an unreadable stamp is a value that exists and cannot be parsed, and this is
+	// a value whose AUTHOR does not exist anywhere in the table. Merging them would
+	// send an operator looking for a timestamp shape that is not wrong. Inventing a
+	// target for it would be the failure the whole file exists to undo, one level
+	// down. The LEFT JOIN and the COALESCE around recorded_at are there so such a
+	// memory REACHES the caller instead of being dropped by an inner join: a row
+	// silently missing from a repair is a memory whose stamp reads as a reflect
+	// run's time with nothing to say so.
 	//
 	// Project-scoped, like the delete: a version filed under another project is not
 	// one this run will remove and not one whose writer moved this memory's stamp,
 	// so it is an anchor.
 	//
-	// The outer pair of parens is load-bearing, not decoration, and dropping it is
-	// a silent total failure rather than a syntax error: with `A OR B AND C` the
-	// AND binds first, so the predicate stops being "A, or B-and-C" and becomes
-	// "A-and-B, or C", and historyRemovableLikeSQL and historyEqualPredecessorSQL
-	// both open with an EXISTS, so the shape that survives is not the one that was
-	// written. The test that catches it is the damage fixture: it has both kinds of
-	// row in every memory.
-	// A row is the anchor when it is NOT something the repair would remove, AND it
-	// either changed state or its phase is one whose writer moves a live memory's
-	// stamp. Both inner parentheses are load-bearing and dropping either one is a
-	// silent total failure rather than a syntax error: with `NOT A AND NOT B OR C`
-	// the ANDs bind first and the predicate stops being the one that was written —
-	// and both historyRemovableLikeSQL and historyEqualPredecessorSQL open with an
-	// EXISTS, so the shape that survives is not the shape anyone is reading.
-	// TestCompactHistoryFixUpdatedAtRestoresTheLastRealChange catches it: every
-	// memory in it has both kinds of row.
+	// The parens around historyRemovableLikeSQL are load-bearing, not decoration,
+	// and dropping one is a silent total failure rather than a syntax error: the
+	// helper opens with an EXISTS, so `NOT EXISTS (…) AND a.phase IN (…)` and
+	// `NOT EXISTS (…) a.phase IN (…)` are not the same query, and only one of them
+	// is the one anyone is reading. TestCompactHistoryFixUpdatedAtRestoresTheLastStampWrite
+	// catches it: every memory in it has both kinds of row.
 	anchor := `(SELECT max(a.rowid) FROM memory_history a
 	        WHERE a.memory_id = h.memory_id AND a.project_id = ?
 	          AND NOT (` + historyRemovableLikeSQL("a") + `)
-	          AND (NOT (` + historyEqualPredecessorSQL("a") + `)
-	               OR a.phase IN (` + placeholders(len(stampMovingPhases)) + `)))`
-	sql := `SELECT c.memory_id, c.target, t.recorded_at, m.updated_at, c.removable_last
+	          AND a.phase IN (` + placeholders(len(stampMovingPhases)) + `))`
+	sql := `SELECT c.memory_id, c.target, COALESCE(t.recorded_at, ''), m.updated_at, c.removable_last
 	    FROM (
-	        SELECT h.memory_id AS memory_id, ` + anchor + ` AS target, ` + evidence + ` AS removable_last
+	        SELECT h.memory_id AS memory_id, COALESCE(` + anchor + `, 0) AS target, ` + evidence + ` AS removable_last
 	        FROM memory_history h
 	        WHERE h.project_id = ? AND NOT ` + historyEqualPredecessorSQL("h") + `
 	        GROUP BY h.memory_id
 	    ) c
-	    JOIN memory_history t ON t.rowid = c.target
+	    LEFT JOIN memory_history t ON t.rowid = c.target
 	    JOIN memories m ON m.id = c.memory_id AND m.project_id = ?
 	    WHERE (? = '' OR c.memory_id > ?)
 	    ORDER BY c.memory_id
@@ -555,6 +626,17 @@ type HistoryCompactResult struct {
 	// supersede orientation is still wrong, and a count of zero fixes would
 	// otherwise read as "nothing left to do".
 	StampsUnreadable int64 `json:"stamps_unreadable"`
+	// StampsUnrecorded is the number of memories carrying a removable version that
+	// this run left in place because no KEPT version of theirs was written by a
+	// writer that moves updated_at. There is no instant to restore the stamp to, so
+	// it is left exactly as it is — and reported, because the stamp is still
+	// reading as a reflect run's time and an operator has to be told that rather
+	// than read "nothing left to do" off a count of zero fixes.
+	//
+	// It is a distinct outcome from StampsUnreadable rather than another reason for
+	// it: an unreadable stamp is a value that exists and cannot be parsed, and this
+	// is a value whose AUTHOR does not exist anywhere in the table.
+	StampsUnrecorded int64 `json:"stamps_unrecorded"`
 }
 
 // CompactHistory repairs one project's recorded history: it removes the version
@@ -617,12 +699,12 @@ func (s *Store) CompactHistory(ctx context.Context, projectID string, opts Histo
 	// record that this run rewrote part of the store, and a zero handed back beside
 	// an error describes a store that no longer exists.
 	if opts.FixUpdatedAt {
-		fixed, unreadable, err := s.restoreUpdatedAt(ctx, projectID, cutoff, true)
+		fixed, unreadable, unrecorded, err := s.restoreUpdatedAt(ctx, projectID, cutoff, true)
 		if err != nil {
-			res.UpdatedAt, res.StampsUnreadable = fixed, unreadable
+			res.UpdatedAt, res.StampsUnreadable, res.StampsUnrecorded = fixed, unreadable, unrecorded
 			return res, err
 		}
-		res.UpdatedAt, res.StampsUnreadable = fixed, unreadable
+		res.UpdatedAt, res.StampsUnreadable, res.StampsUnrecorded = fixed, unreadable, unrecorded
 	}
 	removed, err := s.deleteRemovableHistory(ctx, projectID, cutoff)
 	if err != nil {
@@ -641,12 +723,12 @@ func (s *Store) CompactHistory(ctx context.Context, projectID string, opts Histo
 func (s *Store) compactHistoryPreview(ctx context.Context, projectID, cutoff string, opts HistoryCompactOptions,
 	res HistoryCompactResult) (HistoryCompactResult, error) {
 	if opts.FixUpdatedAt {
-		fixed, unreadable, err := s.restoreUpdatedAt(ctx, projectID, cutoff, false)
+		fixed, unreadable, unrecorded, err := s.restoreUpdatedAt(ctx, projectID, cutoff, false)
 		if err != nil {
-			res.UpdatedAt, res.StampsUnreadable = fixed, unreadable
+			res.UpdatedAt, res.StampsUnreadable, res.StampsUnrecorded = fixed, unreadable, unrecorded
 			return res, err
 		}
-		res.UpdatedAt, res.StampsUnreadable = fixed, unreadable
+		res.UpdatedAt, res.StampsUnreadable, res.StampsUnrecorded = fixed, unreadable, unrecorded
 	}
 	query, args := compactCountStmt(projectID, cutoff)
 	var removed int64
@@ -766,32 +848,52 @@ type compactStamp struct {
 // either side: a target Ghost cannot interpret is not a target, and an unreadable
 // current value is not evidence that the move would be backward.
 //
+// The third outcome is the anchor being ABSENT, and it is separate from the two
+// above rather than folded into either. A memory whose every kept version was
+// written by a writer that moves no stamp has no target at all — the clearest case
+// is a pre-v17 memory, which has no `save` version because migrateV17 records no
+// starting row, whose first recorded version is an `unresolve` from ClearResolved,
+// and which then accumulated the no-op reflects. There is nothing to restore the
+// stamp to, so it stays exactly as it is and the run says so; the alternative is
+// reading a row that moved no stamp as if it had, which is the invention this file
+// exists to undo. The removable versions still go — the delete does not depend on
+// the stamp — so a count of zero fixes alone would describe a run that had done
+// everything it could, and this one names what it could not.
+//
 // The stamp is written in StoredStampLayout rather than in the shape it was read
 // in, because the two columns are written by different statements: a whole-day
 // value on either side is legal to read and illegal to write back, and copying the
 // shape read would leave a row in a form no writer produces — which is the form a
 // reader has to try twice to parse.
-func restorableStamp(s compactStamp) (stamp string, restorable, unreadable bool) {
+func restorableStamp(s compactStamp) (stamp string, restorable, unreadable, unrecorded bool) {
 	if s.removableLast == 0 || s.removableLast <= s.target {
-		return "", false, false
+		return "", false, false, false
+	}
+	// Before the parse, because a target of zero means recorded is the empty
+	// string the candidate statement substituted for a missing anchor, and
+	// ParseStamp would report an absent row as an unreadable one. The two are
+	// different facts and a report that merged them would send an operator looking
+	// for a timestamp shape that does not exist.
+	if s.target == 0 {
+		return "", false, false, true
 	}
 	target, ok := ParseStamp(s.recorded)
 	if !ok {
-		return "", false, true
+		return "", false, true, false
 	}
 	current, ok := ParseStamp(s.updatedAt)
 	if !ok {
-		return "", false, true
+		return "", false, true, false
 	}
 	if !current.After(target) {
-		return "", false, false
+		return "", false, false, false
 	}
-	return target.UTC().Format(StoredStampLayout), true, false
+	return target.UTC().Format(StoredStampLayout), true, false, false
 }
 
 // restoreUpdatedAt walks every live memory of the project that has a version which
-// changed state, in bounded batches, and reports how many were restored and how many
-// could not be read.
+// changed state, in bounded batches, and reports how many were restored, how many
+// could not be read, and how many have no recorded stamp write to restore from.
 //
 // The write lock is the caller's, and each batch takes the database's own write lock
 // in its own BEGIN IMMEDIATE, so the lock is taken historyCompactBatchSize times over
@@ -805,10 +907,10 @@ func restorableStamp(s compactStamp) (stamp string, restorable, unreadable bool)
 // freshness: a count that included a write whose batch rolled back would send an
 // operator looking for damage that is still exactly where it was, and the count is
 // the only thing they have to go on when a run over a large store failed part way
-// through. unreadable is counted as it is decided instead, because an unreadable
-// stamp is a statement about the data rather than a write, and it survives the
-// rollback of the batch that noticed it.
-func (s *Store) restoreUpdatedAt(ctx context.Context, projectID, cutoff string, apply bool) (fixed, unreadable int64, err error) {
+// through. unreadable and unrecorded are counted as they are decided instead,
+// because each is a statement about the data rather than a write, and both survive
+// the rollback of the batch that noticed them.
+func (s *Store) restoreUpdatedAt(ctx context.Context, projectID, cutoff string, apply bool) (fixed, unreadable, unrecorded int64, err error) {
 	cursor := ""
 	for {
 		// tx is nil in a dry run and this batch's transaction in an apply, and it is
@@ -825,7 +927,7 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID, cutoff string, 
 			// writer from losing its hand-off on the busy handler's growing poll
 			// schedule.
 			if tx, lock, err = s.beginWrite(ctx, "history-compact-stamp"); err != nil {
-				return fixed, unreadable, fmt.Errorf("begin restore updated_at: %w", err)
+				return fixed, unreadable, unrecorded, fmt.Errorf("begin restore updated_at: %w", err)
 			}
 		}
 		var q stampQuerier = s.db
@@ -837,13 +939,16 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID, cutoff string, 
 			if tx != nil {
 				_ = tx.Rollback() //nolint:errcheck
 			}
-			return fixed, unreadable, readErr
+			return fixed, unreadable, unrecorded, readErr
 		}
 		stamped := int64(0)
 		for _, c := range batch {
-			stamp, restorable, bad := restorableStamp(c)
+			stamp, restorable, bad, absent := restorableStamp(c)
 			if bad {
 				unreadable++
+			}
+			if absent {
+				unrecorded++
 			}
 			if !restorable {
 				continue
@@ -854,18 +959,18 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID, cutoff string, 
 			}
 			if _, err := tx.ExecContext(ctx, historyCompactRestoreSQL, stamp, c.memoryID, projectID); err != nil {
 				_ = tx.Rollback() //nolint:errcheck
-				return fixed, unreadable, fmt.Errorf("restore updated_at of %s: %w", c.memoryID, err)
+				return fixed, unreadable, unrecorded, fmt.Errorf("restore updated_at of %s: %w", c.memoryID, err)
 			}
 		}
 		if tx != nil {
 			if err := tx.Commit(); err != nil {
-				return fixed, unreadable, fmt.Errorf("commit restore updated_at: %w", err)
+				return fixed, unreadable, unrecorded, fmt.Errorf("commit restore updated_at: %w", err)
 			}
 			lock.reportHold("history-compact-stamp", time.Now())
 		}
 		fixed += stamped
 		if len(batch) < historyCompactBatchSize {
-			return fixed, unreadable, nil
+			return fixed, unreadable, unrecorded, nil
 		}
 		cursor = batch[len(batch)-1].memoryID
 	}

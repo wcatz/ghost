@@ -61,6 +61,23 @@ const (
 	phaseBaseline = "baseline"
 )
 
+// allHistoryPhases is every phase the schema knows about, in the order the
+// constants are declared.
+//
+// It exists for the two classifiers that are claims about CODE rather than rules
+// about rows, and they need the full set to be checkable at all: `compactablePhases`
+// says which phases the compaction may remove, and `stampMovingPhases` says which
+// writers move a live memory's updated_at. Both are asked "what is not in here?",
+// and a hand-written list of the remainder cannot answer it — a phase added to the
+// schema and to neither list would simply be unclassified, which is the failure the
+// compaction's allowlist exists to make impossible.
+func allHistoryPhases() []string {
+	return []string{
+		phaseSave, phaseUpdate, phaseReflect, phaseMerge, phaseResolve, phaseUnresolve,
+		phaseSupersede, phaseUnsupersede, phaseRestore, phaseImport, phaseDelete, phaseBaseline,
+	}
+}
+
 // The growth policy for memory_history, applied inside the same transaction
 // as the append (see pruneHistoryForIDsTx and pruneHistoryTableTx). They are vars
 // rather than consts only so the policy tests can lower them; nothing in

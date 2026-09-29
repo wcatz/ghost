@@ -198,6 +198,17 @@ func printHistoryCompactLines(w io.Writer, r historyCompactReport) error {
 				return err
 			}
 		}
+		// And the third outcome, disclosed for the same reason and named separately
+		// because it is a different fact: the stamp is readable and the history
+		// simply records no write that moved it, so there is nothing to restore it
+		// to. A count of zero fixes beside a store full of no-op reflects is the
+		// wrong reading, and this is the clause that stops it.
+		if p.StampsUnrecorded > 0 {
+			if _, err := fmt.Fprintf(w,
+				" (%d stamp(s) not restorable, no recorded stamp write)", p.StampsUnrecorded); err != nil {
+				return err
+			}
+		}
 		// The same reasoning, for the same reason: these are the batches this
 		// project committed before the run stopped, and a line that reads exactly
 		// like a finished project's would be counted as a finished repair.

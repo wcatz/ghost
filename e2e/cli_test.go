@@ -2509,6 +2509,56 @@ func seedPreFixReflectHistory(t *testing.T, s *sandbox, memoryID string, version
 	}
 }
 
+// seedUnrecordedStampHistory stages the damage #730 deliberately does NOT repair:
+// a memory whose every recorded version was written by a writer that moves no
+// stamp, so there is no instant to put its stamp back to.
+//
+// It is the pre-v17 shape — a memory that predates version recording, resolved and
+// then unresolved by a build that records an `unresolve` and files no baseline
+// before it — with the no-op flood above it that makes the stamp worth repairing on
+// any other memory. A first version has no predecessor, so the state comparison
+// every other row is judged by called it a change; that is what this stages, and it
+// is the case where a repair would have set the stamp to a moment the store had
+// never recorded on any column.
+//
+// Read-write for the same reason seedPreFixReflectHistory is, and with the same
+// bargain: the state here is one no current command can produce, and the assertions
+// all read back through the read-only handle.
+func seedUnrecordedStampHistory(t *testing.T, s *sandbox, memoryID string, versions int, at, stamp string) {
+	t.Helper()
+	dsn := "file:" + filepath.ToSlash(s.dbPath()) + "?_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open %s read-write to seed history: %v", s.dbPath(), err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`DELETE FROM memory_history WHERE memory_id = ?`, memoryID); err != nil {
+		t.Fatalf("drop the recorded history: %v", err)
+	}
+	// The unresolve: the first version, and the only one whose writer leaves
+	// updated_at alone.
+	if _, err := db.Exec(`
+		INSERT INTO memory_history
+			(memory_id, project_id, phase, recorded_at, content, category, importance, resolved_at, source)
+		SELECT id, project_id, 'unresolve', ?, content, category, importance, resolved_at, source
+		FROM memories WHERE id = ?`, at, memoryID); err != nil {
+		t.Fatalf("seed the unresolve version: %v", err)
+	}
+	for i := range versions {
+		if _, err := db.Exec(`
+			INSERT INTO memory_history
+				(memory_id, project_id, phase, recorded_at, content, category, importance, resolved_at, source)
+			SELECT id, project_id, 'reflect', ?, content, category, importance, resolved_at, source
+			FROM memories WHERE id = ?`, at, memoryID); err != nil {
+			t.Fatalf("seed reflect version %d: %v", i, err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE memories SET updated_at = ? WHERE id = ?`, stamp, memoryID); err != nil {
+		t.Fatalf("stage the undamaged-by-evidence stamp: %v", err)
+	}
+}
+
 // TestCLIHistoryCompact drives the #730 repair against the built binary, in a
 // store holding the damage a pre-#727 build left behind.
 //
@@ -2714,6 +2764,42 @@ func TestCLIHistoryCompact(t *testing.T) {
 		mustNotContain(t, "history compact (default bound, spelled out)", underDefaultAgain.stderr, "warning:")
 		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, third); n != 22 {
 			t.Errorf("the widened dry run left %d history rows, want all 22 — it was a dry run", n)
+		}
+	})
+
+	t.Run("a memory with no recorded stamp write is reported, not invented", func(t *testing.T) {
+		// A fourth memory, in the shape a pre-v17 store has: nothing recorded until
+		// an unresolve, which files a version and moves no stamp. The flood above it
+		// is the same damage every other memory here carries, so the versions still
+		// go — and the stamp has nowhere to go, which is a thing the report has to
+		// say rather than a thing a count of zero restored can say for it.
+		fourth := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "a memory whose history records no stamp write at all",
+			"category":   "architecture",
+			"importance": 0.5,
+		}))
+		const (
+			preV17At   = "2026-08-01 09:00:00"
+			preV17Stmp = "2026-08-01 09:30:00"
+		)
+		seedUnrecordedStampHistory(t, s, fourth, 20, preV17At, preV17Stmp)
+
+		fixed := s.mustRun("history", "compact", "--project", e2eProject, "--apply", "--fix-updated-at")
+		mustMatch(t, "history compact (unrecorded stamp)", fixed.stdout, `1 stamp\(s\) not restorable, no recorded stamp write`)
+		// Not folded into the unreadable count, which is a different fault: an
+		// unreadable stamp is a value that exists and cannot be parsed.
+		mustNotContain(t, "history compact (unrecorded stamp)", fixed.stdout, "unreadable")
+		// The flood is still removed — the version removal never depended on there
+		// being a stamp to move — and only the memory's own newest version is kept.
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, fourth); n != 2 {
+			t.Errorf("the memory kept %d history rows, want 2 (its unresolve and its newest version)", n)
+		}
+		// And the stamp is exactly where the damage left it, rather than set to the
+		// instant the unresolve was recorded — the whole point of the rule.
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, fourth).text; got != preV17Stmp {
+			t.Errorf("updated_at = %q, want it left at %q: with no recorded stamp write there is no "+
+				"instant to restore it to", got, preV17Stmp)
 		}
 	})
 

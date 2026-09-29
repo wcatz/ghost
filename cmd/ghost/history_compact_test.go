@@ -531,6 +531,98 @@ func TestHistoryCompactReportsPerProject(t *testing.T) {
 	}
 }
 
+// TestHistoryCompactNamesTheStampsItCouldNotRestore: the report has to say which
+// rows it left wrong, and it has to say the two different reasons separately.
+//
+// A memory with a no-op flood above it and no recorded stamp write is not repaired —
+// nothing in its history was written by a writer that moves updated_at, so there is
+// no instant to put its stamp back to. That row's versions are still removed, so a
+// report of "0 stamps restored" over a store full of removed versions reads as a
+// finished repair. And the count is not the unreadable one: an unreadable stamp is
+// a value that exists and cannot be parsed, and this is a value whose AUTHOR is
+// absent — one number for two different faults would send an operator looking for a
+// timestamp shape that is not the problem.
+func TestHistoryCompactNamesTheStampsItCouldNotRestore(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "compact.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	if err := s.EnsureProject(ctx, "alpha", "/tmp/alpha", "Alpha"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, "alpha", memory.Memory{
+		Category: "gotcha", Content: "a pre-v17 memory resolved before this build recorded it",
+		Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// A pre-v17 memory: no save version, so the only version left is one whose
+	// writer moves no stamp. Then the no-op flood above it, dated on the far side of
+	// the default cut so the run has rows to remove.
+	if _, err := db.Exec(`DELETE FROM memory_history WHERE memory_id = ?`, id); err != nil {
+		t.Fatalf("drop the recorded history: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE memories SET resolved_at = '2025-12-01 09:00:00' WHERE id = ?`, id); err != nil {
+		t.Fatalf("resolve it: %v", err)
+	}
+	if n, err := s.ClearResolved(ctx, "alpha", []string{id}); err != nil || n != 1 {
+		t.Fatalf("ClearResolved: %d rows (err %v), want 1", n, err)
+	}
+	for range 3 {
+		if _, err := db.Exec(
+			`INSERT INTO memory_history (memory_id, project_id, recorded_at, phase, content, category, importance, source)
+			 SELECT id, project_id, '2026-08-01 09:00:00', 'reflect', content, category, importance, source
+			 FROM memories WHERE id = ?`, id); err != nil {
+			t.Fatalf("stage a no-op reflect: %v", err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE memories SET updated_at = '2026-08-01 09:30:00' WHERE id = ?`, id); err != nil {
+		t.Fatalf("move the stamp: %v", err)
+	}
+
+	report, err := runHistoryCompactPlan(ctx, s, t.TempDir(), historyCompactOptions{FixUpdatedAt: true})
+	if err != nil {
+		t.Fatalf("runHistoryCompactPlan: %v", err)
+	}
+	if len(report.Projects) != 1 {
+		t.Fatalf("report covers %d project(s), want 1: %+v", len(report.Projects), report.Projects)
+	}
+	got := report.Projects[0]
+	if got.StampsUnrecorded != 1 {
+		t.Errorf("StampsUnrecorded = %d, want 1: the memory's only version was written by a writer that "+
+			"moves no stamp", got.StampsUnrecorded)
+	}
+	if got.StampsUnreadable != 0 {
+		t.Errorf("StampsUnreadable = %d, want 0: nothing here is unreadable", got.StampsUnreadable)
+	}
+	if got.UpdatedAt != 0 {
+		t.Errorf("UpdatedAt = %d, want 0: there is no instant to restore this memory's stamp to",
+			got.UpdatedAt)
+	}
+	if got.Removed != 2 {
+		t.Errorf("Removed = %d, want 2: the flood is real damage and does not depend on the stamp",
+			got.Removed)
+	}
+	var out strings.Builder
+	if err := printHistoryCompact(&out, report); err != nil {
+		t.Fatalf("printHistoryCompact: %v", err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "1 stamp(s) not restorable, no recorded stamp write") {
+		t.Errorf("the report does not disclose the stamp it could not restore:\n%s", text)
+	}
+	// The dry-run footer says nothing was moved, and that has to stay true — the
+	// disclosure is about the apply, not about this run.
+	if !strings.Contains(text, "Nothing removed and no updated_at moved") {
+		t.Errorf("the disclosure turned a dry run into something that looks like it wrote:\n%s", text)
+	}
+}
+
 // TestHistoryCompactResolvesAndRefusesAnUnknownProject: --project takes the same
 // identifiers every other command's --project does, and one that names nothing is
 // an error rather than an empty report — "no such project" and "nothing to

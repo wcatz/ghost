@@ -345,6 +345,267 @@ func TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow(t *testing
 	}
 }
 
+// The two instants the anchor tests below share: the save whose recorded_at is the
+// answer, and the state change whose recorded_at is NOT. A fixture whose two events
+// sat at one instant could not tell the two apart, and one-second resolution plus a
+// suite that runs inside one second is exactly how that happens by accident.
+const (
+	anchorSavedAt  = "2026-01-01 10:00:00"
+	anchorChangeAt = "2026-01-01 11:00:00"
+	anchorDamageTo = "2026-08-01 09:30:00"
+)
+
+// stateChangeIsReal fails a fixture whose writer did not actually change a recorded
+// column, because a state-identical row is a DIFFERENT case and a test that stages
+// it while claiming to stage the other pins the wrong predicate.
+//
+// It is the check the previous rounds' fixtures were missing. Each of them staged
+// its inert phase's version with the state columns copied out of the live row, so
+// the row read as byte-identical — which is what a `supersede` is and what a
+// `resolve` is not. `SetResolved` writes resolved_at and `Upsert`'s fold writes
+// importance, and a version row is a SNAPSHOT of the live row taken after the
+// write, so a fixture driving the real writer gets both for free.
+func stateChangeIsReal(t *testing.T, s *Store, memoryID, phase string) {
+	t.Helper()
+	var identical int
+	if err := s.db.QueryRow(`
+		SELECT count(*) FROM memory_history cur
+		WHERE cur.memory_id = ? AND cur.phase = ? AND `+historyEqualPredecessorSQL("cur"),
+		memoryID, phase).Scan(&identical); err != nil {
+		t.Fatalf("read whether the %s version changed anything: %v", phase, err)
+	}
+	if identical != 0 {
+		t.Fatalf("the %s version records exactly what the row before it records, so the fixture is "+
+			"staging a byte-identical row and not the state change it claims to be", phase)
+	}
+}
+
+// dropAllHistory takes a memory's whole recorded past away, which is what a
+// pre-v17 memory looks like: migrateV17 records no starting row, so a store
+// upgraded from before the history table holds memories whose first recorded
+// version is whatever the next writer happened to file.
+func dropAllHistory(t *testing.T, s *Store, memoryID string) {
+	t.Helper()
+	if _, err := s.db.Exec(`DELETE FROM memory_history WHERE memory_id = ?`, memoryID); err != nil {
+		t.Fatalf("drop the recorded history of %s: %v", memoryID, err)
+	}
+}
+
+// setResolvedAt stamps a memory resolved without filing a version, which is the
+// state an upgraded store is in: a build old enough not to record resolved_at's
+// write is also old enough to predate the table.
+func setResolvedAt(t *testing.T, s *Store, memoryID, stamp string) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE memories SET resolved_at = ? WHERE id = ?`, stamp, memoryID); err != nil {
+		t.Fatalf("stamp %s resolved at %q: %v", memoryID, stamp, err)
+	}
+}
+
+// TestCompactHistoryFixUpdatedAtAnchorsOnAStampMoveNotOnAStateChange: the
+// anchor is a KEPT version whose WRITER moved updated_at, and this is the finding
+// that the writer is the whole of it.
+//
+// The anchor used to accept any version that CHANGED state. A change of state is
+// not a change of stamp, and the two writers here prove it: `SetResolved` writes
+// resolved_at and says in as many words that it leaves updated_at alone, and
+// `Upsert`'s fold writes importance and moves nothing. Under the state-change
+// reading either one became the answer, and the repair set a memory's stamp to an
+// instant the store never held on either column — a fresh value, invented, in a
+// column `ghost supersede` orients candidates by.
+//
+// The measured damage on a real store was 49 of 288 restored stamps, so this is
+// not a corner: a corpus that runs `ghost resolve` and saves duplicates folds
+// constantly, and both of those land above the last save.
+func TestCompactHistoryFixUpdatedAtAnchorsOnAStampMoveNotOnAStateChange(t *testing.T) {
+	// Same words, different case — the only pair `FoldOnly` folds, and
+	// fold_only_test.go pins that equivalence. A restatement further from the
+	// stored text would be inserted as its own row and file no merge version.
+	const restated = "The Relay Listens On Port 2222 In Staging"
+
+	for _, tc := range []struct {
+		name  string
+		phase string
+		apply func(t *testing.T, s *Store, id string)
+	}{
+		{
+			name:  "a resolve",
+			phase: phaseResolve,
+			apply: func(t *testing.T, s *Store, id string) {
+				t.Helper()
+				n, err := s.SetResolved(context.Background(), []string{id})
+				if err != nil || n != 1 {
+					t.Fatalf("SetResolved: %d rows (err %v), want 1 — the fixture needs a real resolve", n, err)
+				}
+			},
+		},
+		{
+			name:  "an unsaturated fold",
+			phase: phaseMerge,
+			apply: func(t *testing.T, s *Store, id string) {
+				t.Helper()
+				got, dupOf, _, err := s.UpsertWithOptions(context.Background(), testProject, "architecture",
+					restated, "mcp", 0.6, nil, UpsertOptions{FoldOnly: true})
+				if err != nil {
+					t.Fatalf("FoldOnly Upsert: %v", err)
+				}
+				if got != id || dupOf != id {
+					t.Fatalf("FoldOnly returned (%q, %q), want the stored memory %q twice — the fixture is "+
+						"not exercising the fold", got, dupOf, id)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			id := createCompactMemory(t, s, compactFirstText)
+
+			stampHistoryRow(t, s, id, phaseSave, anchorSavedAt)
+			tc.apply(t, s, id)
+			stampHistoryRow(t, s, id, tc.phase, anchorChangeAt)
+			// The precondition, read rather than assumed. A resolve that resolved
+			// nothing, or a fold whose MIN(1.0, …) landed back on the stored
+			// importance, would file a state-identical version and quietly turn
+			// this into a different test that still passed.
+			stateChangeIsReal(t, s, id, tc.phase)
+
+			// The damage the run is here for: pre-#727 no-op reflect versions above
+			// the state change, and a stamp at the end of that run's window. Three
+			// rows for two removals, because the newest version is the memory's own
+			// statement of what it says and no guard in this file will take it — so
+			// the two under it are removable only because it is there. Two rows
+			// would leave one removable row UNDER the state change, and that is the
+			// shape where the old rule's answer came from closing the gate rather
+			// than from answering wrongly; the finding is about the answer, so the
+			// fixture has to leave the gate open under both readings.
+			appendVerbatimVersion(t, s, id)
+			appendVerbatimVersion(t, s, id)
+			appendVerbatimVersion(t, s, id)
+			setUpdatedAt(t, s, id, anchorDamageTo)
+
+			if n := redundantVersionCount(t, s, id); n != 3 {
+				t.Fatalf("%d versions restate their predecessor byte for byte, want 3: the reflect "+
+					"versions copy the live row, which the %s left holding the state they record", n, tc.phase)
+			}
+			if !stampGateIsOpen(t, s, id, reflectNoOpCutoff) {
+				t.Fatal("the gate is closed before the repair runs, so the fixture is not staging the damage")
+			}
+
+			res, err := s.CompactHistory(ctx, testProject,
+				HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+			if err != nil {
+				t.Fatalf("CompactHistory: %v", err)
+			}
+			if res.Removed != 2 {
+				t.Errorf("Removed = %d, want 2: the two byte-identical reflect versions are the damage "+
+					"whether or not an inert writer filed something above them", res.Removed)
+			}
+			if res.UpdatedAt != 1 {
+				t.Errorf("UpdatedAt = %d, want 1: a %s version moves no live memory's updated_at, so it "+
+					"cannot be the thing that moved the stamp", res.UpdatedAt, tc.phase)
+			}
+			// The load-bearing assertion, and the whole finding: the answer is the
+			// SAVE's own instant. Naming the one the rule must not produce keeps the
+			// failure legible — a stamp restored to anchorChangeAt is a stamp set to
+			// a time memories.updated_at never held.
+			if got := readUpdatedAt(t, s, id); got != anchorSavedAt {
+				t.Errorf("updated_at = %q, want the save's own %q and NOT the %s's %q: a writer that "+
+					"changed state without moving the stamp is not the last change to the stamp",
+					got, anchorSavedAt, tc.phase, anchorChangeAt)
+			}
+		})
+	}
+}
+
+// TestCompactHistoryLeavesAStampWithNoRecordedStampWrite: a memory with no kept
+// version whose writer moved the stamp has no anchor at all, and the honest answer
+// is to leave the stamp alone and say so.
+//
+// It is reachable, and not narrowly. `memory_history` records no updated_at, so the
+// only evidence a stamp write happened is a version whose PHASE is one whose writer
+// moves it — and a pre-v17 memory (migrateV17 files no starting row) whose next
+// writer was `ClearResolved` has exactly that: an unresolve version and nothing
+// else. Under the state-change reading the unresolve passed trivially, as a first
+// version has no predecessor to compare against, and the repair restored a stamp to
+// an instant the store had never recorded on any column. One real memory in the
+// measured store had seven no-op reflects above that row and a stamp "restored" to
+// the moment the row was written.
+func TestCompactHistoryLeavesAStampWithNoRecordedStampWrite(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id := createCompactMemory(t, s, compactFirstText)
+
+	// A pre-v17 memory, resolved by a build that recorded nothing, and then
+	// unresolved by the current one.
+	dropAllHistory(t, s, id)
+	setResolvedAt(t, s, id, "2025-12-01 09:00:00")
+	n, err := s.ClearResolved(ctx, testProject, []string{id})
+	if err != nil || n != 1 {
+		t.Fatalf("ClearResolved: %d rows (err %v), want 1 — the fixture needs a real unresolve", n, err)
+	}
+	stampHistoryRow(t, s, id, phaseUnresolve, anchorChangeAt)
+	appendVerbatimVersion(t, s, id)
+	appendVerbatimVersion(t, s, id)
+	appendVerbatimVersion(t, s, id)
+	setUpdatedAt(t, s, id, anchorDamageTo)
+
+	// The unresolve really is the first version, which is what makes the case
+	// reachable at all: a first version has no predecessor, so under the old rule
+	// the state comparison declared every first version a change.
+	if first, err := firstVersionPhase(t, s, id); err != nil {
+		t.Fatal(err)
+	} else if first != phaseUnresolve {
+		t.Fatalf("the memory's first version is a %s, want the unresolve — the fixture is not the "+
+			"pre-v17 case this is about", first)
+	}
+	if n := redundantVersionCount(t, s, id); n != 3 {
+		t.Fatalf("%d versions restate their predecessor byte for byte, want 3", n)
+	}
+
+	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+	if err != nil {
+		t.Fatalf("CompactHistory: %v", err)
+	}
+	// The damage is still real damage and still goes: the version removal does not
+	// depend on there being a stamp to move.
+	if res.Removed != 2 {
+		t.Errorf("Removed = %d, want 2: the two no-op reflect versions are removable whatever the stamp "+
+			"can be restored to", res.Removed)
+	}
+	if res.UpdatedAt != 0 {
+		t.Errorf("UpdatedAt = %d, want 0: nothing in this memory's history was written by a writer that "+
+			"moves the stamp, so there is no instant to restore it to", res.UpdatedAt)
+	}
+	// Counted, not skipped in silence. A stamp left reading as a reflect run's time
+	// is still wrong, and a report whose numbers read "nothing left to do" about
+	// one is a report that says the repair finished.
+	if res.StampsUnrecorded != 1 {
+		t.Errorf("StampsUnrecorded = %d, want 1: the memory is left with a stamp nothing in its history "+
+			"explains, and an operator is told so", res.StampsUnrecorded)
+	}
+	if res.StampsUnreadable != 0 {
+		t.Errorf("StampsUnreadable = %d, want 0: nothing here is unreadable, there is simply no recorded "+
+			"stamp write to read a time from", res.StampsUnreadable)
+	}
+	if got := readUpdatedAt(t, s, id); got != anchorDamageTo {
+		t.Errorf("updated_at = %q, want it untouched at %q: an anchor the history cannot supply is not a "+
+			"reason to invent one", got, anchorDamageTo)
+	}
+}
+
+// firstVersionPhase reads a memory's oldest recorded phase, for the fixtures whose
+// whole point is what its FIRST row is.
+func firstVersionPhase(t *testing.T, s *Store, memoryID string) (string, error) {
+	t.Helper()
+	var phase string
+	err := s.db.QueryRow(
+		`SELECT phase FROM memory_history WHERE memory_id = ? ORDER BY rowid LIMIT 1`, memoryID).Scan(&phase)
+	if err != nil {
+		return "", fmt.Errorf("read %s's first version phase: %w", memoryID, err)
+	}
+	return phase, nil
+}
+
 // TestCompactHistoryFixUpdatedAtOnlyMovesBackward is the direction rule's own
 // regression test, and it is here because a mutation to `!current.After(target)` —
 // dropping the case where the stamp is EXACTLY the target — left the whole suite
@@ -753,19 +1014,26 @@ func TestCompactHistoryColumnPartitionNamesEveryColumn(t *testing.T) {
 	}
 }
 
-// TestCompactHistoryFixUpdatedAtRestoresTheLastRealChange: the second half of the
-// repair. updated_at has to say when the memory last really changed — the resolve,
-// the last row that changed state — and not when a reflection that changed nothing
-// looked at it.
+// TestCompactHistoryFixUpdatedAtRestoresTheLastStampWrite: the second half of the
+// repair. updated_at has to say when the memory last really changed — the last
+// recorded version whose WRITER moved the stamp — and not when a reflection that
+// changed nothing looked at it.
 //
 // The fixture is seedStampedHistory, not the issue's own ordering, and the
-// difference is load-bearing: for a stamp to be PAST the last real change the
-// reflect run has to come after that change, so a run that happened before it never
+// difference is load-bearing: for a stamp to be PAST the last stamp write the
+// reflect run has to come after that write, so a run that happened before it never
 // produced damage to repair and the repair correctly declines to invent any.
-func TestCompactHistoryFixUpdatedAtRestoresTheLastRealChange(t *testing.T) {
+//
+// The answer is the UPDATE's 11:00 and not the resolve's 12:00, and that is the
+// rule rather than a quirk of this fixture: SetResolved files its version from a
+// statement that writes resolved_at alone, so 12:00 is a time updated_at never
+// held. TestCompactHistoryFixUpdatedAtAnchorsOnAStampMoveNotOnAStateChange drives
+// the two shapes that made the difference measurable; this one pins that the common
+// case still lands on a real change rather than skipping past it.
+func TestCompactHistoryFixUpdatedAtRestoresTheLastStampWrite(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	id, _, _, resolvedAt, runTo := seedStampedHistory(t, s, 5)
+	id, _, updatedAt, _, runTo := seedStampedHistory(t, s, 5)
 	if got := readUpdatedAt(t, s, id); got != runTo {
 		t.Fatalf("fixture did not stage the damage: updated_at = %q, want the run's %q", got, runTo)
 	}
@@ -777,11 +1045,17 @@ func TestCompactHistoryFixUpdatedAtRestoresTheLastRealChange(t *testing.T) {
 	if res.UpdatedAt != 1 {
 		t.Errorf("UpdatedAt = %d, want 1 (one live memory whose stamp was restored)", res.UpdatedAt)
 	}
-	if got := readUpdatedAt(t, s, id); got != resolvedAt {
-		t.Errorf("updated_at = %q, want the last state-changing row's recorded_at (%q)", got, resolvedAt)
+	if got := readUpdatedAt(t, s, id); got != updatedAt {
+		t.Errorf("updated_at = %q, want the last version whose writer moved the stamp (%q), and not the "+
+			"resolve's 12:00: a statement that writes resolved_at alone never held that value on "+
+			"updated_at", got, updatedAt)
 	}
 	if res.StampsUnreadable != 0 {
 		t.Errorf("StampsUnreadable = %d, want 0: every fixture stamp is readable", res.StampsUnreadable)
+	}
+	if res.StampsUnrecorded != 0 {
+		t.Errorf("StampsUnrecorded = %d, want 0: the memory does have a version whose writer moved the "+
+			"stamp, so this is not the no-anchor case", res.StampsUnrecorded)
 	}
 	// The versions that moved the stamp are gone, except the memory's newest, which
 	// is the statement of what it says now and which nothing removes.
@@ -895,6 +1169,138 @@ func TestCompactHistoryFixUpdatedAtOnlyTouchesLiveMemories(t *testing.T) {
 	}
 }
 
+// TestCompactHistoryLeavesADeletedMemorysHistoryAlone: the version removal stops
+// at a memory's tombstone, and the reason is as_of rather than this repair.
+//
+// A deleted memory has no `memories` row, so asOfCreatedAt falls back to the
+// ANSWERING version's recorded_at for the age it measures a ranking from. Remove a
+// version from such a memory and the version that answers a given instant changes,
+// so the age a historical listing computes for it changes with it — a reading that
+// was correct yesterday reads differently today because a repair ran, about a
+// memory nobody is editing and nobody can restore. The live memories next to it are
+// different: their `memories` row answers created_at, so removing a redundant
+// version moves which write the answer NAMES and not what it says.
+//
+// So the rule is a scope rule and not a retention one: a memory whose NEWEST
+// version is a `delete` tombstone is not compacted at all. The #727 flood it would
+// have cleaned up is frozen the moment the memory is deleted, which is exactly why
+// it costs nothing to leave it — nothing will ever write there again.
+func TestCompactHistoryLeavesADeletedMemorysHistoryAlone(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id := createCompactMemory(t, s, compactFirstText)
+
+	// The damage a live memory accumulates, and then the retirement that freezes
+	// it. The reflects go in BEFORE the delete so the tombstone is the newest
+	// version, which is the state a deleted memory is in from then on.
+	stampHistoryRow(t, s, id, phaseSave, "2026-01-01 10:00:00")
+	appendVerbatimVersion(t, s, id)
+	appendVerbatimVersion(t, s, id)
+	// Stamped at once, because appendVerbatimVersion leaves recorded_at on the wall
+	// clock and every claim this test makes is a claim about rows on one side of a
+	// HISTORICAL bound. A fixture that left the clock to decide would be asserting
+	// something about the day it ran on.
+	stampPhaseRows(t, s, id, phaseReflect, preFixReflectAt)
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if newest, err := lastVersionPhase(t, s, id); err != nil {
+		t.Fatal(err)
+	} else if newest != phaseDelete {
+		t.Fatalf("the memory's newest version is a %s, want its tombstone — the fixture is not the "+
+			"retired case this is about", newest)
+	}
+	// Asserted rather than assumed, because it is the whole premise: those two
+	// reflect versions are byte-identical, older than the bound, name no other
+	// memory, and are not the newest — so nothing but the tombstone rule keeps them.
+	//
+	// Three rather than two, and the extra one is the tombstone itself: Delete files
+	// its version from the last live state, so it restates its predecessor as
+	// faithfully as a no-op reflect does. Counting the restatements rather than the
+	// removable rows is what surfaces that, and it is why the rule below is a
+	// separate conjunct and not a phase: the tombstone is spared by both, and a
+	// count of three here is the fixture telling us so.
+	if n := redundantVersionCount(t, s, id); n != 3 {
+		t.Fatalf("%d versions restate their predecessor byte for byte, want 3: the fixture has to be "+
+			"damaged for the tombstone rule to be what spares it", n)
+	}
+	// The damage shape on its own, with neither retention guard: two of the memory's
+	// four versions are rows any build would remove but for the tombstone. Counted
+	// through the production predicate rather than restated in the test, because a
+	// hand-written copy of the rules would pass on the day the rules changed.
+	//
+	// The project and the phase list are spelled in beside it because
+	// historyRemovableLikeSQL carries neither: the delete and the count add them, so
+	// a caller reaching for the predicate alone has to add them too. The list is read
+	// from compactablePhases rather than written out, so this count cannot drift from
+	// the phases the delete actually removes.
+	args := []any{id, testProject}
+	for _, p := range compactablePhases() {
+		args = append(args, p)
+	}
+	args = append(args, reflectNoOpCutoff)
+	var inReach int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_history h WHERE h.memory_id = ? AND h.project_id = ? AND `+
+			historyRemovableLikeSQL("h"), args...).Scan(&inReach); err != nil {
+		t.Fatalf("count the rows the tombstone guard is holding back: %v", err)
+	}
+	if inReach != 2 {
+		t.Fatalf("%d of the memory's versions are in the damage shape ignoring both retention "+
+			"guards, want 2: the tombstone guard is only load-bearing if the rows are otherwise "+
+			"in reach, and a third would mean the fixture staged one the newest-version guard "+
+			"already spared", inReach)
+	}
+
+	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+	if err != nil {
+		t.Fatalf("CompactHistory: %v", err)
+	}
+	if res.Removed != 0 {
+		t.Errorf("Removed = %d, want 0: a retired memory's history is frozen, and compacting it would "+
+			"change what as_of answers about a memory nobody can edit", res.Removed)
+	}
+	if got := historyRowCount(t, s, id); got != 4 {
+		t.Errorf("a retired memory kept %d history rows, want 4 (the save, two no-op reflects, the "+
+			"tombstone)", got)
+	}
+	// A live memory beside it is still repaired, so the rule is scoped to the
+	// tombstoned one and not a run that stopped early. Three reflects for two
+	// removals, as above: the newest version of any memory is its own statement of
+	// what it says, and nothing here takes it.
+	live := createCompactMemory(t, s, compactSecondText)
+	stampHistoryRow(t, s, live, phaseSave, "2026-01-01 10:00:00")
+	appendVerbatimVersion(t, s, live)
+	appendVerbatimVersion(t, s, live)
+	appendVerbatimVersion(t, s, live)
+	stampPhaseRows(t, s, live, phaseReflect, preFixReflectAt)
+	setUpdatedAt(t, s, live, anchorDamageTo)
+	res, err = s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, FixUpdatedAt: true})
+	if err != nil {
+		t.Fatalf("CompactHistory: %v", err)
+	}
+	if res.Removed != 2 {
+		t.Errorf("Removed = %d, want 2: a live memory's no-op reflects are still the damage this "+
+			"command exists to remove", res.Removed)
+	}
+	if got := readUpdatedAt(t, s, live); got != "2026-01-01 10:00:00" {
+		t.Errorf("updated_at of the live memory = %q, want its save's own 2026-01-01 10:00:00", got)
+	}
+}
+
+// lastVersionPhase reads a memory's NEWEST recorded phase, which is the one
+// reading that decides whether a memory is retired.
+func lastVersionPhase(t *testing.T, s *Store, memoryID string) (string, error) {
+	t.Helper()
+	var phase string
+	err := s.db.QueryRow(
+		`SELECT phase FROM memory_history WHERE memory_id = ? ORDER BY rowid DESC LIMIT 1`, memoryID).Scan(&phase)
+	if err != nil {
+		return "", fmt.Errorf("read %s's newest version phase: %w", memoryID, err)
+	}
+	return phase, nil
+}
+
 // TestCompactHistoryFixUpdatedAtWritesTheStoredLayout: the two timestamp
 // columns are written by different statements, so they are not the same shape.
 // memory_history.recorded_at is datetime('now'); memories.updated_at is too on
@@ -949,7 +1355,7 @@ func TestCompactHistoryFixUpdatedAtWritesTheStoredLayout(t *testing.T) {
 func TestCompactHistoryDryRunWritesNothing(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	id, _, _, resolvedAt, runTo := seedStampedHistory(t, s, 5)
+	id, _, updatedAt, _, runTo := seedStampedHistory(t, s, 5)
 	rowsBefore := historyRowCount(t, s, id)
 
 	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{FixUpdatedAt: true})
@@ -980,8 +1386,8 @@ func TestCompactHistoryDryRunWritesNothing(t *testing.T) {
 		t.Errorf("the apply removed %d / restamped %d, but the dry run reported %d / %d",
 			applied.Removed, applied.UpdatedAt, res.Removed, res.UpdatedAt)
 	}
-	if got := readUpdatedAt(t, s, id); got != resolvedAt {
-		t.Errorf("after the apply updated_at = %q, want %q", got, resolvedAt)
+	if got := readUpdatedAt(t, s, id); got != updatedAt {
+		t.Errorf("after the apply updated_at = %q, want %q", got, updatedAt)
 	}
 }
 
@@ -1441,11 +1847,14 @@ func TestCompactHistoryCarriesTheStampsItAlreadyCommitted(t *testing.T) {
 	}
 	// Which one is the load-bearing half: the memory the trigger refused must NOT
 	// be counted, because its batch was rolled back and its stamp is untouched.
-	if got := readUpdatedAt(t, s, first); got != "2026-01-01 12:00:00" {
-		t.Errorf("the committed memory's stamp is %q, want the last real change at 2026-01-01 12:00:00: "+
+	// Both memories carry seedStampedHistory's shape, so the instant to compare
+	// against is the fixture's — the update's 11:00, since the resolve above it
+	// moves no stamp.
+	if got := readUpdatedAt(t, s, first); got != "2026-01-01 11:00:00" {
+		t.Errorf("the committed memory's stamp is %q, want the last stamp write at 2026-01-01 11:00:00: "+
 			"the count is not reporting a write that happened", got)
 	}
-	if got := readUpdatedAt(t, s, refused); got == "2026-01-01 12:00:00" {
+	if got := readUpdatedAt(t, s, refused); got == "2026-01-01 11:00:00" {
 		t.Error("the refused memory's stamp was restored, so the count included a write that rolled back")
 	}
 }
@@ -1721,6 +2130,113 @@ func TestCompactHistoryRefusesACutItCannotRead(t *testing.T) {
 	}
 }
 
+// TestCompactingRedundantVersionsLeavesTheAsOfStateAlone pins what the repair does
+// to a historical read, and it is the other half of the tombstone rule.
+//
+// A LIVE memory's `memories` row answers created_at, so the age an as_of read
+// computes is the same whichever of the memory's byte-identical versions it picks.
+// Two fields DO change, and only because they NAME the answer: `VersionRecordedAt`
+// and `VersionPhase` now describe an EARLIER version carrying the same state, so
+// "the memory was merely saved rather than resolved or rewritten" becomes "the
+// memory was resolved or rewritten" for a read of a past instant. That is a
+// documented consequence rather than an accident — docs/invariants.md's memory-history
+// bullet and docs/cli.md's compact section both say it — and it is the price of
+// removing the flood at all, since those rows are what made a past read name a
+// reflect run as the last thing that happened to a memory.
+//
+// The read instant is BETWEEN the reflects, and that is the whole arrangement. An
+// as_of read names the newest version at or before the instant asked for, so a read
+// at the far future names the memory's newest version — which no guard in this file
+// will remove, and so a read there proves nothing. Reading at 2027-02-15 names the
+// SECOND reflect, which the repair does remove, and the pair of reads is what shows
+// the difference: the same question, the same content, a different version named.
+//
+// A RETIRED memory is excluded from the repair instead, and that is a different
+// answer for a different reason: with no `memories` row, asOfCreatedAt falls back to
+// the answering version's recorded_at, so removing a version there changes the age
+// itself. TestCompactHistoryLeavesADeletedMemorysHistoryAlone covers that side.
+func TestCompactingRedundantVersionsLeavesTheAsOfStateAlone(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const content = "a memory whose history is mostly the same version"
+	// Three future instants the read is placed between. They are in the future
+	// because `memories.created_at` cannot be backdated, so a fixture that wants an
+	// as_of read to land on a version has to put the versions after now; the run's
+	// bound is widened to reach them, on purpose.
+	const (
+		readBetween = "2027-02-15 00:00:00"
+		lastReflect = "2027-03-01 00:00:00"
+	)
+	id := mustSave(t, s, content)
+	// The restatements, one per instant so the read has versions to choose between
+	// and the run has rows spread across the side of the bound it removes.
+	for _, at := range []string{asOfStampRewrite, readBetween, lastReflect} {
+		appendVersionRow(t, s, id, phaseReflect, at, "", "", nil)
+	}
+	if n := redundantVersionCount(t, s, id); n != 3 {
+		t.Fatalf("%d versions restate their predecessor byte for byte, want 3", n)
+	}
+
+	before, ok := asOfContentByID(t, mustAsOf(t, s, readBetween))[id]
+	if !ok {
+		t.Fatalf("at %s the memory is absent, want it live", readBetween)
+	}
+	if before.VersionPhase != phaseReflect || before.VersionRecordedAt != readBetween {
+		t.Fatalf("before the repair the answering version is a %s at %s, want the second reflect — the "+
+			"read has to be naming a version the repair will remove, or it proves nothing",
+			before.VersionPhase, before.VersionRecordedAt)
+	}
+
+	res, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, Before: asOfStampFarFuture})
+	if err != nil {
+		t.Fatalf("CompactHistory: %v", err)
+	}
+	// Two of the three: the memory's newest version is spared, because it is the
+	// statement of what the memory says now.
+	if res.Removed != 2 {
+		t.Fatalf("Removed = %d, want 2 (the newest version is the statement of what it says now)", res.Removed)
+	}
+
+	after, ok := asOfContentByID(t, mustAsOf(t, s, readBetween))[id]
+	if !ok {
+		t.Fatalf("at %s the memory is absent after the repair, want it live: compaction removes "+
+			"versions, never memories", readBetween)
+	}
+	// Every field the state columns carry, compared one at a time so the failure
+	// names the column rather than rendering two structs. These are the fields a
+	// historical read is FOR, and a compaction that moved one would be answering a
+	// different question than the one that was asked.
+	for _, c := range []struct {
+		name          string
+		before, after any
+	}{
+		{name: "Content", before: before.Content, after: after.Content},
+		{name: "Category", before: before.Category, after: after.Category},
+		{name: "Importance", before: before.Importance, after: after.Importance},
+		{name: "Source", before: before.Source, after: after.Source},
+		{name: "ResolvedAt", before: before.ResolvedAt, after: after.ResolvedAt},
+		{name: "ProjectID", before: before.ProjectID, after: after.ProjectID},
+		{name: "CreatedAt", before: before.CreatedAt, after: after.CreatedAt},
+		{name: "SupersededBy", before: before.SupersededBy, after: after.SupersededBy},
+	} {
+		if c.before != c.after {
+			t.Errorf("%s = %v after the repair, want %v: a version removed because it recorded the "+
+				"state of its predecessor cannot have recorded a different one", c.name, c.after, c.before)
+		}
+	}
+	// And the two that DO move, asserted rather than left to the documentation: a
+	// change here is the documented consequence, and a change anywhere else is not.
+	if after.VersionPhase == before.VersionPhase || after.VersionRecordedAt == before.VersionRecordedAt {
+		t.Errorf("VersionPhase/VersionRecordedAt still read %s at %s, want an EARLIER equivalent "+
+			"version: the run removed the restatements the read was naming",
+			after.VersionPhase, after.VersionRecordedAt)
+	}
+	if after.VersionPhase != phaseSave {
+		t.Errorf("VersionPhase = %q, want %q: the save is the one version the repair leaves standing",
+			after.VersionPhase, phaseSave)
+	}
+}
+
 // TestCompactHistoryCompactsOnlyReflectVersions pins the phase allowlist itself.
 // It is one phase, and that is a decision rather than an oversight, so a phase
 // added to it has to be a deliberate edit of a pinned list — the state columns
@@ -1801,66 +2317,94 @@ func TestWidenedCompactCutoffFollowsTheBoundTheStoreWillUse(t *testing.T) {
 }
 
 // TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards is the
-// regression the anchor rule introduced, and it is the same sentence read from the
-// other side. The blocker fixed "a row this repair will not remove is an anchor" —
-// and a `supersede` version is a row this repair will not remove, so it became an
-// anchor, which closes the gate for that memory FOREVER.
+// regression the anchor rule introduced, read from the other side. The blocker
+// fixed "a row this repair will not remove is an anchor" — and a `supersede`
+// version is a row this repair will not remove, so it became an anchor, which
+// closes the gate for that memory FOREVER.
 //
 // Forever because CreateLink writes no `memories` row at all: it files the
 // supersede version and moves the stamp for nobody, so it can never be the thing
 // that moved the stamp, and treating it as the last change says the stamp is
-// whatever a reflection run left there. The row is byte-identical to its
-// predecessor — links.go says so in as many words, which is why re-writing a live
-// edge deliberately records nothing at all — so the state-change anchor this
-// replaced had skipped it and the repair worked.
+// whatever a reflection run left there.
+//
+// The phase is the reason, and NOT that the row records nothing new. Five of the
+// nine phases here genuinely change a tracked column — `SetResolved` writes
+// resolved_at, `Upsert`'s fold writes importance, a restore puts the snapshot's own
+// text back — and an earlier version of this fixture staged all nine as
+// byte-identical, which is a shape only the edge phases produce. It pinned the
+// predicate against a fiction and hid the finding that mattered: a row that
+// changed a recorded column and still moved no stamp is the harder case, and
+// TestCompactHistoryFixUpdatedAtAnchorsOnAStampMoveNotOnAStateChange drives two of
+// them through their real writers. Each row below is staged as ITS OWN writer files
+// it, and inertPhaseRows is where that is said per phase.
 //
 // A superseded memory is not a rare thing, and the orientation it gets is exactly
 // the one this command exists to fix: `ghost supersede` orients a candidate pair by
 // updated_at, and `--skip-unchanged`'s fingerprint carries it as a change proxy.
 func TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards(t *testing.T) {
 	ctx := context.Background()
-	// Every phase that files a version and moves NO live memory's updated_at, and a
-	// state-identical row of each. All of them have to be transparent for the
-	// anchor, or the repair silently stops working on any memory that has been
-	// touched by one — and a report that says "0 updated_at restored" while the
-	// stamp is a reflect run's time is the same wrong answer as never running it.
-	//
-	// driven off stampMovingPhases rather than off a hand-written list, so a phase
-	// added to that set without a writer behind it fails here.
-	for _, phase := range []string{
-		phaseSupersede, phaseUnsupersede, phaseMerge, phaseDelete,
-		phaseImport, phaseRestore, phaseBaseline, phaseResolve, phaseUnresolve,
-	} {
+	// Every phase that files a version and moves NO live memory's updated_at, taken
+	// as allHistoryPhases minus stampMovingPhases minus the one phase no live memory
+	// can hold (anchorCoveredPhases) rather than as a hand-written list, so a phase
+	// added to the schema has to be classified in one place or two and a phase moved
+	// into the stamp-moving set without a writer behind it fails here instead of
+	// quietly passing a fixture that no longer covers it.
+	for _, phase := range anchorCoveredPhases() {
 		t.Run(phase, func(t *testing.T) {
+			staged := inertPhaseRows[phase]
 			s := testStore(t)
 			id := createCompactMemory(t, s, compactFirstText)
 
+			// A prologue, for the one phase whose writer cannot be staged in place:
+			// an unresolve clears resolved_at, so the row has to be holding a
+			// resolved_at to clear for its version to record a change. The real
+			// writer files the version from the live row, and every row above the
+			// clear has to say the memory was resolved, or the two reflect versions
+			// would restate the update and there would be no damage to repair.
+			if phase == phaseUnresolve {
+				setResolvedAt(t, s, id, "2025-12-01 09:00:00")
+			}
 			// A save, a real edit above it, then TWO pre-#727 no-op reflect versions,
 			// then the inert event above those.
 			stampHistoryRow(t, s, id, phaseSave, "2026-01-01 10:00:00")
-			if err := s.UpdateMemory(ctx, testProject, id, strPtr(compactSecondText), nil, nil, nil); err != nil {
+			// The edit moves importance rather than content, for the one reason the
+			// prologue above needs: UpdateMemory clears resolved_at when the CONTENT
+			// changes, so a content edit would undo the resolve before the unresolve
+			// had anything to do. importance is a recorded column, so this is still a
+			// genuine state change and the anchor is still this version.
+			raised := float32(0.6)
+			if err := s.UpdateMemory(ctx, testProject, id, nil, nil, &raised, nil); err != nil {
 				t.Fatalf("UpdateMemory: %v", err)
 			}
 			stampHistoryRow(t, s, id, phaseUpdate, "2026-02-01 10:00:00")
 			appendVerbatimVersion(t, s, id)
 			appendVerbatimVersion(t, s, id)
-			// The event, recorded above the damage and recording nothing new: the
-			// state columns are copied out of the live row, so it is byte-identical
-			// to its predecessor, and the thread columns are what its phase sets.
-			related, merged := "", ""
-			switch phase {
-			case phaseSupersede, phaseUnsupersede, phaseDelete:
-				related = compactSecondText
-			case phaseMerge:
-				merged = compactFirstText
-			}
-			appendVersionRow(t, s, id, phase, "2026-03-01 10:00:00", related, merged, nil)
-			runTo := "2026-08-01 09:30:00"
-			setUpdatedAt(t, s, id, runTo)
+			// The event, recorded above the damage. `related` and `merged` are the
+			// thread columns its phase sets, and `edits` is the recorded state its
+			// writer's own UPDATE or INSERT leaves behind — the two reflect versions
+			// above it were copied from the live row BEFORE any of it, so an override
+			// here is a genuine difference from its predecessor rather than a
+			// restatement of it.
+			appendVersionRow(t, s, id, phase, "2026-03-01 10:00:00",
+				staged.related, staged.merged, staged.edits)
+			setUpdatedAt(t, s, id, anchorDamageTo)
 
-			if n := redundantVersionCount(t, s, id); n < 3 {
-				t.Fatalf("%d state-identical versions, want at least 3: this row is the whole "+
-					"finding and it has to record nothing new", n)
+			// The two preconditions, read rather than assumed. The reflect versions
+			// have to be redundant or the delete never runs, and the event has to be
+			// ABOVE them, so that finding it transparent is what opens the gate.
+			if n := redundantVersionCount(t, s, id); n < 2 {
+				t.Fatalf("%d state-identical versions, want at least 2: the two reflect versions copy "+
+					"the live row, and the edit above them is the only thing that moved", n)
+			}
+			if _, err := firstVersionPhase(t, s, id); err != nil {
+				t.Fatal(err)
+			}
+			newest, err := lastVersionPhase(t, s, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if newest != phase {
+				t.Fatalf("the memory's newest version is a %s, want the %s the case is about", newest, phase)
 			}
 			if !stampGateIsOpen(t, s, id, reflectNoOpCutoff) {
 				t.Fatal("the gate is closed before the repair runs, so the fixture is not staging " +
@@ -1878,15 +2422,158 @@ func TestCompactHistoryStillRepairsAMemoryThatWasSupersededAfterwards(t *testing
 					"the event is the newest row", res.Removed)
 			}
 			if res.UpdatedAt != 1 {
-				t.Errorf("UpdatedAt = 0, want 1: a %s version moves no live memory's updated_at, so "+
+				t.Errorf("UpdatedAt = %d, want 1: a %s version moves no live memory's updated_at, so "+
 					"it cannot be the thing that moved the stamp, and treating it as the last "+
 					"change leaves a memory's updated_at reading as a reflect run's time forever",
-					phase)
+					res.UpdatedAt, phase)
 			}
 			if got := readUpdatedAt(t, s, id); got != "2026-02-01 10:00:00" {
 				t.Errorf("updated_at = %q, want the last recorded change's own 2026-02-01 10:00:00", got)
 			}
-			_ = runTo
 		})
 	}
+}
+
+// inertPhaseRows is how each phase outside stampMovingPhases records itself, as its
+// own writer files it: the thread columns it sets, and the recorded state its
+// writer's UPDATE or INSERT leaves behind.
+//
+// It is a map keyed by phase and the loop above indexes it without checking, so a
+// phase added to allHistoryPhases and left out of this map stages the zero value —
+// a byte-identical row with no thread columns, which is what the fixture used to do
+// for every phase and what four of these writers do not produce. That shows up as a
+// failure in the run that adds the phase, which is the moment to classify it.
+var inertPhaseRows = map[string]struct {
+	related, merged string
+	edits           map[string]any
+}{
+	// CreateLink writes no memories row at all, and links.go says in as many words
+	// that re-writing a live edge deliberately records nothing, so a supersede
+	// version restates its predecessor and names the memory whose edge makes the
+	// claim.
+	phaseSupersede:   {related: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"},
+	phaseUnsupersede: {related: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"},
+	// The fold strengthens the target and files the wording it dropped, so a merge
+	// version carries BOTH. A merge recorded without the importance move is the
+	// saturated case — MIN(1.0, …) landing back on the stored value — which changes
+	// no recorded column and is a different row.
+	phaseMerge: {merged: compactFirstText, edits: map[string]any{"importance": 0.9}},
+	// The resolve writers stamp resolved_at and say in as many words that they
+	// leave updated_at alone, so their versions are genuine state changes — the
+	// pair TestCompactHistoryFixUpdatedAtAnchorsOnAStampMoveNotOnAStateChange drives
+	// through SetResolved and ClearResolved themselves.
+	phaseResolve:   {edits: map[string]any{"resolved_at": anchorChangeAt}},
+	phaseUnresolve: {edits: map[string]any{"resolved_at": nil}},
+	// A restore puts the snapshot's own text back, so its version records a state
+	// its predecessor did not hold.
+	phaseRestore: {edits: map[string]any{"content": "a text the snapshot held before the edit"}},
+	// An import and a baseline are the memory's FIRST version by construction — an
+	// artifact inserting a row, and the state a memory held before this build ever
+	// recorded anything — so neither has a predecessor to differ from and a
+	// mid-history row of either is a shape no writer produces. They are staged
+	// because the phase list has to be covered either way, and what the case turns
+	// on is the phase rather than the row.
+	phaseImport:   {},
+	phaseBaseline: {},
+}
+
+// nonStampMovingPhases is every phase the schema knows about that is NOT one whose
+// writer moves a live memory's updated_at, in the order allHistoryPhases gives. It
+// is the coverage list for the anchor rule: a phase absent from stampMovingPhases
+// has to be transparent to the anchor, and a phase present in it has to have a
+// writer that moves the column in the same statement.
+func nonStampMovingPhases() []string {
+	moving := make(map[string]bool, len(stampMovingPhases))
+	for _, p := range stampMovingPhases {
+		moving[p] = true
+	}
+	var out []string
+	for _, p := range allHistoryPhases() {
+		if !moving[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// anchorCoveredPhases is nonStampMovingPhases without phaseDelete, and the
+// exception is structural rather than an omission.
+//
+// Delete REMOVES the memories row, so a `delete` version that is a memory's newest
+// version belongs to a memory the stamp repair cannot reach — the repair joins
+// memories and a retired memory is not in it. The one shape in which a live memory's
+// newest version IS a tombstone is a hand-built one, and that shape is now outside
+// the repair entirely by name: TestCompactHistoryLeavesADeletedMemorysHistoryAlone
+// is its test, and it is a case about the tombstone guard rather than about the
+// anchor. Listing it as anchor-transparent would be asserting something about a
+// memory no caller can ask this pass about.
+func anchorCoveredPhases() []string {
+	var out []string
+	for _, p := range nonStampMovingPhases() {
+		if p != phaseDelete {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestStampMovingPhasesNamesOnlyPhasesWithAWriter pins the set itself, because it
+// is the one list in this file that is a CLAIM about code rather than a rule about
+// rows, and a claim about code is the kind that goes stale silently.
+//
+// What can be checked is not "these three" — a fourth phase with a writer that moves
+// updated_at would be a correct addition, and the audit that backs membership is
+// written out on the var, one writer site per phase, because prose is not checkable.
+// What is checkable is that every phase in the set is a phase the schema has, that
+// every phase the schema has is either in the set or staged for the loop above, and
+// that the two lists do not overlap. The last is the one a typo in a phase constant
+// would break, and it is the one that makes a row both name another memory and move
+// a live stamp — a shape the review that produced the anchor rule found does not
+// exist.
+func TestStampMovingPhasesNamesOnlyPhasesWithAWriter(t *testing.T) {
+	known := make(map[string]bool, len(allHistoryPhases()))
+	for _, p := range allHistoryPhases() {
+		known[p] = true
+		// A partition into three, and the third is the whole point of writing it
+		// this way: every phase is either a stamp-moving writer, or staged by
+		// inertPhaseRows so the loop above drives it, or phaseDelete, which no live
+		// memory can hold as its newest version. A new phase belongs in one of the
+		// three or it is unclassified, and the unclassified case is the one where
+		// nothing fails today and a writer that moves no stamp quietly anchors a
+		// repair on it.
+		_, staged := inertPhaseRows[p]
+		switch {
+		case containsPhase(stampMovingPhases, p):
+		case staged:
+		case p == phaseDelete:
+		default:
+			t.Errorf("phase %q is in neither stampMovingPhases nor inertPhaseRows, so nothing here "+
+				"pins whether its writer moves a live memory's updated_at", p)
+		}
+	}
+	for _, p := range stampMovingPhases {
+		if !known[p] {
+			t.Errorf("stampMovingPhases names %q, which is not a phase of the schema: the list says "+
+				"which writers move the stamp, and a phase that does not exist names no writer", p)
+		}
+		if _, staged := inertPhaseRows[p]; staged {
+			t.Errorf("phase %q is both a stamp-moving writer and staged as an inert event, so the two "+
+				"lists say opposite things about whether it may be an anchor", p)
+		}
+	}
+	for _, p := range nonStampMovingPhases() {
+		if containsPhase(stampMovingPhases, p) {
+			t.Errorf("phase %q is in stampMovingPhases and outside it, so the anchor is a set with no "+
+				"answer for it", p)
+		}
+	}
+}
+
+func containsPhase(phases []string, want string) bool {
+	for _, p := range phases {
+		if p == want {
+			return true
+		}
+	}
+	return false
 }
