@@ -189,8 +189,20 @@ type attestationEntry struct {
 // that implemented only one of the two would report every release the release
 // workflow attests as having no attestation at all.
 //
-// It returns ErrNoAttestation when the service holds none, and a different
-// error for every way of failing to find out.
+// It returns ErrNoAttestation when the service holds none, and a different error
+// for every way of failing to find out. The distinction is not cosmetic and it
+// is not made at the call site either: ONLY the index 404 means absence. A 404
+// on a `bundle_url` is a blob the store could not serve — the index said this
+// release DOES have an attestation, so reporting absence there would tell a user
+// their release is unattested and let --allow-unattested install an archive
+// whose attestation was never checked, when the truth is that the check could
+// not be completed.
+//
+// One member that cannot be read does not abort the lookup, either. The index
+// is an index: a release legitimately has several attestations, and a member
+// with a dead or expired presigned URL must not discard the bundle an earlier
+// member carried in full. It becomes a reason on the error instead, which is
+// what the caller sees when NO member could be read.
 func FetchAttestationBundles(ctx context.Context, apiBaseURL, digestHex string) ([][]byte, error) {
 	if len(digestHex) != sha256HexLen {
 		return nil, fmt.Errorf("attestation lookup needs a %d-character sha256 digest, got %d characters", sha256HexLen, len(digestHex))
@@ -203,7 +215,9 @@ func FetchAttestationBundles(ctx context.Context, apiBaseURL, digestHex string) 
 	defer cancel()
 
 	url := strings.TrimSuffix(apiBaseURL, "/") + "/repos/" + repoSlug + "/attestations/sha256:" + digestHex
-	body, err := attestationGet(ctx, url, attestationResponseCap, "attestations response")
+	// absenceOn404: only the index can answer the question "does this release
+	// have an attestation", so only the index's 404 is an answer.
+	body, err := attestationGet(ctx, url, attestationResponseCap, "attestations response", true)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +227,12 @@ func FetchAttestationBundles(ctx context.Context, apiBaseURL, digestHex string) 
 		return nil, fmt.Errorf("decode the attestations response: %w", err)
 	}
 
+	if len(parsed.Attestations) == 0 {
+		return nil, fmt.Errorf("%w for sha256:%s", ErrNoAttestation, digestHex)
+	}
+
 	bundles := make([][]byte, 0, len(parsed.Attestations))
+	var unreadable []string
 	for i, entry := range parsed.Attestations {
 		// The inline bundle wins, and no request is made when it is there.
 		// bundle_url is a presigned blob link, and spending one on bytes
@@ -224,31 +243,47 @@ func FetchAttestationBundles(ctx context.Context, apiBaseURL, digestHex string) 
 		}
 		if entry.BundleURL == "" {
 			// A member with neither is a fact about the response, not a
-			// failure of the fetch. It contributes nothing and the empty
-			// result below reports it as absence, which is what it is.
+			// failure of the fetch, and it is the one case that cannot be
+			// blamed on the service being down.
+			unreadable = append(unreadable, fmt.Sprintf("attestation %d carries neither an inline bundle nor a bundle_url", i))
 			continue
 		}
-		compressed, err := attestationGet(ctx, entry.BundleURL, attestationBundleCap, "attestation bundle")
+		compressed, err := attestationGet(ctx, entry.BundleURL, attestationBundleCap,
+			fmt.Sprintf("the bundle for attestation %d", i), false)
 		if err != nil {
-			return nil, err
+			unreadable = append(unreadable, fmt.Sprintf("attestation %d: %v", i, err))
+			continue
 		}
 		bundle, err := decodeSnappyBundle(compressed)
 		if err != nil {
-			return nil, fmt.Errorf("decode attestation %d: %w", i, err)
+			unreadable = append(unreadable, fmt.Sprintf("attestation %d: %v", i, err))
+			continue
 		}
 		bundles = append(bundles, bundle)
 	}
 
-	if len(bundles) == 0 {
-		return nil, fmt.Errorf("%w for sha256:%s", ErrNoAttestation, digestHex)
+	if len(bundles) > 0 {
+		// Whatever else went wrong, the caller has a bundle to check and one
+		// that verifies is a proof. Reporting the unreadable members here
+		// would make a release with one good attestation and one dead blob link
+		// look like a failure, which is the outcome a second attacker-supplied
+		// bundle could aim for.
+		return bundles, nil
 	}
-	return bundles, nil
+	return nil, fmt.Errorf("the attestation service lists %d attestation(s) for sha256:%s and none of them could be read: %s",
+		len(parsed.Attestations), digestHex, strings.Join(unreadable, "; "))
 }
 
 // attestationGet fetches url and reads the body through readCapped, so the size
-// a response may reach is decided in one place. A 404 is absence; every other
-// non-200 is a failure to find out, and the two must not be confused.
-func attestationGet(ctx context.Context, url string, limit int64, what string) ([]byte, error) {
+// a response may reach is decided in one place.
+//
+// absenceOn404 decides what a 404 means, and it is a parameter because the two
+// callers are asking different questions. The index asks "does this release have
+// an attestation", where 404 is the answer. A bundle blob is a presigned object
+// whose lifetime has nothing to do with whether the release is attested, and a
+// 404 there is a fault like any other. Every non-200 other than an index 404 is
+// a failure to find out, and none of them may be confused with absence.
+func attestationGet(ctx context.Context, url string, limit int64, what string, absenceOn404 bool) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -262,7 +297,7 @@ func attestationGet(ctx context.Context, url string, limit int64, what string) (
 	defer resp.Body.Close() //nolint:errcheck
 
 	switch {
-	case resp.StatusCode == http.StatusNotFound:
+	case absenceOn404 && resp.StatusCode == http.StatusNotFound:
 		return nil, fmt.Errorf("%w: %s answered 404", ErrNoAttestation, what)
 	case resp.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("fetch the %s: github returned %d", what, resp.StatusCode)
@@ -472,7 +507,16 @@ func (v *AttestationVerifier) Check(ctx context.Context, archive []byte, version
 	}
 
 	// Only now, with a bundle in hand, is the trust root worth fetching.
-	trusted, err := v.TrustedMaterial(ctx)
+	//
+	// Its own deadline, and not the caller's: in production that caller is the
+	// 12-minute run budget, and a stalled Sigstore TUF endpoint would otherwise
+	// hold the whole command open until the budget expires and then report the
+	// budget, which is both a long wait and the wrong explanation. The two
+	// requests above and this one are each metadata fetches that should answer
+	// in seconds; a bound that only exists for two of the three is not a bound.
+	trustCtx, cancel := context.WithTimeout(ctx, attestationTimeout)
+	trusted, err := v.TrustedMaterial(trustCtx)
+	cancel()
 	if err != nil {
 		return AttestationResult{
 			State:  AttestationUnreachable,

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -465,6 +466,11 @@ func sameJSON(t *testing.T, got, want []byte, what string) {
 // `bundle_url` pointing at a snappy-compressed copy, which is what the service
 // actually serves for a GitHub-initiated attestation.
 type attestationServer struct {
+	// mu guards served and the two knobs a test turns after start: the handlers
+	// run on the httptest server's goroutines while the test reads and writes
+	// on its own, and a socket carries no happens-before edge the race detector
+	// can see. CI runs this repository under -race.
+	mu         sync.Mutex
 	inline     json.RawMessage
 	snappyBody []byte
 	// served records the digests this server was asked about, so a test can
@@ -473,23 +479,37 @@ type attestationServer struct {
 	// status and body override the 200 for a failure case.
 	status int
 	body   string
+	// blobStatus, when non-zero, is the status the bundle blob answers with,
+	// so a test can make the SECOND request fail while the index succeeds.
+	blobStatus int
 }
 
 func (s *attestationServer) start(t *testing.T) *httptest.Server {
 	t.Helper()
 	blob := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		s.mu.Lock()
+		body, status := s.snappyBody, s.blobStatus
+		s.mu.Unlock()
+		if status != 0 {
+			w.WriteHeader(status)
+			return
+		}
 		w.Header().Set("Content-Type", "application/x-snappy")
-		_, _ = w.Write(s.snappyBody)
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(blob.Close)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/wcatz/ghost/attestations/", func(w http.ResponseWriter, r *http.Request) {
 		digest := strings.TrimPrefix(r.URL.Path, "/repos/wcatz/ghost/attestations/")
+		s.mu.Lock()
 		s.served = append(s.served, digest)
-		if s.status != 0 {
-			w.WriteHeader(s.status)
-			_, _ = io.WriteString(w, s.body)
+		status, bodyText, inline := s.status, s.body, s.inline
+		s.mu.Unlock()
+
+		if status != 0 {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, bodyText)
 			return
 		}
 		member := map[string]any{
@@ -498,8 +518,8 @@ func (s *attestationServer) start(t *testing.T) *httptest.Server {
 			"bundle_url":    blob.URL + "/bundle.sn",
 			"bundle":        nil,
 		}
-		if s.inline != nil {
-			member["bundle"] = s.inline
+		if inline != nil {
+			member["bundle"] = inline
 			member["bundle_url"] = nil
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"attestations": []any{member}})
@@ -507,6 +527,22 @@ func (s *attestationServer) start(t *testing.T) *httptest.Server {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// servedFor lists the digests this server was asked about, in order.
+func (s *attestationServer) servedFor() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.served...)
+}
+
+// setBlobStatus makes the bundle blob answer with a status instead of a bundle,
+// so a test can fail the SECOND request while the index succeeds — which is the
+// case that must not be reported as a release with no attestation.
+func (s *attestationServer) setBlobStatus(status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blobStatus = status
 }
 
 // snappyFramed compresses data the way the attestation service's blob store
@@ -548,8 +584,8 @@ func TestFetchAttestationBundles(t *testing.T) {
 			t.Fatalf("FetchAttestationBundles returned %d bundles, want 1", len(got))
 		}
 		sameJSON(t, got[0], bundle, "inline bundle")
-		if len(srv.served) != 1 || srv.served[0] != "sha256:"+hexDigest(digest[:]) {
-			t.Fatalf("looked up %v, want the digest the client downloaded", srv.served)
+		if looked := srv.servedFor(); len(looked) != 1 || looked[0] != "sha256:"+hexDigest(digest[:]) {
+			t.Fatalf("looked up %v, want the digest the client downloaded", looked)
 		}
 	})
 
@@ -570,9 +606,9 @@ func TestFetchAttestationBundles(t *testing.T) {
 // TestFetchAttestationBundlesReportsAbsence is the distinction the policy rests
 // on. "GitHub holds no attestation for these bytes" is a fact about the
 // release, and it is the only case --allow-unattested is meant to override. A
-// 404, an empty list, and a member with neither bundle nor bundle_url are all
-// that same fact; none of them is a fetch failure, and conflating the two
-// would mean a release that never had an attestation reads like an outage.
+// 404 from the INDEX and an empty list are that same fact; neither is a fetch
+// failure, and conflating the two would mean a release that never had an
+// attestation reads like an outage.
 func TestFetchAttestationBundlesReportsAbsence(t *testing.T) {
 	const digest = "0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -605,9 +641,21 @@ func TestFetchAttestationBundlesReportsAbsence(t *testing.T) {
 		})
 		ts := httptest.NewServer(mux)
 		t.Cleanup(ts.Close)
+		// NOT absence. The index listed an attestation, so the release has one
+		// according to the service; the member is simply unreadable, and a user
+		// told "this release has no attestation" would pass a flag that means
+		// something quite different.
 		_, err := FetchAttestationBundles(context.Background(), ts.URL, digest)
-		if !errors.Is(err, ErrNoAttestation) {
-			t.Fatalf("a member with no bundle gave %v, want ErrNoAttestation", err)
+		if err == nil {
+			t.Fatal("a member with no bundle was accepted as a readable attestation")
+		}
+		if errors.Is(err, ErrNoAttestation) {
+			t.Fatalf("a member with no bundle read as absence: %v", err)
+		}
+		// The reason has to survive into the message, or the user is told the
+		// check could not be completed and not why.
+		if !strings.Contains(err.Error(), "carries neither") {
+			t.Errorf("error %q does not say which member could not be read", err)
 		}
 	})
 }
@@ -654,6 +702,145 @@ func TestFetchAttestationBundlesReportsAFetchFailure(t *testing.T) {
 			t.Fatalf("a dead server read as absence: %v", err)
 		}
 	})
+
+	// The one that is NOT a fetch failure of the index, and the one the whole
+	// policy hangs on. The index answered 200 and said this release has an
+	// attestation; the blob it then pointed at is gone. That is "could not
+	// check", and it must never be reported as "this release has no
+	// attestation" — the user would read it as a fact about the release and
+	// pass the flag meant for a release that never had one.
+	t.Run("a 404 on the bundle the index pointed at", func(t *testing.T) {
+		srv := &attestationServer{}
+		srv.setBlobStatus(http.StatusNotFound)
+		ts := srv.start(t)
+		_, err := FetchAttestationBundles(context.Background(), ts.URL, digest)
+		if err == nil {
+			t.Fatal("a member whose bundle is gone was accepted")
+		}
+		if errors.Is(err, ErrNoAttestation) {
+			t.Fatalf("a dead bundle blob read as absence: %v", err)
+		}
+		// The SENTENCE matters as much as the classification, because the
+		// classification is right by construction here (a formatted string does
+		// not wrap ErrNoAttestation) while the text is quoted verbatim into the
+		// message a user reads. A blob 404 leaking the absence wording into it
+		// is the same defect as classifying it as absence, told differently.
+		if strings.Contains(err.Error(), "no attestation is published") {
+			t.Errorf("a dead bundle blob produced absence wording in the message: %v", err)
+		}
+		if !strings.Contains(err.Error(), "none of them could be read") {
+			t.Errorf("error %q should say the index listed an attestation that could not be read", err)
+		}
+	})
+}
+
+// TestAttestationVerifierCheckKeepsAGoodBundleWhenAnotherIsUnreadable is the
+// same fault seen from the other side, and it is the one an attacker could aim
+// for. A release legitimately has several attestations — one per workflow run —
+// so the index is a list, and a list where one member's presigned link has
+// expired must still yield the bundles the other members carried. Refusing the
+// whole lookup would let anyone able to publish one extra (unreadable)
+// attestation make a release uninstallable, which is the same denial the "any
+// verifying bundle is enough" rule exists to prevent.
+func TestAttestationVerifierCheckKeepsAGoodBundleWhenAnotherIsUnreadable(t *testing.T) {
+	const version = "0.43.0"
+	artifact := []byte("a release archive")
+	fx := newAttestationFixture(t, artifact)
+	san, issuer := ReleaseWorkflowIdentity(version)
+	good := fx.bundleJSON(t, san, issuer, artifact)
+
+	var ts *httptest.Server
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/repos/wcatz/ghost/attestations/") {
+			// The dead presigned link. 404, and a 404 that is a fault here.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = fmt.Fprintf(w,
+			`{"attestations":[{"repository_id":1,"initiator":"user","bundle":%s,"bundle_url":null},`+
+				`{"repository_id":1,"initiator":"github","bundle":null,"bundle_url":"%s/gone"}]}`,
+			good, ts.URL)
+	}))
+	t.Cleanup(ts.Close)
+
+	v := &AttestationVerifier{
+		APIBaseURL:      ts.URL,
+		TrustedMaterial: staticTrustMaterial(fx.trustRoot),
+	}
+	if got := v.Check(context.Background(), artifact, version); got.State != AttestationVerified {
+		t.Fatalf("a release with one readable attestation reported %s, want verified: %s", got.State, got.Detail)
+	}
+}
+
+// TestAttestationVerifierCheckBoundsTheTrustRootFetch keeps the TUF round trip
+// on the same clock as the two requests before it. In production Check's
+// context is the whole 12-minute upgrade budget, so a stalled Sigstore endpoint
+// with no bound of its own would hold the command open for minutes and then
+// report the budget — a long wait followed by the wrong explanation.
+func TestAttestationVerifierCheckBoundsTheTrustRootFetch(t *testing.T) {
+	const version = "0.43.0"
+	artifact := []byte("a release archive")
+
+	old := attestationTimeout
+	attestationTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { attestationTimeout = old })
+
+	// The index answers and points at a bundle, so the check gets as far as
+	// needing a trust root, and then blocks until it is told to stop.
+	index := &attestationServer{snappyBody: snappyFramed(t, []byte("not really a bundle"))}
+	ts := index.start(t)
+
+	v := &AttestationVerifier{
+		APIBaseURL: ts.URL,
+		TrustedMaterial: func(ctx context.Context) (root.TrustedMaterial, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	start := time.Now()
+	got := v.Check(context.Background(), artifact, version)
+	elapsed := time.Since(start)
+
+	if got.State != AttestationUnreachable {
+		t.Errorf("a stalled trust-root fetch reported %s, want unreachable", got.State)
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("the trust-root fetch took %s, so it was bounded by the run budget rather than attestationTimeout", elapsed)
+	}
+}
+
+// TestAttestationVerifierCheckReportsADeadBundleAsUnreachable is the policy
+// statement of the same fault: an attestation the index listed and the store
+// could not serve is "could not check", never "this release has no
+// attestation". The two states are the difference between a fact about the
+// release and a fact about the moment, and only the first is something a user
+// can permanently do anything about.
+func TestAttestationVerifierCheckReportsADeadBundleAsUnreachable(t *testing.T) {
+	const version = "0.43.0"
+	artifact := []byte("a release archive")
+	fx := newAttestationFixture(t, artifact)
+
+	index := &attestationServer{}
+	index.setBlobStatus(http.StatusNotFound)
+	ts := index.start(t)
+
+	v := &AttestationVerifier{
+		APIBaseURL:      ts.URL,
+		TrustedMaterial: staticTrustMaterial(fx.trustRoot),
+	}
+	got := v.Check(context.Background(), artifact, version)
+	if got.State != AttestationUnreachable {
+		t.Errorf("a dead bundle blob reported %s, want unreachable: %s", got.State, got.Detail)
+	}
+	if strings.Contains(got.Detail, "no attestation is published") {
+		t.Errorf("the detail a user reads reports an outage as a release with no attestation: %s", got.Detail)
+	}
+}
+
+// staticTrustMaterial is a trust root that is already in hand, for a test whose
+// subject is something other than fetching one.
+func staticTrustMaterial(tr root.TrustedMaterial) func(context.Context) (root.TrustedMaterial, error) {
+	return func(context.Context) (root.TrustedMaterial, error) { return tr, nil }
 }
 
 // TestFetchAttestationBundlesRefusesOversizedResponses keeps the service from
