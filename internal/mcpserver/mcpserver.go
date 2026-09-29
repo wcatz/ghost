@@ -2504,7 +2504,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_health",
 		Title:       "System Health",
-		Description: "Get Ghost system health: project count, memory counts, embedding coverage (Ollama reachability, model presence), and memory-link stats. Use when search results seem incomplete or memory features appear inactive.",
+		Description: "Get Ghost system health: project count, memory counts, embedding coverage (Ollama reachability, model presence), memory-link stats, and memory_history growth (rows written per day, how many restate the version before them, and how close the table and its busiest memory are to the retention caps). Use when search results seem incomplete or memory features appear inactive.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -2580,6 +2580,28 @@ func (s *Server) registerTools() {
 
 		if links, scans, err := s.store.LinkStats(ctx); err == nil {
 			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
+		}
+
+		// History growth (#729), additive: everything above keeps its name and
+		// its meaning, and this is the one block that says how fast
+		// memory_history is filling and how much of that is version rows that
+		// restated the row before them. The sentences are the same strings
+		// `ghost mcp status` prints, built in internal/memory, so an agent
+		// reading this and an operator reading the terminal are told the same
+		// thing about the same store.
+		if growth, err := s.store.HistoryGrowth(ctx); err == nil {
+			switch {
+			case growth.TotalRows == 0:
+				fmt.Fprintf(&sb, "**History:** no version rows recorded yet\n")
+			default:
+				fmt.Fprintf(&sb,
+					"**History:** %d version rows in the last %dh, %d restatements (%.0f%%) — busiest memory holds %d of its %d versions, store holds %d of %d rows\n",
+					growth.RowsInWindow, growth.WindowHours, growth.NoOpRows, growth.NoOpShare*100,
+					growth.MaxVersions, growth.PerMemoryCap, growth.TotalRows, growth.StoreCap)
+			}
+			for _, warn := range growth.Warnings {
+				fmt.Fprintf(&sb, "  ⚠ %s\n", warn.Detail)
+			}
 		}
 
 		return &mcp.CallToolResult{

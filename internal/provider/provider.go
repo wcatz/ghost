@@ -81,6 +81,12 @@ type MemoryStore interface {
 	// Links
 	LinkStats(ctx context.Context) (links, scans int, err error)
 
+	// HistoryGrowth reports how fast memory_history is growing into its
+	// retention caps and how much of that growth is version rows that restated
+	// the version before them. Read-only, store-wide (the caps are), and the
+	// same read `ghost mcp status` prints, so the two cannot disagree.
+	HistoryGrowth(ctx context.Context) (memory.HistoryGrowthResult, error)
+
 	// Access tracking
 	Touch(ctx context.Context, ids []string) error
 	TogglePin(ctx context.Context, id string, pinned bool) error

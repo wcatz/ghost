@@ -528,6 +528,12 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		mustNotContain(t, "health", out, "Ollama unreachable")
 		mustNotContain(t, "health", out, "not installed in Ollama")
 		mustContain(t, "health", out, "**Memory links:**")
+		// History growth rides along (#729), and this store has version rows in it
+		// by now, so the block is present rather than the "no version rows" line.
+		// What it SAYS is TestCLIMCPStatusHistoryGrowth's business, against a
+		// store built to have a known share.
+		mustContain(t, "health", out, "**History:**")
+		mustNotContain(t, "health", out, "no version rows recorded yet")
 	},
 
 	"ghost_project_delete": func(t *testing.T, s *sandbox, cs *mcp.ClientSession, _ string) {

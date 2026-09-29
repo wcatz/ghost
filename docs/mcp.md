@@ -21,7 +21,7 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Project | `ghost_project_delete` | Permanently delete a project and its child records |
 | Context | `ghost_project_context` | Load top memories, learned context, tasks, and decisions |
 | Context | `ghost_list_projects` | List known projects and their IDs |
-| Context | `ghost_health` | Report store, embedding, Ollama, and link health |
+| Context | `ghost_health` | Report store, embedding, Ollama, link, and `memory_history` growth health |
 | Tasks | `ghost_task_create` | Create a durable task |
 | Tasks | `ghost_task_list` | List tasks, optionally filtered by status |
 | Tasks | `ghost_task_update` | Change task status, priority, or description |
@@ -34,6 +34,29 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 `ghost_resolve_mark` is the other tool that is not dry-run, and it is the mirror of the one gap `ghost_link_withdraw` cannot fill. `ghost_resolve` is a *pass*: it proposes candidates from a keyword prefilter and asks a KEEP-biased classifier, which is right for most of what it stamps and structurally unable to reach a memory whose claim a *newer note* supersedes — such a note often holds no resolution keyword, so nothing ever proposes it. When an agent has read a specific memory and a newer one saying its fix landed, `ghost_resolve_mark` names the memory instead of asking a model: no LLM is called, nothing is billed, and a ref is a full id or an unambiguous 8-or-more-character prefix. Only a memory in the project you named is marked — a promoted `_global` row is refused, because it is a memory every project shares, and so is naming `_global` as the project. It writes the same `resolved_at` the pass writes, through the same store path, so it also writes the `resolve` history row every writer appends, with the calling client as the performer; that row is the one resolve record in the database that says a *reader* decided rather than a classifier judged. A memory that is already resolved, pinned, in a standing category, or declined by the write-time guard is reported as its own state rather than as a change — and the default marker for a row the call does not recognise is *not marked*, because a tool that tells an agent it buried a memory it did not bury is worse than one that admits the row went unwritten. The memory's cached KEEP verdict is dropped so a later pass cannot report it as cached and bring it straight back. The tool is `ghost_resolve_mark`; its inverse is not a tool, and the result says so — there is no MCP surface for *clearing* a `resolved_at`, because `ghost_resolve` is the forward pass and pointing an agent at it would bury more memories rather than restore one. The result prints the scoped `ghost resolve <project> --reassess --only <ids> --apply` instead, rendered by the same helper the CLI uses.
 
 `ghost_link_withdraw` is the one repair that is NOT dry-run: an agent calls a tool to make a change, so it withdraws the named `supersedes` edge and writes the `unsupersede` history row. It is the repair for an edge the classifier still accepts — a pair that is wrong for a reason no rubric can see — which neither `ghost supersede --reassess` (CLI-only, and only withdraws what the current rules reject) nor anything else on this surface can reach. A ref is a full memory id or an unambiguous 8-or-more-character prefix of one; an ambiguous ref is refused with the matches listed, and a pair with no live edge is an error that writes nothing. Withdrawing the edge does not un-bury its target on its own: the `resolved_at` the edge caused stays until a **scoped** `ghost resolve <project> --reassess --only <ids> --apply` clears it, and the result prints that command, rendered by the same helper the CLI uses so a project name holding a space or a metacharacter is quoted. It is a CLI command and the result says so: there is no MCP tool for the repair, because `ghost_resolve` is the *forward* pass — it stamps `resolved_at` on confirmed evidence — so pointing an agent at it would bury more memories. The repair is scoped because an unscoped one re-judges every resolved memory in the project. `ghost_link_withdraw` is in the Claude Code permission allowlist like every other tool.
+
+`ghost_health` also reports how fast `memory_history` is filling, in one appended
+`**History:**` line, with a `⚠` line per finding:
+
+```text
+**History:** 8 version rows in the last 24h, 6 restatements (75%) — busiest memory holds 7 of its 50 versions, store holds 8 of 20000 rows
+  ⚠ 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — run `ghost history compact` to remove them
+```
+
+It is **additive**: every field above it keeps its name and its meaning, so an
+agent already reading this report is unaffected. It is the same read, the same
+numbers and the same warning sentences `ghost mcp status` prints, so a terminal and
+an agent looking at one store are told the same thing about it — and an agent that
+sees the restatement share rising has the same number the operator sees on the
+command line. A store with no history prints `no version rows recorded yet`.
+
+The thresholds, and what each one is for, are in
+[`ghost mcp status`](cli.md#ghost-mcp-status). The short version: more than 20% of
+the last 24 hours' version rows restated their predecessor, or the table or its
+busiest memory is within 14 days of a retention cap at the current rate. The repair
+is `ghost history compact`, a CLI command with no MCP equivalent, and the warning
+names it — there is no tool here that removes history rows, because that is an
+operator's decision about a table the agent only reads.
 
 Nothing an agent writes is excluded from `ghost reflect` by its `source`: seeds are `builtin`, agent saves are `mcp`, and reflection writes are `reflection`. `ghost_memory_save` therefore takes an optional `pin` so a memory can opt out of consolidation in the call that stores it, rather than in a second `ghost_memory_pin` call that a session might never make. On a near-duplicate save both rows are pinned — the copy just stored and the existing row the text folded into, which is the one a later consolidation is most likely to absorb — and the result message says so.
 
