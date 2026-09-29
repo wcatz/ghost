@@ -6269,10 +6269,18 @@ var memoryColumnNames = []string{
 // the reason that list exists.
 var memoryColumnsPrefixed = qualifyColumns("m")
 
-func qualifyColumns(prefix string) string {
-	out := make([]string, len(memoryColumnNames))
-	for i, c := range memoryColumnNames {
-		if prefix != "" {
+func qualifyColumns(prefix string) string { return qualifyColumnsFrom(memoryColumnNames, prefix) }
+
+// qualifyColumnsFrom is qualifyColumns over a CALLER'S list, for the one reader
+// that cannot use the whole of memoryColumnNames: a read against a store below a
+// column's floor has to select a NULL literal in that column's place, and the
+// position of every other column has to stay exactly where scanMemories expects
+// it. Deriving the list here is what keeps that in step with the scanner rather
+// than in a hand-written SELECT beside it.
+func qualifyColumnsFrom(names []string, prefix string) string {
+	out := make([]string, len(names))
+	for i, c := range names {
+		if prefix != "" && !strings.Contains(c, " ") && !strings.Contains(c, ".") {
 			out[i] = prefix + "." + c
 			continue
 		}

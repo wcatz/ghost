@@ -423,8 +423,20 @@ func assertIDs(t *testing.T, got, want []string) {
 // this fails rather than the query failing at run time with "missing argument".
 func TestDecayRankingSQLAtRoundTripsToTheConstant(t *testing.T) {
 	now := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
-	rank, args := decayRankingSQLAt(now)
-	occurrences := strings.Count(DecayRankingSQL, "julianday('now')")
+	// Run it twice, with and without the tier half, because the two are different
+	// constants and the derivation has to hold for each: a store below the tier
+	// floor gets the tier-less expression, and if the substitution only worked on
+	// the tiered one the pre-tier path would fail at run time instead of here.
+	for _, hasTier := range []bool{true, false} {
+		rank, args := decayRankingSQLAt(now, hasTier)
+		assertDecayDerivation(t, rank, args, hasTier)
+	}
+}
+
+func assertDecayDerivation(t *testing.T, rank string, args []any, hasTier bool) {
+	t.Helper()
+	base := DecayRankingSQLWithTier(hasTier)
+	occurrences := strings.Count(base, "julianday('now')")
 	if occurrences == 0 {
 		t.Fatal("the constant names no wall clock, so the derivation has nothing to substitute")
 	}
@@ -440,9 +452,8 @@ func TestDecayRankingSQLAtRoundTripsToTheConstant(t *testing.T) {
 	// Substituting back must reproduce the constant exactly: a derivation that
 	// loses or reformats part of the formula is a second copy of it, free to
 	// drift.
-	back := strings.ReplaceAll(rank, "julianday(?)", "julianday('now')")
-	if back != DecayRankingSQL {
-		t.Error("substituting the placeholders back does not reproduce DecayRankingSQL: the derivation changed the formula")
+	if back := strings.ReplaceAll(rank, "julianday(?)", "julianday('now')"); back != base {
+		t.Error("substituting the placeholders back does not reproduce the constant: the derivation changed the formula")
 	}
 }
 
@@ -754,5 +765,119 @@ func TestCandidatesPassiveOverAnEmptyStoreReturnsAnEmptySetAndNoError(t *testing
 	// empty set is not larger than the window.
 	if set.Widened {
 		t.Error("Widened is true on an empty passive set, which reports a widening that did not happen")
+	}
+}
+
+// TestCandidatesPassiveReadsAStoreBelowTheTierFloor is the schema-floor case, and
+// it exists because a passive read is the first whole-Memory read the memory
+// package makes through a NON-MIGRATING handle. Every store Ghost opens itself
+// migrates on the way in, and the session-start loaders that read through
+// OpenReadDB each carry their own version probe — so without one here the
+// session-start migration would fail on a pre-v19 store with "no such column:
+// retention", where the loader it replaces renders the block perfectly well.
+//
+// A pre-v12 store is folded in: scope and retention arrived at different versions,
+// and the fixture drops the table and recreates the columns, so the same test
+// covers "the columns this build expects are not all there".
+func TestCandidatesPassiveReadsAStoreBelowTheTierFloor(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+
+	// Rebuild `memories` without the two columns the tier added, and stamp the
+	// floor below scope as well, so the SELECT has to substitute for three.
+	if _, err := st.db.Exec(`ALTER TABLE memories DROP COLUMN retention`); err != nil {
+		t.Skipf("cannot drop a column on this SQLite build: %v", err)
+	}
+	if _, err := st.db.Exec(`ALTER TABLE memories DROP COLUMN expires_at`); err != nil {
+		t.Skipf("cannot drop a column on this SQLite build: %v", err)
+	}
+	if _, err := st.db.Exec(`PRAGMA user_version = 11`); err != nil {
+		t.Fatalf("stamp an old schema version: %v", err)
+	}
+
+	set, err := st.Candidates(ctx, passiveRequest("proj", projectPassivePolicy()))
+	if err != nil {
+		t.Fatalf("a pre-tier store must still be read, not refused: %v", err)
+	}
+	if len(set.Rows) == 0 {
+		t.Fatal("the pre-tier read returned no rows; the NULL substitutions dropped everything")
+	}
+	for _, r := range set.Rows {
+		if r.Retention != "" {
+			t.Errorf("row %s: Retention is %q, but this store has no tier column, so every row must read as unset", r.ID, r.Retention)
+		}
+	}
+}
+
+// TestCandidatesPassiveSchemaVersionIsReadThroughTheSnapshot is a DEADLOCK
+// guard, and it is the kind of bug that shows up as a hung test rather than a
+// failed one.
+//
+// `Candidates` opens a read transaction before dispatching, and the pool is
+// pinned at MaxOpenConns(1): that transaction holds the only connection. A
+// version probe issued on the POOL while it is open waits for a connection that
+// cannot be handed out. The first version of this code read PRAGMA user_version
+// from the primary handle and hung the whole package for its timeout.
+func TestCandidatesPassiveSchemaVersionIsReadThroughTheSnapshot(t *testing.T) {
+	st := passiveFixture(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.Candidates(context.Background(), passiveRequest("proj", projectPassivePolicy()))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("passive Candidates: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("passive Candidates did not return: the schema version is being read on the pool while the read transaction holds the only connection")
+	}
+}
+
+// TestCandidatesPassiveRefusesPoliciesWithAQuery is the mirror of the as_of
+// refusal. A request with a query is answered by the fusion path, which reads no
+// policy and sizes its own window from Fetch.Limit — so a caller that believes
+// its over-fetches are in force would be answered without them.
+func TestCandidatesPassiveRefusesPoliciesWithAQuery(t *testing.T) {
+	st := passiveFixture(t)
+	req := passiveRequest("proj", projectPassivePolicy())
+	req.Query = "some query"
+	req.Fetch = Fetch{Limit: 5, FTSTopK: 10, VectorTopK: 10}
+	if _, err := st.Candidates(context.Background(), req); err == nil {
+		t.Fatal("a request carrying passive policies must have an empty query, or the policies are silently discarded")
+	}
+}
+
+// TestCandidatesPassiveAPersistentRowIsNotANearDuplicateLoser is the protection
+// map, and a pin-only map here is a hole DemotionPenalties' own doc names: an
+// unpinned `persistent` row on the losing end of a pair is penalised here and
+// spared by every other caller in the tree. On a bucket that drops losers,
+// penalised means REMOVED — a persistent memory silently leaving the
+// session-start block because something restated it.
+//
+// The supersede map is the mirror image and is deliberately tier-ONLY, so the two
+// are separate maps rather than one. The fixture makes the near-duplicate case
+// observable by pinning the WINNER, which is what makes the loser the
+// lower-importance end.
+func TestCandidatesPassiveAPersistentRowIsNotANearDuplicateLoser(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+	// gp_high is the pinned, higher-importance winner; gp_mid is the loser.
+	if err := st.CreateLink(ctx, "gp_mid", "gp_high", "duplicate", 1, "manual"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if _, err := st.db.Exec(`UPDATE memories SET retention = 'persistent' WHERE id = 'gp_mid'`); err != nil {
+		t.Fatalf("set retention: %v", err)
+	}
+
+	pol := globalPassivePolicy() // DropDemotedLosers, the case that removes
+	set, err := st.Candidates(ctx, passiveRequest("proj", pol))
+	if err != nil {
+		t.Fatalf("passive Candidates: %v", err)
+	}
+	if !containsStr(passiveIDs(set), "gp_mid") {
+		t.Errorf("a persistent row was treated as a near-duplicate loser and removed; the protection map must include the tier "+
+			"(got %v)", passiveIDs(set))
 	}
 }

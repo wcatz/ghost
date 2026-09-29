@@ -519,6 +519,16 @@ func validateCandidateRequest(req CandidateRequest) error {
 				"embeddings record current content only, so a past content set has no vectors — ask for hybrid or fts_only")
 		}
 	}
+	if len(req.Passive) > 0 && req.Query != "" {
+		// The mirror of the AsOf refusal above, on the sibling axis, and refused
+		// for the same reason. Dispatch sends a request with a query down the FUSION
+		// path, which never reads Passive — so the per-bucket over-fetches would be
+		// discarded and the window would be Fetch.Limit, a number this caller never
+		// stated. A caller that believes its policies are in force must not be
+		// answered without them.
+		return errors.New("candidates: a request carrying passive policies must have an empty query: a query is answered by the " +
+			"fusion path, which reads no policy and sizes its own window — a passive request is the shape that uses them")
+	}
 	if req.Query == "" {
 		// A passive request is sized by its policies rather than by Fetch.Limit,
 		// so the window check does not apply to it. What does apply is the

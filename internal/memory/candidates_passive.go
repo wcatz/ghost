@@ -109,9 +109,15 @@ func validatePassivePolicies(policies []SlicePolicy) error {
 // row (validity, scope) can still reach the row behind it. The assembler's cap
 // then closes the window, which is the only thing that truncates.
 func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set *CandidateSet) (*CandidateSet, error) {
+	// Resolved once, before any bucket runs, because it decides both the SELECT
+	// list and the tier half of the ORDER BY. See passiveColumnsFor.
+	cols, err := passiveColumnsFor(s)
+	if err != nil {
+		return nil, err
+	}
 	var rows []Candidate
 	for _, pol := range req.Passive {
-		fetched, err := s.passiveBucket(ctx, req, pol)
+		fetched, err := s.passiveBucket(ctx, req, pol, cols)
 		if err != nil {
 			return nil, err
 		}
@@ -150,8 +156,14 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 
 // passiveBucket runs one policy: the fetch, the selection, the demotions, and
 // the selected rows followed by the rest of the window.
-func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol SlicePolicy) ([]Candidate, error) {
-	query, args := passiveFetchSQL(pol, req)
+//
+// The store's shape is resolved ONCE for the whole passive request rather than
+// per bucket: it costs a PRAGMA, and a session start with two buckets would pay
+// for it twice. It is passed down rather than re-read so every bucket's SQL, and
+// every bucket's reading of what its rows carry, agree about which store they are
+// talking to.
+func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Candidate, error) {
+	query, args := passiveFetchSQL(pol, req, cols)
 	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("candidates: passive fetch for bucket %q: %w", pol.Bucket, err)
@@ -181,7 +193,7 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 // limit. The scope predicate contributes none: ScopeMatchesSQL embeds the
 // requested values as a quoted JSON literal, so a value holding a quote is
 // escaped rather than allowed to end the statement early.
-func passiveFetchSQL(pol SlicePolicy, req CandidateRequest) (string, []any) {
+func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns) (string, []any) {
 	// The scope predicate is applied HERE, in SQL, rather than only in the
 	// assembler's stage 3. The over-fetch chooses which rows are read at all, so
 	// a row the session excluded must not spend any of the window: filtering it
@@ -209,7 +221,7 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest) (string, []any) {
 		// wall-clock form is what the shipped loaders interpolate, and using it
 		// here would reintroduce the drift a bound Now exists to remove, at a
 		// moment when the two reads can straddle a second boundary.
-		rank, clock := decayRankingSQLAt(req.Now)
+		rank, clock := decayRankingSQLAt(req.Now, cols.HasTier)
 		orderBy = fmt.Sprintf("(%s) DESC, importance DESC, created_at DESC, id", rank)
 		args = append(args, clock...)
 	}
@@ -224,7 +236,7 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest) (string, []any) {
 		FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL%s
 		ORDER BY %s
-		LIMIT ?`, memoryColumns, scopeClause, orderBy)
+		LIMIT ?`, cols.list, scopeClause, orderBy)
 	return query, append(args, pol.OverFetch)
 }
 
@@ -402,23 +414,36 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 		return rows
 	}
 	ids := make([]string, len(rows))
-	pinned := make(map[string]bool, len(rows))
+	// TWO protection maps, because the two relations protect different things.
+	//
+	// Supersede protects a row that has been RETAINED: a persistent row is the
+	// author's statement that it outlives the session, and a supersede edge into
+	// one is a claim being made about a row the tier says is standing. Tier alone.
+	//
+	// Near-duplicate protects a row from being treated as a RESTATEMENT, and a
+	// pinned row is protected for the ordinary reason plus a persistent one. A
+	// pin-only map here is the hole DemotionPenalties' own doc names: an unpinned
+	// persistent row on the losing end of a pair is penalised here and spared
+	// everywhere else — and on a bucket that drops losers, penalised means REMOVED
+	// from the session-start block. Every other caller in the tree passes
+	// Pinned || RetentionExempt, so this must too or the two orderings disagree
+	// about which member of a pair loses.
+	supersedeProtected := make(map[string]bool, len(rows))
+	nearDupProtected := make(map[string]bool, len(rows))
 	for i, r := range rows {
 		ids[i] = r.mem.ID
-		pinned[r.mem.ID] = r.mem.Pinned
+		exempt := RetentionExempt(r.mem)
+		if exempt {
+			supersedeProtected[r.mem.ID] = true
+		}
+		nearDupProtected[r.mem.ID] = r.mem.Pinned || exempt
 	}
 	// A persistent row is exempt from supersede demotion (#709): tier is the
 	// author's statement that a memory outlives the session, and a supersede edge
 	// into one is a claim being made about a row the tier says is standing. The
 	// map is the same one GetTopMemories builds, so the two orderings cannot
 	// disagree about which rows a supersede may move.
-	protected := make(map[string]bool, len(rows))
-	for _, r := range rows {
-		if RetentionExempt(r.mem) {
-			protected[r.mem.ID] = true
-		}
-	}
-	if penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, protected); err != nil {
+	if penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, supersedeProtected); err != nil {
 		s.logger.Debug("candidates: passive supersede demotion lookup failed", "error", err)
 	} else if len(penalty) > 0 {
 		rows = StableDemote(rows, func(r passiveRow) string { return r.mem.ID }, penalty)
@@ -447,7 +472,7 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 		threshold = s.demotionThreshold
 		s.mu.RUnlock()
 	}
-	penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, pinned, threshold)
+	penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, nearDupProtected, threshold)
 	if err != nil {
 		s.logger.Debug("candidates: passive demotion lookup failed", "error", err)
 		return rows
@@ -494,12 +519,79 @@ func passiveCandidate(r passiveRow) Candidate {
 // It is derived from the constant rather than written out beside it, because two
 // copies of a decay formula are two answers to "how old is this row" and they
 // would drift the first time one of them was edited.
-func decayRankingSQLAt(now time.Time) (string, []any) {
+func decayRankingSQLAt(now time.Time, hasTier bool) (string, []any) {
 	stamp := now.UTC().Format(stampLayoutForSQL)
-	occurrences := strings.Count(DecayRankingSQL, "julianday('now')")
+	base := DecayRankingSQLWithTier(hasTier)
+	occurrences := strings.Count(base, "julianday('now')")
 	args := make([]any, 0, occurrences)
 	for i := 0; i < occurrences; i++ {
 		args = append(args, stamp)
 	}
-	return strings.ReplaceAll(DecayRankingSQL, "julianday('now')", "julianday(?)"), args
+	return strings.ReplaceAll(base, "julianday('now')", "julianday(?)"), args
+}
+
+// passiveColumns is the shape of the store this request is reading: the SELECT
+// list to use, and whether the tier half of the decay order is available.
+//
+// It exists because a passive read is reached through a NON-MIGRATING handle.
+// Every store Ghost opens itself migrates on the way in, so the whole-Memory
+// readers have never needed to ask what schema they are looking at — and
+// `internal/mcpinit`'s loaders, which read through `OpenReadDB` and so cannot
+// migrate, each carry their own probe. A passive retrieval is the first
+// whole-Memory read the memory package itself has to make version-tolerant, and
+// without this the session-start migration would fail with "no such column:
+// retention" on a store below the tier floor, where the loader it replaces
+// renders the block perfectly well.
+type passiveColumns struct {
+	list    string
+	HasTier bool
+}
+
+// The schema versions that added memories.scope and memories.retention. They are
+// the same floors the session-start loaders apply, stated here rather than
+// imported: a column cannot be selected on a store that does not have it, and a
+// decay order cannot multiply by one that is not there.
+const (
+	passiveScopeColumnFloor     = 12
+	passiveRetentionColumnFloor = 19
+)
+
+// passiveColumnsFor resolves the store's shape through the exported version pair,
+// so this file does not restate the current schema version.
+//
+// An UNREADABLE version is treated as the floor rather than as "current". That is
+// the safe direction: a store whose version cannot be read is read without the
+// columns that might not be there, and the rows that come back carry NULL for
+// what they could not have said. Returning an error instead would turn a
+// transient PRAGMA failure into no session context at all, which is a worse
+// answer than a block missing a tier label.
+func passiveColumnsFor(s *Store) (passiveColumns, error) {
+	hasScope, hasTier := true, false
+	// Through the SNAPSHOT, not the pool. This runs inside the read transaction
+	// `Candidates` opened, and that pool is pinned at MaxOpenConns(1): the
+	// transaction holds the only connection, so a PRAGMA on the pool would wait for
+	// a connection that cannot be handed out — a deadlock, not an error.
+	version, versionErr := dbUserVersion(s.queryDB())
+	if versionErr != nil {
+		s.logger.Debug("candidates: passive read could not read the store's schema version", "error", versionErr)
+		hasScope = false
+	} else {
+		hasScope = version >= passiveScopeColumnFloor
+		hasTier = version >= passiveRetentionColumnFloor
+	}
+
+	// The list is the shared one, with a column this store may not have replaced by
+	// a NULL literal of the right shape. `NULL AS expires_at` is here for the same
+	// reason as `NULL AS retention`: scanMemories binds both, and it binds by
+	// POSITION, so a shorter list is an argument-count failure rather than a value.
+	names := append([]string(nil), memoryColumnNames...)
+	for i, c := range names {
+		switch {
+		case c == "scope" && !hasScope:
+			names[i] = "NULL AS scope"
+		case (c == "retention" || c == "expires_at") && !hasTier:
+			names[i] = "NULL AS " + c
+		}
+	}
+	return passiveColumns{list: qualifyColumnsFrom(names, ""), HasTier: hasTier}, nil
 }
