@@ -240,7 +240,9 @@ func TestLookupProject_PathWithLikeWildcards(t *testing.T) {
 	}
 }
 
-// openFileTestDB creates a real on-disk SQLite DB (needed for mode=ro callers like loadGlobalMemories).
+// openFileTestDB creates a real on-disk SQLite DB, which is what the passive
+// retrieval reads: it takes a Store, and a Store needs a handle the migration
+// path has already stamped.
 func openFileTestDB(t *testing.T) (db *sql.DB, path string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -253,14 +255,54 @@ func openFileTestDB(t *testing.T) (db *sql.DB, path string) {
 	return db, path
 }
 
-// TestLoadGlobalMemories: the loader returns only the global project, and each
-// row carries the project it is actually stored under. The origin label for a
+// mustHookConfig is config.LoadForHook under a name that says it cannot fail for
+// a test: the hook path is handed a value that falls back to the compiled defaults
+// rather than returning an error, so every session-start caller already treats it
+// as always non-nil. A test that built its own *config.Config instead would be
+// testing a policy no user ever gets.
+func mustHookConfig(t *testing.T) *config.Config {
+	t.Helper()
+	return config.LoadForHook()
+}
+
+// passiveGlobals runs the session-start passive retrieval against the store at
+// dbPath and returns only the `_global` rows, plus the total the block's "N of M"
+// line is built from.
+//
+// It replaces the direct `loadGlobalMemories` call these tests used to make. The
+// global bucket is now ONE slice of one budget, so there is no longer a function
+// that returns "the globals" on its own: a test that wants them asks the passive
+// retrieval for the project's rows and gets the globals in the other half of the
+// same answer, which is also what proves the two buckets cannot drift into
+// disagreeing about the same store.
+func passiveGlobals(t *testing.T, db *sql.DB, projectID string) (globals []sessionMemory) {
+	t.Helper()
+	store := memory.NewStoreWithRead(db, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, globals = loadSessionPassive(context.Background(), store, config.LoadForHook(), projectID, time.Now())
+	return globals
+}
+
+// globalTotal is the count the block's not-shown line divides by. It calls the
+// hook's own function rather than repeating the query, so a test cannot pass
+// against a count the block does not actually render.
+func globalTotal(t *testing.T, db *sql.DB) (total int, known bool) {
+	t.Helper()
+	total, known = globalCount(db)
+	if !known {
+		t.Fatal("the global count did not read; the fixture store is broken")
+	}
+	return total, known
+}
+
+// TestPassiveGlobalsReturnOnlyTheGlobalProject: the passive retrieval returns
+// only the global project, and each row carries the project it is actually
+// stored under. The origin label for a
 // legacy-shaped seed is decided by that field, so a sessionMemory without it
 // cannot tell Ghost's shipped global rule from a project row repeating the same
 // words. The project row below repeats the seed text on purpose: it is the
 // boundary the global section must not cross.
-func TestLoadGlobalMemories(t *testing.T) {
-	db, dbPath := openFileTestDB(t)
+func TestPassiveGlobalsReturnOnlyTheGlobalProject(t *testing.T) {
+	db, _ := openFileTestDB(t)
 
 	// Seed the _global project row (FK required by memories table).
 	_, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`)
@@ -285,7 +327,8 @@ func TestLoadGlobalMemories(t *testing.T) {
 		t.Fatalf("insert project-scoped seed text: %v", err)
 	}
 
-	globals, total, totalKnown := loadGlobalMemories(dbPath, nil)
+	globals := passiveGlobals(t, db, "abc123")
+	total, totalKnown := globalTotal(t, db)
 	if len(globals) != 1 {
 		t.Fatalf("expected 1 global memory, got %d (%+v)", len(globals), globals)
 	}
@@ -293,7 +336,7 @@ func TestLoadGlobalMemories(t *testing.T) {
 	// binds the canonical sentinel in SQL, and a sentinel that disagreed with
 	// the stored value would return no rows at all.
 	if globals[0].ProjectID != "_global" {
-		t.Errorf("ProjectID: got %q, want _global — the global loader must carry the stored project identity", globals[0].ProjectID)
+		t.Errorf("ProjectID: got %q, want _global — a global row must carry the stored project identity", globals[0].ProjectID)
 	}
 	if globals[0].Category != "preference" {
 		t.Errorf("category: got %q, want preference", globals[0].Category)
@@ -307,12 +350,12 @@ func TestLoadGlobalMemories(t *testing.T) {
 }
 
 // TestSessionMemoriesCarryTheirOwnProject is the other half of the identity
-// rule TestLoadGlobalMemories pins for globals: the project loader stamps the
-// project it queried onto every row it returns.
+// rule TestPassiveGlobalsReturnOnlyTheGlobalProject pins for globals: a
+// project row carries the project it is stored under.
 //
 // Nothing renders an origin label for project rows today, so this looks
 // inert. It is not: sessionMemory is one shared shape, and a field that is
-// only sometimes populated is exactly the trap the global loader just fell
+// only sometimes populated is exactly the trap the global half just fell
 // into. If this ever goes back to empty, the first surface that asks a project
 // row where it lives gets "" — which is not the reserved global project, so
 // the compatibility rewrite silently stops applying and a stale global seed
@@ -350,7 +393,7 @@ func TestSessionMemoriesCarryTheirOwnProject(t *testing.T) {
 
 	t.Setenv("XDG_DATA_HOME", xdgHome)
 
-	_, _, memories, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
+	_, _, memories, _, _, _, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 	if len(memories) != 1 {
 		t.Fatalf("expected 1 project memory, got %d", len(memories))
 	}
@@ -359,26 +402,39 @@ func TestSessionMemoriesCarryTheirOwnProject(t *testing.T) {
 	}
 }
 
-// TestLoadGlobalMemories_MissingDBNoPhantom verifies the session hook never
-// creates an empty ghost.db when none exists (the bare-path mode=ro DSN used
-// to open read-write and materialize a phantom file on first read).
-func TestLoadGlobalMemories_MissingDBNoPhantom(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	globals, total, totalKnown := loadGlobalMemories(dbPath, nil)
-	if globals != nil || total != 0 || totalKnown {
-		t.Errorf("missing DB should yield no globals, got globals=%v total=%d known=%v", globals, total, totalKnown)
+// TestSessionStartOnAMissingDBCreatesNoPhantom verifies the session hook never
+// creates an empty ghost.db when none exists (the bare-path mode=ro DSN used to
+// open read-write and materialize a phantom file on first read).
+//
+// It runs the ENTRY POINT rather than a loader, because the loader it used to
+// name no longer exists and the property is about the path a user takes: a first
+// session on a machine with no store must leave the filesystem as it found it.
+// loadSessionContext resolves the data dir and opens the read handle itself, so
+// this is where the refusal now lands.
+func TestSessionStartOnAMissingDBCreatesNoPhantom(t *testing.T) {
+	xdgHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dbPath := filepath.Join(xdgHome, "ghost", "ghost.db")
+
+	projectID, _, memories, globals, _, _, _, _, _, _, total, _ := loadSessionContext(t.TempDir(), config.LoadForHook())
+	if projectID != "" || memories != nil || globals != nil {
+		t.Errorf("a missing store must resolve nothing, got project=%q memories=%v globals=%v", projectID, memories, globals)
+	}
+	if total != 0 {
+		t.Errorf("a missing store must report no total, got %d", total)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
-		t.Errorf("loadGlobalMemories must not create %s (err=%v)", dbPath, err)
+		t.Errorf("the session hook must not create %s (err=%v)", dbPath, err)
 	}
 }
 
-// TestLoadGlobalMemories_DedupsNearDuplicates: two near-duplicate globals
+// TestPassiveGlobalsDedupNearDuplicates: two near-duplicate globals
 // linked above the globals demotion threshold (0.85) must not both survive,
 // even though 0.8857 is below the general DefaultDemotionThreshold (0.90)
 // used for project memories.
-func TestLoadGlobalMemories_DedupsNearDuplicates(t *testing.T) {
-	db, dbPath := openFileTestDB(t)
+func TestPassiveGlobalsDedupNearDuplicates(t *testing.T) {
+	db, _ := openFileTestDB(t)
 
 	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
 		t.Fatalf("insert _global project: %v", err)
@@ -399,7 +455,7 @@ func TestLoadGlobalMemories_DedupsNearDuplicates(t *testing.T) {
 		t.Fatalf("insert link: %v", err)
 	}
 
-	globals, _, _ := loadGlobalMemories(dbPath, nil)
+	globals := passiveGlobals(t, db, "p-nodup")
 	var sawOriginal, sawRestated bool
 	for _, m := range globals {
 		if strings.Contains(m.Content, "ORIGINAL") {
@@ -417,11 +473,11 @@ func TestLoadGlobalMemories_DedupsNearDuplicates(t *testing.T) {
 	}
 }
 
-// TestLoadGlobalMemories_ExcludesResolved verifies a global memory marked
+// TestPassiveGlobalsExcludeResolved verifies a global memory marked
 // resolved_at (via ghost resolve) is excluded from both the injected set and
 // totalCount, matching the project-memory queries' resolved_at IS NULL filter.
-func TestLoadGlobalMemories_ExcludesResolved(t *testing.T) {
-	db, dbPath := openFileTestDB(t)
+func TestPassiveGlobalsExcludeResolved(t *testing.T) {
+	db, _ := openFileTestDB(t)
 
 	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
 		t.Fatalf("insert _global project: %v", err)
@@ -442,7 +498,8 @@ func TestLoadGlobalMemories_ExcludesResolved(t *testing.T) {
 		t.Fatalf("insert live global: %v", err)
 	}
 
-	globals, total, totalKnown := loadGlobalMemories(dbPath, nil)
+	globals := passiveGlobals(t, db, "p-resolved")
+	total, totalKnown := globalTotal(t, db)
 	if len(globals) != 1 || globals[0].ID != "glive0001" {
 		t.Fatalf("resolved global must be excluded from fetch, got %+v", globals)
 	}
@@ -1005,7 +1062,7 @@ func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 		t.Fatalf("insert project: %v", err)
 	}
 	// Two near-duplicates (a, b) plus 13 filler memories plus a distinct
-	// memory (c). loadSessionContext over-fetches at 2x the cap (30) then
+	// memory (c). The project slice over-fetches at 3x the cap (45) then
 	// truncates to 15; with only 3 memories total the >15 demotion gate could never fire,
 	// so this fixture pads the candidate set past 15 (16 total) so the gate
 	// fires and truncation actually drops the demoted duplicate, letting the

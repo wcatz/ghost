@@ -721,7 +721,7 @@ against the real `ghost` project database (43 memories):
 ## Session-injection budget (category-priority + compact render) — SHIPPED
 
 `TestBenchInjectionBudget` (internal/mcpinit/injectionbudget_test.go) drives the
-real `loadSessionContext`/`formatSessionContext` pipeline over a 57-memory
+real `loadSessionPassive`/`formatSessionContext` pipeline over a 57-memory
 representative corpus skewed so the descriptive categories (14 architecture +
 12 facts) would otherwise crowd the rank-only top-15 and starve the behavioral
 slots. Measured under the default `injection.behavior_floor: 8`:

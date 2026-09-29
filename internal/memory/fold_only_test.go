@@ -163,9 +163,9 @@ func TestUpsertDefaultStillInsertsTheDuplicateRow(t *testing.T) {
 // upsert that re-saves the text of a resolved memory strengthens it and leaves
 // it resolved, which is what TestUnresolveOnWrite pins. FoldOnly strengthens the
 // row and then returns WITHOUT storing the incoming wording — so if the target
-// is a resolved _global row, loadGlobalMemories and GetTopMemories both exclude
-// it and the promotion reports success while the memory is in no readable place
-// at all. It has to fall through to the insert.
+// is a resolved _global row, the session-start block's passive read and
+// GetTopMemories both exclude it and the promotion reports success while the
+// memory is in no readable place at all. It has to fall through to the insert.
 func TestUpsertFoldOnlyInsertsInsteadOfFoldingIntoResolvedRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

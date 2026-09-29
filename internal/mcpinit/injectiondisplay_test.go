@@ -12,8 +12,9 @@ import (
 
 // TestSessionContextDisplayCapIndependentOfStoreCap proves the session-start
 // injection display truncation is a separate, hard-coded per-item byte budget
-// (200 bytes for project memories in loadSessionContext) that does not read,
-// and is not affected by, the MCP store cap. Raising the store cap to
+// (200 bytes for project memories, 300 for _global, applied by
+// loadSessionPassive) that does not read, and is not affected by, the MCP store
+// cap. Raising the store cap to
 // memory.MaxContentLen must not bloat injected context: a full-cap memory is
 // stored whole yet still injects as a ~200-byte preview ending in "…".
 func TestSessionContextDisplayCapIndependentOfStoreCap(t *testing.T) {
@@ -47,7 +48,7 @@ func TestSessionContextDisplayCapIndependentOfStoreCap(t *testing.T) {
 
 	t.Setenv("XDG_DATA_HOME", xdgHome)
 
-	_, _, mems, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
+	_, _, mems, _, _, _, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 	if len(mems) != 1 {
 		t.Fatalf("expected 1 injected memory, got %d", len(mems))
 	}

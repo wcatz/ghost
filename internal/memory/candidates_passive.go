@@ -483,7 +483,13 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 	// map is the same one GetTopMemories builds, so the two orderings cannot
 	// disagree about which rows a supersede may move.
 	if penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, supersedeProtected); err != nil {
-		s.logger.Debug("candidates: passive supersede demotion lookup failed", "error", err)
+		// Warn, and the reason is the consequence: a store this lookup cannot read
+		// re-offers a superseded preference as a live claim, and no surface that
+		// renders the result can tell that from a store with nothing superseded.
+		// The session-start loaders this replaced printed the same three failures
+		// on stderr, and a caller that renders the block has no other way to learn
+		// its rows were not demoted.
+		s.logger.Warn("candidates: passive supersede demotion lookup failed", "error", err)
 	} else if len(penalty) > 0 {
 		rows = StableDemote(rows, func(r passiveRow) string { return r.mem.ID }, penalty)
 		// The near-duplicate lookup decides WHICH member of a pair loses from the
@@ -522,7 +528,10 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 	}
 	penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, nearDupProtected, threshold)
 	if err != nil {
-		s.logger.Debug("candidates: passive demotion lookup failed", "error", err)
+		// Warn for the reason the supersede lookup above gives: the near-duplicate
+		// pass decides which member of a pair loses, so a store it cannot read
+		// shows both, as two independent claims.
+		s.logger.Warn("candidates: passive demotion lookup failed", "error", err)
 		return rows
 	}
 	if len(penalty) == 0 {
@@ -657,7 +666,14 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 		hasTier = version >= passiveRetentionColumnFloor
 		hasProvenance = version >= passiveProvenanceColumnFloor
 	} else {
-		s.logger.Debug("candidates: passive read could not read the store's schema version", "error", versionErr)
+		// Warn, and the reason is what the substitutions below are FOR: a version
+		// this cannot read means every flag stays false, so the fetch silently
+		// drops its scope filter, its tier label and its expiry window and the
+		// block renders as an unscoped, undated one. The session-start loaders
+		// this replaced printed exactly this diagnosis on stderr and said why it
+		// had to be loud: the fallbacks keep working, which is what makes the loss
+		// invisible from the outside.
+		s.logger.Warn("candidates: passive read could not read the store's schema version", "error", versionErr)
 	}
 
 	// The list is the shared one, with a column this store may not have replaced by

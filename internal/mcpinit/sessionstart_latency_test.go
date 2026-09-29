@@ -98,8 +98,8 @@ func largeSessionStore(tb testing.TB, xdgHome string, n int) string {
 	return canonical
 }
 
-// measureSessionStart runs the session-start loader against a store and returns
-// the wall time of the load.
+// measureSessionStart runs the session-start read against a store and returns the
+// wall time of the load.
 //
 // The measured span is loadSessionContext alone, not the whole handler: the
 // handler's other costs (the lifecycle marker read, the session-count bump, the
@@ -131,23 +131,30 @@ func sessionStartOn(tb testing.TB, n, runs int) (time.Duration, int, int) {
 	var rows, globals int
 	for i := 0; i < runs; i++ {
 		total += measureSessionStart(tb, projectPath)
-		projectID, _, mems, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
+		projectID, _, mems, g, _, _, _, _, _, _, _, _ := loadSessionContext(projectPath, config.LoadForHook())
 		if projectID == "" {
 			tb.Fatalf("fixture project did not resolve at n=%d", n)
 		}
 		rows = len(mems)
-		g, _, _ := loadGlobals(config.LoadForHook())
 		globals = len(g)
 	}
 	return total / time.Duration(runs), rows, globals
 }
 
-// This file and sessionstart_golden_test.go are BASELINES, and they measure the
-// loader this migration is replacing rather than the path that replaces it — which
-// is why they are recorded on the retriever PR, where the loader is still the code
-// that runs, and not on the hook switch, where it is gone. The measurement of the
-// NEW path lives in sessionstart_passive_latency_test.go and needs the assembler
-// half to exist.
+// This file measures the WHOLE session-start read — open the store, resolve the
+// project, read the learned summary, the tasks and the decisions, count both
+// totals, and retrieve the memory rows — because that is the span a user's session
+// start actually pays for. sessionstart_passive_latency_test.go measures the
+// retrieval inside it, and the difference between the two is the honest answer to
+// "did the migration cost anything": most of a session-start load was never the
+// memory fetch.
+//
+// This file was a BASELINE before the hook switch, and it says so for the record:
+// it measured the private loaders while they were still the code that ran, so
+// #761 could report the cost of the path that would replace them. It measures the
+// shipped path now, and the pre-switch numbers are recorded in #761 rather than
+// here — a baseline that kept measuring a deleted function would have been a
+// number describing code that no longer runs.
 //
 // TestSessionStartLatencyAt1000Memories is the number the PR body reports: the
 // steady-state session-start load against a 1000-memory store.

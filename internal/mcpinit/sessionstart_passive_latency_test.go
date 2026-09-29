@@ -14,13 +14,22 @@ import (
 )
 
 // measurePassiveStart runs the session-start block through the ASSEMBLER against
-// the same store, with the policies the shipped loaders use, so the measurement
-// covers the code this migration adds rather than only the code it leaves alone.
+// the same store, with sessionPassiveBudget — the policies the hook itself sends —
+// so the measurement covers the code this migration adds rather than only the code
+// it leaves alone. It took a restatement of those policies for two PRs; it now
+// takes the function, so a change to the shipped budget cannot leave the number
+// describing something else.
 //
-// The two numbers answer different questions and both belong in the PR body: the
-// loader is what ships today, and the passive assembler path is what the hook
-// switch will ship. Measuring only the loader would say nothing about whether the
-// new path reads the whole store.
+// The two files answer different questions and both belong in the PR body. This
+// one is the RETRIEVAL, which is where the migration could have cost something: a
+// passive bucket whose window was the whole store would return the same 15 rows
+// and be invisible from the outside. The other is the whole session-start read,
+// so the difference between them is what the retrieval actually costs a session.
+//
+// Before the hook switch these two measured different code — the private loaders
+// and the passive path that would replace them. They measure the same path now, at
+// two spans, which is what a baseline and a sub-measurement of it look like once
+// the migration has landed.
 func measurePassiveStart(tb testing.TB, projectID string, now time.Time) (time.Duration, []string) {
 	tb.Helper()
 	dataDir, err := config.DataDir()
@@ -37,6 +46,11 @@ func measurePassiveStart(tb testing.TB, projectID string, now time.Time) (time.D
 	cfg := config.LoadForHook()
 	inj := cfg.Injection
 	start := time.Now()
+	// The SHIPPED budget, not a copy of it. This measurement exists to say what
+	// the hook switch costs, and a restatement of the policies here is a second
+	// statement of them: it would keep reporting the old numbers after the hook
+	// changed one, which is the one thing a measurement added by the PR that
+	// changes the code must never do.
 	res, err := assemble.Run(context.Background(), store, assemble.Request{
 		ProjectID: projectID,
 		Query:     "", // passive: the shape a session start has
@@ -44,20 +58,7 @@ func measurePassiveStart(tb testing.TB, projectID string, now time.Time) (time.D
 		Condition: assemble.CondHybrid,
 		Now:       now,
 		Scope:     inj.SessionScope,
-		Budget: assemble.Budget{Slices: []assemble.Slice{
-			{
-				Bucket: projectID, MaxItems: sessionMemoriesCap, OverFetch: sessionMemoriesCap * 3,
-				ClampBytes: 200, Order: "decay", TwoPass: inj.BehaviorFloor > 0,
-				BehaviorFloor: inj.BehaviorFloor, BehaviorCategories: inj.BehaviorCategories,
-				CategoryWeights: inj.CategoryWeights, CategoryCaps: inj.CategoryCaps,
-				DemotionThreshold: cfg.Linking.DemotionThreshold, DemoteOnlyWhenOverCap: true,
-			},
-			{
-				Bucket: "_global", MaxItems: globalsCap, OverFetch: globalsCap * 2,
-				ClampBytes: 300, Order: "pinned_importance_updated",
-				DemotionThreshold: globalsDemotionThreshold, DropDemotedLosers: true,
-			},
-		}},
+		Budget:    sessionPassiveBudget(cfg, projectID),
 	})
 	elapsed := time.Since(start)
 	if err != nil {

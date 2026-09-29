@@ -524,8 +524,8 @@ func TestTheDemotionLookupsDoNotNameTheTierColumn(t *testing.T) {
 
 	ids := []string{newer, older, near, nearDup}
 	// Read the tiers from a handle that predates the column: every row in such a
-	// store is a `project` row by definition, which is what tierOrProject and
-	// scanMemories both resolve an absent column to.
+	// store is a `project` row by definition, which is what scanMemories
+	// resolves an absent column to for every reader.
 	protected := map[string]bool{newer: false, older: false, near: false, nearDup: false}
 	penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, protected)
 	if err != nil {

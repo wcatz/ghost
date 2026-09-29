@@ -3873,11 +3873,13 @@ var DecayRankingSQL = decayRankingSQL(true)
 // session-start loaders hold a read-only handle that runs no migration
 // (memory.OpenReadDB), so on a store from before schema v19 the column is not
 // there and naming it fails the whole query with SQLite's "no such column" —
-// which both loaders read as no rows, so a user whose first session after the
+// which a passive read takes as no rows, so a user whose first session after the
 // upgrade starts the hook would get a digest with no memories and nothing saying
-// why. That is the same window `scopeColumnExpr` has always covered for
-// memories.scope, and the remedy is the same shape: the expression a reader
-// cannot afford to fail on drops the half it cannot spell.
+// why. That is the same window memories.scope has always had, and the remedy is
+// the same shape: the expression a reader cannot afford to fail on drops the half
+// it cannot spell. passiveColumnsFor picks which half, and it is the only place
+// that does — a second version floor in a caller is a second answer to "which
+// columns does this store have".
 //
 // One template, so the category half cannot drift from DecayRankingSQL — a second
 // hand-copied expression is the failure mode DecayFactor's parity test exists to
