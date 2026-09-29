@@ -169,22 +169,58 @@ For a native Windows installation, use the PowerShell installer:
 irm https://github.com/wcatz/ghost/releases/latest/download/install.ps1 | iex
 ```
 
-The script downloads the release, verifies its checksum, installs `ghost.exe` under `%LOCALAPPDATA%\ghost\bin`, and adds that directory to the user `PATH`. Open a new terminal, then run:
+The script downloads the release, verifies its checksum, verifies the release's build attestation, installs `ghost.exe` under `%LOCALAPPDATA%\ghost\bin`, and adds that directory to the user `PATH`. Open a new terminal, then run:
 
 ```powershell
 ghost version
 ghost mcp init --client claude
 ```
 
-A binary installed this way upgrades itself with `ghost upgrade` (see the [CLI reference](cli.md#ghost-upgrade)), which also handles the fact that Windows will not let a running executable be replaced in place. Note that the script itself verifies only against the release's `checksums.txt`, a file published in the same release as the binary it vouches for; `ghost upgrade` additionally checks the digest GitHub reports for the asset, and from v0.43.0 the release's build attestation (see [`ghost upgrade` → Attestations](cli.md#attestations)).
+A binary installed this way upgrades itself with `ghost upgrade` (see the [CLI reference](cli.md#ghost-upgrade)), which also handles the fact that Windows will not let a running executable be replaced in place.
 
-The script itself does not verify an attestation, and does not grow one here; that is the remaining scope of [#694](https://github.com/wcatz/ghost/issues/694). It does not need one to be sound: it fetches the release over HTTPS from `github.com`, and the checksum it verifies is read from the same release it fetches the binary from, so the check is an integrity check against transport corruption and against a truncated or mixed-up download, not a publisher check. If you want the publisher verified, download the archive and run `gh attestation verify` on it instead of piping the installer:
+### What the installer verifies, and what it needs to
 
-```bash
-gh attestation verify ghost_0.43.0_windows_amd64.zip --repo wcatz/ghost
+**Two checks, and they are not the same kind of check.** The SHA256 in `checksums.txt` is an *integrity* check: it proves the bytes arrived intact and are the bytes the manifest names. It does not prove who published them, because `checksums.txt` is published in the same release as the archive it vouches for — anyone able to replace one can replace the other. The **build attestation** is the publisher check: a Sigstore bundle, signed by a certificate whose identity is this repository's release workflow on the release tag. From v0.43.0 every release asset carries one, `install.ps1` included.
+
+**The attestation is verified by the GitHub CLI.** There is no Sigstore verification library in Windows PowerShell, and shipping one is a dependency nobody piping a script into `iex` has agreed to. So the script runs:
+
+```powershell
+gh attestation verify ghost_0.43.0_windows_amd64.zip `
+  --repo wcatz/ghost `
+  --cert-identity https://github.com/wcatz/ghost/.github/workflows/release.yml@refs/tags/v0.43.0
 ```
 
-The version must be a release published *after* attestations were added to the release workflow. Earlier releases publish no attestation at all, and the command fails on them — a real difference between the two eras, not a documentation quirk. From v0.43.0 onwards every release asset, `install.ps1` included, carries a GitHub artifact attestation from the release workflow. Note which one you are checking: the `gh` output names the workflow identity it verified against, and the identity you require is `.github/workflows/release.yml` on a `v*` tag.
+`--cert-identity` carries the repository, the workflow **and the tag** in one string, because those are the three things the check is for and `gh` will not let you state them separately (`--cert-identity`, `--signer-repo` and `--signer-workflow` are one exclusive group, and `--signer-workflow` matches a path — it would accept the same workflow run from a branch). If you would rather do this by hand, that command is the whole check, and `gh` prints the identity it verified against.
+
+**So `gh` has to be installed and logged in.** `gh auth login` is required even for a public repository — that is `gh`'s own behaviour, not a choice this script makes — and there is no way around it from PowerShell, because the attestations API serves each bundle from a presigned URL whose body is snappy-compressed, and PowerShell cannot decompress snappy.
+
+**What happens when it cannot check, and what happens when the check fails.** These are different, and the difference is the point:
+
+| | what it means | what happens |
+|---|---|---|
+| **verified** | the bundle is this repository's release workflow on this tag | installs |
+| **no attestation required** | the release predates v0.43.0, so none can exist | installs, and says so |
+| **did not verify** | `gh` checked, and the attestation does not hold | **refused, and there is no override** |
+| **could not check** | no `gh`, or `gh` is not logged in | refused unless you say otherwise (below) |
+
+The asymmetry is deliberate and it matches [`ghost upgrade`](cli.md#attestations). The override means *"nobody could be asked"*, never *"the attestation did not check out"* — an attacker who can publish one bundle of their own would otherwise be handed the entire feature. So there is nothing to reach the third row, and its message names no flag, because there is no flag to name.
+
+To install without the check having run, which accepts the archive on the strength of a checksum from the same release and nothing more:
+
+```powershell
+irm https://github.com/wcatz/ghost/releases/latest/download/install.ps1 | iex
+# then, in the same session:
+$env:GHOST_SKIP_ATTESTATION = 1
+irm https://github.com/wcatz/ghost/releases/latest/download/install.ps1 | iex
+```
+
+or, if you saved the script, `.\install.ps1 -SkipAttestation`. The environment variable exists because the documented way to run the installer is a pipe, where a parameter cannot be passed at all.
+
+**Where the check runs.** After the download, because `gh` keys its lookup on the digest of the bytes that actually arrived, and before the archive is unpacked, so nothing nobody has vouched for is ever handed to a decompressor. The cost is one wasted transfer on a release that turns out to be unattested; the property it buys is that reason enough.
+
+Earlier releases publish no attestation at all, and the check is skipped for them — a real difference between the two eras, not a documentation quirk. A version the script cannot order (`dev`, a tag that is not a semver) is treated as *requiring* one, so "cannot tell" never reads as "old enough to skip".
+
+If GitHub's own release attestation (`dotcom.releases.github.com`) is ever enabled for this repository, a release carrying only that one is reported as **did not verify** rather than as missing, and the third row is fatal. See [`ghost upgrade` → Attestations](cli.md#attestations) for what the operator does about that.
 
 For the Claude Code plugin on native Windows, choose the architecture-specific entry shown above.
 
