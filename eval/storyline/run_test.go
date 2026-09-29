@@ -392,6 +392,26 @@ func TestRunFailsWhenTheSupersedeStageFails(t *testing.T) {
 	}
 }
 
+// TestJudgeRefusesAStorylineWithNoReversalToAskAbout: the judge is handed the
+// final stage's expected record, and Validate does NOT require a final stage to
+// expect anything — it requires each Expect to name an EARLIER stage's record,
+// never its own. So a storyline whose last stage expects nothing is valid, and
+// indexing into that empty list would panic inside a run that already spent
+// three model sessions. The judge has nothing to ask about, so it says so.
+func TestJudgeRefusesAStorylineWithNoReversalToAskAbout(t *testing.T) {
+	s := ReversedDecision()
+	s.Stages[len(s.Stages)-1].Expect = nil // still Validate-clean: Expect may be empty
+	if err := s.Validate(); err != nil {
+		t.Fatalf("a storyline with an empty final Expect must be valid: %v", err)
+	}
+	g := &fakeGhost{}
+	r := &Run{Story: s, WorkDir: "/scratch/work/acme", Ghost: g, Agent: &fakeAgent{},
+		Judge: &fakeAgent{}, Out: testWriter{t}}
+	if _, err := r.Execute(context.Background()); err == nil {
+		t.Fatal("Execute succeeded with a judge and no record to judge")
+	}
+}
+
 // TestRunGradedStateComesFromTheStore: the arc is graded from the rows the
 // stages wrote, so the ids the saves returned have to travel all the way to the
 // grade. An id lost here makes every supersede check unresolvable and every

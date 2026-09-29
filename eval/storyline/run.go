@@ -307,7 +307,16 @@ func (r *Run) callState(ctx context.Context) (State, error) {
 // the session's own words, not the store's contents.
 func (r *Run) judge(ctx context.Context, res *Result) (string, error) {
 	last := res.Sessions[len(res.Sessions)-1]
-	reversal, ok := res.Story.RecordByKey(res.Story.Stages[len(res.Story.Stages)-1].Expect[0])
+	// The judge is asked about the final stage's expected record, and Validate
+	// never requires one — it only requires that an Expect name an EARLIER
+	// stage's record. An empty final Expect is therefore a valid storyline with
+	// nothing to judge, and it has to be refused here rather than indexed into:
+	// a panic this deep in a run is a crash after three model sessions spent.
+	final := res.Story.Stages[len(res.Story.Stages)-1]
+	if len(final.Expect) == 0 {
+		return "", fmt.Errorf("judge: the final stage of %s expects no record, so there is no reversal to ask about", res.Story.Key)
+	}
+	reversal, ok := res.Story.RecordByKey(final.Expect[0])
 	if !ok {
 		return "", fmt.Errorf("judge: the final stage expects no record in this storyline")
 	}

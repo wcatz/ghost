@@ -276,6 +276,15 @@ func TestParseJudgeVerdict(t *testing.T) {
 		// would put a number in the report that nothing observed.
 		{"maybe", false, true},
 		{"", false, true},
+		// A PREFIX match turns the first word of an ordinary English sentence
+		// into a verdict: "Yesterday's block..." is not a yes and "Nothing in
+		// the block names the new store" is not a no. The rule is the first WORD
+		// being exactly yes or no, so a sentence that starts with one and then
+		// keeps talking is still a verdict while a sentence that merely begins
+		// with the letters is not.
+		{"Yesterday the session named the old store.", false, true},
+		{"Notably, nothing in the block marks the reversal.", false, true},
+		{"Nonsense, but it starts with N.", false, true},
 	}
 	for _, tc := range cases {
 		got, err := judgeVerdict(tc.answer)

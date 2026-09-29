@@ -241,16 +241,19 @@ func judgedCheck(followed bool, verdict string) Check {
 	return Check{name, false, strings.TrimSpace(verdict)}
 }
 
-// judgeVerdict reads the judge's answer. Only a leading yes or no is a verdict:
-// anything else is a broken measurement, and counting it as either a pass or a
-// fail would put a number in the report that nothing observed.
+// judgeVerdict reads the judge's answer. The verdict is its FIRST WORD being
+// exactly yes or no, and nothing else counts: a prefix match turns the opening
+// of an ordinary sentence into a verdict ("Yesterday's block…" is not a yes, and
+// "Nothing in the block names the new store" is not a no), which would put a
+// number in the report that nothing observed. A first word that IS yes or no
+// followed by the justification the prompt asked for is still a verdict.
 func judgeVerdict(answer string) (bool, error) {
 	trimmed := strings.TrimSpace(answer)
-	upper := strings.ToUpper(trimmed)
-	switch {
-	case strings.HasPrefix(upper, "YES"):
+	first, _, _ := strings.Cut(trimmed, " ")
+	switch strings.ToUpper(strings.Trim(first, "\t\n\r\"'`.,;:!?()[]{}")) {
+	case "YES":
 		return true, nil
-	case strings.HasPrefix(upper, "NO"):
+	case "NO":
 		return false, nil
 	}
 	return false, fmt.Errorf("unreadable judge verdict %q: answer yes or no", trimmed)
