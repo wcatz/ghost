@@ -2,6 +2,9 @@ package ai
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -366,4 +369,78 @@ func TestHarnessCommandFailsRatherThanRunUnconfined(t *testing.T) {
 		t.Errorf("error %q does not name the scratch failure that caused it", err)
 	}
 	release() // safe to call even though nothing was created
+}
+
+// TestEveryHarnessCommandCallSiteChecksItsError pins the half of the contract
+// the other tests cannot reach: that no call site DISCARDS the error.
+//
+// This exists because a review gate found two call sites that did, in
+// TestLive* functions that never run, so no test would ever have caught it. The
+// defect was latent — those tests set a valid GHOST_SCRATCH_DIR, so the
+// returning-nil path was unreachable — which is precisely the failure mode: a
+// nil command is only handed back when the scratch root AND the system temp are
+// both unusable, and both live tests made that impossible. The damage on that
+// path is a nil-pointer dereference, not a wrong answer, because Output and Run
+// dereference their receiver before they can report anything.
+//
+// It parses the package rather than grepping it, so a call site reached through
+// any assignment form is seen, and an unrecognised one FAILS rather than being
+// skipped — a check that quietly passes because it recognised nothing is the
+// same class of bug it is looking for. Finding zero call sites is a failure too.
+func TestEveryHarnessCommandCallSiteChecksItsError(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	found := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			assign, isAssign := n.(*ast.AssignStmt)
+			if !isAssign || len(assign.Rhs) != 1 {
+				return true
+			}
+			call, isCall := assign.Rhs[0].(*ast.CallExpr)
+			if !isCall || !isHarnessCommandCall(call) {
+				return true
+			}
+			found++
+			where := fset.Position(call.Pos())
+			if len(assign.Lhs) < 3 {
+				t.Errorf("%s:%d assigns %d of harnessCommand's 3 results: the error cannot be checked",
+					name, where.Line, len(assign.Lhs))
+				return true
+			}
+			// The blank identifier in the error's position: the exact #751 shape,
+			// and the one a reader cannot notice by skimming.
+			if ident, isIdent := assign.Lhs[2].(*ast.Ident); isIdent && ident.Name == "_" {
+				t.Errorf("%s:%d discards harnessCommand's error with _: the nil command that comes with it "+
+					"would be dereferenced, panicking instead of reporting the failure", name, where.Line)
+			}
+			return true
+		})
+	}
+	if found == 0 {
+		t.Fatal("no harnessCommand call sites found: this test has stopped seeing the code it guards")
+	}
+}
+
+// isHarnessCommandCall reports whether call targets the package's own
+// harnessCommand, by identifier or by selector on the current package.
+func isHarnessCommandCall(call *ast.CallExpr) bool {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name == "harnessCommand"
+	case *ast.SelectorExpr:
+		return fun.Sel.Name == "harnessCommand"
+	}
+	return false
 }

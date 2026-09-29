@@ -654,7 +654,17 @@ func TestLiveCodexDeclaresTheNoToolFeatureKeys(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), noToolsLiveProbeTimeout)
 	defer cancel()
-	probe, release, _ := harnessCommand(ctx, bin, []string{"features", "list"}, os.Environ(), harnessCodex)
+	// The error is checked rather than discarded, and that is the point of
+	// checking it: harnessCommand returns a NIL command when it cannot confine
+	// a child anywhere, and Output dereferences its receiver immediately, so a
+	// discarded error here would be a nil-pointer panic instead of a
+	// diagnostic. The scratch root above makes that unreachable in practice —
+	// which is exactly why a latent nil-deref survives a test run and has to be
+	// defended against by reading the signature rather than by the environment.
+	probe, release, err := harnessCommand(ctx, bin, []string{"features", "list"}, os.Environ(), harnessCodex)
+	if err != nil {
+		t.Fatalf("codex features list: no confined child: %v", err)
+	}
 	defer release()
 	out, err := probe.Output()
 	if err != nil {
@@ -773,7 +783,14 @@ func runCodexFeatureProbe(t *testing.T, bin string, extra ...string) (string, st
 	ctx, cancel := context.WithTimeout(context.Background(), noToolsLiveProbeTimeout)
 	defer cancel()
 	args := append([]string{"features", "list"}, extra...)
-	cmd, release, _ := harnessCommand(ctx, bin, args, os.Environ(), harnessCodex)
+	// Same reason as the other probe, and the consequence is worse here: the
+	// function's whole job is to return a diagnostic a human can read, so a
+	// discarded error is not merely a latent panic on cmd.Stdout — it is the one
+	// failure that would produce no diagnostic at all.
+	cmd, release, err := harnessCommand(ctx, bin, args, os.Environ(), harnessCodex)
+	if err != nil {
+		return "", fmt.Sprintf("codex features list %s: no confined child: %v", strings.Join(extra, " "), err)
+	}
 	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
