@@ -65,6 +65,49 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Every attestation subject exists
+        # actions/attest-build-provenance only fails when the COMBINED glob
+        # result is empty (src/subject.ts, getSubjectFromPath). One pattern
+        # matching nothing is therefore dropped with no error at all, and the
+        # release ships an asset nobody attested.
+        #
+        # That is not hypothetical: the subject list below once read
+        # `dist/install.ps1`, and GoReleaser's release.extra_files resolves its
+        # glob from the PROJECT ROOT (internal/extrafiles, fileglob.Glob) and
+        # uploads the matched file from there under filepath.Base(file) — it
+        # never copies an extra file into dist/. The prefixed path was a glob
+        # that matched nothing, every release would have published install.ps1
+        # with no attestation, and docs/installation.md said it had one.
+        #
+        # This step is what makes that class of mistake fail the release
+        # instead of shipping it. Its list is the attest step's subject-path
+        # restated, and TestEverySubjectPatternIsCheckedAtReleaseTime compares
+        # the two, so a pattern added to one and not the other is a build
+        # failure rather than a silent gap.
+        run: |
+          missing=0
+          for pattern in \
+            "dist/checksums.txt" \
+            "dist/*.tar.gz" \
+            "dist/*.zip" \
+            "install.ps1"
+          do
+            # compgen -G is the glob; mapfile is how an empty result becomes an
+            # empty array rather than the pattern itself, which is the whole
+            # point of the check.
+            mapfile -t matched < <(compgen -G "$pattern")
+            if [ "${#matched[@]}" -eq 0 ]; then
+              echo "::error::attestation subject pattern '$pattern' matches no file. The attest step would skip it silently and the asset would ship with no provenance — check the path against what .goreleaser.yml actually writes."
+              missing=1
+            else
+              echo "attestation subject '$pattern' -> ${#matched[@]} file(s)"
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to attest: at least one subject pattern matches nothing"
+            exit 1
+          fi
+
       - name: Attest the release archives and checksums
         # A release asset's `digest` field, which `ghost upgrade` already
         # verifies, proves the downloaded bytes are the bytes GitHub holds. It
@@ -87,10 +130,17 @@ jobs:
           # than transcribed: dist/*.tar.gz and dist/*.zip are the archive
           # formats archives[].formats and its windows format_overrides
           # produce, dist/checksums.txt is checksum.name_template, and
-          # dist/install.ps1 is release.extra_files. A format or an extra file
-          # added to .goreleaser.yml without adding it here fails
+          # install.ps1 is release.extra_files. A format or an extra file added
+          # to .goreleaser.yml without adding it here fails
           # TestReleaseJobAttestsExactlyWhatGoReleaserPublishes in
           # internal/selfupdate — the diff cannot merge as an unattested gap.
+          #
+          # The extra file is NOT dist/-prefixed, and that asymmetry is the
+          # point: GoReleaser writes its own outputs into dist/ but uploads an
+          # extra file from wherever its glob matched, which here is the
+          # repository root. The guard step above fails a pattern that matches
+          # nothing, and TestEveryLiteralAttestationSubjectExists fails one that
+          # names a file the repository does not have.
           #
           # The digest is computed from the file on disk, not read out of
           # checksums.txt, so the attestation is an independent witness of the
@@ -98,9 +148,9 @@ jobs:
           # witness them. checksums.txt is itself attested.
           subject-path: |
             dist/checksums.txt
-            dist/install.ps1
             dist/*.tar.gz
             dist/*.zip
+            install.ps1
 
   docker:
     runs-on: ubuntu-latest
@@ -242,6 +292,34 @@ jobs:
             dist/ghost-plugin-windows-amd64.zip \
             dist/ghost-plugin-windows-arm64.zip \
             --clobber
+
+      - name: Every attestation subject exists
+        # The same zero-match guard as the release job, and for the same reason:
+        # actions/attest-build-provenance drops a subject pattern that matches
+        # nothing as long as another pattern matched, so a renamed or
+        # misspelled archive would ship as a release asset with no provenance
+        # and the release would still be green. The list is the attest step's
+        # subject-path restated, and
+        # TestEverySubjectPatternIsCheckedAtReleaseTime compares the two.
+        run: |
+          missing=0
+          for pattern in \
+            "dist/ghost-plugin-windows-amd64.zip" \
+            "dist/ghost-plugin-windows-arm64.zip" \
+            "dist/ghost-plugin.zip"
+          do
+            mapfile -t matched < <(compgen -G "$pattern")
+            if [ "${#matched[@]}" -eq 0 ]; then
+              echo "::error::attestation subject pattern '$pattern' matches no file. The attest step would skip it silently and the archive would ship with no provenance."
+              missing=1
+            else
+              echo "attestation subject '$pattern' -> ${#matched[@]} file(s)"
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to attest: at least one subject pattern matches nothing"
+            exit 1
+          fi
 
       - name: Attest the plugin archives
         # Deliberately before the catalog pin and before the publish step

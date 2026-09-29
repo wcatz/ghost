@@ -1,7 +1,10 @@
 package selfupdate
 
 import (
+	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -297,9 +300,27 @@ func TestReleaseJobAttestsExactlyWhatGoReleaserPublishes(t *testing.T) {
 		got, want)
 }
 
-// goReleaserSubjects derives the dist/-relative subject paths that cover every
-// file .goreleaser.yml uploads as a release asset. A template segment becomes
-// a `*` glob, because the version is only known when the tag is pushed.
+// goReleaserSubjects derives the subject paths that cover every file
+// .goreleaser.yml uploads as a release asset. A template segment becomes a `*`
+// glob, because the version is only known when the tag is pushed.
+//
+// The three kinds are at THREE different roots, and conflating them is a
+// silently-empty glob rather than a test failure:
+//
+//   - archives and checksums.txt are GoReleaser OUTPUTS, written into its dist
+//     directory, so they are `dist/`-prefixed;
+//   - release.extra_files are files that already EXIST in the repository.
+//     internal/extrafiles resolves each `glob` with fileglob.Glob from the
+//     working directory, which is the project root, and uploads the matched
+//     file from there under `filepath.Base(file)`. GoReleaser does not copy
+//     them into dist/ first, so an extra file's subject path is the glob
+//     verbatim — repo-root relative, with no prefix.
+//
+// That second case is why `dist/` + glob was wrong for install.ps1: the
+// prefixed path names a file GoReleaser never creates, actions/attest
+// (src/subject.ts, getSubjectFromPath) drops a pattern that matches nothing as
+// long as another pattern matched, and the release published install.ps1 with
+// no attestation while docs/installation.md said it had one.
 func goReleaserSubjects(g goreleaserFile) []string {
 	seen := map[string]bool{}
 	add := func(p string) { seen[p] = true }
@@ -318,8 +339,11 @@ func goReleaserSubjects(g goreleaserFile) []string {
 		}
 	}
 	for _, extra := range g.Release.ExtraFiles {
-		if extra.Glob != "" {
-			add("dist/" + extra.Glob)
+		// Verbatim, and NOT prefixed: see the doc comment above. The leading
+		// "./" GoReleaser's own documentation uses is stripped so the two
+		// spellings of the same file compare equal.
+		if glob := strings.TrimPrefix(extra.Glob, "./"); glob != "" {
+			add(glob)
 		}
 	}
 
@@ -328,6 +352,412 @@ func goReleaserSubjects(g goreleaserFile) []string {
 		out = append(out, p)
 	}
 	return out
+}
+
+// globMetaPattern matches a subject path that is a glob rather than a literal
+// file name. It is deliberately the same character class the attest action's
+// own getSubjectFromPath uses to decide whether to expand an entry.
+var globMetaPattern = regexp.MustCompile(`[*?\[]`)
+
+// TestEveryLiteralAttestationSubjectExists is the check the derivation cannot
+// make. Deriving a subject path from .goreleaser.yml proves the LIST is right;
+// it cannot prove the workflow spells it the way the derivation produced, because
+// that is the very thing being compared. So this asserts the property directly:
+// every subject path with no glob metacharacter must name a file that WILL
+// EXIST when the attest step runs, and only three things in this repository
+// qualify —
+//
+//   - a file in the repository, which is what release.extra_files points at;
+//   - dist/<checksum name_template>, the one GoReleaser output whose name has no
+//     template segment in it;
+//   - a dist/ path the job's own earlier steps build (the plugin archives).
+//
+// Everything else fails. The tempting weaker rule — "a literal under dist/ is a
+// build output, trust it" — is exactly the hole: `dist/install.ps1` is
+// dist/-prefixed like a build output, so it sails through, and the only thing
+// that catches it is looking for the file. GoReleaser writes archives (which are
+// all globs) and the checksum file into dist/ and copies nothing else there, so
+// a literal in dist/ that is neither the checksum file nor named by a build step
+// is a path to nothing.
+func TestEveryLiteralAttestationSubjectExists(t *testing.T) {
+	root := attestationRepoRoot(t)
+	wf, _ := loadReleaseWorkflow(t)
+	byJob := attestStepsByJob(wf)
+	g := loadGoreleaser(t)
+
+	// The one literal GoReleaser output, derived rather than transcribed.
+	generated := map[string]bool{}
+	if name := g.Checksum.NameTemplate; name != "" && !strings.ContainsAny(name, "*?[{") {
+		generated["dist/"+name] = true
+	}
+
+	checked, inRepo := 0, 0
+	for job, idxs := range byJob {
+		attestIdx := idxs[0]
+		// What the job itself builds before the attest step runs.
+		built := map[string]bool{}
+		for _, p := range distPathsInRunSteps(wf.Jobs[job].Steps[:attestIdx]) {
+			built[p] = true
+		}
+		for _, path := range subjectPaths(t, wf.Jobs[job].Steps[attestIdx]) {
+			if globMetaPattern.MatchString(path) {
+				// A glob cannot be checked here: what it expands to depends on
+				// the platform GoReleaser built for. The release job's own guard
+				// step covers those, and
+				// TestEverySubjectPatternIsCheckedAtReleaseTime keeps that guard
+				// in step with this list.
+				continue
+			}
+			checked++
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); err == nil {
+				inRepo++
+				continue
+			}
+			if subjectIsJustified(path, generated, built) {
+				continue
+			}
+			t.Errorf("job %q attests the literal path %q, which is neither a file in the repository, a GoReleaser output (%v), nor a path this job builds (%v) — "+
+				"a path that does not exist is a glob that matches nothing, and actions/attest drops a zero-match pattern silently when another pattern matched",
+				job, path, sortedKeys(generated), sortedKeys(built))
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no literal subject path found to check — this test would pass vacuously")
+	}
+	// Both halves have to be represented, or the rule above is only ever
+	// exercised on one kind of literal and the other goes unchecked.
+	if inRepo == 0 {
+		t.Error("no attested subject path is a repository file; the extra_files half of the rule is untested")
+	}
+	if len(generated) == 0 {
+		t.Error("derived no literal GoReleaser output; the generated half of the rule is untested")
+	}
+	t.Logf("checked %d literal attestation subject path(s), %d of them repository files", checked, inRepo)
+}
+
+// subjectIsJustified is the rule TestEveryLiteralAttestationSubjectExists
+// applies to a literal subject path that is not a file in the repository: it
+// must be a path some build step is known to produce.
+//
+// It is a named function with a test of its own, because a rule that is only
+// ever exercised against a correct workflow cannot be told apart from a rule
+// that is too weak. A weaker version of this — "anything under dist/ is a build
+// output" — agrees with the real one on every path the release happens to use
+// today, and disagrees on exactly the path that caused the blocker.
+func subjectIsJustified(path string, generated, built map[string]bool) bool {
+	return generated[path] || built[path]
+}
+
+// TestSubjectIsJustified is that self-check: the rule must reject the path that
+// shipped unattested, and accept the two kinds that are real. A rule that
+// accepts `dist/install.ps1` because it is dist/-prefixed would pass every
+// other test in this file.
+func TestSubjectIsJustified(t *testing.T) {
+	generated := map[string]bool{"dist/checksums.txt": true}
+	built := map[string]bool{"dist/ghost-plugin.zip": true}
+
+	for _, tc := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"the checksum file GoReleaser writes", "dist/checksums.txt", true},
+		{"an archive the job builds", "dist/ghost-plugin.zip", true},
+		// The blocker: an extra file with a dist/ prefix. GoReleaser never
+		// copies an extra file into dist/, so this names nothing, and it is
+		// dist/-prefixed, so a prefix-based rule would wave it through.
+		{"the extra file with a dist/ prefix", "dist/install.ps1", false},
+		{"an extra file at its real path", "install.ps1", false},
+		{"an archive glob", "dist/*.tar.gz", false},
+		{"a plausible typo", "dist/checksum.txt", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := subjectIsJustified(tc.path, generated, built); got != tc.want {
+				t.Errorf("subjectIsJustified(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSubjectGuardPatternsFindsNothingWithoutTheStep is the other self-check.
+// Reading the guard's list out of a step that is not there has to yield
+// nothing, so that a job with no guard is a failure rather than a comparison
+// that quietly compares the attest step against itself.
+func TestSubjectGuardPatternsFindsNothingWithoutTheStep(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	byJob := attestStepsByJob(wf)
+
+	// The real plugin job, with its guard step removed.
+	steps := make([]workflowStep, 0, len(wf.Jobs["plugin"].Steps))
+	for _, s := range wf.Jobs["plugin"].Steps {
+		if s.Name == subjectGuardStepName {
+			continue
+		}
+		steps = append(steps, s)
+	}
+	if got := subjectGuardPatterns(t, steps, "plugin"); got != nil {
+		t.Errorf("with the guard step deleted, the reader returned %v, want nil — a job with no guard must be a failure, not a tautology", got)
+	}
+	// And the real job, guard intact, must yield its full list.
+	full := subjectGuardPatterns(t, wf.Jobs["plugin"].Steps, "plugin")
+	want := subjectPaths(t, wf.Jobs["plugin"].Steps[byJob["plugin"][0]])
+	equalStringSets(t, "the plugin job's guard step lists every attested pattern", full, want)
+}
+
+// TestTheReleaseTimeGuardFailsOnASingleZeroMatchPattern executes the guard
+// steps' own shell. Every other test here reads the guard's shape; none of them
+// can tell a guard that fails from a guard that walks away quietly, and a guard
+// that never fails is exactly as silent as the bug it replaced. So the scripts
+// are run, under the same `bash -e` the runner uses, against a directory built
+// to match — and then against one that does not.
+//
+// The failure case removes a file that only ONE job's patterns need, so each
+// job's guard is shown to be load-bearing on its own: the release job's
+// `dist/*.zip` still matches without the missing plugin archive.
+func TestTheReleaseTimeGuardFailsOnASingleZeroMatchPattern(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not on PATH; the guard steps are bash")
+	}
+	wf, _ := loadReleaseWorkflow(t)
+	byJob := attestStepsByJob(wf)
+
+	// Every literal path any attesting job declares, plus one file for each
+	// glob's extension, so "everything matches" is the starting state. A literal
+	// belongs to exactly one job's list, which is what makes the failure case
+	// below attributable.
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	allLiterals := []string{}
+	byJobLiterals := map[string][]string{}
+	for job, idxs := range byJob {
+		for _, path := range subjectPaths(t, wf.Jobs[job].Steps[idxs[0]]) {
+			switch {
+			case path == "dist/*.tar.gz":
+				writeFixture(t, dir, "dist/ghost_0.0.0_linux_amd64.tar.gz")
+			case path == "dist/*.zip":
+				writeFixture(t, dir, "dist/ghost_0.0.0_linux_amd64.zip")
+			case globMetaPattern.MatchString(path):
+				// A glob whose every expansion another job also needs cannot
+				// isolate a job, so it is left to the happy path.
+			default:
+				writeFixture(t, dir, path)
+				allLiterals = append(allLiterals, path)
+				byJobLiterals[job] = append(byJobLiterals[job], path)
+			}
+		}
+	}
+
+	for job := range byJob {
+		t.Run(job+" with every subject present", func(t *testing.T) {
+			script := guardScript(t, wf.Jobs[job].Steps)
+			if code, out := runBashScript(t, dir, script); code != 0 {
+				t.Errorf("the guard failed with every subject present (exit %d):\n%s", code, out)
+			}
+		})
+		t.Run(job+" with one of its own subjects missing", func(t *testing.T) {
+			victims := byJobLiterals[job]
+			if len(victims) == 0 {
+				t.Skipf("job %q declares no literal subject, so its failure cannot be isolated from the other job's", job)
+			}
+			victim := victims[len(victims)-1]
+			// A tree with every literal except the victim, so the OTHER job's
+			// guard still passes and this job's does not.
+			bare := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(bare, "dist"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range allLiterals {
+				if path != victim {
+					writeFixture(t, bare, path)
+				}
+			}
+			writeFixture(t, bare, "dist/ghost_0.0.0_linux_amd64.tar.gz")
+			writeFixture(t, bare, "dist/ghost_0.0.0_linux_amd64.zip")
+			script := guardScript(t, wf.Jobs[job].Steps)
+			code, out := runBashScript(t, bare, script)
+			if code == 0 {
+				t.Errorf("the guard exited 0 with %s missing, so the release would publish it with no attestation:\n%s", victim, out)
+			}
+			if !strings.Contains(out, victim) {
+				t.Errorf("the failure does not name the missing subject %q:\n%s", victim, out)
+			}
+		})
+	}
+}
+
+func writeFixture(t *testing.T, dir, rel string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(rel)), []byte("fixture\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// guardScript returns the guard step's run body, failing the test if the job has
+// no guard step.
+func guardScript(t *testing.T, steps []workflowStep) string {
+	t.Helper()
+	for _, s := range steps {
+		if s.Name == subjectGuardStepName {
+			if s.Run == "" {
+				t.Fatalf("step %q has no run body", subjectGuardStepName)
+			}
+			return s.Run
+		}
+	}
+	t.Fatalf("no step named %q", subjectGuardStepName)
+	return ""
+}
+
+// runBashScript runs script with dir as the working directory, under the
+// `bash -e {0}` the Actions runner uses, and returns its exit code and output.
+func runBashScript(t *testing.T, dir, script string) (int, string) {
+	t.Helper()
+	cmd := exec.Command("bash", "-e", "-c", script)
+	cmd.Dir = dir
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	switch {
+	case err == nil:
+		return 0, buf.String()
+	case errors.As(err, &exitErr):
+		return exitErr.ExitCode(), buf.String()
+	default:
+		t.Fatalf("running the guard script: %v", err)
+		return 0, ""
+	}
+}
+
+// distPathsInRunSteps collects the dist/-prefixed paths a run step names,
+// flattening line continuations and dropping comments first. It is deliberately
+// a word scan rather than a shell parse: the claim being tested is "a step in
+// this job names this file", and a word is the least that can establish it.
+func distPathsInRunSteps(steps []workflowStep) []string {
+	var out []string
+	for _, step := range steps {
+		if step.Run == "" {
+			continue
+		}
+		var kept []string
+		for _, line := range strings.Split(step.Run, "\n") {
+			if idx := strings.Index(line, "#"); idx >= 0 {
+				line = line[:idx]
+			}
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				kept = append(kept, trimmed)
+			}
+		}
+		for _, field := range strings.Fields(strings.Join(kept, " ")) {
+			clean := strings.Trim(field, "\"'")
+			if !strings.HasPrefix(clean, "dist/") || globMetaPattern.MatchString(clean) {
+				continue
+			}
+			out = append(out, clean)
+		}
+	}
+	return out
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestEverySubjectPatternIsCheckedAtReleaseTime is the runtime half of the same
+// hole. actions/attest-build-provenance only fails when the COMBINED glob
+// result is empty (src/subject.ts, getSubjectFromPath), so one pattern matching
+// nothing is dropped with no error at all, and the release ships an asset
+// nobody attested.
+//
+// A Go test cannot observe that: the expansion happens on a runner with a
+// dist/ this repository has never seen. So the release job carries its own
+// guard that fails on a single zero-match pattern, and this test is what keeps
+// the guard's list identical to the attest step's list — two hand-written lists
+// that agreed by eye is precisely how `dist/install.ps1` shipped.
+func TestEverySubjectPatternIsCheckedAtReleaseTime(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	byJob := attestStepsByJob(wf)
+
+	for job, idxs := range byJob {
+		attested := subjectPaths(t, wf.Jobs[job].Steps[idxs[0]])
+
+		guards := subjectGuardPatterns(t, wf.Jobs[job].Steps, job)
+		if len(guards) == 0 {
+			t.Errorf("job %q attests %d subject path(s) but carries no step that checks them at release time; "+
+				"actions/attest drops a pattern that matches nothing when another matched, so an unattested asset would ship silently",
+				job, len(attested))
+			continue
+		}
+		equalStringSets(t, "job "+job+": the release-time guard's patterns vs the attest step's subject-path",
+			guards, attested)
+	}
+}
+
+// subjectGuardStepName is the step each attesting job carries to fail on an
+// attestation subject pattern that matches nothing. It is matched by name
+// rather than by "some run step that mentions the patterns", because the
+// plugin job's `gh release upload` step already names all three of its zips and
+// would pass such a test without checking anything.
+const subjectGuardStepName = "Every attestation subject exists"
+
+// subjectGuardPatterns returns the patterns the job's guard step checks.
+func subjectGuardPatterns(t *testing.T, steps []workflowStep, job string) []string {
+	t.Helper()
+	attested := map[string]bool{}
+	for _, step := range steps {
+		if !strings.HasPrefix(step.Uses, attestAction+"@") {
+			continue
+		}
+		for _, p := range subjectPaths(t, step) {
+			attested[p] = true
+		}
+	}
+	if len(attested) == 0 {
+		t.Fatalf("job %q has no attest step", job)
+	}
+
+	for _, step := range steps {
+		if step.Name != subjectGuardStepName {
+			continue
+		}
+		if step.Run == "" {
+			t.Fatalf("job %q has a step named %q with no run body", job, subjectGuardStepName)
+		}
+		var found []string
+		// Drop comments, join continuations, then take the words that name a
+		// declared subject. A word is the least that can establish "this step
+		// checks that pattern", and the equality below is what makes the two
+		// lists unable to drift.
+		var kept []string
+		for _, line := range strings.Split(step.Run, "\n") {
+			if idx := strings.Index(line, "#"); idx >= 0 {
+				line = line[:idx]
+			}
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				kept = append(kept, trimmed)
+			}
+		}
+		fields := strings.Fields(strings.Join(kept, " "))
+		for len(fields) > 0 && fields[len(fields)-1] == "\\" {
+			fields = fields[:len(fields)-1]
+		}
+		for _, word := range fields {
+			word = strings.Trim(word, "\"'")
+			if attested[word] {
+				found = append(found, word)
+			}
+		}
+		return found
+	}
+	return nil
 }
 
 // templateToGlob turns a GoReleaser name template into a glob: `{{.Version}}`
