@@ -172,6 +172,13 @@ const pruneActivitySQL = "COALESCE(last_accessed, max(updated_at, created_at, ex
 // A value set by hand in another shape does not match, which leaves the row in the
 // store rather than taking it out.
 //
+// The last_accessed preference is a KNOWN limit rather than a settled reading: a
+// row holding an OLD non-NULL last_accessed shadows a refreshed expires_at
+// entirely, so a fold's renewal would not reach the grace for that row. It is
+// dormant — nothing in production writes the column (Store.Touch has no caller) —
+// and it is stated here rather than left to be found by the first surface that
+// records a read.
+//
 // pinned = 0 is the fifth term, and it sits in the predicate rather than in Go
 // for the same reason the tier does: a pin is decided by the same statement that
 // reads the row. A pin is an explicit user override, and the session promise was
