@@ -745,9 +745,15 @@ func stampGateIsOpen(t *testing.T, s *Store, memoryID, cutoff string) bool {
 	return found
 }
 
-// historyPhases reads the table rather than the reader, for the reason
+// compactHistoryPhases reads the table rather than the reader, for the reason
 // historyRowCount documents: MemoryHistory defaults to the per-memory cap.
-func historyPhases(t *testing.T, s *Store, memoryID string) []string {
+//
+// Named with this file's prefix rather than plainly `historyPhases` because
+// #709 landed a helper of that name in retention_prune_test.go: two declarations
+// of one name in a package do not compile, and the collision only appears on a
+// branch that carries both. The same query in both files is a coincidence worth
+// naming away rather than a helper worth sharing across two features' tests.
+func compactHistoryPhases(t *testing.T, s *Store, memoryID string) []string {
 	t.Helper()
 	rows, err := s.db.Query(`SELECT phase FROM memory_history WHERE memory_id = ? ORDER BY rowid`, memoryID)
 	if err != nil {
@@ -804,7 +810,7 @@ func TestCompactHistoryRemovesNoOpVersionsAndKeepsEveryChange(t *testing.T) {
 	if res.Removed != 25 {
 		t.Errorf("Removed = %d, want 25 (the 20 + 5 verbatim reflect versions)", res.Removed)
 	}
-	if got := historyPhases(t, s, id); !wantPhases(got, []string{phaseSave, phaseUpdate, phaseResolve}) {
+	if got := compactHistoryPhases(t, s, id); !wantPhases(got, []string{phaseSave, phaseUpdate, phaseResolve}) {
 		t.Fatalf("surviving phases = %v, want [save update resolve]", got)
 	}
 	// The survivors are the right EVENTS, not merely three rows: the save still
@@ -1670,7 +1676,7 @@ func TestCompactHistoryBatchesTheSameAnswer(t *testing.T) {
 	if res.Removed != 25 {
 		t.Errorf("Removed = %d, want 25 in batches of 2", res.Removed)
 	}
-	if got := historyPhases(t, s, id); !wantPhases(got, []string{phaseSave, phaseUpdate, phaseResolve}) {
+	if got := compactHistoryPhases(t, s, id); !wantPhases(got, []string{phaseSave, phaseUpdate, phaseResolve}) {
 		t.Fatalf("surviving phases = %v, want [save update resolve]", got)
 	}
 }
