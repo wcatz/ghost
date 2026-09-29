@@ -86,35 +86,21 @@ func gooseInvocationArgs() []string {
 // temp variables follow the same policy as the other three clients, and then
 // applies the plugin isolation below.
 //
-// When the scratch root is unusable harnessCommand leaves the working directory
-// empty, and the isolation needs a directory to put the child's home in. The
-// fallback is a private MkdirTemp tree, mirroring
-// OpenCodeClient.subprocessEnv: a broken data dir must not quietly restore
-// Ghost's own plugin inside every harness call, so the child either runs
+// A broken scratch root needs no branch here. harnessCommand falls back to a
+// private MkdirTemp tree of its own, so the isolation below always has a
+// directory to put the child's home in: a broken data dir must not quietly
+// restore Ghost's own plugin inside every harness call, so the child either runs
 // isolated or the call fails.
 func (c *GooseClient) subprocessEnv(ctx context.Context, args []string) (*exec.Cmd, func(), error) {
-	cmd, release, ok := harnessCommand(ctx, c.binary, args, os.Environ(), harnessGoose)
-	if ok {
-		if err := configureGooseIsolation(cmd); err != nil {
-			release()
-			return nil, nil, err
-		}
-		return cmd, release, nil
-	}
-
-	dir, err := os.MkdirTemp("", "ghost-goose-")
+	cmd, release, err := harnessCommand(ctx, c.binary, args, os.Environ(), harnessGoose)
 	if err != nil {
-		release()
 		return nil, nil, err
 	}
-	cmd.Dir = dir
-	cmd.Env = scratchEnv(cmd.Env, dir)
 	if err := configureGooseIsolation(cmd); err != nil {
-		_ = os.RemoveAll(dir)
 		release()
 		return nil, nil, err
 	}
-	return cmd, func() { _ = os.RemoveAll(dir) }, nil
+	return cmd, release, nil
 }
 
 // gooseNoToolsMode is goose's tool-execution mode for a harness child. goose

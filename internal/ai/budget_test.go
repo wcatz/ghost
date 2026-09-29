@@ -72,12 +72,12 @@ func TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	cmd, release, ok := harnessCommand(context.Background(), "true", nil, nil, harnessClaude)
+	cmd, release, err := harnessCommand(context.Background(), "true", nil, nil, harnessClaude)
 	t.Cleanup(release)
 
 	// NEVER BLOCKS: the command is still constructed and confined to the root.
-	if !ok || cmd == nil {
-		t.Fatalf("budget enforcement blocked the spawn: cmd=%v ok=%v", cmd, ok)
+	if err != nil || cmd == nil {
+		t.Fatalf("budget enforcement blocked the spawn: cmd=%v err=%v", cmd, err)
 	}
 	if !strings.HasPrefix(cmd.Dir, root) {
 		t.Errorf("cmd.Dir = %q, want a dir under %q (spawn not confined)", cmd.Dir, root)

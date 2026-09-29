@@ -162,7 +162,10 @@ func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
 	}
 	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	probe, release, _ := harnessCommand(pctx, path, []string{"--version"}, os.Environ(), harnessOpencode)
+	probe, release, err := harnessCommand(pctx, path, []string{"--version"}, os.Environ(), harnessOpencode)
+	if err != nil {
+		return 0 // no child could be confined, so there is no version to report
+	}
 	defer release()
 	out, err := probe.Output()
 	if err != nil {
@@ -296,42 +299,20 @@ const openCodeDenyConfig = `{
 // LLM-backed phase fails and maintenance silently becomes a no-op. The scratch
 // dir is removed by the returned cleanup, so the cache dies with it.
 //
-// When the scratch root is unusable, harnessCommand has already logged a WARN;
-// this falls back to a private MkdirTemp tree under the inherited temp dir,
-// while retaining the same allowlisted environment and no-tools config.
+// A broken scratch root needs no branch here: harnessCommand falls back to a
+// private MkdirTemp tree itself, so the isolation below always has a working
+// directory and a temp dir to point HOME at, and the call fails only when there
+// is nowhere at all to confine a child to.
 func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string, policy string) (*exec.Cmd, func(), error) {
-	cmd, release, ok := harnessCommand(ctx, c.binary, args, os.Environ(), harnessOpencode)
-	if ok {
-		if err := configureOpenCodeIsolation(cmd, policy); err != nil {
-			release()
-			return nil, nil, err
-		}
-		return cmd, release, nil
-	}
-
-	dir, err := os.MkdirTemp("", "ghost-opencode-")
+	cmd, release, err := harnessCommand(ctx, c.binary, args, os.Environ(), harnessOpencode)
 	if err != nil {
-		release()
 		return nil, nil, err
 	}
-	cmd.Dir = dir
-	env := make([]string, 0, len(cmd.Env)+len(tempDirKeys))
-	for _, kv := range cmd.Env {
-		if isTempDirKey(kv) {
-			continue // replaced below so the child's cache lives in the private dir
-		}
-		env = append(env, kv)
-	}
-	for _, key := range tempDirKeys {
-		env = append(env, key+"="+dir)
-	}
-	cmd.Env = env
 	if err := configureOpenCodeIsolation(cmd, policy); err != nil {
-		_ = os.RemoveAll(dir)
 		release()
 		return nil, nil, err
 	}
-	return cmd, func() { _ = os.RemoveAll(dir) }, nil
+	return cmd, release, nil
 }
 
 // configureOpenCodeIsolation gives the child a private home and config tree,
