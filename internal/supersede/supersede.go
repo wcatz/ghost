@@ -183,6 +183,14 @@ type Selection struct {
 // different places — the same exemption the linker's 'related' edge and
 // Upsert's 'duplicate' fold already apply (memory.ScopesConflict).
 //
+// A pair with a `persistent` endpoint is never emitted either, and for a
+// stronger reason: this is the pass that makes claims ABOUT a memory, and every
+// consequence of the edge it writes lands on the target — the ranking demotion
+// and resolve's piggyback both. A keep-forever row is a user statement that this
+// must not happen to it, and it is asked before the classify call rather than
+// after, because a verdict the pass cannot act on is a bill for a decision it
+// never needed to make.
+//
 // The refusal is made twice, on purpose. The scope reaches the store so the
 // neighbour budget counts only rows this source may link to — filtering after
 // the cut spends the whole budget on rows that can never be linked, and a
@@ -234,6 +242,21 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			other, ok := byID[n.MemoryID]
 			if !ok {
 				continue // e.g. a _global neighbor not in this project's set
+			}
+			// The persistent-tier refusal, asked here and not after the
+			// classification: a pair with a keep-forever endpoint is not a pair
+			// the model is asked about. The edge this pass writes demotes its
+			// target in every later ranking and lets resolve's piggyback stamp
+			// resolved_at on it, so the exemption has to be here — a classify call
+			// spent on a pair whose only possible outcome is the edge we are
+			// refusing is money for a decision we have already made.
+			//
+			// Both endpoints, because the claim runs newer -> older and either one
+			// being untouchable means the claim must not be made: a keep-forever
+			// SOURCE would be writing an edge about a memory it may not assert
+			// anything about either.
+			if memory.RetentionExempt(m) || memory.RetentionExempt(other) {
+				continue
 			}
 			if memory.ScopesConflict(m.Scope, n.Scope) {
 				continue
@@ -527,6 +550,24 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		if memory.ScopesConflict(newerMem.Scope, olderMem.Scope) {
 			if logger != nil {
 				logger.Info("supersede: dropping pair whose scopes conflict",
+					"newer", c.NewerID, "older", c.OlderID)
+			}
+			continue
+		}
+		// The persistent refusal, here for the reason the scope one above is: this
+		// is the point every pair passes through, so it covers the reclassify path
+		// as well as the fresh one. An edge written before a memory was declared
+		// keep-forever is re-proposed on the first pass after either endpoint is
+		// edited, and re-affirming it is exactly the outcome the exemption exists
+		// to prevent -- a billed call for a verdict that can only re-create a claim
+		// about a memory nothing automatic may make.
+		//
+		// The edge is left alone rather than withdrawn: that is a different command
+		// (`--reassess`, `ghost_link_withdraw`), and this pass is not where graph
+		// history is deleted. What it stops is spending a call to keep it alive.
+		if memory.RetentionExempt(newerMem) || memory.RetentionExempt(olderMem) {
+			if logger != nil {
+				logger.Info("supersede: dropping pair with a persistent endpoint",
 					"newer", c.NewerID, "older", c.OlderID)
 			}
 			continue

@@ -561,9 +561,28 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 	// phase1aProvenanceColumns and AppendVerifiedEvidenceTx is the seam the writers
 	// reach it THROUGH, so neither names it in its own body. Exempting them by name
 	// keeps the reverse check meaningful for everything the scan does cover.
+	//
+	// The eight FULL-ROW READERS are here for the third reason, and it is this
+	// branch's: #587 gave the memories row two more columns and the six (now
+	// eight) readers that hydrate a whole row one shared list, `memoryColumns`,
+	// so a reader can no longer be seen naming `verified_at` in its own body —
+	// the column arrives through the list. They are not here because the list
+	// hid them: TestColumnListWritersAreClassified covers exactly that
+	// indirection by requiring every function iterating the list to be
+	// classified, which is the stronger statement of the same thing. They are
+	// exempt here so the reverse check below keeps meaning "classified but gone"
+	// rather than firing on readers the refactor deliberately made uniform.
 	invisibleToScan := map[string]bool{
 		"migrate.go:migrateV10":                true,
 		"evidence.go:AppendVerifiedEvidenceTx": true,
+		"store.go:GetAll":                      true, // every one of these hydrates a full row through memoryColumns
+		"store.go:GetByCategory":               true,
+		"store.go:GetTopMemories":              true,
+		"store.go:ResolveCandidates":           true,
+		"store.go:ResolvedCandidates":          true,
+		"store.go:SearchFTS":                   true,
+		"store.go:SearchFTSAll":                true,
+		"vector.go:GetByIDs":                   true,
 	}
 	for _, set := range []map[string]bool{writesMemory, snapshotSide, migrationsAndReaders, spansBoth} {
 		for name := range set {

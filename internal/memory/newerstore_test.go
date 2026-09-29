@@ -77,6 +77,23 @@ func TestWriteIsRefusedAfterAnotherHandleStampsTheStoreNewer(t *testing.T) {
 		t.Fatalf("Create before bump: %v", err)
 	}
 
+	// An expired session row, so the prune-apply case below reaches a write
+	// transaction. A prune with no candidates is a read, and a read into a store
+	// this build cannot vouch for is allowed on purpose. It goes in its own
+	// project so the read assertions below still count only abc123's row.
+	if err := s.EnsureProject(ctx, "prn456", "/tmp/prune", "prune-project"); err != nil {
+		t.Fatalf("EnsureProject(prune): %v", err)
+	}
+	if _, _, _, err := s.UpsertWithOptions(ctx, "prn456", "fact", "a session row the prune will want", "mcp", 0.5, nil,
+		UpsertOptions{Retention: RetentionSession}); err != nil {
+		t.Fatalf("UpsertWithOptions(session): %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE memories SET expires_at = datetime('now', '-10 days'), last_accessed = datetime('now', '-10 days')
+		 WHERE project_id = 'prn456' AND retention = 'session'`); err != nil {
+		t.Fatalf("age the session row: %v", err)
+	}
+
 	stampFromAnotherHandle(t, path, SchemaVersion()+1)
 
 	// Every write path, not just the one beginWrite happens to serve.
@@ -120,6 +137,15 @@ func TestWriteIsRefusedAfterAnotherHandleStampsTheStoreNewer(t *testing.T) {
 		}},
 		{"ensure-project", func() error {
 			return s.EnsureProject(ctx, "def456", "/tmp/other", "other-project")
+		}},
+		{"prune-apply", func() error {
+			// A bulk delete, so the dangerous one: it removes rows by a
+			// predicate rather than by an id the caller names, and the store
+			// would have no record to point at afterwards. The row below is what
+			// makes it reach a write transaction at all — a prune with no
+			// candidates is a pure read and is refused by nothing.
+			_, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+			return err
 		}},
 	}
 	for _, w := range writes {

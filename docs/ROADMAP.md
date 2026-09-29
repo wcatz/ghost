@@ -301,7 +301,7 @@ The four axes are named in [`architecture.md`](architecture.md#memory-axes). Val
 | Issue | Why it is P2 |
 |---|---|
 | [#586](https://github.com/wcatz/ghost/issues/586) | First-class backup/export/import (online backup API, inspectable artifact, verified restore) instead of "copy the data dir"; prerequisite for merging two machines' databases |
-| [#587](https://github.com/wcatz/ghost/issues/587) | Retention/ownership tiers: `session` expires, `project` is the default, `persistent` is exempt from consolidation and pruning |
+| [#587](https://github.com/wcatz/ghost/issues/587) | Retention/ownership tiers. **Landed (schema v19):** `memories.retention` (`session|project|persistent`, default `project`) plus a derived `memories.expires_at`; `persistent` is exempt from consolidation, resolve, supersede and pruning and from the ranking demotions those passes cause; a bounded session decay named in explain; `retention` on save, search and list; and `ghost prune` — dry-run by default, bounded batches of 500 rows per transaction (each batch with its own `delete` tombstones in `memory_history`, so a partial apply is a supported, reportable outcome), and **never run automatically**. Still open: the tier is not carried by the portable artifact (an imported memory arrives as `project`), and no lifecycle pass or scheduled maintenance calls the prune |
 | [#582](https://github.com/wcatz/ghost/issues/582) | Context-quality metrics (precision, contamination, budget adherence, diversity, token cost) — coordinate with [#561](https://github.com/wcatz/ghost/issues/561) rather than duplicating its methodology fixes |
 
 P2 depends on P1: export must serialise the axes, pruning needs provenance to

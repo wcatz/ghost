@@ -156,7 +156,7 @@ func runValidity(p *pipeline) {
 	p.trace.record(stageValidity, in, len(kept), dropped, false)
 }
 
-// runPredicates is stage 3: the category and scope verdicts, applied over the
+// runPredicates is stage 3: the category, retention-tier and scope verdicts, applied over the
 // widened candidate set — before the window closes, which is the whole point of
 // the seam. A predicate that ran after closure could only ever remove from the
 // answer, never add to it, so a matching row the window cut was invisible and
@@ -186,6 +186,13 @@ func runPredicates(p *pipeline) {
 			p.droppedBy[dropCategory]++
 			p.trace.decide(c.ID, stagePredicates, "category_mismatch", c.Score)
 			continue
+		case p.req.Retention != "" && c.Retention != p.req.Retention:
+			dropped = append(dropped, c.ID)
+			p.dropped[c.ID] = "retention_mismatch"
+			p.droppedBy[stagePredicates]++
+			p.droppedBy[dropRetention]++
+			p.trace.decide(c.ID, stagePredicates, "retention_mismatch", c.Score)
+			continue
 		case !sig.ScopeMatched:
 			dropped = append(dropped, c.ID)
 			p.dropped[c.ID] = "scope_contradiction"
@@ -212,8 +219,9 @@ func runPredicates(p *pipeline) {
 // stagePredicates, so a reason can name the filter that emptied the set rather than
 // the stage that contained it. They are not stages: nothing runs them.
 const (
-	dropCategory = "predicate:category"
-	dropScope    = "predicate:scope"
+	dropCategory  = "predicate:category"
+	dropRetention = "predicate:retention"
+	dropScope     = "predicate:scope"
 )
 
 const provenanceWeight = "1.0"

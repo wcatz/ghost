@@ -1154,10 +1154,13 @@ func TestConsolidatableFilters(t *testing.T) {
 		{ID: "resolved", ResolvedAt: &now},
 		{ID: "pinned", Pinned: true},
 		{ID: "manual", Source: "manual"},
+		// A persistent row is the same protection as a pin, decided by a different
+		// flag: consolidation must not rewrite it, so it must not even see it.
+		{ID: "persistent", Retention: memory.RetentionPersistent},
 	}
 	got := consolidatable(mems)
 	if len(got) != 1 || got[0].ID != "keep" {
-		t.Fatalf("consolidatable = %+v, want only keep", got)
+		t.Fatalf("consolidatable = %+v, want only keep (a persistent row must be excluded like pinned and manual)", got)
 	}
 }
 

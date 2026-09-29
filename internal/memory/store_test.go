@@ -5191,7 +5191,7 @@ func TestDecaySQLParity(t *testing.T) {
 				if goAge < 0 {
 					goAge = 0
 				}
-				goFactor := DecayFactor(cat, pinned, goAge)
+				goFactor := DecayFactor(cat, RetentionProject, pinned, goAge)
 
 				if math.Abs(sqlFactor-goFactor) > eps {
 					t.Errorf("category=%s age=%d pinned=%v: SQL=%v Go=%v (diff %v)",

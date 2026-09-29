@@ -53,6 +53,13 @@ type MemoryStore interface {
 	SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]memory.Memory, error)
 	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
 	GetByCategory(ctx context.Context, projectID, category string, limit int) ([]memory.Memory, error)
+	// ListMemories is the browse read: a project's memories narrowed by category
+	// and/or retention tier, with an empty filter meaning no filter on that axis.
+	// It exists beside GetByCategory because the two filters are independent and
+	// every combination is a legitimate question an operator asks; a filter
+	// applied to an already-trimmed result would report the rows it dropped as
+	// absent.
+	ListMemories(ctx context.Context, projectID, category, retention string, limit int) ([]memory.Memory, error)
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	GetAll(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
 	CountMemories(ctx context.Context, projectID string) (int, error)

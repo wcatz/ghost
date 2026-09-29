@@ -482,7 +482,7 @@ A memory holds durable knowledge: what survives the conversation and is expensiv
 ghost_memory_search reports whether its answer can be relied on, and you must read that before quoting it. Every formatted ghost_memory_search answer ends with one machine line: "[ghost:outcome=... reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...]" — optionally followed by " retrieval_partial" inside the brackets, when a retrieval leg ran and failed, so parse to the closing "]". (explain:true returns a JSON scoring breakdown instead of a formatted answer, and carries no verdict. ghost_search_all is a different tool, answers a different question, and carries no verdict line.)
 - answerable — nothing was withheld as weak. READ THE REASON before relying on the rows, because two of the reasons this tool can produce mean NO FLOOR COULD BE APPLIED AT ALL, and the rows are then unjudged: no_floor_arm (no arm had a value to compare — neither a keyword rank nor a cosine reached these rows, which is what a paraphrase sharing no words with the corpus looks like) and retrieval_partial (a leg ran and broke, so no verdict was possible). Judge those rows yourself before relying on them. Every other answerable reason means a floor DID clear a row: a machine with no embedder does not make a match unjudged, because the keyword arm still judges it.
 - weak — the memories are listed, but NONE cleared the relevance floor. They are leads, not answers: verify against the source before acting on one, and say the result is weak if you rely on it anyway.
-- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope and all_out_of_category mean the filters excluded rows that WERE found, all_invalid means they were withheld as out of date, all_over_budget means the answer was too large to return, and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty.
+- empty — nothing was returned, and the reason says why. Do not read it as "Ghost has no such memory": all_out_of_scope, all_out_of_category and all_out_of_retention mean a filter excluded rows that were found (scope, category or retention), all_invalid means they were withheld as out of date, all_over_budget means the answer was too large to return, and vector_backend_unavailable means the vector leg never ran, so the keyword leg was all that searched. Only no_candidates says the search found nothing, and even that means nothing within the searched window, not that the store is empty.
 - abstain_cosine is the configured cosine floor, and its three states are three different facts: off means none is configured, not_applied means one IS configured and no cosine could be compared because the vector leg never ran OR ran and failed (reason= and legs= say which), and a number means the arm was configured AND the vector leg ran, so a cosine was available to compare — it does not mean any particular row was judged against it. not_applied is how a floor you set tells you it did nothing.
 - admitted is how many rows the answer carries. It is lower than candidates whenever something was cut, and after a byte-cap trim it is the only place that shows: a too-large answer is shortened, not refused. legs names each retrieval leg as ok, failed, not_run (asked for, never executed) or absent — and absent means the leg does not APPLY to this request rather than that nobody asked for it, which is what an as_of read reports for the vector leg.
 - legs=vector:not_run means the vector leg did not execute — either no embedder is configured or the query could not be embedded; legs=vector:failed means it ran and broke. Either way the answer is narrower than a full hybrid search, so treat a surprising miss as worth retrying rather than as proof the memory is gone. A search with NO surviving rows and a failed leg comes back as a tool error instead of a verdict — so if you got a line, at least one leg answered.
@@ -1287,6 +1287,7 @@ func (s *Server) registerTools() {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops', 'web-app')"`
 		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*'; trailing * is a prefix match, terms are OR'd)"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
+		Retention string `json:"retention,omitempty" jsonschema:"Filter results to one retention tier: session (true for this conversation only; expired session rows are what 'ghost prune' removes), project (the default \u2014 persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning). Omit it for every tier. Applied before the result window closes, so a matching row ranked below the window still takes a slot."`
 		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
 		AsOf      string `json:"as_of,omitempty" jsonschema:"Answer as the store stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'). Returns the wording each memory held then, including memories deleted since, and drops memories that did not exist yet. Keyword matching only: an embedding records current content, so there is no vector search over a past state. Use it to reproduce what a past session was given; omit it for the present. Cannot be combined with explain — explain diagnoses the current ranking, over the live index and the live vectors, so it has nothing to say about a past one."`
@@ -1296,7 +1297,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Title:       "Search Memories",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when a category is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Every formatted answer (explain:true returns a JSON breakdown instead) ends with a machine-readable verdict line, `[ghost:outcome=answerable|weak|empty reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...], optionally followed by \" retrieval_partial\" inside the brackets when a retrieval leg ran and failed` \u2014 `abstain_cosine=off` means no cosine floor is configured, `not_applied` means one is but no cosine could be compared (the vector leg never ran, or ran and failed), and `admitted` is how many rows the answer carries after any trim: `answerable` means nothing was withheld as weak (read its reason: no_floor_arm and retrieval_partial mean no floor could be applied at all, so those rows are unjudged), `weak` means the memories are listed but none cleared the floor \u2014 treat them as leads and verify before relying on them \u2014 and `empty` means the reason on the line says why. A `weak` answer, and an `empty` answer whose reason names a filter or the budget, say so in words as well, because in those cases the rows were found and are not good enough (or were withheld) rather than absent. The complete answer is capped at 16000 bytes \u2014 enough for one memory at the store's own 8,000-byte content cap \u2014 so a large result is trimmed to its highest-ranked memories and the line reports how many were admitted. Pass as_of (RFC 3339) to search the store as it stood at that instant instead: the wording each memory held then, including memories deleted since, matched by keyword only because an embedding records current content. as_of cannot be combined with explain, which diagnoses the current ranking. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category, retention and scope are all applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when one of those is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Every formatted answer (explain:true returns a JSON breakdown instead) ends with a machine-readable verdict line, `[ghost:outcome=answerable|weak|empty reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...], optionally followed by \" retrieval_partial\" inside the brackets when a retrieval leg ran and failed` \u2014 `abstain_cosine=off` means no cosine floor is configured, `not_applied` means one is but no cosine could be compared (the vector leg never ran, or ran and failed), and `admitted` is how many rows the answer carries after any trim: `answerable` means nothing was withheld as weak (read its reason: no_floor_arm and retrieval_partial mean no floor could be applied at all, so those rows are unjudged), `weak` means the memories are listed but none cleared the floor \u2014 treat them as leads and verify before relying on them \u2014 and `empty` means the reason on the line says why. A `weak` answer, and an `empty` answer whose reason names a filter or the budget, say so in words as well, because in those cases the rows were found and are not good enough (or were withheld) rather than absent. The complete answer is capped at 16000 bytes \u2014 enough for one memory at the store's own 8,000-byte content cap \u2014 so a large result is trimmed to its highest-ranked memories and the line reports how many were admitted. Pass as_of (RFC 3339) to search the store as it stood at that instant instead: the wording each memory held then, including memories deleted since, matched by keyword only because an embedding records current content. as_of cannot be combined with explain, which diagnoses the current ranking. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -1312,6 +1313,15 @@ func (s *Server) registerTools() {
 		asOf, err := parseAsOf(args.AsOf)
 		if err != nil {
 			return nil, nil, err
+		}
+		// Refused rather than ignored, for the same reason as_of is: a tier filter
+		// the caller believes was applied and that was not is a wrong answer. The
+		// refusal is the store's own, so the tool and the writer it calls cannot
+		// spell the three tiers differently.
+		if args.Retention != "" {
+			if _, err := memory.NormalizeRetention(args.Retention); err != nil {
+				return nil, nil, err
+			}
 		}
 		if args.Limit <= 0 {
 			args.Limit = 10
@@ -1359,6 +1369,7 @@ func (s *Server) registerTools() {
 			QueryVec:  queryVec,
 			Scope:     scopeFilter,
 			Category:  args.Category,
+			Retention: args.Retention,
 			Source:    assemble.SourceSearch,
 			Budget: assemble.Budget{
 				MaxItems: args.Limit,
@@ -1392,6 +1403,9 @@ func (s *Server) registerTools() {
 			}
 			if args.Category != "" {
 				ex.Notes = append(ex.Notes, "a category filter is not applied to these rows: they are the retrieval window the formatted path searches, before the category filter runs, so a row marked included may not be in that answer")
+			}
+			if args.Retention != "" {
+				ex.Notes = append(ex.Notes, "a retention filter is not applied to these rows either: they are the retrieval window the formatted path searches, before the tier filter runs, so a row marked included may not be in that answer")
 			}
 			payload, mErr := json.MarshalIndent(ex, "", "  ")
 			if mErr != nil {
@@ -1470,6 +1484,7 @@ func (s *Server) registerTools() {
 		Scope      any  `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
 		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to pin it to the top of project context. Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
 		validityArgs
+		Retention string `json:"retention,omitempty" jsonschema:"How long this memory is wanted: session (true of this conversation only \u2014 Ghost derives an expiry, and 'ghost prune' is the only thing that removes one, never automatically), project (the default: persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning, and nothing automatic can rewrite it). Use session for an observation that is about now; use persistent for a decision or rule the user would be annoyed to lose. An unknown value is refused. On a near-duplicate save the tier RAISES the existing row and never lowers it."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1489,6 +1504,12 @@ func (s *Server) registerTools() {
 		}
 		if !memory.IsValidCategory(args.Category) {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
+		}
+		// The vocabulary, the default and the refusal are the store's, so the tool
+		// and the writer it calls cannot spell the three tiers differently.
+		retention, err := memory.NormalizeRetention(args.Retention)
+		if err != nil {
+			return nil, nil, err
 		}
 		importance, err := defaultImportanceArg(args.Importance, 0.7)
 		if err != nil {
@@ -1547,6 +1568,7 @@ func (s *Server) registerTools() {
 			Scope:      scope,
 			Validity:   fields.Validity,
 			Pin:        args.Pin,
+			Retention:  retention,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
@@ -1593,6 +1615,17 @@ func (s *Server) registerTools() {
 		// because both describe the stored result, and the fold notice names
 		// the row that actually answered — which is also the row this advisory
 		// is about.
+		// Reported for the same reason the pin is: on a fold the id this message
+		// names is the copy just stored, while the tier landed on the existing row
+		// the text merged into, so a caller reading only the id would conclude the
+		// wrong memory carries it. An unstated `project` is not worth a clause on
+		// every save, so only a tier the caller asked for by name is reported.
+		if args.Retention != "" {
+			msg += fmt.Sprintf(" — retention %s", retention)
+			if duplicateOf != "" {
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
+			}
+		}
 		msg += repoFactHint(args.Content)
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
@@ -1733,6 +1766,7 @@ func (s *Server) registerTools() {
 	type listArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost')"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter by category (optional)"`
+		Retention string `json:"retention,omitempty" jsonschema:"Filter by retention tier: session, project or persistent (optional; omit for every tier)"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 30)"`
 	}
 
@@ -1760,14 +1794,10 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = resolved
 
-		var memories []memory.Memory
-		var err error
-
-		if args.Category != "" {
-			memories, err = s.store.GetByCategory(ctx, args.ProjectID, args.Category, args.Limit)
-		} else {
-			memories, err = s.store.GetAll(ctx, args.ProjectID, args.Limit)
-		}
+		// One read for both filters, so neither is applied to an already-trimmed
+		// result: a category that matched four of the ten rows the limit allowed
+		// would otherwise report the other six as absent.
+		memories, err := s.store.ListMemories(ctx, args.ProjectID, args.Category, args.Retention, args.Limit)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list failed: %w", err)
 		}
@@ -1780,8 +1810,12 @@ func (s *Server) registerTools() {
 				text = "Project lookup failed — unable to determine whether it is registered."
 			case !exists:
 				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", args.ProjectID)
+			case args.Category != "" && args.Retention != "":
+				text = fmt.Sprintf("No memories found in category %q with retention %q for this project.", args.Category, args.Retention)
 			case args.Category != "":
 				text = fmt.Sprintf("No memories found in category %q for this project.", args.Category)
+			case args.Retention != "":
+				text = fmt.Sprintf("No memories found with retention %q for this project.", args.Retention)
 			default:
 				text = "Project is registered but has no memories yet."
 			}
@@ -1956,6 +1990,12 @@ func (s *Server) registerTools() {
 		Importance any `json:"importance,omitempty" jsonschema:"Importance, a number 0.0-1.0 (e.g. 0.8). Default 0.8"`
 		Tags       any `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
 		validityArgs
+		// Retention here for the same reason it is on ghost_memory_save: this is the
+		// other surface that writes a memory, and a tier one of the two save tools
+		// honoured while the other ignored it is a tier an agent cannot rely on. A
+		// global memory is the archetypal durable one, so `persistent` is the
+		// interesting value here.
+		Retention string `json:"retention,omitempty" jsonschema:"How long this memory is wanted: session, project (the default) or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning). An unknown value is refused, and a near-duplicate save RAISES the existing row's tier rather than lowering it."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1976,6 +2016,10 @@ func (s *Server) registerTools() {
 		}
 		if !memory.IsValidCategory(args.Category) {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
+		}
+		retention, err := memory.NormalizeRetention(args.Retention)
+		if err != nil {
+			return nil, nil, err
 		}
 		importance, err := defaultImportanceArg(args.Importance, 0.8)
 		if err != nil {
@@ -2008,6 +2052,7 @@ func (s *Server) registerTools() {
 		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, "_global", args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{
 			Provenance: prov,
 			Validity:   fields.Validity,
+			Retention:  retention,
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
@@ -2040,6 +2085,12 @@ func (s *Server) registerTools() {
 		// cross-project case. Advisory only — the id above is already written,
 		// and it follows the fold notice because both describe the stored
 		// result, and the fold notice names the row that actually answered.
+		if args.Retention != "" {
+			msg += fmt.Sprintf(" — retention %s", retention)
+			if duplicateOf != "" {
+				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", duplicateOf)
+			}
+		}
 		msg += repoFactHint(args.Content)
 		if globalTruncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)

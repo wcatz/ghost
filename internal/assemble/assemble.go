@@ -97,6 +97,11 @@ type Request struct {
 	QueryVec  []float32 // nil skips the vector leg; required for CondVectorOnly
 	Scope     map[string]string
 	Category  string
+	// Retention is the tier filter (memory's session|project|persistent). Empty is
+	// no filter, and the two are the same thing here: a filter is applied to the
+	// widened candidate set before the window closes, exactly as Category is, so
+	// a row of the requested tier the window cut is still reachable.
+	Retention string
 	Source    Source
 	Budget    Budget
 	Condition Condition
@@ -182,15 +187,20 @@ type Retriever interface {
 	Candidates(context.Context, memory.CandidateRequest) (*memory.CandidateSet, error)
 }
 
-// categoryFetchWiden is the multiple applied to the retrieval window when a
-// category predicate is present. Category is applied before the window closes,
-// so it needs room beyond the caller's limit for a matching row to be reached
-// from — the same widening the tool used to apply by hand before this seam
-// existed. Without the predicate the window is the caller's limit, so a plain
-// search retrieves and returns exactly what it always did.
-const categoryFetchWiden = 3
+// predicateFetchWiden is the multiple applied to the retrieval window when a
+// predicate is present. A predicate is applied before the window closes, so it
+// needs room beyond the caller's limit for a matching row to be reached from —
+// the same widening the tool used to apply by hand before this seam existed.
+// Without a predicate the window is the caller's limit, so a plain search
+// retrieves and returns exactly what it always did.
+//
+// It is named for the predicate rather than for the category because the tier
+// filter uses the same widening for the same reason: a session row ranked just
+// below the cut is exactly the row a `retention: session` search was asking for,
+// and a narrower window would answer the request with a silence.
+const predicateFetchWiden = 3
 
-// maxRetrievalWindow bounds how far the category widening may go. The tool
+// maxRetrievalWindow bounds how far a predicate's widening may go. The tool
 // clamped its category fetch at 100 rows, and the ceiling is kept deliberately:
 // reachability past the window comes from the retriever's discarded tail, so a
 // deeper window buys rows that are hydrated, edge-loaded and then trimmed away.
@@ -385,8 +395,8 @@ func retrievalWindow(req Request) int {
 		// any of that.
 		total = maxRetrievalWindow
 	}
-	if req.Category != "" {
-		widened := total * categoryFetchWiden
+	if req.Category != "" || req.Retention != "" {
+		widened := total * predicateFetchWiden
 		if widened > maxRetrievalWindow {
 			widened = maxRetrievalWindow
 		}
@@ -444,6 +454,18 @@ func validateRequest(req Request) error {
 	}
 	if req.Source == SourceProjectCtx && req.ProjectID == "" {
 		return errors.New("assemble: project context requires a project")
+	}
+	// A tier filter over a historical read, refused rather than answered -- the
+	// same reasoning as vector-only over an as_of request, one field over. The
+	// change log records the state a memory HELD: its wording, its category, its
+	// importance, its pin. It does not record the tier, so the only value a
+	// historical row can carry is the one the row holds NOW, and applying that
+	// would answer "what did Ghost know at T, in the tier it is in today" without
+	// saying the second half. A filter the caller believes was applied and that
+	// was not is the wrong answer; this is the same combination
+	// ghost_memory_search already refuses for explain.
+	if req.AsOf != nil && req.Retention != "" {
+		return fmt.Errorf("assemble: a retention filter cannot describe a historical read: memory_history records what a memory held, not its retention tier, so the only tier available for a version is the one it carries now. Drop the retention filter, or drop as_of")
 	}
 	if req.Budget.MaxItems < 0 || req.Budget.MaxBytes < 0 {
 		return errors.New("assemble: a budget cannot be negative")

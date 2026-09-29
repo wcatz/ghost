@@ -28,13 +28,23 @@ const DefaultDemotionThreshold = 0.90
 //
 // ids order encodes rank (index 0 = highest-ranked). For every 'related' pair
 // found, the lower-ranked ID's penalty is incremented — unless that ID is
-// pinned and the other isn't, in which case the unpinned one is penalized
-// instead regardless of rank, since pinning is an explicit user signal to
-// keep a memory visible. No locking: callers that need Store's s.mu.RLock
+// PROTECTED and the other isn't, in which case the unprotected one is penalized
+// instead regardless of rank, since protection is an explicit user signal to
+// keep a memory visible.
+//
+// The map is called protected rather than pinned because that is what it holds:
+// a pin, or a `persistent` tier. Both are the user saying "keep this where it
+// is", and the near-duplicate demotion is the one place left that sinks a memory
+// every other pass has been taught to leave alone — a keep-forever row that
+// consolidation and resolve spare, and that a stale 'duplicate' edge from before
+// the tier was declared then demotes on every search, is a protection with a
+// hole in it. Callers build the map from the hydrated rows they already hold
+// (m.Pinned || RetentionExempt(m)); nothing in this file reads the column
+// itself, because these functions are handed ids, not rows. No locking: callers that need Store's s.mu.RLock
 // (i.e. GetTopMemories) take it themselves around the call, same as every
 // other Store method taking a raw SQL read handle.
-func DemotionPenalties(ctx context.Context, db Queryer, ids []string, pinned map[string]bool, threshold float64) (map[string]int, error) {
-	penalty, err := nearDuplicateVerdicts(ctx, db, ids, pinned, threshold, nil)
+func DemotionPenalties(ctx context.Context, db Queryer, ids []string, protected map[string]bool, threshold float64) (map[string]int, error) {
+	penalty, err := nearDuplicateVerdicts(ctx, db, ids, protected, threshold, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -45,8 +55,8 @@ func DemotionPenalties(ctx context.Context, db Queryer, ids []string, pinned map
 // kept, for the same reason as supersedeVerdicts: one read, both facts, so the
 // id explain names is the id the demotion chose rather than a second read's idea
 // of it.
-func nearDuplicateVerdicts(ctx context.Context, db Queryer, ids []string, pinned map[string]bool, threshold float64, tr *searchTrace) (map[string]int, error) {
-	pairs, err := nearDuplicatePenaltyRows(ctx, db, ids, pinned, threshold)
+func nearDuplicateVerdicts(ctx context.Context, db Queryer, ids []string, protected map[string]bool, threshold float64, tr *searchTrace) (map[string]int, error) {
+	pairs, err := nearDuplicatePenaltyRows(ctx, db, ids, protected, threshold)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +77,7 @@ func nearDuplicateVerdicts(ctx context.Context, db Queryer, ids []string, pinned
 // cannot come from two different reads: a re-derived attribution could name a
 // different loser than the demotion chose, and the explanation would then
 // contradict the order it is explaining.
-func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, pinned map[string]bool, threshold float64) ([]demotionPairs, error) {
+func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, protected map[string]bool, threshold float64) ([]demotionPairs, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -115,7 +125,7 @@ func nearDuplicatePenaltyRows(ctx context.Context, db Queryer, ids []string, pin
 		if rank[b] > rank[a] {
 			loser, winner = b, a
 		}
-		if pinned[loser] && !pinned[winner] {
+		if protected[loser] && !protected[winner] {
 			loser = winner
 		}
 		pairs = append(pairs, demotionPairs{loser: loser, winner: winner})
@@ -258,8 +268,36 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // CreateLink — from sinking a production answer behind a development one. The
 // edge is left in the graph; scope exempts it from ranking rather than deleting
 // it.
-func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[string]int, error) {
-	penalty, err := supersedeVerdicts(ctx, db, ids, nil)
+//
+// A `persistent` target is exempt for the same reason it is exempt from the
+// classify pass: the exemption has to reach the demotion, or an edge written
+// before the row was declared keep-forever sinks it on the next search anyway.
+// The edge stays — withdrawing a claim is the user's own explicit move — and it
+// stops ranking the row it names.
+//
+// protected is the caller's PROTECTION map, built exactly as it is for
+// DemotionPenalties below (a pin, or a `persistent` tier). It is a parameter
+// rather than a column read here for the reason that is a parameter there: this
+// function is called from four places and two of them cannot migrate: the
+// session-start loaders hold `memory.OpenReadDB`, where a store predating the
+// tier has no such column, so naming it fails the statement in FULL —
+// unreordered results plus a diagnostic on stderr, on every session start.
+// (`GetTopMemories` and `explain` hold the migrating `OpenDB` handle and would
+// not have failed; one un-migratable caller is enough.) The caller already has
+// the hydrated rows — the session loaders select the tier for exactly this — and
+// a caller holding a row it did not read is a caller that cannot protect it.
+//
+// The map is tier-PROTECTED, and "tier" is the whole of it: only the
+// `persistent` retention is protection here, never a plain pin. The near-duplicate
+// demotion spares a pinned row because that is what DemotionPenalties did before
+// tiers existed and the tier extends it; the supersede demotion does not, because
+// a `supersedes` edge states that one claim replaced another — keeping a row on
+// screen is not the same as declaring its claim current, so a pinned superseded
+// target sinks exactly as it did before #587. Same rule as
+// DemotionPenalties' PROTECTION-and-tier map; TestASupersedesEdgeDoesNotSinkAPersistentRow
+// and TestAPinDoesNotStopASupersedesEdge pin both halves.
+func SupersedePenalties(ctx context.Context, db Queryer, ids []string, protected map[string]bool) (map[string]int, error) {
+	penalty, err := supersedeVerdicts(ctx, db, ids, nil, protected)
 	if err != nil {
 		return nil, err
 	}
@@ -272,8 +310,8 @@ func SupersedePenalties(ctx context.Context, db Queryer, ids []string) (map[stri
 // the ranking path's own lookup already happened: a separate attribution query
 // would be a second chance to disagree with it, on the store's single
 // connection, inside a snapshot a concurrent writer is already locked out of.
-func supersedeVerdicts(ctx context.Context, db Queryer, ids []string, tr *searchTrace) (map[string]int, error) {
-	rows, err := supersedePenaltyRows(ctx, db, ids)
+func supersedeVerdicts(ctx context.Context, db Queryer, ids []string, tr *searchTrace, protected map[string]bool) (map[string]int, error) {
+	rows, err := supersedePenaltyRows(ctx, db, ids, protected)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +337,7 @@ func supersedeVerdicts(ctx context.Context, db Queryer, ids []string, tr *search
 // that decides which endpoint a 'supersedes' edge sinks, so the count a caller
 // demotes by and the ids explain attributes that demotion to cannot come from
 // two different reads.
-func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string) (map[string][]string, error) {
+func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string, protected map[string]bool) (map[string][]string, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -338,6 +376,12 @@ func supersedePenaltyRows(ctx context.Context, db Queryer, ids []string) (map[st
 		if ScopesConflict(parseScope(sourceScope), parseScope(targetScope)) {
 			continue
 		}
+		// src supersedes tgt: sink the superseded side once per edge. A target the
+		// user declared keep-forever is not sunk by an edge at all — see the
+		// function comment, and DemotionPenalties for why that arrives as a map.
+		if protected[tgt] {
+			continue
+		}
 		// src supersedes tgt: sink the superseded side once per edge.
 		// The query already restricted both endpoints to ids, so src is
 		// present by construction (same rule demoteSuperseded applies).
@@ -368,13 +412,13 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory, p Se
 		return results
 	}
 	ids := make([]string, len(results))
-	pinned := make(map[string]bool, len(results))
+	protected := make(map[string]bool, len(results))
 	for i, m := range results {
 		ids[i] = m.ID
-		pinned[m.ID] = m.Pinned
+		protected[m.ID] = m.Pinned || RetentionExempt(m)
 	}
 	s.mu.RLock()
-	penalty, err := nearDuplicateVerdicts(ctx, s.queryDB(), ids, pinned, s.demotionThreshold, p.trace)
+	penalty, err := nearDuplicateVerdicts(ctx, s.queryDB(), ids, protected, s.demotionThreshold, p.trace)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("near-duplicate demote: lookup failed", "error", err)

@@ -907,3 +907,73 @@ func theOnlyMemoryID(t *testing.T, s *Store, projectID string) string {
 // run, because created_at is stamped by SQLite at write time and cannot be
 // backdated through any public API.
 var _ = []string{asOfStampSave, asOfStampRewrite, asOfStampLate, asOfStampFarFuture}
+
+// TestMemoriesAsOfOnAStoreBehindTheTierColumnStillReads: the historical reader
+// runs on handles that cannot migrate. `ghost context --as-of` opens the store
+// with memory.OpenReadDB — read-only, refusing to create — so a store written by
+// a Ghost from before schema v19 is a store this statement must still run
+// against. A column named in it fails the WHOLE read, and the consequence is
+// not one missing field: `ghost context --as-of` prints the header it built and
+// then no context at all, for a question the user asked about their own past.
+//
+// The tier was named here for a while, read from the live row the way tags, pin
+// and scope are, and removed: memory_history records the state a memory HELD and
+// a tier is not part of that state, so the only value available is the one the
+// row carries NOW. Nothing consumed it either — the as_of decay passes
+// RetentionProject, and assemble.validateRequest refuses a tier filter over an
+// as_of read — so a version gate would have been machinery guarding a value
+// nobody reads. See AsOfRow.Retention.
+func TestMemoriesAsOfOnAStoreBehindTheTierColumnStillReads(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const first = "the link worker re-embeds a memory whose content changed"
+	const second = "the link worker re-embeds and re-links a memory whose content changed"
+	id, _, _, err := s.UpsertWithProvenance(ctx, testProject, "gotcha", first, "mcp", 0.5, nil, Provenance{})
+	if err != nil {
+		t.Fatalf("UpsertWithProvenance: %v", err)
+	}
+	category := "dependency"
+	if err := s.UpdateMemory(ctx, testProject, id, strPtr(second), &category, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+	stampHistory(t, s, id, asOfStampSave, asOfStampRewrite)
+
+	// The control, read BEFORE the columns go: this is the answer the read owes.
+	want, err := s.MemoriesAsOf(ctx, testProject, asOfAt(t, asOfStampSave))
+	if err != nil {
+		t.Fatalf("MemoriesAsOf control: %v", err)
+	}
+	if _, ok := asOfContentByID(t, want)[id]; !ok {
+		t.Fatalf("the control read does not contain %s, so the comparison below proves nothing", id)
+	}
+
+	// Back to v18: the corpus, the history and the category all stay, because a
+	// fixture that dropped the rows too would be testing an empty store.
+	if _, err := s.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_memories_session_expiry`); err != nil {
+		t.Fatalf("drop the v19 index: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE memories DROP COLUMN retention`); err != nil {
+		t.Fatalf("drop the tier column: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE memories DROP COLUMN expires_at`); err != nil {
+		t.Fatalf("drop the expiry column: %v", err)
+	}
+
+	got, err := s.MemoriesAsOf(ctx, testProject, asOfAt(t, asOfStampSave))
+	if err != nil {
+		t.Fatalf("MemoriesAsOf on a store behind the tier column: %v", err)
+	}
+	row, ok := asOfContentByID(t, got)[id]
+	if !ok {
+		t.Fatalf("memory %s is absent from a historical read on a v18 store: the read answered empty", id)
+	}
+	if row.Content != first || row.Category != "gotcha" {
+		t.Errorf("the version read on a v18 store = (%q, %q), want (%q, gotcha): the text a version carried", row.Content, row.Category, first)
+	}
+	// And the tier is empty here, deliberately: the change log holds no tier, so
+	// there is no historical value for this field to carry.
+	if row.Retention != "" {
+		t.Errorf("AsOfRow.Retention = %q on a historical row, want empty: no version ever recorded a tier", row.Retention)
+	}
+}

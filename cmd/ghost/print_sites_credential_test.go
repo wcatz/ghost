@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/resolve"
@@ -365,4 +367,35 @@ func insertPreGuardHistory(t *testing.T, db *sql.DB, memoryID, content, merged, 
 		memoryID, preGuardProject, merged, content, category); err != nil {
 		t.Fatalf("insert the pre-guard history row: %v", err)
 	}
+}
+
+// TestPruneReportWithholdsACredentialInAPreGuardRow: `ghost prune` prints the
+// stored text of every row it is about to remove — the report exists so an
+// operator can recognise each row before approving its deletion, which is
+// precisely the moment a stale, credential-shaped row is most likely to be
+// sitting in the corpus. The report reads the stored text, and the write-boundary
+// guard is not retroactive, so on a pre-guard database that text can be a
+// credential and the listing's 160 bytes is more than enough to print one whole.
+// The render goes through the same displayStored substitution every other
+// stored-text listing uses, so the marker names the format instead of the value.
+func TestPruneReportWithholdsACredentialInAPreGuardRow(t *testing.T) {
+	_, _, row := preGuardStore(t)
+
+	var out bytes.Buffer
+	if err := printPrune(&out, pruneView{
+		Grace: memory.DefaultPruneGrace,
+		Now:   time.Now().UTC(),
+		Candidates: []memory.PruneCandidate{{
+			ID:         row.ID,
+			ProjectID:  preGuardProject,
+			Category:   row.Category,
+			Content:    row.Content,
+			Retention:  memory.RetentionSession,
+			ExpiresAt:  time.Now().UTC().Add(-24 * time.Hour).Format(memory.StoredStampLayout),
+			ActivityAt: time.Now().UTC().Add(-48 * time.Hour).Format(memory.StoredStampLayout),
+		}},
+	}); err != nil {
+		t.Fatalf("printPrune: %v", err)
+	}
+	assertWithheld(t, "ghost prune", out.String())
 }

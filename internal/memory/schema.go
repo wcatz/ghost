@@ -93,7 +93,32 @@ CREATE TABLE IF NOT EXISTS memories (
     -- applies everywhere. NULL and absent are deliberately the same thing —
     -- "no scope stated" must not read as a scope of "", and a fabricated
     -- scope would claim where knowledge applies that nobody asserted.
-    scope         TEXT
+    scope         TEXT,
+    -- Retention tier (schema v19, issue #587): how long this memory is wanted
+    -- and what may be done to it. 'project' is the default and is what every
+    -- row that predates the column reads after migration, because that is the
+    -- life the corpus has always had. 'session' is a fact true of one
+    -- conversation; Ghost derives expires_at for it on save and 'ghost prune'
+    -- is the only thing that removes one, never automatically. 'persistent' is
+    -- a user-declared keep-forever, exempt from consolidation, supersede,
+    -- resolve and pruning.
+    --
+    -- NOT NULL with a CHECK rather than a nullable column: a reader that has to
+    -- carry a NULL case for "no tier was ever decided" is carrying a case no
+    -- writer can produce, and the default already answers it.
+    retention     TEXT NOT NULL DEFAULT 'project'
+                  CHECK (retention IN ('session', 'project', 'persistent')),
+    -- When this memory stops being wanted. DERIVED for a session row (now plus
+    -- SessionTTL at the save) and stated by nobody else: a project row expires
+    -- only when somebody resolves or deletes it, and a persistent row never
+    -- does. NULL therefore means "no expiry is claimed", and a row with a NULL
+    -- expires_at is never a prune candidate — the unprunable direction.
+    --
+    -- Stored in the same 'YYYY-MM-DD HH:MM:SS' form as every other timestamp
+    -- column here, because the prune compares it as text and a value in some
+    -- other format simply does not match -- which leaves the row in the store
+    -- rather than taking it out.
+    expires_at    TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -635,12 +660,9 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	}
 
 	if tableCount == 0 {
-		if _, err := db.Exec(`
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_remote
-			ON projects(repo_remote) WHERE repo_remote IS NOT NULL AND repo_remote <> ''
-		`); err != nil {
+		if err := ensurePostMigrationIndexes(db); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("create repository identity index: %w", err)
+			return nil, err
 		}
 		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 			_ = db.Close()
@@ -691,15 +713,54 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 			return nil, fmt.Errorf("migrate schema v%d→v%d: %w", version, schemaVersion, err)
 		}
 	}
-	if _, err := db.Exec(`
-		CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_remote
-		ON projects(repo_remote) WHERE repo_remote IS NOT NULL AND repo_remote <> ''
-	`); err != nil {
+	if err := ensurePostMigrationIndexes(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("ensure repository identity index: %w", err)
+		return nil, err
 	}
 
 	return db, nil
+}
+
+// ensurePostMigrationIndexes creates the indexes whose columns a migration added,
+// which is why they are not in initSQL.
+//
+// initSQL is CREATE ... IF NOT EXISTS, so on a database that predates a column
+// every statement in it is a no-op — EXCEPT one that reads the missing column by
+// name. A partial index is exactly that statement: the repository-identity index
+// on projects.repo_remote, and the session-expiry index below on
+// memories.retention/expires_at. Running either against a store that has not
+// been migrated yet fails the whole open with SQLite's "no such column", which
+// is the shape #560 is about — a DDL that cannot be delivered to an existing
+// database run before the migration that delivers it.
+//
+// So they are created here, after migrate(), on the fresh path and the upgraded
+// path alike, and by one function so a third index cannot be added to one branch
+// only. Both are partial indexes over the rows their predicate selects, so the
+// write cost falls only on those rows: the repository one only on projects with
+// a remote, the session one only on session-tier memories, which is what makes
+// the second one free for the 99% of a corpus that is not session-scoped.
+func ensurePostMigrationIndexes(db *sql.DB) error {
+	for _, stmt := range []struct{ name, ddl string }{
+		{"repository identity index", `
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_remote
+			ON projects(repo_remote) WHERE repo_remote IS NOT NULL AND repo_remote <> ''
+		`},
+		// Prune's only index, and a partial one for the reason above: it describes
+		// session rows alone, so every write to a project or persistent row costs
+		// it nothing, and the read it serves is a maintenance pass over a corpus
+		// that may hold tens of thousands of rows of which a handful are
+		// candidates. idx_memories_project_cat does not help -- the predicate is
+		// on the tier and the expiry, neither of which it leads with.
+		{"session-expiry index", `
+			CREATE INDEX IF NOT EXISTS idx_memories_session_expiry
+			ON memories(expires_at) WHERE retention = 'session'
+		`},
+	} {
+		if _, err := db.Exec(stmt.ddl); err != nil {
+			return fmt.Errorf("create %s: %w", stmt.name, err)
+		}
+	}
+	return nil
 }
 
 // backupBeforeMigrate writes a one-shot copy of dbPath beside it before any

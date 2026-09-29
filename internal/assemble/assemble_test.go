@@ -1931,3 +1931,47 @@ func TestScopeLabelCannotBreakOutOfItsLine(t *testing.T) {
 		})
 	}
 }
+
+// TestRunRefusesARetentionFilterOverAsOf: a tier filter cannot describe a
+// historical read, because memory_history records what a memory HELD and not the
+// tier it was in. The only tier a version could carry is the one its row holds
+// now, and applying that silently would answer a different question from the one
+// asked — for all three tiers alike, and worst of all "nothing found in the
+// requested tier". It is refused at the entry point instead, beside the refusal a
+// vector-only request gets over an as_of, so every caller inherits it rather than
+// each remembering.
+func TestRunRefusesARetentionFilterOverAsOf(t *testing.T) {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	_, err := Run(context.Background(), &fakeRetriever{set: &memory.CandidateSet{Legs: map[string]memory.LegStatus{}}}, Request{
+		ProjectID: "p",
+		Query:     "anything",
+		Source:    SourceSearch,
+		Condition: CondFTSOnly,
+		Retention: "persistent",
+		AsOf:      &at,
+		Now:       time.Now().UTC(),
+		Budget:    Budget{MaxItems: 5},
+	})
+	if err == nil {
+		t.Fatal("a retention filter over a historical read was served")
+	}
+	for _, want := range []string{"retention", "memory_history"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+
+	// Either filter alone is fine, so the refusal is about the COMBINATION.
+	if _, err := Run(context.Background(), &fakeRetriever{set: &memory.CandidateSet{Legs: map[string]memory.LegStatus{}}}, Request{
+		ProjectID: "p", Query: "anything", Source: SourceSearch, Condition: CondFTSOnly,
+		Retention: "persistent", Now: time.Now().UTC(), Budget: Budget{MaxItems: 5},
+	}); err != nil {
+		t.Errorf("a retention filter alone was refused: %v", err)
+	}
+	if _, err := Run(context.Background(), &fakeRetriever{set: &memory.CandidateSet{Legs: map[string]memory.LegStatus{}}}, Request{
+		ProjectID: "p", Query: "anything", Source: SourceSearch, Condition: CondFTSOnly,
+		AsOf: &at, Now: time.Now().UTC(), Budget: Budget{MaxItems: 5},
+	}); err != nil {
+		t.Errorf("as_of alone was refused: %v", err)
+	}
+}

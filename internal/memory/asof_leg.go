@@ -296,9 +296,12 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 // asOfComposite is the historical composite the current read ranks on: the
 // version's importance times the category-aware decay of its age measured to T.
 // It is DecayFactor over the version's own category and importance, which is why
-// a relabelled memory decays as what it was rather than as what it became.
+// a relabelled memory decays as what it was rather than as what it became -- and
+// over the `project` tier, because the change log records no tier at all (see
+// sortAsOfRows for why reading today's tier into a past ranking would be a claim
+// the table does not support).
 func asOfComposite(row AsOfRow, at time.Time) float64 {
-	return float64(row.Importance) * DecayFactor(row.Category, row.Pinned, ageDays(row.CreatedAt, at))
+	return float64(row.Importance) * DecayFactor(row.Category, RetentionProject, row.Pinned, ageDays(row.CreatedAt, at))
 }
 
 // asOfSupersedeDemote moves a memory that a live `supersedes` claim named at T
@@ -366,8 +369,8 @@ func asOfTail(hits []asOfHit, limit int, scores map[string]float64, at time.Time
 		}
 	}
 	sort.SliceStable(tail, func(i, j int) bool {
-		si := scores[tail[i].ID] * DecayFactor(tail[i].Category, tail[i].Pinned, ageDays(tail[i].CreatedAt, at))
-		sj := scores[tail[j].ID] * DecayFactor(tail[j].Category, tail[j].Pinned, ageDays(tail[j].CreatedAt, at))
+		si := scores[tail[i].ID] * DecayFactor(tail[i].Category, RetentionProject, tail[i].Pinned, ageDays(tail[i].CreatedAt, at))
+		sj := scores[tail[j].ID] * DecayFactor(tail[j].Category, RetentionProject, tail[j].Pinned, ageDays(tail[j].CreatedAt, at))
 		if si != sj {
 			return si > sj
 		}
@@ -385,7 +388,7 @@ func asOfCandidate(m Memory, hits []asOfHit, scores map[string]float64, at time.
 	c := Candidate{Memory: m}
 	c.Base = scores[m.ID]
 	c.AgeDays = ageDays(m.CreatedAt, at)
-	c.Decay = DecayFactor(m.Category, m.Pinned, c.AgeDays)
+	c.Decay = DecayFactor(m.Category, RetentionProject, m.Pinned, c.AgeDays)
 	c.Score = c.Base * c.Decay
 	c.FTSRank, c.VectorRank, c.VectorScore = -1, -1, -1
 	for _, h := range hits {

@@ -60,6 +60,23 @@ type AsOfRow struct {
 	VersionRecordedAt string
 	VersionPhase      string
 
+	// Retention is always EMPTY here, and that is the honest reading rather than
+	// an omission: memory_history records the state a memory HELD, and a tier is
+	// not part of that state. The tags, pin and scope above are not versioned
+	// either, but they existed before the history table did, so the read takes them
+	// from the live row and says so; the tier did not, and a value read from the
+	// live row would be the tier the memory carries TODAY, which is a different
+	// claim from the one this set makes.
+	//
+	// Nothing consumes it: the as_of decay passes RetentionProject (a version
+	// carries no tier, so the pre-tier formula is the one it would have had), and
+	// assemble.validateRequest refuses a tier filter over an as_of read rather than
+	// answering from a value the change log never recorded. The statement does not
+	// SELECT the column either, because this read runs on a handle that cannot
+	// migrate — `ghost context --as-of` opens the store read-only — and naming a
+	// column a pre-v19 store does not have fails the whole read rather than one
+	// field of it.
+
 	// SupersededBy is the memory whose active `supersedes` edge claimed this one
 	// at T, and "" when no claim was live. It is read from the supersede /
 	// unsupersede SEQUENCE rather than from the version row, because a supersede
@@ -345,6 +362,16 @@ func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectI
 			}
 		}
 		r.Scope = parseScope(scopeRaw)
+		// r.Retention is deliberately left empty. The change log records no tier, so
+		// the only value available is the one the row carries NOW, which is not a
+		// property of the instant being asked about -- and nothing consumes it
+		// anyway: the as_of decay passes RetentionProject explicitly, and
+		// assemble.validateRequest refuses a tier filter over an as_of read rather
+		// than answering from this value. It was selected for a while and removed,
+		// because a read that runs on a handle which cannot migrate (ghost context
+		// --as-of opens the store read-only) must not name a column a store predating
+		// schema v19 does not have -- that is a whole failed read, not a missing
+		// field. See AsOfRow.Retention.
 		r.Importance = float32(importance.Float64)
 		if confidence.Valid {
 			v := confidence.Float64
@@ -491,11 +518,20 @@ func qualifyScopeClause(clause, table string) string {
 // there is a parity test between those two; a third spelling of the decay
 // formula would have no such test and would drift the first time the SQL
 // constant changed.
+//
+// The tier passed is `project`, and that is a statement about what the change
+// log holds rather than a default: memory_history records the state a memory
+// HELD -- its wording, its category, its importance, its pin -- and a tier is a
+// property of the row as it stands now, not of any version of it. Reading
+// today's tier into a past ranking would be a claim about what the store would
+// have done then, made by a table that never recorded it. The cost is that a
+// session memory ranks as durable in a historical read, and the alternative
+// would rank a row by a protection it was not under.
 func sortAsOfRows(rows []AsOfRow, t time.Time) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
-		as := float64(a.Importance) * DecayFactor(a.Category, a.Pinned, ageDays(a.CreatedAt, t))
-		bs := float64(b.Importance) * DecayFactor(b.Category, b.Pinned, ageDays(b.CreatedAt, t))
+		as := float64(a.Importance) * DecayFactor(a.Category, RetentionProject, a.Pinned, ageDays(a.CreatedAt, t))
+		bs := float64(b.Importance) * DecayFactor(b.Category, RetentionProject, b.Pinned, ageDays(b.CreatedAt, t))
 		if as != bs {
 			return as > bs
 		}

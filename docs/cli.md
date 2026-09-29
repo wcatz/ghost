@@ -252,6 +252,47 @@ Candidates come from the stored vectors, and a memory with no vector is proposed
 `--withdraw` is the repair for an edge the rules still accept. `--reassess` withdraws what the current rubric rejects, so a pair that is wrong for a reason no rubric can see — the newer note is not a replacement of the older one at all — keeps its edge and buries its target, because a classifier asked about it has not made a mistake by its own lights. `--withdraw` removes the edge you name, on your say-so, with no harness call and nothing billed. Both are dry-run by default and both write the `unsupersede` history row; under `--apply` both print the same follow-up — a **scoped** `ghost resolve <project> --reassess --only <the withdrawn edges' target ids> --apply`, with the same id list written as a `--only-file` beside it (an id holding a comma is not nameable by `--only`, which splits on commas, so it is carried by the file alone and the report says how many such ids there were; an id holding a newline is reachable through neither form, and the report says that memory stays resolved until the row is rewritten; a `#` on an `--only-file` line is a comment only when it follows whitespace, so an annotated `<id>   # note` still works while `<id>#note` is one id; a `#` in an `--only-file` line is a comment only when it follows whitespace, so an annotated `<id>   # note` still works and `<id>#note` is one id — it never prints the unscoped repair, which would re-judge the whole project) — because the withdrawal is only half the repair and the `resolved_at` the edge caused keeps the target out of ranked injection until that runs. Prefer the scoped form: an unscoped repair re-judges every resolved memory in the project.
 
 A ref is a full memory id, or an unambiguous **8-or-more-character prefix** of one, because every Ghost report abbreviates to eight characters. A full id is accepted whatever its shape — `ghost import` writes an artifact's ids verbatim, and the id column only *defaults* to hex — while the 8-character floor applies to a prefix, which names a class of ids rather than one. A prefix naming two memories is refused with the matches listed rather than guessed at. A pair with no live `supersedes` link is an error, and the message names the target's live edges. Several pairs may be given at once, and the whole request is settled before anything is written — one bad pair out of five withdraws none of them. The edge must belong to the named project (it is found through the memory the edge points *from*), so a project can neither withdraw nor discover another project's edge. The withdrawal is a soft invalidation: a later pass that still judges the pair a supersession re-creates it. The MCP tool `ghost_link_withdraw` does the same thing over the tool surface.
+## Retention tiers
+
+Every memory carries a retention tier: how long it is wanted, and what may be done to it. It is set on save, and it is the only thing in Ghost that can take a memory away on its own.
+
+| Tier | Meaning | Expiry | Exempt from |
+|---|---|---|---|
+| `session` | True of the current conversation — an observation that is about now. | Derived on save, 24 hours out (`memories.expires_at`). | nothing |
+| `project` | The default, and what every memory written before schema v19 reads as after migration. Persists until resolved or deleted. | none | nothing |
+| `persistent` | User-declared keep-forever. | none | `ghost reflect`, `ghost resolve`, `ghost supersede`, `ghost prune`, and the ranking demotions those passes cause |
+
+The exemption is one decision asked in every place it matters. A `persistent` row is excluded from the consolidation's snapshot and its replaceable set (so a consolidation never saw its text and cannot re-emit it, and a restore has no copy to put back), from the resolve and repair candidate queries and from `resolved_at` stamping, from supersede candidate pairs — before the classify call, so the verdict is never paid for — and from the two ranking demotions a `supersedes` or near-duplicate edge causes, which is what stops a protection from being lost one pass after it was declared. A persistent row is still searchable, still injected, and still deletable by `ghost_memory_delete` or `ghost project delete`: the tier keeps a memory away from the automated passes, not from you.
+
+A near-duplicate save **raises** the surviving row's tier and never lowers it, so a `retention: persistent` save protects the row a later consolidation would absorb rather than only the copy it just stored — and a `session`-tier restatement of somebody else's durable memory cannot schedule that memory for deletion. The save result says which row carries the protection.
+
+A `session` row is never removed automatically. It is a candidate for `ghost prune` and nothing else.
+
+A tier is set by a save (`ghost_memory_save`, `ghost_save_global`) and there is no update path: restating a memory with `retention: persistent` folds into the existing row and raises it, which is how a memory that is already stored becomes keep-forever. A save that finds no near-duplicate stores its own new row, so restating a memory in substantially different words creates a second row rather than retiering the first.
+
+### `ghost prune`
+
+```bash
+ghost prune                                     # report: dry run, writes nothing
+ghost prune --apply                             # remove the rows it would have
+ghost prune --project myproject --grace 168h --apply
+```
+
+| Flag | Meaning |
+|---|---|
+| `--project <name-or-id>` | Only this project. Default: every project, and the report says so. |
+| `--grace <duration>` | How long past expiry an untouched row is left alone. Go duration (`168h`, `30m`); `7d` is not a unit, `0` is refused, and the default is `168h`. |
+| `--apply` | Remove the rows instead of only reporting them. |
+
+A row is a candidate only if **all** of these hold: its tier is `session`, it is not pinned, its derived expiry has passed, and nothing has touched it for the grace period. The activity a prune measures is `COALESCE(last_accessed, updated_at, created_at)` — a recorded read is preferred, and nothing in Ghost records one today, so in practice this is the row's last **write**. A `project` or `persistent` row is never a candidate however old it is, and neither is a pinned row — a pin is an explicit "keep this where it is", and the session promise was made for rows nobody overrode.
+
+A store-wide prune (no `--project`) reaches `_global` too, and deliberately: `ghost_save_global` takes `retention`, so a global memory saved as `session` already carries an expiry, and sparing the project would leave that row in the store past an expiry nothing could honour. The report names every row it touches, and `--project <name-or-id>` is the way to keep the blast radius to one project.
+
+The dry run is a read-only preview built from the same query every apply batch re-runs — same predicate, scope, and order — so it cannot describe rows the apply would not have selected, and it writes nothing at all. With `--apply` the removals go out in bounded batches of 500 rows per transaction, each batch with its own `delete` tombstones in `memory_history`, so a backlog never holds the store's write lock open for the whole cleanup; a batch that fails rolls back whole and the report names the rows that actually landed. The tombstone is what makes `ghost history <id>` still report what was lost, and with what text.
+
+**Nothing in Ghost runs this for you.** No lifecycle pass, no hook, no scheduler calls it. A prune removes memories, so it happens when a person asks for it, and the default run asks first.
+
+Two consequences worth knowing, both the same reason: a tier is a claim about a memory's owner rather than part of its text, and nothing that replays text carries one. `ghost export` / `ghost import` do not carry it, so a memory that made the round trip comes back as `project` — consolidatable, and never pruned. And a memory a consolidation WRITES is a `project` row: merging three facts into one does not make the result keep-forever, because a tier the model never chose is not a protection. `ghost reflect --restore` revives a deleted memory as `project` for the same reason — neither the snapshot nor the change log records a tier, so there is nothing to restore one from.
 
 ## Project operations
 

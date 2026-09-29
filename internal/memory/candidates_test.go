@@ -413,7 +413,7 @@ func TestCandidatesUsesTheBoundNow(t *testing.T) {
 	if row.AgeDays < 0.9 || row.AgeDays > 1.1 {
 		t.Errorf("age = %.2f days against the bound clock, want ~1: the candidate path read the wall clock", row.AgeDays)
 	}
-	if want := DecayFactor(row.Category, row.Pinned, row.AgeDays); row.Decay != want {
+	if want := DecayFactor(row.Category, row.Retention, row.Pinned, row.AgeDays); row.Decay != want {
 		t.Errorf("decay = %v, want %v (the factor the bound clock implies)", row.Decay, want)
 	}
 	if row.Score != row.Base*row.Decay {

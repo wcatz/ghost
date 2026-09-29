@@ -593,6 +593,7 @@ var valueFlagOwners = map[string][]string{
 	"parseBackupArgs":          {"backup"},
 	"parseExportArgs":          {"export"},
 	"parseHistoryArgs":         {"history"},
+	"parsePruneArgs":           {"prune"},
 	"parseCleanupSessionsArgs": {"opencode cleanup-sessions"},
 	"runContext":               {"context"},
 	"contextAsOf":              {"context"},

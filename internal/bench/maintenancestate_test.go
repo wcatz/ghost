@@ -425,7 +425,7 @@ func TestMaintenanceFixtureCarriesState(t *testing.T) {
 // restating the category list, so a change to that policy updates this guard
 // with it instead of leaving a second copy to drift.
 func decaysWithAge(category string) bool {
-	return memory.DecayFactor(category, false, 10_000) < 1
+	return memory.DecayFactor(category, memory.RetentionProject, false, 10_000) < 1
 }
 
 // TestMaintenanceSupersedeEdgesMoveLiveWins is the one behavioural assertion in

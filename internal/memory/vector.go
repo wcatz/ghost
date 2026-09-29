@@ -507,11 +507,19 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 		return results
 	}
 	ids := make([]string, len(results))
+	protected := make(map[string]bool, len(results))
 	for i, m := range results {
 		ids[i] = m.ID
+		// The supersede protection is the KEEP-FOREVER tier only, never a plain
+		// pin: a `supersedes` edge is a statement that one claim replaced another,
+		// so a pinned superseded target still sinks — pinning keeps a row visible,
+		// it does not declare the claim current. See the supersede demotion
+		// discussion in docs/invariants.md; the pin exemption variant is filed as
+		// issue #739, because tiers must not change what a pin means.
+		protected[m.ID] = RetentionExempt(m)
 	}
 	s.mu.RLock()
-	penalty, err := supersedeVerdicts(ctx, s.queryDB(), ids, p.trace)
+	penalty, err := supersedeVerdicts(ctx, s.queryDB(), ids, p.trace, protected)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("supersede demote: lookup failed", "error", err)
@@ -534,17 +542,31 @@ func parseCreatedAt(s string) time.Time {
 	return t
 }
 
-// decayFactor returns the category-aware time-decay multiplier for a memory
-// given its age in days. It mirrors DecayRankingSQL (store.go) exactly — a
-// pinned memory or a preference/convention/fact never decays (factor 1.0);
-// pattern/architecture decay with tau 45 and a 0.3 floor; all other categories
-// (decision, gotcha, dependency, ...) decay with tau 30 and a 0.15 floor. The
-// SQL-vs-Go parity test (store_test.go) guards against drift between this and
-// the SQL constant.
-func DecayFactor(category string, pinned bool, ageDays float64) float64 {
+// DecayFactor is the time-decay multiplier for a memory of this category, this
+// tier, this pin state and this age in days. It mirrors DecayRankingSQL
+// (store.go) exactly — a pinned memory or a preference/convention/fact never
+// decays (factor 1.0); pattern/architecture decay with tau 45 and a 0.3 floor;
+// all other categories (decision, gotcha, dependency, ...) decay with tau 30 and
+// a 0.15 floor; and a session-tier row carries the bounded tier decay on top of
+// whichever of those applies (see RetentionDecayFactor). The SQL-vs-Go parity
+// test (store_test.go) guards against drift between this and the SQL constant.
+//
+// The tier is a parameter rather than a second multiplication at each call site
+// because it is not a separate signal: it is how long this memory is wanted, and
+// the age it is being scored against is the same age. A row that ranks as
+// conversation-scoped should read that way in the one number that ranks it.
+func DecayFactor(category, retention string, pinned bool, ageDays float64) float64 {
 	if pinned {
 		return 1.0
 	}
+	return categoryDecay(category, ageDays) * RetentionDecayFactor(retention, pinned, ageDays)
+}
+
+// categoryDecay is the category-and-age half of DecayFactor, split out because
+// the tier half multiplies it and because the two have different floors: a
+// session row is never worth more than half a durable one, whatever its
+// category, and the floors are per-category.
+func categoryDecay(category string, ageDays float64) float64 {
 	switch category {
 	case "preference", "convention", "fact":
 		return 1.0
@@ -599,7 +621,11 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 		// used, and the difference shows up only on old rows.
 		if t := p.trace.row(m.ID); t != nil {
 			t.AgeDays = ageDays(m.CreatedAt, now)
-			t.Decay = DecayFactor(m.Category, m.Pinned, t.AgeDays)
+			// The recorded factor is the one that decided this order, so it carries
+			// every multiplier the composite applied — the category half and the
+			// bounded session decay alike. Recording only the first would report a
+			// factor the sequence never used.
+			t.Decay = DecayFactor(m.Category, m.Retention, m.Pinned, t.AgeDays)
 			if p.trace.now.IsZero() {
 				p.trace.now = now
 			}
@@ -627,8 +653,8 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 		// Reorder by base × decay (ordering; with DecayReselect this also
 		// owns final membership via the subsequent truncate).
 		sort.SliceStable(scored, func(i, j int) bool {
-			fi := scored[i].base * DecayFactor(scored[i].m.Category, scored[i].m.Pinned, ageDays(scored[i].m.CreatedAt, now))
-			fj := scored[j].base * DecayFactor(scored[j].m.Category, scored[j].m.Pinned, ageDays(scored[j].m.CreatedAt, now))
+			fi := scored[i].base * DecayFactor(scored[i].m.Category, scored[i].m.Retention, scored[i].m.Pinned, ageDays(scored[i].m.CreatedAt, now))
+			fj := scored[j].base * DecayFactor(scored[j].m.Category, scored[j].m.Retention, scored[j].m.Pinned, ageDays(scored[j].m.CreatedAt, now))
 			if fi != fj {
 				return fi > fj
 			}
@@ -1208,10 +1234,8 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	const columns = `
-		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
+	columns := `
+		SELECT ` + memoryColumns + `
 		FROM memories
 		WHERE id IN (%s)`
 

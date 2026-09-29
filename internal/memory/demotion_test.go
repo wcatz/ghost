@@ -100,7 +100,11 @@ func TestSupersedePenalties(t *testing.T) {
 		t.Fatalf("CreateLink outside: %v", err)
 	}
 
-	penalty, err := SupersedePenalties(ctx, s.db, []string{fresh, stale})
+	// nil protection: nothing here is pinned or keep-forever, and the two tests
+	// below are about the EDGE and about scope. The map is the caller's, not this
+	// function's — see SupersedePenalties and
+	// TestTheDemotionLookupsDoNotNameTheTierColumn.
+	penalty, err := SupersedePenalties(ctx, s.db, []string{fresh, stale}, nil)
 	if err != nil {
 		t.Fatalf("SupersedePenalties: %v", err)
 	}
@@ -111,7 +115,7 @@ func TestSupersedePenalties(t *testing.T) {
 		t.Errorf("penalty[fresh] = %d, want 0 (superseder is never sunk)", penalty[fresh])
 	}
 
-	if _, err := SupersedePenalties(ctx, s.db, []string{fresh}); err != nil {
+	if _, err := SupersedePenalties(ctx, s.db, []string{fresh}, nil); err != nil {
 		t.Fatalf("single-id window: %v", err)
 	}
 }
@@ -138,7 +142,7 @@ func TestSupersedePenaltiesIgnoresScopeConflictingEdge(t *testing.T) {
 	if len(links) != 1 {
 		t.Fatalf("scope guard must not delete the existing edge, got %+v", links)
 	}
-	penalty, err := SupersedePenalties(ctx, s.db, []string{dev, prod})
+	penalty, err := SupersedePenalties(ctx, s.db, []string{dev, prod}, nil)
 	if err != nil {
 		t.Fatalf("SupersedePenalties: %v", err)
 	}
@@ -160,7 +164,7 @@ func TestSupersedePenaltiesKeepsOneSidedScopeEdge(t *testing.T) {
 		t.Fatalf("CreateLink: %v", err)
 	}
 
-	penalty, err := SupersedePenalties(ctx, s.db, []string{scoped, unscoped})
+	penalty, err := SupersedePenalties(ctx, s.db, []string{scoped, unscoped}, nil)
 	if err != nil {
 		t.Fatalf("SupersedePenalties: %v", err)
 	}

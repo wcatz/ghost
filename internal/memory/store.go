@@ -95,6 +95,24 @@ type Memory struct {
 	ValidUntil *string `json:"valid_until,omitempty"`
 	VerifiedAt *string `json:"verified_at,omitempty"`
 
+	// Retention is how long this memory is wanted: session, project (the
+	// default) or persistent. It is the lifecycle axis, and the only one that
+	// can take a row away on its own — and only a session row, only past its
+	// expiry, only past a grace period, and only behind `ghost prune --apply`.
+	//
+	// Empty means "this row came from a query that did not select the column",
+	// or "no version ever recorded one" — the historical read is the second, and
+	// leaves it empty on purpose (see AsOfRow.Retention). It is never read as
+	// session, because the one tier whose absence has consequences is the one no
+	// reader may infer.
+	Retention string `json:"retention"`
+	// ExpiresAt is when a session row stops being wanted, derived on save as
+	// now+SessionTTL. NULL for every other tier, and NULL means "no expiry is
+	// claimed": a row without one is never a prune candidate. Like the validity
+	// triple it is the stored string, not a parsed time — interpreting it belongs
+	// to the caller, the only layer that has the request clock.
+	ExpiresAt *string `json:"expires_at,omitempty"`
+
 	// ReplacesIDs names the input rows this row stands in for — the ids a
 	// consolidation folded together or rewrote into this one. Only
 	// ReplaceNonManual reads it, and only to stamp the successor id on those
@@ -2583,6 +2601,31 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 	defer s.mu.Unlock()
 
 	tags, _ := json.Marshal(m.Tags)
+	// A Memory carries its own tier, and this is the writer that stores the
+	// struct rather than a list of arguments — so a caller that set Retention
+	// and got `project` back would have been silently overruled. Refused before
+	// the transaction for the same reason Upsert refuses: a bad value costs
+	// nothing.
+	retention, err := NormalizeRetention(m.Retention)
+	if err != nil {
+		return "", err
+	}
+	expires := sessionExpiry(retention, time.Now())
+	if retention == RetentionSession && m.ExpiresAt != nil {
+		// A session row's expiry may be stated rather than derived, and ONLY a
+		// session row's: the gate is the point. Without it this would put an expiry
+		// on a durable row, which is a claim about when the user stops wanting a
+		// memory that no caller ever made -- and one that prune would then ignore,
+		// so the column would lie and the prune would not even be able to say so.
+		// A durable row's NULL is the unprunable direction, and it stays.
+		//
+		// The callers that exist are the corpus seeders, which replay a row they
+		// already hold, and a test restoring a shape. `Store.RestoreSnapshot` is
+		// NOT one of them: it writes through its own INSERT ... SELECT, which does
+		// not name the column, so a restored row takes the DEFAULT — the same
+		// "the change log holds no tier" answer as everything else in that path.
+		expires = *m.ExpiresAt
+	}
 
 	tx, _, err := s.beginWrite(ctx, "create")
 	if err != nil {
@@ -2594,14 +2637,15 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
 		                      agent, session_id, source_ref, confidence, scope,
-		                      valid_from, valid_until, verified_at)
-		VALUES (COALESCE(NULLIF(?, ''), hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      valid_from, valid_until, verified_at,
+		                      retention, expires_at)
+		VALUES (COALESCE(NULLIF(?, ''), hex(randomblob(16))), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, opts.id, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags),
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID),
 		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope),
 		nullIfEmptyPtr(m.ValidFrom), nullIfEmptyPtr(m.ValidUntil),
-		nullIfEmptyPtr(m.VerifiedAt)).Scan(&id)
+		nullIfEmptyPtr(m.VerifiedAt), retention, expires).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create memory: %w", err)
 	}
@@ -3003,6 +3047,101 @@ type UpsertOptions struct {
 	// mean — a promotion that reported success without pinning would have
 	// stored nothing and protected nothing.
 	Pin bool
+
+	// Retention is the tier this save asks for: session, project or persistent.
+	// Empty is project — the tier a store has always had, and the only reading of
+	// "the caller said nothing" that costs nothing when it is wrong.
+	//
+	// A fold RAISES the surviving row's tier and never lowers it (see
+	// raiseRetentionTx), so this option reaches the row a later consolidation
+	// would absorb rather than only the copy this call inserts. Lowering would
+	// be the dangerous direction: a session-scoped save that demoted another
+	// memory's durable tier to its own would be scheduling that memory for
+	// deletion on the strength of a near-duplicate.
+	Retention string
+}
+
+// mergeRetention resolves a fold's two tiers into the one the surviving row
+// keeps, by taking the LONGER life. It is a pure function of the two values so
+// the rule is testable without a store, and it is the whole of the asymmetry:
+// raising is allowed because a protection the caller asked for and did not get
+// is a false report, while lowering is not, because the tier a row already has
+// is a claim about it that a near-duplicate has no standing to withdraw.
+//
+// A value that is not one of the three is ranked as project — the value a reader
+// resolves an unset column to — so an unexpected string can neither be escalated
+// to persistent by a fold nor demote anything.
+func mergeRetention(current, incoming string) string {
+	rank := func(tier string) int {
+		switch tier {
+		case RetentionSession:
+			return 1
+		case RetentionPersistent:
+			return 3
+		default:
+			return 2
+		}
+	}
+	if IsValidRetention(current) && rank(current) >= rank(incoming) {
+		return current
+	}
+	if IsValidRetention(incoming) {
+		return incoming
+	}
+	return RetentionProject
+}
+
+// raiseRetentionTx raises one row's tier to protect, never lowers it, and
+// reports the tier the row ended up with so the save result can name the row
+// that carries the caller's protection.
+//
+// expires_at is cleared when the row leaves the session tier: a durable row with
+// an expiry is a claim about when the user stops wanting it that nobody made,
+// and the value a session row carried described the life of a tier it no longer
+// has. It is left alone when the row stays session, because the expiry belongs
+// to that row's own save rather than to the save that happened to fold into it.
+//
+// A row already at the merged tier is not written at all, so a fold that changes
+// nothing about protection leaves the row's other columns alone.
+func raiseRetentionTx(ctx context.Context, tx *sql.Tx, id, incoming string) (string, error) {
+	if id == "" {
+		return incoming, nil
+	}
+	var current string
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(retention, 'project') FROM memories WHERE id = ?`, id).Scan(&current)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return incoming, nil
+		}
+		return "", fmt.Errorf("read the fold target's retention: %w", err)
+	}
+	merged := mergeRetention(current, incoming)
+	if merged == current {
+		return merged, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories
+		SET retention = ?,
+		    expires_at = CASE WHEN ? = 'session' THEN expires_at ELSE NULL END
+		WHERE id = ?`, merged, merged, id); err != nil {
+		return "", fmt.Errorf("raise retention: %w", err)
+	}
+	return merged, nil
+}
+
+// sessionExpiry is the expires_at a row of that tier is stored with: derived
+// for a session save, absent for every other tier.
+//
+// One function because both tiers' shapes are the same decision — "is this row
+// scheduled to stop being wanted" — and a writer that inlined the conditional
+// would leave a second place to get the durable case wrong. The derivation is
+// the ONLY source of an expiry: a caller cannot state one on a save, so there is
+// no way for a save to schedule the memory it just wrote for deletion.
+func sessionExpiry(tier string, now time.Time) any {
+	if tier != RetentionSession {
+		return nil
+	}
+	return now.UTC().Add(SessionTTL).Format("2006-01-02 15:04:05")
 }
 
 // boolToInt is SQLite's boolean: the pinned column is an INTEGER and every
@@ -3135,6 +3274,17 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
 		return "", "", 0, err
 	}
+	// Same place, same reason, and for the same caller: a tier the vocabulary
+	// does not hold is a typo, and the refusal costs nothing and writes nothing.
+	// It has to happen before the FTS probe rather than after it, because a fold
+	// returns an existing id and writes a linked copy — a tier the fold dropped
+	// on the way would be a protection the caller was promised and did not get.
+	retention, err := NormalizeRetention(opts.Retention)
+	if err != nil {
+		return "", "", 0, err
+	}
+	expires := sessionExpiry(retention, time.Now())
+
 	parentTx, inTx := storeTxFromContext(ctx)
 	if !inTx {
 		s.mu.Lock()
@@ -3563,6 +3713,12 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if err = s.pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
 				return "", "", 0, err
 			}
+			// The tier reaches the target here for the same reason the pin does:
+			// this path stores no row of its own, so the target is the only thing
+			// the request can mean.
+			if _, err = raiseRetentionTx(ctx, tx, existingID, retention); err != nil {
+				return "", "", 0, err
+			}
 			if err = commit(); err != nil {
 				return "", "", 0, err
 			}
@@ -3572,15 +3728,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags,
 			                      agent, session_id, source_ref, confidence, scope, pinned,
-			                      valid_from, valid_until, verified_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			                      valid_from, valid_until, verified_at,
+			                      retention, expires_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
 		`, projectID, category, content, source, importance, string(tagsJSON),
 			nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 			nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
 			scopeJSON(opts.Scope), boolToInt(opts.Pin),
 			nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
-			nullIfEmptyPtr(opts.Validity.VerifiedAt)).Scan(&id); err != nil {
+			nullIfEmptyPtr(opts.Validity.VerifiedAt), retention, expires).Scan(&id); err != nil {
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
 		}
 		if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
@@ -3607,6 +3764,14 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// transaction as the strengthen and the link, or a failure here would
 		// report a successful save whose request was silently dropped.
 		if err = s.pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
+			return "", "", 0, err
+		}
+		// And the tier, for the reason raiseRetentionTx gives: the row a fold
+		// strengthens is the one the corpus keeps, so a tier the caller asked
+		// for has to land there rather than only on the copy inserted above.
+		// Same transaction as the strengthen and the link, or a failure here
+		// would report a save whose request was silently dropped.
+		if _, err = raiseRetentionTx(ctx, tx, existingID, retention); err != nil {
 			return "", "", 0, err
 		}
 
@@ -3646,15 +3811,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if err = db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
 		                      agent, session_id, source_ref, confidence, scope, pinned,
-		                      valid_from, valid_until, verified_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      valid_from, valid_until, verified_at,
+		                      retention, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, category, content, source, importance, string(tagsJSON),
 		nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
 		nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
 		scopeJSON(opts.Scope), boolToInt(opts.Pin),
 		nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
-		nullIfEmptyPtr(opts.Validity.VerifiedAt)).Scan(&id); err != nil {
+		nullIfEmptyPtr(opts.Validity.VerifiedAt), retention, expires).Scan(&id); err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
@@ -3693,8 +3859,39 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 // Pinned is a full decay exemption (factor 1.0), not a multiplier on top of
 // the decayed/floored score — a pinned memory always scores at its raw
 // importance regardless of age or category. It's a no-op for
-// preference/convention/fact, which already never decay.
-const DecayRankingSQL = `
+// preference/convention/fact, which already never decay, and for every tier but
+// session: the tier factor is the one that has to multiply rather than stand in,
+// because a session row decays by its category AND by how long it is wanted.
+//
+// A var, not a const, because the tier half is built from the Go constants that
+// define its floor — see retentionDecayFactorSQL. Every reader interpolates it
+// into its own ORDER BY, so the two spellings cannot disagree.
+var DecayRankingSQL = decayRankingSQL(true)
+
+// DecayRankingSQLWithTier is the same expression with or without the tier half,
+// for a reader that may not be able to name memories.retention. The
+// session-start loaders hold a read-only handle that runs no migration
+// (memory.OpenReadDB), so on a store from before schema v19 the column is not
+// there and naming it fails the whole query with SQLite's "no such column" —
+// which both loaders read as no rows, so a user whose first session after the
+// upgrade starts the hook would get a digest with no memories and nothing saying
+// why. That is the same window `scopeColumnExpr` has always covered for
+// memories.scope, and the remedy is the same shape: the expression a reader
+// cannot afford to fail on drops the half it cannot spell.
+//
+// One template, so the category half cannot drift from DecayRankingSQL — a second
+// hand-copied expression is the failure mode DecayFactor's parity test exists to
+// prevent, and this is the same formula by another route.
+func DecayRankingSQLWithTier(hasTier bool) string {
+	return decayRankingSQL(hasTier)
+}
+
+func decayRankingSQL(hasTier bool) string {
+	tier := ""
+	if hasTier {
+		tier = retentionDecayFactorSQL
+	}
+	return `
 	importance
 	* CASE
 		WHEN pinned = 1 THEN 1.0
@@ -3703,8 +3900,9 @@ const DecayRankingSQL = `
 			MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
 		ELSE
 			MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
-	END
+	END` + tier + `
 `
+}
 
 // GetTopMemories returns the top N memories ranked by composite score
 // with category-aware time decay and pinned exemption.
@@ -3713,9 +3911,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
+		SELECT `+memoryColumns+`
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global')
 		  AND resolved_at IS NULL
@@ -3737,10 +3933,18 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	// when the result fits under limit (order alone still matters).
 	if len(results) >= 2 {
 		ids := make([]string, len(results))
+		supersedeProtected := make(map[string]bool, len(results))
 		for i, m := range results {
 			ids[i] = m.ID
+			// The KEEP-FOREVER tier only — a `supersedes` edge says the target's
+			// claim was replaced, and a pin keeps a row visible rather than
+			// declaring it current, so a pinned superseded target sinks exactly as
+			// it did before tiers existed. Same rule as the search path's
+			// demoteSuperseded, and unlike the near-duplicate map below, whose
+			// pin half predates tiers and is described there.
+			supersedeProtected[m.ID] = RetentionExempt(m)
 		}
-		penalty, err := SupersedePenalties(ctx, s.queryDB(), ids)
+		penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, supersedeProtected)
 		if err != nil {
 			s.logger.Debug("get top memories: supersede demotion lookup failed", "error", err)
 		} else if len(penalty) > 0 {
@@ -3749,12 +3953,20 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	}
 	if len(results) > limit {
 		ids := make([]string, len(results))
-		pinned := make(map[string]bool, len(results))
+		// A protection map, not a pin list (see DemotionPenalties): this is the
+		// session-start injection read, so a keep-forever memory that is the
+		// lower-ranked member of a near-duplicate pair would be cut out of the
+		// very block the tier exists to keep it in. Unlike the supersede
+		// protection above, THIS map still carries a plain pin: sparing a pinned
+		// row from the near-duplicate demotion is what DemotionPenalties did
+		// before tiers existed, and the tier only extends that standing rule to
+		// keep-forever rows.
+		protected := make(map[string]bool, len(results))
 		for i, m := range results {
 			ids[i] = m.ID
-			pinned[m.ID] = m.Pinned
+			protected[m.ID] = m.Pinned || RetentionExempt(m)
 		}
-		penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, pinned, s.demotionThreshold)
+		penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
 		if err != nil {
 			s.logger.Debug("get top memories: demotion lookup failed", "error", err)
 		} else {
@@ -3771,9 +3983,7 @@ func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit in
 	defer s.mu.RUnlock()
 
 	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
-		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
-		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope, m.valid_from, m.valid_until, m.verified_at
+		SELECT `+memoryColumnsPrefixed+`
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE (m.project_id = ? OR m.project_id = '_global')
@@ -3794,9 +4004,7 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 	defer s.mu.RUnlock()
 
 	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
-		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
-		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope, m.valid_from, m.valid_until, m.verified_at
+		SELECT `+memoryColumnsPrefixed+`
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE memories_fts MATCH ?
@@ -3816,9 +4024,7 @@ func (s *Store) GetByCategory(ctx context.Context, projectID, category string, l
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
+		SELECT `+memoryColumns+`
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global') AND category = ?
 		ORDER BY importance DESC, created_at DESC
@@ -3837,9 +4043,7 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
+		SELECT `+memoryColumns+`
 		FROM memories
 		WHERE project_id = ?
 		ORDER BY importance DESC, created_at DESC
@@ -3850,6 +4054,78 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 	}
 	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
+}
+
+// ListMemories returns a project's memories for browsing, narrowed by the two
+// row-level filters a caller can state and left open for everything else. An
+// empty category or retention is no filter on that axis.
+//
+// It is one query rather than GetAll followed by a filter, for the same reason
+// the assembler's predicates run before the window closes: a filter applied to
+// the result spends the LIMIT on rows the caller cannot use and then reports the
+// ones it wanted as absent. The tier predicate is bound, never interpolated, and
+// the vocabulary is checked here rather than trusted — a browse surface that
+// silently ignored a value it did not recognise would answer a mistyped filter
+// with the whole corpus.
+//
+// The SCOPE is the project's own rows alone, which is what the unfiltered browse
+// has always answered: a caller asking "what does this project know" is asking
+// about the project. A filtered browse also brings the `_global` rows, which is
+// what the category filter has always done and what makes a tier filter useful on
+// a keep-forever rule the user wrote once for every repository. That asymmetry is
+// inherited from the two readers this replaces (GetAll and GetByCategory
+// disagreed about it) and is kept rather than tidied, because the wider reading
+// applied to the DEFAULT answer is a behaviour change nobody asked for: a project
+// with no memories of its own would come back holding the per-install builtin
+// seeds, and the "no memories yet" answer a caller reads as a measurement would
+// become unreachable.
+func (s *Store) ListMemories(ctx context.Context, projectID, category, retention string, limit int) ([]Memory, error) {
+	if category != "" && !IsValidCategory(category) {
+		return nil, fmt.Errorf("invalid category %q — must be one of %s", category, categoryList())
+	}
+	if retention != "" && !IsValidRetention(retention) {
+		return nil, InvalidRetentionError(retention)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	scope := "project_id = ?"
+	if category != "" || retention != "" {
+		// A filtered browse keeps the wider scope the category filter has always
+		// had. See the method comment: this is inherited, not chosen, and it is
+		// deliberately NOT applied to the unfiltered default.
+		scope = "(project_id = ? OR project_id = '_global')"
+	}
+	query := `
+		SELECT ` + memoryColumns + `
+		FROM memories
+		WHERE ` + scope
+	var args []any
+	args = append(args, projectID)
+	if category != "" {
+		query += " AND category = ?"
+		args = append(args, category)
+	}
+	if retention != "" {
+		query += " AND retention = ?"
+		args = append(args, retention)
+	}
+	query += " ORDER BY importance DESC, created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list memories: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanMemories(rows)
+}
+
+// categoryList is the category vocabulary in schema order, for the refusal
+// ListMemories names. The map cannot be ranged in that order, which is why this
+// is a list rather than a join over the map's keys.
+func categoryList() string {
+	return "architecture, decision, pattern, convention, gotcha, dependency, preference, fact"
 }
 
 // Touch increments access_count and updates last_accessed.
@@ -3896,14 +4172,13 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
+		SELECT `+memoryColumns+`
 		FROM memories
 		WHERE project_id = ?
 		  AND resolved_at IS NULL
 		  AND pinned = 0
 		  AND category NOT IN ('convention', 'preference')
+		  AND `+retentionExemptSQL+`
 		ORDER BY created_at DESC
 	`, projectID)
 	if err != nil {
@@ -3926,14 +4201,13 @@ func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Mem
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
+		SELECT `+memoryColumns+`
 		FROM memories
 		WHERE project_id = ?
 		  AND resolved_at IS NOT NULL
 		  AND pinned = 0
 		  AND category NOT IN ('convention', 'preference')
+		  AND `+retentionExemptSQL+`
 		ORDER BY created_at DESC
 	`, projectID)
 	if err != nil {
@@ -4057,10 +4331,16 @@ const (
 		  AND (? = '' OR project_id = ?)
 		  AND resolved_at IS NULL
 		  AND pinned = 0
-		  AND category NOT IN ('convention', 'preference')`
+		  AND category NOT IN ('convention', 'preference')
+		  AND ` + retentionExemptSQL
 	// setResolvedUpdateSQL stamps the row and drops its KEEP cache in ONE
 	// statement, so no reader can observe a resolved row still holding a
 	// verdict the next pass would honour.
+	//
+	// Both carry retentionExemptSQL, so a `persistent` row is not stamped by
+	// either half of the one transaction that would stamp it — the SELECT is what
+	// decides the row is eligible and the UPDATE re-checks it at write time, and a
+	// protection asked at only one of them is lost the moment the two disagree.
 	setResolvedUpdateSQL = `
 		UPDATE memories SET resolved_at = datetime('now'), resolve_kept_hash = ''
 		WHERE id IN (%s)
@@ -4068,7 +4348,8 @@ const (
 		  AND (? = '' OR project_id = ?)
 		  AND resolved_at IS NULL
 		  AND pinned = 0
-		  AND category NOT IN ('convention', 'preference')`
+		  AND category NOT IN ('convention', 'preference')
+		  AND ` + retentionExemptSQL
 )
 
 // setResolvedStampTx is the shared body of the two resolve writers: one
@@ -5203,6 +5484,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		       agent, session_id, source_ref, confidence,
 		       valid_from, valid_until, verified_at, scope, 1
 		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		      AND `+retentionExemptSQL+`
 	`, snapshotID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot memories: %w", err)
@@ -5247,6 +5529,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, content, category, importance, tags, scope FROM memories
 		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		  AND `+retentionExemptSQL+`
 		ORDER BY created_at, id
 	`, projectID)
 	if err != nil {
@@ -5277,6 +5560,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		crows, err := tx.QueryContext(ctx, `
 			SELECT id FROM memories
 			WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
+			  AND `+retentionExemptSQL+`
 		`, projectID, consolidatedSince)
 		if err != nil {
 			return nil, fmt.Errorf("find concurrent memories: %w", err)
@@ -5627,6 +5911,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	removedIDs, err := selectIDs(ctx, tx, `
 		SELECT id FROM memories
 		WHERE project_id = ? AND source = 'reflection' AND pinned = 0 AND resolved_at IS NULL
+		  AND `+retentionExemptSQL+`
 		  AND NOT EXISTS (
 		      SELECT 1 FROM memory_snapshots s
 		      WHERE s.snapshot_id = ?
@@ -5643,6 +5928,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	del, err := tx.ExecContext(ctx, `
 		DELETE FROM memories
 		WHERE project_id = ? AND source = 'reflection' AND pinned = 0 AND resolved_at IS NULL
+		  AND `+retentionExemptSQL+`
 		  AND NOT EXISTS (
 		      SELECT 1 FROM memory_snapshots s
 		      WHERE s.snapshot_id = ?
@@ -5686,6 +5972,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		JOIN memories m ON m.id = s.memory_id
 		WHERE s.snapshot_id = ? AND s.memory_id = m.id
 		  AND m.pinned = 0 AND m.resolved_at IS NULL
+		  AND m.`+retentionExemptSQL+`
 		  AND (s.content != m.content OR s.category != m.category
 		       OR s.importance != m.importance OR s.source != m.source)`, snapshotID)
 	if err != nil {
@@ -5713,6 +6000,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		FROM memory_snapshots s
 		WHERE s.snapshot_id = ? AND s.memory_id = memories.id
 		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
+		  AND memories.`+retentionExemptSQL+`
 	`, snapshotID)
 	if err != nil {
 		return 0, fmt.Errorf("restore existing rows: %w", err)
@@ -5957,6 +6245,44 @@ func (s *Store) SetReflectInputSignature(ctx context.Context, projectID, sig str
 	return nil
 }
 
+// memoryColumns is the column list every full-row reader selects, in the order
+// scanMemories scans them. One list for six queries: a column added to Memory and
+// forgotten in one reader hydrates as a zero value in that reader and a real one
+// everywhere else, which reads as a bug in the column rather than as the omission
+// it is — and the omission is silent precisely where it matters, because a
+// session row that reads as "no tier stated" is one a prune cannot see.
+//
+// A reader that selects a SUBSET on purpose (the portable artifact, an as_of
+// version, a snapshot) keeps its own list and its own scanner; this one is for
+// the readers that hydrate a whole Memory.
+var memoryColumnNames = []string{
+	"id", "project_id", "category", "content", "importance", "access_count",
+	"last_accessed", "source", "tags", "pinned", "resolved_at", "created_at", "updated_at",
+	"agent", "session_id", "source_ref", "confidence", "scope",
+	"valid_from", "valid_until", "verified_at",
+	"retention", "expires_at",
+}
+
+// memoryColumnsPrefixed is the same list with every column qualified, for the
+// two FTS queries that alias memories as m (and therefore cannot say `scope` or
+// `retention` unqualified beside the FTS table). Derived from the one list for
+// the reason that list exists.
+var memoryColumnsPrefixed = qualifyColumns("m")
+
+func qualifyColumns(prefix string) string {
+	out := make([]string, len(memoryColumnNames))
+	for i, c := range memoryColumnNames {
+		if prefix != "" {
+			out[i] = prefix + "." + c
+			continue
+		}
+		out[i] = c
+	}
+	return strings.Join(out, ", ")
+}
+
+var memoryColumns = qualifyColumns("")
+
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var memories []Memory
 	for rows.Next() {
@@ -5969,6 +6295,7 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 		var confidence sql.NullFloat64
 		var scopeRaw sql.NullString
 		var validFrom, validUntil, verifiedAt sql.NullString
+		var expiresAt sql.NullString
 
 		if err := rows.Scan(
 			&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
@@ -5976,6 +6303,7 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 			&pinned, &resolvedAt, &m.CreatedAt, &m.UpdatedAt,
 			&agent, &sessionID, &sourceRef, &confidence, &scopeRaw,
 			&validFrom, &validUntil, &verifiedAt,
+			&m.Retention, &expiresAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
@@ -6018,6 +6346,20 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 		}
 		if verifiedAt.Valid {
 			m.VerifiedAt = &verifiedAt.String
+		}
+		// Same rule as the validity triple: the expiry is the stored string, and
+		// NULL stays nil because "no expiry is claimed" is the claim that keeps a
+		// row out of a prune's candidate set.
+		if expiresAt.Valid {
+			m.ExpiresAt = &expiresAt.String
+		}
+		// A row whose tier reads empty is a row a query did not select, not a
+		// fourth tier. Resolving it here — once — means no reader downstream has
+		// to know that shape exists, and the one value it resolves to is the one
+		// that costs nothing: a row nobody classified behaves as the corpus
+		// always has.
+		if m.Retention == "" {
+			m.Retention = RetentionProject
 		}
 
 		if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {

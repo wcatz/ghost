@@ -100,6 +100,13 @@ var writeSeamExemptions = map[string]string{
 	"schema.go:OpenDB":              "OpenDB refuses a newer store itself, before writing anything",
 	"schema.go:backupBeforeMigrate": "runs on OpenDB's handle, after the refusal, to make the pre-migration copy",
 
+	// The post-migration index builder, for the same reason as OpenDB and the
+	// migration path: both callers are inside OpenDB, so both run after the
+	// open-time refusal, on a handle no Store exists behind yet, and what they
+	// write is CREATE INDEX on a store this build has just migrated to its own
+	// version. A guard would ask a question the open has already answered.
+	"schema.go:ensurePostMigrationIndexes": "runs inside OpenDB after the open-time refusal, and a Store does not exist yet",
+
 	// A backup copies the store out; it does not write into it. Refusing it
 	// because the store is newer would refuse the exact copy an operator takes
 	// BEFORE replacing a stale server, which is the one moment the copy
