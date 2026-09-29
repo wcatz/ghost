@@ -1,0 +1,558 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// fakeEmbed stands in for Ollama: it answers every input with a deterministic
+// vector, counts the batches it served, and charges each call to the embedder's
+// budget, which is how a test drives the -embed-deadline wall clock without a
+// model, a network or a sleep.
+type fakeEmbed struct {
+	emb    *cachedEmbedder
+	path   string
+	calls  int
+	charge time.Duration
+}
+
+func (f *fakeEmbed) batch(_ context.Context, texts []string) ([][]float32, error) {
+	f.calls++
+	f.emb.budget.spent += f.charge
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		out[i] = []float32{float32(len(t)), 0.5, 0.25, 0.125}
+	}
+	return out, nil
+}
+
+// newFakeEmbedder returns a cachedEmbedder whose remote batch call is a fake
+// that costs `charge` of embed budget per call, writing to a real cache file so
+// a test can check what an interrupted pass leaves behind on disk.
+func newFakeEmbedder(t *testing.T, charge time.Duration) *fakeEmbed {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "embed-cache.jsonl")
+	emb, err := newCachedEmbedder("", path)
+	if err != nil {
+		t.Fatalf("newCachedEmbedder: %v", err)
+	}
+	f := &fakeEmbed{emb: emb, path: path, charge: charge}
+	emb.embed = f.batch
+	t.Cleanup(func() { _ = emb.Close() })
+	return f
+}
+
+func fakeTurns(n int) []string {
+	texts := make([]string, n)
+	for i := range texts {
+		texts[i] = fmt.Sprintf("turn %d of the haystack", i)
+	}
+	return texts
+}
+
+// TestEmbedDeadlineStopsBeforeTheNextBatch: an embedding pass that spends its
+// budget must stop at a batch boundary with everything it did compute already
+// appended to the cache file, and say so with errEmbedDeadline so the caller
+// can tell it apart from a broken run. The workflow's save step uploads exactly
+// those lines, which is the whole point: a pass killed at the job cap reaches
+// no save step at all and the cache never warms.
+func TestEmbedDeadlineStopsBeforeTheNextBatch(t *testing.T) {
+	const charge = 40 * time.Minute
+	f := newFakeEmbedder(t, charge)
+	f.emb.SetDeadline(50 * time.Minute) // two batches fit, the third does not
+
+	err := f.emb.EnsureBatch(context.Background(), fakeTurns(3*embedBatchSize))
+	if !errors.Is(err, errEmbedDeadline) {
+		t.Fatalf("EnsureBatch error = %v, want errEmbedDeadline", err)
+	}
+	if f.calls != 2 {
+		t.Errorf("fake embedder served %d batches, want 2 (the third must be refused before it is sent)", f.calls)
+	}
+	if _, misses := f.emb.Stats(); misses != 2*embedBatchSize {
+		t.Errorf("misses = %d, want %d", misses, 2*embedBatchSize)
+	}
+
+	// The vectors computed before the stop are on disk, not just in memory —
+	// the workflow's actions/cache/save step reads this file.
+	found := 0
+	file, err := os.Open(f.path)
+	if err != nil {
+		t.Fatalf("open embed cache: %v", err)
+	}
+	defer file.Close() //nolint:errcheck
+	sc := bufio.NewScanner(file)
+	for sc.Scan() {
+		var line cacheLine
+		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
+			t.Fatalf("cache line is not valid JSON: %v", err)
+		}
+		if len(line.Vector) == 0 || line.Hash == "" {
+			t.Errorf("cache line is missing its hash or vector: %s", sc.Text())
+		}
+		found++
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("read embed cache: %v", err)
+	}
+	if found != 2*embedBatchSize {
+		t.Errorf("embed cache holds %d lines, want %d", found, 2*embedBatchSize)
+	}
+}
+
+// TestEmbedDeadlineChargesRealEmbedTime: the budget is charged by the wall
+// clock the pass actually spends inside remote calls, measured around the call
+// itself — not by anything the caller asserts. The fake here deliberately
+// charges NOTHING and just takes time, so this fails if the harness stops
+// measuring (or stops charging) the real call: the second batch would then fit
+// inside a budget the first batch has already overrun by 20x.
+func TestEmbedDeadlineChargesRealEmbedTime(t *testing.T) {
+	const slowCall = 5 * time.Millisecond
+	slow := &fakeEmbed{charge: 0}
+	emb, err := newCachedEmbedder("", filepath.Join(t.TempDir(), "embed-cache.jsonl"))
+	if err != nil {
+		t.Fatalf("newCachedEmbedder: %v", err)
+	}
+	t.Cleanup(func() { _ = emb.Close() })
+	slow.emb = emb
+	emb.embed = func(_ context.Context, texts []string) ([][]float32, error) {
+		slow.calls++
+		time.Sleep(slowCall)
+		out := make([][]float32, len(texts))
+		for i, t := range texts {
+			out[i] = []float32{float32(len(t)), 0.5, 0.25, 0.125}
+		}
+		return out, nil
+	}
+	// Two batches; the first's measured cost (>= 5ms) alone exhausts a 1ms
+	// budget, so the second must be refused.
+	emb.SetDeadline(time.Millisecond)
+	if err := emb.EnsureBatch(context.Background(), fakeTurns(2*embedBatchSize)); !errors.Is(err, errEmbedDeadline) {
+		t.Fatalf("EnsureBatch error = %v, want errEmbedDeadline", err)
+	}
+	if slow.calls != 1 {
+		t.Errorf("fake embedder served %d batches, want 1", slow.calls)
+	}
+}
+
+// TestEmbedDeadlineLeavesAWarmCacheAlone: the budget bounds the embedding
+// pass, so a pass that needs no remote call at all can never be cut off by it,
+// however much of the budget a previous pass spent. This is what makes
+// re-dispatching terminate: a dispatch whose cache is already complete runs its
+// scoring pass and reports real numbers, instead of stopping at its budget and
+// making no progress forever.
+func TestEmbedDeadlineLeavesAWarmCacheAlone(t *testing.T) {
+	f := newFakeEmbedder(t, 40*time.Minute)
+	texts := []string{"alice moved to lisbon", "bob ships on fridays"}
+	if err := f.emb.EnsureBatch(context.Background(), texts); err != nil {
+		t.Fatalf("cold EnsureBatch: %v", err)
+	}
+	callsAfterCold := f.calls
+
+	// Budget already spent (40m against a 1m limit), so any remote call now
+	// would be refused. Both a batch resolve and a single lookup have to
+	// succeed from cache anyway, or a warm dispatch would stop partway through
+	// scoring and re-dispatch could never finish.
+	f.emb.SetDeadline(1 * time.Minute)
+	if err := f.emb.EnsureBatch(context.Background(), texts); err != nil {
+		t.Fatalf("a cached batch must not be cut off by the embed budget: %v", err)
+	}
+	if _, err := f.emb.EmbedDocument(context.Background(), texts[0]); err != nil {
+		t.Fatalf("a cached document must not be cut off by the embed budget: %v", err)
+	}
+	if f.calls != callsAfterCold {
+		t.Errorf("warm pass made %d remote calls, want 0", f.calls-callsAfterCold)
+	}
+	// The lookup resolved from the cache rather than falling through to the
+	// (exhausted) remote path: one more miss would have been computed.
+	if _, misses := f.emb.Stats(); misses != len(texts) {
+		t.Errorf("misses = %d, want %d: a cached lookup was recomputed remotely", misses, len(texts))
+	}
+}
+
+// TestWarmProgressCountsDistinctRolePrefixedInputs: the partial-run report says
+// "cache warmed N/M", so N and M have to count the vectors this pass actually
+// needs: every distinct haystack turn in the document role and every distinct
+// question in the query role. Shared sessions across questions are one vector,
+// and the same text in the two roles is two — the prefixes are what make them
+// different vectors, and a document-role embedding of a question must not
+// satisfy the question's query role.
+func TestWarmProgressCountsDistinctRolePrefixedInputs(t *testing.T) {
+	aliceTurn := turn{Role: "user", Content: "alice moved to lisbon"}
+	bobTurn := turn{Role: "user", Content: "bob ships on fridays"}
+	catTurn := turn{Role: "user", Content: "the cat sleeps"}
+	q1 := question{
+		QuestionID: "q1", Question: "where does alice live?",
+		SessionIDs: []string{"s1", "s2"},
+		Sessions:   [][]turn{{aliceTurn, bobTurn}, {bobTurn}},
+	}
+	// q2 shares bob's session with q1 and repeats one of its turns, so the
+	// distinct-input count cannot be a per-turn tally.
+	q2 := question{
+		QuestionID: "q2", Question: "when does bob ship?",
+		SessionIDs: []string{"s2", "s3"},
+		Sessions:   [][]turn{{bobTurn, catTurn}, {aliceTurn}},
+	}
+	selected := []question{q1, q2}
+	// 3 distinct turns (alice, bob, cat) + 2 questions = 5.
+	const wantRequired = 5
+
+	ctx := context.Background()
+	f := newFakeEmbedder(t, 0)
+	cached, required := f.emb.warmProgress(selected)
+	if required != wantRequired {
+		t.Errorf("required = %d, want %d", required, wantRequired)
+	}
+	if cached != 0 {
+		t.Errorf("cached = %d on an empty cache, want 0", cached)
+	}
+
+	// Embedding q1's question as a DOCUMENT fills the document role only.
+	if err := f.emb.EnsureBatch(ctx, []string{q1.Question}); err != nil {
+		t.Fatalf("EnsureBatch: %v", err)
+	}
+	cached, required = f.emb.warmProgress(selected)
+	if required != wantRequired {
+		t.Errorf("required = %d after embedding, want %d", required, wantRequired)
+	}
+	if cached != 0 {
+		t.Errorf("cached = %d, want 0: a document-role embedding of %q is not the question's query vector",
+			cached, q1.Question)
+	}
+
+	if err := f.emb.EnsureBatch(ctx, []string{
+		aliceTurn.Content, bobTurn.Content, catTurn.Content,
+	}); err != nil {
+		t.Fatalf("EnsureBatch: %v", err)
+	}
+	if _, err := f.emb.EmbedQuery(ctx, q1.Question); err != nil {
+		t.Fatalf("EmbedQuery: %v", err)
+	}
+	cached, required = f.emb.warmProgress(selected)
+	if cached != 4 || required != wantRequired {
+		t.Errorf("warmProgress = %d/%d, want 4/%d", cached, required, wantRequired)
+	}
+}
+
+// TestReportPassPartialPrintsNoResult: a pass stopped at its budget has scored
+// some questions, and their averages are all below the floors — so the one
+// thing it must not do is print a table a reader (or a log scraper) could take
+// for a benchmark result. It reports cache progress, prints no metrics at all,
+// and exits with the partial status rather than the floor-violation one.
+func TestReportPassPartialPrintsNoResult(t *testing.T) {
+	f := newFakeEmbedder(t, 0)
+	selected := []question{{QuestionID: "q1", Question: "where does alice live?"}}
+	// Two questions scored, both far below the floors, on a pass that stopped
+	// partway through the third.
+	partialAgg := &agg{n: 2, r5: 0.0, ndcg: 0.0}
+	var buf bytes.Buffer
+	status := reportPass(&buf, passReport{
+		condition: "hybrid",
+		overall:   partialAgg,
+		byType:    map[string]*agg{"single-session-user": partialAgg},
+		scored:    2,
+		embedder:  f.emb,
+		selected:  selected,
+		floors:    map[string]float64{"r5": 0.91, "ndcg10": 0.89},
+		partial:   true,
+		budget:    5 * time.Hour,
+		elapsed:   4 * time.Hour,
+	})
+
+	if status != exitPartial {
+		t.Errorf("status = %d, want exitPartial=%d", status, exitPartial)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "cache warmed") {
+		t.Errorf("partial report does not state cache progress: %q", got)
+	}
+	for _, isAResult := range []string{"OVERALL", "R@1", "question type", "questions scored", "FLOOR VIOLATION"} {
+		if strings.Contains(got, isAResult) {
+			t.Errorf("partial report contains %q — it reads as a benchmark result: %q", isAResult, got)
+		}
+	}
+}
+
+// TestPartialRunDiscardsItsResultFiles: -out and --retrieval-out are result
+// artefacts — per-question metrics and the Phase 4 generation input. A partial
+// pass breaks out of the scoring loop with both half-written, and a half-written
+// JSONL is byte-shaped exactly like a complete one: the Phase 4 pipeline reads
+// ranked.jsonl without knowing the producer's exit status, so it would judge a
+// subset of the benchmark and publish it as the result. A partial pass must
+// therefore leave no result file behind at all, and say which ones it removed.
+func TestPartialRunDiscardsItsResultFiles(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "per-question.jsonl")
+	retrievalOutPath := filepath.Join(dir, "ranked.jsonl")
+	for _, p := range []string{outPath, retrievalOutPath} {
+		if err := os.WriteFile(p, []byte(`{"question_id":"q1"}`+"\n"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+
+	removed, survived, err := discardPartialOutputs(true, outPath, retrievalOutPath, "")
+	if err != nil {
+		t.Fatalf("discardPartialOutputs: %v", err)
+	}
+	if len(survived) != 0 {
+		t.Errorf("survived %v, want nothing", survived)
+	}
+	if len(removed) != 2 {
+		t.Errorf("removed %v, want both result files named", removed)
+	}
+	for _, p := range []string{outPath, retrievalOutPath} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s survived a partial pass (stat err = %v): a half-written result file is indistinguishable from a complete one", p, err)
+		}
+	}
+
+	// A missing file is not an error: -out is optional, so the common partial
+	// run names no files at all.
+	if removed, _, err := discardPartialOutputs(true, ""); err != nil || len(removed) != 0 {
+		t.Errorf("discardPartialOutputs(true, \"\") = %v, %v; want no removals and no error", removed, err)
+	}
+
+	// The other half: a COMPLETE pass keeps both files. They are the whole
+	// point of -out / --retrieval-out, so the same call that deletes them for
+	// a partial pass must not touch them otherwise.
+	for _, p := range []string{outPath, retrievalOutPath} {
+		if err := os.WriteFile(p, []byte(`{"question_id":"q1"}`+"\n"), 0o644); err != nil {
+			t.Fatalf("reseed %s: %v", p, err)
+		}
+	}
+	removed, _, err = discardPartialOutputs(false, outPath, retrievalOutPath)
+	if err != nil {
+		t.Fatalf("discardPartialOutputs(false, ...): %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("a complete pass removed %v; its result files are the deliverable", removed)
+	}
+	for _, p := range []string{outPath, retrievalOutPath} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("a complete pass deleted %s (stat err = %v)", p, err)
+		}
+	}
+}
+
+// TestCloseAndDiscardPartialOutputsClosesBeforeUnlinking: the discard unlinks
+// the result files, and unlink fails on Windows while any handle to the file is
+// still open (Go opens without FILE_SHARE_DELETE, so DeleteFile is a sharing
+// violation). The files therefore have to be closed BEFORE the unlink, and
+// because a defer closes them again on the way out of run(), that close has to
+// be safe to repeat — a second os.File.Close on a closed file is fine, but a
+// nil handle (the flag was not passed) is not, and reaching one would panic.
+func TestCloseAndDiscardPartialOutputsClosesBeforeUnlinking(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "ranked.jsonl")
+	// A handle left open on the file, exactly as os.Create does mid-pass.
+	handle, err := os.Create(live)
+	if err != nil {
+		t.Fatalf("os.Create: %v", err)
+	}
+	if _, err := handle.WriteString("{}\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	removed, survived, err := closeAndDiscardPartialOutputs(true, []*os.File{handle, nil}, live)
+	if err != nil {
+		t.Fatalf("closeAndDiscardPartialOutputs: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Errorf("removed %v, want the open result file", removed)
+	}
+	if len(survived) != 0 {
+		t.Errorf("survived %v, want nothing", survived)
+	}
+	if _, statErr := os.Stat(live); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("result file survived the discard (stat err = %v)", statErr)
+	}
+	// The handle is closed as a side effect, which is the property the
+	// unlink-on-Windows failure turns on. A Write on a closed *os.File fails
+	// with ErrClosed rather than panicking or silently succeeding.
+	if _, err := handle.WriteString("late\n"); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("handle still open after the discard (write err = %v), want os.ErrClosed", err)
+	}
+	// The defer path: closing again must not panic, and a nil handle is a
+	// no-op rather than a nil dereference.
+	closeResultFiles(handle, nil)
+
+	// A complete pass closes its handles but deletes nothing.
+	kept := filepath.Join(dir, "per-question.jsonl")
+	keptHandle, err := os.Create(kept)
+	if err != nil {
+		t.Fatalf("os.Create: %v", err)
+	}
+	removed, _, err = closeAndDiscardPartialOutputs(false, []*os.File{keptHandle}, kept)
+	if err != nil {
+		t.Fatalf("closeAndDiscardPartialOutputs(false, ...): %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("a complete pass removed %v; its result files are the deliverable", removed)
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Errorf("a complete pass deleted %s (stat err = %v)", kept, err)
+	}
+}
+
+// TestDiscardPartialOutputsAttemptsEveryPath: -out and --retrieval-out name
+// independent paths, so one being un-unlinkable must not skip the other. The
+// second is the Phase 4 generation input — the file the whole discard exists to
+// protect — and returning on the first failure left it half-written with no
+// attempt made on it. Every path is attempted, and every survivor is named, so
+// the report cannot undercount.
+func TestDiscardPartialOutputsAttemptsEveryPath(t *testing.T) {
+	dir := t.TempDir()
+	// Two unlinkable paths, one removable, interleaved so a loop that bailed
+	// out early would miss the last one.
+	stubbornA := filepath.Join(dir, "per-question.jsonl")
+	stubbornB := filepath.Join(dir, "ranked.jsonl")
+	for _, p := range []string{stubbornA, stubbornB} {
+		if err := os.Mkdir(p, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "inner"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+	ok := filepath.Join(dir, "spare.jsonl")
+	if err := os.WriteFile(ok, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	removed, survived, err := discardPartialOutputs(true, stubbornA, ok, stubbornB)
+	if err == nil {
+		t.Fatal("discardPartialOutputs = nil error; want both failures reported")
+	}
+	if len(removed) != 1 || removed[0] != ok {
+		t.Errorf("removed %v, want only %s", removed, ok)
+	}
+	if len(survived) != 2 || survived[0] != stubbornA || survived[1] != stubbornB {
+		t.Errorf("survived %v, want BOTH unlinkable paths named", survived)
+	}
+	for _, p := range []string{stubbornA, stubbornB} {
+		if _, statErr := os.Stat(p); statErr != nil {
+			t.Errorf("%s was removed despite the failure being reported: %v", p, statErr)
+		}
+	}
+	// Every failure is in the joined error, not just the first.
+	for _, p := range []string{stubbornA, stubbornB} {
+		if !strings.Contains(err.Error(), p) {
+			t.Errorf("joined error omits %s: %v", p, err)
+		}
+	}
+}
+
+// TestReportPassNamesDiscardedFiles: the removal is only useful if the pass says
+// it happened, otherwise a re-dispatch finds its -out target missing with no
+// explanation in the log. A cleanup FAILURE is on the report too — every
+// surviving file, not just the first — and the status is still exitPartial,
+// because the pass warmed the cache either way and the workflow's re-dispatch
+// branch is what must still run.
+func TestReportPassNamesDiscardedFiles(t *testing.T) {
+	f := newFakeEmbedder(t, 0)
+
+	t.Run("removed files are named", func(t *testing.T) {
+		var buf bytes.Buffer
+		reportPass(&buf, passReport{
+			condition: "hybrid", overall: &agg{n: 1}, byType: map[string]*agg{},
+			scored: 1, embedder: f.emb, partial: true, budget: time.Minute, elapsed: time.Minute,
+			discarded: []string{"/tmp/ranked.jsonl"},
+		})
+		if !strings.Contains(buf.String(), "/tmp/ranked.jsonl") {
+			t.Errorf("partial report does not name the discarded result file: %q", buf.String())
+		}
+	})
+
+	t.Run("every surviving file is named and the status stays partial", func(t *testing.T) {
+		var buf bytes.Buffer
+		status := reportPass(&buf, passReport{
+			condition: "hybrid", overall: &agg{n: 1}, byType: map[string]*agg{},
+			scored: 1, embedder: f.emb, partial: true, budget: time.Minute, elapsed: time.Minute,
+			survived: []string{"/tmp/per-question.jsonl", "/tmp/ranked.jsonl"},
+			discardErr: errors.New("remove partial result /tmp/per-question.jsonl: directory not empty\n" +
+				"remove partial result /tmp/ranked.jsonl: permission denied"),
+		})
+		if status != exitPartial {
+			t.Errorf("status = %d, want exitPartial=%d: the pass still warmed the cache, so its status must not change", status, exitPartial)
+		}
+		// Assert on the summary line alone. The per-failure detail lines below
+		// it also carry the paths, so a whole-output substring check would
+		// pass even if the summary named only the first survivor — which is the
+		// bug this line of the report exists to prevent.
+		warning := ""
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.HasPrefix(line, "WARNING") {
+				warning = line
+			}
+		}
+		if warning == "" {
+			t.Fatalf("surviving files are not marked as a warning: %q", buf.String())
+		}
+		for _, p := range []string{"/tmp/per-question.jsonl", "/tmp/ranked.jsonl"} {
+			if !strings.Contains(warning, p) {
+				t.Errorf("the warning does not name the surviving file %s: %q", p, warning)
+			}
+		}
+	})
+}
+
+// TestReportPassCompletePrintsTheTable: the other half of the same branch —
+// a pass that finished still reports its metrics and still checks its floors,
+// so bounding the embedding pass changed nothing for a run that completes.
+func TestReportPassCompletePrintsTheTable(t *testing.T) {
+	f := newFakeEmbedder(t, 0)
+	full := &agg{n: 2, r1: 0.5, r5: 1.6, r10: 1.8, mrr: 1.5, ndcg: 1.4}
+
+	t.Run("clean pass reports OVERALL and exits 0", func(t *testing.T) {
+		var buf bytes.Buffer
+		status := reportPass(&buf, passReport{
+			condition: "hybrid", overall: full,
+			byType: map[string]*agg{"single-session-user": full},
+			scored: 2, embedder: f.emb, floors: map[string]float64{"r5": 0.74},
+		})
+		if status != exitComplete {
+			t.Errorf("status = %d, want exitComplete=%d", status, exitComplete)
+		}
+		if !strings.Contains(buf.String(), "OVERALL") {
+			t.Errorf("complete pass did not report its metrics: %q", buf.String())
+		}
+	})
+
+	t.Run("violating pass exits 1", func(t *testing.T) {
+		var buf bytes.Buffer
+		status := reportPass(&buf, passReport{
+			condition: "hybrid", overall: full,
+			byType: map[string]*agg{"single-session-user": full},
+			scored: 2, embedder: f.emb, floors: map[string]float64{"r5": 0.99},
+		})
+		if status != exitFailure {
+			t.Errorf("status = %d, want exitFailure=%d", status, exitFailure)
+		}
+	})
+}
+
+// TestPartialRunMessageIsNotAResult: the message a stopped pass prints is the
+// only thing a cold dispatch reports, so it has to read as progress plus a next
+// step — never as a score, and never as a metric a reader could floor-check.
+func TestPartialRunMessageIsNotAResult(t *testing.T) {
+	got := partialMessage(64000, 231904, 5*time.Hour, 4*time.Hour+58*time.Minute)
+	if !strings.Contains(got, "cache warmed 64000/231904 vectors") {
+		t.Errorf("partial message does not report progress: %q", got)
+	}
+	if !strings.Contains(got, "re-dispatch") {
+		t.Errorf("partial message does not name the next step: %q", got)
+	}
+	for _, notAResult := range []string{"OVERALL", "R@5", "NDCG", "FLOOR"} {
+		if strings.Contains(got, notAResult) {
+			t.Errorf("partial message reads like a result (%q present): %q", notAResult, got)
+		}
+	}
+}

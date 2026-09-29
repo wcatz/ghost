@@ -12,17 +12,55 @@ name: longmemeval
 # Why hybrid is not gated in CI: the cold embedding pass over the dataset is
 # CPU-bound (~6.5 embeds/sec even on fast hardware => several hours for the
 # full ~230k-vector pass on a hosted x86 runner), which exceeds any sane CI
-# timeout — a weekly schedule that never finished within its cap could never
-# warm actions/cache, so it just burned 4h and failed every time. nomic
-# embeddings are deterministic, so a cold run computes the SAME vectors as a
-# warm one => identical R@5/NDCG, so a warm LOCAL run is what justifies the
-# hybrid floors below — but see the caveat: that run predates the harness
-# adopting the search_document:/search_query: task prefixes, so the floors
-# have not been re-derived for the prefixed space. A dispatch today
-# floor-checks them instead of validating them (they came from a different
-# vector space); re-derive them from a prefixed run to get a real gate back
-# (see the CI-gating note in docs/benchmarks.md). Run hybrid via
-# workflow_dispatch (or locally) when you actually want the numbers.
+# timeout. A run left to the cap burns the whole job and stores nothing (why,
+# exactly, is below). nomic embeddings are deterministic, so a cold run computes
+# the SAME vectors as a warm one => identical R@5/NDCG, so a warm run is what
+# justifies the hybrid floors below.
+#
+# WHY A RUN LEFT TO THE CAP STORES NOTHING (#771). A cancelled step's shell is
+# killed but its CHILD IS NOT REAPED, so the harness keeps appending to the
+# append-only cache after the step ends. Any archive taken during that window is
+# not a snapshot: run 36501751853 (cancelled at its cap, 2026-09-29) shows it,
+# with the orphaned `longmemeval` still running when the save ran and tar
+# refusing the moving file —
+#
+#     /usr/bin/tar: .../embed-cache.jsonl: file changed as we read it
+#     ##[warning]Failed to save: "/usr/bin/tar" failed with error: ... exit 1
+#
+# — a failure actions/cache/save downgrades to a warning, so that run reported a
+# green save step over an entry that was never stored. No
+# longmemeval-embed-cache-v1-* entry exists in the repo, so there is still
+# nothing to restore.
+#
+# HOW A COLD RUN MAKES PROGRESS: the embed pass bounds itself with
+# -embed-deadline and EXITS ON ITS OWN, 60 minutes before the cap, so the bench
+# step completes normally and the cache file is QUIESCENT for the save step to
+# archive — that quiescence, not the exit status, is what makes the save able
+# to succeed. A stopped pass prints "cache warmed N/M vectors … re-dispatch"
+# INSTEAD of a metrics table and exits 3; the next dispatch restores the partial
+# cache via restore-keys and embeds the remainder. The budget counts remote
+# embed time only, so a dispatch whose restored cache is already complete is
+# never cut off mid-scoring and does reach a result.
+#
+# Under THIS workflow a cap-cancelled run reports `skipped` rather than a green
+# `success`: the bench shell dies with the cap and never reaches the line that
+# writes `grew`, so the gate below is false. Nothing is stored, but nothing
+# claims otherwise — which is the difference from the run above. That gate has
+# other causes too, including a warm pass with nothing to store and a complete
+# measurement that failed the floors; docs/benchmarks.md lists them against the
+# log evidence that separates each.
+#
+# RE-BASELINE STILL PENDING: the warm local run that set the floors below
+# predates the harness adopting the search_document:/search_query: task
+# prefixes, so the floors are from a different vector space and a dispatch
+# floor-checks them rather than validating them. Getting them real needs a
+# COMPLETE prefixed run, which now takes a small number of dispatches to
+# accumulate: keep re-dispatching until one reports a full pass (exit 0), then
+# read its OVERALL row, re-derive the floors from it, record the run id in
+# docs/benchmarks.md, and update this paragraph. Do NOT re-derive them from a
+# partial run — it prints no metrics, by design. See the CI-gating note in
+# docs/benchmarks.md. Run hybrid via workflow_dispatch (or locally) when you
+# actually want the numbers.
 on:
   workflow_dispatch:
     inputs:
@@ -101,9 +139,24 @@ jobs:
     # a schedule (see the header comment). Runs on manual dispatch unless the
     # input explicitly asked for fts alone.
     if: github.event_name == 'workflow_dispatch' && inputs.condition != 'fts'
-    # Generous: a cold embed-cache pass over the full dataset is CPU-bound and
-    # can take several hours on a hosted runner. Once actions/cache has a warm
-    # entry (a prior manual run that completed), repeat runs finish in minutes.
+    # Generous, because a cold embed-cache pass over the full dataset is
+    # CPU-bound and takes several hours on a hosted runner. Once actions/cache
+    # has a warm entry (a prior dispatch that completed), repeat runs finish in
+    # minutes.
+    #
+    # The cap is a backstop, NOT the way this pass is meant to end: a pass left
+    # to it is cancelled mid-write and stores nothing (see the header). The
+    # embedding pass therefore stops ITSELF, at -embed-deadline below.
+    #
+    # The margin is 60 minutes (360 - 300), and -embed-deadline charges ONLY
+    # time inside remote embed calls, so those 60 minutes must cover what the
+    # budget does not: setup (checkout, Go, the ~277MB dataset download, the
+    # Ollama install and model pull), the per-question SQLite ingest and search
+    # that is not an embed call, and the save step's tar + upload of a cache
+    # that grows with every dispatch. Run 36501751853 spent ~70s on setup with a
+    # dataset cache MISS — the download alone took 5s — so treat that as a floor
+    # for the margin, not a typical figure. Overrun it and the cancellation the
+    # deadline exists to prevent happens anyway.
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7.0.1
@@ -132,15 +185,22 @@ jobs:
 
       # Restore/save split (not a single actions/cache): cache keys are
       # immutable, and the fixed-key single-action variant only saves in the
-      # post-job phase, which a timed-out cold run never reaches — so the cache
-      # could never warm. A per-run save key plus the shared prefix restore-key
-      # lets each dispatch resume from the latest snapshot and warm the cache
+      # post-job phase — which, per the header, a cancelled cold run fails
+      # anyway. A per-run save key plus the shared prefix restore-key lets each
+      # dispatch resume from the latest snapshot and warm the cache
       # incrementally across runs.
+      #
+      # The key carries run_attempt as well as run_id, because a GitHub
+      # "Re-run" reuses the run_id and only bumps run_attempt (verified in this
+      # repo: run 36618752920, attempt 2). Keyed on run_id alone, a re-run
+      # resolved the same immutable key the first attempt had already taken —
+      # or would have — and its save was a silent no-op, so re-running a failed
+      # dispatch (the obvious response to one) could never make progress.
       - name: Restore embedding cache
         uses: actions/cache/restore@v6.1.0
         with:
           path: ${{ env.EMBED_CACHE_PATH }}
-          key: longmemeval-embed-cache-v1-${{ github.run_id }}
+          key: longmemeval-embed-cache-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             longmemeval-embed-cache-v1-
 
@@ -162,15 +222,69 @@ jobs:
         # pull leaves the v1.5 tag missing, so a 404 fails the run outright.
         run: ollama pull nomic-embed-text:v1.5
 
+      - name: Build the benchmark harness
+        run: go build -o "$RUNNER_TEMP/longmemeval" ./bench/longmemeval
+        # A built binary, not `go run`: `go run` reports the child's status on
+        # stderr but exits 1 for ANY non-zero child status, which would flatten
+        # the harness's distinct exit 3 ("partial, cache saved") into the same
+        # code as a floor violation and make the branch below unreachable.
+
       - name: Run hybrid condition with regression floors
+        id: bench
+        env:
+          # Wall clock the embedding pass may spend in remote embed calls
+          # before it stops itself, leaving the vectors it computed in
+          # -embed-cache. 300m against the 360m job cap: the ~12h cold pass
+          # cannot finish in one dispatch, so it is expected to stop here and
+          # be resumed by the next one. Counted in embed time only, so a
+          # dispatch whose restored cache is already complete is never cut off
+          # while scoring and does reach a result.
+          EMBED_DEADLINE: 300m
         run: |
           mkdir -p "$(dirname "$EMBED_CACHE_PATH")"
-          go run ./bench/longmemeval \
+          # Size of the restored snapshot before this dispatch touches it, for
+          # the grew/unchanged decision below.
+          before=$(stat -c %s "$EMBED_CACHE_PATH" 2>/dev/null || echo 0)
+          set +e
+          "$RUNNER_TEMP/longmemeval" \
             -data "$DATASET_PATH" \
             -condition hybrid \
             -ollama http://localhost:11434 \
             -embed-cache "$EMBED_CACHE_PATH" \
+            -embed-deadline "$EMBED_DEADLINE" \
             -floors "r5=0.91,ndcg10=0.89"
+          status=$?
+          set -e
+          # The cache is append-only, so a pass that computed nothing leaves it
+          # byte-identical to the snapshot the restore step downloaded. Saving
+          # that would add a duplicate immutable entry to the repository's
+          # finite cache quota (10GB, LRU-evicted) for no new vectors — and
+          # every later warm dispatch would add another. Report whether this
+          # dispatch grew the cache so the save step below can skip those.
+          after=$(stat -c %s "$EMBED_CACHE_PATH" 2>/dev/null || echo 0)
+          if [ "$after" -gt "$before" ]; then
+            echo "grew=true" >> "$GITHUB_OUTPUT"
+            echo "embed cache grew: ${before} -> ${after} bytes"
+          else
+            echo "grew=false" >> "$GITHUB_OUTPUT"
+            echo "embed cache unchanged at ${after} bytes; nothing new to save"
+          fi
+          case "$status" in
+            0)
+              echo "hybrid pass complete; floors checked against a full question set"
+              ;;
+            3)
+              # Partial: the embedding pass stopped at its budget with its
+              # progress in the cache, and deliberately reported no metrics.
+              # Not a failure and not a result — the next dispatch resumes from
+              # the cache the save step below uploads.
+              echo "::warning::embedding pass stopped at its ${EMBED_DEADLINE} budget: partial, cache saved. Re-dispatch to continue warming; this run reports no benchmark result."
+              ;;
+            *)
+              echo "::error::bench/longmemeval failed with exit ${status}"
+              exit "$status"
+              ;;
+          esac
         # Floors derived from published hybrid OVERALL numbers
         # (docs/benchmarks.md, 2026-07-15 run, n=470): R@5 0.930 -> floor
         # 0.91, NDCG@10 0.903 -> floor 0.89. Same ~0.01-0.02 safety margin
@@ -185,14 +299,43 @@ jobs:
         # First run on a cold embed-cache embeds the whole dataset on CPU and
         # is slow (hence the generous timeout above); once actions/cache has a
         # warm entry under the longmemeval-embed-cache-v1- prefix, subsequent
-        # runs are fast (only new/changed content gets embedded).
+        # runs are fast (only new/changed content gets embedded). The first
+        # dispatches on a cold cache end at -embed-deadline with the cache
+        # saved, NOT at the job cap — re-dispatch until one completes. A
+        # "Re-run" of a failed dispatch also resumes (its key carries
+        # run_attempt, see the restore step).
 
       - name: Save embedding cache
-        # if: always() so a partial embed pass still snapshots progress even if
-        # the run step fails or the job hits its timeout — the next dispatch
-        # then resumes via restore-keys instead of starting cold again.
-        if: always()
+        # `grew` is written by the bench step, which the -embed-deadline keeps
+        # clear of the cap: a partial pass exits 3 at 300m, the shell survives
+        # to record the size change, and this step runs on a quiescent file.
+        #
+        # grew=false means this dispatch computed no vectors, so the file is
+        # byte-identical to the snapshot restore already downloaded: saving it
+        # would write a duplicate immutable entry (the whole cache, ~GB at
+        # full warmth) into a 10GB repository quota whose eviction is LRU, and
+        # an entry evicted is a dispatch that silently restarts cold. Warm
+        # dispatches are the common case once the cache is full, so skipping
+        # them is what keeps the quota available for dispatches that add
+        # something.
+        #
+        # `skipped` means this gate was false, and the gate is the only cause.
+        # The bench step's last line tells the cases apart, and its ABSENCE is a
+        # case in itself — no size line at all means the bench step never got
+        # that far (the cap, or an earlier step failed). `embed cache
+        # unchanged` alone is ambiguous: a green bench step is a warm pass with
+        # nothing to store, but a red one can be a COMPLETE measurement that
+        # failed the floors (nothing embedded, and a real number that matters).
+        # docs/benchmarks.md carries the full list against the log evidence.
+        # Unlike the ungated `always()` this replaced, none of these reports a
+        # green `success` over a cache that was not saved.
+        #
+        # A save that RUNS and fails is only a WARNING and still concludes
+        # `success`, so a `Failed to save` line in this step's log is the thing
+        # to read when a dispatch reports progress the next one does not build
+        # on.
+        if: always() && steps.bench.outputs.grew == 'true'
         uses: actions/cache/save@v6.1.0
         with:
           path: ${{ env.EMBED_CACHE_PATH }}
-          key: longmemeval-embed-cache-v1-${{ github.run_id }}
+          key: longmemeval-embed-cache-v1-${{ github.run_id }}-${{ github.run_attempt }}
