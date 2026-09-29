@@ -445,9 +445,9 @@ func TestEveryLiteralAttestationSubjectExists(t *testing.T) {
 // guard justify the very paths it exists to check: every literal it names would
 // enter the "this job builds it" set and be waved through as a real file while
 // nothing builds it. Today the release job's guard names dist/checksums.txt and
-// no other step does, so the filter is what keeps that path honest — and
-// TestTheGuardStepIsNotABuildStep is what keeps the filter from being deleted
-// as an apparently-inert precaution.
+// no other step in that job does — and that is exactly why the filter's
+// behaviour is tested on synthetic step lists rather than inferred from this
+// workflow.
 func buildStepsBefore(steps []workflowStep, attestIdx int) []workflowStep {
 	var out []workflowStep
 	for _, s := range steps[:attestIdx] {
@@ -458,13 +458,15 @@ func buildStepsBefore(steps []workflowStep, attestIdx int) []workflowStep {
 	return out
 }
 
-// TestTheGuardStepIsNotABuildStep checks both halves of that: the guard is
-// filtered out, AND filtering it actually changes the answer — so a filter that
-// silently stopped matching the guard's name cannot pass as a no-op.
+// TestTheGuardStepIsNotABuildStep keeps the guard out of the build-step set in
+// THIS workflow: the guard must be present, must run before the attest step, and
+// must not survive the filter. The filter's behaviour beyond that is pinned by
+// TestBuildStepsBeforeExcludesTheGuard on synthetic step lists, because anything
+// more here would be a statement about this workflow that a later, unrelated
+// step could make lapse in silence.
 func TestTheGuardStepIsNotABuildStep(t *testing.T) {
 	wf, _ := loadReleaseWorkflow(t)
 	byJob := attestStepsByJob(wf)
-	filterChangedSomething := false
 
 	for job, idxs := range byJob {
 		attestIdx := idxs[0]
@@ -480,33 +482,20 @@ func TestTheGuardStepIsNotABuildStep(t *testing.T) {
 			}
 		}
 
-		all := map[string]bool{}
-		for _, p := range distPathsInRunSteps(wf.Jobs[job].Steps[:attestIdx]) {
-			all[p] = true
-		}
 		built := map[string]bool{}
 		for _, p := range distPathsInRunSteps(kept) {
 			built[p] = true
 		}
-		// No "built but not named" check here, and deliberately so:
-		// buildStepsBefore only ever removes steps, so such a check could not
-		// fail. A check that cannot fail is worse than none — it reads as
-		// coverage of a direction nothing checks.
-		guardOnly := 0
-		for p := range all {
-			if !built[p] {
-				guardOnly++
-				t.Logf("job %q: %q is named only by the guard, not built by anything", job, p)
-			}
-		}
-		filterChangedSomething = filterChangedSomething || guardOnly > 0
-	}
-	// The filter has to matter somewhere, or it is untested and could be
-	// dropped as an apparently-inert precaution. It is a per-job property that
-	// happens to hold for the release job today — whose guard names
-	// dist/checksums.txt, which no other step in that job does.
-	if !filterChangedSomething {
-		t.Error("no job's guard step names a dist/ path its build steps do not, so buildStepsBefore's exclusion is untested — a filter that filters nothing cannot be trusted")
+		// Deliberately nothing more. An earlier version of this test also
+		// asserted that filtering the guard changes the answer for some job,
+		// which reads like coverage of the filter but is really a statement
+		// about THIS workflow: it held only because the release job's guard
+		// names dist/checksums.txt and no other step in that job does. Adding a
+		// step that names it — a `sha256sum -c dist/checksums.txt`, say — would
+		// make the assertion lapse in silence, taking the coverage with it. The
+		// filter's behaviour is pinned by TestBuildStepsBeforeExcludesTheGuard
+		// on synthetic step lists instead, where it cannot lapse.
+		t.Logf("job %q: %d dist/ path(s) named by its build steps", job, len(built))
 	}
 }
 
@@ -573,6 +562,49 @@ func guardRunsBeforeAttest(steps []workflowStep, attestIdx int) (guardIdx int, e
 		return -1, fmt.Errorf("the guard runs at %d, at or after the attest step at %d; the check would be too late to stop anything", guardIdx, attestIdx)
 	}
 	return guardIdx, nil
+}
+
+// TestBuildStepsBeforeExcludesTheGuard pins the filter's behaviour on step
+// lists built for the purpose, rather than on the release workflow.
+//
+// This is the check that was moved out of TestTheGuardStepIsNotABuildStep
+// because there it was a statement about THIS workflow: it held only while the
+// release job's guard was the sole step naming dist/checksums.txt, and a single
+// new step that names the file would have made it lapse in silence. Here the
+// fixtures say what they mean, so the filter is load-bearing by construction.
+func TestBuildStepsBeforeExcludesTheGuard(t *testing.T) {
+	build := workflowStep{Name: "Build", Run: "unzip -l dist/ghost-plugin.zip | head -20"}
+	// A guard that quotes a path no build step names — the shape that made the
+	// existence check justify itself.
+	guard := workflowStep{Name: subjectGuardStepName,
+		Run: "for pattern in \"dist/checksums.txt\" \"dist/*.zip\"; do :; done"}
+	attest := workflowStep{Name: "Attest", Uses: attestAction + "@" + strings.Repeat("a", 40)}
+
+	kept := buildStepsBefore([]workflowStep{build, guard, attest}, 2)
+	for _, s := range kept {
+		if s.Name == subjectGuardStepName {
+			t.Fatal("the guard step survived buildStepsBefore")
+		}
+	}
+	got := distPathsInRunSteps(kept)
+	if len(got) != 1 || got[0] != "dist/ghost-plugin.zip" {
+		t.Errorf("build steps name %v, want only the archive the build step writes — the guard's own quotes must not appear", got)
+	}
+
+	// And the converse: a path a build step genuinely writes is kept, so the
+	// filter is not simply dropping everything.
+	builds := workflowStep{Name: "Build", Run: "sha256sum -c dist/checksums.txt"}
+	got = distPathsInRunSteps(buildStepsBefore([]workflowStep{builds, guard, attest}, 2))
+	if len(got) != 1 || got[0] != "dist/checksums.txt" {
+		t.Errorf("build steps name %v, want the manifest a build step really checks", got)
+	}
+
+	// Renaming the guard must not be able to smuggle it back in as a build step
+	// for as long as the workflow and the test agree on the name; the workflow's
+	// guard step is located BY that name, so a rename is a build failure.
+	if _, err := guardRunsBeforeAttest([]workflowStep{build, attest}, 1); err == nil {
+		t.Error("a job with no guard was accepted")
+	}
 }
 
 // TestGuardRunsBeforeAttest exercises the ordering rule on step lists where it
