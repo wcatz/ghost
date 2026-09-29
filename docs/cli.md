@@ -80,6 +80,87 @@ Registration means what each client reads: `claude mcp get ghost` for Claude Cod
 
 Status also lists any project that records no usable checkout and no repository remote, with the `ghost project bind` command that repairs it. Those projects are not a health failure — every check above can pass while sessions in such a checkout silently get no injected context — and the section is omitted entirely when there is nothing to fix. The listing reads the database without opening it for writing, so a status run never creates the store it is reporting on. The section also names the follow-up step for the standalone, init-managed Claude integration: after binding, `ghost mcp init` writes the per-checkout memory redirect that a newly absolute path makes the redirect check expect — unless that checkout has a `MEMORY.md` of its own, which init only overwrites when the content looks like a stale Ghost redirect.
 
+Status also reports how fast `memory_history` is filling, and how much of that is noise:
+
+```text
+  - history: 8 version rows in 24h, 6 restatements (75%), deepest memory 7/50 versions, store 8/20000 rows
+  ! 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote
+  ! memory 1F2E3D4C5B6A7988 is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
+```
+
+The restatement finding is careful about what it tells you to run, and the care is
+the point. The share counts **every** version row that recorded exactly what the row
+before it held, while the compaction removes only a subset: a memory's newest
+version, a row naming another memory, any phase but `reflect`, anything recorded
+after the repair's own `--before` bound, and every row of a memory that has since
+been deleted. The report therefore measures the **pressure** a store is under rather
+than what a command could reclaim, and the sentence says so — the caps are what
+evict a restatement this build wrote, because the repair will not touch it.
+
+That last guard is why this matters more now than it did. A `delete` tombstones a
+memory and its history is **frozen**: no repair and no compaction will ever remove
+those rows, and since [retention tiers](#ghost-memory-save) give `expires_at` a day
+to arrive, a store now retires memories nobody asked it to. A store that churns
+through session-tier memories fills its table with rows only the store cap can
+reclaim, oldest-first — which is exactly what the store-cap finding below is for.
+
+The line is store-wide, because both retention caps are (see
+[`ghost history compact`](#ghost-history-compact)): how many version rows were
+written in the **last 24 hours**, how many of them restated the version before them
+of the same memory, the most versions any one memory holds against its cap of 50,
+and the table's rows against the store cap of 20 000. A store with no history yet
+prints `no version rows recorded yet` rather than a line of zeroes, and a store
+with nothing written in the last 24 hours has no rate, no share and nothing to
+project, so it prints the numbers and no finding.
+
+`deepest memory` is the **store's widest history** — an aggregate for a line of
+totals. It is usually *not* the memory a cap finding is about, and the finding
+names its own. The per-memory cap is reached per memory, so its finding is about
+one memory by id, quoting **that memory's** two counts: how many versions it holds
+and how many it wrote in the window, which is the arithmetic the countdown closes
+against. A memory sitting at its cap is trimmed by pruning while it is still being
+written, so "at the cap" is the ordinary steady state of an active store rather than
+an edge case, and it is a separate sentence from a countdown:
+
+```text
+  ! memory 1F2E3D4C5B6A7988 is at the per-memory cap: it holds 50 of its 50 versions and wrote 12 in the last 24h, so its oldest versions are what the trim takes now (warning threshold 14 days)
+  ! the store holds 20000 of its 20000 history rows and wrote 310 in the last 24h, so it is at the store cap and the oldest rows in the table are what it trims — not the noisiest ones
+```
+
+The id is printed **whole** rather than abbreviated, because here it is an operand:
+`ghost history 1F2E3D4C5B6A7988` is what you do with it.
+
+Each finding gets its own `!` line, naming both the number that tripped it and the
+threshold it tripped against:
+
+| Finding | Fires when |
+|---|---|
+| restatement share | **more than 20%** of the last 24 hours' version rows restated their predecessor. 20% exactly is silent: a small amount of restatement is the ordinary shape of a working store, and a threshold that fires on it teaches an operator to ignore the line. Measures pressure, not what `ghost history compact` would reclaim — see above. |
+| per-memory cap | some memory reaches its 50-version cap **within 14 days** at its own 24-hour rate — the soonest memory, measured against what *it* wrote rather than the store-wide rate. Reaching the cap starts trimming that memory's oldest versions, which may be the only record of what it said first. |
+| store cap | the table reaches 20 000 rows **within 14 days** at the store's 24-hour rate. The store cap trims the **oldest rows in the table**, not the noisiest ones, so what disappears when the table fills is the oldest real change — and on a store that has been retiring memories, it is a deleted memory's frozen history, which no repair can reach. |
+
+**A finding is a `!` line, not a failed check.** It never changes the exit code and
+never brings back the `Run \`ghost mcp init\` to fix issues.` footer, because the
+verdict above is about **wiring** — whether the memory features are reachable at
+all — and `ghost mcp init` repairs wiring, not a history table. The repair a history
+finding names is `ghost history compact`.
+
+A store that opened cleanly and then could not be read is the one case that prints
+an error instead of a finding — the report says so rather than printing nothing,
+because a check that cannot run must not look like a check that passed:
+
+```text
+  ! history growth: count history versions in the window: no such table: memory_history
+```
+
+The read is read-only, takes no write lock, and costs one pass over the window plus
+one covering-index pass over the table — measured at 1.7 ms typical and 183 ms worst
+case on a full 20 000-row table. It adds no index, deliberately: a standalone
+`recorded_at` index would cost a fifth of the cost of *writing* a history row, on
+every save, to save those milliseconds on a status line. The same read, and the same
+warning sentences, appear in the `ghost_health` MCP tool, so a terminal and an agent
+looking at one store are told the same thing about it.
+
 ## Hooks
 
 ```bash
@@ -925,6 +1006,15 @@ Because the stamp repair needs that evidence, pass both flags in the **same** ru
 removed the versions took the evidence with it, and the second run has nothing to
 act on. That is not a quirk — a dry run reports the same numbers either way, and
 the same is true of the apply.
+
+`ghost mcp status` (and the `ghost_health` MCP tool) report how much of that damage
+a store is still carrying before any of it is removed — the restatement share over
+the last 24 hours, and how close the table and the memory nearest each cap are to
+the two caps above. The share it names is the same comparison this command removes rows by,
+over the same state columns, so the two cannot disagree; it counts every
+restatement while the repair removes a **subset** of them (a memory's newest version
+stays), so the share is how much noise the table carries rather than how much is
+disposable. See [`ghost mcp status`](#ghost-mcp-status) for the thresholds.
 
 Both repairs leave a memory that keeps only the versions a reader could want: its
 first, its newest, and every event. Nothing here removes a `delete` tombstone, a

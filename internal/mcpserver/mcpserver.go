@@ -2504,7 +2504,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_health",
 		Title:       "System Health",
-		Description: "Get Ghost system health: project count, memory counts, embedding coverage (Ollama reachability, model presence), and memory-link stats. Use when search results seem incomplete or memory features appear inactive.",
+		Description: "Get Ghost system health: project count, memory counts, embedding coverage (Ollama reachability, model presence), memory-link stats, and memory_history growth (rows written per day, how many restate the version before them, how close the table is to the store cap, and which named memory is closest to the per-memory cap). Use when search results seem incomplete or memory features appear inactive.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -2580,6 +2580,40 @@ func (s *Server) registerTools() {
 
 		if links, scans, err := s.store.LinkStats(ctx); err == nil {
 			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
+		}
+
+		// History growth (#729), additive: everything above keeps its name and
+		// its meaning, and this is the one block that says how fast
+		// memory_history is filling and how much of that is version rows that
+		// restated the row before them. The sentences are the same strings
+		// `ghost mcp status` prints, built in internal/memory, so an agent
+		// reading this and an operator reading the terminal are told the same
+		// thing about the same store.
+		//
+		// A FAILED read is reported rather than dropped, because dropping it
+		// makes this section's absence mean two different things — no growth to
+		// report, or a read cut short — and an agent cannot tell them apart. It
+		// is also the most expensive statement in this tool (a pass over
+		// memory_history plus a correlated sub-select per row), so a request
+		// deadline reaching it after ListProjects succeeded is a realistic way to
+		// get here. `ghost mcp status` reports the same error rather than
+		// swallowing it, and the two cannot be allowed to disagree about it.
+		growth, growthErr := s.store.HistoryGrowth(ctx)
+		switch {
+		case growthErr != nil:
+			fmt.Fprintf(&sb, "**History:** could not be read: %v\n", growthErr)
+		case growth.TotalRows == 0:
+			fmt.Fprintf(&sb, "**History:** no version rows recorded yet\n")
+		default:
+			fmt.Fprintf(&sb,
+				"**History:** %d version rows in the last %dh, %d restatements (%.0f%%) — deepest memory holds %d of its %d versions, store holds %d of %d rows\n",
+				growth.RowsInWindow, growth.WindowHours, growth.NoOpRows, growth.NoOpShare*100,
+				growth.MaxVersions, growth.PerMemoryCap, growth.TotalRows, growth.StoreCap)
+		}
+		if growthErr == nil {
+			for _, warn := range growth.Warnings {
+				fmt.Fprintf(&sb, "  ⚠ %s\n", warn.Detail)
+			}
 		}
 
 		return &mcp.CallToolResult{

@@ -157,6 +157,36 @@ var writeSeamExemptions = map[string]string{
 	// anything at all".
 	"history_compact.go:(*Store).compactHistoryPreview": "a read: SELECT count(*) built by compactCountStmt and reached through a caller-owned handle, so the scan resolves no leading keyword and counts an unresolvable statement as a write",
 	"history_compact.go:(*Store).stampBatchQuery":       "a read: the candidates SELECT built by compactCandidatesStmt and run through a caller-supplied Queryer (the same shape as asof.go:ReadMemoriesAsOf), so the scan resolves no leading keyword and counts an unresolvable statement as a write",
+
+	// The growth report's own two reads (#729), and the same shape as the two
+	// above for the same reason: `query, args := historyWindowGrowthStmt()` and
+	// `query, args := historyPerMemoryGrowthStmt()` each bind two names from one
+	// call, so the scan deliberately does not follow the multi-value RHS, the head
+	// comes back "", and an unresolvable statement counts as a WRITE.
+	//
+	// Exempt as FUNCTIONS, and each of those functions is ONE read and nothing
+	// else — which is the whole reason history_growth.go reads through
+	// `historyWindowCounts` and `historyPerMemoryCounts` rather than inlining both
+	// statements into `HistoryGrowth`. An exemption is granted per FUNCTION, so a
+	// read left inside the big method would exempt that method whole, and a write
+	// added to it would pass. Narrowing each read to its own function is what keeps
+	// the exemption honest, and it is checked rather than asserted: an unguarded
+	// ExecContext added to `HistoryGrowth` still fails this test.
+	//
+	// The limit of that is the same limit the two compact exemptions above have, and
+	// it is worth stating rather than leaving to be discovered: a write added INSIDE
+	// one of these two functions would not be caught, because the exemption is the
+	// function. What narrowing buys is that the two exempted functions are one read
+	// each, so the hole is two statements rather than every line of the report, and
+	// it is the same trade the compact pass already made for the same reason.
+	//
+	// Reads must keep working against a newer store. ErrStoreNewer tells an operator
+	// to restart their CLIENT, and a report that refused to run would turn that
+	// advice into "you cannot even see how full your history is" — which is exactly
+	// the question the report exists to answer, and the one a stale server most
+	// needs answered before it is replaced.
+	"history_growth.go:(*Store).historyWindowCounts":    "a read: the window aggregate SELECT built by historyWindowGrowthStmt and run through the pool, so the scan resolves no leading keyword and counts an unresolvable statement as a write — and a report that refused to run against a newer store would be useless for diagnosing one",
+	"history_growth.go:(*Store).historyPerMemoryCounts": "a read: the per-memory aggregate SELECT built by historyPerMemoryGrowthStmt, reached the same way and for the same reason",
 }
 
 // TestEveryWriteRefusesANewerStore is the check that the safety property cannot

@@ -526,5 +526,57 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 			_, _ = fmt.Fprintf(w, "  - memory links: %d links, %d memories scanned\n", links, scans)
 		}
 	}
+	reportHistoryGrowth(w, store)
 	return store
+}
+
+// reportHistoryGrowth prints how fast memory_history is growing into its two
+// retention caps, and how much of that growth is version rows that restated the
+// version before them (#729).
+//
+// It is a `-` line plus one `!` line per finding, and it never takes the health
+// verdict, for two reasons. The first is the exit code: `ghost mcp status` exits
+// non-zero on an unhealthy integration, and this is not one — a store whose
+// history is full is working exactly as configured, and the operator's next
+// action is `ghost history compact`, not `ghost mcp init`. Failing the run would
+// also print a footer pointing at the wrong repair. The second is that the
+// verdict is about WIRING: whether the memory features are reachable at all. So
+// a full history is a `-` line carrying the numbers and a `!` line saying what to
+// do about them, which is the shape reportConfigFile already uses for a file it
+// cannot read.
+//
+// The numbers are the report's own fields and the sentences are the report's own
+// Detail strings, so this function formats rather than decides: the threshold, the
+// projection and the wording of every finding are decided in internal/memory and
+// shared with ghost_health, and the two surfaces cannot end up telling an
+// operator different things about one store.
+//
+// "deepest memory" on the summary line is the store's widest history, which is
+// not necessarily the memory a `!` line below is about: the per-memory cap is
+// reached per memory, and the finding names that memory and its own two counts.
+// The label is chosen so the line cannot be read as the subject of the warning.
+func reportHistoryGrowth(w io.Writer, store *memory.Store) {
+	res, err := store.HistoryGrowth(context.Background())
+	if err != nil {
+		// A store that opened cleanly and then cannot be read is a real problem,
+		// but it is not one `ghost mcp init` fixes, so it is reported rather than
+		// failed — the same call reportConfigFile makes about a config it cannot
+		// parse, and for the same reason: a check that cannot run must not print
+		// nothing at all.
+		_, _ = fmt.Fprintf(w, "  ! history growth: %v\n", err)
+		return
+	}
+	if res.TotalRows == 0 {
+		// A store with no history has no growth and no share, and a line of zeroes
+		// on every fresh install is noise a reader learns to skip.
+		_, _ = fmt.Fprintln(w, "  - history: no version rows recorded yet")
+		return
+	}
+	_, _ = fmt.Fprintf(w,
+		"  - history: %d version rows in %dh, %d restatements (%.0f%%), deepest memory %d/%d versions, store %d/%d rows\n",
+		res.RowsInWindow, res.WindowHours, res.NoOpRows, res.NoOpShare*100,
+		res.MaxVersions, res.PerMemoryCap, res.TotalRows, res.StoreCap)
+	for _, warn := range res.Warnings {
+		_, _ = fmt.Fprintf(w, "  ! %s\n", warn.Detail)
+	}
 }
