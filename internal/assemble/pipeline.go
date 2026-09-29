@@ -361,7 +361,14 @@ func runDedup(p *pipeline) {
 	// surface it was written for. It is derived from the request rather than
 	// asserted, because the request is where the policy is stated.
 	note := "near-duplicate reordering is applied by the retriever over the window"
-	if p.dropsDemotedLosers() {
+	// GATED ON PASSIVE as well as on the flag, and the gate is the point: the
+	// policy only ever reaches the store for a passive request, because
+	// `passivePolicies` returns nil for a query and the fusion path only reorders.
+	// A query-mode request that set the flag would otherwise be told a memory was
+	// dropped from the block while it is still in it — which is worse than saying
+	// nothing, because an operator told to go looking for a dropped row will not
+	// find one and will conclude the block is lying about something else.
+	if p.passive && p.dropsDemotedLosers() {
 		// Stated as a POLICY, not as a removal that happened. The stage cannot know
 		// whether a row was removed — the retriever did it, over a window this
 		// pipeline never saw the edges of — and a note that claims a removal for
@@ -377,8 +384,10 @@ func runDedup(p *pipeline) {
 	p.trace.record(stageDedup, len(p.rows), len(p.rows), nil, false, note)
 }
 
-// dropsDemotedLosers reports whether any bucket in the request asked the
-// retriever to remove near-duplicate losers rather than rank them last.
+// dropsDemotedLosers reports whether any bucket in the request ASKS the retriever
+// to remove near-duplicate losers rather than rank them last. It is about the
+// request, not the result: the removal happened in the retriever, over a window
+// whose edges this pipeline never saw, so only the policy can be reported here.
 func (p *pipeline) dropsDemotedLosers() bool {
 	for _, s := range p.req.Budget.Slices {
 		if s.DropDemotedLosers {

@@ -304,12 +304,73 @@ func TestRunPassiveProjectlessIsGlobalOnly(t *testing.T) {
 	f := &fakeRetriever{set: passiveSet(globalCandidate("g1", 0.9))}
 	req := passiveRequest()
 	req.ProjectID = ""
+	// A projectless session start reads ONLY the global bucket, and that is now a
+	// REFUSAL rather than an assertion about Mode: on a passive read the slice
+	// bucket IS the project predicate, so a "proj" slice left here would read that
+	// project through the real store even though the request named no project.
+	// The previous version of this test kept the "proj" slice and passed only
+	// because the fake retriever ignores the request it is given.
+	req.Budget.Slices = []Slice{{
+		Bucket: memory.GlobalProjectID, MaxItems: 2, OverFetch: 16,
+		ClampBytes: 300, Order: "pinned_importance_updated",
+		DemotionThreshold: 0.85, DropDemotedLosers: true,
+	}}
 	res := run(t, f, req)
 	if res.Trace.Mode != string(memory.GlobalOnly) {
 		t.Errorf("mode: got %q, want %q", res.Trace.Mode, memory.GlobalOnly)
 	}
 	if len(res.Items) != 1 {
 		t.Errorf("a projectless session start must still admit global rows; got %v", itemIDs(res.Items))
+	}
+	if got := f.req.Passive; len(got) != 1 || got[0].Bucket != memory.GlobalProjectID {
+		t.Errorf("policies sent: %+v, want exactly the _global bucket", got)
+	}
+}
+
+// TestRunPassiveRefusesASliceNamingAnotherProject is the mismatch refusal, and it
+// is the only thing standing between a request and a project it never named. On a
+// passive read the bucket IS the project predicate — the store binds it as the
+// WHERE clause and does not consult Mode — so a slice pointing elsewhere reads
+// that project, and stage 3 only RECORDS the mismatch as
+// Signals[id].ProjectMatch=false, which nothing refuses and no surface projects.
+func TestRunPassiveRefusesASliceNamingAnotherProject(t *testing.T) {
+	f := &fakeRetriever{set: passiveSet(projectCandidate("p1", 0.9))}
+	req := passiveRequest()
+	req.Budget.Slices[0].Bucket = "some-other-project"
+	_, err := Run(context.Background(), f, req)
+	if err == nil {
+		t.Fatal("a passive slice naming a project the request did not must be refused")
+	}
+	if !strings.Contains(err.Error(), "project predicate") {
+		t.Errorf("the refusal must say why the bucket is load-bearing; got %v", err)
+	}
+	if f.sets != 0 {
+		t.Errorf("the retriever was called %d times for a request this seam refused", f.sets)
+	}
+	// The _global bucket is always legitimate beside a project, because a session
+	// start reads both and the global rows are not "another project".
+	ok := passiveRequest()
+	ok.Budget.Slices[1].Bucket = memory.GlobalProjectID
+	run(t, &fakeRetriever{set: passiveSet(globalCandidate("g1", 0.9))}, ok)
+}
+
+// TestRunPassiveQueryModeIgnoresTheDropPolicyInTheNote is the shape of the other
+// half: a query-mode request that sets DropDemotedLosers must not be told a
+// memory was dropped, because nothing was — the policies never reach a query
+// retrieval and the fusion path only reorders.
+func TestRunPassiveQueryModeIgnoresTheDropPolicyInTheNote(t *testing.T) {
+	f := &fakeRetriever{set: setOf(candidate("c1", "proj", "fact", "a row", 0.9))}
+	req := baseRequest()
+	req.Budget = Budget{MaxItems: 2, Slices: []Slice{{
+		Bucket: "proj", MaxItems: 2, DropDemotedLosers: true, DemotionThreshold: 0.9,
+	}}}
+	res := run(t, f, req)
+	if containsNote(res.Notes, "losers are REMOVED") {
+		t.Errorf("a query-mode request must not be told losers were removed: no policy reaches a query retrieval, "+
+			"and the fusion path only reorders (%v)", res.Notes)
+	}
+	if !containsNote(res.Notes, "no source policy drops losers") {
+		t.Errorf("and it must say the drop does not apply here: %v", res.Notes)
 	}
 }
 

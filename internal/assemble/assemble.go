@@ -63,9 +63,16 @@ type Slice struct {
 	MaxBytes   int // item-content bytes; 0 = unbounded within this slice
 	ClampBytes int // 0 = no per-item presentation clamp
 	// DropDemotedLosers asks the RETRIEVER to remove a near-duplicate loser rather
-	// than rank it last. It is honoured for any passive request — passive is keyed
+	// than rank it last. It is honoured for any PASSIVE request — passive is keyed
 	// on the absence of a query, not on Source, so a source that arrives without
 	// one is passive whatever it calls itself.
+	//
+	// INERT on a query-mode request, and that is worth knowing rather than
+	// discovering: a query's policies are never sent (passivePolicies returns nil
+	// for a non-empty query) and the fusion path only reorders, so a slice that
+	// sets this on a search request changes nothing. Stage 6 reads the flag to
+	// describe the note, and is gated on the passive shape for the same reason —
+	// otherwise it would report a removal the retriever never performed.
 	DropDemotedLosers bool
 	// DemoteOnlyWhenOverCap gates the retriever's near-duplicate demotion on the
 	// selected set being wider than MaxItems. A demotion is a REORDER, so on a set
@@ -643,6 +650,20 @@ func validatePassiveBudget(req Request) error {
 			"give it a slice per bucket, or a query")
 	}
 	for _, s := range req.Budget.Slices {
+		// The bucket IS the project predicate on a passive read: the store binds
+		// SlicePolicy.Bucket as the WHERE clause and does not consult Mode at all,
+		// because one policy per bucket is the whole shape of a passive retrieval.
+		// So a slice naming some other project would read — and inject — rows the
+		// request never named, and stage 3 only RECORDS that as
+		// Signals[id].ProjectMatch=false, which nothing refuses. Refusing the
+		// mismatch here is the same decision `sliceBuckets` makes for a repeated
+		// bucket: one named bucket per slice, and it has to be a bucket this
+		// request is about.
+		if s.Bucket != req.ProjectID && s.Bucket != memory.GlobalProjectID {
+			return fmt.Errorf("assemble: passive slice names bucket %q, which is neither the requested project %q nor %q; "+
+				"the bucket IS the project predicate on this path, so a mismatched one would read a project the request "+
+				"never named", s.Bucket, req.ProjectID, memory.GlobalProjectID)
+		}
 		// The bound that matters here is the FETCH, not the block. A slice bounded
 		// only by MaxBytes says how many bytes the answer may occupy, which bounds
 		// membership but says nothing about how much is READ — and on this path the
