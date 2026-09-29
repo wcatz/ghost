@@ -23,7 +23,8 @@
     --maxw: 1080px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { scroll-behavior: smooth; }
+  html { scroll-behavior: smooth; scroll-padding-top: 72px; }
+  @media (max-width: 720px) { html { scroll-padding-top: 104px; } }
   body {
     background: var(--bg);
     color: var(--text);
@@ -48,8 +49,7 @@
   }
   nav .wrap { display: flex; align-items: center; gap: 24px; height: 56px; }
   nav .brand { font-weight: 700; font-size: 17px; letter-spacing: -.02em; color: var(--text); display: flex; align-items: center; gap: 9px; }
-  nav .brand img { height: 30px; width: auto; border-radius: 7px; }
-  nav .brand span { color: var(--accent); }
+  nav .brand .dot-accent { color: var(--accent); }
   nav .links { display: flex; gap: 18px; margin-left: auto; font-size: 14px; }
   nav .links a { color: var(--muted); }
   nav .links a:hover { color: var(--text); text-decoration: none; }
@@ -63,8 +63,21 @@
       radial-gradient(600px 300px at 70% 30%, rgba(79,209,197,.10), transparent 70%);
     pointer-events: none;
   }
-  .hero-ghost { width: 96px; height: 96px; margin: 0 auto 18px; position: relative; animation: float 5s ease-in-out infinite; }
-  .hero-ghost img { width: 100%; height: 100%; border-radius: 22px; box-shadow: 0 18px 50px rgba(124,108,255,.35); }
+  /* The ghost art is a 1024x1536 transparent PNG whose figure sits at x 144-827,
+     y 184-1075. .mark crops to that box at any height (--h) without distorting it. */
+  .mark { --h: 30px; position: relative; display: inline-block; flex: none;
+          height: var(--h); width: calc(var(--h) * 0.7666); overflow: visible; }
+  .mark img { position: absolute; max-width: none; height: auto;
+              width: calc(var(--h) * 1.1493); left: calc(var(--h) * -0.1616); top: calc(var(--h) * -0.2065);
+              /* the canvas carries faint near-transparent pixels everywhere; clip them so no glow outlines the canvas */
+              clip-path: inset(11.5% 18.9% 22.5% 13.7%); }
+  .hero-ghost { --h: 128px; margin: 0 auto 26px; display: block; animation: float 5s ease-in-out infinite; }
+  .hero-ghost { filter: drop-shadow(0 14px 28px rgba(79,209,197,.28)) drop-shadow(0 0 36px rgba(124,108,255,.30)); }
+  .hero-ghost::after {
+    content: ""; position: absolute; left: 12%; right: 12%; bottom: -18px; height: 12px; border-radius: 50%;
+    background: radial-gradient(closest-side, rgba(0,0,0,.55), transparent); animation: shadow 5s ease-in-out infinite;
+  }
+  @keyframes shadow { 0%,100% { transform: scaleX(1); opacity: .9; } 50% { transform: scaleX(.8); opacity: .55; } }
   @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
   .pill {
     display: inline-block; padding: 5px 14px; border-radius: 999px;
@@ -91,7 +104,7 @@
   .install-snippet {
     margin: 28px auto 0; max-width: 520px; text-align: left; position: relative;
     background: #0d1118; border: 1px solid var(--card-edge); border-radius: 10px;
-    padding: 14px 18px; font-size: 13.5px; color: var(--accent-2); overflow-x: auto;
+    padding: 14px 18px; font-size: 13.5px; color: var(--accent-2); overflow-x: auto; white-space: nowrap;
   }
   .install-snippet .cmt { color: var(--muted); }
   .stats {
@@ -140,7 +153,7 @@
   svg .flow-amber { fill: none; stroke: var(--amber); stroke-width: 1.8; stroke-dasharray: 5 7; animation: flow 1.8s linear infinite; }
   @keyframes flow { to { stroke-dashoffset: -24; } }
   @media (prefers-reduced-motion: reduce) {
-    svg .flow, svg .flow-teal, svg .flow-amber, .hero-ghost { animation: none; }
+    svg .flow, svg .flow-teal, svg .flow-amber, .hero-ghost, .hero-ghost::after { animation: none; }
   }
 
   .flows { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 22px; }
@@ -436,7 +449,7 @@
 
 <nav>
   <div class="wrap">
-    <div class="brand"><img src="https://raw.githubusercontent.com/wcatz/ghost/main/assets/ghost.png" alt="GhostMem logo">GhostMem<span>.</span></div>
+    <div class="brand"><span class="mark"><img src="https://raw.githubusercontent.com/wcatz/ghost/main/assets/ghost.png" alt="GhostMem logo"></span><span>GhostMem<span class="dot-accent">.</span></span></div>
     <div class="links">
       <a href="#architecture">Architecture</a>
       <a href="#features">Features</a>
@@ -453,7 +466,7 @@
 
 <header>
   <div class="wrap">
-    <div class="hero-ghost"><img src="https://raw.githubusercontent.com/wcatz/ghost/main/assets/ghost.png" alt=""></div>
+    <div class="mark hero-ghost"><img src="https://raw.githubusercontent.com/wcatz/ghost/main/assets/ghost.png" alt=""></div>
     <div class="pill">MCP memory server &middot; pure Go &middot; Apache-2.0</div>
     <h1>Your agent's memory,<br><em>on your disk.</em></h1>
     <p class="sub">
@@ -551,11 +564,11 @@
         <text class="s" x="470" y="193">search, session start, project context</text>
         <g>
           <rect class="chip-v" x="326" y="206" width="62" height="22" rx="6"/><text class="m" x="334" y="221">retrieve</text>
-          <rect class="chip-v" x="394" y="206" width="58" height="22" rx="6"/><text class="m" x="401" y="221">validity</text>
-          <rect class="chip-v" x="458" y="206" width="46" height="22" rx="6"/><text class="m" x="466" y="221">scope</text>
-          <rect class="chip-v" x="510" y="206" width="80" height="22" rx="6"/><text class="m" x="517" y="221">provenance</text>
-          <rect class="chip-v" x="596" y="206" width="72" height="22" rx="6"/><text class="m" x="603" y="221">conflicts</text>
-          <rect class="chip-v" x="674" y="206" width="48" height="22" rx="6"/><text class="m" x="682" y="221">dedup</text>
+          <rect class="chip-v" x="394" y="206" width="64" height="22" rx="6"/><text class="m" x="402" y="221">validity</text>
+          <rect class="chip-v" x="464" y="206" width="48" height="22" rx="6"/><text class="m" x="472" y="221">scope</text>
+          <rect class="chip-v" x="518" y="206" width="82" height="22" rx="6"/><text class="m" x="526" y="221">provenance</text>
+          <rect class="chip-v" x="606" y="206" width="74" height="22" rx="6"/><text class="m" x="614" y="221">conflicts</text>
+          <rect class="chip-v" x="686" y="206" width="50" height="22" rx="6"/><text class="m" x="694" y="221">dedup</text>
           <rect class="chip-v" x="326" y="232" width="74" height="22" rx="6"/><text class="m" x="334" y="247">diversity</text>
           <rect class="chip-v" x="406" y="232" width="56" height="22" rx="6"/><text class="m" x="414" y="247">budget</text>
           <rect class="chip-v" x="468" y="232" width="56" height="22" rx="6"/><text class="m" x="476" y="247">render</text>
