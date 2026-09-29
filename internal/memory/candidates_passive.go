@@ -214,14 +214,17 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest) (string, []any) {
 		args = append(args, clock...)
 	}
 
+	// The column list is the shared one every whole-Memory reader selects, rather
+	// than a hand-written copy: the retention change added two columns and a copy
+	// here would have failed at Scan with a count mismatch, which is a loud failure
+	// but still a second statement of what a Memory is. `memoryColumns` is derived
+	// from `memoryColumnNames`, which is the single list.
 	query := fmt.Sprintf(`
-		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
+		SELECT %s
 		FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL%s
 		ORDER BY %s
-		LIMIT ?`, scopeClause, orderBy)
+		LIMIT ?`, memoryColumns, scopeClause, orderBy)
 	return query, append(args, pol.OverFetch)
 }
 
@@ -231,11 +234,19 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	scored := make([]passiveRow, 0, len(memories))
 	for _, m := range memories {
 		age := ageDays(m.CreatedAt, now)
+		// The tier rides the decay rather than being a second multiplication at
+		// each call site, so a session-scoped memory reads as session-scoped in
+		// the one number that ranks it — the same reason DecayFactor takes it
+		// (#709). The SQL order below computes the category-and-age half only, so
+		// a tiered row is ordered slightly differently from how it is scored; that
+		// is the same split the query path has, and the score is what the two-pass
+		// selection ranks on.
+		decay := DecayFactor(m.Category, m.Retention, m.Pinned, age)
 		scored = append(scored, passiveRow{
 			mem:   m,
 			age:   age,
-			decay: DecayFactor(m.Category, m.Pinned, age),
-			score: float64(m.Importance) * DecayFactor(m.Category, m.Pinned, age),
+			decay: decay,
+			score: float64(m.Importance) * decay,
 		})
 	}
 	// The two-pass selection fills a POOL of twice the item cap, which is the
@@ -396,7 +407,18 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 		ids[i] = r.mem.ID
 		pinned[r.mem.ID] = r.mem.Pinned
 	}
-	if penalty, err := SupersedePenalties(ctx, s.queryDB(), ids); err != nil {
+	// A persistent row is exempt from supersede demotion (#709): tier is the
+	// author's statement that a memory outlives the session, and a supersede edge
+	// into one is a claim being made about a row the tier says is standing. The
+	// map is the same one GetTopMemories builds, so the two orderings cannot
+	// disagree about which rows a supersede may move.
+	protected := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		if RetentionExempt(r.mem) {
+			protected[r.mem.ID] = true
+		}
+	}
+	if penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, protected); err != nil {
 		s.logger.Debug("candidates: passive supersede demotion lookup failed", "error", err)
 	} else if len(penalty) > 0 {
 		rows = StableDemote(rows, func(r passiveRow) string { return r.mem.ID }, penalty)
