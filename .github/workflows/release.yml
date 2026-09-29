@@ -1,5 +1,45 @@
 name: release
 
+# RECOVERY
+#
+# Re-running the failed job is the answer for MOST failures here, and the
+# exceptions are documented where they arise rather than here — the plugin job's
+# failure-ordering comment names a prerelease tag the digest script rejects
+# (delete the draft, fix/retag) and a catalog commit step that is blocked on
+# ruleset policy (the manual admin runbook). Read that comment before assuming
+# a re-run helps.
+#
+# What is true is narrower than "nothing here is irreversible". Two things get
+# published on the tag push, before any release exists at all: the docker job
+# declares no `needs:`, so it pushes `ghcr.io/wcatz/ghost:latest` in parallel
+# with the release job, and a re-run of an OLD tag's docker job would move that
+# tag again. The release itself is not published until the plugin job's
+# `gh release edit --draft=false`, and releases/latest keeps serving the previous
+# release until then.
+#
+# Re-running the `release` job after a failure AFTER GoReleaser has uploaded —
+# the published-release guard, the attestation subject guard, or the attest step,
+# which needs Sigstore, Fulcio and GitHub's OIDC provider — works because
+# .goreleaser.yml sets replace_existing_artifacts: true. A re-run starts at the
+# first step, so GoReleaser runs again, use_existing_draft adopts the draft that
+# already holds every asset, and each archive collides with its own name. GitHub
+# answers 422, and GoReleaser's Upload (internal/client/github.go) deletes the
+# colliding asset and returns a retriable error — but ONLY with that setting;
+# without it the same 422 is returned as a plain error and the run aborts on the
+# first archive, leaving a draft that has to be cleared by hand.
+#
+# That is true only while the release is a DRAFT, which is why the job refuses to
+# start at all when the release for the tag is already published — a "Re-run all
+# jobs" in the plugin job's post-publish window would otherwise replace
+# published, already-attested assets. In that window, re-run the plugin job
+# alone.
+#
+# Re-running the `plugin` job works for the same reason: its `gh release upload`
+# passes --clobber.
+#
+# Do not add a step to either job that publishes, or that runs after the
+# publish, without re-checking this.
+
 on:
   push:
     tags:
@@ -12,8 +52,19 @@ jobs:
     # so it needs contents: write. It publishes no container image because
     # .goreleaser.yml has no dockers or image_templates; the docker job pushes
     # the image.
+    #
+    # attestations: write and id-token: write are the two scopes
+    # actions/attest-build-provenance consumes, and they are the whole of what
+    # the step below adds: the first stores the Sigstore bundle under the
+    # asset's sha256, the second mints the OIDC token that token is exchanged
+    # for. They are scoped to this job (and to the plugin job) rather than the
+    # workflow, because a job-level `permissions:` block sets every scope it
+    # omits to `none` — putting them at the top level would hand the docker
+    # job an OIDC token it has no use for.
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -23,8 +74,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Verify server.json matches the tag
-        # server.json is what an MCP registry reads, so a stale version there
+      - name: Verify server.json matches the tag        # server.json is what an MCP registry reads, so a stale version there
         # publishes a stale artifact regardless of what the release actually
         # built. Gate the release on it rather than letting it drift silently
         # (it once read 0.15.0 while the release was 0.29.0).
@@ -42,6 +92,57 @@ jobs:
           fi
           echo "server.json matches release ${VERSION}"
 
+      - name: Refuse to build into a published release
+        # .goreleaser.yml sets replace_existing_artifacts so that a re-run
+        # after a POST-UPLOAD failure can replace the assets it already
+        # uploaded (see the RECOVERY block at the top of this file). That is
+        # only safe while the release is a DRAFT.
+        #
+        # The window where it is not is documented in the plugin job below:
+        # "after publish, before catalog push — re-run safe". A "Re-run all
+        # jobs" in that window re-runs THIS job, and without this step
+        # GoReleaser would be pointed at a public release that already holds
+        # every asset. Each archive then answers 422 and, because of
+        # replace_existing_artifacts, GoReleaser would DELETE it and re-upload
+        # it — turning a loud failure into a silent replacement of published,
+        # already-attested assets while main's catalog still pins the old
+        # digests.
+        #
+        # So the loud case stays loud: a published release stops this job and
+        # says what to do instead, which is to re-run the plugin job alone.
+        # Nothing to check on a first run — there is no release for the tag yet.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # FAIL CLOSED on anything but an answer. `|| true` here would be the
+          # hole the step exists to plug: a 500, a rate limit, a DNS failure or
+          # a rejected token all look exactly like "no release for this tag"
+          # once the error is discarded, and the step would wave GoReleaser at
+          # a published release with replace_existing_artifacts: true.
+          #
+          # So the error is captured rather than dropped, and only a 404 is
+          # read as "not there yet". Anything else — including an error this
+          # script does not recognise, because it matches gh's error text —
+          # refuses the build. The direction of the mistake is the safe one: a
+          # gh that words its 404 differently stops the release rather than
+          # letting it rebuild a published one.
+          if STATE=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '"\(.id) \(.draft)"' 2>&1); then
+            RELEASE_ID=${STATE%% *}
+            IS_DRAFT=${STATE##* }
+            if [ "$IS_DRAFT" = "true" ]; then
+              echo "release ${GITHUB_REF_NAME} is a draft (${RELEASE_ID}) — a re-run may replace its assets"
+              exit 0
+            fi
+            echo "::error::release ${GITHUB_REF_NAME} (${RELEASE_ID}) is PUBLISHED, so this job will not rebuild it. GoReleaser would replace published, already-attested assets, and main's catalog still pins the digests they had before. Re-run the plugin job alone (it is idempotent) — or delete the release and re-tag if this tag was wrong."
+            exit 1
+          fi
+          if printf '%s' "$STATE" | grep -q '404'; then
+            echo "no release exists for ${GITHUB_REF_NAME} yet — GoReleaser will create the draft"
+            exit 0
+          fi
+          echo "::error::could not read the release for ${GITHUB_REF_NAME} (got: ${STATE}) — refusing to rebuild rather than guess whether it is published"
+          exit 1
+
       - name: Run GoReleaser
         # release.draft (goreleaser.yml) makes this create a DRAFT release:
         # assets upload to the draft, releases/latest keeps serving the
@@ -53,6 +154,93 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Every attestation subject exists
+        # actions/attest-build-provenance only fails when the COMBINED glob
+        # result is empty (src/subject.ts, getSubjectFromPath). One pattern
+        # matching nothing is therefore dropped with no error at all, and the
+        # release ships an asset nobody attested.
+        #
+        # That is not hypothetical: the subject list below once read
+        # `dist/install.ps1`, and GoReleaser's release.extra_files resolves its
+        # glob from the PROJECT ROOT (internal/extrafiles, fileglob.Glob) and
+        # uploads the matched file from there under filepath.Base(file) — it
+        # never copies an extra file into dist/. The prefixed path was a glob
+        # that matched nothing, every release would have published install.ps1
+        # with no attestation, and docs/installation.md said it had one.
+        #
+        # This step is what makes that class of mistake fail the release
+        # instead of shipping it. Its list is the attest step's subject-path
+        # restated, and TestEverySubjectPatternIsCheckedAtReleaseTime compares
+        # the two, so a pattern added to one and not the other is a build
+        # failure rather than a silent gap.
+        run: |
+          missing=0
+          for pattern in \
+            "dist/checksums.txt" \
+            "dist/*.tar.gz" \
+            "dist/*.zip" \
+            "install.ps1"
+          do
+            # compgen -G is the glob; mapfile is how an empty result becomes an
+            # empty array rather than the pattern itself, which is the whole
+            # point of the check.
+            mapfile -t matched < <(compgen -G "$pattern")
+            if [ "${#matched[@]}" -eq 0 ]; then
+              echo "::error::attestation subject pattern '$pattern' matches no file. The attest step would skip it silently and the asset would ship with no provenance — check the path against what .goreleaser.yml actually writes."
+              missing=1
+            else
+              echo "attestation subject '$pattern' -> ${#matched[@]} file(s)"
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to attest: at least one subject pattern matches nothing"
+            exit 1
+          fi
+
+      - name: Attest the release archives and checksums
+        # A release asset's `digest` field, which `ghost upgrade` already
+        # verifies, proves the downloaded bytes are the bytes GitHub holds. It
+        # says nothing about who put them there: anyone who can replace an
+        # asset replaces the API's record of it too. This step mints a Sigstore
+        # bundle over each asset's sha256, signed by a Fulcio certificate whose
+        # subject is this repository's own release workflow, so the client can
+        # verify the publisher instead of taking the publisher's word for it
+        # (#694).
+        #
+        # Pinned by full commit SHA, not by tag: this is the one step in the
+        # release path that produces a statement clients are told to trust, so
+        # a movable ref here is the hole the change exists to close. The
+        # trailing comment names the release tag the commit belongs to, so the
+        # digest can be re-resolved by a reviewer. Every other action in this
+        # file is tag-pinned; the asymmetry is deliberate.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          # The globs cover every file .goreleaser.yml uploads, derived rather
+          # than transcribed: dist/*.tar.gz and dist/*.zip are the archive
+          # formats archives[].formats and its windows format_overrides
+          # produce, dist/checksums.txt is checksum.name_template, and
+          # install.ps1 is release.extra_files. A format or an extra file added
+          # to .goreleaser.yml without adding it here fails
+          # TestReleaseJobAttestsExactlyWhatGoReleaserPublishes in
+          # internal/selfupdate — the diff cannot merge as an unattested gap.
+          #
+          # The extra file is NOT dist/-prefixed, and that asymmetry is the
+          # point: GoReleaser writes its own outputs into dist/ but uploads an
+          # extra file from wherever its glob matched, which here is the
+          # repository root. The guard step above fails a pattern that matches
+          # nothing, and TestEveryLiteralAttestationSubjectExists fails one that
+          # names a file the repository does not have.
+          #
+          # The digest is computed from the file on disk, not read out of
+          # checksums.txt, so the attestation is an independent witness of the
+          # bytes rather than a restatement of the manifest that is meant to
+          # witness them. checksums.txt is itself attested.
+          subject-path: |
+            dist/checksums.txt
+            dist/*.tar.gz
+            dist/*.zip
+            install.ps1
 
   docker:
     runs-on: ubuntu-latest
@@ -145,6 +333,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # See the release job above for what these two are for. The plugin
+      # archives are downloadable release assets, so they need the same
+      # provenance the goreleaser archives get — a plugin install is a
+      # download-and-execute path, so attesting the archive that carries the
+      # binaries matters as much here.
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -187,6 +382,50 @@ jobs:
             dist/ghost-plugin-windows-amd64.zip \
             dist/ghost-plugin-windows-arm64.zip \
             --clobber
+
+      - name: Every attestation subject exists
+        # The same zero-match guard as the release job, and for the same reason:
+        # actions/attest-build-provenance drops a subject pattern that matches
+        # nothing as long as another pattern matched, so a renamed or
+        # misspelled archive would ship as a release asset with no provenance
+        # and the release would still be green. The list is the attest step's
+        # subject-path restated, and
+        # TestEverySubjectPatternIsCheckedAtReleaseTime compares the two.
+        run: |
+          missing=0
+          for pattern in \
+            "dist/ghost-plugin-windows-amd64.zip" \
+            "dist/ghost-plugin-windows-arm64.zip" \
+            "dist/ghost-plugin.zip"
+          do
+            mapfile -t matched < <(compgen -G "$pattern")
+            if [ "${#matched[@]}" -eq 0 ]; then
+              echo "::error::attestation subject pattern '$pattern' matches no file. The attest step would skip it silently and the archive would ship with no provenance."
+              missing=1
+            else
+              echo "attestation subject '$pattern' -> ${#matched[@]} file(s)"
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::refusing to attest: at least one subject pattern matches nothing"
+            exit 1
+          fi
+
+      - name: Attest the plugin archives
+        # Deliberately before the catalog pin and before the publish step
+        # below, both of which are cheap to re-run and neither of which can be
+        # undone: a failure here leaves an unpublished draft that a job re-run
+        # completes, whereas a failure after the publish would leave a public
+        # release whose plugin zips carry no provenance, and re-running would
+        # not repair that. The three paths are the three the upload step above
+        # attaches — TestPluginJobAttestsExactlyWhatItUploads reads that step
+        # and fails if the two lists ever diverge.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/ghost-plugin.zip
+            dist/ghost-plugin-windows-amd64.zip
+            dist/ghost-plugin-windows-arm64.zip
 
       - name: Pin the marketplace catalog to the attached archives
         # Rewrites .claude-plugin/marketplace.json (this tag checkout) to
