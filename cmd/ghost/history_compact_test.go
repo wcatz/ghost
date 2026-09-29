@@ -72,6 +72,27 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 		"the shipped help (historyUsage)": "So three fields of an as_of answer can move",
 		"docs/cli.md's compact section":   "Three fields do move",
 	}
+	// The restore target is the ANCHOR, and the half that makes it one — "this
+	// repair will NOT remove" — must be stated wherever the target is. Dropping it
+	// states the wrong claim rather than a vaguer one: on a store with this damage
+	// the last writer that moved the stamp is a no-op reflect, which IS the row the
+	// removal takes, so naming that as the target names a row the repair deletes.
+	// A review found exactly that sentence, written as "the last writer that moved
+	// the stamp", in the as_of paragraph this PR adds.
+	anchorNotRemovable := map[string]string{
+		"the shipped help (historyUsage)": "the recorded time of its ANCHOR: the newest version this repair will NOT remove whose writer moved the stamp",
+		"docs/cli.md's compact section":   "its anchor: the newest version this repair will **not** remove whose writer moved the stamp",
+	}
+	// The anchor's DEFINITION, which is a different claim from the sentence above
+	// and needs its own needle. Asserting only the as_of paragraph's copy let a
+	// mutation of the definition pass, because the two say the same thing and the
+	// paragraph's satisfied the check — which is the definition being wrong while
+	// the test is green. The definition is the one a reader is sent to, so it is
+	// pinned in its own right.
+	anchorDefinition := map[string]string{
+		"the shipped help (historyUsage)": "its ANCHOR — the newest version this repair will NOT remove AND whose WRITER moved updated_at in the same statement that filed it",
+		"docs/cli.md's compact section":   "**The anchor is the newest version this repair will NOT remove whose WRITER moved `updated_at` in the same statement that filed it**",
+	}
 	// Claims each surface must make, in its own words.
 	perSurface := map[string]map[string]string{
 		"the shipped help (historyUsage)": {
@@ -88,17 +109,17 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 			// earlier "Only ever BACKWARD" about a stamp no version explains. A bare
 			// BACKWARD needle is satisfied by that sentence, so a mutation dropping
 			// the direction from THIS claim passed — pinning the claim, not the word.
-			"UpdatedAt moves backward to the stamp writer's own time": "moves it BACKWARD to the recorded time of the last writer",
-			"a deleted memory is left out of both repairs entirely":   "is left out of both repairs",
+			"UpdatedAt moves backward to the ANCHOR, not to the last writer": "moves it BACKWARD to the recorded time of its ANCHOR",
+			"a deleted memory is left out of both repairs entirely":          "is left out of both repairs",
 		},
 		"docs/cli.md's compact section": {
-			"a resolve is named as a writer that moves no stamp":      "leaves `updated_at` alone",
-			"UpdatedAt moves because the repair writes that column":   "moves because the stamp repair *is* a write",
-			"UpdatedAt moves backward to the stamp writer's own time": "it moves **backward** to the recorded time of the last writer",
-			"a deleted memory is left out of both repairs entirely":   "is excluded from both repairs",
-			"a fold is named as a writer that moves no stamp":         "changes `importance` and moves nothing",
-			"both kinds of unrestorable stamp are reported":           "counted separately (`stamps unreadable`)",
-			"the deleted-memory rule gives its reason":                "nobody can restore",
+			"a resolve is named as a writer that moves no stamp":             "leaves `updated_at` alone",
+			"UpdatedAt moves because the repair writes that column":          "moves because the stamp repair *is* a write",
+			"UpdatedAt moves backward to the ANCHOR, not to the last writer": "it moves **backward** to the recorded time of its anchor",
+			"a deleted memory is left out of both repairs entirely":          "is excluded from both repairs",
+			"a fold is named as a writer that moves no stamp":                "changes `importance` and moves nothing",
+			"both kinds of unrestorable stamp are reported":                  "counted separately (`stamps unreadable`)",
+			"the deleted-memory rule gives its reason":                       "nobody can restore",
 		},
 	}
 	// Sentences the rule deleted. Each names a reading of the anchor that is wrong
@@ -136,6 +157,19 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 		}
 		if needle := asOfCounts[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
 			t.Errorf("%s does not state that THREE fields of an as_of answer can move rather than two: no %q",
+				surface.name, needle)
+		}
+		if needle := anchorDefinition[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
+			t.Errorf("%s does not define the anchor with BOTH halves — the not-removable one and the "+
+				"stamp-moving-writer one: no %q. Either half alone names a different row: without "+
+				"not-removable it is the last writer that moved the stamp, which on a store with this "+
+				"damage is a no-op reflect the repair deletes.",
+				surface.name, needle)
+		}
+		if needle := anchorNotRemovable[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
+			t.Errorf("%s does not name the restore target as the anchor with its not-removable half: no %q. "+
+				"\"the last writer that moved the stamp\" is the wrong target on a store with this damage, "+
+				"because that writer is one of the no-op reflects being removed.",
 				surface.name, needle)
 		}
 		for claim, needle := range perSurface[surface.name] {
