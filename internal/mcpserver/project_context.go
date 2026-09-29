@@ -160,6 +160,28 @@ func projectContextItems(items []assemble.Item) string {
 	return sb.String()
 }
 
+// projectNotRegistered is the sentence for a project name no `projects` row
+// matches, and there is ONE of it for three callers.
+//
+// `ResolveProject` answers an unknown name with `("", "", nil)`, so every surface
+// that resolves before reading can be handed an empty id. The old loader was
+// handed it too and read `project_id = ” OR project_id = '_global'`, which lists
+// the GLOBAL rows under a heading naming a project that does not exist — and falls
+// through to this sentence only when the store happens to hold no globals. The
+// assembler refuses a project context with no project, so without a guard here all
+// three surfaces hard-error instead, and an error is worse than the old
+// inconsistency: a caller cannot act on "something went wrong" by saving a memory
+// to the project it named.
+//
+// The RAW name is the argument, not the resolved id, and that is the whole reason
+// this is a function rather than a format string at each call site: the resolved id
+// is `""` here, and `Project "" is not registered` names nothing the caller can
+// act on.
+func projectNotRegistered(asked string) string {
+	return fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. "+
+		"Call ghost_memory_save to create it.", asked)
+}
+
 // projectContextEmptyNote is what the surface says about a project whose memory
 // rows are all gone, and the reason it is not the sentence the section used to
 // carry.

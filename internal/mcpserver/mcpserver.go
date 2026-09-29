@@ -1751,10 +1751,7 @@ func (s *Server) registerTools() {
 			case exists:
 				text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
 			default:
-				// `asked`, not the resolved id: for an unresolved name the id is
-				// "", and a message reading `Project "" is not registered` names
-				// nothing the caller can act on.
-				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. Call ghost_memory_save to create it.", asked)
+				text = projectNotRegistered(asked)
 			}
 		}
 
@@ -2951,6 +2948,21 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// An unresolved name resolves to "", and there is nothing to assemble for a
+		// project that does not exist. Answered with the same sentence the tool
+		// gives, naming what the caller asked for — the old path went through
+		// GetTopMemories and listed the GLOBAL rows under a heading naming this
+		// project, or fell through to "no memories found" depending on unrelated
+		// store contents. See projectNotRegistered.
+		if projectID == "" {
+			return &mcp.ReadResourceResult{
+				Contents: []*mcp.ResourceContents{{
+					URI:      req.Params.URI,
+					MIMEType: "text/plain",
+					Text:     projectNotRegistered(rawID),
+				}},
+			}, nil
+		}
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("reading project context %q: %w", projectID, err)
@@ -3111,6 +3123,18 @@ func (s *Server) registerPrompts() {
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
+		}
+		// The same unresolved-name case the tool and the resource handle, and the
+		// same sentence: three surfaces, one answer. See projectNotRegistered.
+		if projectID == "" {
+			return &mcp.GetPromptResult{
+				Description: "Ghost's accumulated knowledge for " + rawID,
+				Messages: []*mcp.PromptMessage{
+					{Role: "user", Content: &mcp.TextContent{
+						Text: "Recall what Ghost knows about project \"" + rawID + "\" before continuing:\n\n" + projectNotRegistered(rawID),
+					}},
+				},
+			}, nil
 		}
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {

@@ -457,6 +457,82 @@ func shippedSeedText(t *testing.T, st *memory.Store) string {
 	return ""
 }
 
+// TestEveryProjectContextSurfaceAnswersAnUnresolvedProject is the second review
+// finding on this theme, and it is the one that shows the first fix was scoped too
+// narrowly.
+//
+// `buildProjectContext` is reached by three surfaces, not one: the tool, the
+// `ghost://project/{id}/context` resource template and the `recall_project` prompt.
+// The first guard was written at the tool, and the other two kept passing the
+// resolved id — `""` — straight into `assemble.Run`, which refuses it. So reading
+// the resource or the prompt for a project Ghost has never seen became
+// `reading project context "": assemble: project context requires a project`: a
+// hard break against the base ref, where the same call returned a block, and an
+// error quoting an empty id rather than the project the caller named.
+//
+// All three are asserted here rather than at each call site, because the failure
+// mode is a guard that exists on one path and not its two siblings — which is
+// invisible until someone reads all three.
+func TestEveryProjectContextSurfaceAnswersAnUnresolvedProject(t *testing.T) {
+	srv, session := newValiditySession(t)
+	const wanted = "no-such-project-anywhere"
+
+	// The assertions are LITERALS, not `projectNotRegistered(wanted)`. Comparing a
+	// function's output against itself is a tautology: the first version of this
+	// test did exactly that, and a mutation that made the function quote the
+	// RESOLVED id — which is "" here, so the message read `Project "" is not
+	// registered` — survived it. A test that asks a function whether the function
+	// is right has no failure to fail.
+	assertNotRegistered := func(surface, out string) {
+		t.Helper()
+		if !strings.Contains(out, "is not registered with Ghost yet") {
+			t.Errorf("%s did not answer the not-registered sentence:\n%s", surface, out)
+		}
+		if !strings.Contains(out, wanted) {
+			t.Errorf("%s did not NAME the project the caller asked for (want %q); quoting the resolved id would say "+
+				`Project "" is not registered, which names nothing they can act on:`+"\n%s", surface, wanted, out)
+		}
+		if strings.Contains(out, "## Memories") {
+			t.Errorf("%s rendered a memory listing for a project that does not exist; those rows belong to a "+
+				"different project:\n%s", surface, out)
+		}
+	}
+
+	// The tool.
+	assertNotRegistered("ghost_project_context", resultText(callTool(t, session, "ghost_project_context",
+		map[string]any{"project_id": wanted})))
+
+	// The resource template.
+	rr, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{
+		URI: "ghost://project/" + wanted + "/context",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource context: %v", err)
+	}
+	if len(rr.Contents) != 1 {
+		t.Fatalf("expected 1 resource content, got %d", len(rr.Contents))
+	}
+	assertNotRegistered("the context RESOURCE", rr.Contents[0].Text)
+
+	// The recall_project prompt.
+	pr, err := session.GetPrompt(context.Background(), &mcp.GetPromptParams{
+		Name:      "recall_project",
+		Arguments: map[string]string{"project_id": wanted},
+	})
+	if err != nil {
+		t.Fatalf("GetPrompt recall_project: %v", err)
+	}
+	if len(pr.Messages) != 1 {
+		t.Fatalf("expected 1 prompt message, got %d", len(pr.Messages))
+	}
+	tc, ok := pr.Messages[0].Content.(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", pr.Messages[0].Content)
+	}
+	assertNotRegistered("the recall_project PROMPT", tc.Text)
+	_ = srv
+}
+
 // TestProjectContextLoadDoesNotScaleWithStoreSize is the bounded-window check, in
 // the shape of TestSessionStartLoadDoesNotScaleWithStoreSize.
 //
