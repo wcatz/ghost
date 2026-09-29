@@ -17,18 +17,19 @@ name: longmemeval
 # the SAME vectors as a warm one => identical R@5/NDCG, so a warm run is what
 # justifies the hybrid floors below.
 #
-# WHY A RUN LEFT TO THE CAP STORES NOTHING (#771). Run 36501751853 (cancelled
-# at its cap, 2026-09-29) stored nothing, and its log shows why — its save step
-# started 6 seconds after the hybrid step was cancelled, ran, and failed inside:
+# WHY A RUN LEFT TO THE CAP STORES NOTHING (#771). A cancelled step's shell is
+# killed but its CHILD IS NOT REAPED, so the harness keeps appending to the
+# append-only cache after the step ends. Any archive taken during that window is
+# not a snapshot: run 36501751853 (cancelled at its cap, 2026-09-29) shows it,
+# with the orphaned `longmemeval` still running when the save ran and tar
+# refusing the moving file —
 #
 #     /usr/bin/tar: .../embed-cache.jsonl: file changed as we read it
 #     ##[warning]Failed to save: "/usr/bin/tar" failed with error: ... exit 1
 #
-# A cancelled step's child is not reaped before the next step starts, so
-# `longmemeval` kept appending to the append-only cache while the save archived
-# it; tar refuses a file that changes mid-read, and actions/cache/save reports
-# that as a WARNING — so the step still concluded `success` and nobody noticed.
-# No longmemeval-embed-cache-v1-* entry exists in the repo, so there is still
+# — a failure actions/cache/save downgrades to a warning, so that run reported a
+# green save step over an entry that was never stored. No
+# longmemeval-embed-cache-v1-* entry exists in the repo, so there is still
 # nothing to restore.
 #
 # HOW A COLD RUN MAKES PROGRESS: the embed pass bounds itself with
@@ -41,11 +42,10 @@ name: longmemeval
 # embed time only, so a dispatch whose restored cache is already complete is
 # never cut off mid-scoring and does reach a result.
 #
-# Note the two failure modes are NOT the same, and the `grew` gate below makes
-# them differ: on a run that hits the cap anyway, the bench shell dies with its
-# child, so `grew` is never written and the save step is SKIPPED (rendered
-# `skipped`, not `success`) — nothing is stored, but nothing lies either. Only
-# the ungated `always()` on main turned a lost cache into a green step.
+# Under THIS workflow a cap-cancelled run reports `skipped` rather than a green
+# `success`: the bench shell dies with the cap and never reaches the line that
+# writes `grew`, so the gate below is false. Nothing is stored, but nothing
+# claims otherwise — which is the difference from the run above.
 #
 # RE-BASELINE STILL PENDING: the warm local run that set the floors below
 # predates the harness adopting the search_document:/search_query: task
@@ -315,12 +315,17 @@ jobs:
         # them is what keeps the quota available for dispatches that add
         # something.
         #
-        # A `grew` that is never written (the bench step cancelled at the cap,
-        # its child still appending) also skips this step, which is the honest
-        # outcome — see the header. A save that RUNS and fails is only a
-        # WARNING and still concludes `success`, so a `Failed to save` line in
-        # this step's log is the thing to read when a dispatch reports progress
-        # the next one does not build on.
+        # This step is `skipped` for two different reasons, told apart by the
+        # bench step's own last line (`embed cache grew:` vs `embed cache
+        # unchanged at`): grew=false, a warm pass with nothing to store; or no
+        # grew at all, because the bench step was cancelled at the cap before
+        # it could write one. Both mean nothing was stored, and unlike the
+        # ungated `always()` this replaced, neither reports a green `success`.
+        #
+        # A save that RUNS and fails is only a WARNING and still concludes
+        # `success`, so a `Failed to save` line in this step's log is the thing
+        # to read when a dispatch reports progress the next one does not build
+        # on.
         if: always() && steps.bench.outputs.grew == 'true'
         uses: actions/cache/save@v6.1.0
         with:
