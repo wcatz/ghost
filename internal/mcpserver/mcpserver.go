@@ -318,6 +318,14 @@ type retrievalCapableStore interface {
 	assemble.RecordSink
 }
 
+// queryKeyWarmer is the optional startup half: a store that can resolve its
+// per-install retrieval key before the first search does. Separate from
+// retrievalCapableStore because a provider may well be able to record without
+// being able to warm, and the two failures are different.
+type queryKeyWarmer interface {
+	WarmQueryKey() error
+}
+
 // recordSink is the assembler's seam, resolved to whatever the store can do.
 // nil when it cannot, and the assembler treats a nil sink as "record nothing",
 // so this is one branch rather than a special case at the call site.
@@ -548,6 +556,22 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		store:          store,
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
+	}
+
+	// Resolve the retrieval record's per-install key now, at construction, so the
+	// search path never does. A cold key costs a data-directory resolution, a
+	// read, and on a first install a mkdir and a create — unbounded filesystem
+	// work inside the first search every process serves, which is exactly the
+	// post-answer wait the record write's 250ms budget exists to prevent.
+	//
+	// Best-effort and logged, never fatal: a store whose records cannot be grouped
+	// by question is a degraded audit, not a server that cannot search, and the
+	// per-call path reports the same failure with the same reason if it persists.
+	if warmer, ok := s.store.(queryKeyWarmer); ok {
+		if err := warmer.WarmQueryKey(); err != nil {
+			logger.Warn("retrieval key not available at startup; searches will record no query digest until it is",
+				"error", err)
+		}
 	}
 
 	s.mcp = mcp.NewServer(&mcp.Implementation{

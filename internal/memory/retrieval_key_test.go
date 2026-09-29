@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -180,12 +181,19 @@ func TestTheQueryKeyLivesOutsideTheDatabaseAndIsNotInABackup(t *testing.T) {
 	if len(raw) < 32 {
 		t.Errorf("the key file holds %d bytes, want at least 32", len(raw))
 	}
-	info, err := os.Stat(keyPath)
-	if err != nil {
-		t.Fatalf("stat the key: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		t.Errorf("the key is mode %v, want no group or other access", perm)
+	// The one POSIX-only claim in this file, and skipped rather than costing the
+	// whole file a //go:build !windows tag: Windows has no group or other bits, so
+	// the mode there says nothing about the key's protection. Everything else here
+	// — the key's location, its atomic publish, its refusal on a corrupt file — is
+	// platform-independent and worth running there.
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(keyPath)
+		if err != nil {
+			t.Fatalf("stat the key: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("the key is mode %v, want no group or other access", perm)
+		}
 	}
 
 	// A real store beside it, and the key must not be inside.
@@ -253,5 +261,95 @@ func TestQueryDigestSaysSoWhenTheKeyCannotBeRead(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("the failed digest is %q, want empty: a row must never carry an unsalted hash", got)
+	}
+}
+
+// TestAKeyFailureIsNotRememberedForTheLifeOfTheProcess: a transient failure must
+// not become a permanent one.
+//
+// The key is cached once per process, which is what keeps a file read off the
+// search path. Caching the FAILURE as well as the success is the trap: a store
+// that loses the startup race, or starts a moment before the key's directory
+// exists, would record an empty query_hash on every call for the rest of its life
+// — and report the FIRST failure's reason for all of them, which is a diagnostic
+// that points at the wrong cause.
+//
+// So: fail, repair the environment, call again, and the call must succeed. The
+// 0-byte key file is the standing example — it is exactly what a lost race or a
+// crash mid-write leaves behind, and it is the one state that used to be both
+// reachable and permanent.
+func TestAKeyFailureIsNotRememberedForTheLifeOfTheProcess(t *testing.T) {
+	dataDir := fakeDataDir(t)
+	useQueryKeyDir(t, dataDir)
+	keyPath := filepath.Join(dataDir, queryKeyFileName)
+
+	// A key file that exists and holds nothing: the state a lost race leaves.
+	if err := os.WriteFile(keyPath, nil, 0o600); err != nil {
+		t.Fatalf("seed an empty key file: %v", err)
+	}
+	if _, err := QueryDigest("who owns the k8s cluster"); err == nil {
+		t.Fatal("QueryDigest accepted a 0-byte key file")
+	}
+
+	// Repair it, the way an operator would, and the NEXT call must succeed.
+	good := strings.Repeat("ab", queryKeyBytes)
+	if err := os.WriteFile(keyPath, []byte(good), 0o600); err != nil {
+		t.Fatalf("repair the key file: %v", err)
+	}
+	digest, err := QueryDigest("who owns the k8s cluster")
+	if err != nil {
+		t.Fatalf("QueryDigest after repair: %v — the first failure was cached for the process", err)
+	}
+	want := digestWith(mustDecodeHex(t, good), "who owns the k8s cluster")
+	if digest != want {
+		t.Errorf("digest %q does not match the repaired key's HMAC %q", digest, want)
+	}
+}
+
+func mustDecodeHex(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("decode %q: %v", s, err)
+	}
+	return b
+}
+
+// TestWarmingTheQueryKeyTakesTheFilesystemOffTheSearchPath: the placement fix, and
+// it is asserted by removing the filesystem rather than by timing anything.
+//
+// Resolving the key costs a data-directory resolution, a read, and on a first
+// install a mkdir and a create. That work happened inside every search, on the
+// first call of every process — unbounded filesystem I/O between the answer being
+// computed and Run returning, which is precisely the wait the record write's own
+// 250ms budget was added to prevent, and it landed on the first search a user
+// ever ran. WarmQueryKey moves it to startup.
+//
+// The test deletes the key file AND its directory after warming, so a later digest
+// can only come from memory: a warm key that still reads the file fails here.
+func TestWarmingTheQueryKeyTakesTheFilesystemOffTheSearchPath(t *testing.T) {
+	dataDir := fakeDataDir(t)
+	useQueryKeyDir(t, dataDir)
+
+	s := testStore(t)
+	if err := s.WarmQueryKey(); err != nil {
+		t.Fatalf("WarmQueryKey: %v", err)
+	}
+	warmed, err := s.DigestQuery("who owns the k8s cluster")
+	if err != nil {
+		t.Fatalf("DigestQuery: %v", err)
+	}
+
+	// Remove the key entirely. A warmed key must not need it again.
+	if err := os.RemoveAll(filepath.Join(dataDir, queryKeyFileName)); err != nil {
+		t.Fatalf("remove the key file: %v", err)
+	}
+	after, err := s.DigestQuery("who owns the k8s cluster")
+	if err != nil {
+		t.Fatalf("DigestQuery after the key file was removed: %v — the key is being re-read on the "+
+			"search path, so every first search pays for a filesystem round trip", err)
+	}
+	if after != warmed {
+		t.Errorf("the warmed digest changed after the key file was removed: %q then %q", warmed, after)
 	}
 }

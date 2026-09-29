@@ -73,11 +73,39 @@ func queryKey() ([]byte, error) {
 	queryKeyMu.Lock()
 	defer queryKeyMu.Unlock()
 	if queryKeyLoaded {
-		return queryKeyBytes_, queryKeyErr
+		return queryKeyBytes_, nil
 	}
-	queryKeyBytes_, queryKeyErr = loadOrCreateQueryKey()
-	queryKeyLoaded = true
-	return queryKeyBytes_, queryKeyErr
+	key, err := loadOrCreateQueryKey()
+	if err != nil {
+		// NOT cached. A failure here is usually transient -- a directory that did
+		// not exist a moment ago, a file another process had not finished
+		// publishing -- and caching it would make one unlucky moment permanent: an
+		// MCP server that lost the startup race would record an empty query_hash on
+		// every call for the rest of its life, all reporting the first failure's
+		// reason. Only a SUCCESS is a fact worth remembering.
+		return nil, err
+	}
+	queryKeyBytes_, queryKeyLoaded = key, true
+	return queryKeyBytes_, nil
+}
+
+// WarmQueryKey resolves the per-install key NOW, so the search path never pays for
+// it.
+//
+// A cold key costs a data-directory resolution, a read, and on a first install a
+// mkdir and a create -- unbounded filesystem work on a path that runs inside every
+// search, on the first call of every process, which is exactly what the record
+// write's own budget exists to prevent. Calling this where the store is built
+// moves that cost to startup, where a slow filesystem costs a slow start and
+// nothing else.
+//
+// It returns the error rather than logging it, because the caller knows whether a
+// missing key is worth telling the operator about: a server that starts and serves
+// is not broken by a store whose records cannot be grouped by question, and the
+// per-call path reports the same failure with the same reason anyway.
+func (s *Store) WarmQueryKey() error {
+	_, err := queryKey()
+	return err
 }
 
 func loadOrCreateQueryKey() ([]byte, error) {
@@ -117,25 +145,90 @@ func loadOrCreateQueryKey() ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate a retrieval key: %w", err)
 	}
+	return publishQueryKey(dir, path, key)
+}
+
+// publishQueryKey creates the key file ATOMICALLY, with its content already in it,
+// which rules out the window the obvious version leaves open.
+//
+// Creating with O_EXCL and writing afterwards puts a 0-byte file at the real path
+// between the two calls. A second process in that window reads the empty file, is
+// refused, and -- because the old code cached the failure -- records an empty
+// query_hash for the rest of its life. A crash in that window leaves the same
+// 0-byte file on disk permanently, and every later start refuses the key for the
+// same reason.
+//
+// So the content goes to a private temp file, is flushed, and is then HARD LINKED
+// into place: link is atomic and fails with EEXIST if the name is taken, so the
+// destination is either absent or complete. There is no state in which the real
+// path exists and is unreadable, which is what lets the EEXIST branch below keep
+// its promise of using the winner's key rather than a half-written one.
+func publishQueryKey(dir, path string, key []byte) ([]byte, error) {
+	tmp, err := os.CreateTemp(dir, queryKeyFileName+".*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("stage the retrieval key in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	// The staged copy never outlives this call, on any path out of it.
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("tighten the staged retrieval key: %w", err)
+	}
+	if _, err := tmp.WriteString(hex.EncodeToString(key)); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("write the staged retrieval key: %w", err)
+	}
+	// Flushed before it is published, so a crash cannot leave a named-but-empty
+	// file after all.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("flush the staged retrieval key: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("write the staged retrieval key: %w", err)
+	}
+
+	if err := os.Link(tmpName, path); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			// Hard links are unavailable on some filesystems, which is a reason to
+			// fall back rather than to refuse a working install.
+			return fallbackPublishQueryKey(path, key, err)
+		}
+		// Another process published first. Theirs is the key: two keys in one store
+		// would split its records' grouping, which is worse than losing a race.
+		return readPublishedQueryKey(path)
+	}
+	return key, nil
+}
+
+// readPublishedQueryKey is the loser's half of the race: read the winner's key
+// rather than publish our own.
+func readPublishedQueryKey(path string) ([]byte, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read the retrieval key another process created at %s: %w", path, err)
+	}
+	other, decErr := hex.DecodeString(string(raw))
+	if decErr != nil || len(other) < queryKeyBytes {
+		return nil, fmt.Errorf("the retrieval key another process created at %s is unreadable (%d bytes); "+
+			"delete it to start a new key", path, len(raw))
+	}
+	return other, nil
+}
+
+// fallbackPublishQueryKey is the O_EXCL create-and-write path, for a filesystem
+// with no hard links. It carries the empty-file window this package exists to
+// close, so it is used only where the alternative is no key at all.
+func fallbackPublishQueryKey(path string, key []byte, linkErr error) ([]byte, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			// Another process made it between our read and our write; theirs is
-			// the key, and using a different one would split the store's records.
-			raw, rErr := os.ReadFile(path)
-			if rErr != nil {
-				return nil, fmt.Errorf("read the retrieval key another process created at %s: %w", path, rErr)
-			}
-			other, decErr := hex.DecodeString(string(raw))
-			if decErr != nil || len(other) < queryKeyBytes {
-				return nil, fmt.Errorf("the retrieval key another process created at %s is unreadable", path)
-			}
-			return other, nil
+			return readPublishedQueryKey(path)
 		}
-		return nil, fmt.Errorf("create the retrieval key at %s: %w", path, err)
+		return nil, fmt.Errorf("create the retrieval key at %s (hard links unavailable: %v): %w", path, linkErr, err)
 	}
-	// Write via the handle so the 0600 above is the mode on disk, then close
-	// explicitly: a key left open is a key another process can still be writing.
 	if _, err := f.WriteString(hex.EncodeToString(key)); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("write the retrieval key to %s: %w", path, err)
