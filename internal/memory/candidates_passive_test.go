@@ -783,28 +783,74 @@ func TestCandidatesPassiveReadsAStoreBelowTheTierFloor(t *testing.T) {
 	st := passiveFixture(t)
 	ctx := context.Background()
 
-	// Rebuild `memories` without the two columns the tier added, and stamp the
-	// floor below scope as well, so the SELECT has to substitute for three.
-	if _, err := st.db.Exec(`ALTER TABLE memories DROP COLUMN retention`); err != nil {
-		t.Skipf("cannot drop a column on this SQLite build: %v", err)
+	// The partial index the tier migration created reads BOTH columns in its WHERE
+	// clause, and SQLite refuses to drop a column such an index reads — so the
+	// index goes first, as the two other pre-v19 fixtures in the tree do
+	// (mcpinit/retentioncolumn_test.go, memory/asof_test.go). It is recreated by
+	// the next migration, so nothing is lost by removing it here. Every step
+	// FAILS LOUDLY rather than skipping: a skip would leave the NULL-substitution
+	// path with no coverage at all while the test reported nothing wrong, which is
+	// the failure this test exists to catch.
+	if _, err := st.db.Exec(`DROP INDEX IF EXISTS idx_memories_session_expiry`); err != nil {
+		t.Fatalf("drop the partial index the tier migration created: %v", err)
 	}
-	if _, err := st.db.Exec(`ALTER TABLE memories DROP COLUMN expires_at`); err != nil {
-		t.Skipf("cannot drop a column on this SQLite build: %v", err)
+	for _, col := range []string{"retention", "expires_at", "scope"} {
+		if _, err := st.db.Exec(`ALTER TABLE memories DROP COLUMN ` + col); err != nil {
+			t.Fatalf("drop %s to build a pre-v12 store: %v", col, err)
+		}
 	}
+	// Below the SCOPE floor as well as the tier one, so the fetch has to
+	// substitute for three columns and suppress the scope predicate.
 	if _, err := st.db.Exec(`PRAGMA user_version = 11`); err != nil {
 		t.Fatalf("stamp an old schema version: %v", err)
 	}
 
-	set, err := st.Candidates(ctx, passiveRequest("proj", projectPassivePolicy()))
+	// A session scope is REQUESTED, so the suppressed predicate is reachable rather
+	// than inert: without the gate the fetch names a column this store does not
+	// have and the whole read fails.
+	req := passiveRequest("proj", projectPassivePolicy())
+	req.Scope = map[string]string{"area": "payments"}
+
+	// The claim itself, asserted directly rather than only through the read: on a
+	// store below the scope floor the built statement must not NAME the scope
+	// column at all. Asserting it this way rather than relying on the read to fail
+	// is deliberate — the read is the thing being protected, so a driver that
+	// tolerated the reference would leave this test green with the gate removed,
+	// and the gate is the guarantee the loaders' version depends on.
+	cols, err := passiveColumnsFor(st)
 	if err != nil {
-		t.Fatalf("a pre-tier store must still be read, not refused: %v", err)
+		t.Fatalf("resolve the store's shape: %v", err)
+	}
+	if cols.HasScope {
+		t.Error("a store stamped below the scope floor must not report the scope column as present")
+	}
+	pol := projectPassivePolicy()
+	q, _ := passiveFetchSQL(pol, req, cols)
+	if strings.Contains(q, "json_each") {
+		t.Errorf("the scope predicate is present in a statement for a store with no scope column; it names a column that is not there, "+
+			"which is `no such column: scope` at run time: %s", q)
+	}
+
+	set, err := st.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("a pre-tier, pre-scope store must still be read, not refused: %v", err)
 	}
 	if len(set.Rows) == 0 {
 		t.Fatal("the pre-tier read returned no rows; the NULL substitutions dropped everything")
 	}
 	for _, r := range set.Rows {
-		if r.Retention != "" {
-			t.Errorf("row %s: Retention is %q, but this store has no tier column, so every row must read as unset", r.ID, r.Retention)
+		// `project`, NOT "": scanMemories resolves an empty tier once for every
+		// reader, so a row hydrated through `NULL AS retention` arrives as
+		// `project`. Asserting "" here would be asserting a value the shared
+		// scanner cannot produce — the same value the loaders reach through
+		// tierOrProject. The intent is that a pre-tier row behaves as a project
+		// row rather than as a fourth tier, and that is the scanner's contract.
+		if r.Retention != RetentionProject {
+			t.Errorf("row %s: Retention is %q, want %q — a store with no tier column holds project rows by definition",
+				r.ID, r.Retention, RetentionProject)
+		}
+		if RetentionExempt(r.Memory) {
+			t.Errorf("row %s reads as tier-exempt on a store that has no tier column, so its demotion protection is unearned", r.ID)
 		}
 	}
 }

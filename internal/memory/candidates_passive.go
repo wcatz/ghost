@@ -199,8 +199,18 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	// a row the session excluded must not spend any of the window: filtering it
 	// afterwards would fill the window with rows the caller rejected and then cut
 	// them, and a window that small reaches a weaker block.
+	//
+	// GATED on the column existing, which is the same guard the session-start
+	// loaders apply and for the same reason: on a store below the scope floor the
+	// predicate names a column that is not there, and the whole fetch would fail
+	// with `no such column: scope` — where the loaders it replaces render an
+	// unscoped block. Suppressing it is correct rather than merely safe: every row
+	// in such a store carries no scope, and ScopesConflict over an empty scope has
+	// no keys, so an unscoped row never conflicts with a session scope. The rows
+	// the block then shows are the ones that store has, labelled without a scope —
+	// which is exactly the block it produced before scope was read.
 	scopeClause := ""
-	if len(req.Scope) > 0 {
+	if cols.HasScope && len(req.Scope) > 0 {
 		scopeClause = " AND " + ScopeMatchesSQL("scope", req.Scope)
 	}
 
@@ -543,8 +553,9 @@ func decayRankingSQLAt(now time.Time, hasTier bool) (string, []any) {
 // retention" on a store below the tier floor, where the loader it replaces
 // renders the block perfectly well.
 type passiveColumns struct {
-	list    string
-	HasTier bool
+	list     string
+	HasTier  bool
+	HasScope bool
 }
 
 // The schema versions that added memories.scope and memories.retention. They are
@@ -585,17 +596,27 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	}
 
 	// The list is the shared one, with a column this store may not have replaced by
-	// a NULL literal of the right shape. `NULL AS expires_at` is here for the same
-	// reason as `NULL AS retention`: scanMemories binds both, and it binds by
-	// POSITION, so a shorter list is an argument-count failure rather than a value.
+	// a literal of the SHAPE scanMemories expects. Position matters as much as
+	// shape: the scanner binds by position, so a shorter list is an argument-count
+	// failure rather than a value.
+	//
+	// `retention` is substituted with an EMPTY STRING, not NULL, and that is not a
+	// detail: the scanner binds it as a plain string and resolves `""` to
+	// `RetentionProject` itself ("a row whose tier reads empty is a row a query did
+	// not select, not a fourth tier"). A NULL here is a Scan error — "converting
+	// NULL to string is unsupported" — which is how this was found. `scope` and
+	// `expires_at` take NULL because those ARE bound as sql.NullString, and NULL is
+	// the honest value for "no scope stated" and "no expiry claimed".
 	names := append([]string(nil), memoryColumnNames...)
 	for i, c := range names {
 		switch {
 		case c == "scope" && !hasScope:
 			names[i] = "NULL AS scope"
-		case (c == "retention" || c == "expires_at") && !hasTier:
-			names[i] = "NULL AS " + c
+		case c == "retention" && !hasTier:
+			names[i] = "'' AS retention"
+		case c == "expires_at" && !hasTier:
+			names[i] = "NULL AS expires_at"
 		}
 	}
-	return passiveColumns{list: qualifyColumnsFrom(names, ""), HasTier: hasTier}, nil
+	return passiveColumns{list: qualifyColumnsFrom(names, ""), HasTier: hasTier, HasScope: hasScope}, nil
 }
