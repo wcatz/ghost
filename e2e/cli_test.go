@@ -3102,14 +3102,17 @@ func TestCLIMCPStatusHistoryGrowth(t *testing.T) {
 		// The finding, and the repair — named WITHOUT the promise it cannot keep.
 		// The repair's bound is the instant #727 reached main, so on a store running
 		// a current build every row inside this 24-hour window is one it keeps by
-		// design, and "to remove them" would send an operator after nothing. Pinned on
-		// the BUILT BINARY's output rather than on the unit's Detail string, because
-		// this is the sentence a reader actually sees and the one that can rot
-		// silently: the measurement stays true against a moved bound, only the
-		// advice would lie.
+		// design, and "to remove them" would send an operator after nothing. A
+		// memory's NEWEST version is the other guard that decides what the repair
+		// keeps, and the one a reader blames the current writer for missing
+		// (#764's E1). Pinned on the BUILT BINARY's output rather than on the unit's
+		// Detail string, because this is the sentence a reader actually sees and
+		// the one that can rot silently: the measurement stays true against a
+		// moved bound, only the advice would lie.
 		mustMatch(t, "mcp status finding", status.stdout, `! \d+% of the \d+ version rows written in the last 24h restate the version before them`)
 		mustContain(t, "mcp status finding", status.stdout, "ghost history compact")
 		mustContain(t, "mcp status finding", status.stdout, "deliberately leaves what this build wrote")
+		mustContain(t, "mcp status finding", status.stdout, "plus the newest version of any memory")
 		mustNotContain(t, "mcp status finding", status.stdout, "to remove them")
 	})
 

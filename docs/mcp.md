@@ -40,7 +40,7 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 
 ```text
 **History:** 8 version rows in the last 24h, 6 restatements (75%) — deepest memory holds 7 of its 50 versions, store holds 8 of 20000 rows
-  ⚠ 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote
+  ⚠ 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote, plus the newest version of any memory
   ⚠ memory 1F2E3D4C5B6A7988 is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
 ```
 
