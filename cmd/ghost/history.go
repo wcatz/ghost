@@ -169,16 +169,21 @@ source the memory held once that write landed.
               A version row is removed ONLY when it records the same state as the
               row before it of the same memory, compared over every column a
               version stores: content, category, importance, resolved_at and
-              source, AND it was recorded before the bound below. Five things
+              source, AND it was recorded before the bound below. Six things
               always stay: a memory's FIRST version (the only statement of what it
               said), its NEWEST version (the statement of what it says now, and
               the same row the retention cap declines to trim), every event that
               records a claim the state does not (a tombstone, a supersede or its
               withdrawal, a resolve or its clearing, a merge, an import, a
-              restore), any row naming another memory, and every 'reflect' version
+              restore), any row naming another memory, every 'reflect' version
               except those — a retag filed as an update is a change somebody made
               on purpose and this table has no column for tags, so the recorded
-              state cannot tell it from a no-op.
+              state cannot tell it from a no-op — and EVERY version of a memory
+              that has since been deleted. A deleted memory has no live row, so a
+              read of the past takes the age it measures from the version that
+              answers it; removing one would change what that read computes, for a
+              memory nobody can edit and nobody can restore. Its history is frozen
+              the moment it is deleted, so this costs nothing.
 
                 --project <p>   Compact one project only (id, name or path)
                 --before <t>    Only consider versions recorded before <t>, a
@@ -198,15 +203,28 @@ source the memory held once that write landed.
                                 AT a bound.
                 --fix-updated-at  Also move each live memory's updated_at back to
                                  the recorded_at of its ANCHOR — the newest version
-                                 this repair will NOT remove — but only where a
-                                 removable version sits ABOVE that anchor, since
-                                 that version is the evidence a reflection run moved
-                                 the stamp. A row it will not remove is an anchor
-                                 whether or not it changed state, which is what keeps
-                                 a deliberate tags-only edit's bump from being undone
-                                 by a no-op reflect row beneath it. Only ever
+                                 this repair will NOT remove AND whose WRITER moved
+                                 updated_at in the same statement that filed it: a
+                                 save, an update, or a reflection, and nothing else.
+                                 Applied only where a removable version sits ABOVE
+                                 that anchor, since that version is the evidence a
+                                 reflection run moved the stamp. A writer that
+                                 changed state WITHOUT moving the stamp is not an
+                                 anchor: 'ghost resolve' writes resolved_at and
+                                 deliberately leaves updated_at alone, and folding a
+                                 duplicate save writes importance and moves nothing,
+                                 so trusting either as an anchor would set a stamp
+                                 to a time the store had never held. Only ever
                                  BACKWARD, and a stamp no version explains is left
-                                 alone. Without the flag the redundant versions go
+                                 alone. A memory with no such version at all has NO
+                                 anchor — a memory from before this table existed
+                                 whose next writer was an unresolve — so its stamp
+                                 is left exactly as it is and the report counts it
+                                 under "no recorded stamp write" rather than
+                                 reporting nothing: its no-op flood is still
+                                 removed, and a count of 0 fixed beside a store full
+                                 of removed versions otherwise reads as a finished
+                                 repair. Without the flag the redundant versions go
                                  and no stamp moves.
 
               Pass --apply and --fix-updated-at in the SAME run: the stamp repair
@@ -215,9 +233,12 @@ source the memory held once that write landed.
 
               A dry run is the default and writes nothing; --apply writes. Either
               way the counts are per project, and a dry run reports exactly what
-              the apply would do. It refuses to run while a lifecycle run holds
-              any of the projects' locks, and it works in bounded transactions so
-              it does not hold the write lock over a whole store's history.
+              the apply would do. Every row the run could not repair is named in
+              the report rather than left to a count of zero to explain: a stamp no
+              layout reads, and a stamp with no recorded write to restore it from.
+              It refuses to run while a lifecycle run holds any of the projects'
+              locks, and it works in bounded transactions so it does not hold the
+              write lock over a whole store's history.
 
 The history outlives the memory: a deleted memory's last state is still
 readable here unless it was purged.

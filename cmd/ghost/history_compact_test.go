@@ -18,6 +18,128 @@ import (
 // leaves); these are the three things only the command can be wrong about — the
 // arguments, the refusal, and what an operator is told.
 
+// TestHistoryCompactHelpAndDocsStateTheSameRule: the anchor rule lives in three
+// places — the code, docs/cli.md, and the help an operator actually reads — and
+// this is the test for the drift between them.
+//
+// A review of #735 found the help still promising the state-change anchor the PR
+// removes, which is how 49 of 288 stamps got invented: a rule an operator reads is
+// a rule they act on, and the one left behind is the wrong one. No behavioural test
+// covers help text, and the e2e surface check only proves the help RUNS, so nothing
+// would have failed.
+//
+// Both surfaces are matched with whitespace COLLAPSED, which is the whole difficulty:
+// the help is hard-wrapped at one column and the doc at another, so a three-word
+// phrase straddles a line break in one of them and not the other. A test matching
+// the raw text passes on a help that says the wrong thing — mutating the help back
+// to the retired sentence is what proves it — so the wrapping is removed before
+// matching and a claim is a claim whether or not an editor reflowed the paragraph.
+//
+// Each surface also carries its OWN needles for the claims worded differently, and
+// what must not differ is which claims are made, not how they read: a test demanding
+// identical sentences would push the next edit into copy-paste instead of agreement.
+// The retired sentences are the sharper half — a rule removed from the code and left
+// in the help is worse than never documenting it, because it is the sentence a reader
+// trusts.
+func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
+	// Claims both surfaces must make. A surface has to SAY these, not merely avoid
+	// contradicting them.
+	shared := map[string]string{
+		"the anchor is a stamp-moving writer, not a state change": "WRITER moved",
+		"a memory with no anchor at all is disclosed":             "no recorded stamp write",
+		"a deleted memory is not compacted":                       "since been deleted",
+		// The count is load-bearing in its own right: the review's other finding was
+		// a help still reading "Five things always stay" beside a sixth rule.
+		"the retention list counts the deleted-memory rule": "Six things always stay",
+	}
+	// Claims each surface must make, in its own words.
+	perSurface := map[string]map[string]string{
+		"the shipped help (historyUsage)": {
+			"a resolve is named as a writer that moves no stamp": "writes resolved_at and deliberately leaves updated_at alone",
+			"a fold is named as a writer that moves no stamp":    "folding a duplicate save writes importance and moves nothing",
+			"both kinds of unrestorable stamp are reported":      "a stamp no layout reads, and a stamp with no recorded write",
+		},
+		"docs/cli.md's compact section": {
+			"a resolve is named as a writer that moves no stamp": "leaves `updated_at` alone",
+			"a fold is named as a writer that moves no stamp":    "changes `importance` and moves nothing",
+			"both kinds of unrestorable stamp are reported":      "counted separately (`stamps unreadable`)",
+			"the deleted-memory rule gives its reason":           "nobody can restore",
+		},
+	}
+	// Sentences the rule deleted. Each names a reading of the anchor that is wrong
+	// in the permissive direction — the one that invents a stamp — so one surviving
+	// anywhere is a live defect rather than a stale phrase.
+	retired := map[string]string{
+		"a non-removable row anchors on its own":        "whether or not it changed state",
+		"an anchor may be a row that changed nothing":   "A row it will not remove is an anchor",
+		"the retention list predates the sixth rule":    "Five things always stay",
+		"the anchor is the last state-changing version": "newest version that CHANGED state",
+	}
+
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "cli.md"))
+	if err != nil {
+		t.Fatalf("read docs/cli.md: %v", err)
+	}
+	// Scoped to the compact section, so a claim satisfied by unrelated text in the
+	// file cannot pass this — a long reference document repeats phrases.
+	rest, ok := compactDocSection(string(doc))
+	if !ok {
+		t.Fatal(`docs/cli.md has no "#### ` + "`ghost history compact`" + `" section`)
+	}
+
+	for _, surface := range []struct{ name, text string }{
+		{"the shipped help (historyUsage)", historyUsage},
+		{"docs/cli.md's compact section", rest},
+	} {
+		flat := squashSpace(surface.text)
+		for claim, needle := range shared {
+			if !strings.Contains(flat, squashSpace(needle)) {
+				t.Errorf("%s does not state %s: no %q. Shipped text is what an operator reads, and a "+
+					"rule that lives only in a comment has not been shipped.",
+					surface.name, claim, needle)
+			}
+		}
+		for claim, needle := range perSurface[surface.name] {
+			if !strings.Contains(flat, squashSpace(needle)) {
+				t.Errorf("%s does not state %s: no %q", surface.name, claim, needle)
+			}
+		}
+		for wrong, needle := range retired {
+			if strings.Contains(flat, squashSpace(needle)) {
+				t.Errorf("%s still says %s (%q): that is a reading of the anchor this change removed, and "+
+					"the permissive one is the one that invents a stamp", surface.name, wrong, needle)
+			}
+		}
+	}
+}
+
+// squashSpace collapses every run of whitespace to one space and trims, so a phrase
+// matches a hard-wrapped surface whatever column the wrap landed at. The surfaces are
+// hand-wrapped text, so this is not a convenience: it is the difference between the
+// test seeing a sentence and seeing half of one.
+func squashSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// compactDocSection returns docs/cli.md's `ghost history compact` section, up to the
+// next heading. Scoping is the point: the file is a whole reference and will contain
+// this section's vocabulary somewhere unrelated, and a claim satisfied over there is a
+// claim that proves nothing.
+func compactDocSection(doc string) (string, bool) {
+	const start = "#### `ghost history compact`"
+	i := strings.Index(doc, start)
+	if i < 0 {
+		return "", false
+	}
+	rest := doc[i+len(start):]
+	if j := strings.Index(rest, "\n#### "); j >= 0 {
+		rest = rest[:j]
+	} else if j := strings.Index(rest, "\n### "); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest, true
+}
+
 // historyCompactTestStore is a store with two projects and one memory each, so
 // a per-project report has something to be per.
 func historyCompactTestStore(t *testing.T) *memory.Store {
