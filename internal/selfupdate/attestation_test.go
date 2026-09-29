@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -875,11 +876,9 @@ func TestFetchAttestationBundlesRefusesOversizedResponses(t *testing.T) {
 		}
 	})
 
-	// The bare block encoding is a second path with its own bound, and a bound
-	// that is only on the framed path is no bound at all on the day the store
-	// switches. The body below compresses to a few hundred bytes and expands to
-	// 8 KiB, and the cap sits between the two: nothing about the SIZE OF THE
-	// RESPONSE can refuse it, so only the check on what it expands to can.
+	// The bare block encoding is a second path with its own bound, and the bound
+	// is on the CLAIM rather than the outcome. The body below compresses to a
+	// few hundred bytes and expands to 8 KiB, and the cap sits between the two.
 	t.Run("a bare snappy block that expands past the cap", func(t *testing.T) {
 		encoded := snappy.Encode(nil, bytes.Repeat([]byte("C"), 8192))
 		attestationBundleCap = 1024
@@ -890,6 +889,69 @@ func TestFetchAttestationBundlesRefusesOversizedResponses(t *testing.T) {
 		}
 		if _, err := FetchAttestationBundles(context.Background(), ts.URL, digest); err == nil {
 			t.Fatal("a bundle that expands past the cap was accepted")
+		}
+	})
+
+	// The bare block format leads with a varint declaring the DECOMPRESSED
+	// length, and snappy.Decode allocates a destination of that size BEFORE it
+	// discovers the source is too short to be that long. So a body of a handful
+	// of bytes claiming four gibibytes makes the decoder attempt a four-
+	// gibibyte allocation, and a cap applied to the RESULT bounds nothing.
+	//
+	// This is the one place in the upgrade path where a remote service chooses
+	// both what a client decompresses and what that costs, so the test has to
+	// show the claim is refused rather than merely that a big body is: the
+	// difference is a few bytes on the wire against gigabytes of allocation.
+	t.Run("a bare block claiming far more than the cap", func(t *testing.T) {
+		old := attestationBundleCap
+		attestationBundleCap = 8 << 20
+		t.Cleanup(func() { attestationBundleCap = old })
+
+		// varint(4 GiB) followed by nothing: the smallest body that claims the
+		// largest allocation a 64-bit host would make from it.
+		var body []byte
+		var claim [binary.MaxVarintLen64]byte
+		n := binary.PutUvarint(claim[:], 4<<30)
+		body = append(body, claim[:n]...)
+
+		// A cap of 8 MiB and a claim of 4 GiB: the check has to read the varint.
+		start := time.Now()
+		_, err := decodeSnappyBundle(body)
+		elapsed := time.Since(start)
+
+		if err == nil {
+			t.Fatal("a block claiming 4 GiB of output was accepted")
+		}
+		if !strings.Contains(err.Error(), "declares") {
+			t.Errorf("error %q does not report the claimed size, so a reader cannot tell a refused claim from a decode failure", err)
+		}
+		if !strings.Contains(err.Error(), "4294967296") {
+			t.Errorf("error %q does not name the claimed length, so the bound it applied is not visible", err)
+		}
+		// The allocation the bug would have made is ~4 GiB; a cap that ran
+		// after it could not complete inside a second on most hosts.
+		if elapsed > 5*time.Second {
+			t.Errorf("refusing a 4 GiB claim took %s, so the size was checked after the decoder had already allocated for it", elapsed)
+		}
+	})
+
+	// A body that is neither encoding has to be reported as such, naming both
+	// attempts, because which one the store switched to is the first thing
+	// anyone debugging this needs to know. Note what this does NOT pin: the
+	// specific wording for a body whose leading varint is unreadable. The
+	// decoder's own error is an equally good sentence there, so a test
+	// demanding the exact text would be pinning a distinction nothing depends
+	// on — the guard there is about not handing a nonsense claim to the
+	// decoder, not about diagnosing it.
+	t.Run("a body that is neither encoding", func(t *testing.T) {
+		// Too short to hold a varint, and not a framed stream: the framing
+		// format opens with a chunk type byte, so this is neither.
+		_, err := decodeSnappyBundle([]byte{0x07, 0x41})
+		if err == nil {
+			t.Fatal("a body that is not snappy at all was decoded")
+		}
+		if !strings.Contains(err.Error(), "as a framed stream") || !strings.Contains(err.Error(), "as a block") {
+			t.Errorf("refusal %q does not name both encodings it tried, so a reader cannot tell which one the store switched to", err)
 		}
 	})
 }

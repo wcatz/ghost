@@ -555,8 +555,12 @@ func TestUpgradeRefusesToSkipTheCheckBeforeTheCutoverWithNoTrustMaterial(t *test
 // check", because that single substitution turns the feature into a no-op
 // anywhere the wiring is forgotten.
 //
-// The flag does not reach it either. A caller with no verifier has no check to
-// override; the refusal is about this build of ghost, not about the release.
+// The flag does not reach it, and the message must not offer it. This branch
+// returns before the switch that consults --allow-unattested, so a message
+// ending "re-run with --allow-unattested" would send the user into an
+// identical refusal — and this is the branch whose entire purpose is to be a
+// legible dead end, because it is only reached when ghost's own wiring is
+// broken.
 func TestUpgradeRefusesWhenThereIsNoVerifierAtAll(t *testing.T) {
 	for _, flag := range []bool{false, true} {
 		name := "without the flag"
@@ -583,11 +587,55 @@ func TestUpgradeRefusesWhenThereIsNoVerifierAtAll(t *testing.T) {
 			if err == nil {
 				t.Fatal("a post-cutover release was installed with no attestation check wired in at all")
 			}
-			if !strings.Contains(err.Error(), "--allow-unattested") {
-				t.Errorf("refusal %q does not say what would permit it, which is the loud flag", err)
+			if strings.Contains(err.Error(), "--allow-unattested") {
+				t.Errorf("refusal %q names a flag that this branch never consults, so it sends the user into an identical refusal", err)
+			}
+			// It is a bug in ghost, not a property of the release, and the user
+			// is the only one who can report it.
+			if !strings.Contains(err.Error(), "issue") {
+				t.Errorf("refusal %q does not say this is a ghost bug worth reporting, so a broken build is a dead end with no way out", err)
 			}
 			if calls != 0 {
 				t.Errorf("the installer ran %d time(s) with no verifier in place", calls)
+			}
+			assertUnchanged(t, target, "the old binary")
+		})
+	}
+}
+
+// TestUpgradeRefusesAnUnrecognisedAttestationState is the same shape for a state
+// this build has no policy for. It is refused, nothing is offered that would
+// change the answer, and the state is named so a report is actionable.
+func TestUpgradeRefusesAnUnrecognisedAttestationState(t *testing.T) {
+	for _, flag := range []bool{false, true} {
+		name := "without the flag"
+		if flag {
+			name = "with the flag"
+		}
+		t.Run(name, func(t *testing.T) {
+			au := newAttestedUpgrade(t, attestedTag, []byte("pretend executable"))
+			target := installedGhost(t, "the old binary")
+
+			calls := 0
+			_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0",
+				upgradeOptions{allowUnattested: flag}, upgradeDeps{
+					fetch:   au.release.fetch,
+					install: func([]byte) error { calls++; return nil },
+					attest: func(context.Context, []byte, string) selfupdate.AttestationResult {
+						return selfupdate.AttestationResult{State: selfupdate.AttestationState(99)}
+					},
+				})
+			if err == nil {
+				t.Fatal("an unrecognised attestation state was treated as a pass")
+			}
+			if strings.Contains(err.Error(), "--allow-unattested") {
+				t.Errorf("refusal %q names a flag that an unrecognised state never reaches", err)
+			}
+			if !strings.Contains(err.Error(), "unknown") {
+				t.Errorf("refusal %q does not name the state it saw, so a report could not be acted on: %v", err, err)
+			}
+			if calls != 0 {
+				t.Errorf("the installer ran %d time(s) for an unrecognised attestation state", calls)
 			}
 			assertUnchanged(t, target, "the old binary")
 		})

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -318,21 +319,50 @@ func attestationGet(ctx context.Context, url string, limit int64, what string, a
 // The cap applies to the result, because that is what reaches memory: a small
 // compressed body could otherwise expand without bound, and this is the one
 // place a service chooses what a client decompresses.
+//
+// The two encodings need their bounds in different places, and the bare block's
+// is the one that is easy to get wrong. A framed stream is bounded WHILE it is
+// read. A bare block is not: the format leads with a varint declaring the
+// DECOMPRESSED length, and snappy.Decode sizes its destination from that number
+// and allocates before it discovers the source is too short to be that long. A
+// body of a few bytes whose first varint claims four gibibytes therefore makes
+// snappy.Decode(nil, body) attempt a four-gibibyte allocation, and a cap
+// applied to the RESULT bounds nothing at all.
+//
+// So the declared length is read and checked here, before the decoder is
+// called, and the destination is allocated at exactly the size the block claims
+// — which by that point is known to be within the cap. This is the one place in
+// the upgrade path where a remote service chooses both what a client
+// decompresses and what that costs, so the bound is on the claim and not only
+// on the outcome.
 func decodeSnappyBundle(compressed []byte) ([]byte, error) {
 	framed, framedErr := readCapped(snappy.NewReader(bytes.NewReader(compressed)), attestationBundleCap, "attestation bundle")
 	if framedErr == nil {
 		return framed, nil
 	}
-	decoded, blockErr := snappy.Decode(nil, compressed)
-	if blockErr == nil {
-		if int64(len(decoded)) > attestationBundleCap {
-			return nil, fmt.Errorf("attestation bundle expands past the %d-byte cap", attestationBundleCap)
-		}
-		return decoded, nil
+	declared, n := binary.Uvarint(compressed)
+	switch {
+	case n <= 0:
+		// A bare block opens with the uncompressed length as a varint, so a body
+		// with no readable one — too short, or a varint that overflows uint64 —
+		// is not a block. This is a GUARD, not a diagnosis: there is nothing
+		// safe to hand the decoder and nothing to claim, and the decoder's own
+		// error on such a body would be an equally good sentence. The framed
+		// failure is still reported, because that is the half of the answer
+		// that carries information.
+		return nil, fmt.Errorf("not a snappy bundle: as a framed stream: %v; as a block: the leading uncompressed-length varint is unreadable", framedErr)
+	case declared > uint64(attestationBundleCap):
+		return nil, fmt.Errorf("not a snappy bundle: as a framed stream: %v; as a block: it declares %d decompressed bytes, over the %d-byte cap",
+			framedErr, declared, attestationBundleCap)
 	}
-	// Neither encoding parsed. Report both, because which one the store
-	// switched to is the first thing anyone debugging this needs to know.
-	return nil, fmt.Errorf("not a snappy bundle: as a framed stream: %v; as a block: %w", framedErr, blockErr)
+	// Allocated at the declared size, which the check above has already bound.
+	decoded, blockErr := snappy.Decode(make([]byte, 0, declared), compressed)
+	if blockErr != nil {
+		// Neither encoding parsed. Report both, because which one the store
+		// switched to is the first thing anyone debugging this needs to know.
+		return nil, fmt.Errorf("not a snappy bundle: as a framed stream: %v; as a block: %w", framedErr, blockErr)
+	}
+	return decoded, nil
 }
 
 // VerifyReleaseAttestation reports whether any of bundles proves that this

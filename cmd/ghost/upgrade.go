@@ -238,6 +238,35 @@ func attestationRejectedMessage(latest, detail string) string {
 	return fmt.Sprintf("refusing to install %s: %s", latest, detail)
 }
 
+// noVerifierMessage is the refusal for a build that cannot perform the check at
+// all — a caller that wired no attestation verifier, which today only a test can
+// do, and which is a bug in ghost rather than a fact about the release.
+//
+// It names NO flag, for the same reason attestationRejectedMessage does not: it
+// returns before the switch that consults --allow-unattested, so a message built
+// by unattestedMessage or attestationUnreachableMessage would end "re-run with
+// --allow-unattested" and send the user into an identical refusal. That is the
+// one thing this branch cannot afford to do: its whole purpose is to be a
+// legible dead end, and it is reached only when the wiring in runUpgrade is
+// broken, so the user needs to be told that rather than handed a flag.
+func noVerifierMessage(latest string) string {
+	return fmt.Sprintf(
+		"refusing to install %s: this build of ghost could not check the release's build attestation at all, which is a bug in ghost rather than a property of the release — no flag changes it. "+
+			"Install the release archive you want from https://github.com/wcatz/ghost/releases, and please report this at https://github.com/wcatz/ghost/issues",
+		latest)
+}
+
+// unverifiableStateMessage is the same shape for a state this build does not
+// recognise. An unnamed state is a state nobody has written a policy for, so it
+// gets the treatment a stranger gets: refused, with nothing offered that would
+// change the answer.
+func unverifiableStateMessage(latest, got string) string {
+	return fmt.Sprintf(
+		"refusing to install %s: the attestation check reported an unrecognised state (%s), which this build has no policy for — no flag changes it. "+
+			"Install the release archive you want from https://github.com/wcatz/ghost/releases, and please report this at https://github.com/wcatz/ghost/issues",
+		latest, got)
+}
+
 // upgradeUsage is the help for `ghost upgrade`: stdout for -h/--help (see
 // handleHelp), so a help request never checks GitHub Releases, downloads an
 // archive or replaces the running binary.
@@ -515,7 +544,7 @@ func checkAttestation(ctx context.Context, warn io.Writer, archive []byte, versi
 		if !selfupdate.AttestationRequiredFor(version) {
 			return nil
 		}
-		return errors.New(unattestedMessage(version))
+		return errors.New(noVerifierMessage(version))
 	}
 
 	switch result := deps.attest(ctx, archive, version); result.State {
@@ -538,8 +567,9 @@ func checkAttestation(ctx context.Context, warn io.Writer, archive []byte, versi
 	default:
 		// An unnamed state is a state nobody has written a policy for, so it
 		// gets the treatment a stranger gets rather than the treatment a
-		// passing check would get.
-		return errors.New(attestationUnreachableMessage(version, fmt.Sprintf("the attestation check reported %s", result.State)))
+		// passing check would get — and it gets it without naming a flag,
+		// because nothing here consults one.
+		return errors.New(unverifiableStateMessage(version, result.State.String()))
 	}
 }
 
