@@ -17,6 +17,14 @@ type pipeline struct {
 	set   *memory.CandidateSet
 	trace *Trace
 
+	// passive is a fact about the REQUEST, bound once at Run and read by the
+	// stages that must behave differently without a query. It is derived from
+	// the query's absence rather than from Source, because the consequences
+	// follow from the absence: there is no leg rank, no cosine, and no relevance
+	// verdict available, and a Source-keyed branch would let a future passive
+	// source be judged against a floor that never applied to it.
+	passive bool
+
 	// rows is the surviving candidate set, in rank order.
 	rows []memory.Candidate
 	// blockNotes are statements about the assembled block — its conflicts, its
@@ -347,10 +355,46 @@ func runConflicts(p *pipeline) {
 // stage is a pass-through in v1 and says so in the trace rather than pretending
 // to have deduplicated.
 func runDedup(p *pipeline) {
-	p.blockNotes = append(p.blockNotes,
-		"near-duplicate reordering is applied by the retriever over the window; no source policy drops losers on this surface yet")
-	p.trace.record(stageDedup, len(p.rows), len(p.rows), nil, false,
-		"near-duplicate reordering is applied by the retriever over the window; no source policy drops losers on this surface yet")
+	// The sentence is about what the RETRIEVER did, and a passive bucket can have
+	// had losers removed rather than ranked last — so the old wording ("no source
+	// policy drops losers on this surface yet") would be false for exactly the
+	// surface it was written for. It is derived from the request rather than
+	// asserted, because the request is where the policy is stated.
+	note := "near-duplicate reordering is applied by the retriever over the window"
+	// GATED ON PASSIVE as well as on the flag, and the gate is the point: the
+	// policy only ever reaches the store for a passive request, because
+	// `passivePolicies` returns nil for a query and the fusion path only reorders.
+	// A query-mode request that set the flag would otherwise be told a memory was
+	// dropped from the block while it is still in it — which is worse than saying
+	// nothing, because an operator told to go looking for a dropped row will not
+	// find one and will conclude the block is lying about something else.
+	if p.passive && p.dropsDemotedLosers() {
+		// Stated as a POLICY, not as a removal that happened. The stage cannot know
+		// whether a row was removed — the retriever did it, over a window this
+		// pipeline never saw the edges of — and a note that claims a removal for
+		// every `_global` slice that sets the flag would be a report about a
+		// prediction, on the overwhelmingly common occasion that the window held
+		// no near-duplicate edge at all. Which rows went is in the trace; what this
+		// says is why there is one row of each pair when there is one.
+		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of each pair"
+	} else {
+		note += "; no source policy drops losers on this surface yet"
+	}
+	p.blockNotes = append(p.blockNotes, note)
+	p.trace.record(stageDedup, len(p.rows), len(p.rows), nil, false, note)
+}
+
+// dropsDemotedLosers reports whether any bucket in the request ASKS the retriever
+// to remove near-duplicate losers rather than rank them last. It is about the
+// request, not the result: the removal happened in the retriever, over a window
+// whose edges this pipeline never saw, so only the policy can be reported here.
+func (p *pipeline) dropsDemotedLosers() bool {
+	for _, s := range p.req.Budget.Slices {
+		if s.DropDemotedLosers {
+			return true
+		}
+	}
+	return false
 }
 
 // runDiversity is stage 7: a per-bucket quota, off by default until it is

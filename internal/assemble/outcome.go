@@ -29,6 +29,17 @@ const ftsRankFloor = 3
 // the floor.
 const (
 	// Empty results, named by the stage that emptied the set.
+	// reasonNoMemories is the passive empty reason, and it is deliberately NOT a
+	// synonym for no_candidates. A passive retrieval read an over-fetched window
+	// and found nothing in it; it never counted the store, so it cannot say the
+	// store holds no memories. The sentence says what was actually observed.
+	reasonNoMemories = "no_memories"
+	// reasonNotApplicable is the answerable reason for a passive block: the honest
+	// report of a result that was never judged against a floor, and distinct from
+	// reasonNoFloorArm on purpose — that one says an arm held a value and the floor
+	// was never configured, while this one says there was no query to be relevant
+	// to and therefore no arm to hold anything.
+	reasonNotApplicable     = "not_applicable"
 	reasonNoCandidates      = "no_candidates"
 	reasonRetrievalFailed   = "retrieval_failed"
 	reasonVectorUnavailable = "vector_backend_unavailable"
@@ -166,6 +177,20 @@ func (p *pipeline) emptyReason() string {
 	if p.legFailed("fts") || p.legFailed("vector") {
 		return reasonRetrievalFailed
 	}
+	if p.passive {
+		// The last line, and the only one the passive path changes. Reaching here
+		// means no stage removed anything and no leg fact explains the emptiness, so
+		// the window itself is what was empty — and `no_candidates` would claim a
+		// QUERY matched nothing, which is a sentence about a search that never ran.
+		// A passive empty is `no_memories`.
+		//
+		// It sits BELOW the two leg checks deliberately, which is what the block
+		// above says in its own terms: a stage that removed rows is the cause the
+		// caller can act on, and a leg fact is only reached when no stage did. The
+		// two leg reasons are real facts on a passive set — a retriever can report a
+		// leg applicable-but-not-run — so they are kept, not duplicated above.
+		return reasonNoMemories
+	}
 	return reasonNoCandidates
 }
 
@@ -285,6 +310,24 @@ func (p *pipeline) verdict() (Outcome, string) {
 	// corpus that no comparison supports.
 	ftsApplied, vectorValue := p.armValues()
 	p.trace.Floors.FTSApplied = ftsApplied
+	// A passive block is never `weak`, and the check comes before the floor because
+	// the floor never applied to it: there was no query, so neither an FTS rank nor
+	// a cosine exists to compare. Reporting `below_floor` would tell the caller its
+	// memories were judged and found wanting, which is a claim about a question
+	// this surface was never asked.
+	//
+	// Both arms are cleared, not just the keyword one: `fitResponse` derives
+	// VectorApplied from the leg status and the configured arm, so a retriever
+	// reporting the vector leg `ok` on a passive request would otherwise leave the
+	// trace claiming a cosine applied to a block the machine line is simultaneously
+	// reporting `not_applied` for. The CONFIGURED arm and the threshold are left
+	// alone, because they are facts about the request rather than about the verdict,
+	// and a reader has to be able to tell "not applied" from "not configured".
+	if p.passive {
+		p.trace.Floors.FTSApplied = false
+		p.trace.Floors.VectorApplied = false
+		return OutcomeAnswerable, reasonNotApplicable
+	}
 	if !ftsApplied && (!p.trace.Floors.VectorArmOn || !vectorValue) {
 		return OutcomeAnswerable, reasonNoFloorArm
 	}
@@ -450,6 +493,14 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 			return "This search is incomplete: the vector leg could not run, so only the keyword leg ran and " +
 				"it may be less complete than a hybrid one. The query was not wrong — the answer is " +
 				"incomplete, not absent."
+		case reasonNoMemories:
+			// Not "no matching memories found": a passive retrieval matched nothing
+			// because nothing was asked, and the block it read is a window, not a
+			// census. The sentence names the observation it can actually make, which
+			// is the only claim the evidence supports.
+			return "No memories in the over-fetched window: the rows this block was assembled from came back empty, " +
+				"so nothing is injected. That describes the window, not the store — a store with memories behind a " +
+				"narrower scope, an expired validity window or a category this session did not read would look the same."
 		case reasonAllInvalid:
 			return "No sufficiently trustworthy memory found: the candidates this search found were withheld as out " +
 				"of date, their validity windows having closed or not yet opened." + p.stageNote() + " The query was " +
@@ -578,6 +629,16 @@ func (p *pipeline) machineLine(outcome Outcome, reason string) string {
 		b.WriteString(" floor_fts_rank=not_applied")
 	}
 	switch {
+	case p.passive:
+		// FIRST, ahead of every other state, and that ordering is the point. A
+		// passive block has no query, so the cosine arm has nothing to compare
+		// against — and a retriever that reported the vector leg `ok` (or a caller
+		// that set AbstainCosine) would otherwise print a number next to a verdict
+		// that no cosine produced. A fourth state, and the reason the three below
+		// are not enough here: `off` reports a CONFIGURATION to a reader who cannot
+		// change one, because this surface has no vector arm whatever
+		// `context.abstain_cosine` is set to.
+		b.WriteString(" abstain_cosine=not_applied")
 	case p.trace.Floors.VectorApplied:
 		fmt.Fprintf(&b, " abstain_cosine=%s", cosineField(p.trace.Floors.VectorCosine))
 	case p.trace.Floors.VectorArmOn:

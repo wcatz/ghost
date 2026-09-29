@@ -49,12 +49,65 @@ const (
 
 // Slice is a per-bucket membership budget. MaxBytes bounds item content and
 // never includes response framing.
+//
+// The second half of the struct is the RETRIEVAL policy for the bucket, and it
+// is here rather than in a caller because a passive retrieval has no query to
+// shape it: the store cannot know how deep to fetch, in what order, or which
+// categories are behavioural unless the budget says. A passive slice that
+// states no OverFetch and no cap bounds nothing and is refused, because a
+// passive fetch runs on every session start and an unbounded one is a store
+// scan.
 type Slice struct {
-	Bucket            string
-	MaxItems          int  // 0 = unbounded within this slice
-	MaxBytes          int  // item-content bytes; 0 = unbounded within this slice
-	ClampBytes        int  // 0 = no per-item presentation clamp
-	DropDemotedLosers bool // honored only for session-start
+	Bucket     string
+	MaxItems   int // 0 = unbounded within this slice
+	MaxBytes   int // item-content bytes; 0 = unbounded within this slice
+	ClampBytes int // 0 = no per-item presentation clamp
+	// DropDemotedLosers asks the RETRIEVER to remove a near-duplicate loser rather
+	// than rank it last. It is honoured for any PASSIVE request — passive is keyed
+	// on the absence of a query, not on Source, so a source that arrives without
+	// one is passive whatever it calls itself.
+	//
+	// INERT on a query-mode request, and that is worth knowing rather than
+	// discovering: a query's policies are never sent (passivePolicies returns nil
+	// for a non-empty query) and the fusion path only reorders, so a slice that
+	// sets this on a search request changes nothing. Stage 6 reads the flag to
+	// describe the note, and is gated on the passive shape for the same reason —
+	// otherwise it would report a removal the retriever never performed.
+	DropDemotedLosers bool
+	// DemoteOnlyWhenOverCap gates the retriever's near-duplicate demotion on the
+	// selected set being wider than MaxItems. A demotion is a REORDER, so on a set
+	// that fits under the cap it only shuffles rows the answer shows in full, and
+	// the shipped session-start loaders skip it there.
+	DemoteOnlyWhenOverCap bool
+
+	// OverFetch is how many rows the passive fetch reads for this bucket before
+	// any selection. It is the window: a policy's own bound, not the caller's
+	// item budget, because the selection stages below run over what it returns.
+	// 0 means "the same as this slice's MaxItems", which is the query-mode
+	// reading of the field and the only one that shape has.
+	OverFetch int
+	// Order is the passive SQL order: "decay" (the composite score, then
+	// importance, created_at and id) or "pinned_importance_updated". The two
+	// buckets disagree, and the disagreement is policy rather than drift.
+	Order string
+	// TwoPass enables the behavioral reservation: BehaviorFloor slots are filled
+	// from BehaviorCategories first, ordered by score × CategoryWeights and
+	// capped per category by CategoryCaps, and the rest of the window is filled
+	// from every candidate by plain score.
+	TwoPass            bool
+	BehaviorFloor      int
+	BehaviorCategories []string
+	CategoryWeights    map[string]float64
+	CategoryCaps       map[string]int
+	// DemotionThreshold is the near-duplicate similarity above which a row is a
+	// loser. It is per bucket because the buckets genuinely differ: the global
+	// policy is lower, and one number for both would be one bucket's threshold
+	// silently applied to the other. Zero — the Go zero value, and what a caller
+	// that states none sends — means "use the store's configured
+	// linking.demotion_threshold", NOT "treat every edge as a near-duplicate": the
+	// retriever binds this as `strength >= ?`, so a literal zero would demote over
+	// a 0.1 edge and, on a bucket that drops losers, delete the row outright.
+	DemotionThreshold float64
 }
 
 // Budget is what a caller will accept. MaxItems is the total across buckets;
@@ -138,8 +191,10 @@ type Request struct {
 // frames differently must not read Response, and must leave Budget.MaxBytes at 0
 // until it supplies a render of its own — otherwise the post-pass measures this
 // envelope against a budget that was stated for another one, and drops rows
-// against a cap the caller never described. Session-start is the next surface
-// (#577) and inherits that constraint, not an exemption.
+// against a cap the caller never described. Session-start inherits that
+// constraint, not an exemption: it is the passive surface (#581), so it frames
+// its own block around Line() and states its bounds per bucket — `Budget.MaxItems`
+// and `Budget.MaxBytes` both stay 0 and the per-slice caps are the whole bound.
 type Result struct {
 	Items   []Item
 	Outcome Outcome
@@ -245,6 +300,7 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 		mode:           projectMode(req),
 		set:            set,
 		trace:          newTrace(req, set),
+		passive:        Passive(req),
 		rows:           set.Rows,
 		droppedBy:      map[string]int{},
 		droppedByBound: map[string]int{},
@@ -325,13 +381,46 @@ func candidateRequest(req Request) memory.CandidateRequest {
 		// The store treats AsOf as authoritative, so it is carried rather than
 		// re-derived: Run has already bound Now to the same instant, and passing
 		// only one of the two would leave the store guessing which is the clock.
-		AsOf: req.AsOf,
-		Fetch: memory.Fetch{
-			FTSTopK:    depth,
-			VectorTopK: depth,
-			Limit:      window,
-		},
+		AsOf:    req.AsOf,
+		Fetch:   memory.Fetch{FTSTopK: depth, VectorTopK: depth, Limit: window},
+		Passive: passivePolicies(req),
 	}
+}
+
+// passivePolicies maps the caller's budget onto the store's selection policies.
+// It is empty for a query-mode request, which is the point: a query retrieval
+// has no bucket policy, because the query and the budget are the whole of it.
+//
+// The over-fetch default is the slice's own item cap, which is the only reading
+// a query-mode slice has: "fetch what I can admit" is bounded by construction,
+// and only a passive slice needs a wider fetch than it admits, because the
+// selection stages drop rows before stage 8 would.
+func passivePolicies(req Request) []memory.SlicePolicy {
+	if req.Query != "" {
+		return nil
+	}
+	out := make([]memory.SlicePolicy, 0, len(req.Budget.Slices))
+	for _, s := range req.Budget.Slices {
+		over := s.OverFetch
+		if over <= 0 {
+			over = s.MaxItems
+		}
+		out = append(out, memory.SlicePolicy{
+			Bucket:                s.Bucket,
+			Order:                 s.Order,
+			TwoPass:               s.TwoPass,
+			BehaviorFloor:         s.BehaviorFloor,
+			BehaviorCategories:    s.BehaviorCategories,
+			CategoryWeights:       s.CategoryWeights,
+			CategoryCaps:          s.CategoryCaps,
+			OverFetch:             over,
+			ItemCap:               s.MaxItems,
+			DemotionThreshold:     s.DemotionThreshold,
+			DemoteOnlyWhenOverCap: s.DemoteOnlyWhenOverCap,
+			DropDemotedLosers:     s.DropDemotedLosers,
+		})
+	}
+	return out
 }
 
 func resolvedParams(req Request) memory.SearchParams {
@@ -362,6 +451,15 @@ func itemBound(req Request) int {
 // window does, because a disclosure about a window that disagrees with the window
 // is worse than no disclosure: the two would have to be kept in step by hand.
 func windowIsACeiling(req Request) bool {
+	if Passive(req) {
+		// Never, on a passive request. The ceiling is the pipeline's choice for a
+		// window nothing stated; a passive window is stated, per bucket, by the
+		// over-fetch — and the note would tell a reader the block is bounded by a
+		// 100-row window that no passive read ever asked for. A passive slice
+		// bounded only by MaxBytes is bounded by that byte cap, which stage 8
+		// applies; the note is not where that fact is stated.
+		return false
+	}
 	// ==, not >=: the fallback sets the window to exactly the ceiling, and a
 	// looser comparison would let a future ceiling of twice the size keep the note
 	// claiming the old number — the drift this function exists to prevent.
@@ -386,6 +484,23 @@ func RetrievalWindow(req Request) int { return retrievalWindow(req) }
 // budget: the retriever has to be able to return at least as many rows as the
 // caller will accept, or a closure could never be filled.
 func retrievalWindow(req Request) int {
+	if Passive(req) {
+		// A passive window is the policies' own over-fetches and nothing else.
+		// The caller's item cap does not size it (the cap bounds MEMBERSHIP, and
+		// the window has to be wider than the cap for a demoted row to be
+		// backfilled), and a category predicate does not widen it either, because
+		// the passive fetch has no category in its SQL: reporting a tripled
+		// number here would describe a window nothing read.
+		total := 0
+		for _, s := range req.Budget.Slices {
+			over := s.OverFetch
+			if over <= 0 {
+				over = s.MaxItems
+			}
+			total += over
+		}
+		return total
+	}
 	total := itemBound(req)
 	if total <= 0 {
 		// No item bound anywhere, so nothing sizes a window from the budget.
@@ -496,14 +611,120 @@ func validateRequest(req Request) error {
 		return errors.New("assemble: this budget states no bound on the block: set MaxItems or MaxBytes, or give a slice an item or byte cap — a ClampBytes clamp alone bounds neither, since a clamped item is shorter")
 	}
 	if req.Query == "" {
-		// An empty query selects passive retrieval, whose bucket policies are
-		// specification until the session-start surface moves onto this seam.
-		// Rejecting it here keeps the failure an error the caller can see,
-		// rather than an empty block that reads as an empty store.
-		return errors.New("assemble: passive retrieval (an empty query) is not served yet; it arrives with the session-start migration")
+		if req.AsOf != nil {
+			// Refused here as well as in the store, for the same reason the store
+			// refuses it: the passive policies select over LIVE rows and a
+			// historical read selects over RECORDED versions, and Run dispatches
+			// on AsOf first — so a request carrying both would be answered by the
+			// historical path with its policies silently discarded and a window its
+			// caller never stated, while Run still reported `not_applicable` and
+			// added the historical qualifier. The store's own guard is not enough
+			// here because Run never reaches it on this shape.
+			return errors.New("assemble: a passive request (no query) cannot also be a historical (as_of) read: the bucket policies " +
+				"select over live rows and a historical read selects over recorded versions — use one or the other")
+		}
+		if err := validatePassiveBudget(req); err != nil {
+			return err
+		}
 	}
 	return nil
 }
+
+// validatePassiveBudget refuses a passive request the retriever could not serve
+// honestly. Two things are checked, and both are about the FETCH rather than
+// about the block:
+//
+//   - there must be a policy at all. A request with no query and no slices is
+//     the one shape the store cannot answer: it has nothing to retrieve by, and
+//     an empty set would read as a store that holds nothing. A search request
+//     that arrives with an empty query is refused here for the same reason,
+//     which is why the check is on the query's absence and not on Source.
+//   - every slice must bound its own window. The query path gets one from the
+//     budget's item bound, so a fetch limit is always implied; here the window
+//     IS the policy, and a slice stating neither an over-fetch nor a cap would
+//     leave the store to choose — which on a path that runs at every session
+//     start is a full-store scan.
+func validatePassiveBudget(req Request) error {
+	if len(req.Budget.Slices) == 0 {
+		return errors.New("assemble: a request with no query carries no bucket policies, so there is nothing to retrieve by; " +
+			"give it a slice per bucket, or a query")
+	}
+	for _, s := range req.Budget.Slices {
+		// The bucket IS the project predicate on a passive read: the store binds
+		// SlicePolicy.Bucket as the WHERE clause and does not consult Mode at all,
+		// because one policy per bucket is the whole shape of a passive retrieval.
+		// So a slice naming some other project would read — and inject — rows the
+		// request never named, and stage 3 only RECORDS that as
+		// Signals[id].ProjectMatch=false, which nothing refuses. Refusing the
+		// mismatch here is the same decision `sliceBuckets` makes for a repeated
+		// bucket: one named bucket per slice, and it has to be a bucket this
+		// request is about.
+		if s.Bucket != req.ProjectID && s.Bucket != memory.GlobalProjectID {
+			return fmt.Errorf("assemble: passive slice names bucket %q, which is neither the requested project %q nor %q; "+
+				"the bucket IS the project predicate on this path, so a mismatched one would read a project the request "+
+				"never named", s.Bucket, req.ProjectID, memory.GlobalProjectID)
+		}
+		// The bound that matters here is the FETCH, not the block. A slice bounded
+		// only by MaxBytes says how many bytes the answer may occupy, which bounds
+		// membership but says nothing about how much is READ — and on this path the
+		// read is the thing that must not be unbounded. Accepting it would also be
+		// incoherent downstream: `passivePolicies` falls back to MaxItems for the
+		// over-fetch, so a MaxBytes-only slice would reach the store asking for a
+		// window of 0 and be refused there, with a message about the store's
+		// contract for a request this seam had already called valid.
+		if s.OverFetch <= 0 && s.MaxItems <= 0 {
+			return fmt.Errorf("assemble: passive slice %q bounds the block's bytes but states no over-fetch and no item cap, "+
+				"so its retrieval window is unbounded; this path runs at every session start. Name OverFetch, or MaxItems "+
+				"if the over-fetch is the same number", s.Bucket)
+		}
+	}
+	// A category or tier filter cannot be honoured here, and the seam would rather
+	// refuse it than serve a confident wrong answer.
+	//
+	// `passiveFetchSQL` binds `WHERE project_id = ? AND resolved_at IS NULL` plus
+	// scope — there is no category and no retention in its SQL at all, because a
+	// passive block is selected by importance, decay and pin rather than by a
+	// predicate. The query path can afford the same filter because it WIDENS the
+	// window when one is set (`predicateFetchWiden`, what closed #573), so a
+	// matching row ranked below the cut stays reachable; the passive branch of
+	// `retrievalWindow` returns before that widening, because the window there is
+	// the policies' own over-fetches.
+	//
+	// So a passive request carrying a category is not "filtered, then assembled" —
+	// it is assembled from rows the filter never touched, and stage 3 then drops
+	// every non-matching one out of a window nothing widened. The caller gets
+	// `all_out_of_category`, or a short block, while the store holds exactly the
+	// rows it asked for just below the over-fetch cut. That is a false negative
+	// with a confident reason attached, and it is worse than a refusal: a caller
+	// that sees the reason concludes its category is absent from the project.
+	//
+	// Refusing also keeps the number honest. `RetrievalWindow` reporting a tripled
+	// window nothing read is a small lie, but the one that does damage is the
+	// filter: it decides membership, and membership is what the caller came for.
+	if req.Category != "" {
+		return fmt.Errorf("assemble: a passive request cannot carry a Category filter (%q): the passive fetch binds no "+
+			"category in SQL and its window is the policies' over-fetches, so nothing widens the read for one — the rows "+
+			"would be dropped after selection rather than fetched by it. Drop the filter, or send a query", req.Category)
+	}
+	if req.Retention != "" {
+		return fmt.Errorf("assemble: a passive request cannot carry a Retention filter (%q): the passive fetch binds no "+
+			"tier in SQL and its window is the policies' over-fetches, so nothing widens the read for one — the rows "+
+			"would be dropped after selection rather than fetched by it. Drop the filter, or send a query", req.Retention)
+	}
+	return nil
+}
+
+// Passive reports whether this request is a passive retrieval: no query, so the
+// block is selected by importance, decay and pin rather than by relevance to
+// anything the caller asked.
+//
+// It is a function of the query alone, not of the Source, because the shape is
+// what decides the consequences. A passive block cannot receive a relevance
+// verdict (there is no query to be relevant to) and its empty reason describes
+// a window rather than the store, and both of those follow from the absence of
+// a query — so a source that arrives with one is a query-mode request whatever
+// it calls itself, and a source that arrives without one is passive.
+func Passive(req Request) bool { return req.Query == "" }
 
 // sliceBuckets lists the bucket names that appear more than once. The two halves
 // of a slice budget disagree about a repeat: the window sums every cap, and

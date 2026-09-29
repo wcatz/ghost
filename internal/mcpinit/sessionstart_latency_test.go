@@ -142,6 +142,13 @@ func sessionStartOn(tb testing.TB, n, runs int) (time.Duration, int, int) {
 	return total / time.Duration(runs), rows, globals
 }
 
+// This file and sessionstart_golden_test.go are BASELINES, and they measure the
+// loader this migration is replacing rather than the path that replaces it — which
+// is why they are recorded on the retriever PR, where the loader is still the code
+// that runs, and not on the hook switch, where it is gone. The measurement of the
+// NEW path lives in sessionstart_passive_latency_test.go and needs the assembler
+// half to exist.
+//
 // TestSessionStartLatencyAt1000Memories is the number the PR body reports: the
 // steady-state session-start load against a 1000-memory store.
 //

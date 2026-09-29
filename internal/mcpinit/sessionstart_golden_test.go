@@ -228,6 +228,17 @@ func stripSessionCounter(block string) string {
 // this migration is asked to justify is measured against a recorded baseline
 // rather than against memory.
 //
+// It belongs to the retriever PR rather than to the hook switch that CONSUMES it,
+// and that is the whole reason it is here: once the hook calls `assemble.Run`
+// there is no longer a "before" to record, and a baseline captured afterwards is a
+// description rather than a record. Whoever writes the hook switch should run this
+// first, on the current head, and expect it to fail — the failure IS the diff they
+// have to justify line by line. The two review findings that were fixed here
+// (the missing over-cap demotion gate, and a fixture that built no link at all)
+// both passed this test while being wrong, which is why its own guard below
+// asserts the demotion losers are ABSENT from the recorded block rather than
+// trusting that the fixture builds the pairs it says it does.
+//
 // The golden is a whole-block string, not a set of substring assertions: the
 // output change here is a reordering and a re-selection, and a substring test
 // passes under both shapes. A reviewer reads the diff between goldenBlockBefore
