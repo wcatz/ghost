@@ -2517,6 +2517,14 @@ func (s *Server) registerTools() {
 
 		var sb strings.Builder
 		sb.WriteString("## Ghost Health\n\n")
+
+		// The store-version line comes FIRST, before the counts, because it
+		// changes what every number below it means (#746). With writes being
+		// refused, "0 memories" reads as lost data and sends an agent hunting
+		// for something that was never deleted; said first, it reads as the
+		// explanation for the counts.
+		s.writeStoreVersionLine(ctx, &sb)
+
 		fmt.Fprintf(&sb, "**Projects:** %d\n\n", len(projects))
 
 		totalMemories := 0

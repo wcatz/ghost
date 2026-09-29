@@ -241,6 +241,20 @@ func runUpgrade(args []string) {
 	// embedded plugin sources). Surface stale integrations instead of letting
 	// them fail open invisibly on every fire.
 	mcpinit.ReportStaleIntegrations(os.Stdout)
+
+	// The replacement above is what makes this list matter (#746): a running
+	// `ghost mcp` holds the inode of the binary it started from, so the file
+	// that was just replaced is exactly the one those processes are still
+	// executing. They keep serving, and keep writing, from code that is no
+	// longer on disk. Reporting them HERE — right after the swap that orphaned
+	// them — is the only moment the operator is told which clients to restart
+	// as part of the same action.
+	//
+	// The comparison is against `exe`, the path just replaced, not
+	// os.Executable(): this process is still running the OLD image, and
+	// comparing against it would report nothing. That is also why the path is
+	// passed in rather than resolved again here.
+	mcpinit.ReportStaleServers(os.Stdout, exe)
 }
 
 // performUpgrade is the command with its two dependencies injected: it looks the

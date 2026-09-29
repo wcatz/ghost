@@ -52,9 +52,16 @@ func roDSN(dbPath string) string {
 // out and return 0 under contention that 5000ms rides out).
 func rwDSN(dbPath string) string {
 	u := url.URL{
-		Scheme:   "file",
-		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
-		RawQuery: "_pragma=busy_timeout(5000)",
+		Scheme: "file",
+		Opaque: (&url.URL{Path: dbPath}).EscapedPath(),
+		// _txlock=immediate is what makes a `BeginTx(ctx, nil)` take SQLite's
+		// write lock at BEGIN rather than at the first write. memory.OpenDB asks
+		// for the same thing, and for the same reason: the newer-store check has
+		// to run INSIDE a transaction that already holds the write lock, or a
+		// migration can commit between the check and the write. Without it a
+		// transaction starts deferred, so it would read the stamp, then take the
+		// lock, and the whole guard would be the pre-BEGIN race with extra steps.
+		RawQuery: "_pragma=busy_timeout(5000)&_txlock=immediate",
 	}
 	return u.String()
 }
@@ -69,6 +76,10 @@ func rwDSN(dbPath string) string {
 // stay uncreated, mode tightening included. Still best-effort: on any failure
 // (contention that outlasts even 5s, permissions) the stale stored count is
 // shown instead.
+//
+// It is also the ONLY write into a memory store that does not go through the
+// guarded seams in internal/memory, and it checks the version itself for that
+// reason — see the comment at the check.
 func bumpSessionCount(dbPath, projectID string) int {
 	if _, err := os.Stat(dbPath); err != nil {
 		return 0
@@ -84,8 +95,67 @@ func bumpSessionCount(dbPath, projectID string) int {
 	}
 	defer db.Close() //nolint:errcheck
 
+	// The one write outside internal/memory, and therefore outside the guarded
+	// write seams (#746). This handle is opened with sql.Open rather than
+	// memory.OpenDB, and the structural test that keeps every store write behind
+	// a seam only walks internal/memory — so a stale server's own writes are
+	// refused and this one would not be. It is the session hook, so it runs on
+	// every Claude Code session start, against exactly the databases a stale
+	// `ghost mcp` left behind.
+	//
+	// It is guarded the same way internal/memory guards, and the first version of
+	// this did NOT: a bare `PRAGMA user_version` read followed by a separate
+	// autocommit UPSERT. That is the pre-BEGIN placement the store's own doc
+	// comment calls out as leaving the gap the issue describes, and it is not
+	// theoretical — TestBumpSessionCountCannotBeSlippedPastByAMigrationCommittingMidCheck
+	// reproduces it deterministically, because a WAL reader does not block on a
+	// writer and does not see its uncommitted changes. So: one transaction,
+	// _txlock=immediate on the DSN so BEGIN takes the write lock, the stamp read
+	// THROUGH that transaction, and the UPSERT in the same one. A migration needs
+	// the same lock, so it cannot commit in between.
+	//
+	// The wait this adds is the DSN's own busy_timeout(5000), which the single
+	// autocommit UPSERT was already paying on the same contention — the hook is
+	// not slower to fail than it was, only slower to succeed while a migration
+	// holds the lock, and that wait is the correct behaviour rather than a cost.
+	//
+	// Skipping is silent, and deliberately so: a hook that printed "your store
+	// is newer" on every session start would put that text in front of an agent
+	// on each one, and ghost_health plus `ghost mcp status` already say it where
+	// a human is looking. Still best-effort throughout: any failure returns 0 and
+	// the caller shows the count it read instead.
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0
+	}
+	// A refusal rolls back rather than commits, for the same reason the store's
+	// own seam does: a refusal that had written would be the outcome the guard
+	// exists to prevent.
+	// Read here rather than through memory.DBUserVersion, which takes a *sql.DB
+	// and so cannot be pointed at this transaction. Adding a public
+	// DBUserVersionTx to that package for one out-of-package caller would be the
+	// wider change; this function already opens its own handle and writes its own
+	// SQL, so reading its own pragma is the same posture.
+	//
+	// It goes through the transaction rather than the pool, and it is worth being
+	// precise about how much that is worth: with _txlock=immediate already on the
+	// DSN, this transaction holds the write lock, so a pool read would return the
+	// same committed answer. Reading through the transaction is what keeps the
+	// guard correct if the DSN ever loses that parameter, which is why the DSN is
+	// the load-bearing half and why the test pins it rather than the read site.
+	var version int
+	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		_ = tx.Rollback()
+		return 0
+	}
+	if version > memory.SchemaVersion() {
+		_ = tx.Rollback()
+		return 0
+	}
+
 	var n int
-	err = db.QueryRow(`
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO ghost_state (project_id, interaction_count)
 		VALUES (?, 1)
 		ON CONFLICT(project_id) DO UPDATE SET
@@ -94,6 +164,10 @@ func bumpSessionCount(dbPath, projectID string) int {
 		RETURNING interaction_count
 	`, projectID).Scan(&n)
 	if err != nil {
+		_ = tx.Rollback()
+		return 0
+	}
+	if err := tx.Commit(); err != nil {
 		return 0
 	}
 	// Again, and this is not redundant. The pass above ran before this
