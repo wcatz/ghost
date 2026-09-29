@@ -545,3 +545,30 @@ func passiveDedupNote(t *testing.T, res Result) string {
 	t.Fatalf("no near-duplicate note in %v", res.Notes)
 	return ""
 }
+
+// TestRunPassiveRejectsASliceThatBoundsBytesButNotTheFetch: a MaxBytes-only
+// slice bounds how large the ANSWER may be, which is not the same as bounding how
+// much is READ — and the read is what must not be unbounded on a path that runs at
+// every session start.
+//
+// Accepting it would also be incoherent downstream, which is the sharper form of
+// the same point: `passivePolicies` falls back to MaxItems for the over-fetch, so
+// such a slice would reach the store asking for a window of 0 and be refused
+// THERE, with a message about the store's contract for a request this seam had
+// already declared valid. The error a caller gets is the one that names the
+// missing bound.
+func TestRunPassiveRejectsASliceThatBoundsBytesButNotTheFetch(t *testing.T) {
+	f := &fakeRetriever{set: passiveSet(projectCandidate("p1", 0.9))}
+	req := passiveRequest()
+	req.Budget.Slices = []Slice{{Bucket: "proj", MaxBytes: 400, DemotionThreshold: 0.9}}
+	_, err := Run(context.Background(), f, req)
+	if err == nil {
+		t.Fatal("a slice bounding only the answer's bytes must still be refused: it bounds nothing about the read")
+	}
+	if !strings.Contains(err.Error(), "OverFetch") {
+		t.Errorf("the refusal must name the bound that is missing; got %v", err)
+	}
+	if f.sets != 0 {
+		t.Errorf("the retriever was called %d times for a request this seam refused", f.sets)
+	}
+}

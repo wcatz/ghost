@@ -29,31 +29,39 @@ const ftsRankFloor = 3
 // the floor.
 const (
 	// Empty results, named by the stage that emptied the set.
-	reasonNoCandidates      = "no_candidates"
-	reasonRetrievalFailed   = "retrieval_failed"
-	reasonVectorUnavailable = "vector_backend_unavailable"
 	// reasonNoMemories is the passive empty reason, and it is deliberately NOT a
 	// synonym for no_candidates. A passive retrieval read an over-fetched window
 	// and found nothing in it; it never counted the store, so it cannot say the
 	// store holds no memories. The sentence says what was actually observed.
-	reasonNoMemories       = "no_memories"
-	reasonAllInvalid       = "all_invalid"
-	reasonAllOutOfCategory = "all_out_of_category"
-	reasonAllOutOfScope    = "all_out_of_scope"
-	reasonAllDedupDropped  = "all_dedup_dropped"
-	reasonAllDiversity     = "all_diversity_capped"
-	reasonAllOverBudget    = "all_over_budget"
+	reasonNoMemories = "no_memories"
+	// reasonNotApplicable is the answerable reason for a passive block: the honest
+	// report of a result that was never judged against a floor, and distinct from
+	// reasonNoFloorArm on purpose — that one says an arm held a value and the floor
+	// was never configured, while this one says there was no query to be relevant
+	// to and therefore no arm to hold anything.
+	reasonNotApplicable     = "not_applicable"
+	reasonNoCandidates      = "no_candidates"
+	reasonRetrievalFailed   = "retrieval_failed"
+	reasonVectorUnavailable = "vector_backend_unavailable"
+	reasonAllInvalid        = "all_invalid"
+	reasonAllOutOfCategory  = "all_out_of_category"
+	// reasonAllOutOfRetention is the third stage-3 verdict, added with the tier
+	// filter itself. The vocabulary above is closed on purpose, so adding one is a
+	// contract change rather than a patch: a caller branching on the reason now has
+	// a value it has never seen. That is the cheaper of the two failures — the
+	// alternative was folding a tier mismatch into all_out_of_category, which
+	// would tell a reader who filtered by retention to go and change their
+	// category.
+	reasonAllOutOfRetention = "all_out_of_retention"
+	reasonAllOutOfScope     = "all_out_of_scope"
+	reasonAllDedupDropped   = "all_dedup_dropped"
+	reasonAllDiversity      = "all_diversity_capped"
+	reasonAllOverBudget     = "all_over_budget"
 	// Results that admitted rows.
 	reasonBelowFloor    = "below_floor"
 	reasonFloorMet      = "floor_met"
 	reasonNoFloorArm    = "no_floor_arm"
 	reasonBudgetDropped = "response_budget"
-	// reasonNotApplicable is the answerable reason for a passive block. It is
-	// the honest report of a result that was never judged against a floor, and
-	// it is distinct from reasonNoFloorArm on purpose: that one says an arm held
-	// a value and the floor was never configured, while this one says there was
-	// no query to be relevant to and therefore no arm to hold anything.
-	reasonNotApplicable = "not_applicable"
 	// reasonRetrievalPartial is the answerable verdict when a leg failed. It is
 	// the same token the machine line's modifier uses, and the two are not
 	// redundant: the reason says why the answer is answerable (no floor verdict
@@ -145,10 +153,10 @@ func (p *pipeline) retrievalPartial() bool {
 func (p *pipeline) emptyReason() string {
 	if p.passive {
 		// Passive retrieval reports the retrieval's own two failures before any
-		// stage is consulted, and they are the same facts they are in query mode
-		// (a leg that never ran, a leg that broke). Only the fallback differs:
-		// an empty passive window is `no_memories`, because no query ran to fail
-		// and `no_candidates` would claim a query matched nothing.
+		// stage is consulted, and they are the same facts they are in query mode (a
+		// leg that never ran, a leg that broke). Only the fallback differs: an empty
+		// passive window is `no_memories`, because no query ran to fail and
+		// `no_candidates` would claim a query matched nothing.
 		if p.legNeverRan("vector") && !p.legFailed("fts") {
 			return reasonVectorUnavailable
 		}
@@ -231,17 +239,20 @@ func (p *pipeline) dominantRemoval() (string, string) {
 	return best.stage, best.reason
 }
 
-// predicateReason names the stage-3 verdict that removed the rows, or "" when
-// neither filter is set. The two verdicts are counted apart because they answer
+// predicateReason names the stage-3 verdict that removed the rows, or "" when no
+// filter is set. The three verdicts are counted apart because they answer
 // different questions for the caller: a category that removed nothing while the
-// scope removed everything is a scope problem, and a reason naming the category
-// sends the reader to change the wrong filter. A tie names the category, which
-// is the narrower of the two and the one a caller is likelier to have set by
-// accident.
+// tier removed everything is a tier problem, and a reason naming the category
+// sends the reader to change the wrong filter. A tie names the narrowest predicate
+// that removed anything, in the order category, retention, scope — the tier is
+// narrower than the scope for the same reason the category is, and all three are
+// likelier to have been set by accident than deliberately.
 func (p *pipeline) predicateReason() string {
 	switch {
-	case p.droppedBy[dropCategory] > 0 && p.droppedBy[dropCategory] >= p.droppedBy[dropScope]:
+	case p.droppedBy[dropCategory] > 0 && p.droppedBy[dropCategory] >= p.droppedBy[dropRetention] && p.droppedBy[dropCategory] >= p.droppedBy[dropScope]:
 		return reasonAllOutOfCategory
+	case p.droppedBy[dropRetention] > 0 && p.droppedBy[dropRetention] >= p.droppedBy[dropScope]:
+		return reasonAllOutOfRetention
 	case p.droppedBy[dropScope] > 0:
 		return reasonAllOutOfScope
 	}
@@ -301,21 +312,21 @@ func (p *pipeline) verdict() (Outcome, string) {
 	// corpus that no comparison supports.
 	ftsApplied, vectorValue := p.armValues()
 	p.trace.Floors.FTSApplied = ftsApplied
-	// A passive block is never `weak`, and the check comes before the floor
-	// because the floor never applied to it: there was no query, so neither an
-	// FTS rank nor a cosine exists to compare. Reporting `below_floor` would
-	// tell the caller its memories were judged and found wanting, which is a
-	// claim about a question this surface was never asked.
+	// A passive block is never `weak`, and the check comes before the floor because
+	// the floor never applied to it: there was no query, so neither an FTS rank nor
+	// a cosine exists to compare. Reporting `below_floor` would tell the caller its
+	// memories were judged and found wanting, which is a claim about a question
+	// this surface was never asked.
+	//
+	// Both arms are cleared, not just the keyword one: `fitResponse` derives
+	// VectorApplied from the leg status and the configured arm, so a retriever
+	// reporting the vector leg `ok` on a passive request would otherwise leave the
+	// trace claiming a cosine applied to a block the machine line is simultaneously
+	// reporting `not_applied` for. The CONFIGURED arm and the threshold are left
+	// alone, because they are facts about the request rather than about the verdict,
+	// and a reader has to be able to tell "not applied" from "not configured".
 	if p.passive {
 		p.trace.Floors.FTSApplied = false
-		// VectorApplied goes with it, for the reason the machine line puts its
-		// passive case first: a passive block has no query, so no cosine could have
-		// been compared against it. fitResponse sets VectorApplied from the leg
-		// status and the configured arm, and a retriever that reported the vector
-		// leg `ok` on a passive request would otherwise leave the trace claiming an
-		// arm applied to a block the response says was never judged. Unreachable
-		// through *memory.Store today, which is exactly why it is cleared rather
-		// than left to a leg status that happens not to say `ok`.
 		p.trace.Floors.VectorApplied = false
 		return OutcomeAnswerable, reasonNotApplicable
 	}
@@ -363,6 +374,9 @@ func (p *pipeline) absenceNote() string {
 	}
 	if p.req.Category != "" {
 		advice = append(advice, "drop the category filter")
+	}
+	if p.req.Retention != "" {
+		advice = append(advice, "drop the retention filter")
 	}
 	note := "Ghost memory: no match within the searched window"
 	if len(advice) > 0 {
@@ -482,10 +496,10 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 				"it may be less complete than a hybrid one. The query was not wrong — the answer is " +
 				"incomplete, not absent."
 		case reasonNoMemories:
-			// Not "no matching memories found": a passive retrieval matched
-			// nothing because nothing was asked, and the block it read is a
-			// window, not a census. The sentence names the observation it can
-			// actually make, which is the only claim the evidence supports.
+			// Not "no matching memories found": a passive retrieval matched nothing
+			// because nothing was asked, and the block it read is a window, not a
+			// census. The sentence names the observation it can actually make, which
+			// is the only claim the evidence supports.
 			return "No memories in the over-fetched window: the rows this block was assembled from came back empty, " +
 				"so nothing is injected. That describes the window, not the store — a store with memories behind a " +
 				"narrower scope, an expired validity window or a category this session did not read would look the same."
@@ -496,6 +510,9 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 		case reasonAllOutOfCategory:
 			return "No sufficiently trustworthy memory found: nothing found passed the category filter." +
 				p.stageNote()
+		case reasonAllOutOfRetention:
+			return "No sufficiently trustworthy memory found: nothing found was in the requested retention tier " +
+				"(" + p.req.Retention + ")." + p.stageNote()
 		case reasonAllOutOfScope:
 			return "No sufficiently trustworthy memory found: nothing found matched the requested scope." +
 				p.stageNote()
@@ -617,11 +634,11 @@ func (p *pipeline) machineLine(outcome Outcome, reason string) string {
 	case p.passive:
 		// FIRST, ahead of every other state, and that ordering is the point. A
 		// passive block has no query, so the cosine arm has nothing to compare
-		// against — and a retriever that reported a vector leg as `ok` (or a caller
+		// against — and a retriever that reported the vector leg `ok` (or a caller
 		// that set AbstainCosine) would otherwise print a number next to a verdict
 		// that no cosine produced. A fourth state, and the reason the three below
-		// are not enough here: `off` reports a CONFIGURATION to a reader who
-		// cannot change one, because this surface has no vector arm whatever
+		// are not enough here: `off` reports a CONFIGURATION to a reader who cannot
+		// change one, because this surface has no vector arm whatever
 		// `context.abstain_cosine` is set to.
 		b.WriteString(" abstain_cosine=not_applied")
 	case p.trace.Floors.VectorApplied:
@@ -684,13 +701,16 @@ func totalTokens(items []Item) int {
 }
 
 // filterCaveat names the filters that can make a windowed result short and
-// gives the caller a filter-appropriate next step. Both filters are applied
-// before the final cut now, but the candidate pool they select from is still
-// finite, so further matches may exist beyond it.
-func filterCaveat(category string, scope map[string]string) string {
+// gives the caller a filter-appropriate next step. All three are applied before
+// the final cut now, but the candidate pool they select from is still finite, so
+// further matches may exist beyond it.
+func filterCaveat(category, retention string, scope map[string]string) string {
 	var filters []string
 	if category != "" {
 		filters = append(filters, "category")
+	}
+	if retention != "" {
+		filters = append(filters, "retention")
 	}
 	if len(scope) > 0 {
 		filters = append(filters, "scope")
@@ -706,8 +726,12 @@ func filterCaveat(category string, scope map[string]string) string {
 		verb = "were"
 	}
 	next := "raise the limit"
-	if category != "" {
-		next += " or use ghost_memories_list for exhaustive category browsing"
+	if category != "" || retention != "" {
+		// The exhaustive-browsing advice belongs to any row-level filter, not only
+		// to the category: ghost_memories_list carries the same filters and is not
+		// windowed, so it is the next step for a caller looking for rows of one
+		// tier just as it is for one category.
+		next += " or use ghost_memories_list for exhaustive browsing"
 	}
 	return "(Note: " + which + " " + verb + " applied to a finite search window, so further matches may exist beyond the retrieved candidates — " + next + ".)"
 }
@@ -812,7 +836,7 @@ func (p *pipeline) filterCaveat() string {
 	if p.droppedBy[stageResponseFit] > 0 {
 		return ""
 	}
-	caveat := filterCaveat(p.req.Category, p.req.Scope)
+	caveat := filterCaveat(p.req.Category, p.req.Retention, p.req.Scope)
 	if caveat == "" {
 		return ""
 	}

@@ -643,9 +643,18 @@ func validatePassiveBudget(req Request) error {
 			"give it a slice per bucket, or a query")
 	}
 	for _, s := range req.Budget.Slices {
-		if s.OverFetch <= 0 && s.MaxItems <= 0 && s.MaxBytes <= 0 {
-			return fmt.Errorf("assemble: passive slice %q states no over-fetch and no cap, so its retrieval window would be the whole store; "+
-				"this path runs at every session start", s.Bucket)
+		// The bound that matters here is the FETCH, not the block. A slice bounded
+		// only by MaxBytes says how many bytes the answer may occupy, which bounds
+		// membership but says nothing about how much is READ — and on this path the
+		// read is the thing that must not be unbounded. Accepting it would also be
+		// incoherent downstream: `passivePolicies` falls back to MaxItems for the
+		// over-fetch, so a MaxBytes-only slice would reach the store asking for a
+		// window of 0 and be refused there, with a message about the store's
+		// contract for a request this seam had already called valid.
+		if s.OverFetch <= 0 && s.MaxItems <= 0 {
+			return fmt.Errorf("assemble: passive slice %q bounds the block's bytes but states no over-fetch and no item cap, "+
+				"so its retrieval window is unbounded; this path runs at every session start. Name OverFetch, or MaxItems "+
+				"if the over-fetch is the same number", s.Bucket)
 		}
 	}
 	return nil
