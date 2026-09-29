@@ -1008,9 +1008,13 @@ func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
 		// value it can hold after the fold is one the fold wrote.
 		//
 		// So the claim here is that the fold gave it the expiry AND that the restore
-		// left that alone. sameStrPtr below fails if the restore clears or rewrites
-		// the column, which is the property under test: RestoreSnapshot's UPDATE
-		// omits expires_at, so the column keeps whatever was last written to it.
+		// left that alone. The sameStrPtr at the END of this subtest, the one
+		// comparing the post-fold read against the post-restore read, is what fails
+		// if the restore clears or rewrites the column — which is the property under
+		// test: RestoreSnapshot's UPDATE omits expires_at, so the column keeps
+		// whatever was last written to it. (Named positionally because the fold's own
+		// sameStrPtr sits between this paragraph and it, and a reader debugging a
+		// restore would otherwise follow the pointer to the wrong check.)
 		s := testStore(t)
 		ctx := context.Background()
 		from := time.Now().UTC()
@@ -1048,9 +1052,11 @@ func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
 		}
 		refreshed := getOne(t, s, live)
 		// The column MOVED, which is what makes the fold its author rather than a
-		// bystander. Without the ageing the save and the fold write the same value
-		// and this comparison is vacuous; with it, the only way the column can hold
-		// anything else is that the fold wrote it.
+		// bystander. Age the row later than the save and the two writes agree — they
+		// are independent clock reads, so they coincide almost always without being
+		// the same value — and this comparison goes vacuous; with a value days in the
+		// past standing there, the only way the column can hold anything else is that
+		// the fold wrote it.
 		if sameStrPtr(refreshed.ExpiresAt, staleExpiry) {
 			t.Errorf("the fold left the expiry at %v; the fixture cannot tell a fold that refreshed from one that did not",
 				expiryText(staleExpiry))
