@@ -320,7 +320,8 @@ func TestPruneUsageSaysItIsNeverAutomatic(t *testing.T) {
 // that is NOT here is a folded row: a fold refreshes expires_at and leaves
 // updated_at alone, so its basis is the expiry and the label is omitted anyway.
 // TestPruneReportsTheGraceBasisSeparatelyFromActivity pins that, and it is why
-// the condition below compares stamps rather than asking what touched the row.
+// printPruneRow's condition compares stamp VALUES rather than asking what
+// touched the row.
 func TestPrintPruneNamesTheGraceBasisWithoutClaimingItWasATouch(t *testing.T) {
 	t.Run("agrees with the expiry, so the stamp is not repeated", func(t *testing.T) {
 		// A row saved and never touched since: the ordinary shape, and the one the

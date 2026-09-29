@@ -285,11 +285,18 @@ func splitPruneCandidates(candidates []memory.PruneCandidate, removedIDs []strin
 // is reading exactly this line.
 //
 // The grace-from stamp is omitted when it IS the expiry already shown, rather
-// than printed a second time. The condition is about STAMPS, not about writes:
-// raiseRetentionTx refreshes expires_at on a fold and deliberately leaves
-// updated_at alone, so a folded session row is written to and still has the
-// expiry as its newest stamp. So the rule is "no stamp on this row is newer than
-// its expiry", and then the second label has nothing to add.
+// than printed a second time. Stated that way rather than as a rule about the
+// row's stamps, because that is what the comparison below actually decides: a
+// recorded last_accessed shadows the max inside GraceFrom, so a row carrying an
+// OLD read takes the last_accessed branch and has its basis printed even though
+// nothing on it is newer than the expiry. That is dormant (nothing writes
+// last_accessed) and is named as a known limit on pruneActivitySQL itself.
+//
+// The stamps reading is still the one that matters for the shape this was
+// written for: raiseRetentionTx refreshes expires_at on a fold and deliberately
+// leaves updated_at alone, so a folded session row HAS been written to and still
+// has the expiry as its newest stamp — the case a rule phrased as "nothing has
+// written to this row" would get wrong.
 func printPruneRow(w io.Writer, c memory.PruneCandidate, indent string) error {
 	activity := c.ActivityAt
 	if activity == "" {
