@@ -280,6 +280,12 @@ Checks one client's Ghost integration: client registration, lifecycle wiring,
 the database, Ollama reachability, and embedding/link coverage where
 applicable. Without --client it targets Claude Code. The database is only
 read: a status run never creates the store it reports on.
+
+It also lists any running 'ghost mcp' process that is not running this binary —
+a server whose executable a later 'ghost upgrade' replaced keeps serving from
+the old code, and its writes are refused once the store moves past it. Read-only
+and best-effort: it never signals a process, and on a platform that cannot
+answer it prints nothing rather than claiming none are stale.
 `
 
 // runMCPStatus checks the health of the Ghost ↔ MCP client integration.
@@ -329,7 +335,32 @@ func runMCPStatus() {
 		}
 		store.Close() //nolint:errcheck
 	}
+	// Running servers on a replaced binary (#746). Reported after the client's
+	// own checks and before the exit, for the same reason as the notice above:
+	// it is advice, and advice must survive a non-zero exit — a client whose
+	// wiring is broken is exactly the client whose server may also be stale.
+	//
+	// The --client flag deliberately does not narrow this. A stale server is
+	// stale regardless of which client started it, and the one the operator
+	// did not ask about is the one they will forget.
+	reportStaleMCPServers(os.Stdout)
 	if !healthy {
 		os.Exit(1)
 	}
+}
+
+// reportStaleMCPServers prints the running `ghost mcp` processes that are not
+// this binary, and says nothing when there are none or when the platform cannot
+// answer. It is best-effort by design: the process's own executable path is the
+// only thing it can compare, and a failure to read it is not a reason to fail a
+// status check that has already reported everything else.
+func reportStaleMCPServers(w io.Writer) {
+	exe, err := os.Executable()
+	if err != nil {
+		// Without a path to compare against, every server would look
+		// different from this binary. Saying nothing is the honest outcome;
+		// reporting the whole fleet as stale would not be.
+		return
+	}
+	mcpinit.ReportStaleServers(w, exe)
 }
