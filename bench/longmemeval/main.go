@@ -415,14 +415,14 @@ func reportPass(out io.Writer, r passReport) int {
 		// embedder is non-nil on this path: the deadline is only consulted
 		// while embedding, which only the vector/hybrid conditions do.
 		got, want := r.embedder.warmProgress(r.selected)
-		fmt.Fprintf(out, "%s\nEmbedding cache: ", partialMessage(got, want, r.budget, r.elapsed))
+		_, _ = fmt.Fprintf(out, "%s\nEmbedding cache: ", partialMessage(got, want, r.budget, r.elapsed))
 		hits, misses := r.embedder.Stats()
-		fmt.Fprintf(out, "%d hits, %d computed.\n", hits, misses)
+		_, _ = fmt.Fprintf(out, "%d hits, %d computed.\n", hits, misses)
 		return exitCode(true, nil)
 	}
 
-	fmt.Fprintf(out, "LongMemEval-S (cleaned) — session-level retrieval, condition=%s\n\n", r.condition)
-	fmt.Fprintf(out, "%-28s %5s %7s %7s %7s %8s %8s\n", "question type", "n", "R@1", "R@5", "R@10", "MRR@10", "NDCG@10")
+	_, _ = fmt.Fprintf(out, "LongMemEval-S (cleaned) — session-level retrieval, condition=%s\n\n", r.condition)
+	_, _ = fmt.Fprintf(out, "%-28s %5s %7s %7s %7s %8s %8s\n", "question type", "n", "R@1", "R@5", "R@10", "MRR@10", "NDCG@10")
 	typeNames := make([]string, 0, len(r.byType))
 	for name := range r.byType {
 		typeNames = append(typeNames, name)
@@ -432,18 +432,18 @@ func reportPass(out io.Writer, r passReport) int {
 		printAggTo(out, name, r.byType[name])
 	}
 	printAggTo(out, "OVERALL", r.overall)
-	fmt.Fprintf(out, "\n%d questions scored (%d abstention %s). Wall clock %s.\n",
+	_, _ = fmt.Fprintf(out, "\n%d questions scored (%d abstention %s). Wall clock %s.\n",
 		r.scored, r.skippedAbstention,
 		map[bool]string{false: "excluded", true: "included"}[r.includeAbstention],
 		r.elapsed.Round(time.Second))
 	if r.embedder != nil {
 		hits, misses := r.embedder.Stats()
-		fmt.Fprintf(out, "Embedding cache: %d hits, %d computed.\n", hits, misses)
+		_, _ = fmt.Fprintf(out, "Embedding cache: %d hits, %d computed.\n", hits, misses)
 	}
 
 	violations := checkFloors(overallMetrics(r.overall), r.floors)
 	for _, v := range violations {
-		fmt.Fprintln(os.Stderr, v)
+		_, _ = fmt.Fprintln(os.Stderr, v)
 	}
 	return exitCode(r.partial, violations)
 }
@@ -503,7 +503,7 @@ func printAggTo(out io.Writer, name string, a *agg) {
 		return
 	}
 	n := float64(a.n)
-	fmt.Fprintf(out, "%-28s %5d %7.3f %7.3f %7.3f %8.3f %8.3f\n",
+	_, _ = fmt.Fprintf(out, "%-28s %5d %7.3f %7.3f %7.3f %8.3f %8.3f\n",
 		name, a.n, a.r1/n, a.r5/n, a.r10/n, a.mrr/n, a.ndcg/n)
 }
 
