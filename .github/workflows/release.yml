@@ -12,8 +12,19 @@ jobs:
     # so it needs contents: write. It publishes no container image because
     # .goreleaser.yml has no dockers or image_templates; the docker job pushes
     # the image.
+    #
+    # attestations: write and id-token: write are the two scopes
+    # actions/attest-build-provenance consumes, and they are the whole of what
+    # the step below adds: the first stores the Sigstore bundle under the
+    # asset's sha256, the second mints the OIDC token that token is exchanged
+    # for. They are scoped to this job (and to the plugin job) rather than the
+    # workflow, because a job-level `permissions:` block sets every scope it
+    # omits to `none` — putting them at the top level would hand the docker
+    # job an OIDC token it has no use for.
     permissions:
       contents: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -53,6 +64,43 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attest the release archives and checksums
+        # A release asset's `digest` field, which `ghost upgrade` already
+        # verifies, proves the downloaded bytes are the bytes GitHub holds. It
+        # says nothing about who put them there: anyone who can replace an
+        # asset replaces the API's record of it too. This step mints a Sigstore
+        # bundle over each asset's sha256, signed by a Fulcio certificate whose
+        # subject is this repository's own release workflow, so the client can
+        # verify the publisher instead of taking the publisher's word for it
+        # (#694).
+        #
+        # Pinned by full commit SHA, not by tag: this is the one step in the
+        # release path that produces a statement clients are told to trust, so
+        # a movable ref here is the hole the change exists to close. The
+        # trailing comment names the release tag the commit belongs to, so the
+        # digest can be re-resolved by a reviewer. Every other action in this
+        # file is tag-pinned; the asymmetry is deliberate.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          # The globs cover every file .goreleaser.yml uploads, derived rather
+          # than transcribed: dist/*.tar.gz and dist/*.zip are the archive
+          # formats archives[].formats and its windows format_overrides
+          # produce, dist/checksums.txt is checksum.name_template, and
+          # dist/install.ps1 is release.extra_files. A format or an extra file
+          # added to .goreleaser.yml without adding it here fails
+          # TestReleaseJobAttestsExactlyWhatGoReleaserPublishes in
+          # internal/selfupdate — the diff cannot merge as an unattested gap.
+          #
+          # The digest is computed from the file on disk, not read out of
+          # checksums.txt, so the attestation is an independent witness of the
+          # bytes rather than a restatement of the manifest that is meant to
+          # witness them. checksums.txt is itself attested.
+          subject-path: |
+            dist/checksums.txt
+            dist/install.ps1
+            dist/*.tar.gz
+            dist/*.zip
 
   docker:
     runs-on: ubuntu-latest
@@ -145,6 +193,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # See the release job above for what these two are for. The plugin
+      # archives are downloadable release assets, so they need the same
+      # provenance the goreleaser archives get — a plugin install is a
+      # download-and-execute path, so attesting the archive that carries the
+      # binaries matters as much here.
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -187,6 +242,22 @@ jobs:
             dist/ghost-plugin-windows-amd64.zip \
             dist/ghost-plugin-windows-arm64.zip \
             --clobber
+
+      - name: Attest the plugin archives
+        # Deliberately before the catalog pin and before the publish step
+        # below, both of which are cheap to re-run and neither of which can be
+        # undone: a failure here leaves an unpublished draft that a job re-run
+        # completes, whereas a failure after the publish would leave a public
+        # release whose plugin zips carry no provenance, and re-running would
+        # not repair that. The three paths are the three the upload step above
+        # attaches — TestPluginJobAttestsExactlyWhatItUploads reads that step
+        # and fails if the two lists ever diverge.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/ghost-plugin.zip
+            dist/ghost-plugin-windows-amd64.zip
+            dist/ghost-plugin-windows-arm64.zip
 
       - name: Pin the marketplace catalog to the attached archives
         # Rewrites .claude-plugin/marketplace.json (this tag checkout) to

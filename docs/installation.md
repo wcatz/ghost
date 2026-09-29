@@ -176,7 +176,15 @@ ghost version
 ghost mcp init --client claude
 ```
 
-A binary installed this way upgrades itself with `ghost upgrade` (see the [CLI reference](cli.md#ghost-upgrade)), which also handles the fact that Windows will not let a running executable be replaced in place. Note that the script itself verifies only against the release's `checksums.txt`, a file published in the same release as the binary it vouches for; `ghost upgrade` additionally checks the digest GitHub reports for the asset. Signature verification is not implemented on either path, and neither is it possible until the release publishes a signature or an attestation ([#694](https://github.com/wcatz/ghost/issues/694)).
+A binary installed this way upgrades itself with `ghost upgrade` (see the [CLI reference](cli.md#ghost-upgrade)), which also handles the fact that Windows will not let a running executable be replaced in place. Note that the script itself verifies only against the release's `checksums.txt`, a file published in the same release as the binary it vouches for; `ghost upgrade` additionally checks the digest GitHub reports for the asset.
+
+The script does not verify an attestation, and it will not grow one in this change ([#694](https://github.com/wcatz/ghost/issues/694) tracks the client side). It does not need one to be sound: it fetches the release over HTTPS from `github.com`, and the checksum it verifies is read from the same release it fetches the binary from, so the check is an integrity check against transport corruption and against a truncated or mixed-up download, not a publisher check. If you want the publisher verified, download the archive and run `gh attestation verify` on it instead of piping the installer:
+
+```bash
+gh attestation verify ghost_0.42.0_windows_amd64.zip --repo wcatz/ghost
+```
+
+Every release asset, `install.ps1` included, carries a GitHub artifact attestation from the release workflow. Note which one you are checking: the `gh` output names the workflow identity it verified against, and the identity you require is `.github/workflows/release.yml` on a `v*` tag.
 
 For the Claude Code plugin on native Windows, choose the architecture-specific entry shown above.
 
