@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/provider"
 )
 
 // newValiditySession returns a server over a store with three projects: `vproj`
@@ -559,22 +560,27 @@ func TestEveryProjectContextSurfaceAnswersAnUnresolvedProject(t *testing.T) {
 	_ = srv
 }
 
-// TestTheToolAnswersAnUnresolvedProjectTheSameWayWithAsOf is the sixth review
-// finding, and it is the one that made this PR's own docs false.
+// TestTheToolRefusesAnAsOfRequestForAnUnresolvedProject is the sixth and seventh
+// review findings on this path, and the second one is what the first one got wrong.
 //
-// The unresolved-name guard sat BELOW the tool's `as_of` return, so only the
-// present-tense branch was covered. `asOfScopeClause` builds the same
-// `(project_id = ? OR project_id = '_global')` union `GetTopMemories` did, so
-// `as_of` on an unknown name printed the cross-project rows under a `## Memories`
-// heading for a project that does not exist and never said the project was unknown
-// — while architecture.md, docs/mcp.md and the invariants bullet all said the
-// surfaces skip the project-keyed reads on an unresolved name.
+// Finding six: the unresolved-name guard sat BELOW the tool's `as_of` return, so
+// only the present-tense branch was covered — `asOfScopeClause` builds the same
+// `(project_id = ? OR project_id = '_global')` union, so `as_of` on an unknown name
+// printed the cross-project rows under `## Memories` for a project that does not
+// exist, while this PR's own docs said the surfaces skip the project-keyed reads.
 //
-// So: the guard moved ABOVE the `as_of` return, and this asserts the two branches
-// answer the same way. A caller that gets two different answers for the same
-// project depending on whether it asked about the present or the past has no way
-// to tell which one to believe.
-func TestTheToolAnswersAnUnresolvedProjectTheSameWayWithAsOf(t *testing.T) {
+// My fix moved the guard above the return and made the two branches answer
+// IDENTICALLY, which was the second mistake: an `as_of` caller was then handed
+// today's rows with no `as_of` note in the payload, so the requested instant was
+// never consulted and nothing in the answer said so. That is a caller stating one
+// thing and being silently given another.
+//
+// So the branches differ on purpose. The present-tense call appends the
+// cross-project section, which does not depend on a project. The `as_of` call
+// refuses and names the instant, because there is no set to show — a past reading
+// of a project Ghost has never seen is not a reading of anything. Asserted as a
+// DIFFERENCE, because the difference is the contract.
+func TestTheToolRefusesAnAsOfRequestForAnUnresolvedProject(t *testing.T) {
 	_, session := newValiditySession(t)
 	if _, err := session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "ghost_save_global",
@@ -589,29 +595,89 @@ func TestTheToolAnswersAnUnresolvedProjectTheSameWayWithAsOf(t *testing.T) {
 		"project_id": wanted, "as_of": asOfToolFuture,
 	}))
 
+	// The present-tense read appends the cross-project rows, because they do not
+	// depend on a project and the base ref delivered them.
+	if !strings.Contains(current, "## Global (applies to all projects)") ||
+		!strings.Contains(current, "a cross-project preference") {
+		t.Errorf("the present-tense read dropped the cross-project section:\n%s", current)
+	}
+	if strings.Contains(current, "## Memories") {
+		t.Errorf("the present-tense read rendered a memory listing for a project that does not exist:\n%s", current)
+	}
+
+	// The as_of read is a REFUSAL, and it must not carry a single row: handing a
+	// caller today's rows for a request about a past instant is the defect, and
+	// the cross-project section is the row set most likely to be handed over.
+	if !strings.Contains(historical, "is not registered with Ghost yet") {
+		t.Errorf("the as_of read did not answer the not-registered sentence:\n%s", historical)
+	}
+	if !strings.Contains(historical, asOfToolFuture) {
+		t.Errorf("the as_of read does not name the instant, so the reader cannot tell the requested instant was never "+
+			"consulted:\n%s", historical)
+	}
+	if strings.Contains(historical, "a cross-project preference") {
+		t.Errorf("the as_of read returned a present-tense row; a caller who asked for an instant cannot be handed "+
+			"today's rows with nothing in the payload saying so:\n%s", historical)
+	}
+	if strings.Contains(historical, "## Memories") {
+		t.Errorf("the as_of read rendered a memory listing for a project that does not exist:\n%s", historical)
+	}
+	if current == historical {
+		t.Errorf("the two branches answer identically, which was the first fix's mistake: an as_of caller must not be "+
+			"handed a present-tense block.\n%s", current)
+	}
+	// And both still name the project, which is the fact the reader needs either
+	// way.
 	for _, c := range []struct{ name, out string }{
-		{"the current read", current},
-		{"the as_of read", historical},
+		{"the current read", current}, {"the as_of read", historical},
 	} {
-		if !strings.Contains(c.out, "is not registered with Ghost yet") {
-			t.Errorf("%s did not answer the not-registered sentence:\n%s", c.name, c.out)
-		}
-		if strings.Contains(c.out, wanted) == false {
+		if !strings.Contains(c.out, wanted) {
 			t.Errorf("%s did not name the project the caller asked for:\n%s", c.name, c.out)
 		}
-		if strings.Contains(c.out, "## Memories") {
-			t.Errorf("%s rendered a memory listing for a project that does not exist:\n%s", c.name, c.out)
-		}
-		if !strings.Contains(c.out, "## Global (applies to all projects)") {
-			t.Errorf("%s dropped the cross-project section, which does not depend on a project:\n%s", c.name, c.out)
-		}
-	}
-	// And the two answers agree, rather than each merely being reasonable.
-	if current != historical {
-		t.Errorf("the two branches answer an unresolved project differently.\n--- current ---\n%s\n--- as_of ---\n%s",
-			current, historical)
 	}
 }
+
+// TestAnUnresolvedProjectNameDoesNotHideABrokenStore is the seventh finding's third
+// point, and it is the one a real store cannot show.
+//
+// Moving the unresolved-name check above the `as_of` return also moved it above the
+// store's `asOfCapableStore` assertion, so on a store that cannot read its own
+// history an unregistered project name reported SUCCESS — losing a diagnostic the
+// caller may need, and losing it in exactly the case where the answer is already a
+// refusal and so looks plausible.
+//
+// The test needs a store that is not history-capable, which `*memory.Store` never
+// is. `provider.MemoryStore` embedded in a struct without `MemoriesAsOf` is
+// exactly that: it satisfies the interface by delegation and is not
+// `asOfCapableStore`. A real store would have made this assertion vacuous.
+func TestAnUnresolvedProjectNameDoesNotHideABrokenStore(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	blind := connectedClient(t, New(notHistoryCapable{newValidityStore(t)}, logger, "test"))
+
+	// A RESOLVED project, to prove the diagnostic is reachable at all on this store.
+	res := callTool(t, blind, "ghost_project_context", map[string]any{
+		"project_id": "vproj", "as_of": asOfToolFuture,
+	})
+	if !res.IsError || !strings.Contains(resultText(res), "cannot read its own history") {
+		t.Fatalf("fixture precondition: a store that cannot read history must say so for a resolved project, got %q",
+			resultText(res))
+	}
+
+	// And an UNRESOLVED one, which is the case the ordering is about: the store's
+	// own diagnostic must win over the not-registered sentence, because the caller
+	// still does not know whether their store can answer a historical question.
+	unres := callTool(t, blind, "ghost_project_context", map[string]any{
+		"project_id": "no-such-project-broken-store", "as_of": asOfToolFuture,
+	})
+	if !unres.IsError || !strings.Contains(resultText(unres), "cannot read its own history") {
+		t.Errorf("an unresolved project name hid the store's missing-history diagnostic and reported the "+
+			"not-registered sentence instead: %q", resultText(unres))
+	}
+}
+
+// notHistoryCapable satisfies provider.MemoryStore by delegation and deliberately
+// does NOT implement MemoriesAsOf, so it fails the asOfCapableStore assertion.
+type notHistoryCapable struct{ provider.MemoryStore }
 
 // TestTheUnresolvedProjectBlockStillRendersTheResourceOnItsOwn is the half of the
 // finding that a sentence-in-place-of-the-block fix breaks, stated on the resource

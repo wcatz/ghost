@@ -1609,7 +1609,7 @@ func (s *Server) registerTools() {
 	type contextArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops')"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max memories to return (default 20)"`
-		AsOf      string `json:"as_of,omitempty" jsonschema:"Show the project as it stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'): the wording each memory held then, including memories deleted since, and without memories that did not exist yet. Omit it for the present. Learned context, tasks and decisions are not historical — they are omitted rather than shown as they are now."`
+		AsOf      string `json:"as_of,omitempty" jsonschema:"Show the project as it stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'): the wording each memory held then, including memories deleted since, and without memories that did not exist yet. Omit it for the present. Learned context, tasks and decisions are not historical — they are omitted rather than shown as they are now. A project name Ghost has never been registered is refused for as_of rather than read from the present, and the answer names the instant."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1662,25 +1662,52 @@ func (s *Server) registerTools() {
 			}
 		}
 
-		// An UNRESOLVED project name, answered the same way by BOTH branches of this
-		// handler — hence here, above the `as_of` return rather than inside the
-		// present-tense path.
+		// The store's ability to read its own history is asserted BEFORE the
+		// unresolved-name case below, which is a statement about the store and is
+		// true of any `as_of` request. Ordering it after that case would let an
+		// unregistered name report success on a store that cannot read history at
+		// all, losing a diagnostic the caller may need.
 		//
-		// `ResolveProject` answers an unknown name with `("", "", nil)`, and both
-		// historical and current reads were handed that empty id and read
-		// `project_id = '' OR project_id = '_global'` (`asOfScopeClause` builds the
-		// same union). So `as_of` on an unknown name printed the global rows under a
-		// `## Memories` heading for a project that does not exist, and never said the
-		// project was unknown — the mislabelling this migration removes on the other
-		// branch, left in place on this one, against the prose this same PR adds.
+		// The narrowed value is carried down rather than re-asserted, so the one
+		// assertion in this handler is the checked `ok` form — a bare assertion
+		// further down would panic on exactly the store this guard exists to name.
+		var historyReader asOfCapableStore
+		if asOf != nil {
+			var ok bool
+			if historyReader, ok = s.store.(asOfCapableStore); !ok {
+				return nil, nil, fmt.Errorf("ghost_project_context: this store cannot read its own history, so it cannot answer an as_of request")
+			}
+		}
+
+		// An UNRESOLVED project name. `ResolveProject` answers an unknown name with
+		// `("", "", nil)`, and both the historical and the current read were handed
+		// that empty id and read `project_id = '' OR project_id = '_global'`
+		// (`asOfScopeClause` builds the same union). So `as_of` on an unknown name
+		// printed the cross-project rows under a `## Memories` heading for a project
+		// that does not exist, and never said the project was unknown — the
+		// mislabelling this migration removes on the other branch, left in place on
+		// this one, against the prose this same PR adds.
 		//
-		// The cross-project rows are still delivered, under the heading that is true
-		// of them: they do not depend on a project, the base ref delivered them, and
-		// a first session in a project Ghost has never seen is exactly when they
-		// matter. The historical set is a past reading and is not consulted for a
-		// project that was never registered, so the Global section here is the
-		// present-tense one — and the not-registered sentence is appended either way.
+		// The two branches get DIFFERENT answers, deliberately, and the difference
+		// is the whole point of putting the check here rather than in each branch:
+		//
+		//   - The present-tense call APPENDS the cross-project section, because the
+		//     rows do not depend on a project, the base ref delivered them, and the
+		//     SessionStart instructions send an agent here precisely when the
+		//     directory matched nothing and tell it to look for them.
+		//   - The `as_of` call REFUSES, naming the instant. Answering it from the
+		//     present would hand back today's rows to a caller who asked for
+		//     yesterday's, with nothing in the payload to say so — the caller states
+		//     one thing and is silently given another, which the seam's own rule
+		//     refuses rather than clamps. A past reading of a project Ghost has
+		//     never seen is not a reading of anything, so there is no set to show and
+		//     the honest answer is that the project is not there to be read.
 		if args.ProjectID == "" {
+			if asOf != nil {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: projectNotRegisteredAsOf(asked, *asOf)}},
+				}, nil, nil
+			}
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{
 					Text: projectContextWithNotRegistered(s.projectContextGlobalSection(ctx, nil), asked),
@@ -1695,11 +1722,11 @@ func (s *Server) registerTools() {
 			// Only the memories are historical: the learned context below is derived
 			// from the memories as they stand now, so it is omitted rather than
 			// printed under a heading that says the block is a past reading.
-			reader, ok := s.store.(asOfCapableStore)
-			if !ok {
-				return nil, nil, fmt.Errorf("ghost_project_context: this store cannot read its own history, so it cannot answer an as_of request")
-			}
-			set, err := reader.MemoriesAsOf(ctx, args.ProjectID, *asOf)
+			//
+			// The capability assertion was made once, above the unresolved-name case,
+			// and the narrowed value carried down here — so there is exactly one
+			// type assertion on this path and it is the checked form.
+			set, err := historyReader.MemoriesAsOf(ctx, args.ProjectID, *asOf)
 			if err != nil {
 				return nil, nil, fmt.Errorf("read memories as of %s: %w", asOf.Format(time.RFC3339), err)
 			}

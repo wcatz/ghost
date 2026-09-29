@@ -182,6 +182,28 @@ func projectNotRegistered(asked string) string {
 		"Call ghost_memory_save to create it.", asked)
 }
 
+// projectNotRegisteredAsOf is the `as_of` sibling of projectNotRegistered, and it
+// is a REFUSAL rather than the same sentence, for the reason the two branches of the
+// tool answer an unknown name differently.
+//
+// A present-tense call appends the cross-project section: those rows do not depend
+// on a project, and the SessionStart instructions send an agent here precisely when
+// the directory matched nothing. A caller who asked for an INSTANT cannot be
+// handed today's rows — it would be stating one thing and being silently given
+// another, with no `as_of` note in the payload to detect it, which is the slip the
+// seam's own rule refuses rather than clamps. And there is no set to show: a past
+// reading of a project Ghost has never seen is not a reading of anything.
+//
+// So the answer names the project AND the instant, and offers no rows. The instant
+// is in the sentence rather than in a disclosure prefix because there is no block
+// for a disclosure to lead — the reader needs to see that the requested instant was
+// never consulted, and that is the same sentence's job.
+func projectNotRegisteredAsOf(asked string, asOf time.Time) string {
+	return fmt.Sprintf("Project %q is not registered with Ghost yet, so there is nothing to read as of %s: "+
+		"Ghost has never held a row for it, at any instant. Call ghost_memory_save to create it.",
+		asked, asOf.Format(time.RFC3339))
+}
+
 // projectContextWithNotRegistered appends the not-registered sentence to whatever
 // the surface could still render for an unresolved project, which is the
 // `_global` section and nothing else.

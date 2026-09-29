@@ -1537,7 +1537,11 @@ What exists now:
   place is the load-bearing half: a sentence alone drops the cross-project
   preferences on a project's *first* session, which is exactly when they matter and
   exactly what the server's own SessionStart instructions tell the agent to look
-  for.
+  for. The `as_of` branch is the one that **refuses** rather than appends, and the
+  asymmetry is the contract: a caller who asked for an instant must not be handed
+  the present, and there is no set to show — a past reading of a project Ghost has
+  never seen is not a reading of anything. The answer names the instant, so the
+  reader can see the read never happened.
 - **A stamp can be replaced but not removed.** The write path stores NULL for an
   absent value and treats an empty string as the same request — "no claim" — so
   a claim recorded by mistake is corrected by writing a different one rather than
