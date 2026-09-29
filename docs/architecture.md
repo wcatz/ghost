@@ -1522,6 +1522,22 @@ What exists now:
   Rows found and withheld render the assembler's own abstention sentence and name
   `ghost_memories_list`, where the retired rows are still visible with their
   marker.
+
+  The same rule reaches one step earlier, because a surface that filters can also
+  be handed **no project to filter over**. `ghost_project_context` resolves the
+  caller's name first, and an unknown name resolves to `""`; the old loader was
+  handed that and read `project_id = '' OR project_id = '_global'`, so it rendered
+  the global rows under a `## Memories` heading for a project that does not exist,
+  and reached its "not registered" sentence only when the store happened to hold no
+  globals. The assembler refuses a project context with no project, so the three
+  project-context surfaces skip the project-keyed reads, render the
+  `## Global (applies to all projects)` section — which does not depend on a
+  project, and which the base ref did deliver, under the wrong heading — and
+  **append** the not-registered sentence. Appending rather than returning it in
+  place is the load-bearing half: a sentence alone drops the cross-project
+  preferences on a project's *first* session, which is exactly when they matter and
+  exactly what the server's own SessionStart instructions tell the agent to look
+  for.
 - **A stamp can be replaced but not removed.** The write path stores NULL for an
   absent value and treats an empty string as the same request — "no claim" — so
   a claim recorded by mistake is corrected by writing a different one rather than
