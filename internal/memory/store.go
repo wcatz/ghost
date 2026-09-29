@@ -5462,14 +5462,6 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 	return claims, nil
 }
 
-// consolidatedSince should be a timestamp (see CurrentTimestamp) captured
-// before the caller fetched the memories it fed to the consolidator. ghost
-// reflect runs as a separate process from the long-lived MCP server, so a
-// ghost_memory_save landing on the live server during the multi-minute
-// consolidation round trip would otherwise be silently deleted here — it was
-// durably written but never part of what the consolidator saw. Any non-manual
-// memory created at/after that timestamp is preserved through the replace
-// instead. Pass "" to skip the check (tests that don't exercise the race).
 // inheritedRetention is the tier a consolidation successor takes from the rows it
 // stands in for (#773). It is raiseRetentionTx's rule — mergeRetention, longest
 // life wins, never lower — over the SOURCES rather than over a fold's two tiers,
@@ -5547,6 +5539,16 @@ func inheritedRetention(ctx context.Context, tx *sql.Tx, projectID string, m Mem
 // durably written but never part of what the consolidator saw. Any non-manual
 // memory created at/after that timestamp is preserved through the replace
 // instead. Pass "" to skip the check (tests that don't exercise the race).
+//
+// The fresh INSERT below is the one writer in the package that mints a row a save
+// did not ask for, so it is the one that has to decide a tier nobody stated: the
+// successor of rows that are being replaced. It inherits (inheritedRetention)
+// beside inheritedClaims, which already carries their validity and provenance, and
+// expires_at follows from that tier through the same sessionExpiry every other
+// writer uses — the ONLY source of an expiry in the product, so a consolidation
+// cannot schedule the memory it just wrote for deletion any more than a save can.
+// The reuse branches need none of that: they update a row in place, so that row
+// keeps the tier it has and neither column is written.
 func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string) (preserved []string, err error) {
 	if len(memories) == 0 {
 		return nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")

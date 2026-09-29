@@ -12,10 +12,11 @@ import (
 // recorded last access in the past, which is the shape prune prefers to see.
 //
 // lastAccessed may be empty, which leaves last_accessed NULL — a row nothing has
-// recorded a read for. The grace then falls back to the row's last WRITE, so a
-// fixture that wants such a row to be prunable has to age updated_at too
-// (backdateWrite); leaving the write at the save instant is the ordinary case
-// and the row is inside the grace.
+// recorded a read for, and the only shape a real store has. pruneActivitySQL then
+// falls back to the newest of the row's own stamps (see prune.go), so a fixture
+// that wants such a row to be prunable has to age updated_at AND expires_at
+// (backdateWrite plus the expires argument below); leaving either at the save
+// instant is the ordinary case and the row is inside the grace.
 //
 // A test that writes SEVERAL rows through this does NOT get the same result: the
 // save half runs the dedup probe, and a store of session notes is a store of
