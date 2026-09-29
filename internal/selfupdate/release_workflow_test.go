@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -512,6 +513,36 @@ func TestTheGuardStepIsNotABuildStep(t *testing.T) {
 // above an enforced one rather than a claim.
 const publishedReleaseGuardStepName = "Refuse to build into a published release"
 
+// requireBash4 skips unless the bash on PATH is 4.0 or newer.
+//
+// Not just "bash is present". The guard steps use `mapfile`, which is bash 4.0+,
+// and macOS still ships bash 3.2 at /bin/bash — so a `go test ./...` on a Mac
+// would RUN these against a shell that cannot run them and fail with
+// `mapfile: command not found` (exit 127), a failure that says nothing about the
+// workflow. CI is ubuntu-only, so it would never show up there.
+//
+// A guard that cannot run must skip rather than fail: a skipped guard is a gap
+// someone will close, and one that fails for the wrong reason is noise that
+// teaches people to ignore the failing ones.
+func requireBash4(t *testing.T) {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is not on PATH; the guard steps are bash")
+	}
+	out, err := exec.Command(bash, "-c", `echo "${BASH_VERSINFO[0]:-0}"`).Output()
+	if err != nil {
+		t.Skipf("cannot determine the bash version: %v", err)
+	}
+	major, convErr := strconv.Atoi(strings.TrimSpace(string(out)))
+	if convErr != nil {
+		t.Skipf("cannot read the bash major version from %q", out)
+	}
+	if major < 4 {
+		t.Skipf("bash %d is too old: the guard steps use mapfile, which is bash 4.0+", major)
+	}
+}
+
 // TestThePublishedReleaseGuardRefuses is the whole argument for
 // replace_existing_artifacts being safe, and it is one test on purpose.
 //
@@ -565,9 +596,7 @@ func TestThePublishedReleaseGuardRefuses(t *testing.T) {
 		t.Fatalf("step %q has no run body, so it cannot refuse anything", publishedReleaseGuardStepName)
 	}
 
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is not on PATH; the guard step is bash")
-	}
+	requireBash4(t)
 
 	for _, tc := range []struct {
 		name    string
@@ -947,9 +976,7 @@ func TestSubjectGuardPatternsFindsNothingWithoutTheStep(t *testing.T) {
 // job's guard is shown to be load-bearing on its own: the release job's
 // `dist/*.zip` still matches without the missing plugin archive.
 func TestTheReleaseTimeGuardFailsOnASingleZeroMatchPattern(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is not on PATH; the guard steps are bash")
-	}
+	requireBash4(t)
 	wf, _ := loadReleaseWorkflow(t)
 	byJob := attestStepsByJob(wf)
 
