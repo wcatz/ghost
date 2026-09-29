@@ -737,8 +737,10 @@ list, so comparing the column text would report a difference on every run of an
 untagged corpus. **importance is compared at the precision the emission carries**,
 which is a float32 because the read already narrows the column into a `Memory` —
 and that read is the whole reason this is not a full-width `==`: the fold's
-strengthen increment is computed in the column's own float64 and leaves a value
-float32 cannot name (0.55 strengthens to 0.6600000187754631), so a keep of a
+strengthen is `SET importance = MIN(1.0, importance + ?)` with `importance*0.2`
+bound as a float32, so the multiply is Go arithmetic on the caller's own value and
+only the ADD is the column's own float64 — and that sum is a value float32 cannot
+name (0.55 strengthens to 0.6600000187754631), so a keep of a
 folded row reported a change on every run and reinstated the flood this rule
 removes (#750). Narrowing is the one lossy direction and it is the one no reader
 can observe; what it cannot absorb is a reweight, which is a different float32

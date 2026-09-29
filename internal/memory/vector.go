@@ -42,14 +42,16 @@ func beforeHybridHydrate(ids []string) {
 // old ones rather than replacing them (only supersede invalidates edges, and
 // CreateLink keeps MAX(strength)). The delete runs
 // before the upsert only because it has to read the old model first; the
-// ordering fails safe in both directions, so no transaction is needed. If the
-// upsert then fails, the memory is merely re-queued for a scan it did not need,
-// which the linker repeats idempotently. If the delete fails, this returns
-// before touching the vector, so the state is exactly what it was.
+// ordering fails safe in both directions, so no transaction SPANS the two
+// statements. Each is its own guarded write transaction (execGuardedWrite), and
+// that is what keeps the granularity: if the upsert then fails, the memory is
+// merely re-queued for a scan it did not need, which the linker repeats
+// idempotently. If the delete fails, this returns before touching the vector, so
+// the state is exactly what it was.
 func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error {
 	blob := float32sToBytes(vec)
 
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := s.execGuardedWrite(ctx, "retire-link-scan", `
 		DELETE FROM link_scans
 		WHERE memory_id = ? AND EXISTS (
 			SELECT 1 FROM memory_embeddings WHERE memory_id = ? AND model <> ?
@@ -58,7 +60,7 @@ func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float
 		return fmt.Errorf("invalidate link scan: %w", err)
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execGuardedWrite(ctx, "store-embedding", `
 		INSERT INTO memory_embeddings (memory_id, embedding, model)
 		VALUES (?, ?, ?)
 		ON CONFLICT(memory_id) DO UPDATE SET embedding = excluded.embedding, model = excluded.model, created_at = datetime('now')
@@ -71,7 +73,8 @@ func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float
 
 // DeleteEmbedding removes the embedding for a memory.
 func (s *Store) DeleteEmbedding(ctx context.Context, memoryID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM memory_embeddings WHERE memory_id = ?`, memoryID)
+	_, err := s.execGuardedWrite(ctx, "delete-embedding",
+		`DELETE FROM memory_embeddings WHERE memory_id = ?`, memoryID)
 	return err
 }
 

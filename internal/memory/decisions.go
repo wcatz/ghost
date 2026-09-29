@@ -159,7 +159,7 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 		return fmt.Errorf("supersede decision: superseding decision %s not found in project %s", newID, projectID)
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.execGuardedWrite(ctx, "supersede-decision", `
 		UPDATE decisions
 		SET status = 'superseded', superseded_by = ?, updated_at = datetime('now')
 		WHERE id = ? AND project_id = ?

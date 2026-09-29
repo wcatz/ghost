@@ -479,9 +479,9 @@ func TestHarnessCommandConfinesEveryClient(t *testing.T) {
 		{name: "opencode", kind: harnessOpencode},
 	} {
 		t.Run(harness.name, func(t *testing.T) {
-			cmd, release, ok := harnessCommand(context.Background(), "true", nil, env, harness.kind)
-			if !ok {
-				t.Fatal("scratch confinement unexpectedly unavailable")
+			cmd, release, err := harnessCommand(context.Background(), "true", nil, env, harness.kind)
+			if err != nil {
+				t.Fatalf("harnessCommand: %v", err)
 			}
 			defer release()
 			if got := filepath.Dir(cmd.Dir); got != root {
@@ -505,36 +505,12 @@ func TestHarnessCommandConfinesEveryClient(t *testing.T) {
 	}
 }
 
-// TestHarnessCommandFallsBackWhenScratchUnavailable proves the degradation is
-// a fallback, not a failure: with an unusable scratch root the command is
-// still built with the allowlisted environment and the caller's working
-// directory, and release is a safe no-op.
-func TestHarnessCommandFallsBackWhenScratchUnavailable(t *testing.T) {
-	blocker := filepath.Join(t.TempDir(), "not-a-dir")
-	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(blocker, "scratch"))
-
-	env := []string{"PATH=/usr/bin", "TMPDIR=/inherited"}
-	cmd, release, ok := harnessCommand(context.Background(), "true", nil, env, harnessClaude)
-	if ok {
-		t.Fatal("harnessCommand reported confinement with an unusable scratch root")
-	}
-	release()
-	release() // must be safe to call twice
-	if cmd.Dir != "" {
-		t.Errorf("cmd.Dir = %q, want the inherited working directory", cmd.Dir)
-	}
-	if got := envValue(cmd.Env, "TMPDIR"); got != "/inherited" {
-		t.Errorf("TMPDIR = %q, want the inherited value", got)
-	}
-}
-
 // TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable covers the opencode
 // fallback specifically: an unusable scratch root must not fail the run, and
 // the child still gets a private MkdirTemp working/config tree and temp dir,
-// removed by the returned cleanup.
+// removed by the returned cleanup. The funnel-level half of this contract —
+// that EVERY backend is confined this way, and that the funnel itself owns the
+// fallback — is in scratch_test.go.
 func TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {

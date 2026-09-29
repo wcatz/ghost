@@ -268,7 +268,14 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 
 	for {
 		s.mu.Lock()
-		tx, err := s.db.BeginTx(ctx, nil)
+		// The guarded seam, not a bare BeginTx: prune is a bulk delete, so a
+		// server running behind a newer Ghost must refuse it the same way every
+		// other write here is refused, and the check has to run in the SAME
+		// transaction as the delete it guards. The seam owns BEGIN and the
+		// contention retry, and rolls the transaction back on a refusal — which
+		// is what keeps a refused prune from holding the write lock while the
+		// newer binary runs its migration.
+		tx, lock, err := s.beginGuardedWrite(ctx, "prune batch")
 		if err != nil {
 			s.mu.Unlock()
 			return report, fmt.Errorf("begin prune batch: %w", err)
@@ -313,6 +320,8 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 				return report, fmt.Errorf("commit empty prune batch: %w", err)
 			}
 			s.mu.Unlock()
+			// No hold sample: this transaction wrote nothing, and the
+			// distribution reportHold feeds describes writes.
 			break
 		}
 
@@ -372,6 +381,7 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 			return report, fmt.Errorf("commit prune batch: %w", err)
 		}
 		s.mu.Unlock()
+		lock.reportHold("prune batch", time.Now())
 
 		report.RemovedIDs = append(report.RemovedIDs, ids...)
 		report.Removed += int(removed)

@@ -374,14 +374,15 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	// Ensure _global project.
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execGuardedWrite(ctx, "ensure-global-project", `
 		INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')
 		ON CONFLICT(id) DO NOTHING
 	`)
 	if err != nil {
 		return fmt.Errorf("ensure _global project: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`); err != nil {
+	if _, err := s.execGuardedWrite(ctx, "ensure-global-state",
+		`INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`); err != nil {
 		s.logger.Warn("seed global ghost_state insert failed", "error", err)
 	}
 
@@ -415,7 +416,7 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 // source column already says `builtin`, and a phase nothing reads is a phase no
 // filter can use.
 func (s *Store) seedMemoryTx(ctx context.Context, seed seedGlobalMemory, tagsJSON string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "seed")
 	if err != nil {
 		return fmt.Errorf("begin seed tx: %w", err)
 	}
@@ -714,7 +715,7 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 	// OpenDB configures database/sql transactions as BEGIN IMMEDIATE. Holding
 	// SQLite's write lock before the first lookup serializes repository-project
 	// creation across Store handles and independent processes.
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "repo-project")
 	if err != nil {
 		return "", nil, fmt.Errorf("begin repository project tx: %w", err)
 	}
@@ -1408,7 +1409,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 		return fmt.Errorf("refusing to assign a repository to the _global project")
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "ensure-project")
 	if err != nil {
 		return fmt.Errorf("begin ensure project tx: %w", err)
 	}
@@ -1606,7 +1607,7 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 }
 
 func (s *Store) mergeProjectWithRepoLocked(ctx context.Context, oldID, newID, repoRemote string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "merge-project")
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
 	}
@@ -1768,7 +1769,7 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "delete-project")
 	if err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("begin delete tx: %w", err)
 	}
@@ -2626,7 +2627,7 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 		expires = *m.ExpiresAt
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "create")
 	if err != nil {
 		return "", fmt.Errorf("begin create: %w", err)
 	}
@@ -3160,11 +3161,17 @@ func boolToInt(b bool) int {
 // timestamp are load-bearing for decay and for the --skip-unchanged fingerprint
 // (see reusePreservesAge) — the same reason the strengthen UPDATE leaves them
 // alone.
-func pinMemoryTx(ctx context.Context, ex sqlExecutor, id string, pin bool) error {
+//
+// The parameter is *sql.Tx rather than the sqlExecutor interface that covers
+// both it and *sql.DB, because a write that is only ever legal inside a
+// transaction should say so in its type. A wider parameter would let a future
+// caller hand it a handle, and the write would then run in autocommit outside
+// the check that refuses a store a newer Ghost owns (#746).
+func (s *Store) pinMemoryTx(ctx context.Context, tx *sql.Tx, id string, pin bool) error {
 	if !pin || id == "" {
 		return nil
 	}
-	if _, err := ex.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("pin memory: %w", err)
 	}
 	return nil
@@ -3703,7 +3710,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// so the target is the only thing the request can mean, and a fold
 			// that reported success without it would leave the memory the
 			// caller asked to protect fully consolidatable.
-			if err = pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
+			if err = s.pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
 				return "", "", 0, err
 			}
 			// The tier reaches the target here for the same reason the pin does:
@@ -3756,7 +3763,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// above is only linked to it — so Pin has to reach it too. Same
 		// transaction as the strengthen and the link, or a failure here would
 		// report a successful save whose request was silently dropped.
-		if err = pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
+		if err = s.pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
 			return "", "", 0, err
 		}
 		// And the tier, for the reason raiseRetentionTx gives: the row a fold
@@ -4122,6 +4129,13 @@ func categoryList() string {
 }
 
 // Touch increments access_count and updates last_accessed.
+//
+// It is guarded like every other write (#746), so an access counter is never the
+// one field an old server keeps bumping in a store a newer Ghost owns. It has no
+// production caller today — the search paths that would have used it do not touch
+// access_count — and that is the reason it is worth saying out loud: an
+// unreferenced method is exactly the kind of thing that gets wired up on a read
+// path later, where a refusal would turn a search into an error.
 func (s *Store) Touch(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -4143,7 +4157,7 @@ func (s *Store) Touch(ctx context.Context, ids []string) error {
 		WHERE id IN (%s)
 	`, strings.Join(placeholders, ","))
 
-	_, err := s.db.ExecContext(ctx, query, args...)
+	_, err := s.execGuardedWrite(ctx, "touch", query, args...)
 	return err
 }
 
@@ -4234,7 +4248,7 @@ func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "clear-resolved")
 	if err != nil {
 		return 0, fmt.Errorf("begin clear resolved: %w", err)
 	}
@@ -4354,7 +4368,7 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "set-resolved")
 	if err != nil {
 		return nil, fmt.Errorf("begin set resolved: %w", err)
 	}
@@ -4539,7 +4553,7 @@ func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes ma
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "mark-resolve-kept")
 	if err != nil {
 		return fmt.Errorf("begin mark resolve kept: %w", err)
 	}
@@ -4610,7 +4624,7 @@ func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, chec
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "mark-supersede-neither")
 	if err != nil {
 		return fmt.Errorf("begin mark supersede neither: %w", err)
 	}
@@ -4666,7 +4680,7 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "delete")
 	if err != nil {
 		return fmt.Errorf("begin delete: %w", err)
 	}
@@ -4993,7 +5007,7 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "promote")
 	if err != nil {
 		return fmt.Errorf("begin promote: %w", err)
 	}
@@ -5038,7 +5052,7 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	if pinned {
 		pinnedInt = 1
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.execGuardedWrite(ctx, "toggle-pin", `
 		UPDATE memories SET pinned = ?, updated_at = datetime('now') WHERE id = ?
 	`, pinnedInt, id)
 	if err != nil {
@@ -5135,16 +5149,22 @@ func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 // reason this predicate is not a plain ==. Memory.Importance is a float32, the
 // column is a float64, and the READ already narrows the column into a Memory
 // (scanMemories), so that is the precision at which anything downstream can tell
-// one value from another. Upsert's strengthen
-// (`SET importance = MIN(1.0, importance + importance * 0.2)`) computes that
-// increment in SQLite's own float64 — it moved there in #655, where it was Go
-// arithmetic on a float32 and the column therefore held a float32-exact value —
-// so a folded row usually holds a value float32 cannot name: 0.55 strengthens to
-// 0.6600000187754631, which widens to 0.6600000262260437. Comparing the two at
-// full width therefore reported a change on a row that had not moved, so every
-// applied reflect appended a byte-identical version of it and stamped it touched
-// — the whole of #727 reinstated for every strengthened memory (15 of 1,170 on
-// the store it was measured on) #750.
+// one value from another. Upsert's strengthen is `SET importance = MIN(1.0,
+// importance + ?)` with `importance*0.2` BOUND as a float32, so the multiply is
+// Go arithmetic on the caller's own value and the ADDITION is the one SQLite
+// does in its own float64 — the add is what #655 moved into SQL, where it had
+// been Go arithmetic on a float32 that left the column holding a float32-exact
+// value. The increment is therefore the caller's float32, NOT the column's value
+// times 0.2, and the two are not the same number. Either way the sum is a float64
+// a float32 cannot name: float32(0.55) is 0.550000011920929, the bound increment
+// widens to 0.11000000685453415, and the column lands at 0.6600000187754631,
+// which narrows to 0.6600000262260437. (The column's own value times 0.2 gives
+// 0.66000001430511479 — a different float64, though it narrows to the same
+// float32, so the defect and the fix are the same either way.) Comparing the two
+// at full width therefore reported a change on a row that had not moved, so
+// every applied reflect appended a byte-identical version of it and stamped it
+// touched — the whole of #727 reinstated for every strengthened memory (15 of
+// 1,170 on the store it was measured on) #750.
 //
 // So the stored value is NARROWED to the emission's precision and the two are
 // then equal. That is the only lossy direction, and what it loses is one float32
@@ -5859,7 +5879,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		return 0, fmt.Errorf("find snapshot: %w", err)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "restore-snapshot")
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
@@ -6121,14 +6141,31 @@ func (s *Store) IncrementInteraction(ctx context.Context, projectID string) (int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// A guarded transaction, for the same reason CreateTask is one (#746):
+	// `RETURNING interaction_count` is a read, and the value comes back from
+	// the UPDATE that produced it. The `+ 1` stays atomic — it is one statement,
+	// and the transaction here exists to run the newer-store check, not to make
+	// the arithmetic atomic, which SQLite already guarantees for a single
+	// statement.
+	tx, lock, err := s.beginWrite(ctx, "increment-interaction")
+	if err != nil {
+		return 0, err
+	}
 	var count int
-	err := s.db.QueryRowContext(ctx, `
+	if err := tx.QueryRowContext(ctx, `
 		UPDATE ghost_state
 		SET interaction_count = interaction_count + 1, updated_at = datetime('now')
 		WHERE project_id = ?
 		RETURNING interaction_count
-	`, projectID).Scan(&count)
-	return count, err
+	`, projectID).Scan(&count); err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	lock.reportHold("increment-interaction", time.Now())
+	return count, nil
 }
 
 // GetLearnedContext returns the learned context for a project.
@@ -6163,7 +6200,7 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execGuardedWrite(ctx, "update-learned-context", `
 		UPDATE ghost_state
 		SET learned_context = ?, reflection_summary = ?,
 		    last_reflection_at = datetime('now'), updated_at = datetime('now')
@@ -6197,7 +6234,7 @@ func (s *Store) SetReflectInputSignature(ctx context.Context, projectID, sig str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.execGuardedWrite(ctx, "set-reflect-signature", `
 		UPDATE ghost_state
 		SET reflect_input_sig = ?, updated_at = datetime('now')
 		WHERE project_id = ?
