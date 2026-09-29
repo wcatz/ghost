@@ -1810,6 +1810,14 @@ func (s *Server) registerTools() {
 			default:
 				text = projectNotRegistered(asked)
 			}
+		} else if note := s.projectContextOwnRowsNote(ctx, args.ProjectID, memories); note != "" {
+			// A block made entirely of cross-project rows is not this project's
+			// context, and it is only visible from OUTSIDE the empty gate: with
+			// `IncludeGlobal` the section is populated by `_global` whenever the
+			// store holds any, so this case never reached an empty block. Appended
+			// rather than substituted, because there IS an answer above — the
+			// cross-project rows are wanted, they are simply not this project's.
+			text += "\n\n" + note
 		}
 
 		return &mcp.CallToolResult{
@@ -3314,6 +3322,13 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 			return note, nil
 		}
 		return "No memories found for this project.", nil
+	}
+	// The same note the tool appends, for the same reason, and at the same place:
+	// a block whose rows are all cross-project is not this project's context, and
+	// `## Recent Decisions` or `## Learned Context` above do not change that.
+	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(note)
 	}
 	return sb.String(), nil
 }

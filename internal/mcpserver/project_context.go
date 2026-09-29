@@ -306,3 +306,77 @@ func projectContextEmptyNote(res assemble.Result) string {
 	}
 	return note + " Call ghost_memories_list to see them, still marked with the window they carry."
 }
+
+// projectContextOwnRowsNote is the SAME census, moved off the gate it was on.
+//
+// `projectContextEmptyNote` answers only when the whole block is empty, which was
+// the right gate for a loader whose block could only go empty with the project and
+// the wrong gate for a MIXED bucket: `projectContextBudget` sets `IncludeGlobal`, so
+// the block carries `_global` rows whenever the store holds any — and
+// `cmd/ghost/bootstrap.go` seeds the global memories on every real store. So on a
+// project whose every memory has retired, the block was a list of cross-project
+// preferences under a `## Memories` heading, saying nothing at all about the
+// project's own rows. Strictly less than the base reader gave, since
+// `GetTopMemories` did not filter validity and listed them marked `expired`.
+//
+// The gate here is the PROJECT's own rows, which is the question a caller actually
+// asked: is anything above mine? An empty block is a different question and
+// `projectContextEmptyNote` still answers it, because for an empty block the
+// assembler's own verdict is the sharper instrument — it knows WHY the rows are gone.
+//
+// The population split has to happen HERE rather than in the assembler, because with
+// one bucket holding two populations nothing above the caller can tell them apart:
+// the live global is an admitted item, so the outcome is `answerable` and the reason
+// is empty even when the project's every row was withheld. That is the price of
+// expressing "one cap over the union" as a union instead of two buckets, and two
+// buckets at `limit` each would admit twice the rows the caller asked for.
+//
+// The count is `CountMemories`, which covers rows the block dropped for ANY reason —
+// validity, the cap, dedup, resolution — so the sentence names no cause and stays
+// true in all of them. It is not `len(items)`: a project whose only row lost the cap
+// holds a row, and the same sentence is the honest one for it.
+//
+// Silence on an error, like everywhere else on these surfaces: a failed count is not
+// evidence that the project holds nothing, and the census is the one claim this
+// surface may only make from a verdict.
+func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string, res assemble.Result) string {
+	// `_global` IS a project, not a bucket that borrowed one, and an unresolved name
+	// has no project to count rows for — it gets the not-registered sentence, which
+	// says something stronger than this.
+	if projectID == "" || projectID == memory.GlobalProjectID {
+		return ""
+	}
+	// An empty block is projectContextEmptyNote's, and its verdict beats a count:
+	// it can say the rows were found and withheld, which is the useful half.
+	if len(res.Items) == 0 {
+		return ""
+	}
+	for _, it := range res.Items {
+		if it.ProjectID == projectID {
+			return "" // a row of the project's own is in the block, so there is no gap to report
+		}
+	}
+	n, err := s.store.CountMemories(ctx, projectID)
+	if err != nil {
+		return ""
+	}
+	if n == 0 {
+		// The empty half of the same gate, and it was the same misattribution with
+		// one clause fewer: a registered project holding nothing, on a store with any
+		// global row, was answered with the global row under `## Memories` and told
+		// nothing. This is a parity CHANGE where the withheld half is a parity fix —
+		// `GetTopMemories(ctx, "", 20)` returned exactly this — and it is here
+		// because repairing the gate halfway would leave the same defect with fewer
+		// words. The sentence names only the absence, because a `## Learned Context`
+		// or `## Recent Decisions` section above may well hold something.
+		return "Ghost holds no memories for this project; every row above applies to all projects."
+	}
+	if n == 1 {
+		return "Ghost holds 1 memory for this project and none of it is in the block above. Call " +
+			"ghost_memories_list to browse it: a browse is not capped at what fits in a context block, and it " +
+			"shows each row's validity window."
+	}
+	return fmt.Sprintf("Ghost holds %d memories for this project and none of them is in the block above. Call "+
+		"ghost_memories_list to browse them: a browse is not capped at what fits in a context block, and it "+
+		"shows each row's validity window.", n)
+}

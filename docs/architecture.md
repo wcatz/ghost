@@ -1523,6 +1523,33 @@ What exists now:
   `ghost_memories_list`, where the retired rows are still visible with their
   marker.
 
+  And the check is on the PROJECT's own rows rather than on the block, which the
+  same case forces: `projectContextBudget` sets `IncludeGlobal`, so the block is
+  populated by `_global` rows whenever the store holds any — and
+  `cmd/ghost/bootstrap.go` seeds the global memories on every real store. Gating on
+  emptiness therefore reported the one case that was never at risk and missed the
+  one that was, answering a project whose every memory has retired with the
+  cross-project preferences under a `## Memories` heading. `projectContextOwnRowsNote`
+  is the census moved off that gate: no admitted row is the requested project's, so
+  it says how many the project holds, that none is above, and where to browse them.
+  The count is `CountMemories`, which covers rows left out for ANY reason — validity,
+  the cap, deduplication, resolution — so the sentence names no cause and stays true
+  in all of them. The population split has to live at the caller, because with one
+  bucket holding two populations nothing above it can tell them apart: the live
+  global is an admitted item, so the outcome is `answerable` and the reason is empty
+  even when every row of the project was withheld.
+
+  The sentence that renders must also not promise a rendering the assembler does not
+  control. `Result.Abstention` is bytes a **caller** renders, and the callers do not
+  agree on what follows it: the search surface writes `assemblerNotes(res.Notes)`
+  after it, so "the note below breaks the removals down per stage" is there true,
+  while `ghost_project_context`, the project-context resource and the `recall_project`
+  prompt return the abstention as the **entire** answer and render no notes. The
+  promise was dropped from the passive half for that reason — not from the search
+  half, where the renderer keeps it — and what carries the reason without the notes
+  is the clause inside the sentence: *withheld as out of date, their validity windows
+  having closed or not yet opened*.
+
   The same rule reaches one step earlier, because a surface that filters can also
   be handed **no project to filter over**. `ghost_project_context` resolves the
   caller's name first, and an unknown name resolves to `""`; the old loader was
