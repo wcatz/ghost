@@ -45,7 +45,9 @@ name: longmemeval
 # Under THIS workflow a cap-cancelled run reports `skipped` rather than a green
 # `success`: the bench shell dies with the cap and never reaches the line that
 # writes `grew`, so the gate below is false. Nothing is stored, but nothing
-# claims otherwise — which is the difference from the run above.
+# claims otherwise — which is the difference from the run above. `skipped` has
+# other causes too (a warm pass with nothing new to store); docs/benchmarks.md
+# lists them against the log line that distinguishes each.
 #
 # RE-BASELINE STILL PENDING: the warm local run that set the floors below
 # predates the harness adopting the search_document:/search_query: task
@@ -315,12 +317,12 @@ jobs:
         # them is what keeps the quota available for dispatches that add
         # something.
         #
-        # This step is `skipped` for two different reasons, told apart by the
-        # bench step's own last line (`embed cache grew:` vs `embed cache
-        # unchanged at`): grew=false, a warm pass with nothing to store; or no
-        # grew at all, because the bench step was cancelled at the cap before
-        # it could write one. Both mean nothing was stored, and unlike the
-        # ungated `always()` this replaced, neither reports a green `success`.
+        # `skipped` means this gate was false, which has more than one cause.
+        # The bench step's last line tells them apart, and its ABSENCE is a
+        # cause in itself: no size line at all means the bench step never got
+        # that far (the cap, or an earlier step failed), so nothing was stored.
+        # Unlike the ungated `always()` this replaced, none of these reports a
+        # green `success` over a cache that was not saved.
         #
         # A save that RUNS and fails is only a WARNING and still concludes
         # `success`, so a `Failed to save` line in this step's log is the thing
