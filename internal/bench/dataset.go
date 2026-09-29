@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -240,8 +241,33 @@ func loadFile[T any](path string, parse func(io.Reader) (T, error)) (T, error) {
 // store.CreateLink, the production writer, so a fixture describes a state a
 // store could actually hold rather than one only raw SQL can produce.
 func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs Vectors) ([]Query, error) {
+	queries, _, err := SeedAt(ctx, store, db, ds, vecs, time.Now().UTC())
+	return queries, err
+}
+
+// SeedAt is Seed with a caller-chosen clock, and it returns that clock.
+//
+// Both halves matter, and they are the same half. A seeded corpus is stamped at
+// one instant (see newCorpusStampAt), and a context report is measured at one
+// instant as Request.Now — so a caller that stamped the corpus at T and measured
+// against the wall clock would be measuring rows whose ages and windows disagree
+// about what time it is, and the resulting table would depend on when it was run.
+// Handing the instant back is what closes that: SeedAt stamps at T and returns T,
+// so the store the report reads is a function of (corpus, clock) rather than of
+// the calendar.
+//
+// The instant is truncated to the second, because that is the resolution
+// memories.created_at stores — keeping sub-second precision here would only let
+// two rows differ again, which is the whole of what corpusStamp exists to stop.
+//
+// Seed is this at the wall clock, and it stays the entry point for everything that
+// only needs a store: the three ablations score ORDER, which a shared stamp
+// already makes reproducible, and pinning their clock to a fixed date would move
+// every published number by ageing the corpus.
+func SeedAt(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs Vectors, at time.Time) ([]Query, time.Time, error) {
+	stamp := newCorpusStampAt(at)
 	if err := store.EnsureProject(ctx, ds.Project, "/bench/"+ds.Project, ds.Project); err != nil {
-		return nil, fmt.Errorf("ensure project: %w", err)
+		return nil, stamp.instant(), fmt.Errorf("ensure project: %w", err)
 	}
 	dim := 0 // shared embedding dimension; a mixed fixture is a hard error
 	checkDim := func(what string, v []float32) error {
@@ -259,20 +285,19 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 	// enough to reorder a pair whose fused scores tie exactly, so a seed loop
 	// that straddles a second boundary is a coin flip on which of the two is
 	// younger. See corpusStamp, which is where that was measured.
-	stamp := newCorpusStamp()
 	for _, m := range ds.Memories {
 		if m.Key == "" {
-			return nil, fmt.Errorf("memory with empty key: %q", m.Content)
+			return nil, stamp.instant(), fmt.Errorf("memory with empty key: %q", m.Content)
 		}
 		if _, dup := keyToID[m.Key]; dup {
-			return nil, fmt.Errorf("duplicate memory key %q", m.Key)
+			return nil, stamp.instant(), fmt.Errorf("duplicate memory key %q", m.Key)
 		}
 		vec, ok := vecs[m.Key]
 		if !ok {
-			return nil, fmt.Errorf("no fixture vector for memory key %q (regenerate embeddings)", m.Key)
+			return nil, stamp.instant(), fmt.Errorf("no fixture vector for memory key %q (regenerate embeddings)", m.Key)
 		}
 		if err := checkDim("memory "+m.Key, vec); err != nil {
-			return nil, err
+			return nil, stamp.instant(), err
 		}
 		id, err := store.CreateWithIDFromCorpus(ctx, ds.Project, corpusID(ds.Project, m.Key), memory.Memory{
 			Category: m.Category, Content: m.Content, Importance: m.Importance,
@@ -280,17 +305,17 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 			ValidFrom: m.ValidFrom, ValidUntil: m.ValidUntil, VerifiedAt: m.VerifiedAt,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("create memory %q: %w", m.Key, err)
+			return nil, stamp.instant(), fmt.Errorf("create memory %q: %w", m.Key, err)
 		}
 		// Every row is stamped, including the ones the fixture gives no age:
 		// a shared created_at is what makes the decay factor identical across
 		// candidates, and a row that kept its own datetime('now') is a row whose
 		// age can differ from its twin's by a second and reorder a tied pair.
 		if err := stamp.apply(ctx, db, id, m.AgeDays); err != nil {
-			return nil, fmt.Errorf("stamp %q: %w", m.Key, err)
+			return nil, stamp.instant(), fmt.Errorf("stamp %q: %w", m.Key, err)
 		}
 		if err := store.StoreEmbedding(ctx, id, vec, "bench"); err != nil {
-			return nil, fmt.Errorf("embed memory %q: %w", m.Key, err)
+			return nil, stamp.instant(), fmt.Errorf("embed memory %q: %w", m.Key, err)
 		}
 		keyToID[m.Key] = id
 	}
@@ -307,19 +332,19 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 	// supersedes v1) is exactly the shape the demote is built for and has two
 	// superseders on v1.
 	if cycle := supersedesCycle(ds.Memories); cycle != "" {
-		return nil, fmt.Errorf("supersedes cycle in the dataset: %s", cycle)
+		return nil, stamp.instant(), fmt.Errorf("supersedes cycle in the dataset: %s", cycle)
 	}
 	for _, m := range ds.Memories {
 		for _, older := range m.Supersedes {
 			target, ok := keyToID[older]
 			if !ok {
-				return nil, fmt.Errorf("memory %q supersedes unknown key %q", m.Key, older)
+				return nil, stamp.instant(), fmt.Errorf("memory %q supersedes unknown key %q", m.Key, older)
 			}
 			if older == m.Key {
-				return nil, fmt.Errorf("memory %q supersedes itself", m.Key)
+				return nil, stamp.instant(), fmt.Errorf("memory %q supersedes itself", m.Key)
 			}
 			if err := store.CreateLink(ctx, keyToID[m.Key], target, "supersedes", 1.0, "llm"); err != nil {
-				return nil, fmt.Errorf("link %q supersedes %q: %w", m.Key, older, err)
+				return nil, stamp.instant(), fmt.Errorf("link %q supersedes %q: %w", m.Key, older, err)
 			}
 		}
 	}
@@ -328,16 +353,16 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 	for _, q := range ds.Queries {
 		vec, ok := vecs[q.Name]
 		if !ok {
-			return nil, fmt.Errorf("no fixture vector for query %q (regenerate embeddings)", q.Name)
+			return nil, stamp.instant(), fmt.Errorf("no fixture vector for query %q (regenerate embeddings)", q.Name)
 		}
 		if err := checkDim("query "+q.Name, vec); err != nil {
-			return nil, err
+			return nil, stamp.instant(), err
 		}
 		rel := make(Relevance, len(q.Rel))
 		for key, gain := range q.Rel {
 			id, ok := keyToID[key]
 			if !ok {
-				return nil, fmt.Errorf("query %q references unknown memory key %q", q.Name, key)
+				return nil, stamp.instant(), fmt.Errorf("query %q references unknown memory key %q", q.Name, key)
 			}
 			rel[id] = gain
 		}
@@ -345,5 +370,5 @@ func Seed(ctx context.Context, store *memory.Store, db *sql.DB, ds Dataset, vecs
 			Name: q.Name, ProjectID: ds.Project, Text: q.Text, Vector: vec, Rel: rel,
 		})
 	}
-	return queries, nil
+	return queries, stamp.instant(), nil
 }

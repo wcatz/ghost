@@ -104,7 +104,39 @@ type corpusStamp struct {
 // second because that is the resolution the memories.created_at column stores —
 // keeping sub-second precision here would only make two rows differ again.
 func newCorpusStamp() corpusStamp {
-	return corpusStamp{at: time.Now().UTC().Format("2006-01-02 15:04:05")}
+	return newCorpusStampAt(time.Now())
+}
+
+// newCorpusStampAt is the same stamp taken from a caller's clock, which is what
+// makes the stamped corpus a function of (corpus, clock) rather than of when the
+// pass ran. SeedAt uses it, and hands the instant back so the measurement
+// downstream reads the same T the rows were stamped with: a corpus stamped at T
+// and measured against the wall clock would be measuring rows whose ages and
+// validity windows disagree about what time it is.
+//
+// The truncation is newCorpusStamp's own rule, inherited here rather than repeated
+// so it is stated once. Two rows differing by a sub-second are the exact hazard the
+// stamp exists to remove, so a caller-chosen instant gets the same treatment as the
+// wall clock.
+func newCorpusStampAt(t time.Time) corpusStamp {
+	return corpusStamp{at: t.UTC().Truncate(time.Second).Format("2006-01-02 15:04:05")}
+}
+
+// instant is the stamp as a time.Time, for a caller that has to hand the same
+// instant to whatever measures the store this pass built. Read back out of the
+// formatted text rather than carried alongside it, so the two cannot disagree: a
+// caller pairing an untruncated instant with a truncated stamp would measure
+// against a clock its corpus was not written at.
+func (s corpusStamp) instant() time.Time {
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", s.at, time.UTC)
+	if err != nil {
+		// Unreachable through newCorpusStampAt, which formats with this exact
+		// layout. The zero time rather than a panic, because this is a benchmark:
+		// a benchmark that panics on an internal clock bug reports nothing at all,
+		// where a zero stamp still produces a report that is visibly wrong.
+		return time.Time{}
+	}
+	return t
 }
 
 // apply writes the stamp onto one row, offset by the age the fixture asked for,
