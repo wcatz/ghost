@@ -899,3 +899,190 @@ func TestPruneReportsTheGraceBasisSeparatelyFromActivity(t *testing.T) {
 			folded, fc.GraceFrom, fc.ExpiresAt)
 	}
 }
+
+// TestARestoreDoesNotRevertATierOrAnExpiry is the fixture for the bullet's
+// claim about RestoreSnapshot's two paths, which had been asserted in prose with
+// nothing behind it. The two are different answers and only one of them is a
+// DEFAULT: the UPDATE omits both columns, and an UPDATE that omits a column
+// leaves the live row's value alone, while the fresh INSERT takes the column
+// DEFAULT because it mints a row with no value of its own.
+//
+// A restore that REVERTED would be a destructive act nobody asked for, and it
+// would be invisible: memory_snapshots records no tier and no expiry, so the
+// statement could only revert one by writing a literal, and a literal is exactly
+// what a future edit adding `retention = ?, expires_at = ?` to the column list
+// would do. Each case below is a shape a restore is actually asked to undo.
+//
+// The persistent case is deliberately NOT here: a row that became keep-forever
+// is outside the UPDATE altogether (retentionExemptSQL), which is a different
+// rule with its own fixture in retention_exempt_test.go. The two here stay
+// INSIDE the statement, so what is under test is the omitted columns rather
+// than the exclusion.
+//
+// ONE SUBTEST CARRIES THE WEIGHT, and the split is not arbitrary. A session row
+// can only be raised to project or keep-forever, keep-forever puts it outside
+// the statement, and project IS the column DEFAULT — so for any row still in
+// scope, "the UPDATE preserved the raise" and "the UPDATE reset it to the
+// default" are the SAME value, and the first subtest cannot tell them apart. It
+// is kept for the one thing it does pin: that a restore hands a durable row no
+// expiry. The subtest that discriminates is the session one, where preserving and
+// resetting differ in BOTH columns at once.
+func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
+	t.Run("a raised durable row gains no expiry (weak, see above)", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		const body = "the staging cluster answers on port 8443"
+
+		live, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", body, "mcp", 0.5, nil,
+			UpsertOptions{Retention: RetentionSession})
+		if err != nil {
+			t.Fatalf("save the session row: %v", err)
+		}
+		// The snapshot, and a byte-identical re-emission so the row is REUSED and
+		// keeps the id the snapshot records. Without the reuse the snapshot names no
+		// live row and the restore would take the INSERT path instead.
+		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: body, Importance: 0.5, ReplacesIDs: []string{live},
+		}}, ""); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if !rowExists(t, s, live) {
+			t.Fatal("the row was not reused, so the snapshot does not name its id")
+		}
+		if got := getOne(t, s, live); got.Retention != RetentionSession {
+			t.Fatalf("the snapshot row is %s, want %q", got.Retention, RetentionSession)
+		}
+
+		// The edit the restore needs: a restore only rewrites a row whose text has
+		// moved, and without it the UPDATE would be a no-op and the assertions below
+		// would pass for the wrong reason. A PROJECT save, which raises the tier and
+		// clears the expiry — the two facts the restore must not undo.
+		edited := "the staging cluster answers on port 8443, kept for the record"
+		if err := s.UpdateMemory(ctx, testProject, live, &edited, nil, nil, nil); err != nil {
+			t.Fatalf("edit the row after the snapshot: %v", err)
+		}
+		if _, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
+			edited+" and restated as durable", "mcp", 0.5, nil,
+			UpsertOptions{Retention: RetentionProject}); err != nil {
+			t.Fatalf("raise the row: %v", err)
+		} else if dup != live {
+			t.Fatalf("the restatement folded into %q, want %q", dup, live)
+		}
+		raised := getOne(t, s, live)
+		if raised.Retention != RetentionProject {
+			t.Fatalf("the fixture did not raise the row (retention %q); the restore would have nothing to undo", raised.Retention)
+		}
+
+		if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+			t.Fatalf("RestoreSnapshot: %v", err)
+		}
+		// The revert of the TEXT is the proof the UPDATE fired: the restore's job is
+		// to put the row back, so the content coming back to the snapshot's is what
+		// distinguishes a real restore from a no-op one. Asserting the edit SURVIVED
+		// would be asserting the restore failed.
+		after := getOne(t, s, live)
+		if after.Content != body {
+			t.Fatalf("the restore did not rewrite the row (content %q, want the snapshot's %q): the fixture's UPDATE path did not fire", after.Content, body)
+		}
+		if after.Retention != RetentionProject {
+			t.Errorf("after the restore the row is %q, want %q: the UPDATE omits retention, so it must leave the tier a later raise established rather than reverting it",
+				after.Retention, RetentionProject)
+		}
+		if after.ExpiresAt != nil {
+			t.Errorf("after the restore the row carries expires_at %q; a durable row carrying an expiry is a claim nobody made, and the restore must not have written one", *after.ExpiresAt)
+		}
+	})
+
+	t.Run("a session row keeps the tier and the expiry a fold gave it", func(t *testing.T) {
+		// The discriminating case. The row is still session, so preserving and
+		// resetting differ in BOTH columns at once: a restore that grew the column
+		// list would make it project and expiry-less, and both assertions below fail
+		// together. The expiry is the fold's and not the save's, because
+		// raiseRetentionTx refreshes one and deliberately leaves updated_at alone —
+		// so this is also the only shape in which a session row's expiry is newer
+		// than its last write.
+		s := testStore(t)
+		ctx := context.Background()
+		from := time.Now().UTC()
+		const body = "a session fact the consolidator keeps"
+
+		live, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", body, "mcp", 0.5, nil,
+			UpsertOptions{Retention: RetentionSession})
+		if err != nil {
+			t.Fatalf("save the session row: %v", err)
+		}
+		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: body, Importance: 0.5, ReplacesIDs: []string{live},
+		}}, ""); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		edited := "a session fact the consolidator keeps, with more of it"
+		if err := s.UpdateMemory(ctx, testProject, live, &edited, nil, nil, nil); err != nil {
+			t.Fatalf("edit the row after the snapshot: %v", err)
+		}
+		// The fold, which refreshes the expiry and leaves the tier alone.
+		if _, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
+			edited+" and restated", "mcp", 0.5, nil,
+			UpsertOptions{Retention: RetentionSession}); err != nil {
+			t.Fatalf("fold into the row: %v", err)
+		} else if dup != live {
+			t.Fatalf("the restatement folded into %q, want %q", dup, live)
+		}
+		refreshed := getOne(t, s, live)
+
+		if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+			t.Fatalf("RestoreSnapshot: %v", err)
+		}
+		after := getOne(t, s, live)
+		if after.Content != body {
+			t.Fatalf("the restore did not rewrite the row (content %q, want the snapshot's %q): the fixture's UPDATE path did not fire", after.Content, body)
+		}
+		if after.Retention != RetentionSession {
+			t.Errorf("after the restore the row is %q, want %q", after.Retention, RetentionSession)
+		}
+		wantFreshSessionExpiry(t, live, after.ExpiresAt, from, time.Now().UTC())
+		if !sameStrPtr(after.ExpiresAt, refreshed.ExpiresAt) {
+			t.Errorf("after the restore the expiry is %v, want the one the fold refreshed (%v): the UPDATE omits expires_at, so it must not have cleared it",
+				expiryText(after.ExpiresAt), expiryText(refreshed.ExpiresAt))
+		}
+	})
+
+	t.Run("the fresh INSERT takes the column DEFAULT", func(t *testing.T) {
+		// A row that really is gone comes back through the INSERT ... SELECT, which
+		// names neither column, so it arrives as project with no expiry: kept
+		// longer, never pruned. The opposite of the two cases above, and stated here
+		// because the bullet's whole point is that the two paths differ.
+		s := testStore(t)
+		ctx := context.Background()
+		const body = "a session fact that gets deleted before the restore"
+
+		live, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", body, "mcp", 0.5, nil,
+			UpsertOptions{Retention: RetentionSession})
+		if err != nil {
+			t.Fatalf("save the session row: %v", err)
+		}
+		if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: body, Importance: 0.5, ReplacesIDs: []string{live},
+		}}, ""); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, live); err != nil {
+			t.Fatalf("delete the row the snapshot names: %v", err)
+		}
+
+		if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+			t.Fatalf("RestoreSnapshot: %v", err)
+		}
+		if !rowExists(t, s, live) {
+			t.Fatalf("the row was not brought back by its snapshot")
+		}
+		back := getOne(t, s, live)
+		if back.Retention != RetentionProject {
+			t.Errorf("the re-created row is %q, want %q: the INSERT names no tier, so it takes the column DEFAULT",
+				back.Retention, RetentionProject)
+		}
+		if back.ExpiresAt != nil {
+			t.Errorf("the re-created row carries expires_at %q, want NULL: nothing may schedule an expiry for a row that had none", *back.ExpiresAt)
+		}
+	})
+}
