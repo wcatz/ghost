@@ -397,9 +397,14 @@ func TestScoredWindowScoresTheWindowItReturns(t *testing.T) {
 	for _, c := range cosines {
 		top = math.Max(top, float64(c))
 	}
+	// t.Fatalf, not t.Skip, and this is the report's own silence: a skip here
+	// means the whole no-answer report stops being checked by a passing package,
+	// which is the opposite of what a broken fixture is. It is the same assertion
+	// the keyword-only fixture makes about its own precondition, in the same file,
+	// and there it is already fatal.
 	for _, m := range results {
 		if m.ID == ids["globalbest"] {
-			t.Skip("the shared row made the window after all, so this fixture no longer separates the two readings")
+			t.Fatalf("the shared row made the window after all, so this fixture no longer separates the two readings")
 		}
 	}
 	legBest, err := store.SearchVector(ctx, project, q.Vector, 1)

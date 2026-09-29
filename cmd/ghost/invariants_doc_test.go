@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -74,4 +77,88 @@ func subcommandListBody(doc string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(m[1]), true
+}
+
+// TestInvariantsListsEveryInternalPackage holds docs/invariants.md's package
+// map to the tree under internal/, in both directions, for the reason the
+// subcommand list above is held to the dispatch: the map is prose next to the
+// filesystem and no build step reads either, so a package under internal/ can
+// exist with nothing in the file the PR reviewer workflow reads as its
+// conventions. #764 listed three such packages at once (procstat, scratch,
+// repo) and named the map as the fix; the fourth (secret) was not in the item
+// and is only here because this test walks the tree instead of trusting the
+// list of things noticed.
+func TestInvariantsListsEveryInternalPackage(t *testing.T) {
+	const docPath = "../../docs/invariants.md"
+	const internalDir = "../../internal"
+	raw, err := os.ReadFile(docPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", docPath, err)
+	}
+
+	listed := internalPackageList(string(raw))
+	if len(listed) == 0 {
+		t.Fatalf("no `internal/<pkg>/` bullets in %s; the test cannot tell whether the map is stale", docPath)
+	}
+
+	entries, err := os.ReadDir(internalDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", internalDir, err)
+	}
+	found := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pkg := filepath.Join(internalDir, entry.Name())
+		if !hasGoFiles(pkg) {
+			continue
+		}
+		found++
+		if !listed[entry.Name()] {
+			t.Errorf("docs/invariants.md's package map has no bullet for internal/%s/", entry.Name())
+		}
+	}
+	if found == 0 {
+		t.Fatalf("no package directories under %s; the test passed without looking at anything", internalDir)
+	}
+
+	// The other direction: a bullet naming a directory that is gone is a
+	// reader sent looking for a package that is not there.
+	for name := range listed {
+		if _, err := os.Stat(filepath.Join(internalDir, name)); errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("docs/invariants.md's package map names internal/%s/, which is not a directory under %s", name, internalDir)
+		}
+	}
+}
+
+// internalPackageList returns the package names the doc's package map claims a
+// bullet for. Anchored on a line that STARTS with the bullet and names the
+// directory, so a package path mentioned mid-sentence in another bullet is not
+// counted as a bullet of its own — a test that credits a prose mention is worse
+// than one that fails.
+var internalPackageRE = regexp.MustCompile("(?m)^- `internal/([a-z0-9]+)/`")
+
+func internalPackageList(doc string) map[string]bool {
+	listed := map[string]bool{}
+	for _, m := range internalPackageRE.FindAllStringSubmatch(doc, -1) {
+		listed[m[1]] = true
+	}
+	return listed
+}
+
+// hasGoFiles reports whether the directory holds at least one Go file, test
+// files included: internal/adversarial is called only from _test.go files and
+// still owns a bullet.
+func hasGoFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+			return true
+		}
+	}
+	return false
 }

@@ -57,14 +57,25 @@ import (
 // its memory has since been DELETED, whose history is frozen because a past read
 // computes a deleted memory's age from the version that answers it.
 //
-// Two of those are what the advice has to respect, and for different reasons.
+// Three of those are what the advice has to respect, and for different reasons.
+//
+// The NEWEST VERSION is the one a reader is most likely to get wrong from the
+// finding alone, because it is a property of the ROW rather than of the clock: a
+// no-op save leaves a version that restates the one before it AND is the state
+// that memory currently says, so a store can be carrying a majority of pre-#727
+// restatements the repair keeps anyway (291 of 302 in #742's rehearsal). Calling
+// that "what this build wrote" is true of the store and false of the REASON, and
+// the reader who believes the reason concludes there is nothing here for the
+// repair to do when the rows it would remove are the minority. So the finding
+// names the guard itself and not only the bound — and the newest version is the
+// one thing nothing removes, not the growth policy and not the repair
+// (historyRemovableRowSQL).
 //
 // The BOUND is a property of the CLOCK rather than of the store. The report
 // measures the last day and the repair only ever touches what predates #727, so
 // from the day after that fix shipped, every row the share counts is a row the
 // repair keeps. That is why the finding promises no removal: it names the repair,
-// says what the repair reclaims, and says plainly that it leaves a current
-// build's rows alone.
+// says what the repair reclaims, and names the guards that decide what it keeps.
 //
 // The TOMBSTONE guard makes the pressure WORSE rather than the advice weaker, and
 // #709 is what made it reachable on a schedule for the first time: retention
@@ -118,10 +129,11 @@ const (
 	// promising it will remove the rows it reports: the repair's bound is the
 	// instant the writer that stopped producing these rows reached main, so on any
 	// store running a current build every row inside this report's window is one
-	// the repair keeps by design, and a deleted memory's rows are kept whatever
-	// their age. They are still worth reporting, because the table fills either way
-	// and the caps trim oldest-first — it is the pressure, not the disposability,
-	// that the share measures.
+	// the repair keeps by design; a memory's newest version is kept whatever its
+	// age, and that is where most of a store's restatements sit; a deleted
+	// memory's rows are kept whatever their age. They are still worth reporting,
+	// because the table fills either way and the caps trim oldest-first — it is
+	// the pressure, not the disposability, that the share measures.
 	HistoryWarnNoOpShare = "no_op_share"
 	// HistoryWarnPerMemoryCap: a memory will reach the per-memory cap soon, and
 	// reaching it means its oldest versions — which may be the only record of
@@ -462,7 +474,7 @@ func historyGrowthWarnings(res HistoryGrowthResult) []HistoryWarning {
 		warnings = append(warnings, HistoryWarning{
 			Kind: HistoryWarnNoOpShare,
 			Detail: fmt.Sprintf(
-				"%.0f%% of the %d version rows written in the last %dh restate the version before them (warning threshold %.0f%%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote",
+				"%.0f%% of the %d version rows written in the last %dh restate the version before them (warning threshold %.0f%%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote, plus the newest version of any memory",
 				res.NoOpShare*100, res.RowsInWindow, res.WindowHours, HistoryNoOpShareWarn*100),
 		})
 	}

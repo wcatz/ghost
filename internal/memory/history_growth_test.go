@@ -276,6 +276,13 @@ func TestHistoryGrowthWarningsQuoteTheirOwnNumbers(t *testing.T) {
 	for _, want := range []string{
 		"75%", "20%", "16", "ghost history compact",
 		"deliberately leaves what this build wrote",
+		// The newest-version guard, named as itself (#764's E1). "What this build
+		// wrote" is a CLOCK claim and it was the only one, so a store whose
+		// window is mostly PRE-cutoff no-op reflect rows read the sentence as
+		// blaming the current writer and concluded the repair had nothing to do —
+		// when those rows are kept because each is its memory's current state
+		// (291 of 302 in #742's rehearsal), which the sentence did not say.
+		"plus the newest version of any memory",
 		// The caps, because they are what evicts a restatement this build wrote —
 		// and since #709 gave `expires_at` a day to arrive, on a store that has
 		// been deleting memories they are the ONLY thing that evicts anything.
