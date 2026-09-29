@@ -566,18 +566,22 @@ const (
 // transient PRAGMA failure into no session context at all, which is a worse
 // answer than a block missing a tier label.
 func passiveColumnsFor(s *Store) (passiveColumns, error) {
-	hasScope, hasTier := true, false
+	// Both flags start FALSE, which is the safe direction: a column the store may
+	// not have is substituted for, so a path that fails to set one loses a label
+	// rather than failing the read. The error branch below leaves them false on
+	// purpose, and says why.
+	var hasScope, hasTier bool
+
 	// Through the SNAPSHOT, not the pool. This runs inside the read transaction
 	// `Candidates` opened, and that pool is pinned at MaxOpenConns(1): the
 	// transaction holds the only connection, so a PRAGMA on the pool would wait for
 	// a connection that cannot be handed out — a deadlock, not an error.
 	version, versionErr := dbUserVersion(s.queryDB())
-	if versionErr != nil {
-		s.logger.Debug("candidates: passive read could not read the store's schema version", "error", versionErr)
-		hasScope = false
-	} else {
+	if versionErr == nil {
 		hasScope = version >= passiveScopeColumnFloor
 		hasTier = version >= passiveRetentionColumnFloor
+	} else {
+		s.logger.Debug("candidates: passive read could not read the store's schema version", "error", versionErr)
 	}
 
 	// The list is the shared one, with a column this store may not have replaced by
