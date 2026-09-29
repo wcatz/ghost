@@ -512,6 +512,124 @@ func TestTheGuardStepIsNotABuildStep(t *testing.T) {
 // above an enforced one rather than a claim.
 const publishedReleaseGuardStepName = "Refuse to build into a published release"
 
+// TestThePublishedReleaseGuardRefuses is the enforcing half of the test above,
+// and it exists because shape cannot tell a guard that fails from one that walks
+// away quietly — the same reason
+// TestTheReleaseTimeGuardFailsOnASingleZeroMatchPattern runs the subject guard's
+// actual bash rather than reading its name.
+//
+// The step's own script is run, with a stub `gh` first on PATH, over the four
+// answers it has to give. The fourth is the one that matters most: an ERROR it
+// cannot interpret must REFUSE, because the question the step exists to answer
+// is whether the release is public, and a failed lookup is not an answer. A
+// guard that treats "could not ask" as "no release" waves GoReleaser at a
+// published release with replace_existing_artifacts set, which is the exact
+// failure the step was added to stop.
+func TestThePublishedReleaseGuardRefuses(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not on PATH; the guard step is bash")
+	}
+	wf, _ := loadReleaseWorkflow(t)
+
+	var guard workflowStep
+	found := false
+	for _, s := range wf.Jobs["release"].Steps {
+		if s.Name == publishedReleaseGuardStepName {
+			guard, found = s, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no step named %q", publishedReleaseGuardStepName)
+	}
+	if guard.Run == "" {
+		t.Fatalf("step %q has no run body, so it cannot refuse anything", publishedReleaseGuardStepName)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		stderr  string
+		stdout  string
+		exit    string
+		wantErr bool
+	}{
+		{
+			// gh exits non-zero on ANY http error, including the 404 that means
+			// "no release for this tag" — so the stub's exit status is part of
+			// what the test is saying, not decoration.
+			name:    "a first run with no release for the tag",
+			stderr:  "gh: Not Found (HTTP 404)",
+			exit:    "1",
+			wantErr: false,
+		},
+		{
+			name:    "a re-run against a draft",
+			stdout:  "4242 true",
+			exit:    "0",
+			wantErr: false,
+		},
+		{
+			name:    "a re-run against a published release",
+			stdout:  "4242 false",
+			exit:    "0",
+			wantErr: true,
+		},
+		{
+			// The one the shape test cannot see and the fail-open version got
+			// wrong: a 500 is not a 404, and must not be read as "no release".
+			name:    "a service error it cannot interpret",
+			stderr:  "gh: Internal Server Error (HTTP 500)",
+			exit:    "1",
+			wantErr: true,
+		},
+		{
+			name:    "a rejected token",
+			stderr:  "gh: Bad credentials (HTTP 401)",
+			exit:    "1",
+			wantErr: true,
+		},
+		{
+			name:    "an error in a shape it has never seen",
+			stderr:  "something entirely unexpected",
+			exit:    "1",
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			gh := filepath.Join(dir, "gh")
+			script := "#!/usr/bin/env bash\n" +
+				"printf '%s' \"$STUB_STDOUT\"\n" +
+				"printf '%s' \"$STUB_STDERR\" >&2\n" +
+				"exit \"$STUB_EXIT\"\n"
+			if err := os.WriteFile(gh, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			code, out := runBashScript(t, dir, guard.Run, map[string]string{
+				"PATH":              dir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"GITHUB_REPOSITORY": "wcatz/ghost",
+				"GITHUB_REF_NAME":   "v0.43.0",
+				"STUB_STDOUT":       tc.stdout,
+				"STUB_STDERR":       tc.stderr,
+				"STUB_EXIT":         tc.exit,
+			})
+			if tc.wantErr && code == 0 {
+				t.Errorf("the guard exited 0, so the rebuild is authorised on an answer it should have refused:\n%s", out)
+			}
+			if !tc.wantErr && code != 0 {
+				t.Errorf("the guard exited %d, refusing a rebuild it should allow:\n%s", code, out)
+			}
+			// A refusal a human has to read: a red job with no output leaves the
+			// maintainer to work out which of four things went wrong. The
+			// wording is deliberately not asserted — pinning it would make this
+			// a test of the sentence rather than of the decision.
+			if tc.wantErr && strings.TrimSpace(out) == "" {
+				t.Error("the guard refused without saying anything")
+			}
+		})
+	}
+}
+
 // TestTheReleaseJobRefusesAPublishedRelease is the other half of
 // TestTheReleaseJobIsReRunnable, and it exists because replace_existing_artifacts
 // is only safe while the release is a DRAFT.
@@ -892,7 +1010,7 @@ func TestTheReleaseTimeGuardFailsOnASingleZeroMatchPattern(t *testing.T) {
 	for job := range byJob {
 		t.Run(job+" with every subject present", func(t *testing.T) {
 			script := guardScript(t, wf.Jobs[job].Steps)
-			if code, out := runBashScript(t, dir, script); code != 0 {
+			if code, out := runBashScript(t, dir, script, nil); code != 0 {
 				t.Errorf("the guard failed with every subject present (exit %d):\n%s", code, out)
 			}
 		})
@@ -916,7 +1034,7 @@ func TestTheReleaseTimeGuardFailsOnASingleZeroMatchPattern(t *testing.T) {
 			writeFixture(t, bare, "dist/ghost_0.0.0_linux_amd64.tar.gz")
 			writeFixture(t, bare, "dist/ghost_0.0.0_linux_amd64.zip")
 			script := guardScript(t, wf.Jobs[job].Steps)
-			code, out := runBashScript(t, bare, script)
+			code, out := runBashScript(t, bare, script, nil)
 			if code == 0 {
 				t.Errorf("the guard exited 0 with %s missing, so the release would publish it with no attestation:\n%s", victim, out)
 			}
@@ -952,10 +1070,16 @@ func guardScript(t *testing.T, steps []workflowStep) string {
 
 // runBashScript runs script with dir as the working directory, under the
 // `bash -e {0}` the Actions runner uses, and returns its exit code and output.
-func runBashScript(t *testing.T, dir, script string) (int, string) {
+// env is applied on top of the process environment, so a test can put a stub on
+// PATH and set the variables the step reads.
+func runBashScript(t *testing.T, dir, script string, env map[string]string) (int, string) {
 	t.Helper()
 	cmd := exec.Command("bash", "-e", "-c", script)
 	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf

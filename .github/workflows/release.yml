@@ -114,18 +114,33 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RELEASE_ID=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
-            --jq '.id' 2>/dev/null || true)
-          if [ -z "$RELEASE_ID" ]; then
+          # FAIL CLOSED on anything but an answer. `|| true` here would be the
+          # hole the step exists to plug: a 500, a rate limit, a DNS failure or
+          # a rejected token all look exactly like "no release for this tag"
+          # once the error is discarded, and the step would wave GoReleaser at
+          # a published release with replace_existing_artifacts: true.
+          #
+          # So the error is captured rather than dropped, and only a 404 is
+          # read as "not there yet". Anything else — including an error this
+          # script does not recognise, because it matches gh's error text —
+          # refuses the build. The direction of the mistake is the safe one: a
+          # gh that words its 404 differently stops the release rather than
+          # letting it rebuild a published one.
+          if STATE=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '"\(.id) \(.draft)"' 2>&1); then
+            RELEASE_ID=${STATE%% *}
+            IS_DRAFT=${STATE##* }
+            if [ "$IS_DRAFT" = "true" ]; then
+              echo "release ${GITHUB_REF_NAME} is a draft (${RELEASE_ID}) — a re-run may replace its assets"
+              exit 0
+            fi
+            echo "::error::release ${GITHUB_REF_NAME} (${RELEASE_ID}) is PUBLISHED, so this job will not rebuild it. GoReleaser would replace published, already-attested assets, and main's catalog still pins the digests they had before. Re-run the plugin job alone (it is idempotent) — or delete the release and re-tag if this tag was wrong."
+            exit 1
+          fi
+          if printf '%s' "$STATE" | grep -q '404'; then
             echo "no release exists for ${GITHUB_REF_NAME} yet — GoReleaser will create the draft"
             exit 0
           fi
-          IS_DRAFT=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.draft')
-          if [ "$IS_DRAFT" = "true" ]; then
-            echo "release ${GITHUB_REF_NAME} is a draft (${RELEASE_ID}) — a re-run may replace its assets"
-            exit 0
-          fi
-          echo "::error::release ${GITHUB_REF_NAME} (${RELEASE_ID}) is PUBLISHED, so this job will not rebuild it. GoReleaser would replace published, already-attested assets, and main's catalog still pins the digests they had before. Re-run the plugin job alone (it is idempotent) — or delete the release and re-tag if this tag was wrong."
+          echo "::error::could not read the release for ${GITHUB_REF_NAME} (got: ${STATE}) — refusing to rebuild rather than guess whether it is published"
           exit 1
 
       - name: Run GoReleaser
