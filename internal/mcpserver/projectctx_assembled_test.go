@@ -559,6 +559,60 @@ func TestEveryProjectContextSurfaceAnswersAnUnresolvedProject(t *testing.T) {
 	_ = srv
 }
 
+// TestTheToolAnswersAnUnresolvedProjectTheSameWayWithAsOf is the sixth review
+// finding, and it is the one that made this PR's own docs false.
+//
+// The unresolved-name guard sat BELOW the tool's `as_of` return, so only the
+// present-tense branch was covered. `asOfScopeClause` builds the same
+// `(project_id = ? OR project_id = '_global')` union `GetTopMemories` did, so
+// `as_of` on an unknown name printed the cross-project rows under a `## Memories`
+// heading for a project that does not exist and never said the project was unknown
+// — while architecture.md, docs/mcp.md and the invariants bullet all said the
+// surfaces skip the project-keyed reads on an unresolved name.
+//
+// So: the guard moved ABOVE the `as_of` return, and this asserts the two branches
+// answer the same way. A caller that gets two different answers for the same
+// project depending on whether it asked about the present or the past has no way
+// to tell which one to believe.
+func TestTheToolAnswersAnUnresolvedProjectTheSameWayWithAsOf(t *testing.T) {
+	_, session := newValiditySession(t)
+	if _, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ghost_save_global",
+		Arguments: map[string]any{"content": "a cross-project preference", "category": "preference"},
+	}); err != nil {
+		t.Fatalf("save_global: %v", err)
+	}
+	const wanted = "no-such-project-as-of"
+
+	current := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": wanted}))
+	historical := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": wanted, "as_of": asOfToolFuture,
+	}))
+
+	for _, c := range []struct{ name, out string }{
+		{"the current read", current},
+		{"the as_of read", historical},
+	} {
+		if !strings.Contains(c.out, "is not registered with Ghost yet") {
+			t.Errorf("%s did not answer the not-registered sentence:\n%s", c.name, c.out)
+		}
+		if strings.Contains(c.out, wanted) == false {
+			t.Errorf("%s did not name the project the caller asked for:\n%s", c.name, c.out)
+		}
+		if strings.Contains(c.out, "## Memories") {
+			t.Errorf("%s rendered a memory listing for a project that does not exist:\n%s", c.name, c.out)
+		}
+		if !strings.Contains(c.out, "## Global (applies to all projects)") {
+			t.Errorf("%s dropped the cross-project section, which does not depend on a project:\n%s", c.name, c.out)
+		}
+	}
+	// And the two answers agree, rather than each merely being reasonable.
+	if current != historical {
+		t.Errorf("the two branches answer an unresolved project differently.\n--- current ---\n%s\n--- as_of ---\n%s",
+			current, historical)
+	}
+}
+
 // TestTheUnresolvedProjectBlockStillRendersTheResourceOnItsOwn is the half of the
 // finding that a sentence-in-place-of-the-block fix breaks, stated on the resource
 // alone: `buildProjectContext` is what the resource and the prompt both read, so

@@ -1662,6 +1662,32 @@ func (s *Server) registerTools() {
 			}
 		}
 
+		// An UNRESOLVED project name, answered the same way by BOTH branches of this
+		// handler — hence here, above the `as_of` return rather than inside the
+		// present-tense path.
+		//
+		// `ResolveProject` answers an unknown name with `("", "", nil)`, and both
+		// historical and current reads were handed that empty id and read
+		// `project_id = '' OR project_id = '_global'` (`asOfScopeClause` builds the
+		// same union). So `as_of` on an unknown name printed the global rows under a
+		// `## Memories` heading for a project that does not exist, and never said the
+		// project was unknown — the mislabelling this migration removes on the other
+		// branch, left in place on this one, against the prose this same PR adds.
+		//
+		// The cross-project rows are still delivered, under the heading that is true
+		// of them: they do not depend on a project, the base ref delivered them, and
+		// a first session in a project Ghost has never seen is exactly when they
+		// matter. The historical set is a past reading and is not consulted for a
+		// project that was never registered, so the Global section here is the
+		// present-tense one — and the not-registered sentence is appended either way.
+		if args.ProjectID == "" {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{
+					Text: projectContextWithNotRegistered(s.projectContextGlobalSection(ctx, nil), asked),
+				}},
+			}, nil, nil
+		}
+
 		var sb strings.Builder
 
 		if asOf != nil {
@@ -1700,19 +1726,17 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		// An UNRESOLVED project has no rows to select, and it must not borrow
-		// another project's. `ResolveProject` answers an unknown name with `("", "",
-		// nil)`, so the old loader was handed "" and read
-		// `project_id = '' OR project_id = '_global'` — which listed the GLOBAL rows
-		// under a `## Memories` heading for a project that does not exist, and
-		// only fell through to the not-registered sentence when the store happened
-		// to hold no globals. The assembler refuses a project context with no
-		// project, so without this the same call became an error. An error is worse
-		// than the old inconsistency: a caller cannot act on "something went
-		// wrong" by saving a memory to the project it named.
+		// The unresolved-name case was answered ABOVE, before the as_of return,
+		// because both branches of this handler were handed the empty id and both
+		// mislabelled the cross-project rows. From here on the project resolved.
 		//
 		// So the case is answered, and answered the same way whatever else the
 		// store holds — which is the half the old behaviour varied on.
+		//
+		// `if args.ProjectID != ""` is therefore belt-and-braces on the assemble
+		// rather than the case's guard: the assembler refuses a project context
+		// with no project, and this is the seam that would refuse it if the check
+		// above were ever moved back down here.
 		var memories assemble.Result
 		if args.ProjectID != "" {
 			memories, err = s.projectContextMemories(ctx, args.ProjectID, args.Limit)
