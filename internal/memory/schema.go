@@ -516,11 +516,18 @@ CREATE INDEX IF NOT EXISTS idx_snapshot_evidence ON memory_snapshot_evidence(sna
 -- deleted by a memory purge. The column is a name in a record, not a claim that
 -- the memory table is the owner of it.
 --
--- No text anywhere. query_hash is a sha256 digest or empty for a call that
--- carried no query (a session-start injection), and the CHECK is what makes that
--- structural rather than a convention: a column whose only accepted values are
--- 64 hex characters and the empty string cannot hold a question however a
--- future writer builds its statement.
+-- No text anywhere. query_hash is an HMAC-SHA256 digest under a per-install key,
+-- or empty, and the CHECK is what makes that structural rather than a convention:
+-- a column whose only accepted values are 64 hex characters and the empty string
+-- cannot hold a question however a future writer builds its statement.
+--
+-- The key is a sibling FILE in the data directory, NOT in this database, because
+-- 'ghost backup' is a VACUUM INTO of this file and a backup is the most ordinary
+-- thing to hand a colleague. The cost, stated here because this is the column's
+-- comment: a restore ON ANOTHER MACHINE re-keys every row it carries, so grouping
+-- repeat questions holds within one install and not across two. An empty hash
+-- means either "this call carried no query" (a session-start injection) or "the
+-- key could not be read" -- both are logged -- so the column never guesses.
 CREATE TABLE IF NOT EXISTS retrieval_record (
     project_id TEXT NOT NULL,
     -- Empty over stdio, which reports no session. Load-bearing alongside

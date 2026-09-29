@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -170,6 +171,38 @@ var retrievalRecordRowsCap = 5000
 // "all of them", which is a claim about a call nothing recorded.
 var errRetrievalNoProject = errors.New("record retrieval: a project id is required")
 
+// lockRecordWrite takes the store's write lock, or gives up when ctx is done.
+//
+// sync.RWMutex.Lock ignores a context, so a sub-deadline does NOT bound this step
+// on its own: a record write queued behind another writer's long transaction would
+// wait for the hand-over however long the caller had allowed, and the wait sits
+// between the caller receiving its answer and the tool returning. That is the
+// in-process half of the same problem the database half has, and it needs its own
+// answer.
+//
+// TryLock in a short poll is the bounded acquire available without restructuring
+// the store's locking, and the poll costs nothing in the ordinary case because the
+// first attempt succeeds — a record write is not usually queued. Giving up is
+// correct rather than merely defensive: the row is a measurement of a call that
+// already happened, and the caller logs the loss.
+func lockRecordWrite(ctx context.Context, mu *sync.RWMutex) error {
+	for {
+		if mu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(recordLockPoll):
+		}
+	}
+}
+
+// recordLockPoll is how often a contended record write re-tries the store's lock.
+// Short enough that the budget is honoured to within a millisecond, long enough
+// that a queue of searches is not spinning a core while it waits.
+const recordLockPoll = time.Millisecond
+
 // RecordRetrieval appends one call's record.
 //
 // The append and the cap's eviction share one transaction, so the table cannot
@@ -203,7 +236,11 @@ func (s *Store) RecordRetrieval(ctx context.Context, rec RetrievalRecord) error 
 		return fmt.Errorf("record retrieval: encode verdicts: %w", err)
 	}
 
-	s.mu.Lock()
+	// Bounded, because this runs on the search path and a wait here is a wait the
+	// caller pays for a measurement it has already been given. See lockRecordWrite.
+	if err := lockRecordWrite(ctx, &s.mu); err != nil {
+		return fmt.Errorf("record retrieval: store is busy: %w", err)
+	}
 	defer s.mu.Unlock()
 
 	tx, lock, err := s.beginWrite(ctx, "record-retrieval")
@@ -241,6 +278,13 @@ func (s *Store) RecordRetrieval(ctx context.Context, rec RetrievalRecord) error 
 	lock.reportHold("record-retrieval", time.Now())
 	return nil
 }
+
+// DigestQuery is the retrieval record's query_hash: the same keyed digest
+// QueryDigest returns, exposed as a method so the store satisfies
+// assemble.RecordSink. The assembler asks the store that will HOLD the digest
+// rather than resolving a per-install key itself — see that interface's comment,
+// and the reason it is a method here and not a call in that package.
+func (s *Store) DigestQuery(query string) (string, error) { return QueryDigest(query) }
 
 // RetrievalRecords returns the newest calls first, at most `limit` of them.
 //

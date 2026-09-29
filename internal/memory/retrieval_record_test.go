@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func sampleRetrievalRecord() RetrievalRecord {
@@ -1044,6 +1045,70 @@ func TestThePurgeDoesNotFuzzyMatchAWellFormedRecord(t *testing.T) {
 	}
 }
 
+// TestAPurgeIdThatIsAJSONKeywordCannotWipeTheTable: the blocker, and the reason
+// the textual arm must match a VALUE rather than a substring of the document.
+//
+// A record's verdicts column is SERIALIZED JSON, so it contains the field names
+// and vocabulary words of the schema — "id", "kept", "stage", "reason", "valid",
+// "expired", "floor_met" — and a row whose column cannot be parsed is matched by
+// searching that text. `instr(verdicts, ?)` against a raw id therefore matches on
+// any id that equals or is contained in one of those words, and ImportMemory
+// accepts any non-empty id verbatim, so a short imported id reaches that state
+// with no effort. The result is a `ghost history purge` that deletes most of the
+// audit trail while reporting that it erased one memory's record.
+//
+// The fix is to match in the VALUE position — the id preceded by its key — which
+// is what a field name never looks like. This test uses the reviewer's own ids
+// plus a substring case, and asserts the table survives a purge of each.
+func TestAPurgeIdThatIsAJSONKeywordCannotWipeTheTable(t *testing.T) {
+	for _, id := range []string{"id", "stage", "true", "reason", "valid", "validity", "floor_met", "mem"} {
+		t.Run(id, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+
+			// Three records that do NOT name the purged id, one of them unreadable
+			// so the textual arm is the only thing that can reach it.
+			if err := s.RecordRetrieval(ctx, sampleRetrievalRecord()); err != nil {
+				t.Fatalf("RecordRetrieval: %v", err)
+			}
+			if err := s.RecordRetrieval(ctx, RetrievalRecord{
+				ProjectID: testProject, Source: "search", QueryHash: digest(80),
+				Outcome: "answerable", Reason: "floor_met",
+				Verdicts: []RowVerdict{{ID: "MEM-9", Kept: true}},
+			}); err != nil {
+				t.Fatalf("RecordRetrieval: %v", err)
+			}
+			// A truncated multi-verdict record: the realistic unreadable shape, and
+			// one whose text carries the schema's field names AND its vocabulary —
+			// id, kept, true, false, stage, reason, validity, budget, valid,
+			// expired — so the ids under test are ones the document really
+			// contains. The missing closing bracket is what makes it unreadable.
+			if _, err := s.db.Exec(
+				`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
+				 VALUES (?, 'search', ?, 'answerable', 'floor_met', ?)`,
+				testProject, digest(81),
+				`[{"id":"MEM-8","kept":true,"stage":"validity","reason":"valid"},`+
+					`{"id":"MEM-9","kept":false,"stage":"budget","reason":"expired"}`,
+			); err != nil {
+				t.Fatalf("insert an unreadable row: %v", err)
+			}
+
+			if _, err := s.PurgeMemoryHistory(ctx, id); err != nil {
+				t.Fatalf("PurgeMemoryHistory(%q): %v", id, err)
+			}
+
+			var left int
+			if err := s.db.QueryRow(`SELECT count(*) FROM retrieval_record`).Scan(&left); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if left != 3 {
+				t.Errorf("purging the id %q left %d of 3 records — the textual arm matched the SCHEMA's own "+
+					"field names and vocabulary instead of a value", id, left)
+			}
+		})
+	}
+}
+
 // TestTheLeakScanCatchesTextHiddenInsideALongerValue: the scan's sensitivity is
 // substring, and this is what proves it.
 //
@@ -1096,5 +1161,53 @@ func TestRowVerdictJSONShape(t *testing.T) {
 	}
 	if got, want := string(b), `{"id":"M","kept":true,"stage":"validity","reason":"valid"}`; got != want {
 		t.Errorf("verdict JSON = %s, want %s", got, want)
+	}
+}
+
+// TestARecordWriteGivesUpOnAHeldStoreLockRatherThanWaiting: the in-process half
+// of the bound, and it is a separate problem from the database one.
+//
+// A sub-deadline bounds the DATABASE's wait, because a context is what
+// database/sql hands down to SQLite. It does not bound a wait on the store's own
+// mutex: sync.RWMutex.Lock ignores a context entirely, so a record write queued
+// behind another tool call's long transaction would sit there until the mutex was
+// handed over. That is precisely the "one search's record stalls every concurrent
+// tool call in the same MCP server" case, and a context the lock cannot see does
+// not fix it.
+func TestARecordWriteGivesUpOnAHeldStoreLockRatherThanWaiting(t *testing.T) {
+	s := testStore(t)
+
+	// Hold the store's write lock, as another in-process writer would.
+	s.mu.Lock()
+	held := make(chan struct{})
+	go func() {
+		defer close(held)
+		time.Sleep(time.Second) // longer than the 200ms context below
+		s.mu.Unlock()
+	}()
+	t.Cleanup(func() { <-held })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := s.RecordRetrieval(ctx, sampleRetrievalRecord())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("RecordRetrieval succeeded while the store's write lock was held for a second — the wait " +
+			"is " +
+			"unbounded by the caller's context")
+	}
+	if elapsed > 900*time.Millisecond {
+		t.Errorf("RecordRetrieval waited %v on a held lock with a 200ms context, want it to give up at the "+
+			"context — a record is not worth stalling every concurrent tool call for", elapsed)
+	}
+	var left int
+	if qErr := s.db.QueryRow(`SELECT count(*) FROM retrieval_record`).Scan(&left); qErr != nil {
+		t.Fatalf("count: %v", qErr)
+	}
+	if left != 0 {
+		t.Errorf("a refused record left %d row(s) behind", left)
 	}
 }

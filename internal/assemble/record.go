@@ -23,12 +23,28 @@ package assemble
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"log/slog"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
+
+// recordWriteBudget bounds the record write, separately from the caller's own
+// context, and it is small on purpose.
+//
+// The measured uncontended cost is ~45us, so this is three orders of magnitude
+// above the normal case and two below the store's 5s busy_timeout: a write that
+// has not completed in a quarter of a second is not going to, and the only thing
+// waiting longer buys is a search that has already been answered. The ten-process
+// fleet puts a contended record write's p99 wait at ~179ms, so the budget sits
+// just above what contention actually costs and well below the tail it must not
+// inherit.
+//
+// Dropping the row is the right failure because the record is a measurement of a
+// call that already happened: the answer is in the caller's hands either way, and
+// a report with a hole in it is recoverable where a stalled tool is not. Every
+// drop is logged, so the gap is visible rather than inferred.
+const recordWriteBudget = 250 * time.Millisecond
 
 // RecordSink receives the retrieval record for a successful Run. It is the
 // request's own field rather than a package global, so two Runs on one process
@@ -41,6 +57,19 @@ import (
 // memory, and the sink's argument has to be the row the store writes.
 type RecordSink interface {
 	RecordRetrieval(ctx context.Context, rec memory.RetrievalRecord) error
+
+	// DigestQuery returns the store's keyed digest of a caller's question, or ""
+	// for a call that carried none.
+	//
+	// It is on the seam rather than a package call because the KEY is the
+	// store's: a per-install secret that lives in a file beside the database, which
+	// this package has no business resolving. Resolving it here meant that running
+	// this package's tests CREATED A REAL KEY IN THE DEVELOPER'S DATA DIRECTORY —
+	// which is not a tidiness problem, it is the assembler reaching out of the
+	// process it was handed and writing to a machine it knows nothing about. The
+	// store that will hold the digest is the one that owns the key, and asking it
+	// makes that structural rather than a convention.
+	DigestQuery(query string) (string, error)
 }
 
 // record projects a finished Result onto the row the store writes.
@@ -55,7 +84,7 @@ type RecordSink interface {
 //
 // The two halves are ordered kept-then-dropped, which is the order a reader wants
 // to see them in and is stable for the same call's ranking.
-func record(req Request, res Result) memory.RetrievalRecord {
+func record(req Request, res Result, sink RecordSink, log *slog.Logger) memory.RetrievalRecord {
 	var decisions []Decision
 	asOf := ""
 	if res.Trace != nil {
@@ -109,7 +138,7 @@ func record(req Request, res Result) memory.RetrievalRecord {
 		ProjectID: req.ProjectID,
 		SessionID: req.SessionID,
 		Source:    string(req.Source),
-		QueryHash: queryHash(req.Query),
+		QueryHash: queryHash(req.Query, sink, log),
 		AsOf:      asOf,
 		Outcome:   string(res.Outcome),
 		Reason:    res.Reason,
@@ -117,24 +146,36 @@ func record(req Request, res Result) memory.RetrievalRecord {
 	}
 }
 
-// queryHash is the caller's question, reduced to a digest.
+// queryHash is the caller's question, reduced to a keyed digest.
 //
 // A record whose type could hold a query would eventually hold one — a report
 // that wanted the text is a perfectly reasonable next request, and the column is
 // right there. Making the text impossible to express is the cheaper half of the
-// privacy rule than remembering not to. The query is hashed and the ORIGINAL is
-// not retained, so the digest groups calls by "the same question was asked",
-// which is what the report needs, without the record holding a question.
+// privacy rule than remembering not to.
+//
+// The digest is an HMAC under a per-install key, not a bare hash, and the key is
+// what makes the second half hold. A plain sha256 of a short question is a
+// fingerprint: the store's own memories are a dictionary of what a user would
+// ask, and a hash confirms a guess as efficiently as it hides the original.
+// memory.QueryDigest owns the key and says where it lives; what that costs a
+// restore on another machine is in that file's header — grouping holds within one
+// install and not across two.
 //
 // An EMPTY query is an empty hash rather than the digest of the empty string: a
 // constant that looks like a question's fingerprint is worse than an honest
 // "this call carried no query", and a session-start injection is exactly that.
-func queryHash(q string) string {
-	if q == "" {
+//
+// A key that cannot be read yields an empty hash and a LOG line, never an
+// unsalted fallback: the record keeps its verdicts, which are the part that is not
+// about the question, and the row says nothing about what was asked.
+func queryHash(q string, sink RecordSink, log *slog.Logger) string {
+	digest, err := sink.DigestQuery(q)
+	if err != nil {
+		log.Warn("no query digest recorded; the audit cannot group calls by question",
+			"error", err)
 		return ""
 	}
-	sum := sha256.Sum256([]byte(q))
-	return hex.EncodeToString(sum[:])
+	return digest
 }
 
 // emit writes the record and swallows the failure.
@@ -158,8 +199,27 @@ func emit(ctx context.Context, sink RecordSink, req Request, res Result) {
 	if log == nil {
 		log = slog.Default()
 	}
-	rec := record(req, res)
-	if err := sink.RecordRetrieval(ctx, rec); err != nil {
+
+	// The record is projected BEFORE the clock starts: it reads only the result
+	// in hand, and it must not be able to consume the budget the write gets.
+	rec := record(req, res, sink, log)
+
+	// The write gets its own deadline, and this is the property that makes it
+	// safe to leave on a live tool. Recording takes the store's exclusive mutex
+	// and then BEGIN IMMEDIATE, so under contention — another process holding
+	// SQLite's write lock, or another tool call in this same server already in a
+	// write — the caller can wait out the store's whole 5s busy_timeout TWICE,
+	// and that wait would sit between the caller receiving its answer and Run
+	// returning. One slow record would then delay every other concurrent tool
+	// call in the same MCP server, which is the opposite of what a measurement
+	// should do to the thing it measures.
+	//
+	// So the record write is best-effort with a short budget: on timeout the row
+	// is dropped, the loss is logged, and the answer is returned unchanged. A
+	// missing row is a gap in a report; a search that waits is an outage.
+	writeCtx, cancel := context.WithTimeout(ctx, recordWriteBudget)
+	defer cancel()
+	if err := sink.RecordRetrieval(writeCtx, rec); err != nil {
 		log.Warn("retrieval record not written; the audit will be missing this call",
 			"project_id", rec.ProjectID, "source", rec.Source,
 			"outcome", rec.Outcome, "error", err)

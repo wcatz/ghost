@@ -12,6 +12,9 @@ package assemble
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"strings"
@@ -33,6 +36,13 @@ func (r *recordingSink) RecordRetrieval(_ context.Context, rec memory.RetrievalR
 	r.records = append(r.records, rec)
 	return r.err
 }
+
+// DigestQuery stands in for the store's keyed digest. It is computed from the
+// query with a FIXED test key and touches no file, which is the point of asking
+// the sink for it: nothing in this package can create a per-install key on the
+// machine the suite runs on, and a test that could would be a test writing to a
+// developer's real data directory.
+func (r *recordingSink) DigestQuery(query string) (string, error) { return testDigest(query) }
 
 func (r *recordingSink) last(t *testing.T) memory.RetrievalRecord {
 	t.Helper()
@@ -479,12 +489,136 @@ func TestARefusedRecordReachesTheCallersLoggerNotTheProcessDefault(t *testing.T)
 	}
 }
 
+// testDigest is the fixed-key digest every sink fake in this file returns, so the
+// fakes share one implementation and none of them touches the filesystem.
+func testDigest(query string) (string, error) {
+	if query == "" {
+		return "", nil
+	}
+	mac := hmac.New(sha256.New, []byte("test-key"))
+	mac.Write([]byte(query))
+	return hex.EncodeToString(mac.Sum(nil)), nil
+}
+
 // poisonedWriter fails the test if anything is logged through it.
 type poisonedWriter struct{ t *testing.T }
 
 func (p poisonedWriter) Write(b []byte) (int, error) {
 	p.t.Errorf("something logged to the PROCESS DEFAULT logger, which no Ghost process configures: %s", b)
 	return len(b), nil
+}
+
+// blockingSink stands in for a store that will not give up the write lock: it
+// blocks until its context is done, which is what a BEGIN IMMEDIATE waiting out
+// a busy_timeout looks like from the caller's side.
+type blockingSink struct {
+	waited  chan struct{}
+	dropped bool
+}
+
+func (b *blockingSink) DigestQuery(query string) (string, error) { return testDigest(query) }
+
+func (b *blockingSink) RecordRetrieval(ctx context.Context, _ memory.RetrievalRecord) error {
+	close(b.waited)
+	<-ctx.Done()
+	b.dropped = true
+	return ctx.Err()
+}
+
+// TestARecordWriteCannotDelayTheAnswerPastItsBudget: the write is best-effort,
+// and this is the property that makes leaving it on a live tool acceptable.
+//
+// Recording takes the store's exclusive mutex and then BEGIN IMMEDIATE, so a
+// contended write can wait out the store's whole busy_timeout — twice, since
+// beginWrite makes one extra attempt. That wait sits between the caller receiving
+// its answer and Run returning, so one stuck record stalls every concurrent tool
+// call in the same MCP server. The record write therefore gets its own short
+// sub-deadline: on timeout the row is dropped, the loss is logged, and the answer
+// is returned unchanged.
+func TestARecordWriteCannotDelayTheAnswerPastItsBudget(t *testing.T) {
+	var logged bytes.Buffer
+	sink := &blockingSink{waited: make(chan struct{})}
+
+	req := baseRequest()
+	req.Record = sink
+	req.Logger = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	start := time.Now()
+	res := run(t, &fakeRetriever{set: setOf(
+		candidate("A", "proj", "fact", "database configuration pooling", 0.9),
+	)}, req)
+	elapsed := time.Since(start)
+
+	// The answer is intact — that is the half that matters.
+	if len(res.Items) != 1 {
+		t.Errorf("items = %v, want the one row: a record that could not be written changed the answer",
+			itemIDs(res.Items))
+	}
+	if res.Response == "" {
+		t.Error("the response is empty — the fit pass saw a different Result")
+	}
+	// The sink was reached, and released at the budget rather than left hanging.
+	select {
+	case <-sink.waited:
+	default:
+		t.Fatal("the record write was never attempted")
+	}
+	if !sink.dropped {
+		t.Error("the sink was not released by its deadline")
+	}
+	// And the wait is bounded. The budget is 250ms; allow generous slack for a
+	// loaded machine but nothing like the store's 5s x2.
+	if elapsed > 5*recordWriteBudget {
+		t.Errorf("Run took %v with a blocked record write, want at most ~%v — the record write is "+
+			"holding up the answer", elapsed, 5*recordWriteBudget)
+	}
+	// The loss is reported, not silent.
+	if !strings.Contains(logged.String(), "retrieval record not written") {
+		t.Errorf("the dropped record logged nothing: %q", logged.String())
+	}
+}
+
+// TestARecordWriteGetsItsOwnDeadlineRatherThanTheCallersContext: the bound is a
+// SUB-deadline, so a caller with an hour left still cannot hold a search.
+//
+// context.WithTimeout derives from the parent, so the parent's own deadline is
+// respected (a cancelled call writes nothing, which is right) but never extended:
+// the property is that the write is bounded by the SMALLER of the two.
+func TestARecordWriteGetsItsOwnDeadlineRatherThanTheCallersContext(t *testing.T) {
+	var seen time.Duration
+	sink := &deadlineSink{onCall: func(d time.Duration) { seen = d }}
+	req := baseRequest()
+	req.Record = sink
+
+	// A caller context with a deadline an order of magnitude larger than the
+	// record budget.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if _, err := Run(ctx, &fakeRetriever{set: setOf(
+		candidate("A", "proj", "fact", "database configuration pooling", 0.9),
+	)}, req); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if seen <= 0 {
+		t.Fatal("the record write was given no deadline at all")
+	}
+	if seen > recordWriteBudget {
+		t.Errorf("the record write was given %v, want at most the %v budget — the caller's context is "+
+			"not the bound", seen, recordWriteBudget)
+	}
+}
+
+type deadlineSink struct{ onCall func(time.Duration) }
+
+func (d *deadlineSink) DigestQuery(query string) (string, error) { return testDigest(query) }
+
+func (d *deadlineSink) RecordRetrieval(ctx context.Context, _ memory.RetrievalRecord) error {
+	if dl, ok := ctx.Deadline(); ok {
+		d.onCall(time.Until(dl))
+	} else {
+		d.onCall(0)
+	}
+	return nil
 }
 
 // TestARefusedRecordNeverCostsTheSearchAndAlwaysReachesTheLog: what a record the

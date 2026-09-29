@@ -11,6 +11,9 @@ package assemble
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -27,6 +30,17 @@ type countingSink struct{ n int }
 func (c *countingSink) RecordRetrieval(context.Context, memory.RetrievalRecord) error {
 	c.n++
 	return nil
+}
+
+// DigestQuery mirrors recordingSink's: a fixed test key, no file. The benchmark
+// measures the projection, and the projection must not reach the filesystem.
+func (c *countingSink) DigestQuery(query string) (string, error) {
+	if query == "" {
+		return "", nil
+	}
+	mac := hmac.New(sha256.New, []byte("test-key"))
+	mac.Write([]byte(query))
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 func benchAssembleRun(b *testing.B, sink RecordSink) {

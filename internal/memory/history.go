@@ -590,19 +590,29 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	// literal substring search (measured on this build's SQLite: it finds `A_1` in
 	// `[{"id":"A_1"}]` and does NOT find it in `[{"id":"Ax1"}]`, which LIKE does).
 	//
-	// What remains, on a row that cannot be parsed, is the chosen bias: an id that
-	// merely CONTAINS the purged one is over-deleted. An operator redaction is the
-	// one path where that is the recoverable direction — the lost row is evidence
-	// about a call, and a surviving name is a leak the operator believes they
-	// closed. Ids Ghost mints are fixed-width hex, so it needs an imported id that
-	// contains another.
+	// Matched in the VALUE position, and that is the whole fix. A bare
+	// `instr(verdicts, ?)` searches the SERIALIZED DOCUMENT, which contains the
+	// schema's own field names and vocabulary — "id", "kept", "stage", "reason",
+	// "valid", "expired" — so an imported id equal to or contained in any of those
+	// matched nearly every row and `ghost history purge` deleted the audit trail
+	// while reporting that it erased one memory. Requiring the id to sit behind
+	// its own key, and quoting it the way the column quotes it, makes a field name
+	// unable to match: no document contains `"id":"id"` unless a verdict's id is
+	// literally the string "id", which is a real memory being purged.
+	//
+	// The residual, stated rather than hidden: json_quote and Go's encoder escape
+	// differently for `<`, `>` and `&` (Go writes \u003c by default), so an
+	// UNREADABLE row whose id contains one of those is not reached by this arm. It
+	// is a gap in a best-effort arm for malformed rows, not in the parsed one,
+	// which compares ids exactly and covers every row Ghost wrote.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM retrieval_record
 		 WHERE EXISTS (
 			SELECT 1 FROM json_each(`+readableVerdicts(`retrieval_record.verdicts`)+`)
 			WHERE value->>'id' = ?
 		) OR (COALESCE(`+verdictsUnreadable(`retrieval_record.verdicts`)+`, 0)
-		     AND instr(retrieval_record.verdicts, ?) > 0)`, memoryID, memoryID); err != nil {
+		     AND instr(retrieval_record.verdicts, '"id":' || json_quote(?)) > 0)`,
+		memoryID, memoryID); err != nil {
 		return 0, fmt.Errorf("purge retrieval records: %w", err)
 	}
 

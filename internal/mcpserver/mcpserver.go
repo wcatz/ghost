@@ -315,7 +315,7 @@ type asOfCapableStore interface {
 // problem than a store that cannot be searched, and the missing record is a gap
 // in a report rather than a failed call. *memory.Store satisfies it.
 type retrievalCapableStore interface {
-	RecordRetrieval(ctx context.Context, rec memory.RetrievalRecord) error
+	assemble.RecordSink
 }
 
 // recordSink is the assembler's seam, resolved to whatever the store can do.
