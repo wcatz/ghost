@@ -2225,15 +2225,15 @@ func TestHarnessCommandPortableChildKeepsWindowsHome(t *testing.T) {
 		"SystemRoot=C:\\Windows",
 		"Windir=C:\\Windows",
 	}
-	cmd, release, ok := harnessCommand(
+	cmd, release, err := harnessCommand(
 		context.Background(),
 		binary,
 		[]string{"-test.run=TestHarnessPortableChild", "--", "ghost-harness-child"},
 		base,
 		harnessClaude,
 	)
-	if !ok {
-		t.Fatal("scratch confinement unexpectedly unavailable")
+	if err != nil {
+		t.Fatalf("scratch confinement unexpectedly unavailable: %v", err)
 	}
 	defer release()
 	if _, err := cmd.CombinedOutput(); err != nil {

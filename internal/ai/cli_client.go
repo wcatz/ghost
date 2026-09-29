@@ -179,7 +179,10 @@ func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabiliti
 func probeClaudeCapabilities(ctx context.Context, path string, id claudeBinaryID) (claudeCapabilities, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	probe, release, _ := harnessCommand(probeCtx, path, []string{"--help"}, os.Environ(), harnessClaude)
+	probe, release, err := harnessCommand(probeCtx, path, []string{"--help"}, os.Environ(), harnessClaude)
+	if err != nil {
+		return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", err)
+	}
 	defer release()
 	out, err := probe.Output()
 	if err != nil {
@@ -311,7 +314,10 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 	// documents. --system-prompt stays an argument: it is small and fixed, and
 	// keeping it out of the piped text is what stops it being confused with
 	// user content.
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessClaude)
+	cmd, release, err := harnessCommand(ctx, c.binary, args, os.Environ(), harnessClaude)
+	if err != nil {
+		return "", fmt.Errorf("claude -p: %w", err)
+	}
 	defer release()
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer

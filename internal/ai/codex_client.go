@@ -59,7 +59,10 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 	if ctx.Err() == nil {
 		warnOnWeakerCodexPolicy(support)
 	}
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessCodex)
+	cmd, release, err := harnessCommand(ctx, c.binary, args, os.Environ(), harnessCodex)
+	if err != nil {
+		return "", fmt.Errorf("codex exec: %w", err)
+	}
 	defer release()
 	cmd.Stdin = strings.NewReader(prompt)
 	var stdout, stderr bytes.Buffer
@@ -470,7 +473,15 @@ func probeCodexFeatures(ctx context.Context, path string, id codexBinaryID) code
 	// spend the caller's budget, which the caller needs for the model call.
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	probe, release, _ := harnessCommand(probeCtx, path, []string{"features", "list"}, os.Environ(), harnessCodex)
+	probe, release, err := harnessCommand(probeCtx, path, []string{"features", "list"}, os.Environ(), harnessCodex)
+	if err != nil {
+		// Unanswerable, and indistinguishable from a probe that ran and failed:
+		// `probed` stays false, nothing is cached, and the caller warns
+		// "unverified" rather than accusing this codex of declaring nothing.
+		slog.Warn("codex feature probe could not be confined; its answer is unknown",
+			"error", err)
+		return codexFeatureSupport{at: time.Now()}
+	}
 	defer release()
 	// `probed` means THE PROBE ANSWERED, not merely that it ran. That distinction
 	// is the whole reason the field exists, and the two "no" cases must not
