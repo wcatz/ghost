@@ -1,5 +1,29 @@
 name: release
 
+# RECOVERY
+#
+# This workflow fails in places a maintainer cannot fix from the tag, and the
+# answer is always the same: re-run the failed job. Nothing here is
+# irreversible until the plugin job's `gh release edit --draft=false`, and
+# releases/latest keeps serving the previous release until then.
+#
+# Re-running the `release` job after a failure AFTER GoReleaser has uploaded —
+# the attestation subject guard, or the attest step, which needs Sigstore,
+# Fulcio and GitHub's OIDC provider — works because .goreleaser.yml sets
+# replace_existing_artifacts: true. A re-run starts at the first step, so
+# GoReleaser runs again, use_existing_draft adopts the draft that already holds
+# every asset, and each archive collides with its own name. GitHub answers 422,
+# and GoReleaser's Upload (internal/client/github.go) deletes the colliding
+# asset and returns a retriable error — but ONLY with that setting; without it
+# the same 422 is returned as a plain error and the run aborts on the first
+# archive, leaving a draft that has to be cleared by hand.
+#
+# Re-running the `plugin` job works for the same reason: its `gh release upload`
+# passes --clobber.
+#
+# Do not add a step to either job that publishes, or that runs after the
+# publish, without re-checking this.
+
 on:
   push:
     tags:
@@ -34,8 +58,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Verify server.json matches the tag
-        # server.json is what an MCP registry reads, so a stale version there
+      - name: Verify server.json matches the tag        # server.json is what an MCP registry reads, so a stale version there
         # publishes a stale artifact regardless of what the release actually
         # built. Gate the release on it rather than letting it drift silently
         # (it once read 0.15.0 while the release was 0.29.0).

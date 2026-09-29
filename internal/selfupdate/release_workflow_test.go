@@ -80,6 +80,15 @@ type goreleaserFile struct {
 		ExtraFiles []struct {
 			Glob string `yaml:"glob"`
 		} `yaml:"extra_files"`
+		// Draft and UseExistingDraft together are what make a job re-run adopt
+		// the release it already created rather than making a second one;
+		// ReplaceExistingArtifacts is what lets that re-run replace an asset
+		// whose name is already taken. TestTheReleaseJobIsReRunnable asserts
+		// the three together, because the third is only safe while the first
+		// holds.
+		Draft                    bool `yaml:"draft"`
+		UseExistingDraft         bool `yaml:"use_existing_draft"`
+		ReplaceExistingArtifacts bool `yaml:"replace_existing_artifacts"`
 	} `yaml:"release"`
 }
 
@@ -496,6 +505,60 @@ func TestTheGuardStepIsNotABuildStep(t *testing.T) {
 		// filter's behaviour is pinned by TestBuildStepsBeforeExcludesTheGuard
 		// on synthetic step lists instead, where it cannot lapse.
 		t.Logf("job %q: %d dist/ path(s) named by its build steps", job, len(built))
+	}
+}
+
+// TestTheReleaseJobIsReRunnable keeps the documented recovery real.
+//
+// This change puts two steps in the release job AFTER GoReleaser has uploaded
+// every asset to the draft: the zero-match subject guard, and the attest step,
+// which depends on Sigstore, Fulcio and GitHub's OIDC provider. Any of those
+// can fail on a transient fault, and the recovery the workflow comments
+// describe — and the only one a maintainer has — is to re-run the job.
+//
+// A re-run starts at the first step, so it runs GoReleaser again, and
+// use_existing_draft makes GoReleaser ADOPT the draft that already holds every
+// uploaded asset. Each archive then collides with its own name, GitHub answers
+// 422, and GoReleaser's Upload (internal/client/github.go) returns:
+//
+//	if resp != nil && resp.StatusCode == http.StatusUnprocessableEntity {
+//	    if !ctx.Config.Release.ReplaceExistingArtifacts {
+//	        return err
+//	    }
+//	    if err := c.deleteReleaseArtifact(ctx, githubReleaseID, artifact.Name, 1); err != nil { return err }
+//	    return RetriableError{err}
+//	}
+//
+// That first return is a plain error, not a RetriableError: the run aborts on
+// the first archive, and the draft is stuck holding assets that can only be
+// cleared by hand. So a transient Sigstore outage would have turned the release
+// job into a one-shot.
+//
+// replace_existing_artifacts makes the re-run delete the colliding asset and
+// retry it, which is the same policy the plugin job's own `gh release upload
+// --clobber` already applies to the archives it attaches.
+//
+// It is safe HERE because of draft: true, and the test asserts the two
+// together rather than the setting alone. GoReleaser's PublishRelease is a
+// no-op while release.draft is set, so this job never publishes — the plugin
+// job does, with `gh release edit --draft=false`, and only after the
+// attestations are in place. The assets replace_existing_artifacts overwrites
+// are therefore always unpublished ones. If draft were ever turned off, the
+// same setting would start overwriting assets on a PUBLIC release, so that is
+// the pair this test holds together.
+func TestTheReleaseJobIsReRunnable(t *testing.T) {
+	g := loadGoreleaser(t)
+
+	if !g.Release.Draft {
+		t.Error("release.draft is false, so this job publishes its own release — which would make replace_existing_artifacts overwrite assets on a PUBLIC release, and makes the draft-then-publish recovery the plugin job depends on impossible")
+	}
+	if !g.Release.UseExistingDraft {
+		t.Error("release.use_existing_draft is false, so a re-run creates a SECOND release for the same tag instead of completing the first — a duplicate-draft release that nothing cleans up")
+	}
+	if !g.Release.ReplaceExistingArtifacts {
+		t.Errorf("release.replace_existing_artifacts is false, so a re-run after any post-upload failure (the %q guard, the attest step) dies in GoReleaser on the first already-uploaded archive: GitHub answers 422 and internal/client/github.go returns a plain error rather than deleting the asset and retrying. "+
+			"The release job is then stuck holding a draft nobody can complete without deleting its assets by hand",
+			subjectGuardStepName)
 	}
 }
 

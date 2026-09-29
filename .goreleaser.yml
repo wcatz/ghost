@@ -33,6 +33,25 @@ release:
   # A workflow re-run must adopt the existing draft, not create a second
   # (goreleaser v2 defaults this to false → duplicate-draft chaos).
   use_existing_draft: true
+  # The two steps this release job runs AFTER the upload — the attestation
+  # subject guard and the attest step itself — depend on Sigstore, Fulcio and
+  # GitHub's OIDC provider, so any of them can fail on a transient fault. The
+  # only recovery is to re-run the job, and a re-run starts at the first step:
+  # use_existing_draft adopts the draft that already holds every uploaded asset,
+  # each archive then collides with its own name, GitHub answers 422, and
+  # GoReleaser aborts — internal/client/github.go returns a plain error, not a
+  # retriable one, for a 422 unless this is true. Without it a transient Sigstore
+  # outage leaves a draft nobody can complete without deleting its assets by hand.
+  #
+  # Safe here because of draft: true, and the two must be read together.
+  # GoReleaser's PublishRelease is a no-op while release.draft is set, so this job
+  # never publishes — the plugin job does that with `gh release edit --draft=false`,
+  # and only once the attestations are in place. So every asset this setting
+  # replaces is an unpublished one. With draft: false it would start overwriting
+  # assets on a public release, which is why TestTheReleaseJobIsReRunnable holds
+  # the pair rather than the setting alone. The plugin job's `gh release upload`
+  # already applies the same policy with --clobber.
+  replace_existing_artifacts: true
   extra_files:
     - glob: install.ps1
 
