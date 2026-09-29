@@ -843,9 +843,10 @@ func TestCandidatesPassiveReadsAStoreBelowTheTierFloor(t *testing.T) {
 		// `project`, NOT "": scanMemories resolves an empty tier once for every
 		// reader, so a row hydrated through `NULL AS retention` arrives as
 		// `project`. Asserting "" here would be asserting a value the shared
-		// scanner cannot produce — the same value the loaders reach through
-		// tierOrProject. The intent is that a pre-tier row behaves as a project
-		// row rather than as a fourth tier, and that is the scanner's contract.
+		// scanner cannot produce. The intent is that a pre-tier row behaves as a
+		// project row rather than as a fourth tier, and that is the scanner's
+		// contract — the one place that resolves an absent column, for every
+		// reader.
 		if r.Retention != RetentionProject {
 			t.Errorf("row %s: Retention is %q, want %q — a store with no tier column holds project rows by definition",
 				r.ID, r.Retention, RetentionProject)

@@ -12,15 +12,18 @@ import (
 
 // TestSessionStartOnAStoreBehindTheRetentionColumnStillRenders pins the floor for
 // the tier column, and it is the same floor memories.scope has always had: the
-// session-start loaders read through memory.OpenReadDB, which runs no migration
-// and cannot make a store current, so naming memories.retention on a store from
-// before schema v19 fails the whole query with "no such column" — which
-// loadSessionContext reads as no rows. A user whose first session after the
-// upgrade starts the hook would get a digest with its header, its tasks and its
-// decisions and no memories, with nothing saying why. The ORDER BY needs the same
-// treatment (memory.DecayRankingSQL reads the column too), so the two fall back
-// together and the block is the one that store produced before tiers were read at
-// all.
+// session-start block reads through memory.OpenReadDB, which runs no migration and
+// cannot make a store current, so naming memories.retention on a store from before
+// schema v19 fails the whole query with "no such column" — which the read takes as
+// no rows. A user whose first session after the upgrade starts the hook would get a
+// digest with its header, its tasks and its decisions and no memories, with nothing
+// saying why. The ORDER BY needs the same treatment, so the two fall back together
+// and the block is the one that store produced before tiers were read at all.
+//
+// The block is a caller of assemble.Run, so the substitution is not this package's
+// to make any more: internal/memory's passiveColumnsFor owns it, and this test is
+// what says the seam actually delivers the same block for a store that needs it. A
+// test of the substitution itself lives next to the function that performs it.
 //
 // The fixture makes the store what a pre-v19 one is: the stamp is back to 18 AND
 // the column is gone. Both, for the reason the scope fixture above gives — the
@@ -76,52 +79,6 @@ func TestSessionStartOnAStoreBehindTheRetentionColumnStillRenders(t *testing.T) 
 		if !strings.Contains(got, want) {
 			t.Errorf("a store below the retention column's version must render as it did before tiers were read; %q missing from:\n%s", want, got)
 		}
-	}
-}
-
-// TestRetentionColumnExprFallsBackOnAStoreBehindIt is the seam the render above
-// depends on, pinned directly: a store at or past the floor names the column, and
-// one below it selects a NULL literal and says so, because a caller that ORDERS by
-// the column cannot name a column it is not selecting.
-func TestRetentionColumnExprFallsBackOnAStoreBehindIt(t *testing.T) {
-	_, dbPath := scopeSession(t, []scopeRow{
-		{id: "tierexpr01", category: "fact", content: "a row to make the store non-empty", importance: 0.5},
-	}, nil)
-
-	current, err := memory.OpenReadDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenReadDB: %v", err)
-	}
-	expr, hasTier := retentionColumnExpr(current)
-	if !hasTier || expr != "retention" {
-		t.Errorf("a current store got (%q, %v), want the column", expr, hasTier)
-	}
-	if err := current.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	stamper, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open for rewriting: %v", err)
-	}
-	if _, err := stamper.Exec(`PRAGMA user_version = 18`); err != nil {
-		t.Fatalf("stamp user_version: %v", err)
-	}
-	if err := stamper.Close(); err != nil {
-		t.Fatalf("close stamper: %v", err)
-	}
-
-	behind, err := memory.OpenReadDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenReadDB: %v", err)
-	}
-	defer behind.Close() //nolint:errcheck
-	expr, hasTier = retentionColumnExpr(behind)
-	if hasTier {
-		t.Error("a store below the floor was told it has the column")
-	}
-	if !strings.Contains(expr, "NULL AS retention") {
-		t.Errorf("the fallback is %q, want a NULL literal the ORDER BY can share", expr)
 	}
 }
 

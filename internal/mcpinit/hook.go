@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
@@ -240,7 +239,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 	// halves are the same session. A broken config therefore reports once, not
 	// once per half.
 	cfg := config.LoadForHook()
-	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd, cfg)
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, totalGlobalCount, totalGlobalCountKnown := loadSessionContext(cwd, cfg)
 
 	// Surface a failed auto-consolidation chain from an earlier session as
 	// ONE labeled line ahead of the context block (after plugin finalize in
@@ -277,26 +276,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		}
 	}
 
-	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals(cfg)
-
 	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown))
-}
-
-// loadGlobals reads the cross-project global memories for context rendering.
-// It is the shared, read-only global-section loader used by both the
-// SessionStart hook and the `ghost context` command.
-// It takes the config its caller has already loaded rather than reading it a
-// second time: the two entry points load once and hand the same value to both
-// halves of the digest.
-func loadGlobals(cfg *config.Config) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
-	// config.DataDir is where a GHOST_DEV_FORBID_DATA_DIR refusal comes from
-	// (#721); this function's answer to any data-dir error is silence, which is
-	// also the hook's fail-open answer.
-	dataDir, err := config.DataDir()
-	if err != nil {
-		return
-	}
-	return loadGlobalMemories(filepath.Join(dataDir, "ghost.db"), cfg.Injection.SessionScope)
 }
 
 // globalOriginGuidance explains the origin labels actually present in the
@@ -524,7 +504,7 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 	ensureObsidianSyncRunning()
 
 	cfg := config.LoadForHook()
-	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd, cfg)
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, totalGlobalCount, totalGlobalCountKnown := loadSessionContext(cwd, cfg)
 	if projectID != "" {
 		// The same fail-open as the Claude Code session start above, for
 		// opencode's equivalent render.
@@ -534,7 +514,6 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 			}
 		}
 	}
-	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals(cfg)
 	// Nothing to surface — don't inject an empty/decorative block.
 	if projectID == "" && len(globals) == 0 {
 		return ""
@@ -562,7 +541,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 
 	// The read-only handle is both the store's own handle and its snapshot
 	// handle, exactly as in loadSessionContext.
-	store := memory.NewStoreWithRead(db, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	store := sessionStore(db)
 	projectID, project := resolveSessionProject(context.Background(), store, cwd)
 
 	var (
@@ -664,265 +643,12 @@ const globalsDemotionThreshold = 0.85
 // the session digest bounded while preserving the most useful memories.
 const sessionMemoriesCap = 15
 
-// scopeColumnFloor is the schema version that added memories.scope
-// (internal/memory/migrate.go, migrateV12). The session-start loaders read the
-// column, and they read it through a handle that runs no migration.
-const scopeColumnFloor = 12
-
-// retentionColumnFloor is the schema version that added memories.retention
-// (internal/memory/migrate.go, migrateV19). The session-start loader reads the
-// column, and it reads it through a handle that runs no migration — for the same
-// reason, and with the same consequence, as scopeColumnFloor below.
-const retentionColumnFloor = 19
-
-// retentionColumnExpr is the memories.retention column for a store at or past
-// retentionColumnFloor, and a NULL literal for one below it.
-//
-// Same shape and same reason as scopeColumnExpr: memory.OpenReadDB cannot migrate
-// a store it opens, so naming a column a v18 database does not have fails the
-// whole query, and loadSessionContext reads a failed query as no rows — a digest
-// with no memories and nothing saying why, where the same store rendered its
-// memories a build earlier. Every row in a pre-v19 store carries the default
-// tier, so NULL is the value such a store has by definition, and the Go-side
-// re-scoring below resolves it to `project`, which is what those rows are.
-//
-// The ORDER BY needs the same treatment, which is why the second result is a
-// boolean rather than just a string: memory.DecayRankingSQLWithTier is the decay
-// expression with the tier half dropped, and a query that selected NULL for the
-// column while ordering by it would order by a literal.
-func retentionColumnExpr(db *sql.DB) (expr string, hasTier bool) {
-	v, err := memory.DBUserVersion(db)
-	if err != nil {
-		if warnScopeVersionOnce(err) {
-			fmt.Fprintln(os.Stderr, "ghost: could not read the store's schema version:", err)
-		}
-		return "NULL AS retention", false
-	}
-	if v < retentionColumnFloor {
-		return "NULL AS retention", false
-	}
-	return "retention", true
-}
-
-// tierOrProject resolves a scanned retention value, so the loaders share the one
-// reading of an absent tier. Every row in a store below retentionColumnFloor has
-// no tier column and is therefore a `project` row by definition — which is also
-// what the column's DEFAULT says for every row above it, and what a pre-v19 store
-// becomes the moment anything migrates it.
-func tierOrProject(scanned string) string {
-	if scanned == "" {
-		return memory.RetentionProject
-	}
-	return scanned
-}
-
-// scopeColumnExpr is the memories.scope column for a store at or past
-// scopeColumnFloor, and a NULL literal for one below it. The second result says
-// which of the two it is, because a caller that filters on the column cannot name
-// it in a WHERE clause it is not selecting.
-//
-// memory.OpenReadDB opens a store exactly as it is — it refuses to create a
-// missing one, and it cannot make a current one current because it is
-// read-only. So naming the column on a store that predates it fails the whole
-// query with SQLite's "no such column", and both loaders read a failed query as
-// no rows: the digest would render its header, and its tasks, and its decisions,
-// with no memories and nothing saying why, where the same store rendered its
-// memories before this column was selected. NULL is the value every row in such a
-// store carries by definition, so the label is empty and the filter is inert —
-// the block a pre-v12 store produced, reached without a second spelling of either
-// query.
-//
-// A store the hook has never opened read-write is behind only until the first
-// command or MCP server migrates it, so this is a transient window rather than a
-// lasting one; the check is here because that first session is the one a user
-// would notice.
-//
-// A store that is behind is the expected reading, so it is silent. A pragma that
-// could not be READ is not: this falls back to the same unscoped rendering, which
-// is the one outcome the key exists to prevent and which nothing else would say
-// out loud — so it goes to stderr, like the neighbouring demotion lookups. A
-// caller that swallowed the difference would render a block with no scope on it
-// and no filter behind it, and the user would have no way to tell that from a
-// store that has none.
-func scopeColumnExpr(db *sql.DB) (expr string, hasScope bool) {
-	v, err := memory.DBUserVersion(db)
-	if err != nil {
-		// Keyed on the error, not once per process: both loaders probe, so a bare
-		// once would print the line twice for one failure, and a first TRANSIENT
-		// one — a locked store, an unreadable header — would consume the only
-		// warning the process makes and mask the later persistent one behind it. A
-		// distinct diagnosis is still reported once. The same rule, and the same
-		// reason, as config.warnf and Store.warnForeignOnce.
-		if warnScopeVersionOnce(err) {
-			fmt.Fprintln(os.Stderr, "ghost: could not read the store's schema version:", err)
-		}
-		return "NULL AS scope", false
-	}
-	if v < scopeColumnFloor {
-		return "NULL AS scope", false
-	}
-	return "scope", true
-}
-
-// scopeVersionWarned is the per-diagnosis record behind warnScopeVersionOnce, a
-// package var because the process is the scope of the warning: the hook is its
-// own short-lived process, and RenderSessionContext can render many blocks in one.
-var scopeVersionWarned = struct {
-	mu     sync.Mutex
-	warned map[string]bool
-}{warned: map[string]bool{}}
-
-// warnScopeVersionOnce reports whether this diagnosis has not been printed yet in
-// this process.
-func warnScopeVersionOnce(err error) bool {
-	scopeVersionWarned.mu.Lock()
-	defer scopeVersionWarned.mu.Unlock()
-	if scopeVersionWarned.warned[err.Error()] {
-		return false
-	}
-	scopeVersionWarned.warned[err.Error()] = true
-	return true
-}
-
-// resetScopeVersionWarned forgets the record, so a test can assert the line
-// without depending on which package test ran before it.
-func resetScopeVersionWarned() {
-	scopeVersionWarned.mu.Lock()
-	defer scopeVersionWarned.mu.Unlock()
-	scopeVersionWarned.warned = map[string]bool{}
-}
-
-// sessionScope is injection.session_scope, handed down by loadGlobals from the
-// config its caller loaded. An empty scope narrows nothing, and the fetch below is
-// then the statement that shipped.
-func loadGlobalMemories(dbPath string, sessionScope map[string]string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
-	// memory.OpenReadDB is the tree's read-only constructor: it refuses a
-	// missing database rather than creating a phantom empty one, and it is the
-	// same handle a Store takes for snapshot reads.
-	db, err := memory.OpenReadDB(dbPath)
-	if err != nil {
-		return nil, 0, false
-	}
-	defer db.Close() //nolint:errcheck
-
-	// Both global queries bind the same sentinel the store persists, so this
-	// read path cannot drift onto a different project than the one the seeds
-	// were written into.
-	if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL`, memory.GlobalProjectID).Scan(&totalCount); err == nil {
-		totalCountKnown = true
-	}
-
-	// The session scope narrows the fetch, not the rows it returns: the 16-row
-	// over-fetch, the dedup pass and the 8-item cap below are one budget, and a
-	// production row that spent any of it would have hidden a development row
-	// the session asked for. With no scope configured the clause is absent, so
-	// it cannot change the plan, the fetch or the ranking.
-	scopeColumn, hasScope := scopeColumnExpr(db)
-	scopeClause := ""
-	if hasScope && len(sessionScope) > 0 {
-		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", sessionScope)
-	}
-	// retention is selected for the same reason the project query selects it: the
-	// protection map the near-duplicate demotion below is built from reads it. This
-	// query does not order by the decay, so it needs no expression fallback — the
-	// NULL literal alone does the job, and it comes from the same probe so the two
-	// loaders cannot disagree about whether the store has the column.
-	retentionColumn, _ := retentionColumnExpr(db)
-	rows, err := db.Query(`
-		SELECT id, category, content, pinned, source, project_id, `+retentionColumn+`, `+scopeColumn+` FROM memories
-		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
-		ORDER BY pinned DESC, importance DESC, updated_at DESC
-		LIMIT ?
-	`, memory.GlobalProjectID, globalsCap*2)
-	if err != nil {
-		return nil, totalCount, totalCountKnown
-	}
-	defer rows.Close() //nolint:errcheck
-
-	for rows.Next() {
-		var id, cat, content, source, projectID string
-		var pinnedInt int
-		var rawScope []byte
-		// Nullable for the same reason the project loader's is: a pre-v19 store
-		// selects a NULL literal here, and a NULL into a string fails every row of
-		// a loop whose answer to a scan failure is `continue`.
-		var retention sql.NullString
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source, &projectID, &retention, &rawScope); err != nil {
-			continue
-		}
-		// 300 bytes here vs. 200 for project memories below is deliberate,
-		// not drift: globals are already capped at a much smaller item
-		// count (globalsCap=8), so a larger per-item byte budget still
-		// keeps the total globals-section bytes low.
-		content = truncateUTF8(content, 300)
-		// project_id is selected rather than filled in from the WHERE clause
-		// so the row carries the project it is actually stored under. The
-		// filter means it is always the sentinel today, but the origin label
-		// for a legacy-shaped seed is decided by this field — stamping a
-		// value here would make that decision depend on a constant instead of
-		// the row.
-		globals = append(globals, sessionMemory{
-			ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
-			Retention: tierOrProject(retention.String),
-			ProjectID: projectID, Source: source,
-			Scope: memory.ParseScopeJSON(rawScope),
-		})
-	}
-
-	// Dedup: unlike project memories (where StableDemote only reorders and
-	// relies on the 15-item cap to actually drop the loser), globals are
-	// capped much tighter (globalsCap=8) and near-duplicates must not survive
-	// merely because the set is small — so a near-duplicate loser is filtered
-	// out outright here, independent of whether the cap below ever engages.
-	if len(globals) > 1 {
-		ids := make([]string, len(globals))
-		// A protection map, not a pin list: a keep-forever global is not the loser
-		// of a near-duplicate pair, and this path does not merely reorder — it
-		// FILTERS the loser out of the session-start block entirely, so a
-		// pin-only map here would drop a memory the user declared untouchable out
-		// of every later session.
-		protected := make(map[string]bool, len(globals))
-		for i, m := range globals {
-			ids[i] = m.ID
-			protected[m.ID] = m.Pinned || m.Retention == memory.RetentionPersistent
-		}
-		penalty, penaltyErr := memory.DemotionPenalties(context.Background(), db, ids, protected, globalsDemotionThreshold)
-		if penaltyErr != nil {
-			fmt.Fprintln(os.Stderr, "ghost: global memory demotion lookup failed:", penaltyErr)
-		} else if len(penalty) > 0 {
-			filtered := globals[:0:0]
-			for _, m := range globals {
-				if penalty[m.ID] == 0 {
-					filtered = append(filtered, m)
-				}
-			}
-			globals = filtered
-		}
-	}
-
-	// Cap: relevance-gated set may still exceed the display budget, so trim
-	// to the highest-ranked globalsCap entries (the query's ORDER BY already
-	// ranked them pinned-first, then by importance/recency).
-	if len(globals) > globalsCap {
-		globals = globals[:globalsCap]
-	}
-
-	return globals, totalCount, totalCountKnown
-}
-
 // sessionMemory is loadSessionContext's own memory shape — a local struct
 // rather than memory.Memory because this function deliberately queries its
 // own lightweight *sql.DB connection instead of depending on Store.
 type sessionMemory struct {
 	ID, Category, Content string
 	Pinned                bool
-	// Retention is the tier the row carries, read by the project loader's Go-side
-	// re-scoring so it applies the same bounded session decay the SQL ordering
-	// applied. The globals loader does not select it: that query ranks on pin,
-	// importance and recency and never consults the decay, so a tier there would
-	// be a field nothing reads. Empty is never a tier — the loader resolves it,
-	// because the read-only handle may not have been able to select it.
-	Retention string
 	// Scope is the row's machine-readable scope, decoded with
 	// memory.ParseScopeJSON. It is what the renderer labels the line with and
 	// what the session-scope filter decides on, so both halves read the same
@@ -942,10 +668,15 @@ type sessionMemory struct {
 	Source string
 }
 
-// cfg is the caller's already-loaded configuration, for the reason loadGlobals
-// states: the session-start path reads the config once and hands the same value
-// to both halves of the digest.
-func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
+// cfg is the caller's already-loaded configuration: the session-start path
+// reads the config once and hands the same value to the passive budget and to
+// the counts below, so a typo is reported once rather than once per read.
+//
+// It returns the globals beside the project's own rows because they are ONE
+// passive retrieval — two slices of one budget, separated here for the renderer
+// and nowhere else. Before this, each half was read by its own loader, which
+// left the two halves of a single selection policy in two different files.
+func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, totalGlobalCount int, totalGlobalCountKnown bool) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return // a refused data dir reads exactly as no store: no DB access, no blocked session (#721)
@@ -964,9 +695,23 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	// The read-only handle is both the store's own handle and its snapshot
 	// handle: this is a read-only store, and a candidate transaction on the
 	// read DSN is a plain deferred read rather than a BEGIN IMMEDIATE write lock.
-	store := memory.NewStoreWithRead(db, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	store := sessionStore(db)
 	projectID, project = resolveSessionProject(context.Background(), store, cwd)
+
+	// An unmatched directory still gets the cross-project rows, and it got them
+	// before this read moved: the global loader ran at the hook level, above the
+	// project resolution, so it fired whether or not a project matched. Returning
+	// here instead would quietly remove the Global section from every session in a
+	// directory Ghost does not know — which is exactly the session where a user is
+	// most likely to be told what Ghost holds.
+	//
+	// Only the memory rows are read on that path. Everything below this point is
+	// keyed on the project, and a project that did not resolve has no learned
+	// summary, no tasks and no decisions to report; the renderer's unmatched
+	// branch is written for exactly this shape.
 	if projectID == "" {
+		_, globals = loadSessionPassive(context.Background(), store, cfg, "", time.Now())
+		totalGlobalCount, totalGlobalCountKnown = globalCount(db)
 		return
 	}
 
@@ -980,10 +725,10 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	// config must not fail it. LoadForHook reports the failure on stderr and
 	// returns the environment plus the compiled defaults, which pin the same
 	// injection.* and linking.demotion_threshold values the two former
-	// fallbacks did. Every key read below comes from that one load: the memory
-	// query is shaped by injection.session_scope, and the two-pass selection
-	// below it by the behavioral-floor keys.
-	injection := cfg.Injection
+	// fallbacks did. Every key read below comes from that one load: the session
+	// scope the passive request carries, the behavioral floor and category
+	// weights the project's bucket policy states, and the demotion threshold
+	// both policies state.
 
 	// Total count (pre-truncation) so the rendered context can flag how many
 	// memories weren't shown instead of silently dropping them — see the
@@ -995,247 +740,21 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 		totalCountKnown = true
 	}
 
-	// Get top memories using the same category-aware time-decay +
-	// pinned-exemption ranking as Store.GetTopMemories
-	// (internal/memory/store.go), sharing the
-	// exact ranking SQL via memory.DecayRankingSQL so the two orderings can
-	// never drift apart. The query itself isn't issued through a Store method
-	// because this function deliberately uses its own lightweight, read-only
-	// *sql.DB connection (see the sessionMemory doc comment above), not
-	// Store's read-write handle. Over-fetches (3x cap) so the two-pass
-	// category selection and near-duplicate demotion below can drop matches
-	// without under-returning. importance and created_at are fetched (not
-	// just id/category/content/pinned) so pass-1's behavioral ordering can
-	// re-score with memory.DecayFactor and category weights in Go.
+	// The memory rows: the project's own AND `_global`'s, selected in ONE
+	// passive retrieval rather than by a private query per bucket.
 	//
-	// The session scope narrows the fetch, not the rows it returns: the 45-row
-	// over-fetch, the 15-item cap and the demotion pass below are one budget,
-	// and a row the session excluded must not spend any of it. With no scope
-	// configured the clause is absent, so it cannot change the plan, the fetch
-	// or the ranking.
+	// The reference "now" is taken once here and bound into the request, so the
+	// retriever's decay ordering, the rows' ages and anything the trace reports
+	// are all a reading of the same instant. The loaders this replaces captured
+	// their clock immediately after the query for the same reason.
 	//
-	// memory.ScopeMatchesSQL is the SQL statement of the rule the assembler
-	// applies in Go, held to it by a test that runs both forms over the same
-	// rows — the two exist because this query and the assembler's differ in one
-	// respect that matters: the LIMIT below chooses which rows are read at all.
-	scopeColumn, hasScope := scopeColumnExpr(db)
-	scopeClause := ""
-	if hasScope && len(injection.SessionScope) > 0 {
-		scopeClause = " AND " + memory.ScopeMatchesSQL("scope", injection.SessionScope)
-	}
-	// retention is selected because the ORDER BY below reads it: a session-tier
-	// row carries a bounded tier decay in that expression, and a Go re-scoring of
-	// the same candidates has to be given the same value or the two passes
-	// disagree about the same corpus. On a store that predates the column both
-	// halves fall back together, for the reason retentionColumnExpr gives.
-	retentionColumn, hasRetention := retentionColumnExpr(db)
-	rows, err := db.Query(`
-		SELECT id, category, content, pinned, importance, created_at, `+retentionColumn+`, `+scopeColumn+` FROM memories
-		WHERE project_id = ? AND resolved_at IS NULL`+scopeClause+`
-		ORDER BY (`+memory.DecayRankingSQLWithTier(hasRetention)+`) DESC, importance DESC, created_at DESC, id
-		LIMIT ?
-	`, projectID, sessionMemoriesCap*3)
-	if err != nil {
-		return
-	}
-	defer rows.Close() //nolint:errcheck
-
-	// Reference "now" captured once, immediately after the query, so the
-	// Go-side decay scoring below uses the same instant the SQL ranking used
-	// for julianday('now') — no per-candidate clock drift between the two.
+	// The globals are read here too, rather than by loadGlobals on the
+	// session-start path: a bucket policy is the statement of what a bucket
+	// selects, and splitting the two buckets across two entry points left each
+	// half of the same decision in a different file.
 	now := time.Now()
-
-	type candidate struct {
-		mem        sessionMemory
-		importance float64
-		createdAt  time.Time
-	}
-	var cands []candidate
-	for rows.Next() {
-		var id, cat, content, createdAt string
-		var pinnedInt int
-		var importance float64
-		var rawScope []byte
-		// Nullable, because the column may not have been selected at all: on a
-		// store below retentionColumnFloor it is the NULL literal above. Scanning
-		// a NULL into a string fails EVERY row, and this loop's answer to a scan
-		// failure is `continue` — so a plain string here would drop the entire
-		// digest on a pre-v19 store, silently, with no error to find.
-		var retention sql.NullString
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt, &retention, &rawScope); err != nil {
-			continue
-		}
-		// 200 bytes per item (vs. globals' 300 above) — project memories
-		// have a larger cap (sessionMemoriesCap=15 vs. globalsCap=8), so a
-		// smaller per-item budget keeps total section bytes comparable.
-		content = truncateUTF8(content, 200)
-		t, err := time.Parse("2006-01-02 15:04:05", createdAt)
-		if err != nil {
-			// created_at is always written by SQLite's datetime('now'), which
-			// matches the layout above; on the off chance a hand-inserted row
-			// has a different shape, treat it as fresh rather than year-0001
-			// (which would inflate age and wrongly floor its decay).
-			t = now
-		}
-		// The NULL a pre-v19 store selects, resolved to the tier every row in such a
-		// store has by definition — which is also the value the ORDER BY above was
-		// built without a tier factor, so the two agree.
-		tier := tierOrProject(retention.String)
-		cands = append(cands, candidate{
-			mem: sessionMemory{
-				ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1,
-				Retention: tier, ProjectID: projectID, Scope: memory.ParseScopeJSON(rawScope),
-			},
-			importance: importance,
-			createdAt:  t,
-		})
-	}
-
-	// Two-pass category-priority selection. Pass 1 reserves up to
-	// behavior_floor slots for "behavioral" categories (gotcha/convention/
-	// preference/decision by default) — high-signal, hard-to-derive notes the
-	// model cannot reconstruct by reading source — ordered by decay score ×
-	// category weight. Pass 2 fills the remaining budget from every candidate
-	// (behavioral or not) by plain decay score, so the pool still leans on the
-	// rank-only ordering. behavior_floor=0 disables the bias entirely and
-	// reproduces the historical rank-only selection.
-	behaviorFloor := 0
-	if injection.BehaviorFloor > 0 {
-		behaviorFloor = injection.BehaviorFloor
-		if behaviorFloor > sessionMemoriesCap {
-			behaviorFloor = sessionMemoriesCap
-		}
-	}
-	weights := make(map[string]float64, len(injection.CategoryWeights))
-	if len(injection.CategoryWeights) > 0 {
-		weights = injection.CategoryWeights
-	}
-	behavioral := make(map[string]bool, len(injection.BehaviorCategories))
-	for _, c := range injection.BehaviorCategories {
-		behavioral[c] = true
-	}
-	// Per-category cap on pass-1 reserved slots (injection.category_caps).
-	// Without it a gotcha-heavy corpus fills every guaranteed slot with
-	// gotchas; the default caps gotcha at half the floor so convention/
-	// preference/decision can still claim reserved slots.
-	categoryCaps := injection.CategoryCaps
-
-	score := func(c candidate, weighted bool) float64 {
-		w := 1.0
-		if weighted {
-			if cfgW, ok := weights[c.mem.Category]; ok {
-				w = cfgW
-			}
-		}
-		// The tier rides along, exactly as it does on the search path: this is the
-		// same composite score DecayRankingSQL evaluates in SQL below, and a
-		// session-tier row that decayed on one path and not the other would make
-		// the session-start block and a search disagree about the same corpus.
-		return c.importance * memory.DecayFactor(c.mem.Category, c.mem.Retention, c.mem.Pinned, float64(now.Sub(c.createdAt).Hours()/24.0)) * w
-	}
-
-	chosen := make([]sessionMemory, 0, sessionMemoriesCap)
-	used := make(map[string]bool, len(cands)+1)
-	if behaviorFloor > 0 {
-		pass1Count := make(map[string]int, len(behavioral))
-		for {
-			best := -1
-			var bestScore float64
-			for i := range cands {
-				cat := cands[i].mem.Category
-				if used[cands[i].mem.ID] || !behavioral[cat] {
-					continue
-				}
-				if capN, ok := categoryCaps[cat]; ok && capN > 0 && pass1Count[cat] >= capN {
-					continue
-				}
-				s := score(cands[i], true)
-				if best == -1 || s > bestScore {
-					best, bestScore = i, s
-				}
-			}
-			if best == -1 || len(chosen) >= behaviorFloor {
-				break
-			}
-			used[cands[best].mem.ID] = true
-			pass1Count[cands[best].mem.Category]++
-			chosen = append(chosen, cands[best].mem)
-		}
-	}
-	// Pass 2: fill the remainder across all candidates by plain decay score.
-	// Fill past the cap (up to 2x, matching the original over-fetch) so the
-	// near-duplicate demotion step below still has headroom to drop a demoted
-	// row and backfill a distinct one, rather than pre-truncating at the cap.
-	poolCap := sessionMemoriesCap * 2
-	for len(chosen) < poolCap {
-		best := -1
-		var bestScore float64
-		for i := range cands {
-			if used[cands[i].mem.ID] {
-				continue
-			}
-			s := score(cands[i], false)
-			if best == -1 || s > bestScore {
-				best, bestScore = i, s
-			}
-		}
-		if best == -1 {
-			break
-		}
-		used[cands[best].mem.ID] = true
-		chosen = append(chosen, cands[best].mem)
-	}
-	memories = chosen
-
-	// Supersede demote before the cap, same helper as GetTopMemories and the
-	// search path: membership-preserving reorder so a superseded memory never
-	// outranks its co-present replacement in the injected block (order matters
-	// even when both survive the 15-cap).
-	if len(memories) >= 2 {
-		ids := make([]string, len(memories))
-		for i, m := range memories {
-			ids[i] = m.ID
-		}
-		// The protection map, not a pin list, and a map rather than a column read
-		// inside SupersedePenalties because this handle is the read-only one
-		// (memory.OpenReadDB), which cannot migrate a store predating the tier.
-		// Tier-only, matching the search path and GetTopMemories: a pin keeps a
-		// row visible but does not declare its claim current, so it does not
-		// protect a supersedes target.
-		supersedeProtected := make(map[string]bool, len(memories))
-		for _, m := range memories {
-			supersedeProtected[m.ID] = m.Retention == memory.RetentionPersistent
-		}
-		penalty, penaltyErr := memory.SupersedePenalties(context.Background(), db, ids, supersedeProtected)
-		if penaltyErr != nil {
-			fmt.Fprintln(os.Stderr, "ghost: session injection supersede demotion lookup failed:", penaltyErr)
-		} else if len(penalty) > 0 {
-			memories = memory.StableDemote(memories, func(m sessionMemory) string { return m.ID }, penalty)
-		}
-	}
-
-	if len(memories) > sessionMemoriesCap {
-		demotionThreshold := cfg.Linking.DemotionThreshold
-		ids := make([]string, len(memories))
-		// A protection map, not a pin list — see DemotionPenalties. Here the loser is
-		// only reordered, so a keep-forever memory would still reach the block on
-		// its own; the reason to protect it is that every other pass already spares
-		// it and this is the one that would still sink it.
-		protected := make(map[string]bool, len(memories))
-		for i, m := range memories {
-			ids[i] = m.ID
-			protected[m.ID] = m.Pinned || m.Retention == memory.RetentionPersistent
-		}
-		penalty, penaltyErr := memory.DemotionPenalties(context.Background(), db, ids, protected, demotionThreshold)
-		if penaltyErr != nil {
-			fmt.Fprintln(os.Stderr, "ghost: session injection demotion lookup failed:", penaltyErr)
-		} else {
-			memories = memory.StableDemote(memories, func(m sessionMemory) string { return m.ID }, penalty)
-		}
-		if len(memories) > sessionMemoriesCap {
-			memories = memories[:sessionMemoriesCap]
-		}
-	}
+	memories, globals = loadSessionPassive(context.Background(), store, cfg, projectID, now)
+	totalGlobalCount, totalGlobalCountKnown = globalCount(db)
 
 	// Get open tasks
 	taskRows, err := db.Query(`

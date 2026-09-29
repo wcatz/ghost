@@ -294,9 +294,10 @@ against that budget and neither leg drops them. When a project matches fewer
 rows than the limit, the demoted `_global` rows are the only candidates left
 and they fill the remainder — demotion decides which fetched rows lead, never
 which rows are eligible. Session-start injection is outside all of this: it
-ranks in SQL on two separate paths — `loadSessionContext`
-(`internal/mcpinit/hook.go`) builds the session-start digest and
-`Store.GetTopMemories` backs the MCP tool surface — neither reaches fusion,
+ranks in SQL on two separate paths — `loadSessionPassive`
+(`internal/mcpinit/session_passive.go`) assembles the session-start digest
+through the seam's passive branch, and `Store.GetTopMemories` backs the MCP
+tool surface — neither reaches fusion,
 and both queries already filter `resolved_at IS NULL`, so no status factor
 changes what is injected.
 
@@ -1309,25 +1310,29 @@ A round is also reported when it compresses hard: a corpus of six consolidatable
 `expires_at` has exactly one source. A caller cannot state an expiry on a save, so there is no way for a save to schedule the memory it just wrote for deletion, and a NULL expiry is never a prune candidate.
 
 Several readers cannot name a column a migration added, because they open the store
-read-only and cannot migrate it: the session-start loaders, `ghost context --as-of`,
-and anything else on `memory.OpenReadDB`. Two shapes answer that, and which one
-applies depends on whether the reader has the row already.
+read-only and cannot migrate it: the session-start block's retrieval, `ghost context
+--as-of`, and anything else on `memory.OpenReadDB`. Two shapes answer that, and which
+one applies depends on whether the reader has the row already.
 
-A reader that has to *select* the tier uses `internal/mcpinit`'s existing pattern —
-`scopeColumnExpr`, and the `NULL AS scope` literal that stands in for a store below
-v12 — so the tier column takes the same route: `retentionColumnExpr` substitutes
-`NULL AS retention` below v19 and the ORDER BY is built from
-`memory.DecayRankingSQLWithTier(false)`, the same decay expression without the tier
-half. Both halves have to fall back together — a query that selected a literal while
-ordering by the real column would order by nothing — and the scanned value is
-nullable for the same reason, because scanning NULL into a string fails EVERY row
-and that loop's answer to a scan failure is `continue`: a plain string there would
-drop the whole digest on a pre-v19 store, silently.
+A reader that has to *select* the tier substitutes for the column rather than
+failing on it, and the substitution is owned in ONE place —
+`internal/memory`'s `passiveColumnsFor`, which selects `memoryColumnNames` with
+`retention` replaced by `'' AS retention` below v19 and `scope` by
+`NULL AS scope` below v12. The two literals are not interchangeable, and the reason
+is the scanner rather than taste: `retention` is bound as a plain `string`, so a
+NULL there is a `Scan` error, while `scope` is bound as `sql.NullString` and NULL is
+the honest value for "no scope stated". The ORDER BY follows the substitution for
+the reason a scan failure used to: a statement that selected a literal while
+ordering by the real column orders by nothing, and a passive bucket states its own
+order instead. The two loaders that each carried a private copy of this probe are
+gone — the session-start block reads through the seam, and a second version floor
+in a caller is a second answer to "which columns does this store have".
 
 A reader that is *handed ids* takes the protection from its caller instead, which is
 what `DemotionPenalties` already did and what `SupersedePenalties` does now: both
-demotion lookups are called on a read-only handle (`GetTopMemories`, `explain`, the
-session-start loaders), so a statement naming `target_mem.retention` fails in full —
+demotion lookups are called on a read-only handle (`GetTopMemories`, `explain`, and
+the assembler's near-duplicate stage over a passive bucket), so a statement naming
+`target_mem.retention` fails in full —
 a superseded memory outranks its replacement and a spurious diagnostic reaches stderr
 on every session start. The caller already holds the hydrated rows, and a caller
 holding a row it did not read is a caller that cannot protect it, so every one of
@@ -1421,7 +1426,7 @@ Axis interaction rules:
 - **Resolved leaves injection, not the database.** `resolved_at` removes a row from ranked session injection ([#559](https://github.com/wcatz/ghost/issues/559)) but keeps it searchable and auditable.
 - **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Not yet enforced: stage 5 of the assembler *records* a co-occurring `contradicts` pair and leaves both rows in place, because the existing contract requires a contradicted row to survive while a duplicate restatement sinks. Separating the pair needs its own contract change ([#581](https://github.com/wcatz/ghost/issues/581)).
 - **A scope conflict blocks the relation, and is not repaired by deleting it.** Two memories naming `environment=production` and `environment=development` are two claims about two places, so no relation may be proposed or created between them — not `duplicate` (at save time), not `related` (at link time), not `supersedes` (at supersede time), because each of those writers is the only one that can see both scopes at the moment it decides. An edge that already exists stays in the graph and is exempt at read time instead: every reader ignores it, and none deletes a row to reach that verdict. The exemption is stated where the decision is made, and every writer that chooses between candidates states it *inside* the query, because the same `LIMIT` chooses them: a conflict decided after the cut spends the budget on rows the caller may not use and misses a compatible candidate ranked just below ([#665](https://github.com/wcatz/ghost/issues/665)). The two cosine writers narrow before their window (`SearchVectorScoped`, in Go over the scan rather than inside a statement, so its top-k is the limit and there is no statement to fold the rule into), so a neighbour budget counts only rows a memory may relate to. `Upsert`'s two dedup probes and `foldTargetStillLive` each carry a second, SQL statement of the rule (`scopesConflictSQL`, held to the Go one by a test that runs both over the same table), for two different reasons: the probes because their own `LIMIT 15` chooses the candidates — so a save whose fifteen best FTS matches all name another environment still finds the compatible duplicate at rank 16 — and `foldTargetStillLive` because it has no window to protect, names one row by id, and carries the rule to keep a scope-conflicting `supersedes` edge from being read as a verdict on it.
-- **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes. The rule is decided where the rows are read, in whichever form that read allows. Search applies it in Go over the widened pool `Store.Candidates` returns — both legs have already run by then, and fusion narrows the fused pool, so a SQL form there would narrow nothing it still had to decide about — and the assembler keeps it in Go over the same set. A reader whose candidate set *is* a statement's own `LIMIT` has no rows left to decide over once the cut is taken, and no corpus scan to decide them with, so it carries a SQL statement instead: `memory.ScopeMatchesSQL`, in the two session-start loaders. A test runs that form and the Go one over the same rows, and a second test pins the single divergence between them — a stored scope value that is not a string. The cosine writers in the bullet above are that difference made concrete: a brute-force pass over the corpus can decide before its own top-k, in Go, and backfill to fill it.
+- **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes. The rule is decided where the rows are read, in whichever form that read allows. Search applies it in Go over the widened pool `Store.Candidates` returns — both legs have already run by then, and fusion narrows the fused pool, so a SQL form there would narrow nothing it still had to decide about — and the assembler keeps it in Go over the same set. A reader whose candidate set *is* a statement's own `LIMIT` has no rows left to decide over once the cut is taken, and no corpus scan to decide them with, so it carries a SQL statement instead: `memory.ScopeMatchesSQL`, bound by the store's passive fetch. A test runs that form and the Go one over the same rows, and a second test pins the single divergence between them — a stored scope value that is not a string. The cosine writers in the bullet above are that difference made concrete: a brute-force pass over the corpus can decide before its own top-k, in Go, and backfill to fill it.
 - **Who wrote it is not how much to trust it.** `agent`/`session_id`/`source_ref` describe who wrote a row, and `memory_history` ([#578](https://github.com/wcatz/ghost/issues/578)) records who performed each write since — but none of them is a ranking input, and a confidence value is not a verdict anything computes. `memory_provenance` ([#673](https://github.com/wcatz/ghost/issues/673)) now keeps every observation rather than the last, and the assembler reports the count; it still does not rank on it. (Write-time authorship, the change log and the evidence records are three different things; see [Memory history](#memory-history) and [Evidence provenance](#evidence-provenance).)
 
 ## Context assembly (target design)
@@ -1509,36 +1514,49 @@ What exists now:
   are refused. A stamp the writer did not produce — one an artifact or a restored
   snapshot left — is printed at the instant it is stored.
 
-- **The session-start surface shows and applies scope.** The two session-start
-  loaders select `memories.scope`, print it with `assemble.ScopeLabel` — the same
-  label a search line carries, so the two cannot spell one scope differently —
-  and narrow their own fetch when `injection.session_scope` is set
-  ([#577](https://github.com/wcatz/ghost/issues/577)). The filter is
+- **The session-start surface shows and applies scope.** Its rows come from one
+  `assemble.Run` — a PASSIVE request, a no-query retrieval with its own bucket
+  policies, never `weak`, and an empty window reported as `no_memories` rather than
+  as a claim about the store ([#758](https://github.com/wcatz/ghost/pull/758)) —
+  and the block prints each row's scope with `assemble.ScopeLabel`, the same label
+  a search line carries, so the two cannot spell one scope differently. It applies
+  `injection.session_scope` when the key is set
+  ([#577](https://github.com/wcatz/ghost/issues/577)), and the filter is
   `memory.ScopeMatchesSQL`, the SQL statement of the rule stage 3 applies in Go
-  through `assemble.ScopeContradicts`, and it is held to the Go form by a test
-  that runs both over the same rows. It has to be decided in SQL for the reason
+  through `assemble.ScopeContradicts`, held to the Go form by a test that runs
+  both over the same rows. It has to be decided in SQL for the reason
   `scopesConflictSQL` gives: a statement that chooses its own candidate set with a
-  `LIMIT` cannot check scope after that cut. Both loaders are that statement — the
-  45-row and 16-row over-fetches are their candidate sets — so a check applied
-  afterwards would spend the budget on rows the session excluded and never reach
-  an eligible one ranked below the cut. With the key unset the clause is absent,
-  so the query, the ranking and the selection are the ones that shipped — the
-  label is not part of that, and is deliberately new: a row that carries scope is
-  labelled on its line whether or not a session scope is configured, which is
-  half of what [#577](https://github.com/wcatz/ghost/issues/577) asked for. The
-  column itself is read only from a store at or past the version that added it
-  (`migrateV12`), because these loaders run on a read-only handle that migrates
-  nothing: naming `memories.scope` on a store below that version fails the query
-  with "no such column", which a loader reads as no rows — a digest with its
-  header, its tasks and its decisions and no memories, and nothing saying why. A
-  store below the floor selects the column as a NULL literal instead, which is what
-  every row in it carries by definition, so the block is the one that store
-  produced before scope was read. The loaders are callers of the assembler's label
-  and rule, not of `Run`: the seam serves passive retrieval
-  ([#758](https://github.com/wcatz/ghost/pull/758)) — a no-query retrieval with
-  its own bucket policies, never `weak`, and an empty window reported as
-  `no_memories` rather than as a claim about the store — so moving the digest onto
-  it is now only the caller's half. That seam SERVES two requests by refusing them
+  `LIMIT` cannot check scope after that cut, and a passive bucket's `OverFetch` IS
+  its candidate set — 45 rows for the project bucket and 16 for `_global` — so a
+  check applied afterwards would spend the budget on rows the session excluded and
+  never reach an eligible one ranked below the cut. With the key unset the clause
+  is absent, so the query and the ranking are the ones that shipped — the label is
+  not part of that, and is deliberately new: a row that carries scope is labelled
+  on its line whether or not a session scope is configured, which is half of what
+  [#577](https://github.com/wcatz/ghost/issues/577) asked for. The SELECTION is the
+  one that shipped for every branch the golden fixture exercises, and not for
+  `_global`'s supersede demotion, which the old global loader never ran and the
+  assembler's passive demotion runs for every bucket: a `supersedes` edge between
+  two `_global` rows now pushes the replaced row out of a bucket capped at 8. It
+  is kept rather than reverted, on the bucket's own stated ground that a superseded
+  preference is not worth one of eight cross-project slots; the alternative — a
+  `SlicePolicy` field saying globals ignore a relationship the rest of the system
+  honours — is a second answer to one question.
+  The column is substituted rather than named on a store below the version that
+  added it (`migrateV12`): the read runs on a handle that migrates nothing, so
+  naming `memories.scope` on such a store would fail the query with "no such
+  column", which a read-only caller reads as no rows — a digest with its header, its
+  tasks and its decisions and no memories, and nothing saying why. A store below
+  the floor selects a NULL literal instead, which is what every row in it carries by
+  definition, so the block is the one that store produced before scope was read.
+  What moved, and what did not, is the reason the two bucket policies are now ONE
+  statement (`sessionPassiveBudget`): the block is a caller of `Run`, so the
+  selection, the caps, the order and the near-duplicate pass are the assembler's
+  rather than a private copy of them, while the per-item PREVIEW budget and the
+  ellipsis that says a line was cut stayed with the renderer — `Slice.ClampBytes`
+  cuts to a budget and stops, and a caller cannot tell a clamped row from one that
+  happened to be exactly its budget, which is the one distinction the ellipsis
+  needs. That seam SERVES two requests by refusing them
   rather than approximating them, and both refusals are in `validatePassiveBudget`.
   A slice's **bucket must be the requested project or `_global`**: the bucket is the
   project predicate (the store binds it as the `WHERE` clause and never consults
