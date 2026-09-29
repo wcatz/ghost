@@ -52,6 +52,16 @@ func wantFreshSessionExpiry(t *testing.T, id string, got *string, from, to time.
 	}
 }
 
+// expiryText renders a nullable stamp for a failure message. %v on a *string
+// prints an address, so a comparison that went wrong would report where two
+// strings live rather than what they say.
+func expiryText(v *string) string {
+	if v == nil {
+		return "NULL"
+	}
+	return *v
+}
+
 func sameStrPtr(a, b *string) bool {
 	switch {
 	case a == nil && b == nil:
@@ -538,5 +548,226 @@ func TestAReflectionMergeLeavesItsSessionSuccessorPrunable(t *testing.T) {
 	if len(report.RemovedIDs) != 1 || report.RemovedIDs[0] != successor {
 		t.Errorf("prune removed %v, want exactly the merged session successor %s: a merge of session rows was promoted to the tier that never expires",
 			report.RemovedIDs, successor)
+	}
+}
+
+// TestAReusedRowInheritsTheLongestTierOfItsOtherSources is #773 through the REUSE
+// path, and it is the same defect the fresh-INSERT fix removed arriving by the
+// other door. The reuse branches update a row in place, so the reused row keeps
+// its own tier — correct when it is the row the consolidator re-emitted and
+// nothing else. It is not correct when the emission's ReplacesIDs names OTHER
+// sources beside it: those rows are deleted into this one, and their tier is the
+// life the merged knowledge then has.
+//
+// The repro: A saved as session, B saved as project, and one emission whose
+// content byte-matches A with ReplacesIDs [A, B]. A is reused and stays session
+// with a live expiry, B is deleted, and a `ghost prune` run a month later takes
+// the project's knowledge with it. The successor must be the LONGEST life any
+// source named, exactly as the fresh insert's is.
+//
+// The two cases that must NOT move are here too, because the fix is a raise and
+// both are ways to write too much. A verbatim re-emission — reuseChangesNothing,
+// the branch that writes nothing at all — is not a new assertion of the fact, so
+// it must not extend a session row's life on every applied reflect; and a reuse
+// that names no other source is the row restating itself, which is the case
+// keeping the tier was always right for.
+func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
+	from := time.Now().UTC()
+	for _, tc := range []struct {
+		name  string
+		tiers [2]string
+		want  string
+		hasEx bool
+	}{
+		{name: "session reused beside project", tiers: [2]string{RetentionSession, RetentionProject}, want: RetentionProject, hasEx: false},
+		{name: "session reused beside keep-forever", tiers: [2]string{RetentionSession, RetentionPersistent}, want: RetentionPersistent, hasEx: false},
+		{name: "project reused beside session", tiers: [2]string{RetentionProject, RetentionSession}, want: RetentionProject, hasEx: false},
+		{name: "session reused beside session", tiers: [2]string{RetentionSession, RetentionSession}, want: RetentionSession, hasEx: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+
+			// Byte-identical content for the reused row, because reuse is matched on
+			// content alone; unrelated text for the other source, so the emission
+			// cannot reuse it instead.
+			const reused = "the staging cluster answers on port 8443"
+			const other = "deploys go out through the bastion tunnel on port 2222"
+			a, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", reused, "mcp", 0.5, nil,
+				UpsertOptions{Retention: tc.tiers[0]})
+			if err != nil {
+				t.Fatalf("save the reused row as %s: %v", tc.tiers[0], err)
+			}
+			b, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", other, "mcp", 0.5, nil,
+				UpsertOptions{Retention: tc.tiers[1]})
+			if err != nil {
+				t.Fatalf("save the other source as %s: %v", tc.tiers[1], err)
+			}
+			before := getOne(t, s, a)
+
+			// Importance 0.5 with no tags and no scope, so the emission also matches
+			// reuseChangesNothing — the branch that writes nothing. The tier raise is
+			// not optional there, so the test runs against the strictest branch.
+			if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+				Category: "fact", Content: reused, Importance: 0.5,
+				ReplacesIDs: []string{a, b},
+			}}, ""); err != nil {
+				t.Fatalf("ReplaceNonManual: %v", err)
+			}
+
+			if !rowExists(t, s, a) {
+				t.Fatalf("the reused row %s is gone; the fixture did not exercise a reuse", a)
+			}
+			// A keep-forever source is exempt from every set this replace builds, so
+			// it is never deleted and the reused row does not absorb it. The raise
+			// still applies — ReplacesIDs naming a row is the emission asserting it
+			// stands for that row, and the rule does not consult the delete set —
+			// which is asserted above and is why this case is here.
+			if tc.tiers[1] == RetentionPersistent {
+				if !rowExists(t, s, b) {
+					t.Errorf("the keep-forever source %s was deleted: it is exempt from every set this replace builds", b)
+				}
+			} else if rowExists(t, s, b) {
+				t.Errorf("the other source %s survived; the fixture is not exercising the merge this is about", b)
+			}
+			got := getOne(t, s, a)
+			if got.Retention != tc.want {
+				t.Errorf("reused row %s retention = %q, want %q — the row that absorbs %s inherits the longest life any source named",
+					a, got.Retention, tc.want, b)
+			}
+			if tc.hasEx {
+				wantFreshSessionExpiry(t, a, got.ExpiresAt, from, time.Now().UTC())
+			} else if got.ExpiresAt != nil {
+				t.Errorf("reused row %s expires_at = %q on a %s row: only a session row is scheduled for expiry", a, *got.ExpiresAt, got.Retention)
+			}
+			// A verbatim re-emission is not a re-save, so the raise must not move
+			// the stamp reuseChangesNothing exists to leave alone.
+			if got.UpdatedAt != before.UpdatedAt {
+				t.Errorf("updated_at moved from %q to %q: a verbatim re-emission is not a write (#727), and this pass wrote no other column either",
+					before.UpdatedAt, got.UpdatedAt)
+			}
+		})
+	}
+}
+
+// TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission is the other half of
+// the raise, and the reason it is a separate test: a session row that a reflect
+// run re-emits byte-for-byte has not been re-asserted by anybody. Refreshing its
+// expiry on every applied reflect would give a conversation-scoped memory an
+// unbounded life, which is the opposite of what the tier is for — the fix raises
+// a tier when the SOURCES demand one and never invents an extension. A FOLD is the
+// contrast and already has its own test: a fold is a new assertion of the fact and
+// does refresh (#772), so the two behaviours are deliberately different and this
+// is the half that would otherwise go unstated.
+func TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	reEmitted := pruneRow(t, s, testProject, "a session fact a reflect run re-emits every pass", RetentionSession)
+	agePruneRow(t, s, reEmitted, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	wasReEmitted := getOne(t, s, reEmitted)
+
+	// The control, and it is a `manual` source for a reason the fixture needs
+	// rather than for realism: consolidation DELETES every replaceable row the
+	// emission does not account for, so a peer session row written here would be
+	// gone before the prune ever saw it. `manual` is in the exclusion list, so this
+	// row survives the replace and is a candidate on its own terms — an aged,
+	// expired session row the prune must reach, which is what makes the row above
+	// removed because of ITS expiry and nothing else.
+	control := pruneRow(t, s, testProject, "a session fact the user wrote by hand", RetentionSession)
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET source = 'manual' WHERE id = ?`, control); err != nil {
+		t.Fatalf("mark the control manual: %v", err)
+	}
+	agePruneRow(t, s, control, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+
+	// The reflect run: re-emit the row byte-for-byte, naming only itself.
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: "a session fact a reflect run re-emits every pass", Importance: 0.6,
+		ReplacesIDs: []string{reEmitted},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if !rowExists(t, s, reEmitted) {
+		t.Fatalf("the re-emitted row %s is gone; the fixture did not exercise a reuse", reEmitted)
+	}
+	if !rowExists(t, s, control) {
+		t.Fatalf("the control %s was deleted by the replace; a `manual` row is exempt from it", control)
+	}
+	// Compared through the sameStrPtr helper, so a mutation that DROPS the expiry
+	// reports as a finding rather than as a nil dereference: "no expiry" and "a
+	// different expiry" are both the defect, and a test that panics on one of them
+	// does not say which.
+	if got := getOne(t, s, reEmitted); !sameStrPtr(got.ExpiresAt, wasReEmitted.ExpiresAt) {
+		t.Errorf("the re-emitted row's expiry moved from %s to %s: a reflect run that re-states a row is not a new assertion of the fact, and refreshing it here would give a session memory an unbounded life",
+			expiryText(wasReEmitted.ExpiresAt), expiryText(got.ExpiresAt))
+	}
+
+	// The outcome, which is the tier's own. Both rows are expired, aged and past
+	// the grace, and both are removed: the re-emitted one is not spared, because a
+	// reflect run is not something anybody re-asserted.
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	removed := map[string]bool{}
+	for _, id := range report.RemovedIDs {
+		removed[id] = true
+	}
+	if !removed[control] {
+		t.Errorf("the control %s survived; nothing is prunable at this instant, so the row above proves nothing", control)
+	}
+	if !removed[reEmitted] {
+		t.Errorf("prune spared %s: its expiry was refreshed by a re-emission, so a reflect run has become a way to keep a session memory forever", reEmitted)
+	}
+}
+
+// TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone is the boundary the
+// raise must not cross: a reuse that names nothing but the reused row is that row
+// restating itself, and it has no claim on a longer life. This is the case the
+// reuse path was always right about, and it is what a raise written as "fold the
+// ReplacesIDs together" would break — with no other source there is nothing to
+// fold, and a rule that fell back to the emission's silence would read that
+// silence as the project default and quietly make every session memory durable.
+func TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	from := time.Now().UTC()
+
+	reused, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
+		"a session fact reflection keeps, without naming anything else", "mcp", 0.5, nil,
+		UpsertOptions{Retention: RetentionSession})
+	if err != nil {
+		t.Fatalf("save the session row: %v", err)
+	}
+	// A second session row the emission does NOT account for, so the replace has a
+	// real delete to perform and is not a no-op.
+	dropped, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
+		"a session fact the consolidator decided was stale", "mcp", 0.5, nil,
+		UpsertOptions{Retention: RetentionSession})
+	if err != nil {
+		t.Fatalf("save the dropped row: %v", err)
+	}
+	was := getOne(t, s, reused)
+
+	// ReplacesIDs names only the reused row. Reflection does this on every `keep`.
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category: "fact", Content: "a session fact reflection keeps, without naming anything else", Importance: 0.5,
+		ReplacesIDs: []string{reused},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if rowExists(t, s, dropped) {
+		t.Errorf("the unaccounted row %s survived; the fixture is not exercising a replace", dropped)
+	}
+	got := getOne(t, s, reused)
+	if got.Retention != RetentionSession {
+		t.Errorf("retention = %q, want %q: an emission naming no other source has no claim on a longer life, and reading its silence as the project default would make every session memory durable",
+			got.Retention, RetentionSession)
+	}
+	wantFreshSessionExpiry(t, reused, got.ExpiresAt, from, time.Now().UTC())
+	if got.ExpiresAt != nil && *got.ExpiresAt != *was.ExpiresAt {
+		t.Errorf("expires_at moved from %q to %q: nothing re-asserted this row", *was.ExpiresAt, *got.ExpiresAt)
 	}
 }
