@@ -307,6 +307,50 @@ type asOfCapableStore interface {
 	MemoriesAsOf(ctx context.Context, projectID string, t time.Time) (*memory.AsOfSet, error)
 }
 
+// retrievalCapableStore narrows provider.MemoryStore to the retrieval record
+// ghost_memory_search writes (#646). A capability assertion for the reason
+// assembleCapableStore is one — the audit trail is a storage detail, not part of
+// the tool surface — and it is asserted rather than required so a provider
+// without it still answers searches: a store that cannot be audited is a smaller
+// problem than a store that cannot be searched, and the missing record is a gap
+// in a report rather than a failed call. *memory.Store satisfies it.
+type retrievalCapableStore interface {
+	RecordRetrieval(ctx context.Context, rec memory.RetrievalRecord) error
+}
+
+// recordSink is the assembler's seam, resolved to whatever the store can do.
+// nil when it cannot, and the assembler treats a nil sink as "record nothing",
+// so this is one branch rather than a special case at the call site.
+func (s *Server) recordSink() assemble.RecordSink {
+	if r, ok := s.store.(retrievalCapableStore); ok {
+		return r
+	}
+	return nil
+}
+
+// sessionIDFor is the session a call arrived on, and ONLY that.
+//
+// It is separated from provenanceFor because that function's other half is
+// harness detection, which is expensive and belongs on the write paths: with a
+// client the MCP session does not recognise it falls back to detectCallingSource,
+// which on Linux walks /proc and on darwin SPAWNS `ps` and walks the ancestor
+// chain. Reading a search's session id through it would put a process walk — and
+// on macOS a subprocess — on every formatted search, to obtain a value that is
+// "" over the stdio transport Ghost actually ships (#746's note on why that is
+// the answer rather than a problem).
+//
+// The value is a name, not a claim: it is the transport's own id, recorded as
+// given, and the record's Source column is what tells an injection from a search
+// when this is empty.
+func sessionIDFor(req *mcp.CallToolRequest) string {
+	if req == nil || req.Session == nil {
+		return ""
+	}
+	// ID() is "" unless the underlying connection assigns session ids; see
+	// provenanceFor's note on why that is the answer rather than a problem.
+	return req.Session.ID()
+}
+
 // shortID truncates an ID to 8 characters for compact preview (used for both
 // memory and task IDs), mirroring cmd/ghost's package-level shortID.
 //
@@ -1269,6 +1313,23 @@ func (s *Server) registerTools() {
 		Title:       "Search Memories",
 		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category, retention and scope are all applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when one of those is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Every formatted answer (explain:true returns a JSON breakdown instead) ends with a machine-readable verdict line, `[ghost:outcome=answerable|weak|empty reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...], optionally followed by \" retrieval_partial\" inside the brackets when a retrieval leg ran and failed` \u2014 `abstain_cosine=off` means no cosine floor is configured, `not_applied` means one is but no cosine could be compared (the vector leg never ran, or ran and failed), and `admitted` is how many rows the answer carries after any trim: `answerable` means nothing was withheld as weak (read its reason: no_floor_arm and retrieval_partial mean no floor could be applied at all, so those rows are unjudged), `weak` means the memories are listed but none cleared the floor \u2014 treat them as leads and verify before relying on them \u2014 and `empty` means the reason on the line says why. A `weak` answer, and an `empty` answer whose reason names a filter or the budget, say so in words as well, because in those cases the rows were found and are not good enough (or were withheld) rather than absent. The complete answer is capped at 16000 bytes \u2014 enough for one memory at the store's own 8,000-byte content cap \u2014 so a large result is trimmed to its highest-ranked memories and the line reports how many were admitted. Pass as_of (RFC 3339) to search the store as it stood at that instant instead: the wording each memory held then, including memories deleted since, matched by keyword only because an embedding records current content. as_of cannot be combined with explain, which diagnoses the current ranking. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
+			// ReadOnlyHint stays TRUE, and it is worth saying why, because #646 made
+			// this path write. The annotation is a claim a client acts on — it
+			// decides whether to auto-approve or to ask the user — so the claim has
+			// to be about the thing a user would want to confirm, and a search
+			// confirms nothing: it creates no memory, deletes nothing, and changes
+			// no answer. What it now also does is append one row to Ghost's own
+			// audit table (#646), which is bookkeeping about the call rather than a
+			// change to what Ghost knows, and which no other tool or surface can
+			// observe.
+			//
+			// The alternative is to declare it false, and that is a real cost
+			// rather than a technicality: a host that gates a non-read-only tool
+			// behind a confirmation prompt would then ask the user to approve every
+			// search, on the most-used tool Ghost has. If a client ever reads the
+			// annotation as the stricter "modifies its environment" rather than the
+			// user-facing reading above, this is the line to change — and the
+			// refusal to make the record is one `s.recordSink()` returning nil.
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
 		},
@@ -1349,6 +1410,28 @@ func (s *Server) registerTools() {
 			Now:           time.Now().UTC(),
 			AsOf:          asOf,
 			AbstainCosine: s.contextCfg.AbstainCosine,
+			// The retrieval record (#646). Set here and not inside the assembler,
+			// because this is the only place that knows the session the call
+			// arrived on — and the assembler writes the row, so nothing about the
+			// record's shape is duplicated across the two.
+			//
+			// It is nil when the store cannot record, which the assembler treats
+			// as "record nothing". A provider that cannot be audited is a gap in a
+			// report, not a failed search.
+			Record:    s.recordSink(),
+			SessionID: sessionIDFor(req),
+			// The server's own logger, not the process default: nothing in Ghost
+			// calls slog.SetDefault, so a diagnostic the assembler sent there would
+			// reach a handler nobody reads and a failed record would be silent in
+			// production while looking logged in tests.
+			Logger: s.logger,
+			// This handler returns an ERROR — not an answer — when a leg failed
+			// and nothing was admitted (the `result.Outcome == OutcomeEmpty` branch
+			// below), so that call must not be recorded as a retrieval. Without this
+			// the audit's denominator would carry a row for a call that returned no
+			// memories at all: the leg failure is in the trace, not in the record,
+			// so nothing downstream could tell it from a real empty answer.
+			SuppressRecordWhenLegsFailed: true,
 		}
 		// explain returns the store's ranking diagnosis instead of the
 		// formatted list. The explain projection of the assembler's trace
@@ -2801,6 +2884,11 @@ func (s *Server) registerTools() {
 		fmt.Fprintf(&sb, "  decisions:    %d\n", summary.Decisions)
 		fmt.Fprintf(&sb, "  token_usage:  %d\n", summary.TokenUsage)
 		fmt.Fprintf(&sb, "  audit_log:    %d\n", summary.AuditLog)
+		// The audit trail's rows for this project (#646). Rendered here for the
+		// same reason as in printDeleteSummary: this is the same summary an agent
+		// reads before deciding to delete, and a line missing from one surface is
+		// a count the caller cannot see.
+		fmt.Fprintf(&sb, "  retrievals:   %d\n", summary.RetrievalRecords)
 		if !args.Apply {
 			sb.WriteString("\nRe-run with apply:true to actually delete.")
 		}

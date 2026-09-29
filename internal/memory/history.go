@@ -470,7 +470,20 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 // is nothing left to search for. The caller runs this in the same transaction as
 // the memory DELETE, so a memory and every copy of it commit or roll back
 // together.
+//
+// An empty memoryID is REFUSED here rather than at the exported entry point, and
+// here rather than there because there are two callers (PurgeMemoryHistory and
+// the delete-time purge) and only this body is both of them. The reason is the
+// substring search the retrieval-record delete below performs: SQLite's instr
+// returns 1 for an EMPTY needle — measured, not assumed — so an empty id matches
+// every row in that table and the purge would delete the whole audit trail while
+// the equality-keyed deletes around it matched nothing and reported success. A
+// refusal costs a caller a check; the alternative costs an operator the evidence.
 func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, error) {
+	if memoryID == "" {
+		return 0, errPurgeNoMemoryID
+	}
+
 	texts, err := selectIDs(ctx, tx, `
 		SELECT content FROM memory_history WHERE memory_id = ? AND content IS NOT NULL
 		UNION
@@ -544,6 +557,55 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("purge snapshot evidence: %w", err)
 	}
 
+	// And the retrieval records that NAME the memory (#646). It holds no text of
+	// it, but a name is exactly what a redaction is asked to remove when the id
+	// itself is the sensitive thing — a memory named for a customer, a
+	// credential's identifier, an incident ticket. Leaving the row would report
+	// success on a redaction that the audit can still read the id back out of.
+	//
+	// There is no foreign key to cascade: a record outlives the memory by
+	// construction (it is evidence about calls, and a purge deletes history, not
+	// memories), so this reach has to be written out, exactly as the two above
+	// are.
+	//
+	// TWO predicates, because one of them cannot see every row. The parsed arm
+	// goes through readableVerdicts and matches every WELL-FORMED record EXACTLY,
+	// by the id the stages actually recorded. The textual arm is the reach the
+	// parsed one does not have: a row whose verdicts column cannot be read at all
+	// may still name the memory, and a name inside it is still a name.
+	//
+	// SCOPED to exactly those rows, and the scope is what makes the arm defensible
+	// rather than merely cautious. verdictsUnreadable is the same expression
+	// readableVerdicts substitutes on, so "the parsed arm could not see this row"
+	// and "this column is unreadable" are one statement in one place. An UNSCOPED
+	// OR also fuzzy-matches every well-formed row: purging the id `A_1` would
+	// delete a record whose verdict names `A_1%done`, which the parsed arm — which
+	// knows the exact ids — correctly left alone. Having the exact answer and then
+	// searching for it approximately is strictly worse than not having it, so the
+	// arm is gated on the very rows that need it.
+	//
+	// instr, NOT LIKE: LIKE reads % and _ in the BOUND VALUE as wildcards, and
+	// `ghost import` writes an artifact's ids verbatim, so a real id can contain
+	// one — the id `A_1%done` would match the unrelated `Ax1%done` row. instr is a
+	// literal substring search (measured on this build's SQLite: it finds `A_1` in
+	// `[{"id":"A_1"}]` and does NOT find it in `[{"id":"Ax1"}]`, which LIKE does).
+	//
+	// What remains, on a row that cannot be parsed, is the chosen bias: an id that
+	// merely CONTAINS the purged one is over-deleted. An operator redaction is the
+	// one path where that is the recoverable direction — the lost row is evidence
+	// about a call, and a surviving name is a leak the operator believes they
+	// closed. Ids Ghost mints are fixed-width hex, so it needs an imported id that
+	// contains another.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM retrieval_record
+		 WHERE EXISTS (
+			SELECT 1 FROM json_each(`+readableVerdicts(`retrieval_record.verdicts`)+`)
+			WHERE value->>'id' = ?
+		) OR (COALESCE(`+verdictsUnreadable(`retrieval_record.verdicts`)+`, 0)
+		     AND instr(retrieval_record.verdicts, ?) > 0)`, memoryID, memoryID); err != nil {
+		return 0, fmt.Errorf("purge retrieval records: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_history WHERE memory_id = ?`, memoryID)
 	if err != nil {
@@ -582,6 +644,11 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	}
 	return removed, nil
 }
+
+// errPurgeNoMemoryID reports a purge asked for with no memory to purge. See
+// purgeHistoryTx: the retrieval-record delete reaches an unreadable verdicts
+// column by substring, and an empty id is a substring of everything.
+var errPurgeNoMemoryID = errors.New("purge history: a memory id is required")
 
 // purgedTextMarker replaces a folded-in text a purge has erased. It is a marker
 // rather than an empty string so a reader can tell "this fold discarded text that

@@ -855,6 +855,19 @@ var writeLockBudgets = map[string]float64{
 	"decision-record": 0.25,
 	"reflect-apply":   1,
 	"replace":         1,
+	// One INSERT plus, only once the table is over its cap, one ranged DELETE
+	// (#646) — measured in the ten-process fleet below at p50 0.06 ms, p99 0.38 ms
+	// over 178 samples, a fraction of a save's hold and nothing like a
+	// reflection's. It is NAMED rather than omitted because it is the first write
+	// this store performs on a path that was previously read-only: a search now
+	// takes the write lock, so an op missing from this table is a measurement gap
+	// on exactly the path where contention is new.
+	//
+	// The fleet helper records its own searches (testdata/multiproc/main.go) so
+	// that entry has a distribution behind it rather than an allowance: a table
+	// row with no traffic in the run is an untested budget, and the numbers above
+	// would have been the numbers a reader took on faith.
+	"record-retrieval": 0.25,
 }
 
 // assertWriteLockBudget reports the write-lock distributions the fleet measured,

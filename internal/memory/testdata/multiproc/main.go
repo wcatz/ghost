@@ -39,7 +39,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -831,6 +833,24 @@ func runCLI(ctx context.Context, o options, rep *report, b barriers) error {
 		if err := checkNotTorn(rows, o.query); err != nil {
 			return err
 		}
+		// Record the search, the way the formatted MCP path does (#646). A search
+		// that took no write lock is a read, so a fleet that only ever reads
+		// reports nothing about the op that made searches writers — and
+		// writeLockBudgets' entry for it would be an allowance with no
+		// distribution behind it, which is the thing that table exists to replace.
+		// It is deliberately on the writer path and not the reader's: the reader
+		// exists to prove reads are not stalled, and a record write there would
+		// stop proving that.
+		verdicts := make([]memory.RowVerdict, 0, len(rows))
+		for _, r := range rows {
+			verdicts = append(verdicts, memory.RowVerdict{ID: r.ID, Kept: true, Stage: "validity"})
+		}
+		if err := store.RecordRetrieval(ctx, memory.RetrievalRecord{
+			ProjectID: o.project, Source: "search", QueryHash: retrievalQueryHash(o.query),
+			Outcome: "answerable", Reason: "floor_met", Verdicts: verdicts,
+		}); err != nil {
+			return fmt.Errorf("RecordRetrieval: %w", err)
+		}
 		rep.put("reads", fmt.Sprint(rep.count("reads")+1))
 		return nil
 	})
@@ -1188,6 +1208,16 @@ func loadLoop(ctx context.Context, rep *report, b barriers, pace bool, body func
 	}
 	rep.put("stopped_by", "time-cap")
 	return fmt.Errorf("load loop ran for its %s cap without a stop signal", loadCap)
+}
+
+// retrievalQueryHash is the query reduced to the digest the retrieval record
+// stores. It is the assembler's own rule, reproduced here because this child
+// records directly against the store rather than through assemble.Run, and the
+// column's CHECK refuses anything that is not 64 hex characters — so the helper
+// exists to keep the fleet writing records the real writer would write.
+func retrievalQueryHash(query string) string {
+	sum := sha256.Sum256([]byte(query))
+	return hex.EncodeToString(sum[:])
 }
 
 // checkNotTorn requires that every row a search returned really holds the text
