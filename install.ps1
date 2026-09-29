@@ -230,15 +230,81 @@ function Get-AttestationIdentity {
         the flag set can express. The tag is therefore inside the SAN, which is
         also the only way it gets pinned at all — --signer-workflow matches a path
         and would accept the same workflow run from a branch.
-    #>
-    param([Parameter(Mandatory)][string]$Version)
 
-    $tag = 'v' + ((Get-ComparableVersion $Version) ?? ($Version -replace '^v', ''))
+        The version core is resolved with an explicit test rather than the `??`
+        operator, which is PowerShell 7.0 and later. This script's header declares
+        `#Requires -Version 5.1`, `powershell.exe` on Windows is 5.1, and the
+        documented way to run this file is `irm … | iex` — which lands in 5.1. A
+        7-only operator is a PARSE error, so it fails the whole script rather than
+        this one function, and nothing installs at all. The fallback is reachable:
+        Test-AttestationRequired fails closed for an unorderable version such as
+        `dev`, so exactly the versions with no numeric core are the ones that get
+        here.
+
+        AllowEmptyString for the same reason Get-ComparableVersion takes it: an
+        unorderable version is an input to classify here, not a caller error, and a
+        mandatory binding turned the empty one into a terminating parameter error
+        instead of an answer.
+    #>
+    param([AllowEmptyString()][string]$Version)
+
+    $core = Get-ComparableVersion $Version
+    if ([string]::IsNullOrEmpty($core)) { $core = $Version -replace '^v', '' }
     return [ordered]@{
         Repo         = $script:Repo
-        ReleaseTag   = $tag
-        CertIdentity = "https://github.com/$($script:Repo)/$($script:ReleaseWorkflow)@refs/tags/$tag"
+        ReleaseTag   = 'v' + $core
+        CertIdentity = "https://github.com/$($script:Repo)/$($script:ReleaseWorkflow)@refs/tags/v$core"
     }
+}
+
+function Test-GhMachineFailure {
+    <#
+    .SYNOPSIS
+        Whether gh's output says the MACHINE could not reach GitHub, rather than
+        that the attestation did not verify.
+    .DESCRIPTION
+        gh attestation verify exits 1 for both, and there is no exit status that
+        separates them — so a script that maps every non-zero exit to "the
+        attestation did not verify" reports a DNS failure, a 500, a rate limit, a
+        proxy, or a token that expired between two calls, as a fact about the
+        ARCHIVE. That is the mistake this repository already made once and wrote
+        down: a transient fault reported as a permanent property of a release.
+
+        So the two are told apart, and the direction of a wrong answer is chosen
+        deliberately. A recognised machine-side cause is Unchecked — the
+        overridable state, and a loud one. Everything else is Unverifiable, so an
+        output shape this function has never seen is treated as a REFUSAL rather
+        than waved through: the cost of a wrong answer there is an install that
+        cannot proceed until whatever is broken is fixed, and the cost in the
+        other direction is an archive nobody vouched for getting installed by
+        someone who passed a flag.
+
+        That is the opposite of the fail-open shape a guard script usually has, and
+        it is deliberate for the same reason: a pattern that cannot be recognised
+        must not be the pattern that lets something through.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Output)
+
+    if ([string]::IsNullOrWhiteSpace($Output)) { return $false }
+    # Every entry here DOWNGRADES a refusal to the overridable state, so each one
+    # has to be a string an attacker cannot put into gh's error text about a
+    # certificate. gh quotes attacker-influenced values back in its messages — the
+    # certificate's own subject, the repository — so a short generic token is a
+    # downgrade waiting to be typed. "SSL" and "EOF" were both in an earlier draft
+    # of this list and both are gone: "not from a trusted CA" contains one, and any
+    # message can be made to contain the other. What is kept are the specific
+    # forms a real transport failure prints.
+    $machineCauses = @(
+        'HTTP 429', 'HTTP 500', 'HTTP 502', 'HTTP 503', 'HTTP 504',
+        'Bad credentials', 'requires authentication', 'rate limit',
+        'dial tcp', 'no such host', 'connection reset', 'connection refused',
+        'TLS handshake', 'context deadline', 'i/o timeout', 'no such network',
+        'proxyconnect', 'server misbehaving'
+    )
+    foreach ($cause in $machineCauses) {
+        if ($Output.Contains($cause)) { return $true }
+    }
+    return $false
 }
 
 function Get-AttestationVerdict {
@@ -259,17 +325,22 @@ function Get-AttestationVerdict {
           Verified       — gh checked the bundle and it is this repository's
                            release workflow on this tag.
           Skipped        — the release predates attestations, so none can exist.
-          Unverifiable   — gh checked, and the attestation did not verify. FATAL,
-                           and no override reaches it.
-          Unchecked      — there was no way to check: no gh, or gh not logged in.
-                           A property of the MACHINE, not of the archive, which is
-                           why this is the only case an override reaches.
+          Unverifiable   — gh completed the check, and the attestation did not
+                           hold. FATAL, and no override reaches it.
+          Unchecked      — the check could not be run or could not be completed: no
+                           gh, gh not logged in, a gh too old to have the
+                           subcommand, or GitHub unreachable. A property of the
+                           MACHINE, not of the archive, which is why this is the
+                           only case an override reaches.
 
-        gh attestation verify answers "did not verify" and "nothing to verify"
-        with the same exit status, so the script does not try to tell those two
-        apart: a non-zero exit from an authenticated gh is Unverifiable, and the
-        only distinction it draws is one it can establish for itself, which is
-        whether it has a verifier at all.
+        "Completed the check" is the load-bearing phrase and it is ESTABLISHED,
+        not assumed, because gh uses one exit status for "the attestation did not
+        verify", "there is no attestation for these bytes", and "I could not reach
+        GitHub". Two things establish it: a capability probe, so a gh older than
+        the one that added `attestation` is caught before it is asked, and
+        Test-GhMachineFailure, which is the only other thing allowed to claim the
+        check did not happen — and which returns false for anything it does not
+        recognise, so an unknown failure is reported as a refusal.
     #>
     param(
         [Parameter(Mandatory)][string]$FilePath,
@@ -306,6 +377,18 @@ function Get-AttestationVerdict {
         }
     }
 
+    # The capability probe. A gh from before the `attestation` subcommand existed
+    # exits 1 on `gh attestation verify` with `unknown command`, which without this
+    # would be a permanent, unoverridable refusal that blames the release for a
+    # property of the machine.
+    $capability = & $Run $gh @('attestation', 'verify', '--help') $null
+    if ($capability.ExitCode -ne 0) {
+        return @{
+            State  = 'Unchecked'
+            Reason = 'this gh is too old to verify attestations: it has no `gh attestation verify` subcommand. Update the GitHub CLI, or run `gh attestation verify` yourself and compare the identity it reports'
+        }
+    }
+
     $result = & $Run $gh @(
         'attestation', 'verify', $FilePath,
         '--repo', $identity.Repo,
@@ -321,6 +404,14 @@ function Get-AttestationVerdict {
 
     $detail = ($result.Output -replace '\s+', ' ').Trim()
     if ($detail.Length -gt 400) { $detail = $detail.Substring(0, 400) + '...' }
+
+    if (Test-GhMachineFailure $result.Output) {
+        return @{
+            State  = 'Unchecked'
+            Reason = "gh could not complete the check, so nothing has been said about this archive. gh said: $detail"
+        }
+    }
+
     return @{
         State  = 'Unverifiable'
         Reason = "the build attestation did not verify against $($identity.CertIdentity). gh said: $detail"
@@ -372,7 +463,7 @@ function Resolve-AttestationDecision {
             return @{
                 Allow    = $false
                 Severity = 'error'
-                Message  = "$($Verdict.Reason), so nothing says which workflow built this archive. Install the GitHub CLI and run 'gh auth login', then run this script again; or pass -SkipAttestation (or set `$env:GHOST_SKIP_ATTESTATION=1) to install anyway, which accepts the archive on the strength of a checksum from the same release and nothing more."
+                Message  = "$($Verdict.Reason), so nothing says which workflow built this archive. Resolve that and run this script again; or pass -SkipAttestation (or set `$env:GHOST_SKIP_ATTESTATION=1) to install anyway, which accepts the archive on the strength of a checksum from the same release and nothing more."
             }
         }
         default {

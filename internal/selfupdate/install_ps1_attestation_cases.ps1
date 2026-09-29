@@ -99,6 +99,7 @@ function New-Stub {
     param(
         [bool]$HasGh = $true,
         [int]$AuthExit = 0,
+        [int]$CapabilityExit = 0,
         [int]$VerifyExit = 0,
         [string]$VerifyOutput = 'Loaded 1 attestation from GitHub API'
     )
@@ -116,6 +117,9 @@ function New-Stub {
         # call, and the policy assertions below read $null for all of them.
         [void]$calls.Add([PSCustomObject]@{ Exe = $Exe; Args = [string[]]$Arguments })
         if ($Arguments[0] -eq 'auth') { return @{ ExitCode = $AuthExit; Output = 'not logged in' } }
+        if ($Arguments.Count -eq 3 -and $Arguments[2] -eq '--help') {
+            return @{ ExitCode = $CapabilityExit; Output = 'Verify the integrity and provenance of an artifact' }
+        }
         return @{ ExitCode = $VerifyExit; Output = $VerifyOutput }
     }.GetNewClosure()
     return @{ Probe = $probe; Run = $run; Calls = $calls }
@@ -132,7 +136,10 @@ Check-Equal 'gh verifies the attestation' 'Verified' (Get-VerdictWith $stub).Sta
 # The arguments are the policy. Without this the verdict tests would pass even if
 # the script asked gh to verify against the wrong repository, the wrong workflow,
 # or no tag at all — which is the failure the whole change exists to prevent.
-$verifyArgs = @(@($stub.Calls | Where-Object { $_.Args[0] -eq 'attestation' })[0].Args)
+# The capability probe is the first `attestation` call, so the verify is the second.
+$attestationCalls = @($stub.Calls | Where-Object { $_.Args[0] -eq 'attestation' })
+$verifyArgs = @($attestationCalls[1].Args)
+Check-Equal 'the capability is probed before the archive is' 'attestation verify --help' ($attestationCalls[0].Args -join ' ')
 Check-Equal 'gh is asked for the attestation of the file' '/tmp/ghost.zip' $verifyArgs[2]
 Check-Equal 'gh is scoped to the repository' 'wcatz/ghost' $verifyArgs[4]
 Check-Equal 'gh is given the pinned cert identity' `
@@ -147,6 +154,69 @@ Check-Equal 'no gh at all is Unchecked' 'Unchecked' (Get-VerdictWith (New-Stub -
 Check-Equal 'an unauthenticated gh is Unchecked' 'Unchecked' (Get-VerdictWith (New-Stub -AuthExit 1)).State
 Check-Equal 'a checked attestation that failed is Unverifiable' 'Unverifiable' (Get-VerdictWith (New-Stub -VerifyExit 1)).State
 Check-Equal 'a gh usage error is Unverifiable, not Unchecked' 'Unverifiable' (Get-VerdictWith (New-Stub -VerifyExit 1 -VerifyOutput 'unknown flag: --nonsense')).State
+
+# --- a verifier that cannot finish is not a verifier that says no ------------
+#
+# gh exits 1 for "did not verify", "there is no attestation" and "I could not reach
+# GitHub" alike. Mapping all three to the fatal state reports a DNS failure or a
+# 500 as a permanent property of the archive — the mistake this repository already
+# made once, in the other direction, and wrote down.
+
+# A gh too old to have the subcommand is caught by the probe, before it is asked
+# to verify anything.
+$oldGh = New-Stub -CapabilityExit 1 -VerifyOutput 'unknown command "attestation" for "gh"'
+Check-Equal 'a gh without the subcommand is Unchecked, not Unverifiable' 'Unchecked' (Get-VerdictWith $oldGh).State
+Check-Equal 'a gh without the subcommand never verifies the archive' 0 `
+    (@($oldGh.Calls | Where-Object { $_.Args[0] -eq 'attestation' -and $_.Args.Count -ne 3 }).Count)
+Check-Equal 'a gh without the subcommand is told to update' $true `
+    ((Get-VerdictWith $oldGh).Reason -match 'too old')
+
+foreach ($outage in @(
+    'HTTP 500: Internal Server Error',
+    'HTTP 429: Too Many Requests',
+    'Get "https://api.github.com/...": dial tcp: lookup api.github.com: no such host',
+    'Get "https://api.github.com/...": net/http: TLS handshake timeout',
+    'HTTP 401: Bad credentials',
+    'context deadline exceeded'
+)) {
+    $v = Get-VerdictWith (New-Stub -VerifyExit 1 -VerifyOutput $outage)
+    Check-Equal "'$($outage.Substring(0, [Math]::Min(30, $outage.Length)))' is Unchecked" 'Unchecked' $v.State
+    Check-Equal "'$($outage.Substring(0, [Math]::Min(30, $outage.Length)))' does not blame the archive" $false `
+        ($v.Reason -match 'did not verify')
+}
+
+# A refusal the matcher does not recognise is a refusal. This is the direction the
+# whole split is chosen for: an unknown output shape must never become the
+# overridable state.
+foreach ($refusal in @(
+    'Error: verifying with issuer "sigstore.dev"',
+    'one or more attestations did not match the artifact',
+    'no attestations found for subject',
+    'something this script has never seen'
+)) {
+    $v = Get-VerdictWith (New-Stub -VerifyExit 1 -VerifyOutput $refusal)
+    Check-Equal "'$($refusal.Substring(0, [Math]::Min(30, $refusal.Length)))' is Unverifiable" 'Unverifiable' $v.State
+}
+Check-Equal 'an empty failure output is still a refusal' 'Unverifiable' `
+    (Get-VerdictWith (New-Stub -VerifyExit 1 -VerifyOutput '')).State
+
+# The matcher is a DOWNGRADE, so the strings it must not match are the ones an
+# attacker could put into gh's error text about a certificate. gh quotes the
+# certificate's own subject and the repository back in its messages, so a short
+# generic token here would hand an attacker the override. "SSL" and "EOF" were in
+# an earlier draft of the list and a control below is the reason they are not in
+# this one.
+foreach ($attackerText in @(
+    'the certificate is not from a trusted CA (SSL is fine)',
+    'unexpected EOF while reading the statement',
+    'proxy: the workflow identity could not be established',
+    'the repository wcatz/ghost refused',
+    'signer workflow wcatz/ghost/.github/workflows/release.yml mismatch'
+)) {
+    $v = Get-VerdictWith (New-Stub -VerifyExit 1 -VerifyOutput $attackerText)
+    Check-Equal "attacker text is a refusal, not a machine fault: $($attackerText.Substring(0, [Math]::Min(34, $attackerText.Length)))" `
+        'Unverifiable' $v.State
+}
 
 # An unauthenticated gh must not be asked to verify at all: it would answer 1, and
 # treating that as "the attestation did not verify" would blame the archive for the
@@ -271,6 +341,83 @@ if ($iCheck -ge 0 -and $iUnpack -ge 0) {
     Check-Equal 'the refusal is between the check and the unpack' $true `
         ($iDecision -gt $iCheck -and $iDecision -lt $iUnpack)
 }
+
+# --- the 5.1 target ----------------------------------------------------------
+#
+# This script's header says `#Requires -Version 5.1`, `powershell.exe` on Windows
+# IS 5.1, and the documented way to run it is `irm … | iex`. A PowerShell 7-only
+# construct is a PARSE error, so it fails the whole file rather than one function
+# and nothing installs at all — and nothing here would catch it, because the cases
+# run under pwsh 7 and no CI job runs Windows PowerShell.
+#
+# So the operators that are 7.0+ and have no 5.1 spelling are looked for in the
+# CODE. Comments are stripped first, and the stripper has to be real: install.ps1
+# documents itself in `<# … #>` blocks whose interior lines do NOT begin with `#`,
+# so anything that only understands `//` and trailing `#` leaves the prose
+# behind — and the prose NAMES both operators while explaining that they must not
+# be used. A matcher that read comments would fail on the script's own
+# documentation, and one that half-worked would only be caught by that.
+function Get-CodeOnly {
+    param([string]$Text)
+
+    $out = [System.Text.StringBuilder]::new()
+    $i = 0
+    $blockDepth = 0
+    while ($i -lt $Text.Length) {
+        if ($blockDepth -eq 0 -and $Text.Substring($i).StartsWith('<#')) {
+            # Block comments NEST in PowerShell, so this is a counter and not a
+            # flag: a `#>` inside one does not necessarily end it.
+            $blockDepth = 1
+            $i += 2
+            continue
+        }
+        if ($blockDepth -gt 0) {
+            if ($Text.Substring($i).StartsWith('<#')) { $blockDepth++; $i += 2; continue }
+            if ($Text.Substring($i).StartsWith('#>')) { $blockDepth--; $i += 2; continue }
+            $i++
+            continue
+        }
+        if ($Text.Substring($i).StartsWith('//') -or $Text[$i] -eq '#') {
+            while ($i -lt $Text.Length -and $Text[$i] -ne "`n") { $i++ }
+            continue
+        }
+        [void]$out.Append($Text[$i])
+        $i++
+    }
+    return $out.ToString()
+}
+
+$raw = Get-Content -Raw -LiteralPath $Script
+$psCode = Get-CodeOnly $raw
+# `??` and `?.` are PowerShell 7.0. A `?` in a string or a wildcard is not either,
+# and the two controls below are the reason the matcher is not simply "no ??".
+Check-Equal 'install.ps1 uses no PowerShell 7 null-coalescing operator' $false ($psCode -match '\?\?')
+Check-Equal 'install.ps1 uses no PowerShell 7 null-conditional operator' $false ($psCode -match '\?\.')
+Check-Equal 'install.ps1 declares its 5.1 target' $true ($raw -match '#Requires -Version 5\.1')
+
+# ...and the fallback the `??` would have provided is still there, so removing the
+# operator cannot have removed the behaviour with it.
+Check-Equal 'the version core still falls back when unorderable' 'vdev' (Get-AttestationIdentity 'dev').ReleaseTag
+Check-Equal 'the version core still falls back for an empty version' 'v' (Get-AttestationIdentity '').ReleaseTag
+Check-Equal 'an orderable version uses its core' 'v0.43.0' (Get-AttestationIdentity '0.43.0').ReleaseTag
+Check-Equal 'an unorderable version still requires a check' $true (Test-AttestationRequired 'dev')
+
+# Controls for the stripper itself, in both directions. Without these, "no `??`
+# found" could be a stripper that removes the whole file.
+Check-Equal 'the stripper keeps code' $true ((Get-CodeOnly '$a = 1') -match '\$a = 1')
+Check-Equal 'the stripper drops a line comment' 'x = 1' ((Get-CodeOnly 'x = 1 # ?? here').Trim())
+Check-Equal 'the stripper drops a block comment' 'x = 1' ((Get-CodeOnly "<# ?? and ?. #> x = 1").Trim())
+Check-Equal 'the stripper drops a multi-line block comment' 'x = 1' `
+    ((Get-CodeOnly "<#`n ?? on its own line`n and ?. too`n#> x = 1").Trim())
+Check-Equal 'the stripper handles a nested block comment' 'x = 1' `
+    ((Get-CodeOnly "<# outer <# inner ?? #> still outer #> x = 1").Trim())
+# ...and the matcher catches the operators when they ARE in code.
+foreach ($sample in @('?? $x', '"a" ?? $b', '$y = $z?.Name', "??`n", 'if ($a ?? $b) {}')) {
+    Check-Equal "the matcher would catch code using '$($sample.Trim())'" $true ((Get-CodeOnly $sample) -match '\?\?|\?\.')
+}
+# ...and leaves a lone `?` alone, so a wildcard or a string is not a false alarm.
+Check-Equal 'a lone question mark is not an operator' $false ((Get-CodeOnly 'Get-ChildItem -Filter *.ps1?') -match '\?\?|\?\.')
+Check-Equal 'a question mark in a string is not an operator' $false ((Get-CodeOnly 'Write-Host "what? really?"') -match '\?\?|\?\.')
 
 # --- report ------------------------------------------------------------------
 

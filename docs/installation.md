@@ -200,10 +200,12 @@ gh attestation verify ghost_0.43.0_windows_amd64.zip `
 |---|---|---|
 | **verified** | the bundle is this repository's release workflow on this tag | installs |
 | **no attestation required** | the release predates v0.43.0, so none can exist | installs, and says so |
-| **did not verify** | `gh` checked, and the attestation does not hold | **refused, and there is no override** |
-| **could not check** | no `gh`, or `gh` is not logged in | refused unless you say otherwise (below) |
+| **did not verify** | `gh` ran the check, and the attestation does not hold | **refused, and there is no override** |
+| **could not check** | no `gh`, `gh` not logged in, a `gh` too old to have the subcommand, or GitHub unreachable | refused unless you say otherwise (below) |
 
 The asymmetry is deliberate and it matches [`ghost upgrade`](cli.md#attestations). The override means *"nobody could be asked"*, never *"the attestation did not check out"* — an attacker who can publish one bundle of their own would otherwise be handed the entire feature. So there is nothing to reach the third row, and its message names no flag, because there is no flag to name.
+
+The fourth row exists because `gh` answers *"the attestation did not verify"*, *"there is no attestation for these bytes"* and *"I could not reach GitHub"* with the **same exit status**. The script establishes which of those happened rather than guessing: it checks that `gh` is logged in, checks that this `gh` has the `attestation` subcommand at all, and recognises a transport failure by its specific text. **An output it does not recognise is treated as a refusal**, because that is the direction to be wrong in — the other one is an archive nobody vouched for getting installed by whoever passed the flag. A DNS failure or a GitHub outage is therefore never reported as a statement about your release, which is the same rule `ghost upgrade` follows.
 
 To install without the check having run, which accepts the archive on the strength of a checksum from the same release and nothing more:
 
