@@ -339,20 +339,136 @@ func TestPartialRunDiscardsItsResultFiles(t *testing.T) {
 	}
 }
 
+// TestCloseAndDiscardPartialOutputsClosesBeforeUnlinking: the discard unlinks
+// the result files, and unlink fails on Windows while any handle to the file is
+// still open (Go opens without FILE_SHARE_DELETE, so DeleteFile is a sharing
+// violation). The files therefore have to be closed BEFORE the unlink, and
+// because a defer closes them again on the way out of run(), that close has to
+// be safe to repeat — a second os.File.Close on a closed file is fine, but a
+// nil handle (the flag was not passed) is not, and reaching one would panic.
+func TestCloseAndDiscardPartialOutputsClosesBeforeUnlinking(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "ranked.jsonl")
+	// A handle left open on the file, exactly as os.Create does mid-pass.
+	handle, err := os.Create(live)
+	if err != nil {
+		t.Fatalf("os.Create: %v", err)
+	}
+	if _, err := handle.WriteString("{}\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	removed, err := closeAndDiscardPartialOutputs(true, []*os.File{handle, nil}, live)
+	if err != nil {
+		t.Fatalf("closeAndDiscardPartialOutputs: %v", err)
+	}
+	if len(removed) != 1 {
+		t.Errorf("removed %v, want the open result file", removed)
+	}
+	if _, statErr := os.Stat(live); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("result file survived the discard (stat err = %v)", statErr)
+	}
+	// The handle is closed as a side effect, which is the property the
+	// unlink-on-Windows failure turns on. A Write on a closed *os.File fails
+	// with ErrClosed rather than panicking or silently succeeding.
+	if _, err := handle.WriteString("late\n"); !errors.Is(err, os.ErrClosed) {
+		t.Errorf("handle still open after the discard (write err = %v), want os.ErrClosed", err)
+	}
+	// The defer path: closing again must not panic, and a nil handle is a
+	// no-op rather than a nil dereference.
+	closeResultFiles(handle, nil)
+
+	// A complete pass closes its handles but deletes nothing.
+	kept := filepath.Join(dir, "per-question.jsonl")
+	keptHandle, err := os.Create(kept)
+	if err != nil {
+		t.Fatalf("os.Create: %v", err)
+	}
+	removed, err = closeAndDiscardPartialOutputs(false, []*os.File{keptHandle}, kept)
+	if err != nil {
+		t.Fatalf("closeAndDiscardPartialOutputs(false, ...): %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("a complete pass removed %v; its result files are the deliverable", removed)
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Errorf("a complete pass deleted %s (stat err = %v)", kept, err)
+	}
+}
+
+// TestDiscardFailureKeepsThePartialStatus: the exit statuses are a contract the
+// workflow branches on (0 complete, 3 partial, anything else a failure), and the
+// outcome of a pass that warmed the cache has not changed just because an
+// unlink failed. Reporting that as exitFailure would make a successful
+// cache-warming dispatch indistinguishable from a floor violation, and would
+// skip the re-dispatch the operator needs.
+func TestDiscardFailureKeepsThePartialStatus(t *testing.T) {
+	dir := t.TempDir()
+	// A non-empty directory at the -out path. An EMPTY directory would be
+	// removed happily on Linux, so the "not empty" case is what stands in for
+	// the unlink failures that actually occur (the Windows sharing violation,
+	// EACCES on a read-only parent).
+	stubborn := filepath.Join(dir, "per-question.jsonl")
+	if err := os.Mkdir(stubborn, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stubborn, "line.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("seed stubborn dir: %v", err)
+	}
+	ok := filepath.Join(dir, "ranked.jsonl")
+	if err := os.WriteFile(ok, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	discarded, err := discardPartialOutputs(true, ok, stubborn)
+	if err == nil {
+		t.Fatal("discardPartialOutputs on a directory = nil error; want the failure reported")
+	}
+	if len(discarded) != 1 || discarded[0] != ok {
+		t.Errorf("removed %v, want the removable file reported as removed even though a later one failed", discarded)
+	}
+	if !strings.Contains(err.Error(), stubborn) {
+		t.Errorf("error %q does not name the file that survived", err)
+	}
+}
+
 // TestReportPassNamesDiscardedFiles: the removal is only useful if the pass says
 // it happened, otherwise a re-dispatch finds its -out target missing with no
-// explanation in the log.
+// explanation in the log. A cleanup FAILURE is on the report too — and the
+// status is still exitPartial, because the pass warmed the cache either way and
+// the workflow's re-dispatch branch is what must still run.
 func TestReportPassNamesDiscardedFiles(t *testing.T) {
 	f := newFakeEmbedder(t, 0)
-	var buf bytes.Buffer
-	reportPass(&buf, passReport{
-		condition: "hybrid", overall: &agg{n: 1}, byType: map[string]*agg{},
-		scored: 1, embedder: f.emb, partial: true, budget: time.Minute, elapsed: time.Minute,
-		discarded: []string{"/tmp/ranked.jsonl"},
+
+	t.Run("removed files are named", func(t *testing.T) {
+		var buf bytes.Buffer
+		reportPass(&buf, passReport{
+			condition: "hybrid", overall: &agg{n: 1}, byType: map[string]*agg{},
+			scored: 1, embedder: f.emb, partial: true, budget: time.Minute, elapsed: time.Minute,
+			discarded: []string{"/tmp/ranked.jsonl"},
+		})
+		if !strings.Contains(buf.String(), "/tmp/ranked.jsonl") {
+			t.Errorf("partial report does not name the discarded result file: %q", buf.String())
+		}
 	})
-	if !strings.Contains(buf.String(), "/tmp/ranked.jsonl") {
-		t.Errorf("partial report does not name the discarded result file: %q", buf.String())
-	}
+
+	t.Run("a failed cleanup warns and still exits partial", func(t *testing.T) {
+		var buf bytes.Buffer
+		status := reportPass(&buf, passReport{
+			condition: "hybrid", overall: &agg{n: 1}, byType: map[string]*agg{},
+			scored: 1, embedder: f.emb, partial: true, budget: time.Minute, elapsed: time.Minute,
+			discardErr: errors.New("remove partial result /tmp/ranked.jsonl: directory not empty"),
+		})
+		if status != exitPartial {
+			t.Errorf("status = %d, want exitPartial=%d: the pass still warmed the cache, so its status must not change", status, exitPartial)
+		}
+		if !strings.Contains(buf.String(), "/tmp/ranked.jsonl") {
+			t.Errorf("partial report does not warn that a half-written file survived: %q", buf.String())
+		}
+		if !strings.Contains(buf.String(), "WARNING") {
+			t.Errorf("surviving file is not marked as a warning: %q", buf.String())
+		}
+	})
 }
 
 // TestReportPassCompletePrintsTheTable: the other half of the same branch —

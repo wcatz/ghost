@@ -289,7 +289,7 @@ func run() int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return exitFailure
 		}
-		defer outFile.Close() //nolint:errcheck
+		defer closeResultFiles(outFile, nil)
 	}
 
 	var retrievalOutFile *os.File
@@ -299,7 +299,7 @@ func run() int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return exitFailure
 		}
-		defer retrievalOutFile.Close() //nolint:errcheck
+		defer closeResultFiles(retrievalOutFile, outFile)
 	}
 
 	ctx := context.Background()
@@ -371,14 +371,18 @@ func run() int {
 	// would judge a subset of the benchmark and publish it as the result. The
 	// same rule the report follows (no metrics, no floors) has to reach the
 	// files that outlive the process.
+	// Close both handles before unlinking, and collect the outcome. Nothing
+	// here can change this pass's status: the pass warmed the cache and
+	// produced no result either way, so a failed unlink is reported by
+	// reportPass (which still returns exitPartial) rather than turned into an
+	// early exitFailure — that would make a cache-warming dispatch
+	// indistinguishable from a floor violation and skip the re-dispatch the
+	// operator needs.
+	//
 	// The `partial` flag is passed in rather than tested here, so the decision
 	// that a COMPLETE pass keeps its result files is part of the same tested
 	// function as the one that deletes them.
-	discarded, err := discardPartialOutputs(partial, *outPath, *retrievalOutPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return exitFailure
-	}
+	discarded, discardErr := closeAndDiscardPartialOutputs(partial, []*os.File{outFile, retrievalOutFile}, *outPath, *retrievalOutPath)
 
 	return reportPass(os.Stdout, passReport{
 		condition:         *condition,
@@ -394,7 +398,37 @@ func run() int {
 		budget:            *embedDeadline,
 		elapsed:           time.Since(start),
 		discarded:         discarded,
+		discardErr:        discardErr,
 	})
+}
+
+// closeAndDiscardPartialOutputs closes the -out / --retrieval-out handles and
+// then discards a partial pass's files, in that order.
+//
+// The order is the point. os.Remove fails on a file this process still holds
+// open on Windows — Go opens without FILE_SHARE_DELETE, so DeleteFile is a
+// sharing violation — and the defers registered when the files were created
+// have not run yet, because a defer fires when run() returns, which is after
+// this call. Closing here is what makes the unlink portable, and it is why the
+// close is a function that tolerates being called again by those defers.
+func closeAndDiscardPartialOutputs(partial bool, handles []*os.File, paths ...string) (removed []string, err error) {
+	closeResultFiles(handles...)
+	return discardPartialOutputs(partial, paths...)
+}
+
+// closeResultFiles closes the -out / --retrieval-out handles, tolerating nils
+// (the flags are optional) and being called twice. Both properties are needed:
+// run() closes them explicitly before discarding a partial pass's files, and the
+// defers registered at creation close them again on the way out. A second
+// os.File.Close on a closed file is harmless, but a nil handle is not, and
+// reaching one would panic rather than report.
+func closeResultFiles(files ...*os.File) {
+	for _, f := range files {
+		if f == nil {
+			continue
+		}
+		_ = f.Close()
+	}
 }
 
 // discardPartialOutputs removes the result files a partial pass left half
@@ -441,8 +475,11 @@ type passReport struct {
 	partial           bool
 	budget            time.Duration
 	elapsed           time.Duration
-	// discarded names the -out / --retrieval-out files a partial pass removed.
-	discarded []string
+	// discarded names the -out / --retrieval-out files a partial pass removed;
+	// discardErr is the cleanup failure, if any, whose file survived. It is
+	// reported but does not change the status.
+	discarded  []string
+	discardErr error
 }
 
 // reportPass writes a finished pass's report to out and returns its process
@@ -467,6 +504,13 @@ func reportPass(out io.Writer, r passReport) int {
 			// Named, not silent: the files this pass was going to produce are
 			// gone, and a bare "no such file" later would not say why.
 			_, _ = fmt.Fprintf(out, "Discarded partial result file(s): %s.\n", strings.Join(r.discarded, ", "))
+		}
+		if r.discardErr != nil {
+			// The half-written file outlived the pass. Say so on the report
+			// itself, not only on stderr, and still exit partial: this pass
+			// warmed the cache and produced no result, and its caller still
+			// has to re-dispatch.
+			_, _ = fmt.Fprintf(out, "WARNING: could not remove a partial result file, so a half-written one survives: %v\n", r.discardErr)
 		}
 		return exitCode(true, nil)
 	}
