@@ -560,6 +560,14 @@ func requireBash4(t *testing.T) {
 // "could not ask" as "no release" waves GoReleaser at a published release with
 // replace_existing_artifacts set — the exact failure the step stops.
 //
+// There is no `draft: true` answer among them, and there is no branch in the
+// script for one. The by-tag endpoint is documented as returning a PUBLISHED
+// release, so a draft 404s and is indistinguishable from a tag that has no
+// release — which is correct here, because a draft is precisely the case where
+// replace_existing_artifacts is safe. An earlier version of both script and test
+// handled `draft: true` explicitly; that branch could never run, and the test
+// case that fed it was asserting the script's shape rather than the API's.
+//
 // This is the same technique as
 // TestTheReleaseTimeGuardFailsOnASingleZeroMatchPattern, and for the same
 // reason: shape cannot tell a guard that fails from one that walks away quietly.
@@ -596,7 +604,12 @@ func TestThePublishedReleaseGuardRefuses(t *testing.T) {
 		t.Fatalf("step %q has no run body, so it cannot refuse anything", publishedReleaseGuardStepName)
 	}
 
-	requireBash4(t)
+	// Deliberately NOT requireBash4: that skip exists for the subject guard,
+	// whose script uses mapfile. This script is POSIX — a command
+	// substitution, a parameter expansion, printf and grep — so it runs
+	// anywhere bash 3 does, which is every macOS that has bash at all. A skip
+	// here would have been a guard that silently stopped running on the one
+	// platform where a developer is most likely to try a re-run by hand.
 
 	for _, tc := range []struct {
 		name    string
@@ -615,12 +628,22 @@ func TestThePublishedReleaseGuardRefuses(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "a re-run against a draft",
-			stdout:  "4242 true",
-			exit:    "0",
+			// A DRAFT arrives here looking exactly like the case above, and
+			// that is the point. GET /repos/{o}/{r}/releases/tags/{tag} is
+			// documented as "get a published release with the specified tag"
+			// and answers 200 or 404 and nothing else, so a draft 404s. There
+			// is therefore no `draft: true` answer to handle, and a re-run
+			// against the draft GoReleaser created is allowed by the branch
+			// that allows a first run.
+			name:    "a re-run against a draft, which the by-tag endpoint 404s",
+			stderr:  "gh: Not Found (HTTP 404)",
+			exit:    "1",
 			wantErr: false,
 		},
 		{
+			// The only answer that stops the job. A 200 from this endpoint is a
+			// published release, so `draft` is not consulted: the field would
+			// be false on every answer the endpoint can give.
 			name:    "a re-run against a published release",
 			stdout:  "4242 false",
 			exit:    "0",
