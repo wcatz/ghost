@@ -1703,18 +1703,33 @@ func TestSupersedeReport(t *testing.T) {
 		"  4 pair(s) not proposed:",
 		"  2 pair(s) proposed the reverse of a live supersedes link:",
 		"  1 pair(s) refused:",
-		"ghost supersede <project> --reassess",
+		"ghost supersede <project> --reassess --apply",
 	} {
 		if !strings.Contains(orientation, want) {
 			t.Errorf("supersedeReport() = %q, want it to contain %q", orientation, want)
 		}
 	}
-	// Each reason must also say what it costs, so the count cannot be read as
-	// "the pass lost these pairs" when two of the three did not lose them.
-	for _, want := range []string{"no classify call, no link", "judged in the link's direction instead", "not judged, not written"} {
+	// Each reason states the DECISION, not a judgment the pass may never have
+	// made. All three counts are taken before the filters that spend a call, so
+	// a line claiming a pair "was judged" describes a pass that did not run —
+	// the review-gate finding on the OppositeLive line, which the wording here
+	// has to keep fixed: the scan's ORIENTATION was refused, and the pair is
+	// re-judged only under skip-if-unchanged.
+	for _, want := range []string{
+		"no classify call, no link",
+		"the reverse orientation was refused and the pair keeps the link's direction",
+		"only if an endpoint changed since the link was written",
+		"not judged, not written",
+	} {
 		if !strings.Contains(orientation, want) {
-			t.Errorf("supersedeReport() = %q, want it to say %q so the count is not read as a dropped pair", orientation, want)
+			t.Errorf("supersedeReport() = %q, want it to say %q so the count is not read as a pair the classifier saw", orientation, want)
 		}
+	}
+	// The named repair is the APPLIED form: `Reassess` withdraws only under
+	// --apply, so the flagless command an operator copies would predict the
+	// withdrawal and leave the cycle demoting both endpoints.
+	if strings.Contains(orientation, "--reassess`") || strings.Contains(orientation, "--reassess\n") {
+		t.Errorf("supersedeReport() = %q, want the repair quoted with --apply, not as a dry run", orientation)
 	}
 	// A pass with no refusals prints the summary alone, and the reasons do not
 	// accumulate across calls: they are per-pass facts, each conditional on its

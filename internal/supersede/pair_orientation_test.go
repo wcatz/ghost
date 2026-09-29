@@ -122,12 +122,18 @@ func TestRunJudgesOneDirectionForAPairTheScanAndALiveLinkDisagreeAbout(t *testin
 	}
 	// (2) The refusal is COUNTED and NAMED. A pass that declined a proposal and
 	// reported the same totals as one that found nothing reads as "nothing was
-	// skipped".
+	// skipped". It counts a refused ORIENTATION, not a classification: the pair
+	// then faces skip-if-unchanged like any live edge, and this fixture's link is
+	// backdated precisely so it survives that and reaches the classifier — which
+	// (1) above already showed it does.
 	if res.OppositeLive != 1 {
-		t.Errorf("Result.OppositeLive = %d, want 1: the scan proposed the reverse of a live supersedes edge and the pass refused that proposal", res.OppositeLive)
+		t.Errorf("Result.OppositeLive = %d, want 1: the scan proposed the reverse of a live supersedes edge and the pass refused that orientation", res.OppositeLive)
 	}
 	// (3) No cycle. The edge that was already live is the one this pass may
-	// write, and its reverse must never appear.
+	// write, and its reverse must never appear. This is the assertion the
+	// Result counters alone could not make: a pass can report one creation and
+	// still leave a cycle behind, because the two orientations are two
+	// candidates and each one is counted honestly.
 	edges := liveSupersedesEdges(t, store, stale, fix)
 	if len(edges) != 1 || edges[0] != [2]string{stale, fix} {
 		t.Errorf("live supersedes edges = %v, want exactly [%s %s]: a pass must never write both directions of one pair, because a cycle demotes both endpoints",
@@ -217,8 +223,10 @@ func TestRunRefusesAPairTheGraphAlreadyClaimsInBothDirections(t *testing.T) {
 	if res.WouldWriteLinks() {
 		t.Error("WouldWriteLinks() is true for a pass that refused its only pair, so a dry run would promise a link it does not write")
 	}
-	// The pre-existing cycle is left exactly as found — this pass creates
-	// links, `--reassess` withdraws them — so the report has to name the repair.
+	// The pre-existing cycle is left exactly as found — this pass creates links
+	// and `--reassess --apply` is what withdraws one of them — so the report has
+	// to name the repair in its APPLIED form, and cmd/ghost's supersedeReport
+	// test pins that wording there.
 	if edges := liveSupersedesEdges(t, store, newer, older); len(edges) != 2 {
 		t.Errorf("live supersedes edges = %v, want the pre-existing 2 untouched: the creation pass does not withdraw graph history", edges)
 	}

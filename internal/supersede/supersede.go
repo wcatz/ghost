@@ -436,12 +436,17 @@ type Result struct {
 	// direction invented from a hash is the #641 harm wearing a tiebreak.
 	Unoriented int
 	// OppositeLive counts the pairs whose fresh proposal was the REVERSE of a
-	// live 'supersedes' edge, which the pass refused and then judged in the
-	// edge's own direction instead (#778). It is the count of a pass declining
-	// a proposal, and it is on the report because the totals it appears in
-	// would otherwise be indistinguishable from a pass that found nothing to do
-	// about those pairs: the pair is still judged, but the direction the
-	// classifier was shown came from the graph, not from updated_at.
+	// live 'supersedes' edge, and whose fresh orientation the pass therefore
+	// refused (#778). It counts REFUSED PROPOSALS, not classifications: a
+	// refused pair still has to survive the endpoint-existence check,
+	// skip-if-unchanged (a live edge whose endpoints have not moved since it was
+	// written is not re-judged), the scope and persistent filters and the
+	// imperative veto before any of them reaches the classifier, so a counted
+	// pair may be one the pass spent no call on. What the count is exactly is
+	// what the pass decided HERE — the graph's direction beat the scan's — which
+	// is why the report line says the orientation was refused rather than
+	// claiming a judgment, and why the pairs the classifier did see in the link's
+	// direction are the ordinary Candidate/Reclassified totals above.
 	OppositeLive int
 	// Bidirectional counts the pairs the graph already claims in BOTH
 	// directions — the cycle a pass before #778 could write, left in place for
@@ -561,10 +566,13 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // counted and on the report, and each a refusal rather than a guess:
 //
 //   - One pass classifies a pair at most once, in the direction the GRAPH
-//     asserts whenever a live edge names one (Result.OppositeLive for a scan
-//     proposal that contradicted it). The edge's direction is the one a
+//     asserts whenever a live edge names one. The edge's direction is the one a
 //     REVERSED verdict has to be shown, because that is the wrong edge --reassess
-//     and this pass's own withdrawal both have to reach.
+//     and this pass's own withdrawal both have to reach. A scan proposal that
+//     contradicted it is refused AS A DIRECTION and counted
+//     (Result.OppositeLive), which is a count of refused orientations and not of
+//     classifications: the pair continues in the link's direction and is
+//     re-judged only under skip-if-unchanged, like any other untouched live edge.
 //   - A pair the graph already claims in BOTH directions is refused outright
 //     (Result.Bidirectional): no third direction exists, so no orientation of it
 //     can be judged into a state worth keeping, and the repair is the withdrawal
@@ -668,7 +676,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			// creates links, and withdrawing one is `ghost supersede --reassess`.
 			res.Bidirectional++
 			if logger != nil {
-				logger.Info("supersede: refusing a pair the graph claims in both directions (run ghost supersede --reassess)",
+				logger.Info("supersede: refusing a pair the graph claims in both directions (ghost supersede --reassess --apply withdraws one)",
 					"newer", links[0].SourceID, "older", links[0].TargetID)
 			}
 			continue
@@ -690,13 +698,16 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			all = append(all, cand)
 			continue
 		}
-		// The scan proposed the REVERSE of an edge the graph already asserts.
-		// The pair is still judged, in the edge's direction, and the refused
-		// proposal is counted so a report can say the scan's orientation lost.
+		// The scan proposed the REVERSE of an edge the graph already asserts. The
+		// pair continues below in the edge's own direction — subject to the same
+		// skip-if-unchanged, existence, scope, persistent and veto filters as any
+		// other live-link pair, so it is not thereby guaranteed a classify call —
+		// and the refused orientation is counted, because what this pass decided
+		// here is that the graph's direction beat the scan's.
 		if isFresh {
 			res.OppositeLive++
 			if logger != nil {
-				logger.Info("supersede: scan proposed the reverse of a live supersedes link; judging the pair in the link's direction",
+				logger.Info("supersede: scan proposed the reverse of a live supersedes link; keeping the link's direction",
 					"link", l.SourceID, l.TargetID, "scan", cand.NewerID, cand.OlderID)
 			}
 		}

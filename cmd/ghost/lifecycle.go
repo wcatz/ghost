@@ -1642,13 +1642,15 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 // had to re-ask a failed call is not the pass the summary describes, and a
 // harness that is flapping shows up here before it shows up as a failure.
 //
-// The three orientation refusals each say what was refused AND what the pass
-// did instead, because a count alone leaves the operator guessing whether the
-// pairs were considered and dropped or never seen: OppositeLive pairs were still
-// judged, in the direction the live link asserts; Unoriented pairs were not
-// proposed, because the two rows share both timestamps; Bidirectional pairs are
-// the cycle `ghost supersede --reassess` repairs, named as the next step because
-// this pass writes links and does not withdraw them.
+// Each of the three orientation reasons states the DECISION and not a judgment
+// the pass may never have made, because each count is taken before the filters
+// that would have spent a call: OppositeLive counts refused ORIENTATIONS, so the
+// line says the scan's direction lost and that the pair keeps the link's
+// direction, not that the pair was re-validated; Unoriented pairs were never
+// proposed; Bidirectional pairs are the cycle `ghost supersede --reassess
+// --apply` withdraws, named as the next step because this pass creates links and
+// does not delete graph history. The repair is quoted in its APPLIED form, since
+// the flagless one is a dry run that withdraws nothing.
 func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
 	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
 		projectName, res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
@@ -1659,10 +1661,10 @@ func supersedeReport(projectName string, res supersede.Result, verb string, call
 		out += fmt.Sprintf("  %d pair(s) not proposed: both notes carry the same updated_at AND the same created_at (a bulk import stamps a whole batch at once), so there is no chronology to order them by — no classify call, no link, and not cached (a live link on such a pair is still re-judged, since it already carries a direction)\n", res.Unoriented)
 	}
 	if res.OppositeLive > 0 {
-		out += fmt.Sprintf("  %d pair(s) proposed the reverse of a live supersedes link: judged in the link's direction instead, so one pass never carries a pair both ways round\n", res.OppositeLive)
+		out += fmt.Sprintf("  %d pair(s) proposed the reverse of a live supersedes link: the reverse orientation was refused and the pair keeps the link's direction, so one pass never carries a pair both ways round (a pair is re-judged only if an endpoint changed since the link was written)\n", res.OppositeLive)
 	}
 	if res.Bidirectional > 0 {
-		out += fmt.Sprintf("  %d pair(s) refused: a supersedes link is already live in BOTH directions, which demotes both endpoints — not judged, not written, and not withdrawn here; run `ghost supersede <project> --reassess` to repair it\n", res.Bidirectional)
+		out += fmt.Sprintf("  %d pair(s) refused: a supersedes link is already live in BOTH directions, which demotes both endpoints — not judged, not written, and not withdrawn here; run `ghost supersede <project> --reassess --apply` to withdraw one of the two\n", res.Bidirectional)
 	}
 	return out
 }
