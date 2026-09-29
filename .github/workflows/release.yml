@@ -2,21 +2,37 @@ name: release
 
 # RECOVERY
 #
-# This workflow fails in places a maintainer cannot fix from the tag, and the
-# answer is always the same: re-run the failed job. Nothing here is
-# irreversible until the plugin job's `gh release edit --draft=false`, and
-# releases/latest keeps serving the previous release until then.
+# Re-running the failed job is the answer for MOST failures here, and the
+# exceptions are documented where they arise rather than here — the plugin job's
+# failure-ordering comment names a prerelease tag the digest script rejects
+# (delete the draft, fix/retag) and a catalog commit step that is blocked on
+# ruleset policy (the manual admin runbook). Read that comment before assuming
+# a re-run helps.
+#
+# What is true is narrower than "nothing here is irreversible". Two things get
+# published on the tag push, before any release exists at all: the docker job
+# declares no `needs:`, so it pushes `ghcr.io/wcatz/ghost:latest` in parallel
+# with the release job, and a re-run of an OLD tag's docker job would move that
+# tag again. The release itself is not published until the plugin job's
+# `gh release edit --draft=false`, and releases/latest keeps serving the previous
+# release until then.
 #
 # Re-running the `release` job after a failure AFTER GoReleaser has uploaded —
-# the attestation subject guard, or the attest step, which needs Sigstore,
-# Fulcio and GitHub's OIDC provider — works because .goreleaser.yml sets
-# replace_existing_artifacts: true. A re-run starts at the first step, so
-# GoReleaser runs again, use_existing_draft adopts the draft that already holds
-# every asset, and each archive collides with its own name. GitHub answers 422,
-# and GoReleaser's Upload (internal/client/github.go) deletes the colliding
-# asset and returns a retriable error — but ONLY with that setting; without it
-# the same 422 is returned as a plain error and the run aborts on the first
-# archive, leaving a draft that has to be cleared by hand.
+# the published-release guard, the attestation subject guard, or the attest step,
+# which needs Sigstore, Fulcio and GitHub's OIDC provider — works because
+# .goreleaser.yml sets replace_existing_artifacts: true. A re-run starts at the
+# first step, so GoReleaser runs again, use_existing_draft adopts the draft that
+# already holds every asset, and each archive collides with its own name. GitHub
+# answers 422, and GoReleaser's Upload (internal/client/github.go) deletes the
+# colliding asset and returns a retriable error — but ONLY with that setting;
+# without it the same 422 is returned as a plain error and the run aborts on the
+# first archive, leaving a draft that has to be cleared by hand.
+#
+# That is true only while the release is a DRAFT, which is why the job refuses to
+# start at all when the release for the tag is already published — a "Re-run all
+# jobs" in the plugin job's post-publish window would otherwise replace
+# published, already-attested assets. In that window, re-run the plugin job
+# alone.
 #
 # Re-running the `plugin` job works for the same reason: its `gh release upload`
 # passes --clobber.
@@ -75,6 +91,42 @@ jobs:
             exit 1
           fi
           echo "server.json matches release ${VERSION}"
+
+      - name: Refuse to build into a published release
+        # .goreleaser.yml sets replace_existing_artifacts so that a re-run
+        # after a POST-UPLOAD failure can replace the assets it already
+        # uploaded (see the RECOVERY block at the top of this file). That is
+        # only safe while the release is a DRAFT.
+        #
+        # The window where it is not is documented in the plugin job below:
+        # "after publish, before catalog push — re-run safe". A "Re-run all
+        # jobs" in that window re-runs THIS job, and without this step
+        # GoReleaser would be pointed at a public release that already holds
+        # every asset. Each archive then answers 422 and, because of
+        # replace_existing_artifacts, GoReleaser would DELETE it and re-upload
+        # it — turning a loud failure into a silent replacement of published,
+        # already-attested assets while main's catalog still pins the old
+        # digests.
+        #
+        # So the loud case stays loud: a published release stops this job and
+        # says what to do instead, which is to re-run the plugin job alone.
+        # Nothing to check on a first run — there is no release for the tag yet.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            --jq '.id' 2>/dev/null || true)
+          if [ -z "$RELEASE_ID" ]; then
+            echo "no release exists for ${GITHUB_REF_NAME} yet — GoReleaser will create the draft"
+            exit 0
+          fi
+          IS_DRAFT=$(gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.draft')
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "release ${GITHUB_REF_NAME} is a draft (${RELEASE_ID}) — a re-run may replace its assets"
+            exit 0
+          fi
+          echo "::error::release ${GITHUB_REF_NAME} (${RELEASE_ID}) is PUBLISHED, so this job will not rebuild it. GoReleaser would replace published, already-attested assets, and main's catalog still pins the digests they had before. Re-run the plugin job alone (it is idempotent) — or delete the release and re-tag if this tag was wrong."
+          exit 1
 
       - name: Run GoReleaser
         # release.draft (goreleaser.yml) makes this create a DRAFT release:

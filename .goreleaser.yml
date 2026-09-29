@@ -47,10 +47,18 @@ release:
   # GoReleaser's PublishRelease is a no-op while release.draft is set, so this job
   # never publishes — the plugin job does that with `gh release edit --draft=false`,
   # and only once the attestations are in place. So every asset this setting
-  # replaces is an unpublished one. With draft: false it would start overwriting
-  # assets on a public release, which is why TestTheReleaseJobIsReRunnable holds
-  # the pair rather than the setting alone. The plugin job's `gh release upload`
-  # already applies the same policy with --clobber.
+  # replaces is an unpublished one.
+  #
+  # "Unpublished" is enforced, not assumed: the release job's "Refuse to build
+  # into a published release" step stops it before GoReleaser runs if the release
+  # for the tag is already public. Without that, a "Re-run all jobs" in the
+  # plugin job's documented post-publish window would run this job against a
+  # published release and quietly delete and re-upload its attested assets while
+  # main's catalog still pins the old digests. With draft: false it would do the
+  # same on every run. TestTheReleaseJobRefusesAPublishedRelease and
+  # TestTheReleaseJobIsReRunnable hold the pair and the guard together; the
+  # plugin job's `gh release upload` already applies the same policy with
+  # --clobber.
   replace_existing_artifacts: true
   extra_files:
     - glob: install.ps1

@@ -508,6 +508,59 @@ func TestTheGuardStepIsNotABuildStep(t *testing.T) {
 	}
 }
 
+// publishedReleaseGuardStepName is the step that makes the draft assumption
+// above an enforced one rather than a claim.
+const publishedReleaseGuardStepName = "Refuse to build into a published release"
+
+// TestTheReleaseJobRefusesAPublishedRelease is the other half of
+// TestTheReleaseJobIsReRunnable, and it exists because replace_existing_artifacts
+// is only safe while the release is a DRAFT.
+//
+// The plugin job's failure-ordering comment documents a window — "after publish,
+// before catalog push" — in which a re-run is safe, and a "Re-run all jobs" in
+// that window re-runs the RELEASE job too, with GoReleaser pointed at a release
+// that is now public and holds every asset. Without a guard, that re-run hits
+// every 422 and, because this change sets replace_existing_artifacts, responds
+// by DELETING each colliding asset and re-uploading it. So the failure mode
+// moves from a loud 422 — the whole point of keeping the plugin job's ordering
+// documented — to a silent replacement of published, already-attested assets
+// under a catalog that main still pins to the old digests.
+//
+// The guard makes the loud case loud again, with a message that says what to do,
+// and it is asserted to run BEFORE GoReleaser because after the upload the
+// damage is done.
+func TestTheReleaseJobRefusesAPublishedRelease(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	steps := wf.Jobs["release"].Steps
+
+	guardIdx, goreleaserIdx := -1, -1
+	for i, s := range steps {
+		switch {
+		case s.Name == publishedReleaseGuardStepName:
+			guardIdx = i
+		case strings.HasPrefix(s.Uses, "goreleaser/goreleaser-action@"):
+			goreleaserIdx = i
+		}
+	}
+	if goreleaserIdx == -1 {
+		t.Fatal("no goreleaser step found in the release job")
+	}
+	if guardIdx == -1 {
+		t.Errorf("the release job has no %q step, so a re-run in the plugin job's documented \"after publish, before catalog push\" window would run GoReleaser against a PUBLISHED release and replace_existing_artifacts would delete and re-upload its attested assets",
+			publishedReleaseGuardStepName)
+		return
+	}
+	if guardIdx > goreleaserIdx {
+		t.Errorf("%q runs at %d, after GoReleaser at %d; the assets are uploaded by then and the replacement has already happened",
+			publishedReleaseGuardStepName, guardIdx, goreleaserIdx)
+	}
+	// And it has to be able to see the release, which means the API scope the
+	// check needs is one the job already holds.
+	if got := wf.Jobs["release"].Permissions["contents"]; got != "write" {
+		t.Errorf("the release job holds contents: %q, so the guard cannot read the release for the tag", got)
+	}
+}
+
 // TestTheReleaseJobIsReRunnable keeps the documented recovery real.
 //
 // This change puts two steps in the release job AFTER GoReleaser has uploaded
@@ -546,6 +599,13 @@ func TestTheGuardStepIsNotABuildStep(t *testing.T) {
 // are therefore always unpublished ones. If draft were ever turned off, the
 // same setting would start overwriting assets on a PUBLIC release, so that is
 // the pair this test holds together.
+//
+// "Unpublished" is the part that needs a second guard rather than just a
+// claim, and that guard is the release job refusing to run against a published
+// release: the plugin job's failure-ordering comment blesses a re-run in the
+// window after the publish, and a "Re-run all jobs" there re-runs THIS job
+// with GoReleaser pointed at a public release. TestTheReleaseJobRefusesAPublished
+// Release is that guard, and the pair of tests is the whole argument.
 func TestTheReleaseJobIsReRunnable(t *testing.T) {
 	g := loadGoreleaser(t)
 
