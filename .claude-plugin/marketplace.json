@@ -18,8 +18,8 @@
       "homepage": "https://github.com/wcatz/ghost",
       "source": {
         "source": "archive",
-        "url": "https://github.com/wcatz/ghost/releases/download/v0.41.0/ghost-plugin.zip",
-        "sha256": "23106e11fe800171dfbddec4a776a9c1dccd1574e445e0dd9e8511c3af86969a"
+        "url": "https://github.com/wcatz/ghost/releases/download/v0.42.0/ghost-plugin.zip",
+        "sha256": "08273d310df6b988ab8b95b2087afe7f3887c796df269dacb331dee510f6a522"
       }
     },
     {
@@ -33,8 +33,8 @@
       "homepage": "https://github.com/wcatz/ghost",
       "source": {
         "source": "archive",
-        "url": "https://github.com/wcatz/ghost/releases/download/v0.41.0/ghost-plugin-windows-amd64.zip",
-        "sha256": "d6647d5bafa93bab886942257a8e6b635f79b9dfebc498f066d2089a47e38a3b"
+        "url": "https://github.com/wcatz/ghost/releases/download/v0.42.0/ghost-plugin-windows-amd64.zip",
+        "sha256": "a0df46ce4ceef29d4c4354ee9be1975346ab10c26df473a7efb0d7f44e88fec5"
       }
     },
     {
@@ -48,8 +48,8 @@
       "homepage": "https://github.com/wcatz/ghost",
       "source": {
         "source": "archive",
-        "url": "https://github.com/wcatz/ghost/releases/download/v0.41.0/ghost-plugin-windows-arm64.zip",
-        "sha256": "0c3bdbfc35f36e6f0392b2c24d160349d4a25f860fb6e5f66ff5820a4beb1d3d"
+        "url": "https://github.com/wcatz/ghost/releases/download/v0.42.0/ghost-plugin-windows-arm64.zip",
+        "sha256": "05d6ed15340da429cd44b7ca452c1f7f0d8411609b491d5eef38dc4b16caa7af"
       }
     }
   ]
