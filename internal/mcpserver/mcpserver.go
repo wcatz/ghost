@@ -1758,6 +1758,13 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
+		// The RAW name is kept, because `ResolveProject` answers an unknown name
+		// with `("", "", nil)` and the message below formats what it is given:
+		// assigning the resolved id over `args.ProjectID` and then formatting that
+		// produced `Project "" is not registered with Ghost yet`, which names
+		// nothing the caller can act on and reads as though Ghost held a project
+		// with an empty name.
+		asked := args.ProjectID
 		resolved, _, resolveErr := s.store.ResolveProject(ctx, args.ProjectID)
 		if resolveErr != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", resolveErr)
@@ -1767,9 +1774,40 @@ func (s *Server) registerTools() {
 		// One read for both filters, so neither is applied to an already-trimmed
 		// result: a category that matched four of the ten rows the limit allowed
 		// would otherwise report the other six as absent.
-		memories, err := s.store.ListMemories(ctx, args.ProjectID, args.Category, args.Retention, args.Limit)
-		if err != nil {
-			return nil, nil, fmt.Errorf("list failed: %w", err)
+		//
+		// SKIPPED for an unresolved project, which closes a real leak. `ListMemories`
+		// widens its scope to `(project_id = ? OR project_id = '_global')` whenever a
+		// category or retention filter is present, so a FILTERED browse of a project
+		// Ghost has never heard of was handed `project_id = ''` and returned every
+		// project's matching rows. The not-registered sentence was then unreachable
+		// for that call, because the answer was never empty — an agent browsing "all
+		// the gotchas" in a project it misspelled was shown every project's
+		// gotchas. An UNFILTERED read does not widen, which is why only the filtered
+		// case leaked.
+		//
+		// The POSITION, stated rather than deferred: an unresolved project browses
+		// NOTHING, and the not-registered sentence is the answer. Showing the
+		// cross-project rows under a heading that admits where they came from is
+		// defensible — `ghost_project_context` now does exactly that for the same
+		// unresolved name — and it is not done here because a BROWSE is a different
+		// promise from a context block. A browse is "show me this project's
+		// memories, optionally filtered", and a project with no memories has an
+		// empty answer; inventing a section to fill it would be answering a question
+		// the caller did not ask. The context block makes the opposite promise — the
+		// SessionStart instructions send an agent there precisely when the directory
+		// matched nothing, and tell it to look for the cross-project rows — so it
+		// has to deliver them.
+		//
+		// Either way the widening is closed and the sentence is reachable. Whether
+		// `ListMemories` should widen AT ALL is a question about its own scope, and
+		// belongs in a commit about `ListMemories`.
+		var memories []memory.Memory
+		var err error
+		if args.ProjectID != "" {
+			memories, err = s.store.ListMemories(ctx, args.ProjectID, args.Category, args.Retention, args.Limit)
+			if err != nil {
+				return nil, nil, fmt.Errorf("list failed: %w", err)
+			}
 		}
 
 		if len(memories) == 0 {
@@ -1779,7 +1817,7 @@ func (s *Server) registerTools() {
 			case existsErr != nil:
 				text = "Project lookup failed — unable to determine whether it is registered."
 			case !exists:
-				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", args.ProjectID)
+				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", asked)
 			case args.Category != "" && args.Retention != "":
 				text = fmt.Sprintf("No memories found in category %q with retention %q for this project.", args.Category, args.Retention)
 			case args.Category != "":
