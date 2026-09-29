@@ -594,7 +594,7 @@ func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (int64,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "purge-history")
 	if err != nil {
 		return 0, fmt.Errorf("begin purge history: %w", err)
 	}

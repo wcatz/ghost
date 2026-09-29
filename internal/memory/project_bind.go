@@ -179,7 +179,7 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, _, err := s.beginWrite(ctx, "bind-project")
 	if err != nil {
 		return result, fmt.Errorf("begin bind project tx: %w", err)
 	}

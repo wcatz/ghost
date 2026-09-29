@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // Task represents a work item for a project.
@@ -33,15 +34,30 @@ func (s *Store) CreateTask(ctx context.Context, projectID, title, description st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var id string
-	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO tasks (project_id, title, description, priority)
-		VALUES (?, ?, ?, ?)
-		RETURNING id
-	`, projectID, title, description, priority).Scan(&id)
+	// A guarded TRANSACTION rather than execGuardedWrite: `RETURNING id` is a
+	// read, and the row must come back from the insert that produced it, so the
+	// scan has to run inside the same transaction — which is also where the
+	// newer-store check runs (#746). Routing this through QueryRowContext on the
+	// pool instead, as it did, is how a write reaches a store a newer Ghost owns
+	// with nothing checking: `ghost_task_create` is the live tool behind it.
+	tx, lock, err := s.beginWrite(ctx, "create-task")
 	if err != nil {
 		return "", fmt.Errorf("create task: %w", err)
 	}
+
+	var id string
+	if err := tx.QueryRowContext(ctx, `
+		INSERT INTO tasks (project_id, title, description, priority)
+		VALUES (?, ?, ?, ?)
+		RETURNING id
+	`, projectID, title, description, priority).Scan(&id); err != nil {
+		_ = tx.Rollback()
+		return "", fmt.Errorf("create task: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("create task: %w", err)
+	}
+	lock.reportHold("create-task", time.Now())
 	return id, nil
 }
 
@@ -138,7 +154,7 @@ func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) error {
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.execGuardedWrite(ctx, "complete-task", `
 		UPDATE tasks SET status = 'done', notes = ?, completed_at = datetime('now'), updated_at = datetime('now')
 		WHERE id = ?
 	`, notes, id)
@@ -224,7 +240,7 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 		t.Description = *description
 	}
 
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := s.execGuardedWrite(ctx, "update-task", `
 		UPDATE tasks SET status = ?, priority = ?, description = ?, updated_at = datetime('now')
 		WHERE id = ?
 	`, t.Status, t.Priority, t.Description, id); err != nil {
