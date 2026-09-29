@@ -178,8 +178,17 @@ func (a *fakeAgent) Ask(_ context.Context, prompt string) (string, error) {
 
 func runFixture(t *testing.T, g *fakeGhost, a *fakeAgent) *Result {
 	t.Helper()
+	return runFixtureStory(t, ReversedDecision(), g, a)
+}
+
+// runFixtureStory is runFixture for a caller-chosen storyline, so a test can
+// exercise a shape the shipped arc does not have — an opening record that is
+// itself reversed, say — without the shipped storyline growing an arc nobody
+// asked for.
+func runFixtureStory(t *testing.T, s Storyline, g *fakeGhost, a *fakeAgent) *Result {
+	t.Helper()
 	r := &Run{
-		Story:   ReversedDecision(),
+		Story:   s,
 		WorkDir: "/scratch/work/acme",
 		Ghost:   g,
 		Agent:   a,
@@ -454,6 +463,28 @@ func TestRunGradedStateComesFromTheStore(t *testing.T) {
 		if c := checkNamed(res, name); c.Passed {
 			t.Errorf("%s passed against a block that still quotes the superseded claim", name)
 		}
+	}
+}
+
+// TestRunGradesAReversalOfAnOpeningRecord: the opening notes are saved BEFORE
+// the first session, and their ids used to live only in a local slice, so
+// idOf could not resolve them. A storyline may supersede an OPENING record —
+// Validate accepts it, because stageOf answers -1 for an opening record and the
+// SupersededBy rule only demands a LATER stage — and the supersede-edge check
+// names BOTH keys, so it would fail with "no id reached the grade" on a store
+// that had the edge perfectly right. A runner defect must never surface as a
+// check a reader takes as a finding about Ghost.
+func TestRunGradesAReversalOfAnOpeningRecord(t *testing.T) {
+	s := goodStory()
+	s.Opening[0].SupersededBy = "reversal"
+	if err := s.Validate(); err != nil {
+		t.Fatalf("a reversal of an opening record must validate: %v", err)
+	}
+	g := &fakeGhost{}
+	g.edge = &fakeEdge{source: "reversal", target: "opening", relation: "supersedes"}
+	res := runFixtureStory(t, s, g, &fakeAgent{})
+	if c := checkNamed(res, "supersede-edge:reversal"); !c.Passed {
+		t.Errorf("the edge on an opening record did not resolve: %s", c.Detail)
 	}
 }
 

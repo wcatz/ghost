@@ -32,11 +32,29 @@ type Agent interface {
 // differs.
 type opencodeAgent struct{ client *ai.OpenCodeClient }
 
+// resolveModel decides the ONE model a run is measured with, and it is a
+// function rather than a passthrough because an empty -model is not a pin.
+//
+// internal/ai's OpenCodeClient falls back to the RUNNER's own
+// GHOST_OPENCODE_MODEL before its default, so an empty string here would let a
+// stale export in the developer's shell decide what the sessions run on — while
+// the arc's classification phases, whose child env has that variable DROPPED,
+// run on Ghost's default, and the report names the default. Three different
+// models behind one number. Resolving here means the sessions, the phases, the
+// judge and the report all name the same one, and the default is a stated model
+// rather than a fallback the environment can move.
+func resolveModel(model string) string {
+	if m := strings.TrimSpace(model); m != "" {
+		return m
+	}
+	return ai.DefaultOpenCodeModel
+}
+
 // newAgent returns the harness a run drives its sessions (and its judge) with.
-// An empty model keeps Ghost's own default rather than the user's OpenCode
-// default, which the isolated child cannot read anyway.
+// The model is always resolved (see resolveModel), so a non-empty string here is
+// a pin rather than a hint.
 func newAgent(model string) Agent {
-	return opencodeAgent{client: ai.NewOpenCodeClientWithBinaryAndModel("opencode", model)}
+	return opencodeAgent{client: ai.NewOpenCodeClientWithBinaryAndModel("opencode", resolveModel(model))}
 }
 
 func (a opencodeAgent) Ask(ctx context.Context, prompt string) (string, error) {

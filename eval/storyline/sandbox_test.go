@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/ai"
 )
 
 // TestScratchEnvConfinesEveryRoot is the isolation contract every ghost process
@@ -69,6 +71,37 @@ func TestScratchEnvPinsTheRunModelForEveryHarnessCall(t *testing.T) {
 		return strings.HasPrefix(kv, "GHOST_OPENCODE_MODEL=")
 	}) {
 		t.Error("an inherited or invented model pin reached the child")
+	}
+}
+
+// TestResolveModelNamesOneModelForTheWholeRun: an empty -model is not a pin.
+// internal/ai's OpenCodeClient falls back to the RUNNER's own
+// GHOST_OPENCODE_MODEL before its own default, and scratchEnv only rewrites the
+// environment of the CHILD ghost processes — never the runner's. So a developer
+// with that variable exported and no -model would get sessions run on one model,
+// the arc's classification phases run on another, and a report whose `model:`
+// line names a third. The model is resolved ONCE, before anything is built or
+// spawned, so the sessions, the phases, the judge and the report all name the
+// same one — and an inherited export cannot become a silent sixth participant.
+func TestResolveModelNamesOneModelForTheWholeRun(t *testing.T) {
+	t.Setenv("GHOST_OPENCODE_MODEL", "somebody-elses/model")
+
+	if got := resolveModel("  opencode-go/glm-5.3-flash "); got != "opencode-go/glm-5.3-flash" {
+		t.Errorf("resolveModel trimmed a named model to %q", got)
+	}
+	// Empty or whitespace means Ghost's own default, STATED rather than left to
+	// an environment lookup: the default is a real model with a real name, and a
+	// report that says "ghost default" while a stale export decided otherwise is
+	// the false attribution this exists to prevent.
+	for _, in := range []string{"", "   ", "\t"} {
+		if got := resolveModel(in); got != ai.DefaultOpenCodeModel {
+			t.Errorf("resolveModel(%q) = %q, want the stated default %q", in, got, ai.DefaultOpenCodeModel)
+		}
+	}
+	// And the resolved value is what the child env carries, so the phases judge
+	// by the same model the report names.
+	if !slices.Contains(scratchEnv("/scratch", resolveModel("")), "GHOST_OPENCODE_MODEL="+ai.DefaultOpenCodeModel) {
+		t.Error("the resolved default did not reach the child env")
 	}
 }
 

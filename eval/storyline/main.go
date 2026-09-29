@@ -92,7 +92,12 @@ func run(cfg config) error {
 	if err := seedOpencodeAuth(scratch, cfg.authFile); err != nil {
 		return err
 	}
-	env := scratchEnv(scratch, cfg.model)
+	// Resolved once, here, before anything is built or spawned: the sessions, the
+	// arc's phases and the report all have to name ONE model, and leaving the
+	// choice to a fallback would let an inherited GHOST_OPENCODE_MODEL decide the
+	// sessions alone (see resolveModel).
+	model := resolveModel(cfg.model)
+	env := scratchEnv(scratch, model)
 
 	// The session-start block resolves a project from a DIRECTORY, and the
 	// directory it resolves is the one the storyline's project is bound to. The
@@ -126,13 +131,13 @@ func run(cfg config) error {
 
 	var judge Agent
 	if cfg.judge {
-		judge = newAgent(cfg.model)
+		judge = newAgent(model)
 	}
 	r := &Run{
 		Story:   story,
 		WorkDir: workDir,
 		Ghost:   ghost,
-		Agent:   newAgent(cfg.model),
+		Agent:   newAgent(model),
 		Judge:   judge,
 		Timeout: cfg.timeout,
 		Out:     os.Stdout,
@@ -148,7 +153,7 @@ func run(cfg config) error {
 		}
 		fmt.Printf("%s %s — %s\n", mark, c.Name, oneLine(c.Detail))
 	}
-	path, err := writeReport(cfg.resultsDir, res, modelLabel(cfg.model))
+	path, err := writeReport(cfg.resultsDir, res, model)
 	if err != nil {
 		return err
 	}
@@ -161,15 +166,4 @@ func run(cfg config) error {
 			len(res.FailedNames()), len(res.Checks), strings.Join(res.FailedNames(), ", "))
 	}
 	return nil
-}
-
-// modelLabel is what the report attributes the answers to. An empty -model means
-// Ghost's own default was used, so the report says which default instead of
-// leaving the model field empty — a blank attribution in a report about a model's
-// behaviour is the one thing a reader cannot recover from the artifact.
-func modelLabel(model string) string {
-	if strings.TrimSpace(model) == "" {
-		return "(ghost default) opencode/big-pickle"
-	}
-	return model
 }

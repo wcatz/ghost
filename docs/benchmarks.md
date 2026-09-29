@@ -786,8 +786,12 @@ and HOME all point inside the run's own scratch tree, an inherited override of a
 of them is dropped, `ANTHROPIC_API_KEY` is stripped, and an opencode credential is
 copied into the scratch data dir (`-opencode-auth-file`) so the sandboxed
 sessions authenticate without touching yours. Two further pins are the run's own:
-`GHOST_OPENCODE_MODEL` is set from `-model` so the arc's classification phases
-judge by the model the report names, and the phases pass `--source opencode`
+the model is resolved **once** and passed to everything — the sessions, the judge,
+`GHOST_OPENCODE_MODEL` in the child env, and the report's `model:` line — so the
+arc is one model's behaviour end to end, and an inherited `GHOST_OPENCODE_MODEL`
+in your shell cannot decide the sessions alone (`internal/ai` would otherwise
+read it out of the runner's own environment while the phases used the default).
+The phases pass `--source opencode`
 rather than letting `ghost supersede`/`ghost resolve` resolve a harness by walking
 the ancestry of whatever launched the runner (which would bill Claude for
 verdicts about an opencode-driven arc, and fail outright when the sandbox holds

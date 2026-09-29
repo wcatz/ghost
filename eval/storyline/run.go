@@ -82,8 +82,15 @@ type Session struct {
 // Result is a completed run: every session, the arc stages' raw output, the end
 // state, and the graded checks.
 type Result struct {
-	Story      Storyline
-	WorkDir    string
+	Story   Storyline
+	WorkDir string
+	// Opening carries the ids the OPENING records were saved under, keyed by
+	// record key, on the same terms as a session's Saved. They are saved before
+	// any session runs, so they belong to no session — and Validate lets a
+	// storyline reverse an opening record, which makes the supersede-edge check
+	// need their ids. Holding them here rather than in a local slice is what
+	// keeps that lookup from failing on a store that got the edge right.
+	Opening    map[string]string
 	Sessions   []Session
 	Supersede  string
 	Resolve    string
@@ -126,6 +133,9 @@ func (r *Result) FailedNames() []string {
 // (ids), and it reads the ids the saves returned rather than the store, so an id
 // the runner lost shows up as a failed check instead of being quietly re-derived.
 func (r *Result) idOf(key string) string {
+	if id, ok := r.Opening[key]; ok {
+		return id
+	}
 	for _, s := range r.Sessions {
 		if id, ok := s.Saved[key]; ok {
 			return id
@@ -177,12 +187,17 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	// path renders no project half at all, and the first session would read as an
 	// empty one for a reason that has nothing to do with the storyline.
 	order := []string{}
+	res.Opening = make(map[string]string, len(r.Story.Opening))
 	for _, rec := range r.Story.Opening {
 		id, err := r.save(ctx, rec)
 		if err != nil {
 			return nil, fmt.Errorf("opening record %s: %w", rec.Key, err)
 		}
 		order = append(order, id)
+		// Kept on the Result, not only in the local order slice: a storyline may
+		// reverse an opening record, and the grade resolves the edge through both
+		// keys. See Result.Opening.
+		res.Opening[rec.Key] = id
 	}
 	if err := r.Ghost.Bind(ctx, r.Story.Project, r.WorkDir); err != nil {
 		return nil, fmt.Errorf("bind %s to %s: %w", r.Story.Project, r.WorkDir, err)
