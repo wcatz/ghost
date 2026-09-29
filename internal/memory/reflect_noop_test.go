@@ -182,6 +182,210 @@ func TestReplaceNonManualVerbatimReemissionWritesNothing(t *testing.T) {
 	}
 }
 
+// TestReplaceNonManualAStrengthenedRowKeptVerbatimIsStillANoOp is #750, the
+// precision half of #727's rule, and it needed a value the earlier corpus never
+// produced.
+//
+// Memory.Importance is a float32 and the column is a float64. Upsert's strengthen
+// computes `MIN(1.0, importance + importance * 0.2)` in SQLite's own float64, so
+// a folded row usually holds a value float32 cannot name — 0.55 + 0.11 lands at
+// 0.6600000187754631, and widening float32(0.55) is 0.550000011920929. Reading
+// the row back narrows it to a float32 (scanMemories), so the keep path re-emits
+// 0.6600000262260437, the no-op predicate compared that against the column's
+// 0.6600000187754631, called the row changed, and every applied reflect wrote a
+// byte-identical version of it and stamped it touched — the exact behaviour
+// #727 removed, restored for 15 of 1,170 memories on the store it was measured
+// on. A corpus that never folds looks fine, which is why #727's tests did too.
+//
+// The fix is to compare at the precision the emission carries
+// (float32(stored) == emitted.Importance): narrowing is the one lossy direction,
+// so it is exact for a row that really is unchanged, and the companion test
+// below is the other half — a strengthened row that IS reweighted still takes
+// the write branch.
+func TestReplaceNonManualAStrengthenedRowKeptVerbatimIsStillANoOp(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const content = "the release tag is signed, not the release commit"
+	// 0.55 is chosen because 0.55 + 0.55*0.2 is one of the strengthen results
+	// that float32 cannot represent, so the fixture reaches the state under
+	// test without a hand-written column value. Nothing here may assert that
+	// by hand: the value has to come from the writer that produces it.
+	if _, _, _, err := s.Upsert(ctx, testProject, "convention", content, "mcp", 0.55, nil); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// The same sentence re-cased, folded into the stored row and strengthened
+	// there. FoldOnly is the shape reflection's _global promotion uses, and the
+	// strengthen UPDATE it runs is the one the default fold runs too (that
+	// statement sits outside FoldOnly's own block), so a project row lands on a
+	// non-representable importance through an ordinary save just as this one
+	// does.
+	id, dupOf, _, err := s.UpsertWithOptions(ctx, testProject, "convention",
+		"The Release Tag Is Signed, Not The Release Commit",
+		"reflection", 0.55, nil, UpsertOptions{FoldOnly: true})
+	if err != nil {
+		t.Fatalf("fold-only Upsert: %v", err)
+	}
+	if dupOf != id {
+		t.Fatalf("the fold returned id %q as duplicate-of %q; it did not fold onto one row", id, dupOf)
+	}
+
+	// The fixture is only this test if the column really does hold a value
+	// float32 cannot name. Asserted rather than assumed, because a strength
+	// formula that stopped producing such values would otherwise leave the
+	// test passing for the wrong reason: the comparison it is about would be
+	// the one #727 already got right.
+	stored := storedImportance(t, s, id)
+	if stored == float64(float32(stored)) {
+		t.Fatalf("fixture: the fold left importance at %v, which float32 represents exactly — "+
+			"this test needs a value that does not survive the round trip", stored)
+	}
+	setAgesDaysAgo(t, s, id, 30)
+	beforeRows := historyRowCount(t, s, id)
+	beforePhases := phaseCounts(t, s, id)
+	if beforeRows != 2 || beforePhases[phaseSave] != 1 || beforePhases[phaseMerge] != 1 {
+		t.Fatalf("fixture: %s has %d history rows %v, want the save and the fold", id, beforeRows, beforePhases)
+	}
+	updatedAtBefore := memoryUpdatedAt(t, s, id)
+
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{keptReemit(t, s, id)}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	// The phases and not only the count: a no-op that dropped the fold's merge
+	// row and appended a reflect one would hold the count at 2, and that merge
+	// row is the record of the very strengthen this test exists to be quiet
+	// about.
+	if got := phaseCounts(t, s, id); !equalPhases(got, beforePhases) {
+		t.Errorf("history phases %v -> %v: a verbatim keep rewrote the log of a row it did not change",
+			beforePhases, got)
+	}
+	if got := historyRowCount(t, s, id); got != beforeRows {
+		t.Errorf("history rows %d -> %d (%v): a verbatim keep of a strengthened row appended a "+
+			"version of a row it did not change", beforeRows, got, phaseCounts(t, s, id))
+	}
+	if got := memoryUpdatedAt(t, s, id); got != updatedAtBefore {
+		t.Errorf("updated_at %q -> %q: a verbatim keep stamped the row as touched, which is what "+
+			"supersede orients a pair by", updatedAtBefore, got)
+	}
+	// The column itself is the sharpest statement of "nothing was written": a
+	// write would bind the emitted float32 back into the column and replace
+	// the fold's float64 with a different number, so this row would read as
+	// though the fold had never happened.
+	if got := storedImportance(t, s, id); got != stored {
+		t.Errorf("importance %v -> %v: the keep rewrote the column, so a fold's exact value does not "+
+			"survive a run that changed nothing", stored, got)
+	}
+}
+
+// storedImportance reads the raw column, not the Memory, because the whole
+// subject is the value the widening to float64 carries and float32 does not.
+func storedImportance(t *testing.T, s *Store, id string) float64 {
+	t.Helper()
+	var importance float64
+	if err := s.db.QueryRow(`SELECT importance FROM memories WHERE id = ?`, id).Scan(&importance); err != nil {
+		t.Fatalf("read importance for %s: %v", id, err)
+	}
+	return importance
+}
+
+// TestReplaceNonManualAStrengthenedRowReweightedIsStillAChange is the other half
+// of #750, and the half the fix could have cost. Narrowing the stored value to
+// the emission's precision is a lossy direction, so the question it has to answer
+// is whether it can hide a reweight — and the answer has to be asserted on a
+// STRENGTHENED row, at a distance of ONE ULP. Every other importance case in this
+// file reweights a value Create wrote, which is a float32 already and therefore
+// float32-exact, so all of them keep passing under a comparator loose enough to be
+// wrong: an epsilon, or any threshold, swallows the reweight below and no other
+// test here would notice. A strengthened row is the only fixture where a loosened
+// comparison shows, which is why this one is built through the same two writers as
+// the test above.
+//
+// So the reweight is the next representable float32 above the stored value, not a
+// comfortable step: a real change at the smallest distance the emission can
+// express, which the exact comparison catches and nothing else would.
+func TestReplaceNonManualAStrengthenedRowReweightedIsStillAChange(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const content = "the epoch rotation is driven by the KES operational cert"
+	if _, _, _, err := s.Upsert(ctx, testProject, "architecture", content, "mcp", 0.55, nil); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	id, dupOf, _, err := s.UpsertWithOptions(ctx, testProject, "architecture",
+		"The Epoch Rotation Is Driven By The KES Operational Cert",
+		"reflection", 0.55, nil, UpsertOptions{FoldOnly: true})
+	if err != nil {
+		t.Fatalf("fold-only Upsert: %v", err)
+	}
+	if dupOf != id {
+		t.Fatalf("the fold returned id %q as duplicate-of %q; it did not fold onto one row", id, dupOf)
+	}
+	if stored := storedImportance(t, s, id); stored == float64(float32(stored)) {
+		t.Fatalf("fixture: the fold left importance at %v, which float32 represents exactly — "+
+			"this test needs a value that does not survive the round trip", stored)
+	}
+	setAgesDaysAgo(t, s, id, 30)
+	beforeRows := historyRowCount(t, s, id)
+	updatedAtBefore := memoryUpdatedAt(t, s, id)
+
+	// One float32 ULP above what the fold left: 0.6600001 widens to
+	// 0.66000008583068848, the representable value immediately above the
+	// stored 0.6600000262260437, so it is a rating a caller CAN state and a
+	// different one by the only measure every reader of this column uses. It is
+	// deliberately the smallest change the fix could conceivably hide rather
+	// than a comfortable 0.2, because a comparator loosened to an epsilon — the
+	// obvious way to "fix" this — swallows this value and would swallow every
+	// importance case in this file, since the others all reweight a Create'd
+	// value that was float32-exact to begin with. This is the assertion that
+	// says the comparison is exact.
+	const reweight float32 = 0.6600001
+	emitted := keptReemit(t, s, id)
+	emitted.Importance = reweight
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{emitted}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	row := mustGetOneByID(t, s, id)
+	if row.Importance != reweight {
+		t.Errorf("importance = %v, want the reweight %v applied in place — the narrowed comparison "+
+			"swallowed a real change to a strengthened row", row.Importance, reweight)
+	}
+	if got := historyRowCount(t, s, id); got != beforeRows+1 {
+		t.Errorf("history rows %d -> %d (%v), want exactly one more: a reweight of a strengthened "+
+			"row is a real update", beforeRows, got, phaseCounts(t, s, id))
+	}
+	entries := mustHistory(t, s, id)
+	if got := phasesOf(t, entries); !equalStrings(got, []string{phaseSave + ":", phaseMerge + ":", phaseReflect + ":"}) {
+		t.Errorf("phases = %v, want [save merge reflect]", got)
+	}
+	if got := entries[len(entries)-1].Importance; got != float64(reweight) {
+		t.Errorf("the appended row records importance %v, want %v — the version must be the row as "+
+			"the write left it", got, float64(reweight))
+	}
+	if got := memoryUpdatedAt(t, s, id); got == updatedAtBefore {
+		t.Errorf("updated_at is still %q after a real reweight; supersede orients a pair by it", got)
+	}
+	if got := memoryCreatedAt(t, s, id); got != updatedAtBefore {
+		t.Errorf("created_at = %q, want the stored %q — a reweight is not refreshed knowledge (#279)",
+			got, updatedAtBefore)
+	}
+}
+
+// equalPhases compares two phase histograms for equality, for the assertion that
+// a no-op left the log alone rather than swapping one row for another.
+func equalPhases(got, want map[string]int) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for phase, n := range want {
+		if got[phase] != n {
+			return false
+		}
+	}
+	return true
+}
+
 // TestReplaceNonManualRepeatedAllKeepApplyIsStable is the same rule measured
 // over rounds, which is where the measurement in #727 was taken: the lifecycle
 // runs every lifecycle.min_interval, so the question is not whether ONE apply is
