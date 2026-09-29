@@ -479,12 +479,21 @@ func contextTrimReport(t *testing.T) ContextReport {
 // as "not measured" for a pass that ran on every query and cut nothing.
 //
 // The populations are all named rather than inherited, so this also pins what each
-// denominator is: the cap saw 12 + 3 = 15 rows (every row of both queries — a
-// fit-dropped row would have passed the cap on its way, so nothing else can be in
-// it), and the fit pass saw 13 (only what the cap left). The relevant denominator
-// is the graded rows that reached the trim, 12 for the cap, so the cap's cost in
-// relevant rows reads 2/12 — NOT 2/13, which is the admitted count and would divide
-// rows the cap threw away by rows the cap kept.
+// denominator is, and all three DIFFER here — which is what makes the fixture able to
+// catch a rule that reaches for the wrong one:
+//
+//   - rows the cap reached: 15 (q_wide's 10 kept + its 2 cut, q_narrow's 3 kept; a
+//     fit-dropped row would have passed the cap on its way, so nothing else is in it)
+//   - GRADED rows the cap reached: 13 (q_wide grades all 12 rows it reached — 10 kept
+//     plus the 2 cut — and q_narrow grades 1 of its 3 kept rows)
+//   - answered queries: 2, one trimmed and one not
+//
+// So the cap's cost in relevant rows reads 2/13. Note that 13 is ALSO the pooled
+// admitted count here (10 + 3) — a coincidence of this fixture, not the definition,
+// and the fixture is built so the two cannot be told apart by accident elsewhere: the
+// assertions below pin all three denominators, and
+// TestContextTrimRatiosGiveEachStageTheRowsItActuallySaw pins the both-trims-fire case
+// where they diverge.
 func TestContextTrimRatiosCountEveryAnsweredQuery(t *testing.T) {
 	rep := contextTrimReport(t)
 	if rep.Answered != 2 || rep.Items != 13 {
@@ -752,6 +761,83 @@ func absDuration(d time.Duration) time.Duration {
 		return -d
 	}
 	return d
+}
+
+// TestFormatContextPrintsTheCostTheDocsPromise is the review's finding, as a test.
+//
+// ContextCost was measured, documented in three places and never printed, which is
+// the worst of both: docs/benchmarks.md, docs/cli.md and `benchUsage` all promise the
+// block's cost, and a reader of the section the command produces cannot find it. A
+// metric nothing renders is a metric nobody reads, and the three claims it made
+// elsewhere were then false.
+//
+// So the cost is rendered, with its population, in the same num/den form as every
+// other ratio — and this asserts on the OUTPUT rather than on the report struct,
+// because the defect was precisely that a struct field can be correct and never reach
+// a reader. The two maxima (largest response, largest block) are the other half of
+// this table: a mean says what a block usually costs, a maximum says what the worst
+// one cost, and a section that printed only one of them would let a caller size a
+// budget from the wrong number.
+func TestFormatContextPrintsTheCostTheDocsPromise(t *testing.T) {
+	rep := ContextReport{
+		Project: "p", Queries: 2, Answered: 2, Items: 20,
+		Precision: Ratio{Num: 3, Den: 20}, Contamination: Ratio{Num: 0, Den: 20},
+		Arms: []LeakArm{{Name: assemble.LeakResolved, Count: 0}},
+		Budget: ContextBudget{
+			MaxItems: ContextItems, MaxBytes: ContextBytes,
+			MaxResponse: 2000, MaxTokens: 300,
+		},
+		Cost: ContextCost{
+			TokensPerQuery: Ratio{Num: 500, Den: 2},  // 250 mean
+			BytesPerQuery:  Ratio{Num: 4000, Den: 2}, // 2000 mean
+		},
+	}
+	out := FormatContext(rep)
+	for _, want := range []string{
+		"250.000 (500/2)",   // the token mean, with its population
+		"2000.000 (4000/2)", // the byte mean, with its population
+		"2000 bytes",        // the maximum, which the mean must not be confused with
+		"300 (est.)",        // the token maximum
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the rendered section does not print %q, so the cost never reaches a reader:\n%s", want, out)
+		}
+	}
+
+	// The unit belongs on the value, not only in the population column, because the
+	// two rows are the same kind of number and a reader scanning the value column
+	// must be able to tell a token count from a byte count.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "2000.000 (4000/2)") && !strings.Contains(line, "byte") {
+			t.Errorf("the byte row does not name its unit:\n%s", line)
+		}
+	}
+
+	// And the section says which questions these are, so a row is not read as a
+	// verdict on retrieval rather than on the bill.
+	if !strings.Contains(out, "cost per answered query") {
+		t.Errorf("the cost table has no heading naming its population:\n%s", out)
+	}
+}
+
+// TestFormatContextNamesTheTableItComparesAgainst is the review's second finding.
+//
+// The preamble said "NDCG@10 and MRR@10 above", but `--context` returns immediately
+// after this section and never prints the ablation table — so the reader was told to
+// compare against rows that were not on their screen. The words have to name where
+// those numbers actually live, because "above" was the only pointer the section gave.
+func TestFormatContextNamesTheTableItComparesAgainst(t *testing.T) {
+	out := FormatContext(ContextReport{Project: "p", Queries: 0})
+	if strings.Contains(out, "above") {
+		t.Errorf("the preamble points at a table this mode never prints:\n%s", out)
+	}
+	// The claim is still worth making — these metrics and the ranking metrics answer
+	// different questions — so the names stay and only the false pointer goes.
+	for _, want := range []string{"NDCG@10", "MRR@10", "BLOCK"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the preamble dropped %q, which is the comparison the section exists to draw:\n%s", want, out)
+		}
+	}
 }
 
 // TestFormatContextSaysNAWhenNothingWasMeasured: a ratio with no denominator is

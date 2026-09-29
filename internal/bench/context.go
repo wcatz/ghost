@@ -571,7 +571,8 @@ func FormatContext(rep ContextReport) string {
 	b.WriteString("  (Result.Leaks, from the verdicts its own stages recorded). A metric that re-read the corpus\n")
 	b.WriteString("  instead would be a second implementation of rules the pipeline already applies, and free to\n")
 	b.WriteString("  drift from them until a leak was reported as clean. These numbers are about the BLOCK a\n")
-	b.WriteString("  caller receives; NDCG@10 and MRR@10 above are the ordering numbers and cannot see any of it.\n\n")
+	b.WriteString("  caller receives. NDCG@10 and MRR@10 are the ordering numbers -- they are in the table plain\n")
+	b.WriteString("  `ghost bench` prints, not this one -- and neither can see any of it.\n\n")
 	fmt.Fprintf(&b, "  %-24s %18s  %s\n", "metric", "value", "population")
 	fmt.Fprintf(&b, "  %-24s %18s  %s\n", "result rate", rep.ResultRate, "queries that admitted at least one row")
 	fmt.Fprintf(&b, "  %-24s %18s  %s\n", "context precision", rep.Precision, "graded-relevant of the admitted rows")
@@ -599,6 +600,24 @@ func FormatContext(rep ContextReport) string {
 	fmt.Fprintf(&b, "  %-24s %18s  %s\n", "response fit trimmed", rep.Budget.FittedItems,
 		fmt.Sprintf("of the rows that reached it; %s of answered queries, %s of the graded ones among them",
 			rep.Budget.FittedQueries, rep.Budget.FittedRelevant))
+
+	// The cost, with its population beside it, because three separate places promise
+	// it: the metric table in docs/benchmarks.md, the flag's own description in
+	// docs/cli.md, and `benchUsage`. A measured field that nothing renders leaves all
+	// three claims false and the reader with a section that measures a thing it never
+	// shows. The maxima above are the other half of this table and neither substitutes
+	// for the other: a mean is what a block usually costs and a maximum is what the
+	// worst one cost, and a caller sizing a budget from the mean alone under-reserves.
+	//
+	// Bytes is the COMPLETE rendered response, framing and verdict line included, so it
+	// is the number a caller actually receives; tokens is the assembler's own
+	// bytes/4 estimate over the admitted rows, and there is no tokenizer in the
+	// pipeline, so it is an estimate everywhere it appears.
+	fmt.Fprintf(&b, "\n  %-24s %18s  %s\n", "cost per answered query", "value", "population")
+	fmt.Fprintf(&b, "  %-24s %18s  %s\n", "estimated tokens", rep.Cost.TokensPerQuery,
+		"mean over answered queries; bytes/4 per row, an estimate, no tokenizer here")
+	fmt.Fprintf(&b, "  %-24s %18s  %s\n", "rendered bytes", fmt.Sprintf("%s bytes", rep.Cost.BytesPerQuery),
+		"mean over answered queries; the complete response, framing and verdict line included")
 
 	fmt.Fprintf(&b, "\n  %-24s %8s %16s %8s\n", "admitted rows by bucket", "rows", "share", "queries")
 	for _, bk := range rep.Diversity.Buckets {
