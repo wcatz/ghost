@@ -382,7 +382,7 @@ func run() int {
 	// The `partial` flag is passed in rather than tested here, so the decision
 	// that a COMPLETE pass keeps its result files is part of the same tested
 	// function as the one that deletes them.
-	discarded, discardErr := closeAndDiscardPartialOutputs(partial, []*os.File{outFile, retrievalOutFile}, *outPath, *retrievalOutPath)
+	discarded, survived, discardErr := closeAndDiscardPartialOutputs(partial, []*os.File{outFile, retrievalOutFile}, *outPath, *retrievalOutPath)
 
 	return reportPass(os.Stdout, passReport{
 		condition:         *condition,
@@ -398,6 +398,7 @@ func run() int {
 		budget:            *embedDeadline,
 		elapsed:           time.Since(start),
 		discarded:         discarded,
+		survived:          survived,
 		discardErr:        discardErr,
 	})
 }
@@ -411,7 +412,7 @@ func run() int {
 // have not run yet, because a defer fires when run() returns, which is after
 // this call. Closing here is what makes the unlink portable, and it is why the
 // close is a function that tolerates being called again by those defers.
-func closeAndDiscardPartialOutputs(partial bool, handles []*os.File, paths ...string) (removed []string, err error) {
+func closeAndDiscardPartialOutputs(partial bool, handles []*os.File, paths ...string) (removed, survived []string, err error) {
 	closeResultFiles(handles...)
 	return discardPartialOutputs(partial, paths...)
 }
@@ -432,16 +433,21 @@ func closeResultFiles(files ...*os.File) {
 }
 
 // discardPartialOutputs removes the result files a partial pass left half
-// written and returns the paths it actually removed. It is a no-op for a
-// complete pass — those files are the deliverable. An empty path (the flag was
-// not passed) and an already-absent file are both skipped rather than errors,
-// so the common partial run — which names no output files at all — reports
-// nothing removed and fails nothing.
-func discardPartialOutputs(partial bool, paths ...string) ([]string, error) {
+// written, and returns the paths it removed, the paths that survived, and every
+// failure joined. It is a no-op for a complete pass — those files are the
+// deliverable. An empty path (the flag was not passed) and an already-absent
+// file are both skipped rather than errors, so the common partial run — which
+// names no output files at all — reports nothing removed and fails nothing.
+//
+// Every path is attempted, and none of them aborts the rest. -out and
+// --retrieval-out name independent files, and the second is the Phase 4
+// generation input — the artefact this discard exists to protect — so bailing
+// out on the first failure would leave precisely that one half-written.
+func discardPartialOutputs(partial bool, paths ...string) (removed, survived []string, err error) {
 	if !partial {
-		return nil, nil
+		return nil, nil, nil
 	}
-	var removed []string
+	var errs []error
 	for _, p := range paths {
 		if p == "" {
 			continue
@@ -450,11 +456,13 @@ func discardPartialOutputs(partial bool, paths ...string) ([]string, error) {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return removed, fmt.Errorf("remove partial result %s: %w", p, err)
+			survived = append(survived, p)
+			errs = append(errs, fmt.Errorf("remove partial result %s: %w", p, err))
+			continue
 		}
 		removed = append(removed, p)
 	}
-	return removed, nil
+	return removed, survived, errors.Join(errs...)
 }
 
 // passReport is everything a finished pass reports and needs to report it. It
@@ -476,9 +484,10 @@ type passReport struct {
 	budget            time.Duration
 	elapsed           time.Duration
 	// discarded names the -out / --retrieval-out files a partial pass removed;
-	// discardErr is the cleanup failure, if any, whose file survived. It is
-	// reported but does not change the status.
+	// survived and discardErr describe the cleanup failures, if any, whose files
+	// outlived the pass. They are reported but do not change the status.
 	discarded  []string
+	survived   []string
 	discardErr error
 }
 
@@ -506,11 +515,17 @@ func reportPass(out io.Writer, r passReport) int {
 			_, _ = fmt.Fprintf(out, "Discarded partial result file(s): %s.\n", strings.Join(r.discarded, ", "))
 		}
 		if r.discardErr != nil {
-			// The half-written file outlived the pass. Say so on the report
-			// itself, not only on stderr, and still exit partial: this pass
-			// warmed the cache and produced no result, and its caller still
-			// has to re-dispatch.
-			_, _ = fmt.Fprintf(out, "WARNING: could not remove a partial result file, so a half-written one survives: %v\n", r.discardErr)
+			// Every half-written file that outlived the pass, named: one of
+			// them is the Phase 4 generation input, and a reader told about
+			// only the first failure would not know it is still there. Reported
+			// on the report itself, and still exit partial — this pass warmed
+			// the cache and produced no result, and its caller still has to
+			// re-dispatch.
+			_, _ = fmt.Fprintf(out, "WARNING: could not remove partial result file(s), so half-written one(s) survive: %s\n",
+				strings.Join(r.survived, ", "))
+			for _, e := range strings.Split(r.discardErr.Error(), "\n") {
+				_, _ = fmt.Fprintf(out, "  %s\n", e)
+			}
 		}
 		return exitCode(true, nil)
 	}

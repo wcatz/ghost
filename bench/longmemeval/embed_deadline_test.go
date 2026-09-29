@@ -298,9 +298,12 @@ func TestPartialRunDiscardsItsResultFiles(t *testing.T) {
 		}
 	}
 
-	removed, err := discardPartialOutputs(true, outPath, retrievalOutPath, "")
+	removed, survived, err := discardPartialOutputs(true, outPath, retrievalOutPath, "")
 	if err != nil {
 		t.Fatalf("discardPartialOutputs: %v", err)
+	}
+	if len(survived) != 0 {
+		t.Errorf("survived %v, want nothing", survived)
 	}
 	if len(removed) != 2 {
 		t.Errorf("removed %v, want both result files named", removed)
@@ -313,7 +316,7 @@ func TestPartialRunDiscardsItsResultFiles(t *testing.T) {
 
 	// A missing file is not an error: -out is optional, so the common partial
 	// run names no files at all.
-	if removed, err := discardPartialOutputs(true, ""); err != nil || len(removed) != 0 {
+	if removed, _, err := discardPartialOutputs(true, ""); err != nil || len(removed) != 0 {
 		t.Errorf("discardPartialOutputs(true, \"\") = %v, %v; want no removals and no error", removed, err)
 	}
 
@@ -325,7 +328,7 @@ func TestPartialRunDiscardsItsResultFiles(t *testing.T) {
 			t.Fatalf("reseed %s: %v", p, err)
 		}
 	}
-	removed, err = discardPartialOutputs(false, outPath, retrievalOutPath)
+	removed, _, err = discardPartialOutputs(false, outPath, retrievalOutPath)
 	if err != nil {
 		t.Fatalf("discardPartialOutputs(false, ...): %v", err)
 	}
@@ -358,12 +361,15 @@ func TestCloseAndDiscardPartialOutputsClosesBeforeUnlinking(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	removed, err := closeAndDiscardPartialOutputs(true, []*os.File{handle, nil}, live)
+	removed, survived, err := closeAndDiscardPartialOutputs(true, []*os.File{handle, nil}, live)
 	if err != nil {
 		t.Fatalf("closeAndDiscardPartialOutputs: %v", err)
 	}
 	if len(removed) != 1 {
 		t.Errorf("removed %v, want the open result file", removed)
+	}
+	if len(survived) != 0 {
+		t.Errorf("survived %v, want nothing", survived)
 	}
 	if _, statErr := os.Stat(live); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("result file survived the discard (stat err = %v)", statErr)
@@ -384,7 +390,7 @@ func TestCloseAndDiscardPartialOutputsClosesBeforeUnlinking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Create: %v", err)
 	}
-	removed, err = closeAndDiscardPartialOutputs(false, []*os.File{keptHandle}, kept)
+	removed, _, err = closeAndDiscardPartialOutputs(false, []*os.File{keptHandle}, kept)
 	if err != nil {
 		t.Fatalf("closeAndDiscardPartialOutputs(false, ...): %v", err)
 	}
@@ -396,47 +402,60 @@ func TestCloseAndDiscardPartialOutputsClosesBeforeUnlinking(t *testing.T) {
 	}
 }
 
-// TestDiscardFailureKeepsThePartialStatus: the exit statuses are a contract the
-// workflow branches on (0 complete, 3 partial, anything else a failure), and the
-// outcome of a pass that warmed the cache has not changed just because an
-// unlink failed. Reporting that as exitFailure would make a successful
-// cache-warming dispatch indistinguishable from a floor violation, and would
-// skip the re-dispatch the operator needs.
-func TestDiscardFailureKeepsThePartialStatus(t *testing.T) {
+// TestDiscardPartialOutputsAttemptsEveryPath: -out and --retrieval-out name
+// independent paths, so one being un-unlinkable must not skip the other. The
+// second is the Phase 4 generation input — the file the whole discard exists to
+// protect — and returning on the first failure left it half-written with no
+// attempt made on it. Every path is attempted, and every survivor is named, so
+// the report cannot undercount.
+func TestDiscardPartialOutputsAttemptsEveryPath(t *testing.T) {
 	dir := t.TempDir()
-	// A non-empty directory at the -out path. An EMPTY directory would be
-	// removed happily on Linux, so the "not empty" case is what stands in for
-	// the unlink failures that actually occur (the Windows sharing violation,
-	// EACCES on a read-only parent).
-	stubborn := filepath.Join(dir, "per-question.jsonl")
-	if err := os.Mkdir(stubborn, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
+	// Two unlinkable paths, one removable, interleaved so a loop that bailed
+	// out early would miss the last one.
+	stubbornA := filepath.Join(dir, "per-question.jsonl")
+	stubbornB := filepath.Join(dir, "ranked.jsonl")
+	for _, p := range []string{stubbornA, stubbornB} {
+		if err := os.Mkdir(p, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "inner"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
 	}
-	if err := os.WriteFile(filepath.Join(stubborn, "line.jsonl"), []byte("{}\n"), 0o644); err != nil {
-		t.Fatalf("seed stubborn dir: %v", err)
-	}
-	ok := filepath.Join(dir, "ranked.jsonl")
+	ok := filepath.Join(dir, "spare.jsonl")
 	if err := os.WriteFile(ok, []byte("{}\n"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	discarded, err := discardPartialOutputs(true, ok, stubborn)
+	removed, survived, err := discardPartialOutputs(true, stubbornA, ok, stubbornB)
 	if err == nil {
-		t.Fatal("discardPartialOutputs on a directory = nil error; want the failure reported")
+		t.Fatal("discardPartialOutputs = nil error; want both failures reported")
 	}
-	if len(discarded) != 1 || discarded[0] != ok {
-		t.Errorf("removed %v, want the removable file reported as removed even though a later one failed", discarded)
+	if len(removed) != 1 || removed[0] != ok {
+		t.Errorf("removed %v, want only %s", removed, ok)
 	}
-	if !strings.Contains(err.Error(), stubborn) {
-		t.Errorf("error %q does not name the file that survived", err)
+	if len(survived) != 2 || survived[0] != stubbornA || survived[1] != stubbornB {
+		t.Errorf("survived %v, want BOTH unlinkable paths named", survived)
+	}
+	for _, p := range []string{stubbornA, stubbornB} {
+		if _, statErr := os.Stat(p); statErr != nil {
+			t.Errorf("%s was removed despite the failure being reported: %v", p, statErr)
+		}
+	}
+	// Every failure is in the joined error, not just the first.
+	for _, p := range []string{stubbornA, stubbornB} {
+		if !strings.Contains(err.Error(), p) {
+			t.Errorf("joined error omits %s: %v", p, err)
+		}
 	}
 }
 
 // TestReportPassNamesDiscardedFiles: the removal is only useful if the pass says
 // it happened, otherwise a re-dispatch finds its -out target missing with no
-// explanation in the log. A cleanup FAILURE is on the report too — and the
-// status is still exitPartial, because the pass warmed the cache either way and
-// the workflow's re-dispatch branch is what must still run.
+// explanation in the log. A cleanup FAILURE is on the report too — every
+// surviving file, not just the first — and the status is still exitPartial,
+// because the pass warmed the cache either way and the workflow's re-dispatch
+// branch is what must still run.
 func TestReportPassNamesDiscardedFiles(t *testing.T) {
 	f := newFakeEmbedder(t, 0)
 
@@ -452,21 +471,35 @@ func TestReportPassNamesDiscardedFiles(t *testing.T) {
 		}
 	})
 
-	t.Run("a failed cleanup warns and still exits partial", func(t *testing.T) {
+	t.Run("every surviving file is named and the status stays partial", func(t *testing.T) {
 		var buf bytes.Buffer
 		status := reportPass(&buf, passReport{
 			condition: "hybrid", overall: &agg{n: 1}, byType: map[string]*agg{},
 			scored: 1, embedder: f.emb, partial: true, budget: time.Minute, elapsed: time.Minute,
-			discardErr: errors.New("remove partial result /tmp/ranked.jsonl: directory not empty"),
+			survived: []string{"/tmp/per-question.jsonl", "/tmp/ranked.jsonl"},
+			discardErr: errors.New("remove partial result /tmp/per-question.jsonl: directory not empty\n" +
+				"remove partial result /tmp/ranked.jsonl: permission denied"),
 		})
 		if status != exitPartial {
 			t.Errorf("status = %d, want exitPartial=%d: the pass still warmed the cache, so its status must not change", status, exitPartial)
 		}
-		if !strings.Contains(buf.String(), "/tmp/ranked.jsonl") {
-			t.Errorf("partial report does not warn that a half-written file survived: %q", buf.String())
+		// Assert on the summary line alone. The per-failure detail lines below
+		// it also carry the paths, so a whole-output substring check would
+		// pass even if the summary named only the first survivor — which is the
+		// bug this line of the report exists to prevent.
+		warning := ""
+		for _, line := range strings.Split(buf.String(), "\n") {
+			if strings.HasPrefix(line, "WARNING") {
+				warning = line
+			}
 		}
-		if !strings.Contains(buf.String(), "WARNING") {
-			t.Errorf("surviving file is not marked as a warning: %q", buf.String())
+		if warning == "" {
+			t.Fatalf("surviving files are not marked as a warning: %q", buf.String())
+		}
+		for _, p := range []string{"/tmp/per-question.jsonl", "/tmp/ranked.jsonl"} {
+			if !strings.Contains(warning, p) {
+				t.Errorf("the warning does not name the surviving file %s: %q", p, warning)
+			}
 		}
 	})
 }
