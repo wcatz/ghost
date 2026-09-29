@@ -281,6 +281,80 @@ func TestReportPassPartialPrintsNoResult(t *testing.T) {
 	}
 }
 
+// TestPartialRunDiscardsItsResultFiles: -out and --retrieval-out are result
+// artefacts — per-question metrics and the Phase 4 generation input. A partial
+// pass breaks out of the scoring loop with both half-written, and a half-written
+// JSONL is byte-shaped exactly like a complete one: the Phase 4 pipeline reads
+// ranked.jsonl without knowing the producer's exit status, so it would judge a
+// subset of the benchmark and publish it as the result. A partial pass must
+// therefore leave no result file behind at all, and say which ones it removed.
+func TestPartialRunDiscardsItsResultFiles(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "per-question.jsonl")
+	retrievalOutPath := filepath.Join(dir, "ranked.jsonl")
+	for _, p := range []string{outPath, retrievalOutPath} {
+		if err := os.WriteFile(p, []byte(`{"question_id":"q1"}`+"\n"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", p, err)
+		}
+	}
+
+	removed, err := discardPartialOutputs(true, outPath, retrievalOutPath, "")
+	if err != nil {
+		t.Fatalf("discardPartialOutputs: %v", err)
+	}
+	if len(removed) != 2 {
+		t.Errorf("removed %v, want both result files named", removed)
+	}
+	for _, p := range []string{outPath, retrievalOutPath} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s survived a partial pass (stat err = %v): a half-written result file is indistinguishable from a complete one", p, err)
+		}
+	}
+
+	// A missing file is not an error: -out is optional, so the common partial
+	// run names no files at all.
+	if removed, err := discardPartialOutputs(true, ""); err != nil || len(removed) != 0 {
+		t.Errorf("discardPartialOutputs(true, \"\") = %v, %v; want no removals and no error", removed, err)
+	}
+
+	// The other half: a COMPLETE pass keeps both files. They are the whole
+	// point of -out / --retrieval-out, so the same call that deletes them for
+	// a partial pass must not touch them otherwise.
+	for _, p := range []string{outPath, retrievalOutPath} {
+		if err := os.WriteFile(p, []byte(`{"question_id":"q1"}`+"\n"), 0o644); err != nil {
+			t.Fatalf("reseed %s: %v", p, err)
+		}
+	}
+	removed, err = discardPartialOutputs(false, outPath, retrievalOutPath)
+	if err != nil {
+		t.Fatalf("discardPartialOutputs(false, ...): %v", err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("a complete pass removed %v; its result files are the deliverable", removed)
+	}
+	for _, p := range []string{outPath, retrievalOutPath} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("a complete pass deleted %s (stat err = %v)", p, err)
+		}
+	}
+}
+
+// TestReportPassNamesDiscardedFiles: the removal is only useful if the pass says
+// it happened, otherwise a re-dispatch finds its -out target missing with no
+// explanation in the log.
+func TestReportPassNamesDiscardedFiles(t *testing.T) {
+	f := newFakeEmbedder(t, 0)
+	var buf bytes.Buffer
+	reportPass(&buf, passReport{
+		condition: "hybrid", overall: &agg{n: 1}, byType: map[string]*agg{},
+		scored: 1, embedder: f.emb, partial: true, budget: time.Minute, elapsed: time.Minute,
+		discarded: []string{"/tmp/ranked.jsonl"},
+	})
+	if !strings.Contains(buf.String(), "/tmp/ranked.jsonl") {
+		t.Errorf("partial report does not name the discarded result file: %q", buf.String())
+	}
+}
+
 // TestReportPassCompletePrintsTheTable: the other half of the same branch —
 // a pass that finished still reports its metrics and still checks its floors,
 // so bounding the embedding pass changed nothing for a run that completes.

@@ -193,6 +193,7 @@ jobs:
         # code as a floor violation and make the branch below unreachable.
 
       - name: Run hybrid condition with regression floors
+        id: bench
         env:
           # Wall clock the embedding pass may spend in remote embed calls
           # before it stops itself, leaving the vectors it computed in
@@ -204,6 +205,9 @@ jobs:
           EMBED_DEADLINE: 300m
         run: |
           mkdir -p "$(dirname "$EMBED_CACHE_PATH")"
+          # Size of the restored snapshot before this dispatch touches it, for
+          # the grew/unchanged decision below.
+          before=$(stat -c %s "$EMBED_CACHE_PATH" 2>/dev/null || echo 0)
           set +e
           "$RUNNER_TEMP/longmemeval" \
             -data "$DATASET_PATH" \
@@ -214,6 +218,20 @@ jobs:
             -floors "r5=0.91,ndcg10=0.89"
           status=$?
           set -e
+          # The cache is append-only, so a pass that computed nothing leaves it
+          # byte-identical to the snapshot the restore step downloaded. Saving
+          # that would add a duplicate immutable entry to the repository's
+          # finite cache quota (10GB, LRU-evicted) for no new vectors — and
+          # every later warm dispatch would add another. Report whether this
+          # dispatch grew the cache so the save step below can skip those.
+          after=$(stat -c %s "$EMBED_CACHE_PATH" 2>/dev/null || echo 0)
+          if [ "$after" -gt "$before" ]; then
+            echo "grew=true" >> "$GITHUB_OUTPUT"
+            echo "embed cache grew: ${before} -> ${after} bytes"
+          else
+            echo "grew=false" >> "$GITHUB_OUTPUT"
+            echo "embed cache unchanged at ${after} bytes; nothing new to save"
+          fi
           case "$status" in
             0)
               echo "hybrid pass complete; floors checked against a full question set"
@@ -263,7 +281,16 @@ jobs:
         #    rescue that — it is why the embed pass stops itself at
         #    -embed-deadline with slack under the cap instead of relying on
         #    this step to catch a timeout.
-        if: always()
+        #
+        # grew=false means this dispatch computed no vectors, so the file is
+        # byte-identical to the snapshot restore already downloaded: saving it
+        # would write a duplicate immutable entry (the whole cache, ~GB at
+        # full warmth) into a 10GB repository quota whose eviction is LRU, and
+        # an entry evicted is a dispatch that silently restarts cold. Warm
+        # dispatches are the common case once the cache is full, so skipping
+        # them is what keeps the quota available for dispatches that add
+        # something.
+        if: always() && steps.bench.outputs.grew == 'true'
         uses: actions/cache/save@v6.1.0
         with:
           path: ${{ env.EMBED_CACHE_PATH }}

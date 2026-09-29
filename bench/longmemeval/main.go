@@ -364,6 +364,22 @@ func run() int {
 		}
 	}
 
+	// A partial pass leaves no result artefact behind. The -out and
+	// --retrieval-out files are half-written at this point, and a half-written
+	// JSONL is byte-shaped exactly like a complete one — the Phase 4 pipeline
+	// reads ranked.jsonl without consulting this process's exit status, so it
+	// would judge a subset of the benchmark and publish it as the result. The
+	// same rule the report follows (no metrics, no floors) has to reach the
+	// files that outlive the process.
+	// The `partial` flag is passed in rather than tested here, so the decision
+	// that a COMPLETE pass keeps its result files is part of the same tested
+	// function as the one that deletes them.
+	discarded, err := discardPartialOutputs(partial, *outPath, *retrievalOutPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return exitFailure
+	}
+
 	return reportPass(os.Stdout, passReport{
 		condition:         *condition,
 		overall:           overall,
@@ -377,7 +393,34 @@ func run() int {
 		partial:           partial,
 		budget:            *embedDeadline,
 		elapsed:           time.Since(start),
+		discarded:         discarded,
 	})
+}
+
+// discardPartialOutputs removes the result files a partial pass left half
+// written and returns the paths it actually removed. It is a no-op for a
+// complete pass — those files are the deliverable. An empty path (the flag was
+// not passed) and an already-absent file are both skipped rather than errors,
+// so the common partial run — which names no output files at all — reports
+// nothing removed and fails nothing.
+func discardPartialOutputs(partial bool, paths ...string) ([]string, error) {
+	if !partial {
+		return nil, nil
+	}
+	var removed []string
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if err := os.Remove(p); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return removed, fmt.Errorf("remove partial result %s: %w", p, err)
+		}
+		removed = append(removed, p)
+	}
+	return removed, nil
 }
 
 // passReport is everything a finished pass reports and needs to report it. It
@@ -398,6 +441,8 @@ type passReport struct {
 	partial           bool
 	budget            time.Duration
 	elapsed           time.Duration
+	// discarded names the -out / --retrieval-out files a partial pass removed.
+	discarded []string
 }
 
 // reportPass writes a finished pass's report to out and returns its process
@@ -418,6 +463,11 @@ func reportPass(out io.Writer, r passReport) int {
 		_, _ = fmt.Fprintf(out, "%s\nEmbedding cache: ", partialMessage(got, want, r.budget, r.elapsed))
 		hits, misses := r.embedder.Stats()
 		_, _ = fmt.Fprintf(out, "%d hits, %d computed.\n", hits, misses)
+		if len(r.discarded) > 0 {
+			// Named, not silent: the files this pass was going to produce are
+			// gone, and a bare "no such file" later would not say why.
+			_, _ = fmt.Fprintf(out, "Discarded partial result file(s): %s.\n", strings.Join(r.discarded, ", "))
+		}
 		return exitCode(true, nil)
 	}
 
