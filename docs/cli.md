@@ -746,7 +746,18 @@ the purge, or another machine's copy of the store. The MCP equivalent is
 `ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
 erase something rather than to retire a memory.
 
-The command writes no memory, history or project row. It does open the store read-write — the same open `ghost maintenance status` and `ghost backup` use — so a database predating the history table is migrated by the open, and that migration first writes the full pre-migration backup copy it always takes. The strictly read-only opener is not used here because it refuses a store behind the current schema, which is exactly the store someone is most likely to run this against after upgrading.
+Reading a history (`ghost history <ref>`, and `as_of`) writes no memory, history or
+project row, and neither does `ghost history compact` **without** `--apply` — a dry
+run is nothing but reads, and it is the command to reach for first. The two forms
+that do write are `ghost history purge <ref>`, which deletes the recorded text, and
+`ghost history compact --apply`, which deletes redundant versions and (with
+`--fix-updated-at`) moves a stamp; see [the compact section](#ghost-history-compact)
+for what that one touches. All of them open the store read-write — the same open
+`ghost maintenance status` and `ghost backup` use — so a database predating the
+history table is migrated by the open, and that migration first writes the full
+pre-migration backup copy it always takes. The strictly read-only opener is not used
+here because it refuses a store behind the current schema, which is exactly the store
+someone is most likely to run this against after upgrading.
 
 Entries are kept per the growth policy in [architecture.md](architecture.md#memory-history): the newest 50 versions of one memory, and the newest 20 000 rows in the store.
 

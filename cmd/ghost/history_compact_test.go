@@ -900,6 +900,18 @@ func TestPrintPartialHistoryCompactCarriesTheWarning(t *testing.T) {
 	if !strings.Contains(text, "beta") || !strings.Contains(text, "5") {
 		t.Errorf("the partial report lost its counts:\\n%s", text)
 	}
+	// And the bound those counts were taken under, in the completed report's own
+	// words. A count is a count OF a set and the bound defines that set, so a
+	// partial report naming "5 redundant versions" without saying which versions
+	// were eligible is a number the operator cannot check against their own store
+	// — on the one report where the failure may have BEEN the bound. Matched
+	// literally against the completed report's line rather than for the bound's
+	// mere presence: the two paths printing different sentences for one run is
+	// the defect this closes.
+	want := "  removing only versions recorded before 2030-01-01 00:00:00\n"
+	if !strings.Contains(text, want) {
+		t.Errorf("the partial report does not name the bound its counts were taken at (want %q):\\n%s", want, text)
+	}
 }
 
 // TestRunHistoryCompactWarnsBeforeItsReport is the ordering, and it is a separate

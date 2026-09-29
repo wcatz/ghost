@@ -745,13 +745,18 @@ func (s *Store) deleteRemovableHistory(ctx context.Context, projectID, cutoff st
 	query, args := compactDeleteStmt(projectID, cutoff)
 	var total int64
 	for {
-		// beginWrite, not s.db.BeginTx: this opens a write transaction per batch
-		// and a whole pass can be dozens of them, which is the shape #671 measured
-		// — a writer that loses its hand-off on SQLite's growing busy-handler
-		// schedule — so the bounded retry rides on the batches too, and the wait
-		// and hold are reported under their own op name rather than folded into a
-		// writer's.
-		tx, lock, err := s.beginWrite(ctx, "history-compact")
+		// beginGuardedWrite, not beginWrite and not s.db.BeginTx: this opens a
+		// write transaction per batch and a whole pass can be dozens of them,
+		// which is the shape #671 measured — a writer that loses its hand-off on
+		// SQLite's growing busy-handler schedule — so the bounded retry rides on
+		// the batches too, and the wait and hold are reported under their own op
+		// name rather than folded into a writer's. The seam is #746's: it runs
+		// the newer-store check in the SAME transaction as the delete it guards,
+		// because a compact --apply against a store a newer Ghost owns would
+		// otherwise destroy rows the newer schema has already reinterpreted. The
+		// check costs one PRAGMA per batch and it rolls the transaction back on a
+		// refusal, so a refused pass holds nothing and blocks nothing.
+		tx, lock, err := s.beginGuardedWrite(ctx, "history-compact")
 		if err != nil {
 			return total, fmt.Errorf("begin compact history: %w", err)
 		}
@@ -922,11 +927,16 @@ func (s *Store) restoreUpdatedAt(ctx context.Context, projectID, cutoff string, 
 			lock writeLock
 		)
 		if apply {
-			// beginWrite for the reason deleteRemovableHistory gives: a pass opens
-			// a transaction per batch, and #671's bounded retry is what keeps a
-			// writer from losing its hand-off on the busy handler's growing poll
-			// schedule.
-			if tx, lock, err = s.beginWrite(ctx, "history-compact-stamp"); err != nil {
+			// beginGuardedWrite for both reasons deleteRemovableHistory gives: a
+			// pass opens a transaction per batch, so #671's bounded retry is what
+			// keeps a writer from losing its hand-off on the busy handler's
+			// growing poll schedule; and the seam runs #746's newer-store check in
+			// the same transaction as the stamp restore it guards. The second is
+			// not optional here either — this write moves a live memory's
+			// updated_at, which is the column `ghost supersede` orients candidate
+			// pairs by, so a stale server restoring it against a store a newer
+			// Ghost owns would move a value the newer schema reads differently.
+			if tx, lock, err = s.beginGuardedWrite(ctx, "history-compact-stamp"); err != nil {
 				return fixed, unreadable, unrecorded, fmt.Errorf("begin restore updated_at: %w", err)
 			}
 		}

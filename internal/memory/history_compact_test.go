@@ -2577,3 +2577,72 @@ func containsPhase(phases []string, want string) bool {
 	}
 	return false
 }
+
+// TestCompactHistoryRefusesToWriteOnAStoreANewerGhostOwns is the behaviour that
+// says the pass's two writes are guarded, which the structural scan
+// (TestEveryWriteRefusesANewerStore) can only say indirectly: it exempts this
+// file's two READS and requires every write to reach beginGuardedWrite, but a
+// scan that passes and a pass that refuses are different claims.
+//
+// The store here is stamped forward by ANOTHER connection, which is what a
+// newer Ghost process does to a running server's file. Both writes of an apply
+// are exercised, because they are two separate transactions and either could
+// have been the unguarded one:
+//
+//   - the DELETE (deleteRemovableHistory), which destroys rows;
+//   - the updated_at restore (restoreUpdatedAt), which moves the column
+//     `ghost supersede` orients candidate pairs by.
+//
+// The stamp is the assertion as well as the refusal: a guarded transaction
+// ROLLS BACK on a refusal, so a run that reported the refusal and left
+// updated_at moved would have written into a store it just declared newer. And
+// the dry run is checked separately, because the reads are exempt and a dry run
+// is nothing but reads — a refusal there would mean the exemption had cost an
+// operator the ability to LOOK before writing, which is the opposite of the
+// intent.
+func TestCompactHistoryRefusesToWriteOnAStoreANewerGhostOwns(t *testing.T) {
+	s, path := fileBackedStore(t)
+	ctx := context.Background()
+	// EnsureProject's SECOND argument is the project id, which is what the
+	// memories table's foreign key and this pass's project argument both name.
+	// It is testProject because the shared fixture helpers (createCompactMemory,
+	// setUpdatedAt) write under it; a second name here would leave the fixture's
+	// memories pointing at a project this run never compacts, and the refusal
+	// below would then be a pass finding nothing to do.
+	if err := s.EnsureProject(ctx, testProject, "/tmp/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, _, _, _, runTo := seedStampedHistory(t, s, 3)
+	before := historyRowCount(t, s, id)
+	if before == 0 {
+		t.Fatal("fixture wrote no history rows, so a refusal could not be told from a no-op")
+	}
+
+	// A read-only pass still works, and it still COUNTS: this is what an operator
+	// runs first, and the two reads this file holds are exempt precisely so it
+	// keeps working against a store a newer Ghost owns.
+	stampFromAnotherHandle(t, path, SchemaVersion()+1)
+	if _, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{}); err != nil {
+		t.Fatalf("a dry run must still read a store a newer Ghost owns: %v", err)
+	}
+
+	// The delete, refused.
+	if _, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true}); err == nil {
+		t.Error("CompactHistory --apply deleted removable versions from a store a newer Ghost owns: " +
+			"the write reached a handle instead of beginGuardedWrite")
+	}
+	if got := historyRowCount(t, s, id); got != before {
+		t.Errorf("history rows = %d, want %d: a refused delete rolled nothing back", got, before)
+	}
+
+	// The stamp restore, refused — and refused WITHOUT having moved the stamp,
+	// which is the half a rollback buys.
+	if _, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true, FixUpdatedAt: true}); err == nil {
+		t.Error("CompactHistory --fix-updated-at restored a stamp on a store a newer Ghost owns: " +
+			"the write reached a handle instead of beginGuardedWrite")
+	}
+	if got := readUpdatedAt(t, s, id); got != runTo {
+		t.Errorf("updated_at = %q, want %q unchanged: the refusal rolled the write back, so the stamp "+
+			"must still read as the reflect run left it", got, runTo)
+	}
+}

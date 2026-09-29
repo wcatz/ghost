@@ -422,6 +422,17 @@ func printPartialHistoryCompact(w io.Writer, r historyCompactReport) error {
 		map[bool]string{true: "compacted", false: "read"}[r.Apply]); err != nil {
 		return err
 	}
+	// The bound, on this path too, in the same words the completed report uses.
+	// A count is a count OF a set, and the set is defined by the bound: "17
+	// redundant versions" beside a bound the operator cannot see is a number they
+	// cannot check against their own store, and on a failed run it is the number
+	// most likely to be wrong, because the failure may have been the bound being
+	// unparseable in the first place. The completed report says the same line, and
+	// a partial report that dropped it would make the two disagree about the same
+	// run.
+	if _, err := fmt.Fprintf(w, "  removing only versions recorded before %s\n", r.Before); err != nil {
+		return err
+	}
 	return printHistoryCompactLines(w, r)
 }
 
