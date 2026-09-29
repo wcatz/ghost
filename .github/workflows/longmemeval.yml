@@ -12,17 +12,32 @@ name: longmemeval
 # Why hybrid is not gated in CI: the cold embedding pass over the dataset is
 # CPU-bound (~6.5 embeds/sec even on fast hardware => several hours for the
 # full ~230k-vector pass on a hosted x86 runner), which exceeds any sane CI
-# timeout — a weekly schedule that never finished within its cap could never
-# warm actions/cache, so it just burned 4h and failed every time. nomic
-# embeddings are deterministic, so a cold run computes the SAME vectors as a
-# warm one => identical R@5/NDCG, so a warm LOCAL run is what justifies the
-# hybrid floors below — but see the caveat: that run predates the harness
-# adopting the search_document:/search_query: task prefixes, so the floors
-# have not been re-derived for the prefixed space. A dispatch today
-# floor-checks them instead of validating them (they came from a different
-# vector space); re-derive them from a prefixed run to get a real gate back
-# (see the CI-gating note in docs/benchmarks.md). Run hybrid via
-# workflow_dispatch (or locally) when you actually want the numbers.
+# timeout — a run left to the cap could never warm actions/cache, so it just
+# burned the job and saved nothing every time. nomic embeddings are
+# deterministic, so a cold run computes the SAME vectors as a warm one =>
+# identical R@5/NDCG, so a warm run is what justifies the hybrid floors below.
+#
+# HOW A COLD RUN MAKES PROGRESS (#771): the embed pass bounds itself with
+# -embed-deadline and stops with its vectors already in the cache, printing
+# "cache warmed N/M vectors … re-dispatch" INSTEAD of a metrics table and
+# exiting 3. The save step (if: always()) then uploads that partial cache, and
+# the next dispatch restores it via restore-keys and embeds the remainder. Each
+# dispatch therefore ends cleanly at its own budget rather than at the cap,
+# where a cancelled job skips the save step entirely and warms nothing. The
+# budget counts embed time only, so a dispatch whose restored cache is already
+# complete runs to a real result instead of stopping early forever.
+#
+# RE-BASELINE STILL PENDING: the warm local run that set the floors below
+# predates the harness adopting the search_document:/search_query: task
+# prefixes, so the floors are from a different vector space and a dispatch
+# floor-checks them rather than validating them. Getting them real needs a
+# COMPLETE prefixed run, which now takes a small number of dispatches to
+# accumulate: keep re-dispatching until one reports a full pass (exit 0), then
+# read its OVERALL row, re-derive the floors from it, record the run id in
+# docs/benchmarks.md, and update this paragraph. Do NOT re-derive them from a
+# partial run — it prints no metrics, by design. See the CI-gating note in
+# docs/benchmarks.md. Run hybrid via workflow_dispatch (or locally) when you
+# actually want the numbers.
 on:
   workflow_dispatch:
     inputs:
@@ -101,9 +116,17 @@ jobs:
     # a schedule (see the header comment). Runs on manual dispatch unless the
     # input explicitly asked for fts alone.
     if: github.event_name == 'workflow_dispatch' && inputs.condition != 'fts'
-    # Generous: a cold embed-cache pass over the full dataset is CPU-bound and
-    # can take several hours on a hosted runner. Once actions/cache has a warm
-    # entry (a prior manual run that completed), repeat runs finish in minutes.
+    # Generous, because a cold embed-cache pass over the full dataset is
+    # CPU-bound and takes several hours on a hosted runner. Once actions/cache
+    # has a warm entry (a prior dispatch that completed), repeat runs finish in
+    # minutes.
+    #
+    # The cap is a backstop, NOT the way this pass is meant to end. A job
+    # cancelled at its cap skips every remaining step — including the
+    # actions/cache/save below — so a pass left to the cap saves nothing and
+    # the cache never warms (run 36501751853, cancelled at 2026-09-29). The
+    # embedding pass therefore stops ITSELF, at -embed-deadline below, with
+    # ~30 minutes of slack for setup, the save step and the upload.
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7.0.1
@@ -162,15 +185,51 @@ jobs:
         # pull leaves the v1.5 tag missing, so a 404 fails the run outright.
         run: ollama pull nomic-embed-text:v1.5
 
+      - name: Build the benchmark harness
+        run: go build -o "$RUNNER_TEMP/longmemeval" ./bench/longmemeval
+        # A built binary, not `go run`: `go run` reports the child's status on
+        # stderr but exits 1 for ANY non-zero child status, which would flatten
+        # the harness's distinct exit 3 ("partial, cache saved") into the same
+        # code as a floor violation and make the branch below unreachable.
+
       - name: Run hybrid condition with regression floors
+        env:
+          # Wall clock the embedding pass may spend in remote embed calls
+          # before it stops itself, leaving the vectors it computed in
+          # -embed-cache. 300m against the 360m job cap: the ~12h cold pass
+          # cannot finish in one dispatch, so it is expected to stop here and
+          # be resumed by the next one. Counted in embed time only, so a
+          # dispatch whose restored cache is already complete is never cut off
+          # while scoring and does reach a result.
+          EMBED_DEADLINE: 300m
         run: |
           mkdir -p "$(dirname "$EMBED_CACHE_PATH")"
-          go run ./bench/longmemeval \
+          set +e
+          "$RUNNER_TEMP/longmemeval" \
             -data "$DATASET_PATH" \
             -condition hybrid \
             -ollama http://localhost:11434 \
             -embed-cache "$EMBED_CACHE_PATH" \
+            -embed-deadline "$EMBED_DEADLINE" \
             -floors "r5=0.91,ndcg10=0.89"
+          status=$?
+          set -e
+          case "$status" in
+            0)
+              echo "hybrid pass complete; floors checked against a full question set"
+              ;;
+            3)
+              # Partial: the embedding pass stopped at its budget with its
+              # progress in the cache, and deliberately reported no metrics.
+              # Not a failure and not a result — the next dispatch resumes from
+              # the cache the save step below uploads.
+              echo "::warning::embedding pass stopped at its ${EMBED_DEADLINE} budget: partial, cache saved. Re-dispatch to continue warming; this run reports no benchmark result."
+              ;;
+            *)
+              echo "::error::bench/longmemeval failed with exit ${status}"
+              exit "$status"
+              ;;
+          esac
         # Floors derived from published hybrid OVERALL numbers
         # (docs/benchmarks.md, 2026-07-15 run, n=470): R@5 0.930 -> floor
         # 0.91, NDCG@10 0.903 -> floor 0.89. Same ~0.01-0.02 safety margin
@@ -185,12 +244,25 @@ jobs:
         # First run on a cold embed-cache embeds the whole dataset on CPU and
         # is slow (hence the generous timeout above); once actions/cache has a
         # warm entry under the longmemeval-embed-cache-v1- prefix, subsequent
-        # runs are fast (only new/changed content gets embedded).
+        # runs are fast (only new/changed content gets embedded). The first
+        # dispatches on a cold cache end at -embed-deadline with the cache
+        # saved, NOT at the job cap — re-dispatch until one completes.
 
       - name: Save embedding cache
-        # if: always() so a partial embed pass still snapshots progress even if
-        # the run step fails or the job hits its timeout — the next dispatch
-        # then resumes via restore-keys instead of starting cold again.
+        # if: always() so a partial embed pass (exit 3 above) still snapshots
+        # its progress; the next dispatch then resumes via restore-keys instead
+        # of starting cold again.
+        #
+        # This step is what makes the deadline above worth having, and the two
+        # failure modes are not equivalent:
+        #  - a step that exits EARLY (exit 3, or a failure) leaves the job
+        #    running, so this step runs and uploads. `always()` covers it.
+        #  - a job CANCELLED at its cap is torn down by the runner: remaining
+        #    steps never start, so this save never happens and the vectors
+        #    computed so far are lost with the runner. No `if:` condition can
+        #    rescue that — it is why the embed pass stops itself at
+        #    -embed-deadline with slack under the cap instead of relying on
+        #    this step to catch a timeout.
         if: always()
         uses: actions/cache/save@v6.1.0
         with:

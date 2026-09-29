@@ -85,6 +85,85 @@ func TestOverallMetricsZeroQuestions(t *testing.T) {
 	}
 }
 
+// TestSelectedQuestions: the scoring loop and the partial-run progress report
+// must agree on WHICH questions a pass covers, or the "cache warmed N/M"
+// denominator measures a different pass than the one that ran. Abstention
+// questions carry no evidence labels and are dropped (and counted), and
+// -questions caps the count after that drop.
+func TestSelectedQuestions(t *testing.T) {
+	questions := []question{
+		{QuestionID: "a"}, {QuestionID: "b_abs"}, {QuestionID: "c"}, {QuestionID: "d_abs"}, {QuestionID: "e"},
+	}
+	ids := func(selected []question) []string {
+		out := make([]string, len(selected))
+		for i, q := range selected {
+			out[i] = q.QuestionID
+		}
+		return out
+	}
+
+	tests := []struct {
+		name              string
+		maxQuestions      int
+		includeAbstention bool
+		want              []string
+		wantSkipped       int
+	}{
+		{"all answerable", 0, false, []string{"a", "c", "e"}, 2},
+		{"abstention included", 0, true, []string{"a", "b_abs", "c", "d_abs", "e"}, 0},
+		{"cap counts scored questions only", 2, false, []string{"a", "c"}, 2},
+		{"cap with abstention included", 3, true, []string{"a", "b_abs", "c"}, 0},
+		{"cap beyond the dataset", 99, false, []string{"a", "c", "e"}, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, skipped := selectedQuestions(questions, tt.maxQuestions, tt.includeAbstention)
+			if !reflect.DeepEqual(ids(got), tt.want) {
+				t.Errorf("selectedQuestions = %v, want %v", ids(got), tt.want)
+			}
+			if skipped != tt.wantSkipped {
+				t.Errorf("skippedAbstention = %d, want %d", skipped, tt.wantSkipped)
+			}
+		})
+	}
+}
+
+// TestExitCode: a partial pass is neither a pass nor a failure. It exits with
+// its own status so the workflow can save the cache and re-dispatch, and — the
+// half that matters for a gate — it is decided BEFORE the floor violations: a
+// pass that stopped at its budget has no metrics, so it can neither report a
+// violation nor be reported as a benchmark result.
+func TestExitCode(t *testing.T) {
+	violations := []string{"FLOOR VIOLATION: r5 = 0.100 < 0.910"}
+
+	tests := []struct {
+		name       string
+		partial    bool
+		violations []string
+		want       int
+	}{
+		{"complete and clean", false, nil, exitComplete},
+		{"complete with a violation", false, violations, exitFailure},
+		{"partial never fails the floors", true, violations, exitPartial},
+		{"partial with nothing to check", true, nil, exitPartial},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exitCode(tt.partial, tt.violations); got != tt.want {
+				t.Errorf("exitCode(partial=%v, %d violations) = %d, want %d",
+					tt.partial, len(tt.violations), got, tt.want)
+			}
+		})
+	}
+
+	// Distinct from every other status the harness returns, so a caller can
+	// tell "stopped early, cache saved" from "ran and failed the floors".
+	if exitPartial == exitComplete || exitPartial == exitFailure {
+		t.Errorf("exitPartial = %d must differ from exitComplete=%d and exitFailure=%d",
+			exitPartial, exitComplete, exitFailure)
+	}
+}
+
 func TestCheckFloors(t *testing.T) {
 	// Published fts OVERALL numbers (docs/benchmarks.md).
 	overall := map[string]float64{"r1": 0.429, "r5": 0.751, "r10": 0.832, "mrr10": 0.758, "ndcg10": 0.738}

@@ -17,7 +17,7 @@
 //	    --condition fts|vector|hybrid [--questions N] [--out per-question.jsonl] \
 //	    [--retrieval-out ranked.jsonl] \
 //	    [--ollama http://localhost:11434] [--embed-cache ~/.cache/ghost-bench/nomic-cache.jsonl] \
-//	    [--floors "r5=0.74,ndcg10=0.72"]
+//	    [--embed-deadline 4h30m] [--floors "r5=0.74,ndcg10=0.72"]
 //
 // --retrieval-out emits, per scored question, the full untruncated ranked
 // session list in the official LongMemEval retrieval_results format
@@ -37,12 +37,22 @@
 // 1, for use as a CI regression gate. An unknown key or malformed spec is
 // validated before the benchmark runs and exits 1 immediately.
 //
+// --embed-deadline bounds a cold embedding pass, for the CI job whose cap would
+// otherwise kill it. When the budget is spent, the pass stops at a batch
+// boundary with every vector it did compute appended to the --embed-cache file,
+// prints "cache warmed N/M vectors … re-dispatch" INSTEAD of the metrics table,
+// and exits 3 — distinct from the floor-violation exit 1, so a caller can save
+// the cache and re-dispatch rather than read an unfinished pass as a result.
+// The budget counts only time inside remote embed calls, so a pass whose cache
+// is already complete is never cut off partway through scoring.
+//
 // See docs/benchmarks.md ("Phase 1") for methodology and reporting rules.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -198,7 +208,18 @@ func checkFloors(overall map[string]float64, floors map[string]float64) []string
 	return violations
 }
 
-func main() {
+// Exit statuses. A partial pass — one whose embedding pass stopped at
+// -embed-deadline — is deliberately neither success nor failure: it warmed the
+// cache and nothing else, so it gets its own status for the caller to branch on.
+const (
+	exitComplete = 0
+	exitFailure  = 1
+	exitPartial  = 3
+)
+
+func main() { os.Exit(run()) }
+
+func run() int {
 	dataPath := flag.String("data", "", "path to longmemeval_s_cleaned.json (required)")
 	condition := flag.String("condition", "fts", "fts | vector | hybrid")
 	maxQuestions := flag.Int("questions", 0, "limit scored questions (0 = all)")
@@ -206,6 +227,8 @@ func main() {
 	retrievalOutPath := flag.String("retrieval-out", "", "JSONL of full ranked sessions per question in official retrieval_results format (Phase 4 generation input)")
 	ollamaURL := flag.String("ollama", "http://localhost:11434", "Ollama URL for vector/hybrid")
 	embedCache := flag.String("embed-cache", "", "append-only embedding cache JSONL (vector/hybrid)")
+	embedDeadline := flag.Duration("embed-deadline", 0, "stop the embedding pass after this much wall clock in remote embed calls and exit "+
+		"partial (cache saved, no metrics, no floor check) so a re-dispatch resumes from the cache; 0 = unbounded")
 	floorsSpec := flag.String("floors", "", "comma-separated metric=min floors over OVERALL metrics, e.g. \"r5=0.74,ndcg10=0.72\" (keys: r1, r5, r10, mrr10, ndcg10)")
 	includeAbstention := flag.Bool("include-abstention", false, "include abstention questions in Phase 1 scoring (not recommended for IR metrics)")
 	flag.Parse()
@@ -215,16 +238,20 @@ func main() {
 	floors, err := parseFloors(*floorsSpec)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		return exitFailure
 	}
 
 	if *dataPath == "" {
 		fmt.Fprintln(os.Stderr, "error: --data is required")
-		os.Exit(1)
+		return exitFailure
 	}
 	if *condition != "fts" && *condition != "vector" && *condition != "hybrid" {
 		fmt.Fprintf(os.Stderr, "error: unknown --condition %q\n", *condition)
-		os.Exit(1)
+		return exitFailure
+	}
+	if *embedDeadline < 0 {
+		fmt.Fprintln(os.Stderr, "error: --embed-deadline cannot be negative")
+		return exitFailure
 	}
 
 	// Search diagnostics (FTS term-cap warnings etc.) would swamp the report.
@@ -242,17 +269,25 @@ func main() {
 		embedder, err = newCachedEmbedder(*ollamaURL, *embedCache)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return exitFailure
 		}
 		defer embedder.Close() //nolint:errcheck
+		// Bounding the embedding pass is what lets a cold CI run save its
+		// progress; the pass below turns a spent budget into a partial exit.
+		embedder.SetDeadline(*embedDeadline)
 	}
+
+	// Resolve the question set once, up front: the partial-run report needs
+	// the same set the scoring loop would have covered, or its "N/M" would
+	// measure a different pass than the one that ran.
+	selected, skippedAbstention := selectedQuestions(questions, *maxQuestions, *includeAbstention)
 
 	var outFile *os.File
 	if *outPath != "" {
 		outFile, err = os.Create(*outPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return exitFailure
 		}
 		defer outFile.Close() //nolint:errcheck
 	}
@@ -262,7 +297,7 @@ func main() {
 		retrievalOutFile, err = os.Create(*retrievalOutPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			return exitFailure
 		}
 		defer retrievalOutFile.Close() //nolint:errcheck
 	}
@@ -270,21 +305,21 @@ func main() {
 	ctx := context.Background()
 	overall := &agg{}
 	byType := map[string]*agg{}
-	scored, skippedAbstention := 0, 0
+	scored := 0
+	partial := false
 
-	for _, q := range questions {
-		if isAbstention(q.QuestionID) && !*includeAbstention {
-			skippedAbstention++
-			continue
-		}
-		if *maxQuestions > 0 && scored >= *maxQuestions {
-			break
-		}
-
+	for _, q := range selected {
 		rankedSessions, err := rankSessionsForQuestion(ctx, q, *condition, embedder)
 		if err != nil {
+			if errors.Is(err, errEmbedDeadline) {
+				// Stop before the job cap, with every vector computed so far
+				// already in the cache file. No metrics, no floor check: a
+				// partial pass is cache progress, not a result.
+				partial = true
+				break
+			}
 			fmt.Fprintf(os.Stderr, "error: question %s: %v\n", q.QuestionID, err)
-			os.Exit(1)
+			return exitFailure
 		}
 
 		rel := bench.Relevance{}
@@ -329,40 +364,146 @@ func main() {
 		}
 	}
 
-	fmt.Printf("LongMemEval-S (cleaned) — session-level retrieval, condition=%s\n\n", *condition)
-	fmt.Printf("%-28s %5s %7s %7s %7s %8s %8s\n", "question type", "n", "R@1", "R@5", "R@10", "MRR@10", "NDCG@10")
-	typeNames := make([]string, 0, len(byType))
-	for name := range byType {
+	return reportPass(os.Stdout, passReport{
+		condition:         *condition,
+		overall:           overall,
+		byType:            byType,
+		scored:            scored,
+		skippedAbstention: skippedAbstention,
+		includeAbstention: *includeAbstention,
+		embedder:          embedder,
+		selected:          selected,
+		floors:            floors,
+		partial:           partial,
+		budget:            *embedDeadline,
+		elapsed:           time.Since(start),
+	})
+}
+
+// passReport is everything a finished pass reports and needs to report it. It
+// is a struct rather than a dozen parameters because the reporting decision —
+// in particular whether a partial pass is allowed to print a metrics table at
+// all — is the invariant the harness exists to keep, and it has to be
+// reachable by a test that can drive both branches.
+type passReport struct {
+	condition         string
+	overall           *agg
+	byType            map[string]*agg
+	scored            int
+	skippedAbstention int
+	includeAbstention bool
+	embedder          *cachedEmbedder
+	selected          []question
+	floors            map[string]float64
+	partial           bool
+	budget            time.Duration
+	elapsed           time.Duration
+}
+
+// reportPass writes a finished pass's report to out and returns its process
+// status.
+//
+// A partial pass — one whose embedding pass stopped at -embed-deadline —
+// prints cache progress and NOTHING else: no table, no per-type rows, no
+// overall row, no floor verdict. It covered a subset of the questions, so
+// every number it could print is a subset average, and a table is the one
+// output a reader (or a log scraper) would take as a benchmark result. The
+// partial branch therefore returns before the table is reached rather than
+// printing it and qualifying it.
+func reportPass(out io.Writer, r passReport) int {
+	if r.partial {
+		// embedder is non-nil on this path: the deadline is only consulted
+		// while embedding, which only the vector/hybrid conditions do.
+		got, want := r.embedder.warmProgress(r.selected)
+		fmt.Fprintf(out, "%s\nEmbedding cache: ", partialMessage(got, want, r.budget, r.elapsed))
+		hits, misses := r.embedder.Stats()
+		fmt.Fprintf(out, "%d hits, %d computed.\n", hits, misses)
+		return exitCode(true, nil)
+	}
+
+	fmt.Fprintf(out, "LongMemEval-S (cleaned) — session-level retrieval, condition=%s\n\n", r.condition)
+	fmt.Fprintf(out, "%-28s %5s %7s %7s %7s %8s %8s\n", "question type", "n", "R@1", "R@5", "R@10", "MRR@10", "NDCG@10")
+	typeNames := make([]string, 0, len(r.byType))
+	for name := range r.byType {
 		typeNames = append(typeNames, name)
 	}
 	sort.Strings(typeNames)
 	for _, name := range typeNames {
-		printAgg(name, byType[name])
+		printAggTo(out, name, r.byType[name])
 	}
-	printAgg("OVERALL", overall)
-	fmt.Printf("\n%d questions scored (%d abstention %s). Wall clock %s.\n",
-		scored, skippedAbstention,
-		map[bool]string{false: "excluded", true: "included"}[*includeAbstention],
-		time.Since(start).Round(time.Second))
-	if embedder != nil {
-		hits, misses := embedder.Stats()
-		fmt.Printf("Embedding cache: %d hits, %d computed.\n", hits, misses)
+	printAggTo(out, "OVERALL", r.overall)
+	fmt.Fprintf(out, "\n%d questions scored (%d abstention %s). Wall clock %s.\n",
+		r.scored, r.skippedAbstention,
+		map[bool]string{false: "excluded", true: "included"}[r.includeAbstention],
+		r.elapsed.Round(time.Second))
+	if r.embedder != nil {
+		hits, misses := r.embedder.Stats()
+		fmt.Fprintf(out, "Embedding cache: %d hits, %d computed.\n", hits, misses)
 	}
 
-	if violations := checkFloors(overallMetrics(overall), floors); len(violations) > 0 {
-		for _, v := range violations {
-			fmt.Fprintln(os.Stderr, v)
+	violations := checkFloors(overallMetrics(r.overall), r.floors)
+	for _, v := range violations {
+		fmt.Fprintln(os.Stderr, v)
+	}
+	return exitCode(r.partial, violations)
+}
+
+// selectedQuestions returns the questions a pass actually scores, in dataset
+// order, and how many abstention questions were dropped to get there.
+// Abstention questions carry no evidence labels, so they are excluded unless
+// includeAbstention is set, and maxQuestions (0 = all) caps the count AFTER
+// that exclusion — a cap of 2 means two scored questions, not the first two
+// rows of the file. The scoring loop and the partial-run report both read this,
+// so the "N/M" a partial pass prints describes the pass that actually ran.
+func selectedQuestions(questions []question, maxQuestions int, includeAbstention bool) (selected []question, skippedAbstention int) {
+	for _, q := range questions {
+		if isAbstention(q.QuestionID) && !includeAbstention {
+			skippedAbstention++
+			continue
 		}
-		os.Exit(1)
+		if maxQuestions > 0 && len(selected) >= maxQuestions {
+			break
+		}
+		selected = append(selected, q)
+	}
+	return selected, skippedAbstention
+}
+
+// exitCode maps a finished pass to a process status. A partial pass is decided
+// FIRST and unconditionally: it scored some questions and may well sit below
+// every floor, but it never covered the whole set, so those numbers are not a
+// result and must not be reported as one. Returning exitPartial rather than
+// exitFailure is what lets the workflow save the cache and re-dispatch instead
+// of reading a half-finished pass as a regression.
+func exitCode(partial bool, violations []string) int {
+	switch {
+	case partial:
+		return exitPartial
+	case len(violations) > 0:
+		return exitFailure
+	default:
+		return exitComplete
 	}
 }
 
-func printAgg(name string, a *agg) {
+// partialMessage is the whole report of a pass that stopped at its
+// -embed-deadline: how much of the cache this dispatch warmed, and what to do
+// about it. It deliberately reads as progress, never as a score — no metric
+// names, no table, no floor verdict.
+func partialMessage(got, want int, budget, elapsed time.Duration) string {
+	// The budget is echoed as the user wrote it, unrounded: rounding a 500ms
+	// budget to "1s" would name a deadline this pass was not given.
+	return fmt.Sprintf("Embedding pass stopped at its %s budget after %s: cache warmed %d/%d vectors. "+
+		"No metrics, no floor check — re-dispatch to continue from this cache.",
+		budget, elapsed.Round(time.Second), got, want)
+}
+
+func printAggTo(out io.Writer, name string, a *agg) {
 	if a.n == 0 {
 		return
 	}
 	n := float64(a.n)
-	fmt.Printf("%-28s %5d %7.3f %7.3f %7.3f %8.3f %8.3f\n",
+	fmt.Fprintf(out, "%-28s %5d %7.3f %7.3f %7.3f %8.3f %8.3f\n",
 		name, a.n, a.r1/n, a.r5/n, a.r10/n, a.mrr/n, a.ndcg/n)
 }
 

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -25,11 +26,36 @@ const embedBatchSize = 64
 type cachedEmbedder struct {
 	ollamaURL string
 	client    *http.Client
+	// embed is the remote batch call, held as a field so a test can substitute
+	// a fake for Ollama. newCachedEmbedder always sets embedRemote.
+	embed     func(ctx context.Context, texts []string) ([][]float32, error)
 	cache     map[string][]float32
 	cacheFile *os.File
 	hits      int
 	misses    int
+	// budget bounds the embedding pass; zero limit means unbounded. See
+	// SetDeadline.
+	budget embedBudget
 }
+
+// embedBudget is a wall-clock allowance for the embedding pass, charged only by
+// the time spent inside remote embed calls. It is deliberately not a process
+// deadline: the pass this bounds is the embedding, and a warm pass makes no
+// remote call at all, so a budget spent by an earlier dispatch can never cut
+// off a dispatch whose cache is already complete (which is what would otherwise
+// make re-dispatch loop forever without progress).
+type embedBudget struct {
+	spent time.Duration
+	limit time.Duration
+}
+
+func (b *embedBudget) exhausted() bool { return b.limit > 0 && b.spent >= b.limit }
+
+// errEmbedDeadline is returned by ensure when the budget is spent. The caller
+// (main) treats it as "partial pass": the vectors computed so far are already
+// appended to the cache file, and the run reports cache-warming progress and
+// exits with a distinct status instead of printing metrics or checking floors.
+var errEmbedDeadline = errors.New("embedding deadline reached")
 
 type cacheLine struct {
 	Hash   string    `json:"h"`
@@ -42,6 +68,7 @@ func newCachedEmbedder(ollamaURL, cachePath string) (*cachedEmbedder, error) {
 		client:    &http.Client{Timeout: 5 * time.Minute},
 		cache:     make(map[string][]float32),
 	}
+	e.embed = e.embedRemote
 	if cachePath == "" {
 		return e, nil
 	}
@@ -110,6 +137,51 @@ func (e *cachedEmbedder) EnsureBatch(ctx context.Context, texts []string) error 
 	return e.ensure(ctx, inputs)
 }
 
+// SetDeadline bounds the embedding pass to d of wall clock spent in remote
+// embed calls. Once spent, ensure stops at a batch boundary and returns
+// errEmbedDeadline with every vector it did compute already appended to the
+// cache file; a zero d leaves the pass unbounded, which is the local default.
+//
+// The CI hybrid job sets this so a cold pass stops short of the job cap. That
+// distinction is the whole point: a job cancelled at its cap skips the
+// actions/cache/save step, so a pass killed by the cap caches nothing, while a
+// pass that stops itself returns, reports progress and lets the save step run.
+func (e *cachedEmbedder) SetDeadline(d time.Duration) { e.budget.limit = d }
+
+// warmProgress reports how many of the distinct vectors a pass over these
+// questions needs (want) and how many are already cached (got). It is what a
+// partial pass reports instead of a result, and it is derived from the same
+// role-prefixed inputs the pass would embed — so N only ever counts vectors the
+// next dispatch can actually use, and the same text in the document and query
+// roles is counted as the two distinct vectors it is.
+func (e *cachedEmbedder) warmProgress(questions []question) (got, want int) {
+	seen := make(map[string]bool)
+	note := func(input string) {
+		h := hashContent(input)
+		if seen[h] {
+			return
+		}
+		seen[h] = true
+		want++
+		if _, ok := e.cache[h]; ok {
+			got++
+		}
+	}
+	for _, q := range questions {
+		for _, session := range q.Sessions {
+			for _, t := range session {
+				if t.Content != "" {
+					note(documentInput(t.Content))
+				}
+			}
+		}
+		if q.Question != "" {
+			note(queryInput(q.Question))
+		}
+	}
+	return got, want
+}
+
 // ensure resolves inputs already in their final, role-prefixed form: the cache
 // key and the Ollama payload are the same string, so a hit means "this exact
 // text was embedded in this exact role".
@@ -124,10 +196,17 @@ func (e *cachedEmbedder) ensure(ctx context.Context, inputs []string) error {
 		seen[h] = true
 		missing = append(missing, t)
 	}
+	// The budget is checked only once there is a batch to send, so a fully
+	// cached pass never trips it no matter how much a previous pass spent.
 	for start := 0; start < len(missing); start += embedBatchSize {
+		if e.budget.exhausted() {
+			return errEmbedDeadline
+		}
 		end := min(start+embedBatchSize, len(missing))
 		batch := missing[start:end]
-		vecs, err := e.embedRemote(ctx, batch)
+		began := time.Now()
+		vecs, err := e.embed(ctx, batch)
+		e.budget.spent += time.Since(began)
 		if err != nil {
 			return err
 		}
