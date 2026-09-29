@@ -735,3 +735,70 @@ func TestRunPassiveRejectsASliceThatBoundsBytesButNotTheFetch(t *testing.T) {
 		t.Errorf("the retriever was called %d times for a request this seam refused", f.sets)
 	}
 }
+
+// TestAPassiveAbstentionPromisesNoNoteItCannotSend is a review should-fix, and the
+// sentence is the defect rather than the pipeline.
+//
+// `Result.Abstention` is bytes a CALLER renders, and the callers do not agree on
+// what comes with it. The search surface writes `assemblerNotes(res.Notes)` after
+// the abstention, so "The note below breaks the removals down per stage" is
+// there true. The passive block does not: `ghost_project_context`, the
+// `ghost://project/{id}/context` resource and the `recall_project` prompt return
+// `res.Abstention` as the ENTIRE answer, and render `Result.Notes` never. A
+// passive block whose rows were all withheld as out of date shipped:
+//
+//	…withheld as out of date, their validity windows having closed or not yet
+//	opened. The note below breaks the removals down per stage. The block was not
+//	empty before that — the answer is withheld, not absent. Call
+//	ghost_memories_list to see them, still marked with the window they carry.
+//
+// which points an agent at a breakdown that is not in the payload. The promise
+// cannot be kept by the sentence, because the assembler does not own the
+// rendering, so it is dropped from the PASSIVE half only — the search half keeps
+// it, where the renderer honours it, and the control below proves that rather
+// than asserting it.
+//
+// The abstention is still the same sentence otherwise: it keeps the shared
+// exclusion wording pinned by the test above, and it keeps the clause that
+// distinguishes "found and withheld" from "not there", which is the part a
+// caller needs.
+func TestAPassiveAbstentionPromisesNoNoteItCannotSend(t *testing.T) {
+	expired := projectCandidate("p_exp", 0.9)
+	expired.ValidUntil = stampPtr("2026-01-01 00:00:00")
+	res := run(t, &fakeRetriever{set: passiveSet(expired)}, passiveRequest())
+	if res.Outcome != OutcomeEmpty || res.Reason != reasonAllInvalid {
+		t.Fatalf("fixture: got outcome %q reason %q, want empty/all_invalid", res.Outcome, res.Reason)
+	}
+	if !strings.Contains(strings.ToLower(res.Abstention), "no sufficiently trustworthy memory found") {
+		t.Fatalf("fixture: the abstention must be the all_invalid sentence under test: %q", res.Abstention)
+	}
+	lower := strings.ToLower(res.Abstention)
+	for _, promise := range []string{"note below", "breaks the removals down", "per stage"} {
+		if strings.Contains(lower, promise) {
+			t.Errorf("the passive abstention promises %q, and a caller that renders the abstention alone "+
+				"(ghost_project_context, the project-context resource, recall_project) sends no note:\n%s",
+				promise, res.Abstention)
+		}
+	}
+	// The half that makes the abstention useful has to survive the removal: this is
+	// an EXCLUSION, and a reader who is not told the rows were found cannot tell it
+	// from a window that was empty.
+	if !strings.Contains(lower, "withheld as out of date") {
+		t.Errorf("the passive abstention lost the clause saying the rows were found and withheld:\n%s", res.Abstention)
+	}
+
+	// The control: the SEARCH sentence keeps the promise, and there it is true —
+	// the response really does carry the breakdown it points at.
+	row := projectCandidate("p_exp", 0.9)
+	row.ValidUntil = stampPtr("2020-01-01 00:00:00")
+	sres := run(t, &fakeRetriever{set: ftsOnlySet(row)}, baseRequest())
+	if sres.Reason != reasonAllInvalid {
+		t.Fatalf("control fixture: got reason %q, want %q", sres.Reason, reasonAllInvalid)
+	}
+	if !strings.Contains(sres.Response, "The note below") {
+		t.Errorf("control: the search response lost its promise, which is the half that is true:\n%s", sres.Response)
+	}
+	if !strings.Contains(sres.Response, "(Note:") {
+		t.Errorf("control: the search response promises a breakdown and then does not send one:\n%s", sres.Response)
+	}
+}

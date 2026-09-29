@@ -513,8 +513,23 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 				// "the query was not wrong" about a request that made none. Both are
 				// rewritten rather than the sentence being replaced, so the phrase
 				// every other exclusion reason uses stays the phrase this one uses.
+				//
+				// And `stageNote()` is DROPPED here, which is the third thing that
+				// does not survive. It splices "The note below breaks the removals
+				// down per stage", and `Result.Abstention` is bytes a CALLER
+				// renders: `p.response` writes `assemblerNotes(res.Notes)` after it,
+				// so the search half keeps a true promise, but
+				// `ghost_project_context`, the project-context resource and the
+				// `recall_project` prompt return this string as the ENTIRE answer
+				// and render no notes, so the promise pointed at a breakdown that was
+				// not in the payload. The assembler does not own the rendering and
+				// cannot keep the promise, so the passive sentence drops it rather
+				// than every passive caller being made to render diagnostics to
+				// satisfy a sentence. What carries the reason without the notes is
+				// the clause above it: "withheld as out of date, their validity
+				// windows having closed or not yet opened".
 				return "No sufficiently trustworthy memory found: the candidates this block was assembled from were " +
-					"withheld as out of date, their validity windows having closed or not yet opened." + p.stageNote() +
+					"withheld as out of date, their validity windows having closed or not yet opened." +
 					" The block was not empty before that — the answer is withheld, not absent."
 			}
 			return "No sufficiently trustworthy memory found: the candidates this search found were withheld as out " +
