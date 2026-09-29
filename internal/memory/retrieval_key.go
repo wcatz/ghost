@@ -53,7 +53,6 @@ var (
 	queryKeyMu     sync.Mutex
 	queryKeyLoaded bool
 	queryKeyBytes_ []byte
-	queryKeyErr    error
 )
 
 // resetQueryKeyCache clears the cache so a test can resolve the key against a
@@ -61,14 +60,14 @@ var (
 func resetQueryKeyCache() {
 	queryKeyMu.Lock()
 	defer queryKeyMu.Unlock()
-	queryKeyLoaded, queryKeyBytes_, queryKeyErr = false, nil, nil
+	queryKeyLoaded, queryKeyBytes_ = false, nil
 }
 
 // queryKey returns the per-install key, loading it or creating it on first use.
 //
-// Creation is O_EXCL so two processes racing to make the file cannot end up with
-// two keys and a store whose records are split across them: the loser reads the
-// winner's file and uses that.
+// Two processes racing to create the file cannot end up with two keys and a store
+// whose records are split across them: publication is atomic, so the loser sees
+// the winner's COMPLETE key and uses that. A failure is not cached -- see below.
 func queryKey() ([]byte, error) {
 	queryKeyMu.Lock()
 	defer queryKeyMu.Unlock()
