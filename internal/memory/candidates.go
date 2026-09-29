@@ -74,10 +74,18 @@ type CandidateRequest struct {
 	// wider than that, so a predicate can be evaluated over rows the window
 	// would have cut.
 	Fetch Fetch
-	// Passive carries the selection policies for an empty query. Populated
-	// only for passive retrieval, which arrives with the session-start
-	// migration; Candidates rejects a passive request rather than serving an
-	// empty set that would read as an empty store.
+	// Passive carries the selection policies for an empty query, one per bucket,
+	// and is populated only for passive retrieval. An empty query with NO policy is
+	// refused (ErrPassiveUnsupported) rather than served as an empty set, which
+	// would read as a store holding nothing; a policy that names no bucket, states
+	// no over-fetch, overstates the ceiling or repeats a bucket is refused for the
+	// same reason in a different shape — see validatePassivePolicies.
+	//
+	// It cannot be combined with AsOf, and the reason is that the two select over
+	// different things: a passive policy chooses among live rows, a historical read
+	// chooses among recorded versions. Dispatch checks AsOf first, so without that
+	// refusal a passive+as_of request would be answered by the historical path with
+	// its policies discarded and a window its caller never stated.
 	Passive []SlicePolicy
 }
 
@@ -103,8 +111,33 @@ type SlicePolicy struct {
 	CategoryCaps       map[string]int
 	OverFetch          int
 	DemotionThreshold  float64
-	ExcludeSeen        bool
-	DropDemotedLosers  bool
+	// ItemCap is the rows this bucket will finally admit. The two-pass selection
+	// fills a POOL of twice it before the near-duplicate demotion runs, which is
+	// the shipped shape: a window wider than the cap has rows to trade when a
+	// demoted one drops out, and a window narrower than the cap has nothing to
+	// trade, so the demotion is skipped (see DemoteOnlyWhenOverCap). 0 means the
+	// cap is the over-fetch itself, i.e. the bucket admits its whole window.
+	ItemCap int
+	// DemoteOnlyWhenOverCap gates the near-duplicate demotion on the selected set
+	// being WIDER than ItemCap. The project bucket sets it, the `_global` bucket
+	// does not — and that difference is observable rather than tidiness: the
+	// demotion is a REORDER, so on a set that fits entirely under the cap it can
+	// only change the order of rows the answer shows in full, and the shipped
+	// loaders both skip it there.
+	DemoteOnlyWhenOverCap bool
+	// ExcludeSeen is reserved for the project-context bucket, which is the one
+	// passive policy that must not repeat a row the project bucket already
+	// showed. Nothing reads it yet, deliberately: a field that silently did
+	// nothing would be worse than an absent one, so it is stated as unread until
+	// the surface that needs it lands, and the migration of that surface is
+	// where it gets honoured rather than a silent no-op here.
+	ExcludeSeen bool
+	// DropDemotedLosers asks for a near-duplicate loser to be REMOVED rather than
+	// ranked last. It is what the `_global` bucket does and the project bucket
+	// does not, and the difference is observable in a rendered block rather than
+	// being a policy preference: one bucket spends no slot on a restatement of a
+	// row it is already showing.
+	DropDemotedLosers bool
 }
 
 // CandidateSet is one retrieval's rows plus the facts about how they were
@@ -326,6 +359,13 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		// different query, not a different value in the same one.
 		return cand.candidatesAsOf(ctx, req, p, ftsTopK, set)
 	}
+	if req.Query == "" {
+		// A passive retrieval runs no leg, so the statuses keep their zero
+		// values: not applicable, not attempted, not available. That is the honest
+		// report, and the abstention floor reads it — a leg that never ran must
+		// not leave an arm holding a value it never compared.
+		return cand.candidatesPassive(ctx, req, set)
+	}
 	fts, vec := cand.runCandidateLegs(ctx, req, p, ftsTopK, vecTopK, set)
 	// A leg the condition made applicable but the request could not run (a
 	// hybrid search with no query vector) is a skip, not a failure, so it does
@@ -446,15 +486,27 @@ func validateCandidateRequest(req CandidateRequest) error {
 	if req.Condition == CondVectorOnly && len(req.QueryVec) == 0 {
 		return errors.New("candidates: vector-only retrieval requires a query vector")
 	}
-	if req.Fetch.Limit <= 0 {
-		return fmt.Errorf("candidates: fetch limit must be positive, got %d", req.Fetch.Limit)
-	}
-	if req.Query == "" {
-		return ErrPassiveUnsupported
-	}
 	if req.AsOf != nil {
+		// The AsOf checks come BEFORE the passive branch on purpose. Candidates is
+		// reachable directly — the bench harness and tests call it without going
+		// through assemble.Run — so a guard that only the assembler's copy of the
+		// contract applies is a guard half the callers miss. Placing them here is
+		// what keeps a zero instant from being answered with the empty set that
+		// reads as "nothing existed at year 1".
 		if req.AsOf.IsZero() {
 			return errors.New("candidates: AsOf is required to name an instant; the zero time is not one")
+		}
+		if req.Query == "" {
+			// Refused rather than routed to the historical path, which would
+			// silently DISCARD the passive policies and answer the question with a
+			// different window (Fetch.Limit) while the caller believed its
+			// per-bucket over-fetches were in force. A historical read is keyword
+			// retrieval over recorded versions, and a passive one is a selection
+			// policy over live rows; there is no combination of the two here yet,
+			// and answering one as the other would report a block neither policy
+			// describes.
+			return errors.New("candidates: a passive request cannot also be a historical (as_of) read: the passive " +
+				"policies select over live rows and a historical read selects over recorded versions — use one or the other")
 		}
 		if req.Condition == CondVectorOnly {
 			// Refused rather than downgraded. An embedding records the text a
@@ -466,6 +518,16 @@ func validateCandidateRequest(req CandidateRequest) error {
 			return errors.New("candidates: vector-only retrieval is not available for a historical (as_of) read: " +
 				"embeddings record current content only, so a past content set has no vectors — ask for hybrid or fts_only")
 		}
+	}
+	if req.Query == "" {
+		// A passive request is sized by its policies rather than by Fetch.Limit,
+		// so the window check does not apply to it. What does apply is the
+		// per-policy bound: a passive fetch runs at every session start, and a
+		// policy with no over-fetch is a store scan.
+		return validatePassivePolicies(req.Passive)
+	}
+	if req.Fetch.Limit <= 0 {
+		return fmt.Errorf("candidates: fetch limit must be positive, got %d", req.Fetch.Limit)
 	}
 	return nil
 }

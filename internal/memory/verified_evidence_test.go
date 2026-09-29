@@ -524,6 +524,14 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		"store.go:SearchFTS":                   true,
 		"store.go:SearchFTSAll":                true,
 		"vector.go:GetByIDs":                   true,
+		// #581's passive read SELECTs the validity triple off the current row, the
+		// same reason SearchFTS and GetTopMemories above do: a session-start block
+		// is assembled from a window, and the validity stage downstream of this
+		// read is what judges the triple. A reader. It is placed here rather than
+		// left implicit because the passive fetch is a NEW statement that names the
+		// column, and the alternative to placing it is a future edit widening it
+		// into a writer nobody re-classified.
+		"candidates_passive.go:passiveFetchSQL": true,
 	}
 
 	found := scanVerifiedAtMentions(t)
