@@ -1710,7 +1710,13 @@ func (s *Server) registerTools() {
 			}
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{
-					Text: projectContextWithNotRegistered(s.projectContextGlobalSection(ctx, nil), asked),
+					// `args.Limit` and NOT a fixed cap: origin/main's
+					// `GetTopMemories(ctx, "", limit)` honoured the tool's own
+					// argument for a name that resolves to nothing, so hard-coding
+					// the Global section's 15 here would have overridden
+					// `limit` — which the tool publishes as "Max memories to
+					// return" — and returned 15 rows for a `limit: 3` request.
+					Text: projectContextWithNotRegistered(s.projectContextGlobalSection(ctx, args.Limit, nil), asked),
 				}},
 			}, nil, nil
 		}
@@ -3285,22 +3291,18 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// admitted 15 rows of which some were repeats — a membership change with
 	// nothing behind it. `SlicePolicy.ExcludeSeen` stays unread for that reason.
 	if projectID != memory.GlobalProjectID {
-		seen := make(map[string]bool, len(memories.Items))
-		for _, it := range memories.Items {
-			seen[it.ID] = true
+
+		// 15 for the resolved case (projectContextGlobalsCap, unchanged) and 20 for
+		// an unresolved name (projectContextMemoriesCap), because the row COUNT is
+		// what a caller observes and origin/main's `GetTopMemories(ctx, "", 20)`
+		// returned 20 for it. Only the heading moved.
+		limit := projectContextGlobalsCap
+		if projectID == "" {
+			limit = projectContextMemoriesCap
 		}
-		globals, gErr := s.projectContextGlobals(ctx)
-		if gErr == nil {
-			var extra []assemble.Item
-			for _, g := range globals.Items {
-				if !seen[g.ID] {
-					extra = append(extra, g)
-				}
-			}
-			if len(extra) > 0 {
-				sb.WriteString("\n\n## Global (applies to all projects)\n\n")
-				sb.WriteString(projectContextItems(extra))
-			}
+		if section := s.projectContextGlobalSection(ctx, limit, memories.Items); section != "" {
+			sb.WriteString("\n\n")
+			sb.WriteString(section)
 		}
 	}
 
@@ -3330,13 +3332,21 @@ func (s *Server) projectContextMemories(ctx context.Context, projectID string, l
 	})
 }
 
-// projectContextGlobals is the Global section's own read, on its own request. See
-// buildProjectContext's comment on why it is not a second slice.
-func (s *Server) projectContextGlobals(ctx context.Context) (assemble.Result, error) {
+// projectContextGlobals is the Global section's own read, on its own request and
+// at the cap its CALLER asked for. See buildProjectContext's comment on why it is
+// not a second slice, and projectContextGlobalBudget on why the cap is a parameter.
+//
+// The two callers pass different numbers and both are parity with origin/main:
+// the resolved resource's `## Global` section keeps projectContextGlobalsCap (15),
+// and the UNRESOLVED-name case passes the cap the caller asked for — `limit` for
+// the tool, projectContextMemoriesCap (20) for the resource and prompt, because
+// that is what `GetTopMemories(ctx, "", 20)` returned for a name that resolves to
+// nothing.
+func (s *Server) projectContextGlobals(ctx context.Context, limit int) (assemble.Result, error) {
 	return assembleProjectContext(ctx, s, assemble.Request{
 		ProjectID: memory.GlobalProjectID,
 		Query:     "",
-		Budget:    projectContextGlobalBudget(),
+		Budget:    projectContextGlobalBudget(limit),
 	})
 }
 

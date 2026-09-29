@@ -87,7 +87,7 @@ func projectContextBudget(projectID string, limit int) assemble.Budget {
 }
 
 // projectContextGlobalBudget is the SECOND read, for the resource's Global
-// section: `_global` alone, capped at projectContextGlobalsCap, over-fetching 2×.
+// section: `_global` alone, over-fetching 2×.
 //
 // It is a separate REQUEST and not a second slice of the first, for two reasons
 // that are both about correctness rather than tidiness. The first: a request that
@@ -99,11 +99,21 @@ func projectContextBudget(projectID string, limit int) assemble.Budget {
 // the shipped code admitted 15 rows of which some were repeats. Doing it here —
 // one request per section, the boundary applied by the caller over the admitted
 // rows — is what keeps the second section's membership identical.
-func projectContextGlobalBudget() assemble.Budget {
+//
+// The cap is a PARAMETER because the same read serves an UNRESOLVED project name,
+// where the caller has asked for a different number: the tool asks for its own
+// `limit`, and the resource and prompt ask for projectContextMemoriesCap. Both are
+// parity with origin/main, which read `GetTopMemories(ctx, "", limit)` and
+// `GetTopMemories(ctx, "", 20)` respectively for a name that resolves to nothing.
+// A hard-coded cap here quietly overrode the tool's own argument — the defect
+// review found — and the `## Global` section's cap is the one thing that is NOT
+// a parity target for that case, so the two numbers are stated at the call sites
+// rather than guessed here.
+func projectContextGlobalBudget(limit int) assemble.Budget {
 	return assemble.Budget{Slices: []assemble.Slice{{
 		Bucket:                memory.GlobalProjectID,
-		MaxItems:              projectContextGlobalsCap,
-		OverFetch:             projectContextGlobalsCap * 2,
+		MaxItems:              limit,
+		OverFetch:             limit * 2,
 		Order:                 memory.OrderDecay,
 		DemoteOnlyWhenOverCap: true,
 	}}}
@@ -235,12 +245,15 @@ func projectContextWithNotRegistered(text, asked string) string {
 // before the cap and admit up to 15 NEW rows where the shipped code admitted 15
 // rows of which some were repeats. `SlicePolicy.ExcludeSeen` stays unread for
 // that reason.
-func (s *Server) projectContextGlobalSection(ctx context.Context, alreadyShown []assemble.Item) string {
+//
+// `limit` is the cap the CALLER asked for, and the two call sites pass different
+// ones on purpose — see projectContextGlobalBudget.
+func (s *Server) projectContextGlobalSection(ctx context.Context, limit int, alreadyShown []assemble.Item) string {
 	seen := make(map[string]bool, len(alreadyShown))
 	for _, it := range alreadyShown {
 		seen[it.ID] = true
 	}
-	globals, err := s.projectContextGlobals(ctx)
+	globals, err := s.projectContextGlobals(ctx, limit)
 	if err != nil {
 		// A failed global read is silence, exactly as it was when this ran inline:
 		// the block is the answer, and a block without a global section beats an

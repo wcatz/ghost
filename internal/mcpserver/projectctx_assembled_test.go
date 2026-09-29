@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -678,6 +679,103 @@ func TestAnUnresolvedProjectNameDoesNotHideABrokenStore(t *testing.T) {
 // notHistoryCapable satisfies provider.MemoryStore by delegation and deliberately
 // does NOT implement MemoriesAsOf, so it fails the asOfCapableStore assertion.
 type notHistoryCapable struct{ provider.MemoryStore }
+
+// TestTheUnresolvedNameHonoursTheCallersLimit is a review BLOCKER, and the
+// test that would have caught it.
+//
+// The unresolved-name branch rendered the cross-project section through
+// `projectContextGlobalSection` -> `projectContextGlobals` ->
+// `projectContextGlobalBudget`, whose cap was the hard-coded
+// `projectContextGlobalsCap`. So the tool returned 15 rows for a `limit: 3`
+// request, for `limit: 100`, and for every other value - silently overriding the
+// argument it publishes as "Max memories to return". The resource and prompt
+// paths went through the same read and got 15 where origin/main returned 20.
+//
+// The fix makes the cap a parameter. This asserts the row SET as well as the
+// count, and it takes the ORACLE from the reader this migration replaced:
+// `formatMemories(store.GetTopMemories(ctx, "", limit))` is what origin/main
+// rendered for this exact call, so "the same rows in the same order, under a
+// heading that is true of them" is a checkable statement rather than a
+// re-derivation of the new path's own logic.
+//
+// A count alone would pass against the wrong rows. A byte-golden cannot be used
+// here at all, because the heading and the appended sentence are two of this PR's
+// deliberate output changes, and re-recording a baseline to accommodate them would
+// turn a parity proof into a diff record - which is what the two goldens exist to
+// avoid.
+func TestTheUnresolvedNameHonoursTheCallersLimit(t *testing.T) {
+	st := newValidityStore(t)
+	// 25 globals, so every cap under test binds and `limit: 100` is bounded by the
+	// corpus rather than by the argument.
+	for i := 0; i < 25; i++ {
+		if _, err := st.CreateWithIDFromCorpus(context.Background(), memory.GlobalProjectID,
+			"bulkg"+twoDigits(i/10)+twoDigits(i%10), memory.Memory{
+				Category: "preference", Content: "bulk global row " + twoDigits(i),
+				Source: "manual", Importance: 0.5,
+			}); err != nil {
+			t.Fatalf("seed global %d: %v", i, err)
+		}
+	}
+	srv, session := validityServerFor(t, st)
+	ctx := context.Background()
+
+	rowLines := func(text string) []string {
+		var lines []string
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "- [") {
+				lines = append(lines, strings.TrimSpace(line))
+			}
+		}
+		return lines
+	}
+	// The oracle: the row lines origin/main's reader produced for this call.
+	oracle := func(limit int) []string {
+		rows, err := st.GetTopMemories(ctx, "", limit)
+		if err != nil {
+			t.Fatalf("GetTopMemories with an empty project and limit %d: %v", limit, err)
+		}
+		return rowLines(formatMemories(rows))
+	}
+	// report compares against the base reader and, when they differ, prints both
+	// sides: "the sets differ" is not a finding a reader can act on, and the count
+	// alone would pass against the wrong rows.
+	report := func(what string, got, want []string) {
+		t.Helper()
+		for i := 0; i < len(got) && i < len(want); i++ {
+			if got[i] != want[i] {
+				t.Errorf("%s: row %d differs from the base reader.\n--- base reader (origin/main) ---\n%s\n"+
+					"--- this PR ---\n%s", what, i, strings.Join(want, "\n"), strings.Join(got, "\n"))
+				return
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("%s returned %d rows, the base reader returned %d.\n--- base reader (origin/main) ---\n%s\n"+
+				"--- this PR ---\n%s", what, len(got), len(want), strings.Join(want, "\n"), strings.Join(got, "\n"))
+		}
+	}
+
+	for _, limit := range []int{1, 3, 15, 20, 100} {
+		want := oracle(limit)
+		out := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+			"project_id": "no-such-limited", "limit": limit,
+		}))
+		report(fmt.Sprintf("ghost_project_context with limit=%d", limit), rowLines(out), want)
+	}
+
+	// The resource and the prompt read at 20, which is what
+	// `GetTopMemories(ctx, "", 20)` returned for them. Asserted through
+	// buildProjectContext, the body both read.
+	want := oracle(projectContextMemoriesCap)
+	if len(want) != projectContextMemoriesCap {
+		t.Fatalf("fixture precondition: the base reader returned %d rows for a %d cap, so the cap is not "+
+			"binding and this test would pass without exercising it", len(want), projectContextMemoriesCap)
+	}
+	text, err := srv.buildProjectContext(ctx, "")
+	if err != nil {
+		t.Fatalf("buildProjectContext with an empty project: %v", err)
+	}
+	report("buildProjectContext with an unresolved project", rowLines(text), want)
+}
 
 // TestTheUnresolvedProjectBlockStillRendersTheResourceOnItsOwn is the half of the
 // finding that a sentence-in-place-of-the-block fix breaks, stated on the resource
