@@ -48,6 +48,9 @@ merged*.json
 # evalcycle run artifacts (regenerated per run)
 eval/cycle/results/
 
+# storyline run artifacts (regenerated per run)
+eval/storyline/results/
+
 # local scratch
 .cache/
 /cycle
