@@ -293,13 +293,29 @@ The demotion only reorders what the legs already fetched: each leg pulls
 against that budget and neither leg drops them. When a project matches fewer
 rows than the limit, the demoted `_global` rows are the only candidates left
 and they fill the remainder — demotion decides which fetched rows lead, never
-which rows are eligible. Session-start injection is outside all of this: it
-ranks in SQL on two separate paths — `loadSessionPassive`
+which rows are eligible. The two passive surfaces are outside all of this: they
+rank in SQL on two separate paths — `loadSessionPassive`
 (`internal/mcpinit/session_passive.go`) assembles the session-start digest
-through the seam's passive branch, and `Store.GetTopMemories` backs the MCP
-tool surface — neither reaches fusion,
+through the seam's passive branch, and `projectContextBudget`
+(`internal/mcpserver/project_context.go`) is the policy behind
+`ghost_project_context`, the `ghost://project/{id}/context` resource and the
+`recall_project` prompt — neither reaches fusion,
 and both queries already filter `resolved_at IS NULL`, so no status factor
 changes what is injected.
+
+The project-context read is the one passive bucket that admits `_global` into a
+project bucket (`SlicePolicy.IncludeGlobal`), because it is the one that has
+always read `project_id = ? OR project_id = '_global'` under a single cap — the
+whole-project listing. Two buckets cannot express that: capped at the caller's
+`limit` each, they admit twice the rows the caller asked for. The consequence
+is that a bucket name and a row's own project stop being the same thing, so the
+retriever reports which policy admitted each row (`Candidate.FetchedBy`) and the
+assembler's stage 8 keys its per-slice cap on that. A request that both mixes
+`_global` into one bucket and fetches it in another is refused at both seams: the
+two row sets overlap, so every global row would be admitted twice under two
+different caps. A caller that wants both — the resource's Global section is
+exactly that caller — runs them as two **requests**, which is also what keeps
+their two verdicts separate.
 
 A cross-project
 search leaves `_global` undemoted (there is no project whose own memories it
@@ -1487,15 +1503,25 @@ What exists now:
   written before any of those reads nil, which is what stage 2 calls unset —
   so a store nobody has written a window into is corpus-neutral for the stage.
 
-  **Only `ghost_memory_search` filters on it**, because it is the only surface
-  that runs the pipeline. `ghost_memories_list`, `ghost_search_all`,
-  `ghost_project_context` and the `ghost://` resources still return a closed
-  window, and the shared renderer marks it `expired` rather than printing a
-  retired claim unmarked — honest, but not yet a filter. The session-start block
-  is the one surface that shows a closed window with nothing marking it, because
-  it renders its own rows through none of the shared labels. All of them move
-  onto the pipeline with the rest of the PR plan; until then, a window that has
-  closed is a fact only search acts on.
+  **The surfaces that run the pipeline filter on it**, and there are three of
+  them: `ghost_memory_search`, the session-start block, and
+  `ghost_project_context` (with the `ghost://project/{id}/context` resource and
+  the `recall_project` prompt, which share its read). `ghost_memories_list` and
+  `ghost_search_all` still return a closed window, and the shared renderer marks
+  it `expired` rather than printing a retired claim unmarked — honest, but not a
+  filter. The `ghost://memories/global` resource is in that group too: it is a
+  global listing rather than a project context, so it kept its own reader.
+
+  A surface that filters has to be able to say what it filtered, or it reports an
+  empty project as an empty one. `ghost_project_context` is the case that forced
+  the rule: its empty branch was a **census** — "nothing has been saved for it" —
+  which was true of a loader that only ever lost rows to its own cap, and became
+  a lie the moment stage 2 could empty the section. The census is now gated on
+  the verdict, and only `no_memories` — the over-fetched window came back empty,
+  which is the sole absence a `LIMIT n*2` read can honestly claim — keeps it.
+  Rows found and withheld render the assembler's own abstention sentence and name
+  `ghost_memories_list`, where the retired rows are still visible with their
+  marker.
 - **A stamp can be replaced but not removed.** The write path stores NULL for an
   absent value and treats an empty string as the same request — "no claim" — so
   a claim recorded by mistake is corrected by writing a different one rather than
@@ -1691,13 +1717,15 @@ Rules the pipeline must hold:
   and the source reference are rendered by one implementation per field — scope
   already, through `assemble.ScopeLabel`; the rest through
   `assemble.ValidityLabel`, `ConfidenceLabel`, `AgentLabel` and `SourceRefLabel`.
-  `ghost_memory_search` reaches them through `assemble.Item.Line`, and the
-  surfaces that still render `memory.Memory` directly — `ghost_memories_list`,
-  `ghost_search_all`, `ghost_project_context`, the `ghost://` resources — call
-  the same four, and scope is already one implementation across the search,
-  listing and session-start surfaces. What is **not** converged is the
-  session-start block, which shows none of the four; it moves onto `assemble`
-  with the rest of the plan.
+  `ghost_memory_search`, the session-start block and `ghost_project_context` all
+  reach them through `assemble.Item.Line`; the surfaces that still render
+  `memory.Memory` directly — `ghost_memories_list`, `ghost_search_all` and the
+  `ghost://memories/global` resource — call the same four. The project-context
+  block was already converged on the **labels** before it moved onto the
+  assembler (`formatMemories` called the same four in the same order), so what
+  that move changed was the selection and the stages rather than the rendering —
+  which is why its two goldens are byte-identical while its one behavioural
+  difference is not in them at all.
 - **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
 - **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)). An unmeasured threshold is never the default, and a leg that could not run is never evidence that a match is weak.
 - **The budget is a hard boundary, in the unit it names.** Stage 8's slice caps are item content; the response-fit post-pass is the complete response. Both trim deterministically and both are tested at, just under, and just over the limit; injection and search use different budgets but the same code.

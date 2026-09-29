@@ -130,7 +130,7 @@ carries a `truncation` object naming how many candidates were dropped; only excl
 candidates are ever dropped, so every row in the answer is present, and `max_rows`
 reports what the payload actually carries rather than the budget it aimed for.
 
-Demotion only reorders what the legs already fetched: each leg pulls `limit*2` rows from the project plus `_global`, and `_global` rows count against that budget, so a project with fewer matches than the limit still gets `_global` rows filling the rest — demoted, but present. Session-start injection is unaffected by all of this: it ranks in SQL on two separate paths — `loadSessionPassive` (`internal/mcpinit/session_passive.go`) assembles the session-start digest and `Store.GetTopMemories` backs the MCP tool surface — neither reaches fusion, and both already filter resolved rows.
+Demotion only reorders what the legs already fetched: each leg pulls `limit*2` rows from the project plus `_global`, and `_global` rows count against that budget, so a project with fewer matches than the limit still gets `_global` rows filling the rest — demoted, but present. Session-start injection is unaffected by all of this: the two passive surfaces rank in SQL on two separate paths — `loadSessionPassive` (`internal/mcpinit/session_passive.go`) assembles the session-start digest and `projectContextBudget` (`internal/mcpserver/project_context.go`) backs `ghost_project_context` with the `ghost://project/{id}/context` resource and the `recall_project` prompt — neither reaches fusion, and both already filter resolved rows.
 
 ## Tasks
 

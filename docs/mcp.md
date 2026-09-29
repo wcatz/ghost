@@ -19,7 +19,7 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Memory | `ghost_resolve_mark` | Stamp `resolved_at` on memories you name |
 | Memory | `ghost_link_withdraw` | Withdraw one named wrong `supersedes` edge |
 | Project | `ghost_project_delete` | Permanently delete a project and its child records |
-| Context | `ghost_project_context` | Load top memories, learned context, tasks, and decisions |
+| Context | `ghost_project_context` | Load top memories and the learned-context summary (assembled, so a memory whose validity window has closed is withheld; tasks and decisions are separate tools and resources) |
 | Context | `ghost_list_projects` | List known projects and their IDs |
 | Context | `ghost_health` | Report store, embedding, Ollama, link, and `memory_history` growth health |
 | Tasks | `ghost_task_create` | Create a durable task |
@@ -112,14 +112,23 @@ An unknown value is refused in the caller's own words, naming all three, and not
 
 `ghost_memory_search` and `ghost_memories_list` take the same three values as a `retention` filter, and both refuse an unknown one rather than ignoring it. The search filter is applied before the result window closes, so a matching row ranked below the window still takes a slot; an answer that found rows and withheld them all reports `reason=all_out_of_retention`. It cannot be combined with `as_of`: the change log records what a memory held, not the tier it was in, so a historical read has no tier to filter on and the request is refused rather than answered from the tier the row carries now. `ghost_memories_list` returns the project's own rows; a filtered browse also brings the `_global` rows, as its category filter always has.
 
+## Project context
+
+`ghost_project_context`, the `ghost://project/{id}/context` resource and the `recall_project` prompt share one read. Their memory rows are assembled rather than selected by a private query, so they carry the same selection, the same filters and the same rendered fields as `ghost_memory_search` — including a `valid_until` window that has closed.
+
+- **The rows.** The project's own and `_global`'s, ranked by the composite score of importance, pin and category-aware recency, superseded rows pushed down and a near-duplicate pushed behind anything unpaired. `limit` (default 20, maximum 100) caps the whole block; the resource uses a fixed 20 for `## Memories` and a fixed 15 for `## Global`, minus anything the first section already showed. A superseded or near-duplicate row can therefore fall out of the block — that is a membership decision the ranking makes, not a truncation.
+- **A memory whose validity window has closed, or has not opened, is not shown.** It was marked `expired` before; it is now withheld, the same as on `ghost_memory_search` and in the session-start block. `ghost_memories_list` and `ghost_search_all` still show it, still marked, because they browse rather than filter.
+- **An empty block says which kind of empty it is.** A project with no memories at all, or whose over-fetched window came back empty, reports that nothing has been saved. A project whose memories were all found and withheld reports *that* instead, and points at `ghost_memories_list` — where they are still visible with the window they carry. The distinction matters because the first is a census of the window and the second is not.
+- **Not part of the assembled rows**, and unchanged by any of the above: the learned-context summary, the resource's `## Recent Decisions`, and the `as_of` reading. An `as_of` request is a historical read rather than a current assembly — ranked from the change log rather than from the current tables, still honouring `limit`, and returning the wording each memory held at that instant with the halves that have no history (learned context, decisions, tasks) omitted rather than shown as they are now.
+
 ## Resources
 
 | Resource | Contents |
 |---|---|
-| `ghost://project/{project}/context` | Bounded project memory and learned context |
+| `ghost://project/{project}/context` | Bounded project memory and learned context (assembled, so it withholds a memory whose validity window has closed) |
 | `ghost://project/{project}/decisions` | Project decision records |
 | `ghost://project/{project}/tasks` | Project tasks |
-| `ghost://memories/global` | Global memories shared across projects |
+| `ghost://memories/global` | Global memories shared across projects (a global listing, not a project context, so it is a direct read and does not withhold on a closed window) |
 
 Clients that support MCP resource subscriptions can pin these resources to survive context compaction. Resource URIs accept the project name or the resolved project ID, depending on the client.
 
