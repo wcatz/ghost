@@ -316,25 +316,24 @@ func attestationGet(ctx context.Context, url string, limit int64, what string, a
 // — which reads as "unverifiable", i.e. a hard refusal, rather than as the
 // transport hiccup it is.
 //
-// The cap applies to the result, because that is what reaches memory: a small
-// compressed body could otherwise expand without bound, and this is the one
-// place a service chooses what a client decompresses.
-//
 // The two encodings need their bounds in different places, and the bare block's
 // is the one that is easy to get wrong. A framed stream is bounded WHILE it is
 // read. A bare block is not: the format leads with a varint declaring the
-// DECOMPRESSED length, and snappy.Decode sizes its destination from that number
-// and allocates before it discovers the source is too short to be that long. A
-// body of a few bytes whose first varint claims four gibibytes therefore makes
-// snappy.Decode(nil, body) attempt a four-gibibyte allocation, and a cap
-// applied to the RESULT bounds nothing at all.
+// DECOMPRESSED length, and the decoder allocates a destination of that size
+// before it discovers the source is too short to be that long. A body of a few
+// bytes whose first varint claims four gibibytes therefore attempts a
+// four-gibibyte allocation, and a cap applied only to the RESULT bounds nothing
+// at all.
 //
 // So the declared length is read and checked here, before the decoder is
 // called, and the destination is allocated at exactly the size the block claims
-// — which by that point is known to be within the cap. This is the one place in
-// the upgrade path where a remote service chooses both what a client
-// decompresses and what that costs, so the bound is on the claim and not only
-// on the outcome.
+// — which by that point is known to be within the cap. The result is checked
+// too, and the comment at that check is honest about why that one is a guard
+// rather than the load-bearing bound.
+//
+// This is the one place in the upgrade path where a remote service chooses both
+// what a client decompresses and what that costs, so both the claim and the
+// outcome are bounded.
 func decodeSnappyBundle(compressed []byte) ([]byte, error) {
 	framed, framedErr := readCapped(snappy.NewReader(bytes.NewReader(compressed)), attestationBundleCap, "attestation bundle")
 	if framedErr == nil {
@@ -361,6 +360,27 @@ func decodeSnappyBundle(compressed []byte) ([]byte, error) {
 		// Neither encoding parsed. Report both, because which one the store
 		// switched to is the first thing anyone debugging this needs to know.
 		return nil, fmt.Errorf("not a snappy bundle: as a framed stream: %v; as a block: %w", framedErr, blockErr)
+	}
+	// The check above is the one that does the work, and it is deliberately not
+	// the only one. klauspost/compress sizes the destination from the header
+	// varint and decodes INTO it — s2.Decode allocates dLen bytes and returns
+	// exactly that, or ErrCorrupt if the tag elements overrun the buffer — so
+	// with that decoder a successful result cannot exceed the declared length,
+	// and this comparison cannot fail.
+	//
+	// It is kept because that is a property of a DEPENDENCY, not of this
+	// function: a decoder that sized its output from the tag stream instead
+	// would turn the pre-check into a claim about a number the body supplies and
+	// nothing more. A remote service chooses this body, so the bound belongs on
+	// what comes out as well as on what was asked for.
+	//
+	// No test here can distinguish the two cases — a result larger than the
+	// declared length does not exist for this decoder to produce — so this is a
+	// guard and not coverage, and it is labelled as one rather than given a
+	// mutation-checked test that would be asserting a fiction.
+	if int64(len(decoded)) > attestationBundleCap {
+		return nil, fmt.Errorf("not a snappy bundle: as a framed stream: %v; as a block: it decoded to %d bytes, over the %d-byte cap",
+			framedErr, len(decoded), attestationBundleCap)
 	}
 	return decoded, nil
 }
