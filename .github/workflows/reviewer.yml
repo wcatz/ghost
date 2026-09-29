@@ -26,12 +26,30 @@ jobs:
     # fallback below. Only anonymous opencode/*-free ids and
     # opencode/big-pickle are eligible for the free path.
     #
+    # MODELS is the full current free roster, not a short preference list:
+    # on GitHub-hosted runners `opencode models` has so far returned no free
+    # ids at all ("catalog free ids: 0"), so this list is in practice the only
+    # source of candidates. Keep it current by hand as free models come and go
+    # (the local orchestration rotation uses the same roster). Order is the
+    # retry order: models that have passed the read-only probe from CI first,
+    # opencode/big-pickle last because its provider has refused CI calls ("free
+    # tier can only be used from within OpenCode"). The selection step caps the
+    # list at MAX_CANDIDATES (8), so a ninth entry is never probed.
+    #
     # PAID_MODEL is deliberately one low-cost Go coding model, not a list and
     # not Kimi: Muse Spark 1.3 Contributor is the cheapest suitable current
     # opencode-go route. The secret is injected only around its invocation.
     # Job scope, because shell variables do not survive between steps.
     env:
-      MODELS: opencode/space-bunny-free opencode/big-pickle opencode/mimo-v2.6-flash-free
+      MODELS: >-
+        opencode/space-bunny-free
+        opencode/mimo-v2.6-flash-free
+        opencode/longcat-2.5-preview-free
+        opencode/nemotron-3-ultra-free
+        opencode/muse-spark-1.3-contributor-free
+        opencode/ling-3.0-flash-fin-free
+        opencode/nemotron-3.5-lightning-free
+        opencode/big-pickle
       PAID_MODEL: opencode-go/muse-spark-1.3-contributor
     # Must stay above the bounded model-selection phase (15 min), the free
     # review phase (70 min), the paid fallback phase (15 min), and the
