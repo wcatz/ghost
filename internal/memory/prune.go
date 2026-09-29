@@ -85,9 +85,23 @@ type PruneOptions struct {
 }
 
 // PruneCandidate is one row a prune would remove, with everything the report
-// needs to be checkable by a reader: which tier it is, when it expires, and when
-// anything last touched it. The text is included because a report of rows the
-// operator cannot recognise is a report they cannot approve.
+// needs to be checkable by a reader: which tier it is, when it expires, when
+// anything last touched it, and what the grace is measured from. The text is
+// included because a report of rows the operator cannot recognise is a report
+// they cannot approve.
+//
+// GraceFrom and ActivityAt are SEPARATE fields because they stopped being the
+// same value when #772 put expires_at into the activity term, and one field
+// under one name cannot honestly carry both readings. ActivityAt is what
+// happened to the row: a recorded read, else its last write, else its creation —
+// a statement about an event. GraceFrom is the basis the grace was actually
+// measured from, which now includes the expiry, and an expiry is a value Ghost
+// derived FORWARD at save time: a prediction about the future, not a record of
+// one. Reporting it as "last touched" would claim the row was touched at the
+// instant it stopped being wanted, and for a row never edited since its save
+// that instant IS the expiry, so the report would print one timestamp twice
+// under two labels. An operator reading that line to decide whether to run
+// `ghost prune --apply` deserves the difference.
 type PruneCandidate struct {
 	ID         string
 	ProjectID  string
@@ -96,6 +110,7 @@ type PruneCandidate struct {
 	Retention  string
 	ExpiresAt  string
 	ActivityAt string
+	GraceFrom  string
 }
 
 // PruneReport is what one run did, or would do.
@@ -248,8 +263,14 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 	// the preview named.
 	order := "\n\t\tORDER BY " + pruneActivitySQL + ", id"
 
+	// TWO columns, not one: pruneActivitySQL is the grace's basis and the removal
+	// order, and it includes an expiry — a value derived forward, not an event. The
+	// second is the row's last real activity, which is what an operator reading
+	// "last touched" is asking about, and the two differ on every ordinary row.
+	// See PruneCandidate.
 	candQuery := `
 		SELECT id, project_id, category, content, retention, expires_at,
+		       COALESCE(last_accessed, updated_at, created_at),
 		       ` + pruneActivitySQL + `
 		FROM memories
 		WHERE ` + prunePredicate + scope + order
@@ -264,7 +285,7 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 	}
 	for rows.Next() {
 		var c PruneCandidate
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Category, &c.Content, &c.Retention, &c.ExpiresAt, &c.ActivityAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Category, &c.Content, &c.Retention, &c.ExpiresAt, &c.ActivityAt, &c.GraceFrom); err != nil {
 			rows.Close() //nolint:errcheck
 			s.mu.RUnlock()
 			return report, fmt.Errorf("scan prunable memory: %w", err)

@@ -273,12 +273,35 @@ func splitPruneCandidates(candidates []memory.PruneCandidate, removedIDs []strin
 // printPruneRow renders one selected row and the stored text under it. indent is
 // the row's own prefix, so the removed listing and the spared listing are this one
 // renderer at two depths rather than two spellings of a row.
+//
+// Two stamps, and they are different facts. ActivityAt is the row's last real
+// activity — a recorded read, else its last write. GraceFrom is what the grace was
+// measured from, which since #772 also includes the expiry. They are printed
+// together and separately LABELLED, because the expiry is a value Ghost derived
+// forward at save time: printing it as "last touched" would claim the row was
+// touched at the instant it stopped being wanted, and on a row never edited since
+// its save that instant IS the expiry — so the line would carry one timestamp
+// twice under two names. An operator deciding whether to run `ghost prune --apply`
+// is reading exactly this line.
+//
+// The grace-from stamp is omitted when it is the expiry already shown, which is
+// the ordinary case, rather than printed a second time: the two agree precisely
+// when nothing has written to the row since its save, and then there is nothing
+// for the second label to add.
 func printPruneRow(w io.Writer, c memory.PruneCandidate, indent string) error {
 	activity := c.ActivityAt
 	if activity == "" {
 		activity = "(no recorded activity)"
 	}
-	if _, err := fmt.Fprintf(w, "%s%s  %s  %s  expired %s  last touched %s\n", indent, c.ID, c.Category, c.Retention, c.ExpiresAt, activity); err != nil {
+	if _, err := fmt.Fprintf(w, "%s%s  %s  %s  expired %s  last touched %s", indent, c.ID, c.Category, c.Retention, c.ExpiresAt, activity); err != nil {
+		return err
+	}
+	if c.GraceFrom != "" && c.GraceFrom != c.ExpiresAt {
+		if _, err := fmt.Fprintf(w, "  grace from %s", c.GraceFrom); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
 	// The stored text, through the shared displayStored substitution: this is

@@ -771,3 +771,85 @@ func TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone(t *testing.T) {
 		t.Errorf("expires_at moved from %q to %q: nothing re-asserted this row", *was.ExpiresAt, *got.ExpiresAt)
 	}
 }
+
+// TestPruneReportsTheGraceBasisSeparatelyFromActivity is the store half of the
+// renderer fix, and it exists because the two columns are projected by one
+// statement and a renderer cannot tell a projection that was never made from one
+// it chose to ignore.
+//
+// The shape it pins: a session row saved and never written to since. Its expiry
+// is the save's own value derived forward, so it is the NEWEST of the three
+// stamps the grace can be measured from — which means the two fields are equal
+// here, and a report that printed the grace basis under the name "last touched"
+// would be naming an event at an instant nothing happened. A row edited after its
+// save is the other direction: the write is later than the expiry, so the basis
+// and the activity are again the same value but neither is the expiry, which is
+// the case where printing only one of the two hides why the row is eligible now.
+//
+// The control is a project row, which is never a candidate at all: if it reached
+// the list, the projection rather than this test's arithmetic would be wrong.
+func TestPruneReportsTheGraceBasisSeparatelyFromActivity(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	untouched := pruneRow(t, s, testProject, "a session note nobody has written to since its save", RetentionSession)
+	edited := pruneRow(t, s, testProject, "a session note edited after the expiry its save derived", RetentionSession)
+	pruneFixture(t, s, "a durable note that is just as old", RetentionProject,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	// Thirty days ago with no recorded read, which is the shape a real store
+	// holds and the shape the fallback is for: last_accessed stays NULL, the
+	// write stamps go back to the save, and the expiry is that save's own
+	// SessionTTL — a month past the write, not on it.
+	for _, id := range []string{untouched, edited} {
+		backdateWrite(t, s, id, stamp(-30*24*time.Hour))
+		agePruneRow(t, s, id, stamp(-30*24*time.Hour+SessionTTL), "")
+	}
+	// The edit: later than the expiry, so the grace has to run from it.
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET updated_at = ? WHERE id = ?`,
+		stamp(-20*24*time.Hour), edited); err != nil {
+		t.Fatalf("edit %s: %v", edited, err)
+	}
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	got := map[string]PruneCandidate{}
+	for _, c := range report.Candidates {
+		got[c.ID] = c
+		if c.Retention != RetentionSession {
+			t.Errorf("a %s row is a prune candidate: %s", c.Retention, c.ID)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("the preview selected %d row(s), want the 2 session rows: %+v", len(got), report.Candidates)
+	}
+
+	// Untouched: the expiry is the save's own forward-derived value and is the
+	// newest stamp, so the basis IS the expiry while the activity is the save.
+	// Equality here is the fact the renderer has to be able to see.
+	u := got[untouched]
+	if u.GraceFrom != u.ExpiresAt {
+		t.Errorf("%s: GraceFrom = %q, want the expiry %q — nothing has written to this row since its save, so the expiry is the newest stamp the grace can be measured from",
+			untouched, u.GraceFrom, u.ExpiresAt)
+	}
+	if u.ActivityAt == u.ExpiresAt {
+		t.Errorf("%s: ActivityAt = %q, which is the expiry: nothing touched this row at the instant it stopped being wanted, and a report saying so is claiming an event",
+			untouched, u.ActivityAt)
+	}
+	if u.ActivityAt == "" || u.GraceFrom == "" {
+		t.Errorf("%s: both readings must be populated: %+v", untouched, u)
+	}
+
+	// Edited: the write is later than the expiry, so the basis follows the write
+	// and the two readings agree on something that HAPPENED.
+	e := got[edited]
+	if e.GraceFrom != e.ActivityAt {
+		t.Errorf("%s: GraceFrom = %q and ActivityAt = %q, want the same — the row's last write is the newest stamp, so the grace ran from the event",
+			edited, e.GraceFrom, e.ActivityAt)
+	}
+	if e.GraceFrom == e.ExpiresAt {
+		t.Errorf("%s: GraceFrom = %q is the expiry, but this row was edited after it: the basis is the write",
+			edited, e.GraceFrom)
+	}
+}
