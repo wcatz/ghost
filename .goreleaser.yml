@@ -55,10 +55,9 @@ release:
   # plugin job's documented post-publish window would run this job against a
   # published release and quietly delete and re-upload its attested assets while
   # main's catalog still pins the old digests. With draft: false it would do the
-  # same on every run. TestTheReleaseJobRefusesAPublishedRelease and
-  # TestTheReleaseJobIsReRunnable hold the pair and the guard together; the
-  # plugin job's `gh release upload` already applies the same policy with
-  # --clobber.
+  # same on every run. TestThePublishedReleaseGuardRefuses holds the guard and
+  # TestTheReleaseJobIsReRunnable holds the pair; the plugin job's
+  # `gh release upload` already applies the same policy with --clobber.
   replace_existing_artifacts: true
   extra_files:
     - glob: install.ps1
