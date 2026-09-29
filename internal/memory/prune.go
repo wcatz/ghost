@@ -140,11 +140,18 @@ type PruneReport struct {
 	Removed    int
 }
 
-// pruneActivitySQL is the row's last activity, as ONE expression, because three
-// statements have to agree on it: the predicate below, the candidate's own
-// ActivityAt, and the removal order. A grace measured from one expression and
+// pruneActivitySQL is the instant the grace is measured from, as ONE expression,
+// because three things have to agree on it: the predicate below, the candidate's
+// GraceFrom, and the removal order. A grace measured from one expression and
 // ordered by another is a report that describes a different run from the one it
 // previews.
+//
+// The report's OTHER stamp, ActivityAt, is a deliberately NARROWER term —
+// COALESCE(last_accessed, updated_at, created_at), no expiry — because it answers
+// a different question ("what happened to this row?") and an expiry is not an
+// event, it is a value derived forward. The divergence is the point; folding
+// expires_at back into it would put a prediction under a label that claims
+// otherwise. See PruneCandidate.
 //
 // A recorded access is the strongest signal and is preferred when it exists.
 // Nothing in production writes last_accessed (Store.Touch has no caller), so

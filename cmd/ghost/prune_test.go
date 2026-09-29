@@ -315,9 +315,12 @@ func TestPruneUsageSaysItIsNeverAutomatic(t *testing.T) {
 //
 // Both directions are checked, because the fix is not "print more". When the two
 // agree there is nothing for a second label to add, so the line must not repeat
-// the stamp; when they differ — a row edited after its save, or one a fold
-// refreshed — the basis is what makes the row eligible NOW rather than a month
-// ago, so it has to be there.
+// the stamp; when they differ — a row EDITED after its save, which is what makes
+// it eligible now rather than a month ago — the basis has to be there. The case
+// that is NOT here is a folded row: a fold refreshes expires_at and leaves
+// updated_at alone, so its basis is the expiry and the label is omitted anyway.
+// TestPruneReportsTheGraceBasisSeparatelyFromActivity pins that, and it is why
+// the condition below compares stamps rather than asking what touched the row.
 func TestPrintPruneNamesTheGraceBasisWithoutClaimingItWasATouch(t *testing.T) {
 	t.Run("agrees with the expiry, so the stamp is not repeated", func(t *testing.T) {
 		// A row saved and never touched since: the ordinary shape, and the one the

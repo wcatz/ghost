@@ -284,10 +284,12 @@ func splitPruneCandidates(candidates []memory.PruneCandidate, removedIDs []strin
 // twice under two names. An operator deciding whether to run `ghost prune --apply`
 // is reading exactly this line.
 //
-// The grace-from stamp is omitted when it is the expiry already shown, which is
-// the ordinary case, rather than printed a second time: the two agree precisely
-// when nothing has written to the row since its save, and then there is nothing
-// for the second label to add.
+// The grace-from stamp is omitted when it IS the expiry already shown, rather
+// than printed a second time. The condition is about STAMPS, not about writes:
+// raiseRetentionTx refreshes expires_at on a fold and deliberately leaves
+// updated_at alone, so a folded session row is written to and still has the
+// expiry as its newest stamp. So the rule is "no stamp on this row is newer than
+// its expiry", and then the second label has nothing to add.
 func printPruneRow(w io.Writer, c memory.PruneCandidate, indent string) error {
 	activity := c.ActivityAt
 	if activity == "" {

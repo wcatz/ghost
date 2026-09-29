@@ -852,4 +852,50 @@ func TestPruneReportsTheGraceBasisSeparatelyFromActivity(t *testing.T) {
 		t.Errorf("%s: GraceFrom = %q is the expiry, but this row was edited after it: the basis is the write",
 			edited, e.GraceFrom)
 	}
+
+	// And the case the two comments disagreed about, pinned rather than argued: a
+	// FOLD is a write, and #772 made it the write that most refreshes a session
+	// row — but raiseRetentionTx sets expires_at and deliberately leaves
+	// updated_at alone, so on a row with no recorded read the expiry is STILL the
+	// newest stamp. The basis therefore equals the expiry here and the renderer
+	// omits the label, even though something did write to the row. The rule is not
+	// "nothing has been written to the row"; it is "no stamp on the row is newer
+	// than the expiry".
+	// The fold happens BEFORE the ageing, which is the order the case needs: the
+	// fold refreshes the expiry to now+SessionTTL, so a row aged first and folded
+	// second is not a candidate at all — which is #772 working, and would make this
+	// the re-emission test's subject rather than this one's.
+	folded := pruneRow(t, s, testProject, "a session note a later save folds into", RetentionSession)
+	backdateWrite(t, s, folded, stamp(-30*24*time.Hour))
+	if _, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
+		"a session note a later save folds into, at some length", "mcp", 0.6, nil,
+		UpsertOptions{Retention: RetentionSession}); err != nil {
+		t.Fatalf("fold into %s: %v", folded, err)
+	} else if dup != folded {
+		t.Fatalf("the restatement folded into %q, want %q", dup, folded)
+	}
+	agePruneRow(t, s, folded, stamp(-30*24*time.Hour+SessionTTL), "")
+	// The fold must leave updated_at alone, or this row is not the case the test
+	// claims to be. Asserted rather than assumed, because the whole point of the
+	// case is that the fold's write lands on a DIFFERENT column than an edit's.
+	if got := getOne(t, s, folded); got.UpdatedAt != stamp(-30*24*time.Hour) {
+		t.Errorf("updated_at = %q after the fold, want the backdated %q: #772 refreshes expires_at and must not move this",
+			got.UpdatedAt, stamp(-30*24*time.Hour))
+	}
+	report, err = s.PruneSessionMemories(ctx, PruneOptions{})
+	if err != nil {
+		t.Fatalf("PruneSessionMemories: %v", err)
+	}
+	got = map[string]PruneCandidate{}
+	for _, c := range report.Candidates {
+		got[c.ID] = c
+	}
+	fc, ok := got[folded]
+	if !ok {
+		t.Fatalf("the folded row %s is not a candidate; the fixture did not age a prunable row", folded)
+	}
+	if fc.GraceFrom != fc.ExpiresAt {
+		t.Errorf("%s: GraceFrom = %q, want the expiry %q — a fold refreshes expires_at and leaves updated_at alone, so the expiry is still the newest stamp and the basis is not a separate event",
+			folded, fc.GraceFrom, fc.ExpiresAt)
+	}
 }
