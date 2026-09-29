@@ -13,9 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -244,163 +242,6 @@ func TestReleaseWorkflowIdentityUsesATagRef(t *testing.T) {
 // this repository's release workflow on the release tag, over the bytes the
 // client downloaded. It is the case that has to keep working, and it is the
 // one that fails silently if the cutover or the identity is wrong.
-// TestTheVerifierTakesTheTimestampNotTheWallClock guards the verifier's TIME
-// POLICY, and it is a source assertion rather than a behavioural one. That is a
-// deliberate fallback, and this comment is where the evidence lives.
-//
-// The natural behavioural test is an EXPIRED certificate verified through a
-// timestamp inside its validity window — the case that only an
-// observer-timestamp verifier can pass. It cannot be written here, and I tried
-// both directions before concluding that rather than assuming it:
-//
-//   - ca.VirtualSigstore mints leaves with NotBefore/NotAfter hardcoded to
-//     now±5h (pkg/testing/ca/ca.go), and AttestAtTime moves the integrated
-//     timestamp, not the certificate. `GenerateLeafCert(subject, issuer,
-//     expiration, …)` takes an expiration, but the virtual CA does not use it
-//     for the leaf it issues.
-//   - the only timestamp signer in the dependency graph stamps genTime with
-//     time.Now() with no injectable time source
-//     (github.com/sigstore/timestamp-authority/v2/pkg/api/timestamp.go:184), so
-//     no bundle reachable from this package can carry a timestamp inside a PAST
-//     certificate's window.
-//
-// What I then tried was the same disagreement run backwards — a certificate
-// that is valid NOW with a thirty-day-old timestamp, where the observer
-// verifier should refuse (the certificate did not exist then) and the wall-clock
-// verifier should accept. Measured: BOTH accept. And in the other direction, a
-// `WithCurrentTime()` verifier does not refuse a bundle that carries a trusted
-// timestamp, despite its documentation. So sigstore-go's two policies are not
-// separable by any bundle this package can mint, and a behavioural test would
-// be a test that passes for reasons unrelated to the property.
-//
-// Hence the source assertion: the production verifier must be built from
-// observer timestamps, and must not carry a wall-clock policy. The control
-// proves the matcher is sensitive — a string that DOES contain the wall-clock
-// option is rejected by the same code.
-func TestTheVerifierTakesTheTimestampNotTheWallClock(t *testing.T) {
-	raw, err := os.ReadFile("attestation.go")
-	if err != nil {
-		t.Fatalf("read attestation.go: %v", err)
-	}
-	body, ok := functionBody(t, string(raw), "newReleaseVerifier")
-	if !ok {
-		t.Fatal("no newReleaseVerifier in attestation.go, so the verifier's time policy is assembled somewhere ungoverned")
-	}
-	if usesWallClockPolicy(body) {
-		t.Errorf("newReleaseVerifier configures a wall-clock time policy, so the certificate would be checked at time.Now() instead of at the bundle's timestamp. A Fulcio leaf is valid for about ten minutes, so every real release would then be refused as expired — AttestationUnverifiable, which no flag reaches:\n%s", body)
-	}
-	if !strings.Contains(body, "WithObserverTimestamps") {
-		t.Errorf("newReleaseVerifier does not ask for an observer timestamp, so a signature with no trusted timestamp counts as observed:\n%s", body)
-	}
-	if !strings.Contains(body, strconv.Itoa(attestationObserverTimestamps)) {
-		t.Errorf("newReleaseVerifier does not use attestationObserverTimestamps, so the tolerance is decided somewhere else:\n%s", body)
-	}
-	// "The only place this package configures a verifier" has to be true, not
-	// merely said. A second call site would be a second time policy, assembled
-	// where this test cannot see it — and the bypass is exactly the shape of
-	// change this assertion exists to catch.
-	if n := strings.Count(string(raw), "verify.NewVerifier("); n != 1 {
-		t.Errorf("verify.NewVerifier appears %d times in attestation.go, want 1: every call site is a place the time policy can be assembled without newReleaseVerifier governing it", n)
-	}
-	// The policy sets NO transparency-log expectation, and that is a decision
-	// rather than an omission, so it is asserted here. Two shapes are real and
-	// neither is the one most fixtures carry: actions/attest-build-provenance
-	// builds its bundle through @sigstore/bundle and so includes the Rekor entry
-	// it uploaded, while the GitHub-initiated bundles the recorded API fixtures
-	// hold have none. Measured against this version's source, a carried entry is
-	// neither verified nor rejected — VerifyTransparencyLogInclusion is a no-op
-	// unless requireTlogEntries is set (pkg/verify/signed_entity.go) — so the
-	// policy is tolerant of both. Demanding an entry would refuse every
-	// GitHub-initiated bundle; requiring integrated timestamps alongside it would
-	// refuse every GitHub-hosted one. Either would be AttestationUnverifiable, so
-	// fatal and unreachable by any flag, with this file's fixtures — all of
-	// which lack an entry — staying green.
-	for _, unwanted := range []string{
-		"WithTransparencyLog",
-		"WithIntegratedTimestamps",
-		"WithSignedTimestamps",
-		"WithSignedCertificateTimestamps",
-	} {
-		if usesOption(body, unwanted) {
-			t.Errorf("newReleaseVerifier sets %s, so the policy starts requiring material some real bundles do not carry — every such release would be refused as AttestationUnverifiable, which no flag reaches:\n%s", unwanted, body)
-		}
-	}
-
-	// The control. Without it, a matcher that always returned false would make
-	// every assertion above pass.
-	for _, tc := range []struct {
-		name string
-		src  string
-		want bool
-	}{
-		{"a verifier with a wall-clock policy", "return verify.NewVerifier(t, verify.WithCurrentTime())", true},
-		{"a verifier with both policies", "return verify.NewVerifier(t, verify.WithObserverTimestamps(1), verify.WithCurrentTime())", true},
-		{"the production verifier", "return verify.NewVerifier(t, verify.WithObserverTimestamps(attestationObserverTimestamps))", false},
-		{
-			// The reason the matcher strips comments: the production function
-			// NAMES the options it must not use, in the comment explaining why.
-			// A matcher that read prose would fail on its own documentation.
-			name: "a comment naming options it does not use",
-			src:  "// not WithCurrentTime, and no WithTransparencyLog\nreturn verify.NewVerifier(t, verify.WithObserverTimestamps(1))",
-			want: false,
-		},
-	} {
-		if got := usesWallClockPolicy(tc.src); got != tc.want {
-			t.Errorf("usesWallClockPolicy(%q) = %v, want %v", tc.src, got, tc.want)
-		}
-	}
-}
-
-// usesWallClockPolicy reports whether source configures a wall-clock
-// verification time. The option is named rather than inferred from behaviour,
-// because the two policies are not separable by any bundle this package can mint
-// — see the test above for the measurements.
-func usesWallClockPolicy(source string) bool { return usesOption(source, "WithCurrentTime") }
-
-// usesOption reports whether source sets the named verifier option. Comments are
-// stripped first, and that is not a convenience: the production function NAMES
-// the options it must not set, in the comment explaining why. Matching prose
-// would fail on its own documentation.
-func usesOption(source, option string) bool {
-	for _, line := range strings.Split(source, "\n") {
-		if i := strings.Index(line, "//"); i >= 0 {
-			line = line[:i]
-		}
-		if strings.Contains(line, option) {
-			return true
-		}
-	}
-	return false
-}
-
-// functionBody returns the body of the named function, braces balanced. It
-// exists so the assertion above reads a function rather than the whole file,
-// where an unrelated mention of the option would be a false alarm.
-func functionBody(t *testing.T, source, name string) (string, bool) {
-	t.Helper()
-	start := strings.Index(source, "func "+name+"(")
-	if start < 0 {
-		return "", false
-	}
-	open := strings.Index(source[start:], "{")
-	if open < 0 {
-		return "", false
-	}
-	depth, i := 0, start+open
-	for ; i < len(source); i++ {
-		switch source[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return source[start+open : i+1], true
-			}
-		}
-	}
-	return "", false
-}
-
 func TestVerifyReleaseAttestation(t *testing.T) {
 	const version = "0.43.0"
 	artifact := []byte("a release archive")
@@ -580,6 +421,26 @@ func TestVerifyReleaseAttestationRejectsAMalformedBundle(t *testing.T) {
 				t.Fatalf("accepted a malformed bundle: %s", tc.name)
 			}
 		})
+	}
+}
+
+// TestAnUnreadableBundleIsRefusedAsUnreadable covers the reason a malformed
+// bundle gives, which the test above cannot see because it only asks whether the
+// bundle was refused.
+//
+// It matters because "this is not a Sigstore bundle" and "a Sigstore bundle that
+// did not verify" are different facts about a release, and an attacker who can
+// make the two indistinguishable gets to pick which one the user is told. The
+// classify-then-report path in verifyOneBundle is where that distinction is
+// decided, and nothing else in the file asserts it.
+func TestAnUnreadableBundleIsRefusedAsUnreadable(t *testing.T) {
+	fx := newAttestationFixture(t, []byte("a release archive"))
+	err := VerifyReleaseAttestation([][]byte{[]byte("this is not a bundle")}, "0.43.0", []byte("a release archive"), fx.trustRoot)
+	if err == nil {
+		t.Fatal("a body that is not a bundle was accepted")
+	}
+	if !strings.Contains(err.Error(), "not a readable Sigstore bundle") {
+		t.Errorf("refusal %q does not say the bundle was unreadable, so a body that never parsed is reported the same way as one that parsed and did not verify", err)
 	}
 }
 

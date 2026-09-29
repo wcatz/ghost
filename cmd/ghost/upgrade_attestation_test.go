@@ -521,6 +521,62 @@ func TestUpgradeSkipsTheAttestationBeforeTheCutover(t *testing.T) {
 	}
 }
 
+// TestUpgradeSaysSoWhenItSkipsTheAttestationBeforeTheCutover is the other half
+// of the previous test. That one pins that the install happens; this pins that
+// the user is TOLD, because AttestationVerified covers two different facts here
+// and only one of them is a proof: a pre-cutover release is verified because
+// nothing could be checked, not because anything vouched for it.
+//
+// The detail is what distinguishes them, and it used to be dropped, so the
+// upgrade reported the same silent success for a release nothing vouched for as
+// for one a signed bundle proved. A warning with nothing in it would be noise on
+// every upgrade from the cutover onwards, so the second half of this test holds
+// that a genuinely verified release stays silent.
+func TestUpgradeSaysSoWhenItSkipsTheAttestationBeforeTheCutover(t *testing.T) {
+	t.Run("a pre-cutover release says nothing vouched for it", func(t *testing.T) {
+		binary := []byte("pretend executable")
+		au := newAttestedUpgrade(t, preAttestationTag, binary)
+		target := installedGhost(t, "the old binary")
+
+		var warn strings.Builder
+		streams := upgradeStreams{out: io.Discard, err: &warn}
+		// The floor is below the release, so the upgrade actually proceeds and
+		// reaches the attestation check. The warning names the RELEASE being
+		// installed, not this argument, which is why the assertion below is
+		// against the tag and not against the string here.
+		if _, err := performUpgrade(context.Background(), streams, "0.41.0", upgradeOptions{}, au.deps(t, target)); err != nil {
+			t.Fatalf("performUpgrade on a pre-cutover release: %v", err)
+		}
+		got := warn.String()
+		if got == "" {
+			t.Fatal("the upgrade installed a release nothing vouched for and said nothing, so \"verified\" stands for a release where no check could happen")
+		}
+		// It has to name the boundary, or the user cannot tell which releases
+		// are affected or when this changes.
+		if !strings.Contains(got, selfupdate.FirstAttestedVersion) {
+			t.Errorf("the warning %q does not name the first attested release, so it does not say what to compare the version against", got)
+		}
+		if !strings.Contains(got, preAttestationTag[1:]) {
+			t.Errorf("the warning %q does not name the release being installed", got)
+		}
+	})
+
+	t.Run("a genuinely verified release is silent", func(t *testing.T) {
+		binary := []byte("pretend executable")
+		au := newAttestedUpgrade(t, attestedTag, binary)
+		target := installedGhost(t, "the old binary")
+
+		var warn strings.Builder
+		streams := upgradeStreams{out: io.Discard, err: &warn}
+		if _, err := performUpgrade(context.Background(), streams, strings.TrimPrefix(attestedTag, "v"), upgradeOptions{}, au.deps(t, target)); err != nil {
+			t.Fatalf("performUpgrade on an attested release: %v", err)
+		}
+		if got := warn.String(); got != "" {
+			t.Errorf("a release whose bundle verified printed %q, so the pre-cutover warning is not keyed on anything real", got)
+		}
+	})
+}
+
 // TestUpgradeRefusesToSkipTheCheckBeforeTheCutoverWithNoTrustMaterial covers
 // the other direction: the cutover is decided from the version alone, and
 // nothing about the running binary, the flag, or the absence of a trust root

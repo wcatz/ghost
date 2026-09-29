@@ -385,35 +385,111 @@ func decodeSnappyBundle(compressed []byte) ([]byte, error) {
 	return decoded, nil
 }
 
-// attestationObserverTimestamps is how many trusted timestamps a signature needs
-// before it counts as observed.
-const attestationObserverTimestamps = 1
+const (
+	// attestationObserverTimestamps is how many trusted timestamps a signature
+	// needs before it counts as observed. Either transport can supply one — see
+	// newReleaseVerifier — and both are anchored in the same trust root.
+	attestationObserverTimestamps = 1
+	// attestationTransparencyLogEntries is how many verified transparency-log
+	// entries a bundle that carries entries must have. It is never zero: a
+	// zero threshold is not "any number of entries", it is "the threshold is
+	// unset", which is the other branch below.
+	attestationTransparencyLogEntries = 1
+)
 
-// newReleaseVerifier is the ONLY place this package configures a sigstore
-// verifier, so the time policy cannot be assembled anywhere else by accident.
+// newReleaseVerifier builds the verifier for one bundle, and it is the ONLY
+// place this package configures a sigstore verifier, so the time policy cannot
+// be assembled anywhere else by accident.
 //
-// The policy is: verify at a trusted timestamp's notion of when the signature
-// was made, never at the wall clock. A Fulcio leaf lives about ten minutes, so
-// the certificate on a release published weeks ago is expired right now, and the
-// only thing that lets it verify is the RFC3161 timestamp the bundle carries.
-// Adding a wall-clock option alongside the observer timestamps would keep every
-// test in this package green — every fixture's certificate is valid now — while
-// making every real release unverifiable, and that state is
-// AttestationUnverifiable: fatal, and not reachable by any flag.
+// The policy is: verify at a trusted timestamp's notion of when the signature was
+// made, never at the wall clock. A Fulcio leaf lives about ten minutes, so the
+// certificate on a release published weeks ago is expired right now, and only a
+// trusted timestamp can place verification inside its validity window.
 //
-// The behavioural test for this cannot be written here, and
-// TestTheVerifierTakesTheTimestampNotTheWallClock carries the measurements: the
-// two policies are not separable by any bundle this package can mint, because
-// ca.VirtualSigstore cannot issue an expired leaf and the only timestamp signer
-// in the dependency graph stamps the wall clock with no time source. So the
-// policy is asserted on this function's source instead, with a control that
-// proves the assertion is sensitive.
-func newReleaseVerifier(trusted root.TrustedMaterial) (*verify.Verifier, error) {
-	// WithObserverTimestamps(1) and not a wall-clock option: the certificate is
-	// checked at the time a trusted timestamp authority says the signature was
-	// made, not at the wall clock. Every release ever attested would otherwise
-	// be expired.
-	return verify.NewVerifier(trusted, verify.WithObserverTimestamps(attestationObserverTimestamps))
+// WHICH timestamp is a property of the bundle, not a choice, and the two
+// transports are mutually exclusive as policy:
+//
+//   - actions/attest-build-provenance — the action ghost's release workflow uses
+//     — produces a bundle with a transparency-log entry and NO RFC3161
+//     timestamp, because Rekor's integrated time is the timestamp. sigstore-go
+//     counts a log's integrated time toward the observer threshold ONLY when
+//     WithTransparencyLog is set (VerifyObserverTimestamps adds logTimestamps,
+//     and VerifyTransparencyLogInclusion is a no-op without it), so a bundle
+//     without it scores 0 against WithObserverTimestamps(1) and is refused with
+//     "threshold not met ... 0 < 1".
+//   - a bundle carrying an RFC3161 timestamp and no log entry — what the
+//     attestations service mints on its own — is refused by the opposite error,
+//     "not enough verified log entries from transparency log: 0 < 1", the moment
+//     WithTransparencyLog is set.
+//
+// So neither policy accepts both shapes and the verifier follows the bundle:
+// WithTransparencyLog is set for a bundle that carries entries and omitted for
+// one that does not. Neither branch weakens the check. The identity and the
+// archive's digest are pinned either way, and either way the signature must
+// carry a timestamp whose verifying key is in the same trust root — a Rekor
+// whose key is in the root, or a TSA whose key is in the root.
+//
+// Both branches are pinned by recorded real bundles in
+// TestTheRecordedBundlesVerifyUnderThePolicyForTheirShape, one of each shape.
+// Every fixture this package can mint has an RFC3161 timestamp and no log entry,
+// so the minting fixtures alone cannot see this at all — which is exactly how the
+// shape went wrong once already.
+func newReleaseVerifier(trusted root.TrustedMaterial, hasTransparencyLogEntries bool) (*verify.Verifier, error) {
+	opts := []verify.VerifierOption{verify.WithObserverTimestamps(attestationObserverTimestamps)}
+	if hasTransparencyLogEntries {
+		opts = append(opts, verify.WithTransparencyLog(attestationTransparencyLogEntries))
+	}
+	return verify.NewVerifier(trusted, opts...)
+}
+
+// verifyOneBundle checks a single wire bundle against policy, and it is where
+// the shape of the bundle decides the verifier's time policy.
+//
+// It is a named function rather than a few lines inside the loop above because
+// the decision — does this bundle carry a transparency-log entry, or an RFC3161
+// timestamp, or neither — is the one that was gotten wrong, and a test that
+// re-derived the shape in its own helper would go on passing when production's
+// call to it changed. Read the shape here, once, and the test can call this.
+func verifyOneBundle(raw []byte, policy verify.PolicyBuilder, trusted root.TrustedMaterial) error {
+	var b bundle.Bundle
+	if err := b.UnmarshalJSON(raw); err != nil {
+		return errors.New("one bundle is not a readable Sigstore bundle")
+	}
+	// The verifier is built per bundle because the time policy depends on which
+	// timestamp transport the producer used. newReleaseVerifier says why the two
+	// shapes cannot share one policy; the brief version is that the log's
+	// integrated time only counts toward the observer threshold when the log is
+	// asked about, and asking unconditionally refuses a bundle with no entries.
+	// The configuration cannot fail: the option set is a constant, and
+	// verify.NewVerifier only rejects an option it was handed. So this error is
+	// unreachable, and the branch is kept honest about that rather than asserted
+	// to be reachable — there is nothing to test, because if it ever did fail the
+	// bundle would be reported as a reason and refused, which is the only safe
+	// reading of a verifier that could not be built.
+	verifier, err := newReleaseVerifier(trusted, len(b.GetVerificationMaterial().GetTlogEntries()) > 0)
+	if err != nil {
+		return errors.New("the attestation verifier could not be configured")
+	}
+	if _, err := verifier.Verify(&b, policy); err != nil {
+		return errors.New(classifyAttestationFailure(err))
+	}
+	return nil
+}
+
+// releaseAttestationPolicy is the ONLY place this package builds a sigstore
+// policy, with the identity and the expected archive digest as parameters so
+// that a recorded bundle can be checked through exactly the policy production
+// uses, with its own identity. artifactDigest is the sha256 the download
+// produced, compared against the digest the attestation's statement claims.
+func releaseAttestationPolicy(san, issuer string, artifactDigest []byte) (verify.PolicyBuilder, error) {
+	identity, err := verify.NewShortCertificateIdentity(issuer, "", san, "")
+	if err != nil {
+		return verify.PolicyBuilder{}, fmt.Errorf("build the release workflow identity: %w", err)
+	}
+	return verify.NewPolicy(
+		verify.WithArtifactDigest("sha256", artifactDigest),
+		verify.WithCertificateIdentity(identity),
+	), nil
 }
 
 // VerifyReleaseAttestation reports whether any of bundles proves that this
@@ -446,34 +522,15 @@ func VerifyReleaseAttestation(bundles [][]byte, version string, artifact []byte,
 	}
 	sum := sha256.Sum256(artifact)
 	san, issuer := ReleaseWorkflowIdentity(version)
-	identity, err := verify.NewShortCertificateIdentity(issuer, "", san, "")
+	policy, err := releaseAttestationPolicy(san, issuer, sum[:])
 	if err != nil {
-		return fmt.Errorf("build the release workflow identity: %w", err)
+		return err
 	}
-	// The time policy lives in newReleaseVerifier, whose comment says why it is
-	// observer-timestamps rather than the wall clock: a Fulcio leaf is valid for
-	// about ten minutes, so the certificate on a release published weeks ago is
-	// expired right now, and only the RFC3161 timestamp the bundle carries can
-	// place verification inside its validity window.
-	verifier, err := newReleaseVerifier(trusted)
-	if err != nil {
-		return fmt.Errorf("configure the attestation verifier: %w", err)
-	}
-
-	policy := verify.NewPolicy(
-		verify.WithArtifactDigest("sha256", sum[:]),
-		verify.WithCertificateIdentity(identity),
-	)
 
 	var reasons []string
 	for _, raw := range bundles {
-		var b bundle.Bundle
-		if err := b.UnmarshalJSON(raw); err != nil {
-			reasons = append(reasons, "one bundle is not a readable Sigstore bundle")
-			continue
-		}
-		if _, err := verifier.Verify(&b, policy); err != nil {
-			reasons = append(reasons, classifyAttestationFailure(err))
+		if err := verifyOneBundle(raw, policy, trusted); err != nil {
+			reasons = append(reasons, err.Error())
 			continue
 		}
 		return nil

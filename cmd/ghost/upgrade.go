@@ -518,7 +518,9 @@ func installRelease(ctx context.Context, streams upgradeStreams, rel *selfupdate
 // quietly undo the feature:
 //
 //   - Verified, including a release published before the cutover, which has no
-//     attestation because none could exist for it. Nothing to do.
+//     attestation because none could exist for it. Nothing to refuse — but the
+//     pre-cutover case is SURFACED, because "nothing to refuse" and "something
+//     vouched for this" are different facts and only the first is true.
 //   - Absent: the release publishes none. The loud flag reaches this and only
 //     this, and it says so on stderr before the install, so proceeding is a
 //     decision the user can see they made.
@@ -549,6 +551,17 @@ func checkAttestation(ctx context.Context, warn io.Writer, archive []byte, versi
 
 	switch result := deps.attest(ctx, archive, version); result.State {
 	case selfupdate.AttestationVerified:
+		// Verified covers two different facts, and only one of them is a proof: a
+		// release published before the cutover is Verified because nothing could
+		// be checked, not because something vouched for it. The detail says so,
+		// and dropping it — as this case once did — lets "verified" stand for a
+		// release that nothing vouches for. Surfaced the way the unreachable and
+		// absent cases surface theirs, and only when there is a detail: a bundle
+		// that actually verified has none, and a warning with nothing in it would
+		// be noise on every upgrade from the cutover onwards.
+		if result.Detail != "" {
+			_, _ = fmt.Fprintf(warn, "warning: %s\n", result.Detail)
+		}
 		return nil
 	case selfupdate.AttestationAbsent:
 		if !opts.allowUnattested {
