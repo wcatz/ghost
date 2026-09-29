@@ -354,6 +354,125 @@ func TestPruneNeverRemovesAPinnedRow(t *testing.T) {
 	}
 }
 
+// TestPruneSparesARowThatStoppedMatchingMidRun: Candidates is the PREVIEW's
+// selection, and every batch re-derives the predicate under the write lock — so a
+// row a write changed between the preview and its own batch stops matching, is
+// correctly spared, and is STILL in Candidates while absent from RemovedIDs. That
+// asymmetry is the whole reporting contract on the apply path: `ghost prune`
+// counted the candidates, so an apply that removed 3049 of 3050 headlined 3050
+// removals with the spared row live in the store.
+//
+// Placing the write is the whole difficulty, and the shape here is the one that
+// works. pruneBeforeDelete cannot do it: that seam runs inside the batch
+// transaction, which holds the write lock (BEGIN IMMEDIATE) AND has already
+// selected the batch's ids, so a second connection's write blocks on the lock and
+// an in-transaction write arrives too late to spare anything. So the write is a
+// trigger on the tombstone insert — the one write a batch makes before its DELETE.
+// It fires inside that transaction and therefore COMMITS with the batch, which is
+// exactly a write that landed after the preview and before the next batch
+// re-derived the predicate, and it needs no second connection and no timing.
+//
+// The row it touches has to be the one the first batch cannot reach, so it is
+// seeded a day newer and sorts last in the removal order. Two directions, because
+// "spared" is not one fact and the rendered line has to hold for both: a pin
+// leaves the row in the store, a concurrent delete leaves nothing to spare.
+func TestPruneSparesARowThatStoppedMatchingMidRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// change is the trigger body, and its WHEN clause is what keeps it to one
+		// firing: the tombstone statement inserts one history row per batched id,
+		// so the trigger runs pruneBatchSize times and only the first may act.
+		change string
+		live   bool
+	}{
+		{
+			name: "pinned between batches",
+			change: `WHEN NEW.phase = 'delete' AND NOT EXISTS (SELECT 1 FROM memories WHERE id = '%[1]s' AND pinned = 1)
+				BEGIN
+					UPDATE memories SET pinned = 1 WHERE id = '%[1]s';
+				END`,
+			live: true,
+		},
+		{
+			name: "removed by a write in the same window",
+			change: `WHEN NEW.phase = 'delete' AND EXISTS (SELECT 1 FROM memories WHERE id = '%[1]s')
+				BEGIN
+					DELETE FROM memories WHERE id = '%[1]s';
+				END`,
+			live: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			const total = pruneBatchSize + 1 // two batches
+			for i := 0; i < total-1; i++ {
+				seedPruneRow(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession,
+					stamp(-30*24*time.Hour), stamp(-30*24*time.Hour))
+			}
+			// Newer activity, so it sorts last in the removal order and the first
+			// batch cannot reach it.
+			spared := seedPruneRow(t, s, "the row a write reaches between batches", RetentionSession,
+				stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+			// The id is store-minted hex, so inlining it into the trigger cannot
+			// carry a quote out of the literal.
+			installPruneSpareTrigger(t, s, fmt.Sprintf(tc.change, spared))
+
+			report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+			if err != nil {
+				t.Fatalf("prune: %v", err)
+			}
+			if len(report.Candidates) != total {
+				t.Errorf("the report selected %d row(s), want %d: Candidates is the preview's selection whatever the batches took", len(report.Candidates), total)
+			}
+			if report.Removed != total-1 || len(report.RemovedIDs) != total-1 {
+				t.Errorf("the apply removed %d row(s) (%d ids), want %d of each: a row that stopped matching is not a removal", report.Removed, len(report.RemovedIDs), total-1)
+			}
+			for _, id := range report.RemovedIDs {
+				if id == spared {
+					t.Errorf("the spared row %s is in RemovedIDs", spared)
+				}
+			}
+			// The pin leaves the row behind and the delete leaves nothing, which is
+			// why the rendered line names the change rather than claiming the row is
+			// still there. One row survived the first batch in both directions.
+			want := 0
+			if tc.live {
+				want = 1
+			}
+			if got := liveCount(t, s, testProject); got != want {
+				t.Errorf("the project holds %d row(s) after the apply, want %d", got, want)
+			}
+			if tc.live && liveID(t, s, testProject) != spared {
+				t.Errorf("the surviving row is not the spared %s: the run removed a row it never selected", spared)
+			}
+		})
+	}
+}
+
+// installPruneSpareTrigger puts a write into the window between the preview and
+// the batch that would have taken a row: it fires on the first delete tombstone
+// of the run, which is inside the first batch's transaction, and therefore
+// commits with it.
+func installPruneSpareTrigger(t *testing.T, s *Store, whenAndBody string) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), `CREATE TEMP TRIGGER prune_spare_mid_run AFTER INSERT ON memory_history `+whenAndBody); err != nil {
+		t.Fatalf("install the mid-run write trigger: %v", err)
+	}
+}
+
+// liveID returns the one live row id in a project, and fails when there is not
+// exactly one — the caller here asserts what a single spared row left behind, so
+// a second survivor is itself the finding.
+func liveID(t *testing.T, s *Store, projectID string) string {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRow(`SELECT id FROM memories WHERE project_id = ?`, projectID).Scan(&id); err != nil {
+		t.Fatalf("read the surviving row id: %v", err)
+	}
+	return id
+}
+
 // TestPruneRollsBackTheBatchThatFailed: a batch that appended its tombstones and
 // then failed before the DELETE would leave the store claiming removals that did
 // not happen — and the failure that matters is the ordinary one, a busy database

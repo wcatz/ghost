@@ -162,12 +162,28 @@ func pluralNoun(n int) string {
 // read anything else: the headline says which of the two runs this is, and the
 // closing line says what to do next in the dry-run case rather than leaving the
 // reader to infer that nothing happened.
+//
+// An applied report is about what the run DID, and the candidate list is not that.
+// It is what the PREVIEW selected, while every batch re-derives the same predicate
+// under the write lock — so a row a concurrent save pinned, re-tiered or re-saved
+// between the preview and its own batch stops matching and is spared, correctly,
+// and it is still in that list. Counting and listing the candidates on this path
+// headlined removals nobody performed: 3050 in the headline against 3049 removed,
+// with the spared row live in the store and the closing line contradicting the
+// headline. So the applied path splits on RemovedIDs: the removals are counted and
+// listed, and the rest are named as spared, because a row the operator asked about
+// has to be accounted for either way. renderApplyFailure filters the same way
+// before it calls in, and this split is a no-op on the list it passes.
 func printPrune(w io.Writer, v pruneView) error {
 	if v.NoDatabase {
 		_, err := fmt.Fprintln(w, "no Ghost database yet (run ghost first) — nothing to prune")
 		return err
 	}
-	headline := fmt.Sprintf("prune: %d session %s", len(v.Candidates), pluralNoun(len(v.Candidates)))
+	removed, spared := v.Candidates, []memory.PruneCandidate(nil)
+	if v.Applied {
+		removed, spared = splitPruneCandidates(v.Candidates, v.RemovedIDs)
+	}
+	headline := fmt.Sprintf("prune: %d session %s", len(removed), pluralNoun(len(removed)))
 	scope := "every project"
 	if v.Scope != "" {
 		scope = "project " + v.Scope
@@ -180,21 +196,24 @@ func printPrune(w io.Writer, v pruneView) error {
 	if _, err := fmt.Fprintln(w, headline); err != nil {
 		return err
 	}
-	for _, c := range v.Candidates {
-		activity := c.ActivityAt
-		if activity == "" {
-			activity = "(no recorded activity)"
-		}
-		if _, err := fmt.Fprintf(w, "  %s  %s  %s  expired %s  last touched %s\n", c.ID, c.Category, c.Retention, c.ExpiresAt, activity); err != nil {
+	for _, c := range removed {
+		if err := printPruneRow(w, c, "  "); err != nil {
 			return err
 		}
-		// The stored text, through the shared displayStored substitution: this is
-		// the surface an operator reads precisely when a stale, credential-shaped
-		// row is most likely to need purging, and the write-boundary guard is not
-		// retroactive — a pre-guard row can still carry a value, and 160 bytes is
-		// more than enough to print one whole.
-		if _, err := fmt.Fprintf(w, "    %s\n", displayStored(c.Content, c.Category, 160)); err != nil {
+	}
+	if len(spared) > 0 {
+		// The line says the row stopped MATCHING, not that it was kept: a
+		// concurrent write may have removed it outright, in which case calling it
+		// spared-and-present would be the false claim in the other direction.
+		them := plural(len(spared), "it", "them")
+		if _, err := fmt.Fprintf(w, "  spared: %s no longer matched the prune when this run reached %s (pinned, re-tiered or re-saved since the preview listed %s)\n",
+			pluralCount(len(spared), "row", "rows"), them, them); err != nil {
 			return err
+		}
+		for _, c := range spared {
+			if err := printPruneRow(w, c, "    "); err != nil {
+				return err
+			}
 		}
 	}
 	switch {
@@ -203,15 +222,70 @@ func printPrune(w io.Writer, v pruneView) error {
 			len(v.Candidates), pluralNoun(len(v.Candidates))); err != nil {
 			return err
 		}
-	case v.Applied && len(v.Candidates) > 0:
+	case v.Applied && len(removed) > 0:
 		if _, err := fmt.Fprintf(w, "removed %d %s; ghost history <id> still reports each one, with phase=delete\n",
 			v.Removed, pluralNoun(v.Removed)); err != nil {
 			return err
 		}
+	case v.Applied && len(spared) > 0:
+		// The spared block above is the whole statement. This run selected rows and
+		// took none of them, so "no expired session memories past the grace period"
+		// would be false — something WAS prunable when the run looked — and a
+		// "removed 0" closing line would be a claim about a run that never
+		// reported one either.
 	case v.Applied:
 		if _, err := fmt.Fprintln(w, "no expired session memories past the grace period — nothing removed"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// splitPruneCandidates partitions a selected set into the rows an applied run
+// removed and the rows it did not, by the ids the run reports. A dry run is never
+// split — nothing was attempted, so the whole selection is what it would remove —
+// which is why the caller decides with v.Applied rather than this function.
+//
+// "Spared" is not only "pinned between batches". Every term of the predicate is
+// re-checked at the row's own batch, so a save that re-tiered the row, recomputed
+// its expiry or moved its last write spares it too, and a concurrent write that
+// removed the row outright leaves it in the spared set with nothing left to spare.
+// The renderer's wording holds for all of those, which is why it names the change
+// rather than the outcome.
+func splitPruneCandidates(candidates []memory.PruneCandidate, removedIDs []string) (removed, spared []memory.PruneCandidate) {
+	landed := make(map[string]bool, len(removedIDs))
+	for _, id := range removedIDs {
+		landed[id] = true
+	}
+	removed = make([]memory.PruneCandidate, 0, len(candidates))
+	for _, c := range candidates {
+		if landed[c.ID] {
+			removed = append(removed, c)
+			continue
+		}
+		spared = append(spared, c)
+	}
+	return removed, spared
+}
+
+// printPruneRow renders one selected row and the stored text under it. indent is
+// the row's own prefix, so the removed listing and the spared listing are this one
+// renderer at two depths rather than two spellings of a row.
+func printPruneRow(w io.Writer, c memory.PruneCandidate, indent string) error {
+	activity := c.ActivityAt
+	if activity == "" {
+		activity = "(no recorded activity)"
+	}
+	if _, err := fmt.Fprintf(w, "%s%s  %s  %s  expired %s  last touched %s\n", indent, c.ID, c.Category, c.Retention, c.ExpiresAt, activity); err != nil {
+		return err
+	}
+	// The stored text, through the shared displayStored substitution: this is
+	// the surface an operator reads precisely when a stale, credential-shaped
+	// row is most likely to need purging, and the write-boundary guard is not
+	// retroactive — a pre-guard row can still carry a value, and 160 bytes is
+	// more than enough to print one whole.
+	if _, err := fmt.Fprintf(w, "%s  %s\n", indent, displayStored(c.Content, c.Category, 160)); err != nil {
+		return err
 	}
 	return nil
 }

@@ -152,7 +152,12 @@ func TestPrintPruneSaysWhichRunItWas(t *testing.T) {
 	}
 
 	var applied bytes.Buffer
-	if err := printPrune(&applied, pruneView{Applied: true, Candidates: candidates, Removed: 1, Grace: 168 * time.Hour}); err != nil {
+	// An applied view carries the ids it removed, not just the count: that is what
+	// the headline is counted from, so a run that selected a row and spared it
+	// cannot be rendered as a removal. The store always fills both
+	// (PruneReport.RemovedIDs is appended beside Removed), so a fixture with a
+	// count and no ids is a shape the renderer refuses to overstate.
+	if err := printPrune(&applied, pruneView{Applied: true, Candidates: candidates, Removed: 1, RemovedIDs: []string{"abc123"}, Grace: 168 * time.Hour}); err != nil {
 		t.Fatalf("printPrune(apply): %v", err)
 	}
 	for _, want := range []string{"1 session memory removed", "phase=delete", "abc123"} {
@@ -162,6 +167,74 @@ func TestPrintPruneSaysWhichRunItWas(t *testing.T) {
 	}
 	if strings.Contains(applied.String(), "dry run") {
 		t.Errorf("an applied run describes itself as a dry run:\n%s", applied.String())
+	}
+}
+
+// TestPrintPruneReportsOnlyWhatItRemoved: on an apply the candidate list is what
+// the PREVIEW selected, while every batch is re-derived from the same predicate
+// under the write lock — so a row a concurrent save pinned, re-tiered or re-saved
+// between the preview and its own batch is correctly spared, and it is still in
+// that list. Headlining len(Candidates) on the success path therefore counted
+// rows the run never removed: measured 3050 in the headline against 3049 removed,
+// with the spared row still live in the store. The applied report counts and
+// lists RemovedIDs, and the rest are named as spared rather than dropped
+// silently — a row the operator asked about has to be accounted for either way.
+//
+// This is the same filter renderApplyFailure applies, one path earlier: without
+// RemovedIDs the renderer cannot tell a removal from a prediction, so the split
+// is the renderer's own and both call sites inherit it.
+func TestPrintPruneReportsOnlyWhatItRemoved(t *testing.T) {
+	candidates := []memory.PruneCandidate{
+		{ID: "row-1", ProjectID: "p", Category: "fact", Content: "the row the run removed", Retention: memory.RetentionSession, ExpiresAt: "2026-09-01 10:00:00", ActivityAt: "2026-08-20 09:00:00"},
+		{ID: "row-2", ProjectID: "p", Category: "fact", Content: "the row a concurrent save pinned", Retention: memory.RetentionSession, ExpiresAt: "2026-09-01 10:00:00", ActivityAt: "2026-08-20 09:00:00"},
+	}
+	var out bytes.Buffer
+	if err := printPrune(&out, pruneView{
+		Applied: true, Candidates: candidates, Removed: 1, RemovedIDs: []string{"row-1"}, Grace: 168 * time.Hour,
+	}); err != nil {
+		t.Fatalf("printPrune: %v", err)
+	}
+	report := out.String()
+	for _, want := range []string{"1 session memory removed", "row-1", "the row the run removed"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the applied report does not say %q:\n%s", want, report)
+		}
+	}
+	if strings.Contains(report, "2 session memories") || strings.Contains(report, "removed 2 memories") {
+		t.Errorf("the applied report headlines or closes with the candidate count, not the rows it removed:\n%s", report)
+	}
+	// The spared row is named, with the reason it was spared, and it sits BELOW the
+	// removed listing: an operator reading top to bottom has to be able to tell
+	// which rows are gone from the ones that are still there.
+	spared := strings.Index(report, "spared:")
+	if spared < 0 {
+		t.Errorf("the applied report does not name the row it spared:\n%s", report)
+	} else {
+		if !strings.Contains(report[spared:], "spared: 1 row") {
+			t.Errorf("the spared line does not count what it spared:\n%s", report)
+		}
+		if strings.Contains(report[:spared], "the row a concurrent save pinned") {
+			t.Errorf("the spared row is listed among the removals:\n%s", report)
+		}
+		if !strings.Contains(report[spared:], "row-2") {
+			t.Errorf("the spared row is not named under the spared line:\n%s", report)
+		}
+	}
+
+	// Every selected row spared: the headline says nothing was removed, and the
+	// closing line must NOT claim there was nothing to remove — this run did
+	// select a row, and it stopped matching while the run was walking the batches.
+	out.Reset()
+	if err := printPrune(&out, pruneView{
+		Applied: true, Candidates: candidates[:1], Grace: 168 * time.Hour,
+	}); err != nil {
+		t.Fatalf("printPrune(all spared): %v", err)
+	}
+	if !strings.Contains(out.String(), "0 session memories removed") || !strings.Contains(out.String(), "spared: 1 row") {
+		t.Errorf("a run where the only candidate was spared does not say so:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "no expired session memories") {
+		t.Errorf("a run that selected a row and spared it claims nothing was ever prunable:\n%s", out.String())
 	}
 }
 
