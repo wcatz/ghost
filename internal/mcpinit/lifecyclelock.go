@@ -92,3 +92,40 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 		}
 	}, true, nil
 }
+
+// LifecycleLockHeld reports whether a LIVE process holds projectID's per-project
+// lifecycle lock, reading the claim AcquireLifecycleLock writes. It takes the
+// RESOLVED project id, not a name, id or path: resolving an identifier is a
+// database read, and a caller that has to ask about many projects has already
+// resolved them.
+//
+// It is a reader and not a second claim, and the difference is the whole reason
+// it exists. A command that must not interfere with a running lifecycle — #730's
+// `ghost history compact` rewrites memory_history and moves memories.updated_at
+// under an unattended pass that is appending to both — has to be able to ask
+// whether one is running, and asking must not take the lock itself: a claim
+// would turn the question into a second writer and would have to be released by
+// a caller with no business holding it.
+//
+// It reads WITHOUT taking the claim file's flock, so it creates nothing: a check
+// that wrote a ".lock" sibling would make a dry run change the store it is
+// previewing. The claim itself is published by write-temp-then-rename
+// (atomicWritePID), so a reader never sees a half-written one, and the window
+// this leaves is the one a reader cannot close without becoming a writer: a
+// lifecycle that claims immediately after this returns is not seen, and the worst
+// that follows is that the repair and the run interleave — the repair only ever
+// removes rows that changed nothing, so a row appended during it survives to the
+// next run rather than being lost.
+//
+// Every unknown reads as NOT held. A missing, unreadable or unparseable claim is
+// no run to wait for, and a reader that reported "held" on a corrupt file would
+// refuse every future repair with no way for an operator to clear it. The
+// project id is validated as a safe filename component for the same reason
+// AcquireLifecycleLock validates it: the claim path is built from it, and an
+// unconstrained id joined into a path can be pointed outside the data dir.
+func LifecycleLockHeld(dataDir, projectID string) bool {
+	if dataDir == "" || projectID == "" || !safeProjectIDComponent(projectID) {
+		return false
+	}
+	return isAlive(filepath.Join(dataDir, "lifecycle-"+projectID+".pid"))
+}

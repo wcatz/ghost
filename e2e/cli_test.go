@@ -3,11 +3,13 @@
 package e2e
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2453,5 +2455,395 @@ func TestCLIHistory(t *testing.T) {
 		s.mustFail("history", "purge", id, "--json")
 		// Two ids is an error rather than a silently-ignored second one.
 		s.mustFail("history", id, id)
+	})
+}
+
+// seedPreFixReflectHistory writes the damage #727 stopped new stores taking and
+// #730 exists to remove: `versions` byte-identical `reflect` versions of one
+// memory, each recorded at a moment in the run, the memory's updated_at moved to
+// the run's own time, and the edit's own history row stamped at an instant of its
+// own so the restored stamp is about WHICH event it came from rather than about
+// the clock. The seeded rows' state columns are copied out of the live row, which
+// is exactly what the removed writer's INSERT ... SELECT did — so every one of them
+// is byte-identical to its neighbour over every column a version records.
+//
+// It opens the sandbox store READ-WRITE, which is the one place this suite does:
+// every other handle here is read-only so an assertion cannot perturb what it
+// observes. There is no other way to reach this state — the built binary no longer
+// writes it, and that is the whole point of #727 — so the fixture has to. Every
+// ASSERTION below goes back through the read-only handle.
+func seedPreFixReflectHistory(t *testing.T, s *sandbox, memoryID string, versions int, editAt, runFrom, runTo string) {
+	t.Helper()
+	dsn := "file:" + filepath.ToSlash(s.dbPath()) + "?_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open %s read-write to seed history: %v", s.dbPath(), err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(
+		`UPDATE memory_history SET recorded_at = ? WHERE memory_id = ? AND phase = 'update'`,
+		editAt, memoryID); err != nil {
+		t.Fatalf("stamp the update row: %v", err)
+	}
+	// The LAST version carries the run's end time, so the sequence has the shape a
+	// real one had rather than n rows in one instant, and the stamp the damage
+	// left is that same value.
+	for i := 0; i < versions; i++ {
+		at := runFrom
+		if i == versions-1 {
+			at = runTo
+		}
+		if _, err := db.Exec(`
+			INSERT INTO memory_history
+				(memory_id, project_id, phase, recorded_at, content, category, importance, resolved_at, source)
+			SELECT id, project_id, 'reflect', ?, content, category, importance, resolved_at, source
+			FROM memories WHERE id = ?`, at, memoryID); err != nil {
+			t.Fatalf("seed reflect version %d: %v", i, err)
+		}
+	}
+	// And the damage to updated_at: the reflect's own time, not the last real
+	// change's.
+	if _, err := db.Exec(`UPDATE memories SET updated_at = ? WHERE id = ?`, runTo, memoryID); err != nil {
+		t.Fatalf("stage the updated_at damage: %v", err)
+	}
+}
+
+// seedUnrecordedStampHistory stages the damage #730 deliberately does NOT repair:
+// a memory whose every recorded version was written by a writer that moves no
+// stamp, so there is no instant to put its stamp back to.
+//
+// It is the pre-v17 shape — a memory that predates version recording, resolved and
+// then unresolved by a build that records an `unresolve` and files no baseline
+// before it — with the no-op flood above it that makes the stamp worth repairing on
+// any other memory. A first version has no predecessor, so the state comparison
+// every other row is judged by called it a change; that is what this stages, and it
+// is the case where a repair would have set the stamp to a moment the store had
+// never recorded on any column.
+//
+// Read-write for the same reason seedPreFixReflectHistory is, and with the same
+// bargain: the state here is one no current command can produce, and the assertions
+// all read back through the read-only handle.
+func seedUnrecordedStampHistory(t *testing.T, s *sandbox, memoryID string, versions int, at, stamp string) {
+	t.Helper()
+	dsn := "file:" + filepath.ToSlash(s.dbPath()) + "?_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open %s read-write to seed history: %v", s.dbPath(), err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`DELETE FROM memory_history WHERE memory_id = ?`, memoryID); err != nil {
+		t.Fatalf("drop the recorded history: %v", err)
+	}
+	// The unresolve: the first version, and the only one whose writer leaves
+	// updated_at alone.
+	if _, err := db.Exec(`
+		INSERT INTO memory_history
+			(memory_id, project_id, phase, recorded_at, content, category, importance, resolved_at, source)
+		SELECT id, project_id, 'unresolve', ?, content, category, importance, resolved_at, source
+		FROM memories WHERE id = ?`, at, memoryID); err != nil {
+		t.Fatalf("seed the unresolve version: %v", err)
+	}
+	for i := range versions {
+		if _, err := db.Exec(`
+			INSERT INTO memory_history
+				(memory_id, project_id, phase, recorded_at, content, category, importance, resolved_at, source)
+			SELECT id, project_id, 'reflect', ?, content, category, importance, resolved_at, source
+			FROM memories WHERE id = ?`, at, memoryID); err != nil {
+			t.Fatalf("seed reflect version %d: %v", i, err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE memories SET updated_at = ? WHERE id = ?`, stamp, memoryID); err != nil {
+		t.Fatalf("stage the undamaged-by-evidence stamp: %v", err)
+	}
+}
+
+// TestCLIHistoryCompact drives the #730 repair against the built binary, in a
+// store holding the damage a pre-#727 build left behind.
+//
+// What only this layer can see: that `ghost history compact` ROUTES (the word
+// sits where a memory id sits, so a word the routing missed would be read as an id
+// and answered with "no memory and no history recorded for compact"), that a dry
+// run is the default, that the refusal reaches the user, and that the store is
+// really unchanged when the command says it wrote nothing.
+func TestCLIHistoryCompact(t *testing.T) {
+	s := newSandbox(t)
+	cs := s.mcpSession(t)
+	id := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "the compaction keeps this save and this edit",
+		"category":   "architecture",
+		"importance": 0.5,
+	}))
+	call(t, cs, "ghost_memory_update", map[string]any{
+		"project_id": e2eProject,
+		"memory_id":  id,
+		"content":    "the compaction keeps this save and this edit, in production",
+	})
+
+	// The edit's own instant, the reflect run's instants, and a stamp the edit
+	// reached. Distinct values, so the assertion is about WHICH event the restored
+	// updated_at comes from rather than about the clock.
+	const (
+		updateAt = "2026-01-01 11:00:00"
+		runFrom  = "2026-01-01 12:00:00"
+		runTo    = "2026-01-01 12:30:00"
+	)
+	seedPreFixReflectHistory(t, s, id, 20, updateAt, runFrom, runTo)
+	damaged := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, id)
+	if damaged != 22 {
+		t.Fatalf("the fixture left %d history rows, want 22 (1 save + 1 update + 20 reflect)", damaged)
+	}
+	// And the run is the LAST write, which is what makes the stamp damage real: a
+	// reflect that happened before the edit never moved updated_at past it.
+
+	t.Run("a dry run is the default and writes nothing", func(t *testing.T) {
+		before := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, id)
+		dry := s.mustRun("history", "compact", "--project", e2eProject)
+		mustContain(t, "history compact (dry run)", dry.stdout, "dry run")
+		mustContain(t, "history compact (dry run)", dry.stdout, e2eProject)
+		mustMatch(t, "history compact (dry run)", dry.stdout, `19 redundant version`)
+		// The bound is named, because every count is a count AT one: "19" answers a
+		// different question at each instant, and an operator with a store whose
+		// clock is behind has no other way to tell whether the default already
+		// reached their rows.
+		mustContain(t, "history compact (dry run)", dry.stdout, "before 2026-09-28 17:14:07")
+		if got := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, id); got != before {
+			t.Errorf("the dry run left %d history rows, want the %d it started with", got, before)
+		}
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, id).text; got != runTo {
+			t.Errorf("the dry run moved updated_at to %q, want it left at the damage (%q)", got, runTo)
+		}
+	})
+
+	t.Run("--apply removes only the versions that changed nothing", func(t *testing.T) {
+		applied := s.mustRun("history", "compact", "--project", e2eProject, "--apply")
+		mustNotContain(t, "history compact --apply", applied.stdout, "dry run")
+		// Nineteen of the twenty: the last is this memory's newest version, and a
+		// memory's newest version is the statement of what it says now, which
+		// nothing removes — the same rule the per-memory retention cap applies.
+		mustMatch(t, "history compact --apply", applied.stdout, `19 redundant version`)
+
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, id); n != 3 {
+			t.Fatalf("compaction left %d history rows, want 3 (the save, the edit, and the newest version)", n)
+		}
+		// The two EVENTS are still there, and the first still holds the wording
+		// nothing else keeps. The third row is the newest version, not an event.
+		phases := s.queryStrings(t, `SELECT phase FROM memory_history WHERE memory_id = ? ORDER BY rowid`, id)
+		if len(phases) != 3 || phases[0] != "save" || phases[1] != "update" || phases[2] != "reflect" {
+			t.Fatalf("surviving phases = %v, want [save update reflect]", phases)
+		}
+		mustContain(t, "history after compaction", s.mustRun("history", id).stdout, "in production")
+		// No --fix-updated-at, so the stamp is exactly where the damage left it.
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, id).text; got != runTo {
+			t.Errorf("updated_at = %q, want the reflect run's time (%q) — no stamp moves without --fix-updated-at", got, runTo)
+		}
+	})
+
+	t.Run("--fix-updated-at restores the last real change, in the same run", func(t *testing.T) {
+		// A second damaged memory, because the first one's evidence is already gone:
+		// the stamp repair asks whether a version that changed nothing sits ABOVE
+		// the last real change, and an earlier run that removed those versions has
+		// taken the evidence with them. One run, both flags, is also how an operator
+		// applies this.
+		second := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the compaction restores this memory's freshness stamp",
+			"category":   "architecture",
+			"importance": 0.5,
+		}))
+		call(t, cs, "ghost_memory_update", map[string]any{
+			"project_id": e2eProject,
+			"memory_id":  second,
+			"content":    "the compaction restores this memory's freshness stamp, once",
+			"importance": 0.9,
+		})
+		const (
+			secondUpdate = "2026-02-01 11:00:00"
+			secondFrom   = "2026-02-01 12:00:00"
+			secondTo     = "2026-02-01 12:30:00"
+		)
+		seedPreFixReflectHistory(t, s, second, 20, secondUpdate, secondFrom, secondTo)
+
+		fixed := s.mustRun("history", "compact", "--project", e2eProject, "--apply", "--fix-updated-at")
+		mustMatch(t, "history compact --fix-updated-at", fixed.stdout, `1 updated_at restored`)
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, second).text; got != secondUpdate {
+			t.Errorf("updated_at = %q, want the edit's own recorded_at (%q)", got, secondUpdate)
+		}
+		// And the first memory's already-restored, already-compacted state is not
+		// disturbed by a run that had nothing to do for it.
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, id).text; got != runTo {
+			t.Errorf("updated_at of the first memory = %q, want it left at %q — its versions were already compacted away", got, runTo)
+		}
+	})
+
+	t.Run("a second run removes 0", func(t *testing.T) {
+		again := s.mustRun("history", "compact", "--project", e2eProject, "--apply", "--fix-updated-at")
+		mustMatch(t, "history compact (second run)", again.stdout, `0 redundant version`)
+		mustMatch(t, "history compact (second run)", again.stdout, `0 updated_at restored`)
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, id); n != 3 {
+			t.Errorf("the second run left %d history rows for the first memory, want the 3 the first left", n)
+		}
+	})
+
+	t.Run("a version a current build wrote is left to --before", func(t *testing.T) {
+		// Twenty restatements recorded AFTER #727 shipped, which is what a current
+		// build's own byte-identical version looks like: a consolidation merge whose
+		// survivor is one of its sources carries the union of the sources' tags, and
+		// this table has no column for tags. Nothing in the row says so, so the
+		// default bound cannot tell these from the damage and leaves them alone —
+		// which is the safe direction, and the one an operator re-runs after an
+		// upgrade to reach.
+		third := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "a current build's own restatement is not the damage",
+			"category":   "architecture",
+			"importance": 0.5,
+		}))
+		call(t, cs, "ghost_memory_update", map[string]any{
+			"project_id": e2eProject,
+			"memory_id":  third,
+			"content":    "a current build's own restatement is not the damage, restated",
+		})
+		const (
+			thirdUpdate = "2026-03-01 11:00:00"
+			thirdRun    = "2026-10-01 12:00:00"
+		)
+		seedPreFixReflectHistory(t, s, third, 20, thirdUpdate, thirdRun, thirdRun)
+
+		// Under the default bound the store has nothing left to remove: the first
+		// memory was already compacted and these twenty are newer than the cut.
+		underDefault := s.mustRun("history", "compact", "--project", e2eProject, "--fix-updated-at")
+		mustMatch(t, "history compact (default bound)", underDefault.stdout, `0 redundant version`)
+		mustMatch(t, "history compact (default bound)", underDefault.stdout, `0 updated_at restored`)
+		mustContain(t, "history compact (default bound)", underDefault.stdout, "before 2026-09-28 17:14:07")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, third); n != 22 {
+			t.Errorf("the default bound left %d history rows, want all 22", n)
+		}
+		// And the stamp is untouched, because the twenty rows that would have been
+		// its evidence are rows this repair will not remove.
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, third).text; got != thirdRun {
+			t.Errorf("updated_at = %q, want the run's own time (%q): a row outside the repair is not "+
+				"evidence that a reflection moved the stamp", got, thirdRun)
+		}
+
+		// Move the cut past them and they are the damage after all — 19 of 20, the
+		// last being the memory's newest version. Both runs are dry, so the store is
+		// the same store.
+		//
+		// A bound that reaches past the fix is WARNED about, and this is the only
+		// place the warning's stream and its presence in a dry run are observable:
+		// the command prints it from runHistoryCompact, and a unit test on the plan
+		// cannot see which stream it chose.
+		//
+		// stderr, not stdout, because stdout is what a script reads for the counts.
+		// A warning on stdout ends up inside whatever parses that output, and one on
+		// stderr is still seen by the operator at a terminal — which is who has to
+		// act on it. And in a DRY RUN, because that is where the operator decides
+		// whether to pass --apply: a risk disclosed only by the write is disclosed
+		// after the decision.
+		widened := s.mustRun("history", "compact", "--project", e2eProject, "--before", "2026-10-02", "--fix-updated-at")
+		mustMatch(t, "history compact --before", widened.stdout, `19 redundant version`)
+		mustMatch(t, "history compact --before", widened.stdout, `1 updated_at restored`)
+		// The bound is the one THIS run used, not the default it did not have to
+		// fall back on.
+		mustContain(t, "history compact --before", widened.stdout, "before 2026-10-02 00:00:00")
+		mustNotContain(t, "history compact --before", widened.stdout, "before 2026-09-28 17:14:07")
+		// The warning is on stderr and nowhere else, and it names the risk rather
+		// than restating the bound the operator just typed: the tags union is the
+		// thing they cannot check from the counts.
+		mustContain(t, "history compact --before warning", widened.stderr, "warning:")
+		mustContain(t, "history compact --before warning", widened.stderr, "2026-09-28 17:14:07")
+		mustContain(t, "history compact --before warning", widened.stderr, "tags")
+		mustNotContain(t, "history compact --before warning", widened.stdout, "warning:")
+		// The default bound does NOT warn, and this run is the same store one flag
+		// narrower. A command whose zero configuration printed a warning would train
+		// its reader to skip the one that matters.
+		underDefaultAgain := s.mustRun("history", "compact", "--project", e2eProject, "--before", "2026-09-28")
+		mustNotContain(t, "history compact (default bound, spelled out)", underDefaultAgain.stderr, "warning:")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, third); n != 22 {
+			t.Errorf("the widened dry run left %d history rows, want all 22 — it was a dry run", n)
+		}
+	})
+
+	t.Run("a memory with no recorded stamp write is reported, not invented", func(t *testing.T) {
+		// A fourth memory, in the shape a pre-v17 store has: nothing recorded until
+		// an unresolve, which files a version and moves no stamp. The flood above it
+		// is the same damage every other memory here carries, so the versions still
+		// go — and the stamp has nowhere to go, which is a thing the report has to
+		// say rather than a thing a count of zero restored can say for it.
+		fourth := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "a memory whose history records no stamp write at all",
+			"category":   "architecture",
+			"importance": 0.5,
+		}))
+		const (
+			preV17At   = "2026-08-01 09:00:00"
+			preV17Stmp = "2026-08-01 09:30:00"
+		)
+		seedUnrecordedStampHistory(t, s, fourth, 20, preV17At, preV17Stmp)
+
+		fixed := s.mustRun("history", "compact", "--project", e2eProject, "--apply", "--fix-updated-at")
+		mustMatch(t, "history compact (unrecorded stamp)", fixed.stdout, `1 stamp\(s\) not restorable, no recorded stamp write`)
+		// Not folded into the unreadable count, which is a different fault: an
+		// unreadable stamp is a value that exists and cannot be parsed.
+		mustNotContain(t, "history compact (unrecorded stamp)", fixed.stdout, "unreadable")
+		// The flood is still removed — the version removal never depended on there
+		// being a stamp to move — and only the memory's own newest version is kept.
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, fourth); n != 2 {
+			t.Errorf("the memory kept %d history rows, want 2 (its unresolve and its newest version)", n)
+		}
+		// And the stamp is exactly where the damage left it, rather than set to the
+		// instant the unresolve was recorded — the whole point of the rule.
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, fourth).text; got != preV17Stmp {
+			t.Errorf("updated_at = %q, want it left at %q: with no recorded stamp write there is no "+
+				"instant to restore it to", got, preV17Stmp)
+		}
+	})
+
+	t.Run("it refuses while the project's lifecycle lock is held", func(t *testing.T) {
+		claim := filepath.Join(s.dataDir(), "lifecycle-"+e2eProject+".pid")
+		if err := os.WriteFile(claim, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+			t.Fatalf("write a live lifecycle claim: %v", err)
+		}
+		defer func() { _ = os.Remove(claim) }()
+
+		// This test process is alive, so the claim is a claim by a live run — the
+		// same thing a coordinator leaves behind.
+		refused := s.mustFail("history", "compact", "--project", e2eProject, "--apply")
+		mustContain(t, "history compact under a held lock", refused.stderr+refused.stdout, e2eProject)
+		mustMatch(t, "history compact under a held lock", refused.stderr+refused.stdout, "(?i)lock|wait")
+
+		// And the refusal is a refusal: nothing moved. The store here is already
+		// compacted, so the check is that a refusal did not rewrite anything on its
+		// way out.
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ?`, id); n != 3 {
+			t.Errorf("the refused run left %d history rows, want the 3 it started with", n)
+		}
+		if got := s.queryRow(t, `SELECT updated_at, 0 FROM memories WHERE id = ?`, id).text; got != runTo {
+			t.Errorf("the refused run moved updated_at to %q, want it left at %q", got, runTo)
+		}
+	})
+
+	t.Run("argument errors", func(t *testing.T) {
+		// A flag that means nothing here is refused rather than ignored: a
+		// dropped --fix-updated-at would report a repair that never ran.
+		s.mustFail("history", "compact", "--fixit")
+		s.mustFail("history", "compact", "--project")
+		s.mustFail("history", "compact", "e2e-proj")
+		// And a project that names nothing is an error, not an empty report: the
+		// alternative is a whole-store compaction by a reader who mistyped.
+		s.mustFail("history", "compact", "--project", "no-such-project")
+		// A bound the command cannot read is refused before it opens a project. It
+		// is not defaulted and it is not passed down: defaulting would delete the
+		// rows the operator asked to spare while reporting the default's numbers,
+		// and passing it down would refuse it from inside the first project, having
+		// already said the store was compactable.
+		refused := s.mustFail("history", "compact", "--before", "the day it shipped")
+		mustContain(t, "history compact --before refusal", refused.stderr+refused.stdout, "--before")
+		s.mustFail("history", "compact", "--before")
+		s.mustFail("history", "compact", "--before=")
 	})
 }

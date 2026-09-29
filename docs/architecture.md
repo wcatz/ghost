@@ -47,6 +47,7 @@ ghost context                     Render passive session context
 ghost context --as-of <RFC3339>   Render it as the store stood at an instant
 ghost history <memory-id>         Print one memory's append-only history
 ghost history purge <memory-id>   Erase a memory and every recorded version of it
+ghost history compact [--apply]   Remove history versions that changed nothing (bounded by --before)
 ghost bench [--sweep|--context]   Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
 ghost version                     Print the version
@@ -470,7 +471,7 @@ The main schema tables are:
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
 | `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
-| `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`). Its `memory_id` deliberately has no foreign key |
+| `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`). Its `memory_id` deliberately has no foreign key. A version row that changed nothing is removable by `ghost history compact` ([#730](https://github.com/wcatz/ghost/issues/730)); see [Memory history](#memory-history) |
 | `memory_provenance` | Append-only per-memory EVIDENCE records (schema v18, [#673](https://github.com/wcatz/ghost/issues/673)) — SEVERAL rows per memory, one per observation, each naming the agent, session, reference and confidence that supported it, with `observed_at`/`verified_at`, and `carried_from` when a consolidation carried the record off the memory it was consolidated from. A different question from the change log, and the name `memory_history` deliberately did not take. Its `memory_id` cascades, and the table is in the migration's derived-row whitelist so an orphan cannot brick a newer build |
 | `memory_snapshot_evidence` | The evidence a reflection snapshot carries, so a restore brings the support back with the row (schema v18). Pruned with the snapshots themselves |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
@@ -506,6 +507,60 @@ the **same transaction** as the write, so history cannot diverge from state:
 The redaction is whole-content, not a span, and the reason is worth stating because it looks like laziness and is not. `secret.Finding` carries a rule name and a human-readable label and no offsets, deliberately — its other consumer is a refusal message that must not quote the value — so a span-precise redactor would need a capture group per rule across the whole rules table plus offsets from all three post-table passes. The honest options today are "replace the content" and "keep the credential", and only one of those is a redaction. The trade is that a **false positive now costs one history entry's text**, where before the guard landed it cost nothing: the live row still holds the current text, and the entry still records that a change happened, when and by whom. And it is defence in depth rather than a live control — every writer refuses a credential on the way in, so a credential can only be in a history row if it was stored before that guard existed, which means the filter fires on nothing at all in a store that has never held one.
 
 The filter runs on **every** appended row whether or not anything is redacted, because the only sound way to know is to look, and that cost is on the write path's critical section: measured at **~1.1 ms per 2 KB row and ~3.6 ms at the 8 KB content cap**, inside the transaction, so a batched append pays it once per id. Skipping the detector on rows that look clean is not available — a prefilter with a false negative is a silent leak, which is the same lesson `internal/secret` already teaches once in its own comments.
+
+**A version row is removable only when it changed nothing, and "nothing" is every column a version records.**
+`ghost history compact` (#730) is the repair for the rows a pre-#727 build left behind: #727 stopped every applied
+reflection from appending a byte-identical `reflect` version per kept memory and from moving that memory's
+`updated_at` to the run's own time, which measured at 80% of this table on one real store. A version row goes only
+when it records the same state as the row before it of the same memory, in rowid order, compared over **every**
+column a version stores — and it is a `reflect` version recorded before a bound. Five things never go: a memory's
+first version, its newest version, the phases that record a claim the state does not, any row naming another memory,
+and any version at or after the bound. A sixth rule keeps ALL of a memory's versions, and it is a scope rule rather
+than a sixth: a memory whose newest version is a `delete` tombstone is not compacted at all. A deleted memory has no
+`memories` row, so `CreatedAt` falls back to the version that answers and removing a version from it would change the
+AGE a past read computes, for a memory nobody can edit and nobody can restore. It costs nothing by construction —
+a retired memory's history is frozen — and it is stable under the deletion, because the rule reads the newest
+version and no removable row is ever the newest.
+
+The bound is the interesting one, and it exists because a **current** build still files a byte-identical `reflect`
+version on purpose: a consolidation merge whose survivor is one of its own sources carries the union of that source's
+tags, `ReplaceNonManual`'s `reusePreservesAge` branch writes them, and the version restates every column this table
+stores, because the tags are not a column of it. So the recorded state cannot tell a deliberate retag from the
+pre-#727 flood, and the repair does not pretend otherwise — the default bound is the instant #727 reached main
+(`--before` widens it for a store whose clock is behind), so a row a current build wrote is a current writer's
+business and a row written before the fix shipped is this repair's. `save` and `update` are not compacted at all,
+which is the same fact from the other side: a tags-only `ghost memory update` is a real change this table cannot see.
+
+The same fact decides `--fix-updated-at`'s **anchor**, and this is where the design went wrong twice. The anchor is
+the newest version the repair will **not** remove **and** whose WRITER bumped `updated_at` in the same statement
+that filed it — `stampMovingPhases`, three phases long. The first attempt read "not the newest version that
+*changed state*", and that was wrong in the direction that invents: `SetResolved` writes `resolved_at` and says in
+as many words that it leaves `updated_at` alone, `Upsert`'s unsaturated fold writes `importance` and moves nothing,
+and a memory's FIRST version passes the state comparison trivially because it has no predecessor. Any of them
+became the anchor, so the repair set a memory's stamp to an instant the store had never held on that column — 49 of
+288 restored stamps on one real store, and one pre-v17 memory whose stamp was set to the moment its unresolve row
+was written. There is nothing else to check the claim against, and that is why the rule is a phase list and not a
+cleverer predicate: this table records no `updated_at` at all, so a version cannot be compared with the stamp it is
+supposed to account for. The only evidence a stamp write happened is the identity of the writer, and the writer is
+what the phase names. The newest-version guard is the one clause deliberately left out of the anchor, for an
+arithmetic reason rather than a judgement one: a removable row is never the newest, so an anchor that always
+included the newest row would sit above every removable row and the repair would never fire at all.
+
+The obvious over-correction is to make *every* non-removable row an anchor, and that is worse than the bug: a
+`supersede` version is non-removable, and `CreateLink` writes no `memories` row at all, so as an anchor it closes
+the gate for that memory permanently — on exactly the store where the supersede landed after the damage. So the
+anchor takes both clauses and neither alone. Getting `stampMovingPhases` wrong in the permissive direction is
+silent, and getting it wrong in the *other* direction is silent too: a memory whose history holds no version written
+by a stamp-moving writer has no anchor at all, and its stamp is left exactly where the damage put it rather than set
+to a guess. That is a third outcome, counted under its own name (`no recorded stamp write`) because it is a
+different fault from an unreadable stamp — an unreadable stamp is a value that exists and no layout reads, and this
+is a value whose AUTHOR does not exist anywhere in the table — and because a report of `0 updated_at restored` beside
+a store full of removed versions otherwise reads as a finished repair. A pre-v17 memory is the reachable case: no
+`save` version, so a `ClearResolved` above the flood leaves nothing that moved the stamp.
+
+The rules, the reasons, the writers whose deliberate restatements forced the bound, and the gate `--fix-updated-at`
+needs are stated in [invariants.md](invariants.md#ghost-invariants) under "Memory history"; this section is the
+design narrative, that file the checklist a change is held to.
 
 **The name is a distinction, not a description.** This is a change log — one
 row per write, holding the state the memory had once that write landed. Evidence

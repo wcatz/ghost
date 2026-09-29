@@ -659,7 +659,7 @@ ghost context --cwd /path/to/project
 
 This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response.
 
-### `ghost history <memory-ref>` / `ghost history purge <memory-id>`
+### `ghost history <memory-ref>` / `ghost history purge <memory-id>` / `ghost history compact`
 
 Prints one memory's append-only history: every insert, edit, reflection rewrite,
 duplicate fold, resolve, supersession, restore, import and deletion, oldest
@@ -746,9 +746,213 @@ the purge, or another machine's copy of the store. The MCP equivalent is
 `ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
 erase something rather than to retire a memory.
 
-The command writes no memory, history or project row. It does open the store read-write — the same open `ghost maintenance status` and `ghost backup` use — so a database predating the history table is migrated by the open, and that migration first writes the full pre-migration backup copy it always takes. The strictly read-only opener is not used here because it refuses a store behind the current schema, which is exactly the store someone is most likely to run this against after upgrading.
+Reading a history (`ghost history <ref>`, and `as_of`) writes no memory, history or
+project row, and neither does `ghost history compact` **without** `--apply` — a dry
+run is nothing but reads, and it is the command to reach for first. The two forms
+that do write are `ghost history purge <ref>`, which deletes the recorded text, and
+`ghost history compact --apply`, which deletes redundant versions and (with
+`--fix-updated-at`) moves a stamp; see [the compact section](#ghost-history-compact)
+for what that one touches. All of them open the store read-write — the same open
+`ghost maintenance status` and `ghost backup` use — so a database predating the
+history table is migrated by the open, and that migration first writes the full
+pre-migration backup copy it always takes. The strictly read-only opener is not used
+here because it refuses a store behind the current schema, which is exactly the store
+someone is most likely to run this against after upgrading.
 
 Entries are kept per the growth policy in [architecture.md](architecture.md#memory-history): the newest 50 versions of one memory, and the newest 20 000 rows in the store.
+
+#### `ghost history compact`
+
+Repairs what the pre-#727 reflect behaviour left in a store. Until #727 landed,
+every applied reflection appended a **byte-identical** `reflect` version for each
+memory it kept and set that memory's `updated_at` to the run's own time. On a store
+that ran the unattended lifecycle, that measured at 80% of `memory_history`, and it
+pushed real events toward the retention caps above while leaving `updated_at`
+holding the time of a reflection instead of the time of the last real change — which
+is what `ghost supersede` orients a candidate pair by and what `--skip-unchanged`'s
+fingerprint carries as a change proxy. #727 stopped the new damage; this removes the
+old.
+
+```bash
+ghost history compact                                  # dry run, every project
+ghost history compact --project my-project             # dry run, one project
+ghost history compact --apply                          # remove the redundant versions
+ghost history compact --apply --fix-updated-at         # and restore updated_at too
+ghost history compact --before 2026-10-01              # widen the bound (see below)
+```
+
+A version row is removed **only** when it records the same state as the row before
+it of the same memory, in rowid order, compared over every column a version stores:
+`content`, `category`, `importance`, `resolved_at` and `source`; and only when it is
+a `reflect` version recorded before the bound. Six things always stay:
+
+- a memory's **first** version — the only statement of what it said, with nothing
+  to duplicate;
+- a memory's **newest** version — the statement of what it says *now*, and the same
+  row the per-memory retention cap already declines to trim;
+- a `delete` tombstone, a `supersede` or its `unsupersede`, a `resolve` or its
+  `unresolve`, a `merge`, an `import`, a `restore` — each records a claim the state
+  does not, and a phase added to the schema later is not removable until it has
+  been classified;
+- any row carrying a `related_id` or `merged_content` — it is the thread a reader
+  follows from one memory's past into its successor's, not a statement about this
+  one;
+- any version recorded at or after the bound;
+- **every version of a memory that has since been deleted.** A deleted memory has
+  no live row, so an `as_of` read of it takes the age it measures from the version
+  that answers — and removing a version from it would change what a past read
+  computes, for a memory nobody can edit and nobody can restore. Its history is
+  frozen the moment it is deleted, so this costs nothing: the flood it would have
+  cleaned up is never written to again.
+
+`save`, `update` and `baseline` are never compacted even though they record a state
+and nothing else, and the reason is a real one rather than caution: `ghost memory
+update` appends an `update` version on **every** edit, and a **tags-only** edit is a
+change to what the memory says about itself that this table cannot see, because it
+has no column for tags. Both `update` versions and the stamps they moved survive.
+
+`--before <t>` bounds the repair, and the default is `2026-09-28T17:14:07Z` — the
+instant #727 reached main. A current build still files a byte-identical `reflect`
+version on purpose: a consolidation merge whose survivor is one of its own sources
+carries the union of that source's tags, and nothing in this table can see that,
+because the tags are not a column. So the repair does not try to tell such a row
+from the damage; it declines to touch any row a current build wrote. Widen the bound
+only for a store whose clock is behind — a restored backup, a copied database —
+and read the dry run at the wider bound before applying it. `<t>` is a `2006-01-02`
+date or an RFC 3339 instant, and a bound the command cannot read is refused rather
+than defaulted. **Every count is a count at a bound**, and the report names the one
+it used:
+
+```
+history compact (dry run — nothing was written; pass --apply to write)
+  removing only versions recorded before 2026-09-28 17:14:07
+  my-project  19 redundant version(s), 1 updated_at restored
+```
+
+A bound that reaches **past** the default is warned about on **stderr**, in a dry
+run as well as an apply, because a dry run is where you decide whether to pass
+`--apply`, and a risk disclosed only by the write is disclosed after the decision.
+It names the risk rather than restating the bound you typed:
+
+```
+warning: --before 2026-10-02 00:00:00 reaches past 2026-09-28 17:14:07, the instant
+#727 shipped, so this run can remove 'reflect' versions a current build wrote — …
+```
+
+The default does **not** warn. A command whose zero configuration printed a warning
+would train its reader to skip the one that matters.
+
+`--fix-updated-at` is a second, separate repair, behind its own flag. Each live
+memory's `updated_at` becomes the `recorded_at` of its **anchor**, and only where a
+version that changed nothing sits **above** that anchor — that version is the
+evidence a reflection run moved the stamp, and without it a stamp the history
+cannot account for belongs to some other writer. The bound reaches this gate too,
+for the same reason it reaches the delete: a version this repair would not remove
+is not a version it may treat as proof that a reflection ran.
+
+**The anchor is the newest version that does not itself repeat the version before it
+whose WRITER moved `updated_at` in the same statement that filed it** — `save`,
+`update` or `reflect`. The test for "repeats" is the DAMAGE rule on its own, not the
+full removal rule: a version is damage when it records the state its predecessor
+recorded, is a `reflect`, was recorded before the bound, and names no other memory.
+The two retention guards — a memory's newest version is spared, and a deleted
+memory's history is left alone — are **not** part of the anchor's definition — which
+is why being spared by one is not what makes a version an anchor, and is not a reason to
+look for one. A version can be the anchor while a guard spares it from removal, but only
+if it repeats nothing; a repeating row is damage at any position in the history. A `ghost resolve` changes
+`resolved_at` and says
+in as many words that it leaves `updated_at` alone; a duplicate save that folds
+changes `importance` and moves nothing. Answering with either would set a memory's
+stamp to an instant the store never held on that column at all, and on a real store
+this did so for 49 of 288 restored stamps. `ghost history compact --fix-updated-at`
+therefore skips over all three and lands on the newest write that really moved the
+stamp without itself being the damage. Note what that does *not* mean: the anchor is
+not necessarily earlier than the last write that moved the stamp — a memory later
+touched by a deliberate `update`, or by any post-#727 write, anchors on that write. It
+does *not* mean a newest no-op `reflect` can be one: a pre-#727 no-op repeat is damage
+whatever its position, so being spared by the newest-version guard does not make it an
+anchor, and `TestCompactHistoryFixUpdatedAtRestoresTheLastStampWrite` is the case — its
+newest version is a no-op reflect and the anchor is the `update` beneath the flood. "The
+damage is earlier" is the reason a *flood* does not pin the stamp, not a guarantee about
+any one memory. A version a
+deliberate writer filed *and* moved the stamp is still an anchor: that is what
+`save`/`update`/`reflect` membership means, and `TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow`
+pins the interleaving.
+
+A memory whose history holds **no** version written by such a writer has no anchor
+at all, and the answer is to leave its stamp exactly where it is and say so. A
+pre-#727 memory is the case: it has no `save` version, so if its next writer was an
+unresolve its only recorded version is one whose writer moved no stamp. Its no-op
+reflect flood is still removed — the version removal never depended on there being a
+stamp to move — and the report counts the row separately as
+`no recorded stamp write`, so a report of `0 updated_at restored` beside a store full
+of removed versions cannot be read as a finished repair. It is a different count from
+`unreadable` on purpose: an unreadable stamp is a value that exists and no layout
+reads, and this is a value whose *author* does not exist anywhere in the table.
+
+It moves **only backward** — the damage moved a stamp forward, so the repair undoes
+that — and a memory whose stamp is already at or before the target is left as it
+is. Both stamps are read through the store's own layouts and the restored one is
+written in the layout the store writes, so a whole-day value on either side is
+readable and never written back. A memory whose stamp no layout reads is left alone
+and counted separately (`stamps unreadable`), because a row this run could not
+repair is a row whose supersede orientation is still wrong.
+
+For a memory that is still **live**, neither repair changes what an `as_of` read
+of it returns *for*. Its `content`, `category`, `importance`, `resolved_at`,
+`source`, `project_id`, `created_at` and supersede edges are all read from the live
+row or from a version carrying the same state, so a read of the same instant gives
+the same answer after the repair as before it. Three fields do move, and they move
+for two different reasons. `UpdatedAt` moves because the stamp repair *is* a write
+to `memories.updated_at` — the column the as-of read takes from the live row — and
+it moves **backward** to the recorded time of its anchor: the newest version that
+does not itself repeat the version before it whose writer moved the stamp in the same
+statement that filed it. That is the field a reader comparing output across the repair
+would notice, and it is the one the flag exists to move. The anchor is not necessarily
+earlier than the last write that moved the stamp: a memory later touched by a deliberate
+`update` or any post-#727 write anchors on that write. A newest no-op `reflect` is damage
+all the same and is never the anchor. The other two fields move only
+because they *name* which version
+answered: `VersionRecordedAt` and `VersionPhase` can now describe an earlier,
+equivalent version — a memory that was resolved and unresolved, or folded, may read
+as merely saved for an instant whose reflect flood has been compacted away. Nothing a
+historical read is *for* changes; the attribution and the stamp do. A **deleted** memory is excluded from both repairs
+instead, so for one of those none of the three fields move at all — which is why the
+exclusion is a scope rule rather than a retention one.
+
+Because the stamp repair needs that evidence, pass both flags in the **same** run:
+`ghost history compact --apply --fix-updated-at`. An earlier run that already
+removed the versions took the evidence with it, and the second run has nothing to
+act on. That is not a quirk — a dry run reports the same numbers either way, and
+the same is true of the apply.
+
+Both repairs leave a memory that keeps only the versions a reader could want: its
+first, its newest, and every event. Nothing here removes a `delete` tombstone, a
+supersede or its withdrawal, a resolve or its clearing, a merge, an import, a
+restore, or a row that names another memory.
+
+A dry run is the default and writes nothing; `--apply` writes. Either way the
+counts are per project, and the dry run's numbers are the apply's numbers rather
+than an estimate: deleting a version that changed nothing cannot change whether the
+row after it changed anything, so the set of removable rows is a fixed point of the
+deletion. The work runs in bounded `BEGIN IMMEDIATE` batches, so it never holds the
+write lock over a whole store's history, and running it twice is a no-op the second
+time. It refuses to run while a lifecycle run holds any of the projects' locks, and
+it checks **every** project before it touches any of them — a refusal that arrived
+after the first project had been compacted would be a check that protects nothing.
+The refusal names the projects, so an operator can either wait or re-run scoped with
+`--project`.
+
+This is the only `ghost history` mode that writes. It opens the store read-write
+like the rest of the command and, under `--apply`, deletes `memory_history` rows and
+updates `memories.updated_at`. Both are repairs rather than edits: a version row is
+removed only when the row before it of the same memory says the same thing, so no
+event and no state a reader could want is lost.
+
+A run that fails partway through says what it had already done, per project,
+including the project it stopped in — its committed batches are a store already
+rewritten, and a report that dropped the project for having failed would send an
+operator re-running a whole store to find out about one.
 
 ### `ghost bench`
 

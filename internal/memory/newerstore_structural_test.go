@@ -134,6 +134,29 @@ var writeSeamExemptions = map[string]string{
 	// statement in its table is a `SELECT count(*)`, read from a struct field
 	// the scan cannot follow.
 	"backup.go:CountRows": "counts rows for a backup manifest; every statement in its table is a SELECT count(*), read from a struct field the scan cannot follow",
+
+	// The compact pass's own two reads (#730), and the same shape as the two
+	// above: a `SELECT` the scan cannot read, because the statement is BUILT by a
+	// helper and reaches the handle as a local name. `query, args :=
+	// compactCountStmt(...)` binds two names from one call, so the scan resolves
+	// the first from a multi-value RHS it deliberately does not follow, the head
+	// comes back "", and an unresolvable statement counts as a WRITE.
+	//
+	// These are exempt as FUNCTIONS, not as a file, and that is the narrowest
+	// form available: history_compact.go also holds the pass's two real writes,
+	// and those are NOT exempt — they open through beginGuardedWrite, which is
+	// what makes a compact --apply against a store a newer Ghost owns refuse
+	// rather than delete rows under it. Naming the two read functions says the
+	// check still covers every write in the file
+	// (TestCompactHistoryRefusesToDeleteOnAStoreANewerGhostOwns is the behaviour
+	// that says so, and it would fail if either write stopped being guarded).
+	//
+	// Both statements are `SELECT`s and both are reached through a Queryer the
+	// caller owns, so they must keep working against a newer store: refusing
+	// reads is what would turn "restart your client" into "you cannot count
+	// anything at all".
+	"history_compact.go:(*Store).compactHistoryPreview": "a read: SELECT count(*) built by compactCountStmt and reached through a caller-owned handle, so the scan resolves no leading keyword and counts an unresolvable statement as a write",
+	"history_compact.go:(*Store).stampBatchQuery":       "a read: the candidates SELECT built by compactCandidatesStmt and run through a caller-supplied Queryer (the same shape as asof.go:ReadMemoriesAsOf), so the scan resolves no leading keyword and counts an unresolvable statement as a write",
 }
 
 // TestEveryWriteRefusesANewerStore is the check that the safety property cannot

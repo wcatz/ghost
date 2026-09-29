@@ -43,6 +43,12 @@ type historyOptions struct {
 // anything else is an error rather than being ignored, because a silently
 // misparsed flag here would print a confident and wrong history. The ref is NOT
 // resolved here: that needs the store, and this stays a pure function of argv.
+//
+// `compact` is NOT a mode here. It is routed away before this runs
+// (historyCompactRequested), because it is a different request with its own
+// flags and its own parser, and mixing the two would mean this function
+// accepting --apply for a mode that has no meaning in it — or refusing it, which
+// would be a parser reporting a flag that works.
 func parseHistoryArgs(args []string) (historyOptions, error) {
 	var opts historyOptions
 	for i := 0; i < len(args); i++ {
@@ -89,6 +95,19 @@ func parseHistoryArgs(args []string) (historyOptions, error) {
 	return opts, nil
 }
 
+// historyCompactRequested reports whether `ghost history` was asked for the
+// store-wide compaction (#730) rather than for one memory's history.
+//
+// It is a named function because runHistory ends in os.Exit, so an inline word
+// comparison would be untestable — and the routing is the one thing that decides
+// whether a word the reader typed is a REQUEST or a memory id. A memory id is 32
+// hex characters, so nothing a reader can type is ambiguous with `compact`; the
+// decision is made on the first word alone, exactly as `purge` is, and every
+// other word is still read as the id it looks like.
+func historyCompactRequested(args []string) bool {
+	return len(args) > 0 && args[0] == "compact"
+}
+
 // parseHistoryLimit accepts a positive whole number. Zero is refused rather
 // than read as "unlimited": a reader who types --limit 0 asking for no entries
 // would be handed the store's full default, which is the opposite of what they
@@ -106,6 +125,7 @@ func parseHistoryLimit(value string) (int, error) {
 // both, so the two cannot drift.
 const historyUsage = `Usage: ghost history <memory-ref> [--limit N] [--json]
        ghost history purge <memory-id>
+       ghost history compact [--project <p>] [--before <t>] [--fix-updated-at] [--apply]
 
 Prints one memory's append-only history: every insert, edit, reflection
 rewrite, duplicate fold, resolve, supersession, restore, import and deletion,
@@ -140,13 +160,120 @@ source the memory held once that write landed.
               argument is not a message but an unprintable memory. Run
               'ghost history <prefix>' to see the full id a prefix names.
 
+  compact     Repair what the pre-#727 reflect behaviour left in this store
+              (#730). Until that fix landed, every applied reflection appended a
+              byte-identical 'reflect' version for each memory it kept and set
+              that memory's updated_at to the run's own time. New ones stopped
+              being written; this removes the ones already here.
+
+              A version row is removed ONLY when it records the same state as the
+              row before it of the same memory, compared over every column a
+              version stores: content, category, importance, resolved_at and
+              source, AND it was recorded before the bound below. Six things
+              always stay: a memory's FIRST version (the only statement of what it
+              said), its NEWEST version (the statement of what it says now, and
+              the same row the retention cap declines to trim), every event that
+              records a claim the state does not (a tombstone, a supersede or its
+              withdrawal, a resolve or its clearing, a merge, an import, a
+              restore), any row naming another memory, every 'reflect' version
+              except those — a retag filed as an update is a change somebody made
+              on purpose and this table has no column for tags, so the recorded
+              state cannot tell it from a no-op — and EVERY version of a memory
+              that has since been deleted. A deleted memory has no live row, so a
+              read of the past takes the age it measures from the version that
+              answers it; removing one would change what that read computes, for a
+              memory nobody can edit and nobody can restore. Its history is frozen
+              the moment it is deleted, so this costs nothing.
+
+                --project <p>   Compact one project only (id, name or path)
+                --before <t>    Only consider versions recorded before <t>, a
+                                2006-01-02 date or an RFC 3339 instant. The
+                                default is 2026-09-28T17:14:07Z, the moment #727
+                                reached main, because a current build writes a
+                                byte-identical 'reflect' version of its own — a
+                                consolidation merge carries the union of its
+                                sources' tags, and the tags are not a column here —
+                                and no state column can tell that from the damage.
+                                Widen it only for a store whose clock is behind (a
+                                restored backup, a copied database) and re-read the
+                                dry run first. A bound PAST this one is warned about
+                                on stderr, in a dry run as well as an apply, and the
+                                default never warns. Whichever bound was used is
+                                named in the report, because every count is a count
+                                AT a bound.
+                --fix-updated-at  Also move each live memory's updated_at back to
+                                 the recorded_at of its ANCHOR — the newest version
+                                 that does not itself REPEAT the version before it
+                                 AND whose WRITER moved updated_at in the same
+                                 statement that filed it: a save, an update, or a
+                                 reflection, and nothing else.
+                                 Applied only where a removable version sits ABOVE
+                                 that anchor, since that version is the evidence a
+                                 reflection run moved the stamp. A writer that
+                                 changed state WITHOUT moving the stamp is not an
+                                 anchor: 'ghost resolve' writes resolved_at and
+                                 deliberately leaves updated_at alone, and folding a
+                                 duplicate save writes importance and moves nothing,
+                                 so trusting either as an anchor would set a stamp
+                                 to a time the store had never held. Only ever
+                                 BACKWARD, and a stamp no version explains is left
+                                 alone. A memory with no such version at all has NO
+                                 anchor — a memory from before this table existed
+                                 whose next writer was an unresolve — so its stamp
+                                 is left exactly as it is and the report counts it
+                                 under "no recorded stamp write" rather than
+                                 reporting nothing: its no-op flood is still
+                                 removed, and a count of 0 fixed beside a store full
+                                 of removed versions otherwise reads as a finished
+                                 repair. Without the flag the redundant versions go
+                                 and no stamp moves.
+
+              Pass --apply and --fix-updated-at in the SAME run: the stamp repair
+              needs the versions the deletion removes as its evidence, so a second
+              run after an --apply has nothing left to act on.
+
+              A dry run is the default and writes nothing; --apply writes. Either
+              way the counts are per project, and a dry run reports exactly what
+              the apply would do. Every row the run could not repair is named in
+              the report rather than left to a count of zero to explain: a stamp no
+              layout reads, and a stamp with no recorded write to restore it from.
+              It refuses to run while a lifecycle run holds any of the projects'
+              locks, it refuses a store a newer Ghost owns rather than repairing
+              one, and it works in bounded transactions so it does not hold the
+              write lock over a whole store's history.
+
+              What a repair changes, and it is worth knowing before running one on
+              a store an 'as_of' read matters for. Removing a redundant version
+              changes nothing a read of the past is FOR: the state, the supersede
+              edges and the creation time all answer as before, and only WHICH
+              version is named can differ, so a memory that was resolved and then
+              unresolved may read as merely saved for an instant whose reflect
+              flood has been compacted away. --fix-updated-at moves because the
+              stamp repair IS a write to the live row's UpdatedAt, and it moves it
+              BACKWARD to the recorded time of its ANCHOR: the newest version that
+              does not itself repeat the version before it whose writer moved the
+              stamp in the same statement that filed it. That 'repeats' test is the
+              DAMAGE rule, not the whole removal rule: a memory's NEWEST version is
+              spared from removal, and a deleted memory's history is left alone,
+              but neither guard is part of the anchor's definition, and being spared
+              by one is not what makes a version an anchor. A pre-#727 no-op repeat
+              is damage at any position, so a newest no-op reflect is never the
+              anchor. The anchor is not necessarily earlier than the last write
+              that moved the stamp: a memory later touched by a deliberate update,
+              or by any post-#727 write, anchors on that write.
+              That is what the flag is for, and it is the field that visibly
+              changes. So three fields of an as_of answer can move, for those two
+              reasons. A DELETED memory is left out of both repairs entirely, so
+              for one of those nothing changes.
+
 The history outlives the memory: a deleted memory's last state is still
 readable here unless it was purged.
 
-This command writes no memory, history or project row. It does open the store
-read-write, the same open 'ghost maintenance status' and 'ghost backup' use, so
-a database predating the history table is migrated by the open — and that
-migration first writes the pre-migration backup copy it always takes.
+Reading a history writes no memory, history or project row. It does open the
+store read-write, the same open 'ghost maintenance status' and 'ghost backup'
+use, so a database predating the history table is migrated by the open — and that
+migration first writes the pre-migration backup copy it always takes. 'compact'
+under --apply writes memory_history and memories, deliberately and only then.
 `
 
 // historyView is everything `ghost history` prints. A value the printer takes,
@@ -314,7 +441,15 @@ func displayedHistoryEntry(e memory.HistoryEntry) memory.HistoryEntry {
 // instead of failing, and says so in its help rather than promising to write
 // nothing.
 func runHistory() {
-	opts, err := parseHistoryArgs(os.Args[2:])
+	args := os.Args[2:]
+	// `compact` is routed away before parseHistoryArgs sees it: it is a different
+	// request with its own flags and its own parser, and this command's first
+	// operand stays a memory id.
+	if historyCompactRequested(args) {
+		runHistoryCompact(args[1:])
+		return
+	}
+	opts, err := parseHistoryArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, historyUsage)
 		os.Exit(1)
