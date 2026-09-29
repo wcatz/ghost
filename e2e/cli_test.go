@@ -2864,6 +2864,30 @@ func TestCLIHistoryCompact(t *testing.T) {
 // read-only handle.
 func seedRestatementsNow(t *testing.T, s *sandbox, memoryID string, versions int) {
 	t.Helper()
+	seedRestatementsAt(t, s, memoryID, versions, "datetime('now')")
+}
+
+// seedRestatementsAgo writes the same rows outside the report's window, which is
+// what a memory whose history is real but old looks like. Recorded by an explicit
+// offset rather than by waiting: a fixture that slept for three days to be out of
+// the window would not run, and one that stamped a row a second past the edge
+// would make the test's answer depend on how fast the machine runs it.
+//
+// The offset must clear the WINDOW, not merely be old: the window is 24h, so three
+// hours ago is still inside it and would make an "outside the window" fixture
+// indistinguishable from an in-window one.
+func seedRestatementsAgo(t *testing.T, s *sandbox, memoryID string, versions int, ago time.Duration) {
+	t.Helper()
+	modifier := fmt.Sprintf("datetime('now', '%d seconds')", int(ago.Seconds()))
+	seedRestatementsAt(t, s, memoryID, versions, modifier)
+}
+
+// seedRestatementsAt is the one seeding call, with the recorded_at expression
+// chosen by the caller: every row copies the live memories row's state columns, so
+// each restates its neighbour exactly — which is what the report's numerator
+// counts and what the reader of these rows is meant to see.
+func seedRestatementsAt(t *testing.T, s *sandbox, memoryID string, versions int, recordedAt string) {
+	t.Helper()
 	dsn := "file:" + filepath.ToSlash(s.dbPath()) + "?_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -2880,7 +2904,7 @@ func seedRestatementsNow(t *testing.T, s *sandbox, memoryID string, versions int
 		if _, err := db.Exec(`
 			INSERT INTO memory_history
 				(memory_id, project_id, phase, recorded_at, content, category, importance, resolved_at, source)
-			SELECT id, project_id, 'reflect', datetime('now'), content, category, importance, resolved_at, source
+			SELECT id, project_id, 'reflect', `+recordedAt+`, content, category, importance, resolved_at, source
 			FROM memories WHERE id = ?`, memoryID); err != nil {
 			t.Fatalf("seed restatement %d of %s: %v", i, memoryID, err)
 		}
@@ -2912,15 +2936,24 @@ func countRestatements(t *testing.T, s *sandbox) int {
 // historyLineRE and historyToolRE are the two surfaces' one-line reports, as
 // patterns that capture the eight numbers each prints. They are separate
 // patterns rather than one shared expression because the two lines read
-// differently ("busiest memory 3/50 versions" against "busiest memory holds 3 of
+// differently ("deepest memory 3/50 versions" against "deepest memory holds 3 of
 // its 50 versions") — and the captures are compared, which is the assertion: two
 // surfaces rendering one read differently is the failure this test exists for.
 var (
 	historyLineRE = regexp.MustCompile(
-		`- history: (\d+) version rows in (\d+)h, (\d+) restatements \((\d+)%\), busiest memory (\d+)/(\d+) versions, store (\d+)/(\d+) rows`)
+		`- history: (\d+) version rows in (\d+)h, (\d+) restatements \((\d+)%\), deepest memory (\d+)/(\d+) versions, store (\d+)/(\d+) rows`)
 	historyToolRE = regexp.MustCompile(
-		`\*\*History:\*\* (\d+) version rows in the last (\d+)h, (\d+) restatements \((\d+)%\) — busiest memory holds (\d+) of its (\d+) versions, store holds (\d+) of (\d+) rows`)
+		`\*\*History:\*\* (\d+) version rows in the last (\d+)h, (\d+) restatements \((\d+)%\) — deepest memory holds (\d+) of its (\d+) versions, store holds (\d+) of (\d+) rows`)
 )
+
+// historyCapWarningRE is the per-memory cap finding, captured with the memory it
+// names and that memory's two own counts. The summary line's per-memory number is
+// the store's DEEPEST history; this is a different memory (the one whose own
+// headroom over its own rate is smallest), and a finding that quoted the deepest
+// memory's count beside the busiest writer's rate would name no memory at all —
+// so the id and both counts are part of what the two surfaces are compared on.
+var historyCapWarningRE = regexp.MustCompile(
+	`memory ([0-9A-F]{16,}) is closest to the per-memory cap: it holds (\d+) of its (\d+) versions and wrote (\d+) in the last (\d+)h`)
 
 // TestCLIMCPStatusHistoryGrowth drives #729 against the built binary: the two
 // surfaces that report memory_history growth, asked the same question about one
@@ -2986,31 +3019,65 @@ func TestCLIMCPStatusHistoryGrowth(t *testing.T) {
 	const seeded = 6
 	seedRestatementsNow(t, s, id, seeded)
 
+	// A SECOND memory, deeper but quiet: its history is old enough to be outside
+	// the window, so it never appears in the counts about rate, and it holds more
+	// versions than the memory the finding is about. That is the shape that broke
+	// the per-memory sentence — "holds N of its 50 versions and wrote M in the
+	// last 24h" was three independent aggregates, so it could print the deepest
+	// memory's N beside the busiest writer's M and name no memory at all. With
+	// this fixture the two are different memories, so the finding's own two counts
+	// have to be the named memory's or the test below is vacuous.
+	quietID := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "this memory's history is old, deep and out of the window",
+		"category":   "architecture",
+		"importance": 0.5,
+	}))
+	seedRestatementsAgo(t, s, quietID, seeded+4, -72*time.Hour)
+
 	// The numbers the report must print, counted from the store over the same
 	// window it uses. seedRestatementsNow's own check only proves the fixture
 	// wrote something; these are the assertions.
 	total := s.queryInt(t, `SELECT count(*) FROM memory_history`)
-	// Over EVERY memory, not just the seeded one: the report's busiest memory is
-	// the table's maximum, and the builtin global memory a fresh store carries is
-	// in that table too. Scoping it to the fixture's memory would only agree by
-	// luck.
+	// Over EVERY memory, not just the seeded one: the report's per-memory number is
+	// the table's maximum, and the builtin global memory a fresh store carries is in
+	// that table too. Scoping it to the fixture's memory would only agree by luck.
 	perMemory := s.queryInt(t, `SELECT max(n) FROM (SELECT count(*) n FROM memory_history GROUP BY memory_id)`)
 	restatements := countRestatements(t, s)
 	inWindow := s.queryInt(t, `SELECT count(*) FROM memory_history WHERE recorded_at >= datetime('now', '-24 hours')`)
 	if restatements < seeded {
 		t.Fatalf("the fixture seeded %d restatements but the store counts %d — a seeded row is not being read as one", seeded, restatements)
 	}
-	if inWindow < total {
-		t.Fatalf("%d rows in the window but %d in the table", inWindow, total)
+	// The window is a SUBSET of the table, not the other way round, and the quiet
+	// memory above is why there is now a difference to have: its rows are real and
+	// are counted in the table, and they are outside the day.
+	if inWindow >= total {
+		t.Fatalf("%d rows in the window against %d in the table — the out-of-window memory is not outside the window, so the two clocks are not separated", inWindow, total)
 	}
 	if perMemory < 2 {
-		t.Fatalf("the busiest memory holds %d versions, want at least the save and its restatements", perMemory)
+		t.Fatalf("the deepest memory holds %d versions, want at least the save and its restatements", perMemory)
+	}
+	// The premise of the cap-finding subtest below, asserted here: the deepest
+	// memory and the memory the finding is about must be DIFFERENT memories, or
+	// every count in that finding is the same count and it proves nothing about
+	// which memory the numbers belong to.
+	namedHeld := s.queryInt(t, `SELECT count(*) FROM memory_history WHERE memory_id = ?`, id)
+	if namedHeld >= perMemory {
+		t.Fatalf("the memory under the cap holds %d versions and the deepest holds %d — the fixture cannot tell a spliced finding from a correct one", namedHeld, perMemory)
 	}
 	// The share the two lines print is a rounded whole percentage, and the capture
 	// is the digits alone — so this is the rounding the report does, restated: the
 	// point is that both surfaces round the same ratio the same way, not that a
 	// test knows where a 75% comes from.
 	wantShare := strconv.Itoa(int(float64(restatements)/float64(inWindow)*100 + 0.5))
+
+	// The fixture is finished growing the store; from here on nothing but the
+	// report is allowed to write. The control's own snapshot above was taken
+	// before the noise existed, so it cannot answer that question about the
+	// noisy store — comparing the end of this test against it would be
+	// comparing the fixture's growth with the report's, and a report that wrote
+	// one row of its own would hide inside the difference.
+	preReport := snapshotStore(t, s)
 
 	// Both surfaces are asked ONCE, here, so the comparison between them is over
 	// the same store at the same moment and a difference between them cannot be
@@ -3075,7 +3142,7 @@ func TestCLIMCPStatusHistoryGrowth(t *testing.T) {
 		// renderings. This is the assertion the whole shared-read design exists
 		// for, and it is the one a unit test on either surface alone cannot make.
 		names := []string{"rows in the window", "window hours", "restatements", "the share",
-			"the busiest memory's versions", "the per-memory cap", "rows in the table", "the store cap"}
+			"the deepest memory's versions", "the per-memory cap", "rows in the table", "the store cap"}
 		for i := 1; i <= len(names) && i < len(statusLine) && i < len(healthLine); i++ {
 			if statusLine[i] != healthLine[i] {
 				t.Errorf("%s: mcp status says %s, ghost_health says %s", names[i-1], statusLine[i], healthLine[i])
@@ -3094,9 +3161,40 @@ func TestCLIMCPStatusHistoryGrowth(t *testing.T) {
 		}
 	})
 
+	t.Run("the cap finding names one memory, with its own numbers", func(t *testing.T) {
+		// The per-memory cap is reached PER MEMORY, so its finding has to be about
+		// one memory: named by id, holding a count that is its own, at a rate that
+		// is its own. The fixture's deepest memory and the memory under the cap are
+		// DIFFERENT memories (asserted above), which is what makes this more than
+		// a consistency check: a sentence splicing the deepest memory's count onto
+		// the busiest writer's rate would pass every other assertion in this test
+		// and name no memory at all, which is what a reader would have to work out
+		// for themselves.
+		for _, surface := range []struct {
+			name string
+			text string
+		}{{"mcp status", status.stdout}, {"ghost_health", health}} {
+			m := historyCapWarningRE.FindStringSubmatch(surface.text)
+			if m == nil {
+				t.Errorf("%s printed no per-memory cap finding naming a memory:\n%s", surface.name, surface.text)
+				continue
+			}
+			id, held, wrote := m[1], mustAtoi(t, surface.name, m[2]), mustAtoi(t, surface.name, m[4])
+			versions := s.queryInt(t, `SELECT count(*) FROM memory_history WHERE memory_id = ?`, id)
+			recent := s.queryInt(t, `SELECT count(*) FROM memory_history
+			    WHERE memory_id = ? AND recorded_at >= datetime('now', '-24 hours')`, id)
+			if held != versions {
+				t.Errorf("%s: the finding says memory %s holds %d versions, the store has %d", surface.name, id, held, versions)
+			}
+			if wrote != recent {
+				t.Errorf("%s: the finding says memory %s wrote %d rows in the window, the store has %d", surface.name, id, wrote, recent)
+			}
+		}
+	})
+
 	t.Run("neither run wrote to the store", func(t *testing.T) {
-		if after := snapshotStore(t, s); after != before {
-			t.Fatalf("the history report wrote to the store:\nbefore %s\nafter  %s", before, after)
+		if after := snapshotStore(t, s); after != preReport {
+			t.Fatalf("the history report wrote to the store:\nbefore %s\nafter  %s", preReport, after)
 		}
 		if n := s.queryInt(t, `SELECT count(*) FROM memory_history`); n != total {
 			t.Errorf("the history report left %d history rows, want the %d it started with", n, total)
@@ -3124,7 +3222,7 @@ func assertHistoryNumbers(t *testing.T, what string, m []string, inWindow, resta
 		mustAtoi(t, what, m[5]), mustAtoi(t, what, m[6]),
 		mustAtoi(t, what, m[7]), mustAtoi(t, what, m[8])}
 	want := []int{inWindow, restatements, perMemory, -1, total, -1}
-	names := []string{"rows in the window", "restatements", "busiest memory's versions",
+	names := []string{"rows in the window", "restatements", "the deepest memory's versions",
 		"the per-memory cap", "rows in the table", "the store cap"}
 	for i := range want {
 		if want[i] >= 0 && got[i] != want[i] {
@@ -3132,7 +3230,7 @@ func assertHistoryNumbers(t *testing.T, what string, m []string, inWindow, resta
 		}
 	}
 	if got[3] < got[2] {
-		t.Errorf("%s: the per-memory cap is %d but the busiest memory holds %d versions — a cap the store is not enforcing", what, got[3], got[2])
+		t.Errorf("%s: the per-memory cap is %d but the deepest memory holds %d versions — a cap the store is not enforcing", what, got[3], got[2])
 	}
 	if got[5] < got[4] {
 		t.Errorf("%s: the store cap is %d but the table holds %d rows — a cap the store is not enforcing", what, got[5], got[4])

@@ -39,8 +39,29 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 `**History:**` line, with a `⚠` line per finding:
 
 ```text
-**History:** 8 version rows in the last 24h, 6 restatements (75%) — busiest memory holds 7 of its 50 versions, store holds 8 of 20000 rows
+**History:** 8 version rows in the last 24h, 6 restatements (75%) — deepest memory holds 7 of its 50 versions, store holds 8 of 20000 rows
   ⚠ 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — run `ghost history compact` to remove them
+  ⚠ memory 1F2E3D4C5B6A7988 is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
+```
+
+`deepest memory` is the **store's widest history** — an aggregate for a line of
+totals, and usually not the memory a `⚠` line is about. The per-memory cap is
+reached per memory, so that finding names one memory by **full id** and quotes
+**that memory's own** two counts — how many versions it holds and how many it wrote
+in the window — which is what the countdown closes against. A memory can be *at* its
+cap while still being written, because pruning holds it there, so that is a separate
+sentence rather than a countdown of zero days:
+
+```text
+  ⚠ memory 1F2E3D4C5B6A7988 is at the per-memory cap: it holds 50 of its 50 versions and wrote 12 in the last 24h, so its oldest versions are what the trim takes now (warning threshold 14 days)
+```
+
+A store that opened cleanly and then could not be read prints the error in place of
+the block, rather than printing nothing — a report that cannot run must not look
+like a report with nothing to say:
+
+```text
+**History:** could not be read: count history versions in the window: no such table: memory_history
 ```
 
 It is **additive**: every field above it keeps its name and its meaning, so an
@@ -52,8 +73,8 @@ command line. A store with no history prints `no version rows recorded yet`.
 
 The thresholds, and what each one is for, are in
 [`ghost mcp status`](cli.md#ghost-mcp-status). The short version: more than 20% of
-the last 24 hours' version rows restated their predecessor, or the table or its
-busiest memory is within 14 days of a retention cap at the current rate. The repair
+the last 24 hours' version rows restated their predecessor, or the table or some
+named memory is within 14 days of a retention cap at the current rate. The repair
 is `ghost history compact`, a CLI command with no MCP equivalent, and the warning
 names it — there is no tool here that removes history rows, because that is an
 operator's decision about a table the agent only reads.

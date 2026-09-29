@@ -83,8 +83,9 @@ Status also lists any project that records no usable checkout and no repository 
 Status also reports how fast `memory_history` is filling, and how much of that is noise:
 
 ```text
-  - history: 8 version rows in 24h, 6 restatements (75%), busiest memory 7/50 versions, store 8/20000 rows
+  - history: 8 version rows in 24h, 6 restatements (75%), deepest memory 7/50 versions, store 8/20000 rows
   ! 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — run `ghost history compact` to remove them
+  ! memory 1F2E3D4C5B6A7988 is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
 ```
 
 The line is store-wide, because both retention caps are (see
@@ -95,6 +96,23 @@ and the table's rows against the store cap of 20 000. A store with no history ye
 prints `no version rows recorded yet` rather than a line of zeroes, and a store
 with nothing written in the last 24 hours has no rate, no share and nothing to
 project, so it prints the numbers and no finding.
+
+`deepest memory` is the **store's widest history** — an aggregate for a line of
+totals. It is usually *not* the memory a cap finding is about, and the finding
+names its own. The per-memory cap is reached per memory, so its finding is about
+one memory by id, quoting **that memory's** two counts: how many versions it holds
+and how many it wrote in the window, which is the arithmetic the countdown closes
+against. A memory sitting at its cap is trimmed by pruning while it is still being
+written, so "at the cap" is the ordinary steady state of an active store rather than
+an edge case, and it is a separate sentence from a countdown:
+
+```text
+  ! memory 1F2E3D4C5B6A7988 is at the per-memory cap: it holds 50 of its 50 versions and wrote 12 in the last 24h, so its oldest versions are what the trim takes now (warning threshold 14 days)
+  ! the store holds 20000 of its 20000 history rows and wrote 310 in the last 24h, so it is at the store cap and the oldest rows in the table are what it trims — not the noisiest ones
+```
+
+The id is printed **whole** rather than abbreviated, because here it is an operand:
+`ghost history 1F2E3D4C5B6A7988` is what you do with it.
 
 Each finding gets its own `!` line, naming both the number that tripped it and the
 threshold it tripped against:
@@ -109,10 +127,15 @@ threshold it tripped against:
 never brings back the `Run \`ghost mcp init\` to fix issues.` footer, because the
 verdict above is about **wiring** — whether the memory features are reachable at
 all — and `ghost mcp init` repairs wiring, not a history table. The repair a history
-finding names is `ghost history compact`. The one case that prints rather than
-summarises is a store that opened cleanly and then could not be read: the error is
-reported instead of being dropped, because a check that cannot run must not print
-nothing at all.
+finding names is `ghost history compact`.
+
+A store that opened cleanly and then could not be read is the one case that prints
+an error instead of a finding — the report says so rather than printing nothing,
+because a check that cannot run must not look like a check that passed:
+
+```text
+  ! history growth: count history versions in the window: no such table: memory_history
+```
 
 The read is read-only, takes no write lock, and costs one pass over the window plus
 one covering-index pass over the table — measured at 1.7 ms typical and 183 ms worst
@@ -970,8 +993,8 @@ the same is true of the apply.
 
 `ghost mcp status` (and the `ghost_health` MCP tool) report how much of that damage
 a store is still carrying before any of it is removed — the restatement share over
-the last 24 hours, and how close the table and its busiest memory are to the two
-caps above. The share it names is the same comparison this command removes rows by,
+the last 24 hours, and how close the table and the memory nearest each cap are to
+the two caps above. The share it names is the same comparison this command removes rows by,
 over the same state columns, so the two cannot disagree; it counts every
 restatement while the repair removes a **subset** of them (a memory's newest version
 stays), so the share is how much noise the table carries rather than how much is

@@ -99,7 +99,7 @@ func almostEqual(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
 //     stopped writing and #730 removes — a store that ran the unattended
 //     lifecycle for a while. Twelve rows, eleven of them restatements, and the
 //     one that is not is the memory's NEWEST version, which nothing removes.
-//   - quiet: the same damage in miniature, so the busiest memory is not the only
+//   - quiet: the same damage in miniature, so the deepest memory is not the only
 //     memory with restatements and the share is not a property of one memory.
 //   - edited: a memory whose save is two days old and whose two edits are not.
 //     It is there to separate the two clocks the report runs on — the window
@@ -108,7 +108,7 @@ func almostEqual(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
 //     the past.
 //
 // 12 + 2 + 2 = 16 rows in the window, 12 of them restatements, 17 rows in the
-// table, and 12 versions on the busiest memory.
+// table, and 12 versions on the deepest memory.
 func seedGrowthFixture(t *testing.T, s *Store) {
 	t.Helper()
 	ctx := context.Background()
@@ -137,7 +137,7 @@ func seedGrowthFixture(t *testing.T, s *Store) {
 // holding 12 versions, 17 rows in the table.
 //
 // The four numbers the issue asks for are all here and all distinct on purpose —
-// rows in the window, the no-op share, the busiest memory against the per-memory
+// rows in the window, the no-op share, the deepest memory against the per-memory
 // cap, and the table against the store cap — because a report that reported one
 // number for two of them would pass a fixture where they coincided.
 func TestHistoryGrowthReportsTheNoOpShareAndTheCapHeadroom(t *testing.T) {
@@ -167,10 +167,11 @@ func TestHistoryGrowthReportsTheNoOpShareAndTheCapHeadroom(t *testing.T) {
 		t.Errorf("TotalRows = %d, want 17 — the store total is all-time, so it counts the two-day-old row the window does not", res.TotalRows)
 	}
 	if res.MaxVersions != 12 {
-		t.Errorf("MaxVersions = %d, want 12 (the busiest memory holds 12 versions)", res.MaxVersions)
+		t.Errorf("MaxVersions = %d, want 12 (the deepest memory holds 12 versions)", res.MaxVersions)
 	}
-	if res.BusiestMemoryRows != 12 {
-		t.Errorf("BusiestMemoryRows = %d, want 12 (busy wrote 12 rows in the window)", res.BusiestMemoryRows)
+	if res.CapMemoryID == "" || res.CapMemoryVersions != 12 || res.CapMemoryRecent != 12 {
+		t.Errorf("the named memory is %q holding %d versions and having written %d, want a named memory at 12 and 12 (busy is the only memory writing in the window)",
+			res.CapMemoryID, res.CapMemoryVersions, res.CapMemoryRecent)
 	}
 	if res.PerMemoryCap != int64(historyVersionsPerMemory) {
 		t.Errorf("PerMemoryCap = %d, want the policy's %d", res.PerMemoryCap, historyVersionsPerMemory)
@@ -191,7 +192,7 @@ func TestHistoryGrowthReportsTheNoOpShareAndTheCapHeadroom(t *testing.T) {
 	}
 	wantPerMemory := float64(historyVersionsPerMemory-12) / 12 // busy: 38 left, 12 a day
 	if !almostEqual(res.DaysToPerMemoryCap, wantPerMemory) {
-		t.Errorf("DaysToPerMemoryCap = %v, want %v (the busiest memory, not the largest)", res.DaysToPerMemoryCap, wantPerMemory)
+		t.Errorf("DaysToPerMemoryCap = %v, want %v (the memory the countdown names, which need not be the deepest)", res.DaysToPerMemoryCap, wantPerMemory)
 	}
 	// The store is nowhere near its cap: 19983 rows to go at 16 a day.
 	wantStore := float64(historyRowsCap-17) / 16
@@ -343,8 +344,14 @@ func TestHistoryGrowthOnAnEmptyHistoryReportsZeros(t *testing.T) {
 	if res.NoOpShare != 0 {
 		t.Errorf("NoOpShare = %v on an empty store, want 0 (not NaN, not 1)", res.NoOpShare)
 	}
-	if res.MaxVersions != 0 || res.BusiestMemoryRows != 0 {
-		t.Errorf("MaxVersions = %d, BusiestMemoryRows = %d on an empty store, want 0 and 0", res.MaxVersions, res.BusiestMemoryRows)
+	if res.MaxVersions != 0 || res.CapMemoryRecent != 0 || res.CapMemoryVersions != 0 {
+		t.Errorf("MaxVersions = %d, CapMemoryVersions = %d, CapMemoryRecent = %d on an empty store, want 0, 0 and 0",
+			res.MaxVersions, res.CapMemoryVersions, res.CapMemoryRecent)
+	}
+	// No memory to name, and an id is a claim: a report that printed a zero id
+	// would be naming a memory that does not exist.
+	if res.CapMemoryID != "" {
+		t.Errorf("CapMemoryID = %q on an empty store, want empty — there is no memory to point at", res.CapMemoryID)
 	}
 	if res.Projected {
 		t.Error("Projected = true on an empty store, want false — there is no rate to project")
@@ -403,8 +410,13 @@ func TestHistoryGrowthOnAQuietStoreProjectsNothing(t *testing.T) {
 	if res.TotalRows != 2 || res.MaxVersions != 2 {
 		t.Errorf("TotalRows = %d, MaxVersions = %d, want 2 and 2 — the table is not empty, only the window is", res.TotalRows, res.MaxVersions)
 	}
-	if res.BusiestMemoryRows != 0 {
-		t.Errorf("BusiestMemoryRows = %d on a quiet store, want 0", res.BusiestMemoryRows)
+	// The countdown's subject is per WINDOW, so a quiet store has none — not the
+	// memory holding the most versions, which the caps above still report. Naming
+	// that one would put a memory in front of an operator with no warning to act
+	// on and a projection that was never made.
+	if res.CapMemoryID != "" || res.CapMemoryRecent != 0 {
+		t.Errorf("CapMemoryID = %q with CapMemoryRecent = %d on a quiet store, want empty and 0 — the countdown only runs on what wrote in the window",
+			res.CapMemoryID, res.CapMemoryRecent)
 	}
 }
 
@@ -798,5 +810,300 @@ func TestGrowthLoadStoreHasTheShapeItClaims(t *testing.T) {
 	}
 	if res.MaxVersions != int64(restatements+1) {
 		t.Errorf("MaxVersions = %d, want %d — the rows must be spread over memories, not piled on one", res.MaxVersions, restatements+1)
+	}
+}
+
+// TestHistoryGrowthNamesTheMemoryClosestToTheCap is the reviewer's counterexample
+// for the per-memory warning, and the reason it exists: three of the numbers that
+// warning used to print were three INDEPENDENT aggregates — the most versions any
+// memory holds, the most rows any memory wrote, and the soonest per-memory cap —
+// and nothing stopped them coming from three different memories.
+//
+// deep: 40 versions, 1 written in the window. (50-40)/1 = 10 days to its cap.
+// fast: 30 versions, all 30 written in the window. (50-30)/30 = 0.7 days to its.
+//
+// So the soonest memory is fast, MaxVersions is deep's, and the old sentence read
+// "the busiest memory holds 40 of its 50 versions and wrote 30 in the last 24h —
+// it reaches the per-memory cap in 0.7 days at that rate": it named no memory
+// correctly, and its arithmetic did not close (40 versions at 30 a day is a third
+// of a day, not 0.7). A warning whose job is to point an operator at the memory
+// about to be trimmed cannot name a memory that is not the one, and the field
+// comments already said the two aggregates need not be the same memory — the
+// sentence did not.
+func TestHistoryGrowthNamesTheMemoryClosestToTheCap(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// deep holds 40 versions and wrote one of them today: the save, restamped
+	// into the past so exactly one of its rows is inside the window.
+	deep := createCompactMemory(t, s, "the staging relay drains hourly")
+	stampHistoryRow(t, s, deep, phaseSave, stampAgo(3*growthDays))
+	for range 38 {
+		appendVersionRow(t, s, deep, phaseReflect, stampAgo(3*growthDays), "", "", nil)
+	}
+	appendVerbatimVersion(t, s, deep)
+
+	// fast holds 30 versions and wrote all of them today.
+	fast := createCompactMemory(t, s, "the tablet drains to the relay nightly")
+	for range 29 {
+		appendVerbatimVersion(t, s, fast)
+	}
+
+	res, err := s.HistoryGrowth(ctx)
+	if err != nil {
+		t.Fatalf("HistoryGrowth: %v", err)
+	}
+
+	if res.CapMemoryID != fast {
+		t.Errorf("CapMemoryID = %q, want %q — (50-30)/30 is under a day and (50-40)/1 is ten, so fast is the soonest", res.CapMemoryID, fast)
+	}
+	if res.CapMemoryVersions != 30 || res.CapMemoryRecent != 30 {
+		t.Errorf("the named memory holds %d versions and wrote %d, want 30 and 30 — both figures are its own",
+			res.CapMemoryVersions, res.CapMemoryRecent)
+	}
+	// The aggregate is still reported, and still the aggregate: it is the number
+	// the issue asks for, and the line above the warning says so in words. What
+	// it must not be is the number attributed to the memory the warning names.
+	if res.MaxVersions != 40 {
+		t.Errorf("MaxVersions = %d, want 40 (deep's 40, not the named memory's 30)", res.MaxVersions)
+	}
+	wantDays := float64(res.PerMemoryCap-30) / 30
+	if !almostEqual(res.DaysToPerMemoryCap, wantDays) {
+		t.Errorf("DaysToPerMemoryCap = %v, want %v — the named memory's own headroom over its own rate", res.DaysToPerMemoryCap, wantDays)
+	}
+	detail := warningDetail(t, res, HistoryWarnPerMemoryCap)
+	// "under a day" is the rendering of 0.67 (historyDaysText refuses a decimal
+	// below a day), and it is still the assertion that matters: the memory the
+	// warning names is fast's, and fast's days are under one while deep's are ten,
+	// so a warning that printed the wrong memory's projection cannot read this way.
+	for _, want := range []string{fast, "30 of its 50 versions", "wrote 30 in the last 24h", "under a day"} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("the per-memory warning does not mention %q:\n%s", want, detail)
+		}
+	}
+	if strings.Contains(detail, deep) {
+		t.Errorf("the per-memory warning names %s, which has ten days left:\n%s", deep, detail)
+	}
+	// The spliced claim, stated as a whole, because "40" and "30" both appear in
+	// the honest sentence too and only the pairing is wrong.
+	if strings.Contains(detail, "40 of its") {
+		t.Errorf("the per-memory warning attributes deep's 40 versions to the memory it names:\n%s", detail)
+	}
+}
+
+// TestHistoryGrowthSaysTheCapHasBeenReached covers the state both cap warnings
+// are FOR, which is also the state they used to render as broken English: a memory
+// sitting at exactly 50 versions that wrote anything today has zero days left, and
+// historyDaysText turned that into the phrase "already there" — which was then
+// interpolated into "it reaches the per-memory cap in %s at that rate" and "the
+// store cap is %s away at that rate". So the line read "it reaches the per-memory
+// cap in already there at that rate", and "the store cap is already there away at
+// that rate".
+//
+// This is not an edge case to be handled for completeness. pruneHistoryTx holds a
+// memory at exactly the cap while it is still being written, and a full table
+// settles at exactly the store cap, so days == 0 is the ORDINARY steady state of
+// the memory the countdown names in an active store — the most common moment for
+// the feature to fire was the moment it printed nonsense.
+//
+// Both arms are read through the real report rather than handed to the sentence
+// builder, because the reachable-at-zero-days claim is a property of the READ
+// (the projection of a capped memory) and not only of the wording. The store arm
+// needs a table at the cap, so it is the load fixture at 2000 memories x 10
+// versions: one bulk INSERT, and TotalRows lands on historyRowsCap exactly.
+func TestHistoryGrowthSaysTheCapHasBeenReached(t *testing.T) {
+	t.Run("per memory", func(t *testing.T) {
+		s := testStore(t)
+		capped := createCompactMemory(t, s, "the relay publishes its own address book")
+		// 50 versions in total: the save plus 49 restatements, all written today.
+		for range historyVersionsPerMemory - 1 {
+			appendVerbatimVersion(t, s, capped)
+		}
+
+		// A second memory, DEEPER than the capped one and entirely outside the
+		// window. It is here so the count in the sentence is checkable at all:
+		// with one memory in the table the capped memory is simultaneously the
+		// subject of the countdown and the store's MaxVersions, so a sentence
+		// that spliced the store's widest history onto the countdown's own
+		// memory would print the same number either way and this subtest would
+		// pass on it.
+		//
+		// Inserted directly rather than through Create, because Create records
+		// the save as its first version AT THE CURRENT INSTANT: that one row
+		// would put this memory inside the window, and a memory holding 60
+		// versions with 1 in the window has negative headroom, so it would win
+		// the countdown and this would stop being the at-cap case at all. As
+		// written here it has recent == 0, which is what leaves it out of the
+		// countdown and is the ordinary shape of a real store — one memory
+		// sitting at the cap, and an older one holding more of them.
+		if _, err := s.db.Exec(`
+			INSERT INTO memories (project_id, category, content, source, importance, tags, pinned)
+			VALUES (?, 'architecture', 'an older memory holds more of them', 'mcp', 0.4, '[]', 0)`, testProject); err != nil {
+			t.Fatalf("insert the deeper memory: %v", err)
+		}
+		var deeper string
+		if err := s.db.QueryRow(`SELECT id FROM memories WHERE content = 'an older memory holds more of them'`).Scan(&deeper); err != nil {
+			t.Fatalf("read back the deeper memory's id: %v", err)
+		}
+		if _, err := s.db.Exec(`
+			WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < ?)
+			INSERT INTO memory_history
+				(memory_id, project_id, phase, recorded_at, content, category, importance, resolved_at, source)
+			SELECT m.id, m.project_id, ?, datetime('now', '-72 hours'),
+			       m.content, m.category, m.importance, m.resolved_at, m.source
+			FROM n JOIN memories m ON m.id = ?`,
+			historyVersionsPerMemory+10, phaseReflect, deeper); err != nil {
+			t.Fatalf("load the deeper out-of-window memory: %v", err)
+		}
+
+		res, err := s.HistoryGrowth(context.Background())
+		if err != nil {
+			t.Fatalf("HistoryGrowth: %v", err)
+		}
+		if res.DaysToPerMemoryCap != 0 {
+			t.Fatalf("DaysToPerMemoryCap = %v, want 0 — a memory at its cap has no headroom left", res.DaysToPerMemoryCap)
+		}
+		// The premises of the "of its 50 versions" assertion below, stated as
+		// failures rather than assumed: the memory the countdown is about, and the
+		// store's widest history, have to be DIFFERENT memories here or that
+		// assertion cannot tell a spliced sentence from a correct one.
+		if res.CapMemoryID != capped {
+			t.Fatalf("the countdown is about %s, want the capped memory %s", res.CapMemoryID, capped)
+		}
+		if res.MaxVersions <= res.CapMemoryVersions {
+			t.Fatalf("MaxVersions = %d and the capped memory holds %d — the fixture cannot tell a spliced sentence from a correct one",
+				res.MaxVersions, res.CapMemoryVersions)
+		}
+		detail := warningDetail(t, res, HistoryWarnPerMemoryCap)
+		if strings.Contains(detail, "already there") {
+			t.Errorf("the per-memory warning splices a state into a duration frame:\n%s", detail)
+		}
+		for _, want := range []string{
+			"at the per-memory cap",
+			"50 of its 50 versions",
+			"wrote 50 in the last 24h",
+			"oldest versions",
+		} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("the per-memory warning does not mention %q:\n%s", want, detail)
+			}
+		}
+	})
+
+	t.Run("store", func(t *testing.T) {
+		// 2000 memories x 10 versions = 20000 rows, which is historyRowsCap.
+		const restatements = 9
+		s := growthLoadStore(t, int(historyRowsCap/(restatements+1)), restatements)
+
+		res, err := s.HistoryGrowth(context.Background())
+		if err != nil {
+			t.Fatalf("HistoryGrowth: %v", err)
+		}
+		if res.TotalRows != int64(historyRowsCap) {
+			t.Fatalf("TotalRows = %d, want %d — the fixture has to be AT the cap, not near it", res.TotalRows, historyRowsCap)
+		}
+		if res.DaysToStoreCap != 0 {
+			t.Fatalf("DaysToStoreCap = %v, want 0 — a full table has no headroom left", res.DaysToStoreCap)
+		}
+		detail := warningDetail(t, res, HistoryWarnStoreCap)
+		if strings.Contains(detail, "already there") {
+			t.Errorf("the store warning splices a state into a duration frame:\n%s", detail)
+		}
+		for _, want := range []string{
+			"at the store cap",
+			"20000 of its 20000 history rows",
+			"oldest rows",
+		} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("the store warning does not mention %q:\n%s", want, detail)
+			}
+		}
+	})
+}
+
+// warningDetail is the one warning of a kind, or a failure: a test that reads a
+// sentence out of the result is testing a sentence, and finding it by kind is what
+// keeps it from passing on whichever finding happened to come first.
+func warningDetail(t *testing.T, res HistoryGrowthResult, kind string) string {
+	t.Helper()
+	for _, w := range res.Warnings {
+		if w.Kind == kind {
+			return w.Detail
+		}
+	}
+	t.Fatalf("no %s warning in %v", kind, warningKinds(res.Warnings))
+	return ""
+}
+
+// TestHistoryGrowthIsExcludedByAWriter pins WHERE the read's lock is taken. It
+// used to be taken inside the per-memory helper, so the window aggregate had
+// already run — unlocked — by the time it was taken, and the comment on it claimed
+// "a consistent snapshot of the table across the two statements" while the first
+// statement sat outside the critical section. docs/invariants.md made the same
+// claim, so the code was contradicting both its own comment and the invariant
+// written about it.
+//
+// The effect on the numbers is small and the effect on the report is not: a
+// lifecycle pass or a compaction from this process appending or deleting between
+// the two statements leaves TotalRows and RowsInWindow describing different
+// moments, and DaysToStoreCap is one of those numbers divided by the other. The
+// share is sound either way — its numerator and denominator come out of a single
+// statement — so no assertion on the numbers could have caught this.
+//
+// The seam IS the assertion. A read leaves no trace, so "the first statement has
+// not run yet" and "the first statement ran and returned" look identical from
+// outside the call; historyGrowthAfterWindow reports the moment between the two
+// statements, and while a writer holds the store's write lock that moment must
+// never arrive.
+func TestHistoryGrowthIsExcludedByAWriter(t *testing.T) {
+	s := testStore(t)
+	seedGrowthFixture(t, s)
+
+	// A writer holds s.mu for its whole apply path, so this is the state a
+	// concurrent save leaves the store in. Unlock is explicit at each exit below
+	// rather than deferred, because a deferred unlock after an explicit one is a
+	// fatal "unlock of unlocked RWMutex" that would take the whole package's test
+	// binary down and hide the assertion it was supposed to follow.
+	s.mu.Lock()
+
+	firstStatementDone := make(chan struct{})
+	historyGrowthAfterWindow = func() { close(firstStatementDone) }
+	// Cleanup only clears the seam: it is a plain assignment, safe to run on every
+	// exit, and leaving it set would make an unrelated failure in a later test
+	// report itself as this one's.
+	t.Cleanup(func() { historyGrowthAfterWindow = nil })
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := s.HistoryGrowth(context.Background())
+		errc <- err
+	}()
+
+	select {
+	case <-firstStatementDone:
+		s.mu.Unlock()
+		t.Fatal("HistoryGrowth read memory_history while a writer held the store's write lock — the lock is taken inside the per-memory helper, so the window aggregate runs outside it")
+	case err := <-errc:
+		s.mu.Unlock()
+		t.Fatalf("HistoryGrowth returned while a writer held the store's write lock (err %v)", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	s.mu.Unlock()
+
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("HistoryGrowth after the writer finished: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("HistoryGrowth did not return after the writer released the store's write lock")
+	}
+	// And once the writer is done the read really did reach the second statement:
+	// a report that took the lock and then returned early would satisfy the wait
+	// above without having read the per-memory counts at all.
+	select {
+	case <-firstStatementDone:
+	default:
+		t.Error("HistoryGrowth returned without reaching the statement after the window aggregate")
 	}
 }

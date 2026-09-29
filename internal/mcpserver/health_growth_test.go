@@ -114,10 +114,14 @@ func TestHealthReportsHistoryGrowth(t *testing.T) {
 	for _, want := range []string{
 		"12 version rows in the last 24h", // the save plus eleven restatements
 		"11 restatements (92%)",           // 11 of 12
-		"busiest memory holds 12 of its 50 versions",
+		"deepest memory holds 12 of its 50 versions",
 		"store holds 12 of 20000 rows",
 		"restate the version before them",
 		"ghost history compact",
+		// The cap finding names the memory it is about, by id, with that memory's
+		// own two counts — the summary line's "deepest memory" is an aggregate and
+		// must not be mistaken for the warning's subject.
+		"is closest to the per-memory cap: it holds 12 of its 50 versions and wrote 12 in the last 24h",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("ghost_health does not report %q:\n%s", want, text)
@@ -182,7 +186,7 @@ func TestHealthHistoryGrowthIsAdditive(t *testing.T) {
 
 // TestHealthOnAStoreWithNoHistorySaysSo: a store nobody has written to is the
 // first thing most agents see, and "0 version rows in the last 24h, 0
-// restatements (0%), busiest memory holds 0 of its 50 versions" is a report
+// restatements (0%), deepest memory holds 0 of its 50 versions" is a report
 // about a table that does not exist yet. One line saying so is the honest one.
 func TestHealthOnAStoreWithNoHistorySaysSo(t *testing.T) {
 	store, _ := testStoreWithPath(t)
@@ -199,5 +203,71 @@ func TestHealthOnAStoreWithNoHistorySaysSo(t *testing.T) {
 	}
 	if strings.Contains(text, "⚠") {
 		t.Errorf("ghost_health warns about an empty store:\n%s", text)
+	}
+}
+
+// TestHealthSaysWhenTheHistoryReadFails: the tool used to discard a failed
+// HistoryGrowth read and return a report with no **History:** section at all, so
+// an agent could not tell "this store has no growth to report" from "the read was
+// cut short" — and the read is the most expensive statement in the tool (a pass
+// over memory_history plus a correlated sub-select per row), so a request-context
+// deadline reaching it after ListProjects already succeeded is a realistic way to
+// get there.
+//
+// The two surfaces are supposed to be unable to disagree about one store, and this
+// was a disagreement with a rule attached: `ghost mcp status` prints `! history
+// growth: %v` on a failed read, and docs/cli.md states that a check which cannot
+// run must not print nothing at all.
+//
+// memory_history is dropped from a second handle, which is the only way to make
+// this statement fail on a store that opened cleanly: a dropped table is an error
+// the read cannot recover from and cannot mistake for an empty report.
+func TestHealthSaysWhenTheHistoryReadFails(t *testing.T) {
+	store, dbPath := testStoreWithPath(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "the relay listens on port 2222 in production",
+		Importance: 0.5, Source: "mcp",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	dropHistoryTable(t, dbPath)
+
+	text := ghostHealthText(t, srv)
+
+	if !strings.Contains(text, "**History:**") {
+		t.Fatalf("ghost_health dropped the history section after a failed read, so the omission reads as an empty report:\n%s", text)
+	}
+	if !strings.Contains(text, "could not be read") {
+		t.Errorf("ghost_health does not say the read failed:\n%s", text)
+	}
+	// And it must not have fallen back to reporting numbers it does not have: a
+	// store whose table is gone has no share and no cap headroom, and printing
+	// zeroes for them would be a claim rather than an absence.
+	if strings.Contains(text, "restatements (0%)") || strings.Contains(text, "no version rows recorded yet") {
+		t.Errorf("ghost_health reported an empty history after a failed read:\n%s", text)
+	}
+	// The rest of the report is still there: one unreadable table is not a reason
+	// to hand the agent less than it had a moment ago.
+	if !strings.Contains(text, "**Total memories:** 1") {
+		t.Errorf("ghost_health lost the fields it already reported:\n%s", text)
+	}
+}
+
+// dropHistoryTable removes memory_history through its own handle, from outside the
+// store under test, so nothing about the store's own state changes and the only
+// thing the read finds is a missing table.
+func dropHistoryTable(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s to drop memory_history: %v", dbPath, err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`DROP TABLE memory_history`); err != nil {
+		t.Fatalf("drop memory_history: %v", err)
 	}
 }

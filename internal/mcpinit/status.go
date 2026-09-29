@@ -550,6 +550,11 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 // projection and the wording of every finding are decided in internal/memory and
 // shared with ghost_health, and the two surfaces cannot end up telling an
 // operator different things about one store.
+//
+// "deepest memory" on the summary line is the store's widest history, which is
+// not necessarily the memory a `!` line below is about: the per-memory cap is
+// reached per memory, and the finding names that memory and its own two counts.
+// The label is chosen so the line cannot be read as the subject of the warning.
 func reportHistoryGrowth(w io.Writer, store *memory.Store) {
 	res, err := store.HistoryGrowth(context.Background())
 	if err != nil {
@@ -568,7 +573,7 @@ func reportHistoryGrowth(w io.Writer, store *memory.Store) {
 		return
 	}
 	_, _ = fmt.Fprintf(w,
-		"  - history: %d version rows in %dh, %d restatements (%.0f%%), busiest memory %d/%d versions, store %d/%d rows\n",
+		"  - history: %d version rows in %dh, %d restatements (%.0f%%), deepest memory %d/%d versions, store %d/%d rows\n",
 		res.RowsInWindow, res.WindowHours, res.NoOpRows, res.NoOpShare*100,
 		res.MaxVersions, res.PerMemoryCap, res.TotalRows, res.StoreCap)
 	for _, warn := range res.Warnings {

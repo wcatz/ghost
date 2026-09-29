@@ -26,6 +26,16 @@ import (
 // ("0 seconds" meaning now).
 func historyStore(t *testing.T, memories, restatements int, ageAgo string) *memory.Store {
 	t.Helper()
+	store, _ := historyStoreWithPath(t, memories, restatements, ageAgo)
+	return store
+}
+
+// historyStoreWithPath is historyStore plus the database's path, for the one
+// fixture that has to reach the file from a second handle: memory_history is
+// dropped from OUTSIDE the store under test, so nothing about the store's own
+// state changes and the only thing the read finds is a missing table.
+func historyStoreWithPath(t *testing.T, memories, restatements int, ageAgo string) (*memory.Store, string) {
+	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
 	db, err := memory.OpenDB(dbPath)
 	if err != nil {
@@ -37,7 +47,7 @@ func historyStore(t *testing.T, memories, restatements int, ageAgo string) *memo
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	seedHistoryVersions(t, db, memories, restatements, ageAgo)
-	return store
+	return store, dbPath
 }
 
 // seedHistoryVersions saves `memories` memories and then appends `restatements`
@@ -99,15 +109,16 @@ func TestReportHistoryGrowthPrintsTheNumbersAndTheFindings(t *testing.T) {
 	output := out.String()
 
 	if !strings.Contains(output,
-		"- history: 21 version rows in 24h, 20 restatements (95%), busiest memory 21/50 versions, store 21/20000 rows") {
+		"- history: 21 version rows in 24h, 20 restatements (95%), deepest memory 21/50 versions, store 21/20000 rows") {
 		t.Errorf("the history line does not carry the report's numbers:\n%s", output)
 	}
 	for _, want := range []string{
 		"! 95% of the 21 version rows written in the last 24h restate the version before them",
 		"warning threshold 20%",
 		"ghost history compact",
-		"! the busiest memory holds 21 of its 50 versions and wrote 21 in the last 24h",
-		"reaches the per-memory cap in 1.4 days",
+		"! memory ", // the memory the countdown is about, named
+		"is closest to the per-memory cap: it holds 21 of its 50 versions and wrote 21 in the last 24h",
+		"the cap is 1.4 days away at that rate",
 		"warning threshold 14 days",
 	} {
 		if !strings.Contains(output, want) {
@@ -153,11 +164,71 @@ func TestReportHistoryGrowthOnAQuietStoreIsNotAFinding(t *testing.T) {
 	output := out.String()
 
 	if !strings.Contains(output,
-		"- history: 0 version rows in 24h, 0 restatements (0%), busiest memory 6/50 versions, store 12/20000 rows") {
+		"- history: 0 version rows in 24h, 0 restatements (0%), deepest memory 6/50 versions, store 12/20000 rows") {
 		t.Errorf("a quiet store does not report its numbers:\n%s", output)
 	}
 	if strings.Contains(output, "!") {
 		t.Errorf("a quiet store produces a finding, which is a warning that fires every morning:\n%s", output)
+	}
+}
+
+// TestReportHistoryGrowthSaysWhenTheReadFails: docs/cli.md states that a check
+// which cannot run must not print nothing at all, and this is the branch that
+// claim rests on. Returning silently here would make an unreadable history
+// indistinguishable from a store with nothing to say — and the read is the most
+// expensive statement in the command, so a context deadline reaching it after the
+// database check already succeeded is a realistic way to get there.
+//
+// The failure is induced by dropping memory_history from a SECOND handle, which
+// is the only way to make this statement fail on a store that opened cleanly: a
+// dropped table is an error the read cannot recover from and cannot mistake for an
+// empty report.
+//
+// The line is a `!` and not a `✗`, for the same reason every other finding is (see
+// above): `ghost mcp init` does not repair a history table, so failing the run
+// would name the wrong fix for it. ghost_health's counterpart is
+// TestHealthSaysWhenTheHistoryReadFails, and the two together are what makes
+// "the surfaces cannot disagree about one store" true when the read fails rather
+// than only when it succeeds.
+func TestReportHistoryGrowthSaysWhenTheReadFails(t *testing.T) {
+	store, dbPath := historyStoreWithPath(t, 1, 3, "0 seconds")
+
+	dropHistoryTableFile(t, dbPath)
+
+	var out bytes.Buffer
+	reportHistoryGrowth(&out, store)
+	output := out.String()
+
+	if !strings.Contains(output, "history growth:") {
+		t.Fatalf("a failed history read printed nothing at all:\n%s", output)
+	}
+	// The error itself, not a summary of it: the operator's next question is
+	// which table and why, and "history growth failed" does not answer it.
+	if !strings.Contains(output, "memory_history") {
+		t.Errorf("the failed read does not name what could not be read:\n%s", output)
+	}
+	// And it must not have fallen back to reporting numbers it does not have: a
+	// store whose table is gone has no share and no cap headroom, and printing
+	// zeroes for them would be a claim rather than an absence.
+	if strings.Contains(output, "version rows in 24h") || strings.Contains(output, "no version rows recorded yet") {
+		t.Errorf("the report published an empty history after a failed read:\n%s", output)
+	}
+	if strings.Contains(output, "✗") {
+		t.Errorf("a failed read is printed as a failed check, naming a repair that does not apply:\n%s", output)
+	}
+}
+
+// dropHistoryTableFile removes memory_history through its own handle, from outside
+// the store under test.
+func dropHistoryTableFile(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s to drop memory_history: %v", dbPath, err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`DROP TABLE memory_history`); err != nil {
+		t.Fatalf("drop memory_history: %v", err)
 	}
 }
 
