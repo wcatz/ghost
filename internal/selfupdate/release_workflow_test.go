@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -394,9 +395,9 @@ func TestEveryLiteralAttestationSubjectExists(t *testing.T) {
 	checked, inRepo := 0, 0
 	for job, idxs := range byJob {
 		attestIdx := idxs[0]
-		// What the job itself builds before the attest step runs.
+		// What the job itself BUILDS before the attest step runs.
 		built := map[string]bool{}
-		for _, p := range distPathsInRunSteps(wf.Jobs[job].Steps[:attestIdx]) {
+		for _, p := range distPathsInRunSteps(buildStepsBefore(wf.Jobs[job].Steps, attestIdx)) {
 			built[p] = true
 		}
 		for _, path := range subjectPaths(t, wf.Jobs[job].Steps[attestIdx]) {
@@ -433,6 +434,190 @@ func TestEveryLiteralAttestationSubjectExists(t *testing.T) {
 		t.Error("derived no literal GoReleaser output; the generated half of the rule is untested")
 	}
 	t.Logf("checked %d literal attestation subject path(s), %d of them repository files", checked, inRepo)
+}
+
+// buildStepsBefore returns the steps that run before index attestIdx, minus the
+// guard step.
+//
+// The exclusion is load-bearing and is why this is a function rather than a
+// slice. The guard step's entire content is the list of subject paths quoted
+// back in order to test them, so counting it as a build step would let the
+// guard justify the very paths it exists to check: every literal it names would
+// enter the "this job builds it" set and be waved through as a real file while
+// nothing builds it. Today the release job's guard names dist/checksums.txt and
+// no other step does, so the filter is what keeps that path honest — and
+// TestTheGuardStepIsNotABuildStep is what keeps the filter from being deleted
+// as an apparently-inert precaution.
+func buildStepsBefore(steps []workflowStep, attestIdx int) []workflowStep {
+	var out []workflowStep
+	for _, s := range steps[:attestIdx] {
+		if s.Name != subjectGuardStepName {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// TestTheGuardStepIsNotABuildStep checks both halves of that: the guard is
+// filtered out, AND filtering it actually changes the answer — so a filter that
+// silently stopped matching the guard's name cannot pass as a no-op.
+func TestTheGuardStepIsNotABuildStep(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	byJob := attestStepsByJob(wf)
+	filterChangedSomething := false
+
+	for job, idxs := range byJob {
+		attestIdx := idxs[0]
+		if _, err := guardRunsBeforeAttest(wf.Jobs[job].Steps, attestIdx); err != nil {
+			t.Errorf("job %q: %v", job, err)
+			continue
+		}
+
+		kept := buildStepsBefore(wf.Jobs[job].Steps, attestIdx)
+		for _, s := range kept {
+			if s.Name == subjectGuardStepName {
+				t.Errorf("job %q's guard step survived buildStepsBefore — it would justify the paths it only tests", job)
+			}
+		}
+
+		all := map[string]bool{}
+		for _, p := range distPathsInRunSteps(wf.Jobs[job].Steps[:attestIdx]) {
+			all[p] = true
+		}
+		built := map[string]bool{}
+		for _, p := range distPathsInRunSteps(kept) {
+			built[p] = true
+		}
+		// No "built but not named" check here, and deliberately so:
+		// buildStepsBefore only ever removes steps, so such a check could not
+		// fail. A check that cannot fail is worse than none — it reads as
+		// coverage of a direction nothing checks.
+		guardOnly := 0
+		for p := range all {
+			if !built[p] {
+				guardOnly++
+				t.Logf("job %q: %q is named only by the guard, not built by anything", job, p)
+			}
+		}
+		filterChangedSomething = filterChangedSomething || guardOnly > 0
+	}
+	// The filter has to matter somewhere, or it is untested and could be
+	// dropped as an apparently-inert precaution. It is a per-job property that
+	// happens to hold for the release job today — whose guard names
+	// dist/checksums.txt, which no other step in that job does.
+	if !filterChangedSomething {
+		t.Error("no job's guard step names a dist/ path its build steps do not, so buildStepsBefore's exclusion is untested — a filter that filters nothing cannot be trusted")
+	}
+}
+
+// TestAttestationDoesNotPushToTheRegistry keeps the two attestation scopes the
+// whole of what the attest step needs. The concern is real and the resolution
+// is NOT to add `packages: write`:
+//
+//	actions/attest-build-provenance at the pinned SHA
+//	(4d101475d8b20a2381f78447822ac1eab6504dd8, v4.2.2) declares
+//	  push-to-registry:
+//	    default: false
+//	    description: "…Requires that the \"subject-name\" parameter specify the
+//	                  fully-qualified image name and that the \"subject-digest\"
+//	                  parameter be specified. Defaults to false."
+//
+// So the registry push is off, and it could not run in any case: it requires
+// subject-name and subject-digest, and both attest steps use subject-path.
+//
+// This test is what keeps that true rather than assumed. It is not a check on
+// the upstream action — a Go test cannot read action.yml — but it is a check on
+// the combination that would break a release: enabling the registry push
+// without the scope it needs. Whoever bumps the action's SHA re-reads the
+// action.yml above, because this test's comment is where the evidence lives.
+func TestAttestationDoesNotPushToTheRegistry(t *testing.T) {
+	wf, _ := loadReleaseWorkflow(t)
+	byJob := attestStepsByJob(wf)
+	if len(byJob) == 0 {
+		t.Fatal("no job invokes " + attestAction)
+	}
+
+	for job, idxs := range byJob {
+		step := wf.Jobs[job].Steps[idxs[0]]
+		if got, ok := step.With["push-to-registry"]; ok && got != "false" {
+			t.Errorf("job %q sets push-to-registry: %q, which pushes the attestation into ghcr.io and needs packages: write that this job deliberately does not hold", job, got)
+		}
+		if got := wf.Jobs[job].Permissions["packages"]; got != "" {
+			t.Errorf("job %q holds packages: %s; nothing in the release path pushes an image, and the attest step does not push to the registry", job, got)
+		}
+	}
+}
+
+// guardRunsBeforeAttest locates the guard step in the WHOLE job and reports
+// where it is relative to the attest step.
+//
+// It searches the whole job rather than the prefix before the attest step, and
+// that is the load-bearing part: a guard placed AFTER the attest step is the
+// case this exists to catch, and a prefix search cannot see it — the index
+// comparison would be comparing a bound against itself and would pass.
+func guardRunsBeforeAttest(steps []workflowStep, attestIdx int) (guardIdx int, err error) {
+	guardIdx = -1
+	for i, s := range steps {
+		if s.Name != subjectGuardStepName {
+			continue
+		}
+		if guardIdx != -1 {
+			return -1, fmt.Errorf("two %q steps; the one that runs is ambiguous", subjectGuardStepName)
+		}
+		guardIdx = i
+	}
+	switch {
+	case guardIdx == -1:
+		return -1, fmt.Errorf("no %q step, so nothing checks a zero-match pattern", subjectGuardStepName)
+	case guardIdx >= attestIdx:
+		return -1, fmt.Errorf("the guard runs at %d, at or after the attest step at %d; the check would be too late to stop anything", guardIdx, attestIdx)
+	}
+	return guardIdx, nil
+}
+
+// TestGuardRunsBeforeAttest exercises the ordering rule on step lists where it
+// can fail, which the real workflow cannot supply — its guard is already in the
+// right place, so against it the comparison is a tautology and every version of
+// it passes.
+func TestGuardRunsBeforeAttest(t *testing.T) {
+	attest := workflowStep{Name: "Attest the release archives and checksums",
+		Uses: attestAction + "@" + strings.Repeat("a", 40)}
+	guard := workflowStep{Name: subjectGuardStepName, Run: "true"}
+	other := workflowStep{Name: "Build", Run: "true"}
+
+	for _, tc := range []struct {
+		name      string
+		steps     []workflowStep
+		attestIdx int
+		wantErr   string
+	}{
+		{"guard before the attest step", []workflowStep{other, guard, attest}, 2, ""},
+		{"guard after the attest step", []workflowStep{other, attest, guard}, 1,
+			"at or after the attest step"},
+		{"guard immediately after the attest step", []workflowStep{attest, guard}, 0,
+			"at or after the attest step"},
+		{"no guard at all", []workflowStep{other, attest}, 1, "nothing checks a zero-match pattern"},
+		{"two guards", []workflowStep{guard, guard, attest}, 2, "ambiguous"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx, err := guardRunsBeforeAttest(tc.steps, tc.attestIdx)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if idx >= tc.attestIdx {
+					t.Errorf("guard index %d is not before the attest step at %d", idx, tc.attestIdx)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("accepted a guard that is %s (index %d, attest at %d)", tc.wantErr, idx, tc.attestIdx)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not mention %q", err, tc.wantErr)
+			}
+		})
+	}
 }
 
 // subjectIsJustified is the rule TestEveryLiteralAttestationSubjectExists
