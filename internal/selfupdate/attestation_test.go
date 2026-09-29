@@ -135,6 +135,13 @@ func (f *attestationFixture) bundleJSON(t *testing.T, identity, issuer string, a
 		rfc3161 = append(rfc3161, &protocommon.RFC3161SignedTimestamp{SignedTimestamp: ts})
 	}
 
+	material := &protobundle.VerificationMaterial{
+		Content: &protobundle.VerificationMaterial_Certificate{
+			Certificate: &protocommon.X509Certificate{RawBytes: content.Certificate().Raw},
+		},
+		TimestampVerificationData: &protobundle.TimestampVerificationData{Rfc3161Timestamps: rfc3161},
+	}
+
 	wire, err := protojson.Marshal(&protobundle.Bundle{
 		MediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
 		Content: &protobundle.Bundle_DsseEnvelope{
@@ -144,12 +151,7 @@ func (f *attestationFixture) bundleJSON(t *testing.T, identity, issuer string, a
 				Signatures:  sigs,
 			},
 		},
-		VerificationMaterial: &protobundle.VerificationMaterial{
-			Content: &protobundle.VerificationMaterial_Certificate{
-				Certificate: &protocommon.X509Certificate{RawBytes: content.Certificate().Raw},
-			},
-			TimestampVerificationData: &protobundle.TimestampVerificationData{Rfc3161Timestamps: rfc3161},
-		},
+		VerificationMaterial: material,
 	})
 	if err != nil {
 		t.Fatalf("marshal bundle: %v", err)
@@ -300,6 +302,29 @@ func TestTheVerifierTakesTheTimestampNotTheWallClock(t *testing.T) {
 	if n := strings.Count(string(raw), "verify.NewVerifier("); n != 1 {
 		t.Errorf("verify.NewVerifier appears %d times in attestation.go, want 1: every call site is a place the time policy can be assembled without newReleaseVerifier governing it", n)
 	}
+	// The policy sets NO transparency-log expectation, and that is a decision
+	// rather than an omission, so it is asserted here. Two shapes are real and
+	// neither is the one most fixtures carry: actions/attest-build-provenance
+	// builds its bundle through @sigstore/bundle and so includes the Rekor entry
+	// it uploaded, while the GitHub-initiated bundles the recorded API fixtures
+	// hold have none. Measured against this version's source, a carried entry is
+	// neither verified nor rejected — VerifyTransparencyLogInclusion is a no-op
+	// unless requireTlogEntries is set (pkg/verify/signed_entity.go) — so the
+	// policy is tolerant of both. Demanding an entry would refuse every
+	// GitHub-initiated bundle; requiring integrated timestamps alongside it would
+	// refuse every GitHub-hosted one. Either would be AttestationUnverifiable, so
+	// fatal and unreachable by any flag, with this file's fixtures — all of
+	// which lack an entry — staying green.
+	for _, unwanted := range []string{
+		"WithTransparencyLog",
+		"WithIntegratedTimestamps",
+		"WithSignedTimestamps",
+		"WithSignedCertificateTimestamps",
+	} {
+		if usesOption(body, unwanted) {
+			t.Errorf("newReleaseVerifier sets %s, so the policy starts requiring material some real bundles do not carry — every such release would be refused as AttestationUnverifiable, which no flag reaches:\n%s", unwanted, body)
+		}
+	}
 
 	// The control. Without it, a matcher that always returned false would make
 	// every assertion above pass.
@@ -313,10 +338,10 @@ func TestTheVerifierTakesTheTimestampNotTheWallClock(t *testing.T) {
 		{"the production verifier", "return verify.NewVerifier(t, verify.WithObserverTimestamps(attestationObserverTimestamps))", false},
 		{
 			// The reason the matcher strips comments: the production function
-			// NAMES the option it must not use, in the comment explaining why.
+			// NAMES the options it must not use, in the comment explaining why.
 			// A matcher that read prose would fail on its own documentation.
-			name: "a comment naming the option it does not use",
-			src:  "// not WithCurrentTime: the leaf lives ten minutes\nreturn verify.NewVerifier(t, verify.WithObserverTimestamps(1))",
+			name: "a comment naming options it does not use",
+			src:  "// not WithCurrentTime, and no WithTransparencyLog\nreturn verify.NewVerifier(t, verify.WithObserverTimestamps(1))",
 			want: false,
 		},
 	} {
@@ -330,16 +355,18 @@ func TestTheVerifierTakesTheTimestampNotTheWallClock(t *testing.T) {
 // verification time. The option is named rather than inferred from behaviour,
 // because the two policies are not separable by any bundle this package can mint
 // — see the test above for the measurements.
-//
-// Comments are stripped first, and that is not a convenience: the production
-// function NAMES the option it must not use, in the comment explaining why it
-// must not. Matching prose would fail on its own documentation.
-func usesWallClockPolicy(source string) bool {
+func usesWallClockPolicy(source string) bool { return usesOption(source, "WithCurrentTime") }
+
+// usesOption reports whether source sets the named verifier option. Comments are
+// stripped first, and that is not a convenience: the production function NAMES
+// the options it must not set, in the comment explaining why. Matching prose
+// would fail on its own documentation.
+func usesOption(source, option string) bool {
 	for _, line := range strings.Split(source, "\n") {
 		if i := strings.Index(line, "//"); i >= 0 {
 			line = line[:i]
 		}
-		if strings.Contains(line, "WithCurrentTime") {
+		if strings.Contains(line, option) {
 			return true
 		}
 	}
