@@ -90,6 +90,17 @@ type Slice struct {
 	// importance, created_at and id) or "pinned_importance_updated". The two
 	// buckets disagree, and the disagreement is policy rather than drift.
 	Order string
+	// IncludeGlobal admits `_global` rows into this bucket's read, so the cap on
+	// MaxItems is a cap over the UNION rather than over the project alone. It is
+	// what every whole-project listing reads and what two slices cannot express:
+	// a project slice at 20 plus a `_global` slice at 20 admits 40 rows where the
+	// caller asked for 20.
+	//
+	// False by default, which is the shipped session-start shape — those two
+	// buckets are disjoint on purpose. A request that mixes `_global` into one
+	// bucket and fetches it in another is refused (validatePassiveBudget): the
+	// rows would come back twice.
+	IncludeGlobal bool
 	// TwoPass enables the behavioral reservation: BehaviorFloor slots are filled
 	// from BehaviorCategories first, ordered by score × CategoryWeights and
 	// capped per category by CategoryCaps, and the rest of the window is filled
@@ -418,6 +429,7 @@ func passivePolicies(req Request) []memory.SlicePolicy {
 			DemotionThreshold:     s.DemotionThreshold,
 			DemoteOnlyWhenOverCap: s.DemoteOnlyWhenOverCap,
 			DropDemotedLosers:     s.DropDemotedLosers,
+			IncludeGlobal:         s.IncludeGlobal,
 		})
 	}
 	return out
@@ -649,6 +661,16 @@ func validatePassiveBudget(req Request) error {
 		return errors.New("assemble: a request with no query carries no bucket policies, so there is nothing to retrieve by; " +
 			"give it a slice per bucket, or a query")
 	}
+	// Resolved BEFORE the loop, not during it. The overlap is a property of the
+	// whole budget, so a check that sets the flag as it walks is order-dependent:
+	// it refuses `[mixing, _global]` and serves `[_global, mixing]`, which is a
+	// refusal a caller can talk its way past by sorting its slices.
+	mixesGlobal := false
+	for _, s := range req.Budget.Slices {
+		if s.IncludeGlobal {
+			mixesGlobal = true
+		}
+	}
 	for _, s := range req.Budget.Slices {
 		// The bucket IS the project predicate on a passive read: the store binds
 		// SlicePolicy.Bucket as the WHERE clause and does not consult Mode at all,
@@ -663,6 +685,22 @@ func validatePassiveBudget(req Request) error {
 			return fmt.Errorf("assemble: passive slice names bucket %q, which is neither the requested project %q nor %q; "+
 				"the bucket IS the project predicate on this path, so a mismatched one would read a project the request "+
 				"never named", s.Bucket, req.ProjectID, memory.GlobalProjectID)
+		}
+		// Overlapping row sets under distinct bucket NAMES, which `sliceBuckets`
+		// cannot see: one slice admits `_global` into the project read and another
+		// fetches `_global` in its own right. The two sets overlap, so every
+		// global row is admitted twice — and stage 8 would cap them under two
+		// different slices, so neither slice's cap would describe the block. The
+		// store refuses the same shape; this seam has to, because it is where a
+		// caller states its budget and `Run` is the exported entry point.
+		//
+		// A caller that wants both — the project-context surface does, for its
+		// `## Global` section — runs them as two REQUESTS, which is also what
+		// keeps their two verdicts and two traces separate.
+		if s.Bucket == memory.GlobalProjectID && mixesGlobal {
+			return fmt.Errorf("assemble: a passive slice fetches %q while another admits it into a project bucket; "+
+				"the two row sets overlap, so every global row would be admitted twice and capped under two different "+
+				"slices. Read them as two requests", memory.GlobalProjectID)
 		}
 		// The bound that matters here is the FETCH, not the block. A slice bounded
 		// only by MaxBytes says how many bytes the answer may occupy, which bounds
@@ -725,6 +763,19 @@ func validatePassiveBudget(req Request) error {
 // a query — so a source that arrives with one is a query-mode request whatever
 // it calls itself, and a source that arrives without one is passive.
 func Passive(req Request) bool { return req.Query == "" }
+
+// ReasonNoMemories is the empty reason for a passive block: the over-fetched
+// window came back empty. It is exported because a surface that frames its own
+// block has to tell this case from a block that was EMPTIED, and only the reason
+// knows which — the two call for opposite sentences, one of which is a census and
+// the other a report of rows found and withheld. Comparing against the string
+// literal would work until the vocabulary moved.
+const ReasonNoMemories = reasonNoMemories
+
+// ReasonAllInvalid is the empty reason for a block whose every row was withheld
+// as out of date, exported for the same reason as ReasonNoMemories and beside it
+// so a caller comparing reasons reads them from one place.
+const ReasonAllInvalid = reasonAllInvalid
 
 // sliceBuckets lists the bucket names that appear more than once. The two halves
 // of a slice budget disagree about a repeat: the window sums every cap, and

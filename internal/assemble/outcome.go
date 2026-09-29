@@ -502,6 +502,21 @@ func (p *pipeline) abstention(outcome Outcome, reason string) string {
 				"so nothing is injected. That describes the window, not the store — a store with memories behind a " +
 				"narrower scope, an expired validity window or a category this session did not read would look the same."
 		case reasonAllInvalid:
+			if p.passive {
+				// The SHARED exclusion wording is kept, deliberately: an empty result
+				// caused by exclusions says "no sufficiently trustworthy memory
+				// found" rather than "no matching memories", on every surface, and
+				// the distinction is the reason all_invalid is its own reason. What
+				// does not survive the move to a queryless surface is the two halves
+				// that talk about a SEARCH: a passive block was assembled from a
+				// window nobody queried, and the closing clause would tell a reader
+				// "the query was not wrong" about a request that made none. Both are
+				// rewritten rather than the sentence being replaced, so the phrase
+				// every other exclusion reason uses stays the phrase this one uses.
+				return "No sufficiently trustworthy memory found: the candidates this block was assembled from were " +
+					"withheld as out of date, their validity windows having closed or not yet opened." + p.stageNote() +
+					" The block was not empty before that — the answer is withheld, not absent."
+			}
 			return "No sufficiently trustworthy memory found: the candidates this search found were withheld as out " +
 				"of date, their validity windows having closed or not yet opened." + p.stageNote() + " The query was " +
 				"not wrong — the answer is withheld, not absent."

@@ -1696,13 +1696,13 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		memories, err := s.store.GetTopMemories(ctx, args.ProjectID, args.Limit)
+		memories, err := s.projectContextMemories(ctx, args.ProjectID, args.Limit)
 		if err != nil {
-			return nil, nil, fmt.Errorf("get memories: %w", err)
+			return nil, nil, err
 		}
-		if len(memories) > 0 {
+		if len(memories.Items) > 0 {
 			sb.WriteString("## Memories\n\n")
-			sb.WriteString(formatMemories(memories))
+			sb.WriteString(projectContextItems(memories.Items))
 		}
 
 		learned, err := s.store.GetLearnedContext(ctx, args.ProjectID)
@@ -1716,6 +1716,14 @@ func (s *Server) registerTools() {
 
 		text := sb.String()
 		if text == "" {
+			// A block the stages EMPTIED is not an empty project, and the census
+			// below would say it is. So the two are separated by the verdict, and
+			// only an empty over-fetched window may claim absence.
+			if note := projectContextEmptyNote(memories); note != "" {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: note}},
+				}, nil, nil
+			}
 			exists, existsErr := s.projectExists(ctx, args.ProjectID)
 			switch {
 			case existsErr != nil:
@@ -3126,19 +3134,25 @@ func (s *Server) registerPrompts() {
 }
 
 // buildProjectContext assembles the text body for a project context resource read.
-// Returns top 20 memories (project + global) plus any learned context summary.
+// Returns the top 20 memories (project + global) plus any learned context summary.
 // Extracted from the resource handler for direct testability.
 // Returns an error if the memory store is unavailable.
+//
+// The memory rows are an `assemble.Run` — the same two requests the tool makes,
+// at this surface's fixed caps — and everything else here is still a direct read.
+// That split is deliberate rather than partial: the assembler's `Item` carries no
+// field for a decision or a learned summary, and moving those would be a
+// different migration in a commit about which reader selects the rows.
 func (s *Server) buildProjectContext(ctx context.Context, projectID string) (string, error) {
 	var sb strings.Builder
 
-	memories, err := s.store.GetTopMemories(ctx, projectID, 20)
+	memories, err := s.projectContextMemories(ctx, projectID, projectContextMemoriesCap)
 	if err != nil {
 		return "", fmt.Errorf("get memories for %q: %w", projectID, err)
 	}
-	if len(memories) > 0 {
+	if len(memories.Items) > 0 {
 		sb.WriteString("## Memories\n\n")
-		sb.WriteString(formatMemories(memories))
+		sb.WriteString(projectContextItems(memories.Items))
 	}
 
 	decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
@@ -3162,33 +3176,70 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	}
 
 	// Include global memories (preferences, conventions) that apply to all
-	// projects. GetTopMemories above already mixes '_global' rows into the
-	// project list, so skip any global already shown there rather than
-	// repeating the highest-value preferences in the token budget.
-	if projectID != "_global" {
-		seen := make(map[string]bool, len(memories))
-		for _, m := range memories {
-			seen[m.ID] = true
+	// projects. The read above already mixes '_global' rows into the project list,
+	// so skip any global already shown there rather than repeating the
+	// highest-value preferences in the token budget.
+	//
+	// The `seen` filter stays HERE, after the cap, and that is the whole reason
+	// the Global section is a second REQUEST rather than a second slice: this is a
+	// section boundary, not a selection rule. Filtering it into the store's read
+	// would run before the cap and admit up to 15 NEW rows where the shipped code
+	// admitted 15 rows of which some were repeats — a membership change with
+	// nothing behind it. `SlicePolicy.ExcludeSeen` stays unread for that reason.
+	if projectID != memory.GlobalProjectID {
+		seen := make(map[string]bool, len(memories.Items))
+		for _, it := range memories.Items {
+			seen[it.ID] = true
 		}
-		globals, gErr := s.store.GetTopMemories(ctx, "_global", 15)
+		globals, gErr := s.projectContextGlobals(ctx)
 		if gErr == nil {
-			var extra []memory.Memory
-			for _, g := range globals {
+			var extra []assemble.Item
+			for _, g := range globals.Items {
 				if !seen[g.ID] {
 					extra = append(extra, g)
 				}
 			}
 			if len(extra) > 0 {
 				sb.WriteString("\n\n## Global (applies to all projects)\n\n")
-				sb.WriteString(formatMemories(extra))
+				sb.WriteString(projectContextItems(extra))
 			}
 		}
 	}
 
 	if sb.Len() == 0 {
+		// Same two cases as the tool's, for the same reason: a block the stages
+		// emptied is not an empty project, and "No memories found for this
+		// project" would say it is.
+		if note := projectContextEmptyNote(memories); note != "" {
+			return note, nil
+		}
 		return "No memories found for this project.", nil
 	}
 	return sb.String(), nil
+}
+
+// projectContextMemories assembles the mixed project + `_global` block for one
+// project at one cap, which is the read both surfaces make.
+func (s *Server) projectContextMemories(ctx context.Context, projectID string, limit int) (assemble.Result, error) {
+	return assembleProjectContext(ctx, s, assemble.Request{
+		ProjectID: projectID,
+		// The empty Query IS the passive shape, for the same reason the session
+		// start's is: it is what makes the retriever take the passive branch, and a
+		// non-empty query here would answer a different question with a fused
+		// window. It is not a placeholder.
+		Query:  "",
+		Budget: projectContextBudget(projectID, limit),
+	})
+}
+
+// projectContextGlobals is the Global section's own read, on its own request. See
+// buildProjectContext's comment on why it is not a second slice.
+func (s *Server) projectContextGlobals(ctx context.Context) (assemble.Result, error) {
+	return assembleProjectContext(ctx, s, assemble.Request{
+		ProjectID: memory.GlobalProjectID,
+		Query:     "",
+		Budget:    projectContextGlobalBudget(),
+	})
 }
 
 // parseProjectIDFromURI extracts and URL-decodes the project_id segment from

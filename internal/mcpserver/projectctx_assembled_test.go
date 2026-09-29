@@ -161,6 +161,73 @@ func TestTheProjectContextEmptyBlockSaysRowsWereExcludedRatherThanThatNothingWas
 	}
 }
 
+// TestTheProjectContextSkipsTheNearDuplicateReorderUnderTheCap is a parity
+// property the goldens CANNOT see, and it is the one this surface's policy most
+// easily gets wrong.
+//
+// GetTopMemories ran its near-duplicate demotion only when the window was WIDER
+// THAN THE CAP, because a demotion is a REORDER: on a selected set that fits
+// entirely under the cap it can only shuffle rows the answer already shows in
+// full. The passive policy has the same gate (`DemoteOnlyWhenOverCap`), and
+// leaving it off is the kind of change that is invisible on any store with more
+// memories than the limit — which is every store a reviewer would try.
+//
+// So the fixture is built the other way round: three rows against a cap of 20,
+// and the pair arranged so the demotion has something to REORDER rather than
+// merely confirm. `nearDuplicatePenaltyRows` gives the edge to whichever member
+// ranks LOWER, so a pair of the top two rows penalises the second of them — and a
+// penalised row is pushed behind every unpenalised one, which on three rows means
+// the second row swaps with the third. Flip the flag and the swap happens; leave
+// it and the plain score order stands, which is the shipped behaviour.
+//
+// The first version of this fixture paired the bottom two rows, where the loser is
+// already last and the demotion is a no-op, and the second saved its rows through
+// ghost_memory_save, whose linker auto-linked all three and penalised two of them
+// — so a stable sort left the order alone and the test passed with the gate
+// removed. Both are the same trap the session-start stack hit with a fixture that
+// built no edge at all, and the mutation is what found it. The rows are written in
+// SQL here for the same reason the golden fixture writes its own: a save is a
+// LINKING opportunity, and a test about one edge cannot accept edges nobody asked
+// for.
+func TestTheProjectContextSkipsTheNearDuplicateReorderUnderTheCap(t *testing.T) {
+	srv, session := newValiditySession(t)
+	st, ok := srv.store.(*memory.Store)
+	if !ok {
+		t.Fatalf("store is a %T, not a *memory.Store", srv.store)
+	}
+	for _, r := range []struct {
+		id, content string
+		imp         float32
+	}{
+		{"gatetop", "zeppelin", 0.9},
+		{"gatemid", "quicksilver", 0.6},
+		{"gatelow", "brass tacks", 0.5},
+	} {
+		if _, err := st.CreateWithIDFromCorpus(context.Background(), "vproj", r.id, memory.Memory{
+			Category: "preference", Content: r.content, Source: "manual", Importance: r.imp,
+		}); err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
+		}
+	}
+	// A and B are the pair; B is the one that loses, because it ranks second.
+	if err := st.CreateLink(context.Background(), "gatetop", "gatemid", "duplicate", 1, "manual"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	out := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"}))
+	loser, third := positionOf(out, "gatemid"), positionOf(out, "gatelow")
+	if loser < 0 || third < 0 {
+		t.Fatalf("both rows must be in the block; loser=%d third=%d\n%s", loser, third, out)
+	}
+	if loser > third {
+		t.Errorf("the near-duplicate loser gatemid was pushed behind the unpaired row gatelow on a 3-row set under a "+
+			"20-cap; the demotion is a REORDER, and on a set that fits under the cap the shipped loader skipped it\n%s", out)
+	}
+}
+
+// positionOf is the index of id's first occurrence in backticks, or -1. The ids
+// Ghost mints are unique, so a substring search cannot collide with content.
+func positionOf(text, id string) int { return strings.Index(text, "`"+id+"`") }
+
 // TestProjectContextLoadDoesNotScaleWithStoreSize is the bounded-window check, in
 // the shape of TestSessionStartLoadDoesNotScaleWithStoreSize.
 //

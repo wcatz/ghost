@@ -111,6 +111,25 @@ type SlicePolicy struct {
 	CategoryCaps       map[string]int
 	OverFetch          int
 	DemotionThreshold  float64
+	// IncludeGlobal admits `_global` rows into this bucket's read, which is what
+	// the query path calls memory.ProjectScoped and what every whole-project
+	// listing has always read: `WHERE project_id = ? OR project_id = '_global'`,
+	// with ONE cap over the union.
+	//
+	// It exists because a bucket names one project and two buckets cannot express
+	// a union. A project slice capped at 20 plus a `_global` slice capped at 20
+	// admits 40 rows where the caller asked for 20, and the caller's `limit`
+	// argument says "max memories to return" — so the alternative is not a
+	// tidier policy, it is a different and wrong answer to the same question.
+	//
+	// FALSE by default, and the default is the shipped session-start shape: those
+	// two buckets are disjoint on purpose, and a global row arriving through the
+	// project bucket would spend the `_global` slice's slots.
+	//
+	// A request that mixes `_global` into one bucket AND fetches it in another is
+	// refused at both seams: the rows would come back twice, which is the same
+	// defect the repeated-bucket refusal already names.
+	IncludeGlobal bool
 	// ItemCap is the rows this bucket will finally admit. The two-pass selection
 	// fills a POOL of twice it before the near-duplicate demotion runs, which is
 	// the shipped shape: a window wider than the cap has rows to trade when a
@@ -169,6 +188,19 @@ type Candidate struct {
 	// absent leg must not look like one.
 	FTSRank, VectorRank int
 	VectorScore         float64
+	// FetchedBy is the passive policy that retrieved this row, and it is empty
+	// on every query-mode row.
+	//
+	// It exists because a row's OWN project is not always the bucket that read
+	// it: a policy with IncludeGlobal set fetches `_global` rows under a project
+	// bucket, and the caller's cap belongs to the POLICY. Without this field the
+	// assembler's per-slice cap cannot be applied to such a row at all — a
+	// `_global` row admits no slice under its own name and is therefore unbounded
+	// — which turns "at most N rows" into "at most N project rows, plus however
+	// many globals happened to be nearby". That is the failure mode this field
+	// removes, and it is why the cap is keyed on the retriever's answer rather
+	// than re-derived from the row.
+	FetchedBy string
 	// Base is the fused score the window was cut on, after status demotion.
 	// Decay is the category-and-age multiplier, and Score is the product the
 	// decay order ranked on. Supersede and near-duplicate demotion is a
