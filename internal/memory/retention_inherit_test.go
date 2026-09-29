@@ -993,27 +993,24 @@ func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
 		}
 	})
 
-	t.Run("a session row keeps its tier and the expiry it was last written with", func(t *testing.T) {
+	t.Run("a session row keeps the tier and the expiry the fold gave it", func(t *testing.T) {
 		// The discriminating case. The row is still session, so preserving and
 		// resetting differ in BOTH columns at once: a restore that grew the column
 		// list would make it project and expiry-less, and both assertions below fail
 		// together.
 		//
-		// What this subtest does NOT claim, because the fixture cannot establish it:
-		// that the expiry it finds is the FOLD's rather than the save's.
-		// sessionExpiry is a function of now and formats at second precision, and
-		// the save, the reuse, the edit and the fold all run within milliseconds, so
-		// the fold writes a byte-identical value to the one the original save
-		// derived. Ageing the row first does not help — it changes what the fold
-		// REPLACED, not what it writes — and the reason it was tried is worth
-		// recording, because "the fold refreshed it" is the easy wrong conclusion to
-		// draw from a subtest named after a fold.
+		// The row is AGED immediately before the fold, and that is what makes the
+		// fold the AUTHOR of the expiry this subtest finds. sessionExpiry is a
+		// function of now, so a fold on a row saved a moment earlier writes a value
+		// indistinguishable from the save's own — the two are independent clock
+		// reads at second precision, and two reads inside one second produce the same
+		// string. Ageing puts a value days in the past in the column, so the only
+		// value it can hold after the fold is one the fold wrote.
 		//
-		// What it does pin is the property the restore could break: the column still
-		// holds what was last written to it. sameStrPtr below fails if the restore
-		// clears or rewrites expires_at, and TestAFoldRefreshesASessionRowsExpiry is
-		// the fixture that proves a fold refreshes one at all — it ages the row eight
-		// days first, which is what makes that observable.
+		// So the claim here is that the fold gave it the expiry AND that the restore
+		// left that alone. sameStrPtr below fails if the restore clears or rewrites
+		// the column, which is the property under test: RestoreSnapshot's UPDATE
+		// omits expires_at, so the column keeps whatever was last written to it.
 		s := testStore(t)
 		ctx := context.Background()
 		from := time.Now().UTC()
@@ -1033,15 +1030,32 @@ func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
 		if err := s.UpdateMemory(ctx, testProject, live, &edited, nil, nil, nil); err != nil {
 			t.Fatalf("edit the row after the snapshot: %v", err)
 		}
+		// Aged, so the fold below is the only thing that can have written the expiry
+		// this subtest goes on to check. See the comment above.
+		ageSessionRow(t, s, live, 8*24*time.Hour)
+		staleExpiry := getOne(t, s, live).ExpiresAt
+		if staleExpiry == nil {
+			t.Fatal("the aged row has no expiry, so the fold has nothing stale to replace")
+		}
+
 		// The fold, which refreshes the expiry and leaves the tier alone.
 		if _, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
 			edited+" and restated", "mcp", 0.5, nil,
 			UpsertOptions{Retention: RetentionSession}); err != nil {
 			t.Fatalf("fold into the row: %v", err)
 		} else if dup != live {
-			t.Fatalf("the restatement folded into %q, want %q", dup, live)
+			t.Fatalf("the restatement folded into %q, want %q — the fixture needs a fold, and an aged target is still a fold target", dup, live)
 		}
 		refreshed := getOne(t, s, live)
+		// The column MOVED, which is what makes the fold its author rather than a
+		// bystander. Without the ageing the save and the fold write the same value
+		// and this comparison is vacuous; with it, the only way the column can hold
+		// anything else is that the fold wrote it.
+		if sameStrPtr(refreshed.ExpiresAt, staleExpiry) {
+			t.Errorf("the fold left the expiry at %v; the fixture cannot tell a fold that refreshed from one that did not",
+				expiryText(staleExpiry))
+		}
+		wantFreshSessionExpiry(t, live, refreshed.ExpiresAt, from, time.Now().UTC())
 
 		if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
 			t.Fatalf("RestoreSnapshot: %v", err)
