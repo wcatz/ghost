@@ -8,6 +8,7 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 |---|---|---|
 | LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions (measured pre-task-prefix — re-baseline pending, see Phase 1) |
 | `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 551 memories; paired 95% CI over `vector-only` **+0.018** [+0.003, +0.034] |
+| `ghost bench --context` | The **block** a caller receives, not its order | Context precision **0.138** (304/2200 rows); the item cap shortened **220/220** queries and dropped 27 graded-relevant rows; contamination **0.000** — a fact about this corpus, which holds no contaminable row |
 | LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
 | Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000**, fresh@1 **0.521** (0.583 state / 0.458 premise) — the top slot is the stale answer on about half the premise probes |
 | Recency-trap suite | Old-but-correct memory against newer distractors | **0.929** in a never-decay category (invariant under decay, as claimed) and **0.417** in a decaying one — but **1.000** there when the correct memory is pinned |
@@ -17,7 +18,7 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 
 These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, a staleness fixture, a recency-trap fixture, a ranking-state fixture, a maintenance-state fixture and a false-positive count answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
 
-**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, recency-trap, ranking-state, maintenance-state and no-answer suites are report-only in CI. The official GPT-4o leaderboard-comparable run has not been executed.
+**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, recency-trap, ranking-state, maintenance-state, no-answer and context-assembly suites are report-only in CI. The official GPT-4o leaderboard-comparable run has not been executed.
 
 > Sections explicitly labeled **Historical record** document past experiments and their original implementation details. They are retained for reproducibility context, not as a description of current production routing. For current behavior, start with the [documentation index](README.md).
 
@@ -184,6 +185,67 @@ vec=0.30                 0.494   0.737    0.875    0.790  -0.0280 [-0.0440, -0.0
 - **The sweep reproduces, and the reason is the tie-break.** A grid point weighting its two legs EQUALLY is where RRF scores collide, and the store resolves a collision with two inputs that were being redrawn on every run: it breaks tied fused scores **by memory id**, and it re-sorts the window by a **decay factor** built from `created_at`. The benchmark used to seed every row through `store.Create`, so the id came from the column's `hex(randomblob(16))` default and `created_at` came from `datetime('now')` per row. `vec=0.50`'s NDCG@10 therefore took four values (0.807, 0.808, 0.809, 0.810) over ten runs of one binary, and its paired interval crossed zero, while the other five points — which barely tie — were byte-identical every time ([#708](https://github.com/wcatz/ghost/issues/708)). Both inputs are now a function of the fixture: a seeded row is stored under `bench:<project>:<key>` (`corpusID`) and carries one stamp per seeding pass (`corpusStamp`), so a tie resolves by the dataset's own key order and a tied pair of different categories is ordered by their categories rather than by which side of a second boundary they landed. Nothing in the ranking changed: `store.Create` still mints its own ids, `ghost bench`'s three-abiations table is **byte-identical before and after** (the ablations never tie, so a derived id cannot move them), and the five unaffected sweep rows are unchanged to the digit. The table above is five runs of one binary, byte-identical, and the report now says so in its own footer rather than telling the reader to discount a row.
 
 - **Outcome: the 70/30 leg weighting ships unchanged, and the graph bonus was removed.** With the leg weights robust across the upper half of the grid, there is no evidence to change the shipped 70/30 split. The graph-expansion bonus was removed rather than kept disabled (see the spec linked above); the link graph is still built for the Obsidian mirror and `supersedes`.
+
+## Context assembly (`ghost bench --context`)
+
+Every other table in this file asks **which row came first**. Recall@1, MRR@10 and NDCG@10 are statements about ORDER, and they are invariant under the decision that actually costs a caller money: NDCG@10 gives the tenth row the same credit as the first, so a block carrying ten rows where two would have answered scores *identically* to the two-row block while costing five times the tokens. Nothing in a ranking metric can see a row that should never have been in the block at all, because ordering presumes the set is right.
+
+`ghost bench --context` measures the block. It assembles one context block per graded query through the same path `ghost_memory_search` takes — `Store.Candidates` → `internal/assemble.Run` — at that tool's own budget (**10 items, 16000 response bytes** = `2 × memory.MaxContentLen`, `CondHybrid`), because a context metric measured against any other budget is a metric about a surface nobody ships. It prints this section and returns; it prints neither table above. Here is one captured run:
+
+```text
+context assembly (ghost_memory_search's own block: 10 items / 16000 bytes; report-only, no gate)
+  project bench, 220 queries measured, 220 answered, 2200 admitted rows
+
+  metric                                value  population
+  result rate                 1.000 (220/220)  queries that admitted at least one row
+  context precision          0.138 (304/2200)  graded-relevant of the admitted rows
+  contamination                0.000 (0/2200)  admitted rows the assembler flags
+
+  contamination by arm         rows  what the arm is
+  resolved                        0  resolved_at is set: retired evidence the ranking demotes rather than drops
+  expired                         0  its validity window has closed
+  not_yet_valid                   0  its validity window has not opened yet
+  out_of_scope                    0  it names a different place than the request asked for
+  other_project                   0  it sits in a bucket the request did not name
+  a zero here is a reading of THIS corpus: the graded one holds no resolved, out-of-window or
+  cross-bucket row, so there is nothing for an arm to catch. docs/benchmarks.md says which.
+
+  budget adherence                      value  population
+  largest response                 2411 bytes  cap 16000 bytes, 0 responses over it
+  largest block, tokens            336 (est.)  bytes/4 rounded up per row; an estimate, there is no tokenizer here
+  item cap trimmed          0.499 (2191/4391)  of the rows that reached it; 1.000 (220/220) of answered queries, 0.012 (27/2200) of them graded-relevant
+  response fit trimmed                    n/a  of the rows that reached it; n/a of answered queries, n/a of them graded-relevant
+
+  admitted rows by bucket      rows            share  queries
+  bench                        2200 1.000 (2200/2200)      220
+
+  dominant bucket, mean rows per answered query  10.000 (2200/220)
+```
+
+**What each metric is, and which of them a ranking metric could have told you.**
+
+| Metric | What it answers | Why the ranking tables cannot |
+|---|---|---|
+| **context precision** | Of the rows a caller receives, how many does the corpus grade relevant? | Not recall. Recall asks whether a relevant row was found; this asks how much of what *was* found was worth carrying. |
+| **contamination** | Of those rows, how many does `internal/assemble` classify as ones it should not have carried? | A ranking metric only orders a set it was given. A retired, out-of-window or wrong-project row ranks perfectly well; only the block's *composition* can be wrong. |
+| **result rate** | Of the queries, how many returned a block at all? | Every other ratio here has "admitted rows" or "answered queries" under it, so a system that returned nothing would post perfect precision and perfect cleanliness. Measured, not excluded. |
+| **budget adherence** | Did the block the tool shipped fit the budget the tool sent — and what did the cap cost? | NDCG is computed over a truncated window, so the truncation is invisible by construction. |
+| **diversity** | How is the block spread across buckets — the request's project, or `_global`? | Depends on the set, not the order. |
+| **token cost** | What did one answered query's block cost, in bytes and estimated tokens? | A metric about how much context to *spend*, which is only meaningful once the set is fixed. |
+
+Three findings, all from the table above:
+
+- **The budget is the binding constraint on every query, and it costs graded-relevant rows.** The item cap shortened **220 of 220** answered queries, cutting 2191 rows of the 4391 that reached it — the ranking found 331 graded-relevant rows and the block could only carry 304 of them. The **27 rows it dropped were all graded-relevant** (0.012 of the admitted rows), because the cap removes from the bottom of the ranking and relevance is concentrated near the top. This is the one budget number that is a quality claim rather than a conformance reading, and it is a direct argument about `limit`: the shipped 10 is not a neutral default, it is a policy that discards 8% of the relevant evidence a 551-row corpus can produce per query. A caller who needs the rest asks for it, and pays for it in tokens.
+- **The byte cap never binds, and the item cap always does.** The largest rendered response was 2411 bytes against a 16000-byte cap — 15% — so the response-fit pass never fired on a single query (`n/a`, not `0.000`: it was not measured, rather than measured as nothing). This is not a coincidence but a consequence: a larger `limit` makes the *byte* cap harder to hit, not easier, so the two bounds are not interchangeable and a report that folded them into one "budget" number would advise raising the limit that raises the problem. They are counted separately for that reason.
+- **This corpus cannot measure contamination, and the report says so rather than printing 0.000 as if it could.** The graded corpus holds no resolved row, no out-of-window row, no scope contradiction and no `_global` row (see [what this table cannot see](#phase-2--ghost-bench-an-in-repo-dataset--ci-regression-floors--shipped)), and the only contamination arm reachable through a real `assemble.Run` is `resolved` — stage 2 drops an out-of-window row and stage 3 drops a scope contradiction *before* either can be admitted. So all five arms read 0 and the 0.000 is a **property of the corpus, not evidence the filters work**. A gate on it would be a gate on a tautology, which is why this section is report-only. The measurement is carried by an 8-row in-test fixture (`contextFixture`, `internal/bench/context_test.go`) that holds a `resolved` row, an expired row, a not-yet-valid row and a `_global` row, and asserts the assembler withholds the first two and flags the third.
+
+**Contamination is classified by `internal/assemble`, not by the bench.** `assemble.Result.Leaks()` (`internal/assemble/leak.go`) reports a leak by reading the verdicts the assembler's own stages recorded in its trace — `ValidityState`, `ScopeMatched`, `ProjectMatch`, and the row's `resolved_at`. A bench-local predicate would be a *second* implementation of rules the pipeline already applies, free to drift from them until a leak was reported as clean by the one component whose entire job is to say otherwise. The bench refuses rather than guesses in the other direction too: a result with no trace, or an admitted row the trace never reached, is a measurement whose inputs are missing, and `measureQuery` errors rather than reporting a clean zero for it.
+
+**Determinism.** The context report is measured at a **fixed instant** (`bench.ContextInstant()`, 2026-06-01T12:00:00Z) rather than the wall clock, so two runs of one binary print byte-identical output — verified in the PR. The ablation tables deliberately keep their wall-clock seed: pinning that would age the corpus by however long ago the constant was written and move the published NDCG numbers for a reason that has nothing to do with retrieval. The fixed clock also has to sit well clear of every validity boundary the corpus states (its nearest are 2020-06-01 and 2099-01-01); `TestContextInstantSitsInsideEveryGradedWindow` holds a 90-day margin, so a corpus edit that added a window closing next quarter fails loudly instead of quietly restating the table.
+
+**What this does not measure: session-start injection.** The block measured here is the one `ghost_memory_search` assembles. The passive session-start block (`ghost context`, the loader path) is a different assembler and is not covered by this section — see [#581](https://github.com/wcatz/ghost/issues/581). The **cost** figures here do cover the rendered search response in full, framing and verdict line included, because that is what a caller receives and pays for; they do not cover a session-start injection.
+
+**CI cost.** The context metrics are measured on the existing graded dataset at report time, not by a new test that reloads the 551-row corpus: the fixture is 8 rows, and `internal/bench`'s test time is unchanged within noise (14.36 s on `98ffe9c5` before this section, 11.7–13.5 s after it over six runs, so within noise; the new tests themselves read 0.17 s).
 
 ## Phase 3 — staleness suite (the flagship)
 

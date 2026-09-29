@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/wcatz/ghost/internal/bench"
 	"github.com/wcatz/ghost/internal/memory"
@@ -14,35 +15,82 @@ import (
 // benchUsage is the help for `ghost bench`: stderr after an unknown flag (a
 // usage error, exit 1), stdout for -h/--help (see handleHelp). One text for
 // both, so the two can never drift.
-const benchUsage = `Usage: ghost bench [--sweep]
+const benchUsage = `Usage: ghost bench [--sweep | --context]
 
 Runs the built-in retrieval-quality benchmark (judge-free, deterministic, no
 network) over the embedded dataset and prints the metric table. --sweep
-grid-searches the fusion parameters and prints the ranked table instead. See
-docs/benchmarks.md.
+grid-searches the fusion parameters and prints the ranked table instead.
+--context prints the context-assembly table: what the block ghost_memory_search
+returns costs, how much of it is relevant, and how much of it should never have
+been in it. See docs/benchmarks.md.
 `
+
+// The three things `ghost bench` can print. A mode rather than a pair of bools
+// because they are not independent: a sweep and a context measurement are two
+// different reports over two different questions, and a caller asking for both
+// gets neither rather than one of them.
+const (
+	benchModeResults = "results"
+	benchModeSweep   = "sweep"
+	benchModeContext = "context"
+)
+
+// benchModeOf reads the flags after the command. It is a named function because
+// runBench is unreachable from a test (it writes to stdout and exits), and the
+// flag table is exactly the kind of thing that rots untested: a flag added here
+// and not in benchUsage is a mode a user cannot discover, and a flag parsed but
+// not honoured is a mode that prints the wrong table while looking like it worked.
+func benchModeOf(args []string) (string, error) {
+	mode := benchModeResults
+	for _, arg := range args {
+		switch arg {
+		case "--sweep":
+			if mode == benchModeContext {
+				return "", fmt.Errorf("--sweep and --context measure different things and cannot share a run")
+			}
+			mode = benchModeSweep
+		case "--context":
+			if mode == benchModeSweep {
+				return "", fmt.Errorf("--sweep and --context measure different things and cannot share a run")
+			}
+			mode = benchModeContext
+		default:
+			return "", fmt.Errorf("unknown flag %q", arg)
+		}
+	}
+	return mode, nil
+}
 
 // runBench implements `ghost bench` — runs the built-in retrieval-quality
 // benchmark (three ablations over the embedded dataset, plus the no-answer
 // false-positive table under them) and prints the metric table. With --sweep it
-// instead grid-searches the fusion parameters and prints the ranked table.
-// Judge-free, deterministic, no network. See docs/benchmarks.md.
+// instead grid-searches the fusion parameters and prints the ranked table; with
+// --context it prints the context-assembly table. Judge-free, deterministic, no
+// network. See docs/benchmarks.md.
 func runBench() {
-	sweep := false
-	for _, arg := range os.Args[2:] {
-		switch arg {
-		case "--sweep":
-			sweep = true
-		default:
-			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n\n%s", arg, benchUsage)
-			os.Exit(1)
-		}
+	mode, err := benchModeOf(os.Args[2:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, benchUsage)
+		os.Exit(1)
 	}
 
 	ds, vecs, err := bench.BuiltinDataset()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+	// The context mode measures the block at a FIXED clock and the ablations at
+	// the wall clock, and the split is deliberate in both directions. The
+	// published ablation numbers depend on a corpus stamped at the moment the run
+	// started — pinning that would age the corpus by however long ago the
+	// constant was written and move NDCG for reasons that have nothing to do with
+	// retrieval. The context table is a REPORT (#582) whose claim is that two runs
+	// of one binary print the same bytes, and a report measured against the wall
+	// clock cannot make it: a row's age and its validity window would both move.
+	// One seed serves either mode, so the choice is a clock and nothing else.
+	clock := time.Now().UTC()
+	if mode == benchModeContext {
+		clock = bench.ContextInstant()
 	}
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
@@ -58,7 +106,7 @@ func runBench() {
 	defer store.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	queries, err := bench.Seed(ctx, store, db, ds, vecs)
+	queries, stampedAt, err := bench.SeedAt(ctx, store, db, ds, vecs, clock)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -75,13 +123,28 @@ func runBench() {
 		os.Exit(1)
 	}
 
-	if sweep {
+	if mode == benchModeSweep {
 		points, err := bench.Sweep(ctx, store, queries, bench.SweepGrid())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Print(bench.FormatSweep(points))
+		return
+	}
+
+	// The context mode reads the stamped instant SeedAt handed back rather than
+	// the clock that was passed in: the stamp is truncated to the second, because
+	// that is what memories.created_at holds, so a request measured at an
+	// untruncated T would be measuring against a clock the corpus was not written
+	// at. The two halves of the report are then about one instant.
+	if mode == benchModeContext {
+		rep, err := bench.RunContext(ctx, store, queries, stampedAt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(bench.FormatContext(rep))
 		return
 	}
 

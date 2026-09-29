@@ -716,11 +716,14 @@ Runs the built-in retrieval-quality benchmark without a network call or LLM judg
 ```bash
 ghost bench
 ghost bench --sweep
+ghost bench --context
 ```
 
 Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) over the embedded dataset, then three things beneath it: the **no-answer false-positive table** — what each condition returns for the 24 queries nothing in the corpus answers — the abstention baseline for the shipped fused path, and the **paired 95% interval between the fused condition and each single leg**, so the fusion margin quoted in the docs is a number the command prints rather than one only a test logs.
 
 `--sweep` is a different report: it grid-searches the vector-leg weight (FTS weight is the complement) and prints each point's NDCG@10, R@1, R@10 and MRR@10 **plus a paired 95% interval against the shipped default** — because a sort by point estimate is not a ranking of points the dataset cannot separate. It returns there, so it prints neither table above. See [Benchmarks and methodology](benchmarks.md).
+
+`--context` is a third report, and the only one that measures the **block** rather than the ranking: it assembles one context block per graded query through the same path `ghost_memory_search` takes, at that tool's own budget (10 items, 16000 response bytes), and reports how much of each block is graded-relevant, how much of it is contamination, whether it fit the budget, how the rows are spread across buckets and what the block costs in bytes and estimated tokens per answered query. It is report-only, and it prints only this section. The two flags cannot be combined — they are two reports over two questions — and the report is measured at a fixed instant rather than the wall clock so two runs of one binary print the same bytes. See [Benchmarks and methodology](benchmarks.md#context-assembly-ghost-bench---context).
 
 ## Scratch hygiene
 
