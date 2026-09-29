@@ -16,6 +16,34 @@ import (
 // fixture that wants such a row to be prunable has to age updated_at too
 // (backdateWrite); leaving the write at the save instant is the ordinary case
 // and the row is inside the grace.
+// pruneFixtureIn is pruneFixture for a named project. The `_global` row a
+// `session` save can produce is a normal row in every respect but its project
+// id, and pinning the decision that a store-wide prune reaches it needs a way to
+// write one.
+func pruneFixtureIn(t *testing.T, s *Store, projectID, content, tier, expires, lastAccessed string) string {
+	t.Helper()
+	ctx := context.Background()
+	// A project_id that is not in `projects` trips the FK, and `_global` is only
+	// in a store that has had a global write go through ensureGlobalProject — the
+	// same path a real `ghost_save_global` takes. The test therefore makes the
+	// global row the way production does, not by naming the id directly.
+	if projectID == GlobalProjectID {
+		if err := s.EnsureProject(ctx, GlobalProjectID, GlobalProjectID, "global"); err != nil {
+			t.Fatalf("EnsureProject(%s): %v", GlobalProjectID, err)
+		}
+	}
+	id, _, _, err := s.UpsertWithOptions(ctx, projectID, "fact", content, "mcp", 0.6, nil, UpsertOptions{Retention: tier})
+	if err != nil {
+		t.Fatalf("UpsertWithOptions(%s, %s): %v", projectID, tier, err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE memories SET expires_at = ?, last_accessed = ? WHERE id = ?`,
+		nullIfEmpty(expires), nullIfEmpty(lastAccessed), id); err != nil {
+		t.Fatalf("age %s: %v", id, err)
+	}
+	return id
+}
+
 func pruneFixture(t *testing.T, s *Store, content, tier, expires, lastAccessed string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -351,6 +379,59 @@ func TestPruneNeverRemovesAPinnedRow(t *testing.T) {
 	}
 	if liveCount(t, s, testProject) != 1 {
 		t.Errorf("after the prune the project holds %d row(s), want 1 (the pinned one): a pinned session row was removed", liveCount(t, s, testProject))
+	}
+}
+
+// TestAStoreWidePruneReachesGlobalRows: a store-wide `ghost prune --apply`
+// (no --project) sweeps every project, `_global` included. That is DELIBERATE and
+// this test is what makes it a decision rather than an accident.
+//
+// The `_global` protection rule (best_practices.md) covers destructive and
+// REASSIGNING PROJECT operations — DeleteProject, MergeProject, anything that
+// deletes project rows or moves child records between them. It protects the
+// project IDENTITY, not the rows a project happens to hold. Prune is neither:
+// it deletes a memory row the user asked to have expired, in place, and moves
+// nothing. And skipping `_global` would break the tier's own promise in the
+// opposite direction: `ghost_save_global` takes `retention`, so a global memory
+// saved as `session` carries a derived `expires_at`, and a predicate that
+// excluded the project would leave that row in the store forever, past an
+// expiry the save already published — a session row that no prune can ever
+// remove is worse than one that a person asked to be removed.
+//
+// So the predicate carries no `_global` term, and the report names every row it
+// touches — which is the narrower safety the rule's intent asks for.
+func TestAStoreWidePruneReachesGlobalRows(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	globalID := pruneFixtureIn(t, s, GlobalProjectID, "a global note saved as conversation-scoped, long expired", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+
+	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if report.Removed != 1 || len(report.RemovedIDs) != 1 || report.RemovedIDs[0] != globalID {
+		t.Fatalf("store-wide prune removed %v (%d row(s)), want exactly the global row %s — a store-wide prune must reach _global, or a global session row outlives its own expiry",
+			report.RemovedIDs, report.Removed, globalID)
+	}
+	if liveCount(t, s, GlobalProjectID) != 0 {
+		t.Errorf("after the prune _global holds %d row(s), want 0", liveCount(t, s, GlobalProjectID))
+	}
+
+	// The scoped run is the half that must NOT reach it: `--project <id>` is the
+	// narrower blast radius, and a store-wide sweep being intended does not make
+	// a scoped one store-wide.
+	kept := pruneFixtureIn(t, s, GlobalProjectID, "a global note a scoped prune must not touch", RetentionSession,
+		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	scoped, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, ProjectID: testProject})
+	if err != nil {
+		t.Fatalf("scoped prune: %v", err)
+	}
+	if scoped.Removed != 0 {
+		t.Errorf("a --project-scoped prune removed %d row(s), want 0: it must not reach outside its project", scoped.Removed)
+	}
+	if liveCount(t, s, GlobalProjectID) != 1 {
+		t.Errorf("_global holds %d row(s) after the scoped prune, want 1 (%s)", liveCount(t, s, GlobalProjectID), kept)
 	}
 }
 

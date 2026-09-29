@@ -31,7 +31,9 @@ nothing at all. With --apply each removal is appended to memory_history as a
 delete tombstone first, so "ghost history <id>" still reports what was lost.
 
 Flags:
-  --project <name-or-id>   Only this project (default: every project)
+  --project <name-or-id>   Only this project (default: every project, which
+                           includes _global — a global memory saved as a
+                           session has an expiry like any other)
   --grace <duration>       How long past expiry an untouched row is left alone
                            (Go duration: 168h, 7d is not a unit and 0 is
                            refused; default 168h)
