@@ -387,10 +387,12 @@ Commands:
                                whose id already exists; imported memories are
                                downgraded to source "onboarding" and unpinned
                                unless --trust-provenance)
-  upgrade [--allow-downgrade] [--allow-prerelease]
+  upgrade [--allow-downgrade] [--allow-prerelease] [--allow-unattested]
                               Update ghost to the latest release (refuses an older
-                              release unless --allow-downgrade is given, and a
-                              prerelease unless --allow-prerelease is)
+                              release unless --allow-downgrade is given, a
+                              prerelease unless --allow-prerelease is, and from
+                              v0.43.0 a release whose build attestation cannot
+                              be confirmed unless --allow-unattested is)
   version                     Print version
 
 Flags (reflect):

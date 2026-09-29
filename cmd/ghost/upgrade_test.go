@@ -168,10 +168,20 @@ func TestParseUpgradeArgs(t *testing.T) {
 		{name: "no arguments", args: nil, want: upgradeOptions{}},
 		{name: "the downgrade opt-in", args: []string{"--allow-downgrade"}, want: upgradeOptions{allowDowngrade: true}},
 		{name: "the prerelease opt-in", args: []string{"--allow-prerelease"}, want: upgradeOptions{allowPrerelease: true}},
+		{name: "the attestation opt-in", args: []string{"--allow-unattested"}, want: upgradeOptions{allowUnattested: true}},
 		{
 			name: "both opt-ins",
 			args: []string{"--allow-prerelease", "--allow-downgrade"},
 			want: upgradeOptions{allowPrerelease: true, allowDowngrade: true},
+		},
+		{
+			// The three are independent, so passing all three is a legal
+			// command line rather than a contradiction. Whether installing an
+			// older, prerelease AND unattested release is a good idea is the
+			// user's call; the parser's job is to report what they asked for.
+			name: "all three opt-ins",
+			args: []string{"--allow-prerelease", "--allow-downgrade", "--allow-unattested"},
+			want: upgradeOptions{allowPrerelease: true, allowDowngrade: true, allowUnattested: true},
 		},
 	}
 
@@ -195,7 +205,8 @@ func TestParseUpgradeArgs(t *testing.T) {
 func TestParseUpgradeArgsRejectsAnythingElse(t *testing.T) {
 	for _, arg := range []string{
 		"--allow-down", "-allow-downgrade", "--allow-downgrade=false",
-		"--allow-pre", "--allow-prerelease=true", "--apply", "upgrade", "",
+		"--allow-pre", "--allow-prerelease=true", "--allow-unatteste",
+		"--allow-unattested=true", "--apply", "upgrade", "",
 	} {
 		if _, err := parseUpgradeArgs([]string{arg}); err == nil {
 			t.Errorf("parseUpgradeArgs(%q) accepted an argument it does not implement", arg)
@@ -346,11 +357,11 @@ func TestInstallReleaseInstallsTheVerifiedArchive(t *testing.T) {
 
 	var installed []byte
 	calls := 0
-	err := installRelease(context.Background(), io.Discard, fx.release, fx.asset, func(b []byte) error {
+	err := installRelease(context.Background(), discardStreams(), fx.release, fx.asset, upgradeOptions{}, upgradeDeps{install: func(b []byte) error {
 		calls++
 		installed = b
 		return nil
-	})
+	}})
 	if err != nil {
 		t.Fatalf("installRelease: %v", err)
 	}
@@ -421,11 +432,11 @@ func TestInstallReleaseRefusesBeforeInstalling(t *testing.T) {
 
 			var installed []byte
 			calls := 0
-			err := installRelease(context.Background(), io.Discard, fx.release, fx.asset, func(b []byte) error {
+			err := installRelease(context.Background(), discardStreams(), fx.release, fx.asset, upgradeOptions{}, upgradeDeps{install: func(b []byte) error {
 				calls++
 				installed = b
 				return nil
-			})
+			}})
 			if err == nil {
 				t.Fatal("expected a refusal, but the archive was accepted")
 			}
@@ -452,10 +463,10 @@ func TestInstallReleaseVerifiesTheDigestBeforeParsingTheArchive(t *testing.T) {
 	fx.payloads.setManifest(sha256HexDigest(notAnArchive) + "  " + fx.asset.Name + "\n")
 	fx.payloads.setArchive(notAnArchive)
 
-	err := installRelease(context.Background(), io.Discard, fx.release, fx.asset, func([]byte) error {
+	err := installRelease(context.Background(), discardStreams(), fx.release, fx.asset, upgradeOptions{}, upgradeDeps{install: func([]byte) error {
 		t.Error("the installer ran for an archive that was never verified")
 		return nil
-	})
+	}})
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
@@ -479,10 +490,10 @@ func TestInstallReleaseRefusesAMissingManifest(t *testing.T) {
 	fx.release.Assets = []selfupdate.Asset{*fx.asset}
 
 	calls := 0
-	err := installRelease(context.Background(), io.Discard, fx.release, fx.asset, func([]byte) error {
+	err := installRelease(context.Background(), discardStreams(), fx.release, fx.asset, upgradeOptions{}, upgradeDeps{install: func([]byte) error {
 		calls++
 		return nil
-	})
+	}})
 	if err == nil {
 		t.Fatal("expected a refusal for a release with no checksums.txt")
 	}
@@ -500,9 +511,9 @@ func TestInstallReleaseReportsAnInstallerFailure(t *testing.T) {
 	fx := newUpgradeFixture(t, []byte("pretend executable"))
 
 	want := "the target directory is read-only"
-	err := installRelease(context.Background(), io.Discard, fx.release, fx.asset, func([]byte) error {
+	err := installRelease(context.Background(), discardStreams(), fx.release, fx.asset, upgradeOptions{}, upgradeDeps{install: func([]byte) error {
 		return errors.New(want)
-	})
+	}})
 	if err == nil {
 		t.Fatal("expected the installer's error to be reported")
 	}
@@ -1064,15 +1075,22 @@ func TestPerformUpgradeDoesNotBlameTheBudgetForTheCallersDeadline(t *testing.T) 
 // untidy — the summary goes on telling a user that `ghost upgrade` refuses
 // pre-releases unconditionally, which is the opposite of what the command does.
 // This is the drift review-sweeper found on this change; nothing pinned it.
+//
+// It is written as a per-flag check rather than one literal, because a single
+// literal is satisfied by a PREFIX: a usage line ending at
+// "[--allow-prerelease]" still contains "upgrade [--allow-downgrade]
+// [--allow-prerelease]", so the literal passed while the newest flag was
+// missing from the summary. Each flag has to be named in both surfaces.
 func TestUpgradeFlagsAgreeAcrossBothHelpSurfaces(t *testing.T) {
-	const usageLine = "upgrade [--allow-downgrade] [--allow-prerelease]"
-
-	if !strings.Contains(upgradeUsage, usageLine) {
-		t.Errorf("upgradeUsage opens with %q, want the usage line to carry %q", firstLine(upgradeUsage, 80), usageLine)
-	}
 	_, summary := captureStreams(t, printUsage)
-	if !strings.Contains(summary, usageLine) {
-		t.Errorf("the top-level command list does not carry %q, so the two help surfaces disagree about what `ghost upgrade` accepts:\n%s", usageLine, summary)
+
+	for _, flag := range []string{"--allow-downgrade", "--allow-prerelease", "--allow-unattested"} {
+		if !strings.Contains(upgradeUsage, flag) {
+			t.Errorf("the per-command help for `ghost upgrade` never mentions %s, so a user reading it cannot discover the opt-in:\n%s", flag, upgradeUsage)
+		}
+		if !strings.Contains(summary, flag) {
+			t.Errorf("the top-level command list does not carry %s, so the two help surfaces disagree about what `ghost upgrade` accepts:\n%s", flag, summary)
+		}
 	}
 }
 
