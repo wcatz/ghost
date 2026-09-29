@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -29,9 +30,28 @@ func SchemaVersion() int { return schemaVersion }
 // export holds, and it deliberately does not migrate: the caller opening
 // read-only has already decided not to write, and a version check that repaired
 // the store would be the read doing the write.
-func DBUserVersion(db *sql.DB) (int, error) {
+func DBUserVersion(db *sql.DB) (int, error) { return dbUserVersion(db) }
+
+// dbUserVersion is DBUserVersion over a Queryer, for a caller that is INSIDE a read
+// transaction. This is not a convenience: the pool is pinned at MaxOpenConns(1), so
+// an open transaction holds the only connection and a PRAGMA issued on the pool
+// while it is open waits for a connection that cannot be handed out — a deadlock
+// rather than an error. A caller holding a snapshot therefore has to read the
+// version through it, and that is the only way this can be asked at all.
+func dbUserVersion(q Queryer) (int, error) {
+	rows, err := q.QueryContext(context.Background(), `PRAGMA user_version`)
+	if err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, fmt.Errorf("read schema version: %w", err)
+		}
+		return 0, errors.New("read schema version: PRAGMA user_version returned no row")
+	}
 	var v int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+	if err := rows.Scan(&v); err != nil {
 		return 0, fmt.Errorf("read schema version: %w", err)
 	}
 	return v, nil
