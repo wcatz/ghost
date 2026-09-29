@@ -1691,6 +1691,37 @@ func TestSupersedeReport(t *testing.T) {
 	// inside the call tally rather than a second sentence, because the calls and
 	// the retries are one fact: the retry IS a call, and the line that reports
 	// one without the other describes a pass nobody ran.
+	//
+	// The three orientation refusals are on the report for the same reason the
+	// veto is, and each one says what the pass did INSTEAD, because a bare count
+	// cannot distinguish a pair that was judged and dropped from a pair that was
+	// never seen — and the two call for opposite follow-ups from the operator.
+	orientation := supersedeReport("proj", supersede.Result{
+		Candidates: 3, Unoriented: 4, OppositeLive: 2, Bidirectional: 1,
+	}, "would link", 1, 0)
+	for _, want := range []string{
+		"  4 pair(s) not proposed:",
+		"  2 pair(s) proposed the reverse of a live supersedes link:",
+		"  1 pair(s) refused:",
+		"ghost supersede <project> --reassess",
+	} {
+		if !strings.Contains(orientation, want) {
+			t.Errorf("supersedeReport() = %q, want it to contain %q", orientation, want)
+		}
+	}
+	// Each reason must also say what it costs, so the count cannot be read as
+	// "the pass lost these pairs" when two of the three did not lose them.
+	for _, want := range []string{"no classify call, no link", "judged in the link's direction instead", "not judged, not written"} {
+		if !strings.Contains(orientation, want) {
+			t.Errorf("supersedeReport() = %q, want it to say %q so the count is not read as a dropped pair", orientation, want)
+		}
+	}
+	// A pass with no refusals prints the summary alone, and the reasons do not
+	// accumulate across calls: they are per-pass facts, each conditional on its
+	// own count.
+	if plain := supersedeReport("proj", supersede.Result{Candidates: 2}, "would link", 1, 0); strings.Count(plain, "\n") != 1 {
+		t.Errorf("supersedeReport() = %q, want the summary line and no refusal lines when nothing was refused", plain)
+	}
 	retried := supersedeReport("proj", supersede.Result{Candidates: 4, Confirmed: 1}, "would link", 3, 1)
 	if !strings.Contains(retried, "in 3 classify call(s), 1 retried after a failed call, 0 cached") {
 		t.Errorf("supersedeReport() = %q, want the retried call counted next to the calls it made", retried)

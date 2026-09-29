@@ -1632,21 +1632,39 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 }
 
 // supersedeReport renders the pass's per-outcome report: the one-line summary
-// followed by the deterministic veto's count. A pass that declined work it did
-// not do and printed the same totals as a pass that found nothing to do reads
-// as "nothing was skipped", so the veto is on the report (#686) — and it is
-// printed by the one call below, so the report and the pass cannot drift.
+// followed by each reason the pass declined a pair. A pass that declined work it
+// did not do and printed the same totals as a pass that found nothing to do reads
+// as "nothing was skipped", so every refusal is on the report (#686, and #778 for
+// the three orientation refusals) — and they are printed by the one call below,
+// so the report and the pass cannot drift.
 //
 // A retried call is on the report too, and only when there was one: a pass that
 // had to re-ask a failed call is not the pass the summary describes, and a
 // harness that is flapping shows up here before it shows up as a failure.
+//
+// The three orientation refusals each say what was refused AND what the pass
+// did instead, because a count alone leaves the operator guessing whether the
+// pairs were considered and dropped or never seen: OppositeLive pairs were still
+// judged, in the direction the live link asserts; Unoriented pairs were not
+// proposed, because the two rows share both timestamps; Bidirectional pairs are
+// the cycle `ghost supersede --reassess` repairs, named as the next step because
+// this pass writes links and does not withdraw them.
 func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
 	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
 		projectName, res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
-	if res.Vetoed == 0 {
-		return out
+	if res.Vetoed > 0 {
+		out += fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
 	}
-	return out + fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
+	if res.Unoriented > 0 {
+		out += fmt.Sprintf("  %d pair(s) not proposed: both notes carry the same updated_at AND the same created_at (a bulk import stamps a whole batch at once), so there is no chronology to order them by — no classify call, no link, and not cached (a live link on such a pair is still re-judged, since it already carries a direction)\n", res.Unoriented)
+	}
+	if res.OppositeLive > 0 {
+		out += fmt.Sprintf("  %d pair(s) proposed the reverse of a live supersedes link: judged in the link's direction instead, so one pass never carries a pair both ways round\n", res.OppositeLive)
+	}
+	if res.Bidirectional > 0 {
+		out += fmt.Sprintf("  %d pair(s) refused: a supersedes link is already live in BOTH directions, which demotes both endpoints — not judged, not written, and not withdrawn here; run `ghost supersede <project> --reassess` to repair it\n", res.Bidirectional)
+	}
+	return out
 }
 
 // retryNote is the ", N retried call(s)" clause the call counts share: empty

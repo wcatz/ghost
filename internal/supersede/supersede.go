@@ -6,10 +6,12 @@
 // docs/benchmarks.md Phase 3.
 //
 // Design: cosine similarity proposes same-subject candidate pairs (cheap,
-// local), updated_at gives direction (newer/older — SQLite's
-// 'YYYY-MM-DD HH:MM:SS' timestamps compare lexicographically), and an LLM
-// Classifier makes a 4-way SUPERSEDES/CAUSES/NEITHER/REVERSED judgment for each
-// pair — batched up to classifyBatchSize pairs per harness call so a large
+// local), the timestamps give direction (newer/older by updated_at, then by
+// created_at — SQLite's 'YYYY-MM-DD HH:MM:SS' timestamps compare
+// lexicographically, and a pair that ties on BOTH has no direction this pass may
+// invent), and an LLM Classifier makes a 4-way
+// SUPERSEDES/CAUSES/NEITHER/REVERSED judgment for each pair — batched up to
+// classifyBatchSize pairs per harness call so a large
 // project's pass does not pay one process spawn and full rubric per pair — since
 // "replaces a stale claim" and "is caused by / follows from" are distinct
 // relations that a binary confirm/reject can't tell apart. SUPERSEDES writes
@@ -28,6 +30,20 @@
 // after the fact it reports (#641): a bare three-way answer cannot decline a
 // direction, and the pass wrote a backwards link that demoted a fix and promoted
 // the stale claim it replaced.
+//
+// The unit the pass judges is the UNORDERED PAIR, and it is that unit because
+// the two things the edge does — demote a target, stamp resolved_at on it —
+// both land on the target alone, so two edges in opposite directions demote
+// BOTH memories of one pair and neither can undo the other (#778). A live edge
+// therefore decides which way round its pair is judged, a pair claimed in both
+// directions is refused rather than judged, and a pair whose two rows share both
+// timestamps is not proposed at all: a bulk import stamps a whole batch with
+// one updated_at, and the only "chronology" left to invent a direction from
+// would be a pair of hex ids. Each of those three is a counted, named refusal
+// (Result.OppositeLive, .Bidirectional, .Unoriented) because a pass that
+// declined work and reported the totals of one that found nothing to do reads
+// as "nothing was skipped".
+//
 // Fresh NEITHER verdicts are cached by pair and both endpoints' content hashes
 // (supersede_checked, schema v8): unchanged fresh pairs are skipped on later
 // passes — a cache skip is equivalent to a NEITHER verdict, so a stale
@@ -164,6 +180,21 @@ type Selection struct {
 	// every vector in a project, both halves describe the same corpus and only
 	// one of the two sentences is true.
 	Unscored int
+	// Unoriented counts the near-neighbour pairs this scan found and REFUSED to
+	// propose, because both rows carry the same updated_at and the same
+	// created_at and the pass therefore holds no chronology to order them by
+	// (see orient). It is counted, unlike the scope and persistent refusals
+	// above, for the reason those are not: those rows are dropped by the query
+	// before this function sees them, so a count taken here would read as zero
+	// for work the pass really declined. This one is decided HERE, from the two
+	// timestamp columns this function has just read, and a bulk import produces
+	// a whole corpus of it (#778: 33 rows sharing one updated_at) — so a pass
+	// that reported "0 candidate pairs" over a project whose pairs are all tied
+	// would be reporting a scan that ran, not a scan that found nothing.
+	//
+	// Counted per unordered PAIR, not per sighting: every endpoint sees every
+	// pair, so a per-sighting count would report each refusal twice.
+	Unoriented int
 }
 
 // SelectCandidates returns the deduped ordered candidate pairs for a project:
@@ -205,6 +236,11 @@ type Selection struct {
 // a number that reads as "nothing was skipped", which is worse than no number.
 // Run's reclassify filter can see its own pairs and logs each refusal; on the
 // fresh path a refusal shows up as a candidate the pass never spends a call on.
+// The THIRD refusal — a pair this scan will not orient because both endpoints
+// share both timestamps — is decided here and is counted in Selection.Unoriented
+// for the opposite reason: unlike the two above, this function holds the columns
+// the decision is made from, so the count is knowable, and a corpus of tied
+// bulk-import rows would otherwise read as a corpus with no similar pairs in it.
 func SelectCandidates(ctx context.Context, store vectorStore, projectID string, threshold float32) (Selection, error) {
 	var sel Selection
 	mems, err := store.GetAll(ctx, projectID, 100000)
@@ -216,7 +252,9 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 		byID[m.ID] = m
 	}
 
-	seen := make(map[[2]string]bool)
+	// seen is keyed by the UNORDERED pair, so a pair is proposed once and a
+	// refusal is counted once however many times the two endpoints see it.
+	seen := make(map[pairKey]bool)
 	var cands []Candidate
 	for _, m := range mems {
 		vec, err := store.GetEmbedding(ctx, m.ID)
@@ -261,15 +299,24 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			if memory.ScopesConflict(m.Scope, n.Scope) {
 				continue
 			}
-			newer, older := orient(m, other)
-			if newer.ID == older.ID {
-				continue // identical created_at and ID collision guard
-			}
-			key := [2]string{newer.ID, older.ID}
+			key := newPairKey(m.ID, other.ID)
 			if seen[key] {
 				continue
 			}
 			seen[key] = true
+			newer, older, ok := orient(m, other)
+			if !ok {
+				// No chronology: both rows carry the same updated_at AND the same
+				// created_at, so this pass cannot say which note is the current
+				// one and must not guess. Counted once per pair, and not
+				// proposed, so no call is spent on it and nothing is cached
+				// under a direction nobody read.
+				sel.Unoriented++
+				continue
+			}
+			if newer.ID == older.ID {
+				continue // identical ID (a store that minted one id twice)
+			}
 			cands = append(cands, Candidate{
 				NewerID: newer.ID, NewerContent: newer.Content, NewerCreatedAt: newer.CreatedAt,
 				OlderID: older.ID, OlderContent: older.Content, OlderCreatedAt: older.CreatedAt,
@@ -281,18 +328,59 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 	return sel, nil
 }
 
-// orient returns (newer, older) by updated_at — the same freshness signal
-// Run()'s skip-if-unchanged reclassification already uses. created_at would
-// misorder (and mislabel the direction of) a memory that was edited long
-// after it was first created, which is exactly the reversed-decision case
-// this pass exists to catch. SQLite 'YYYY-MM-DD HH:MM:SS' strings order
-// chronologically under lexicographic comparison; ties break by ID so the
-// pair is deterministic.
-func orient(a, b memory.Memory) (newer, older memory.Memory) {
-	if a.UpdatedAt > b.UpdatedAt || (a.UpdatedAt == b.UpdatedAt && a.ID > b.ID) {
-		return a, b
+// pairKey is the identity of a PAIR of memories, which is unordered: {A,B} and
+// {B,A} are the same pair, and a pass that treats them as two is how one pair
+// came to be classified twice in opposite orientations in a single run (#778).
+// It is deliberately not the [2]string the store's supersede_checked rows and
+// the NEITHER cache are keyed by, because those record a verdict ABOUT a
+// direction and so must stay ordered.
+type pairKey [2]string
+
+// newPairKey is the canonical form of the unordered pair, with the ids in
+// ascending order. Every lookup that asks "is this the same pair?" goes through
+// it, so the reconciliation in Run cannot be half-applied.
+func newPairKey(a, b string) pairKey {
+	if a > b {
+		return pairKey{b, a}
 	}
-	return b, a
+	return pairKey{a, b}
+}
+
+// orient returns (newer, older) by updated_at, then by created_at, and reports
+// whether a direction is knowable at all.
+//
+// updated_at is the primary signal — the same freshness Run()'s skip-if-unchanged
+// reclassification already uses. created_at misorders (and mislabels the
+// direction of) a memory that was edited long after it was first created, which
+// is exactly the reversed-decision case this pass exists to catch, so it decides
+// only what updated_at cannot: a pair of rows a bulk import stamped together
+// carries one updated_at for the whole batch and a real per-row chronology in
+// created_at. SQLite 'YYYY-MM-DD HH:MM:SS' strings order chronologically under
+// lexicographic comparison.
+//
+// ok is false when the two agree on BOTH columns, and that is the answer the
+// caller must act on rather than a fallback. A bulk import stamps every row it
+// writes (#778 measured 33 rows sharing one `2026-09-20 09:26:05` updated_at), and
+// for any pair among them the pass holds no chronology at all. The old third
+// tiebreak was the ID, which is a hash: it made the direction of a real
+// supersession a function of which of two random hex strings sorted higher,
+// rather than of anything about the two notes. There is no fourth column to
+// read, and inventing a direction is the harm, so the pair is not proposed (see
+// Selection.Unoriented).
+func orient(a, b memory.Memory) (newer, older memory.Memory, ok bool) {
+	if a.UpdatedAt != b.UpdatedAt {
+		if a.UpdatedAt > b.UpdatedAt {
+			return a, b, true
+		}
+		return b, a, true
+	}
+	if a.CreatedAt != b.CreatedAt {
+		if a.CreatedAt > b.CreatedAt {
+			return a, b, true
+		}
+		return b, a, true
+	}
+	return memory.Memory{}, memory.Memory{}, false
 }
 
 // Classified pairs a Candidate with the verdict Run() reached for it — used
@@ -341,6 +429,28 @@ type Result struct {
 	// purely destructive: a reversal and a NEITHER both only invalidate the
 	// links they find, so neither re-links the pair.
 	ReclassifiedNoWrite int
+	// Unoriented counts the near-neighbour pairs the scan REFUSED to propose
+	// because both rows carry the same updated_at and the same created_at, so
+	// the pass has no chronology to order them by (see orient and
+	// Selection.Unoriented). No classify call, no link, no cache row: a
+	// direction invented from a hash is the #641 harm wearing a tiebreak.
+	Unoriented int
+	// OppositeLive counts the pairs whose fresh proposal was the REVERSE of a
+	// live 'supersedes' edge, which the pass refused and then judged in the
+	// edge's own direction instead (#778). It is the count of a pass declining
+	// a proposal, and it is on the report because the totals it appears in
+	// would otherwise be indistinguishable from a pass that found nothing to do
+	// about those pairs: the pair is still judged, but the direction the
+	// classifier was shown came from the graph, not from updated_at.
+	OppositeLive int
+	// Bidirectional counts the pairs the graph already claims in BOTH
+	// directions — the cycle a pass before #778 could write, left in place for
+	// `--reassess` to withdraw. This pass refuses the pair outright: it judges
+	// nothing, writes nothing, and withdraws nothing (that is
+	// `ghost supersede <project> --reassess`, the repair path), because a cycle
+	// demotes both endpoints and no orientation of it can be judged into a
+	// state worth keeping.
+	Bidirectional int
 }
 
 // WouldWriteLinks reports whether an --apply pass would put a NEW link in the
@@ -398,9 +508,11 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // previously cached version, that link is not invalidated on the skipping pass
 // — graph-only staleness, since ranking consumes only 'supersedes'. Reclassify
 // candidates are never cache-skipped, so live-link pairs are still validated
-// every pass and self-healing is untouched. Cache rows are recorded on apply
-// only — dry-run stays side-effect-free — and cascade away with their memories
-// via the FK.
+// every pass and self-healing is untouched — and a pair a live edge names is
+// never cache-skipped for the same reason, whichever source proposed its
+// direction, since the edge still has to keep self-healing. Cache rows are
+// recorded on apply only — dry-run stays side-effect-free — and cascade away
+// with their memories via the FK.
 //
 // Pairs whose endpoints are replaced by a concurrent reflect pass (the stop
 // hook spawns both for the same session) are dropped and counted in
@@ -437,6 +549,32 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // fix. That is why the classifier is also shown each note's created_at: the
 // timestamps are the only signal it has to tell a re-saved stale claim from a
 // genuine later update.
+//
+// A PAIR is the unit, not a direction, and that is what #778 changed. The two
+// sources disagreed about which way round a pair runs — the scan orients by
+// updated_at, a live edge keeps the direction it was written with — and they
+// were reconciled on the ordered pair, so a disagreement matched nothing and one
+// pass put the same pair to the classifier twice in opposite orientations. Where
+// a verdict could not decline a direction, that pass wrote a cycle, and a cycle
+// demotes BOTH endpoints in ranking, so the harm is not "one edge is backwards"
+// but "two live memories stop being reminded of". Three rules follow, each
+// counted and on the report, and each a refusal rather than a guess:
+//
+//   - One pass classifies a pair at most once, in the direction the GRAPH
+//     asserts whenever a live edge names one (Result.OppositeLive for a scan
+//     proposal that contradicted it). The edge's direction is the one a
+//     REVERSED verdict has to be shown, because that is the wrong edge --reassess
+//     and this pass's own withdrawal both have to reach.
+//   - A pair the graph already claims in BOTH directions is refused outright
+//     (Result.Bidirectional): no third direction exists, so no orientation of it
+//     can be judged into a state worth keeping, and the repair is the withdrawal
+//     pass, not a verdict.
+//   - A fresh pair whose rows tie on updated_at AND created_at is not proposed at
+//     all (Result.Unoriented), because a bulk import stamps a whole batch with
+//     one timestamp and the only remaining "chronology" is a pair of hex ids. A
+//     LIVE edge naming such a pair is still revalidated: it already carries a
+//     direction, so the tie rules out proposing one and says nothing about
+//     judging one.
 func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Classified, error) {
 	sel, err := SelectCandidates(ctx, store, projectID, threshold)
 	if err != nil {
@@ -450,11 +588,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	// pass can fix that — the vectors belong to the embedding worker — but a
 	// caller that knows the number can say so instead of implying a complete
 	// scan over a corpus it never saw.
-	res := Result{Unscored: sel.Unscored}
-	freshKeys := make(map[[2]string]bool, len(fresh))
-	for _, c := range fresh {
-		freshKeys[[2]string{c.NewerID, c.OlderID}] = true
-	}
+	res := Result{Unscored: sel.Unscored, Unoriented: sel.Unoriented}
 
 	existingLinks, err := store.LinksByRelationSource(ctx, projectID, string(RelationSupersedes), "llm")
 	if err != nil {
@@ -482,13 +616,89 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		}
 	}
 
-	reclassifyByKey := make(map[[2]string]bool, len(existingLinks))
-	all := append([]Candidate{}, fresh...)
+	// The two sources, reconciled on the UNORDERED pair. Before #778 they were
+	// keyed by the ORDERED pair, so a live edge pointing the opposite way from
+	// the scan's orientation for the same two memories matched nothing and both
+	// orientations were put to the classifier in one pass — and a verdict that
+	// cannot decline a direction wrote both edges, a cycle whose two
+	// SupersedePenalties demote BOTH endpoints. Keyed unordered, the two sources
+	// meet: a pair is on the schedule exactly once.
+	liveByPair := make(map[pairKey][]memory.Link, len(existingLinks))
 	for _, l := range existingLinks {
-		key := [2]string{l.SourceID, l.TargetID}
-		reclassifyByKey[key] = true
-		if freshKeys[key] {
-			continue // already going to be classified via fresh
+		key := newPairKey(l.SourceID, l.TargetID)
+		liveByPair[key] = append(liveByPair[key], l)
+	}
+	freshByPair := make(map[pairKey]Candidate, len(fresh))
+	order := make([]pairKey, 0, len(fresh)+len(existingLinks))
+	queued := make(map[pairKey]bool, len(fresh)+len(existingLinks))
+	for _, c := range fresh {
+		key := newPairKey(c.NewerID, c.OlderID)
+		freshByPair[key] = c
+		if !queued[key] {
+			queued[key] = true
+			order = append(order, key)
+		}
+	}
+	for _, l := range existingLinks {
+		key := newPairKey(l.SourceID, l.TargetID)
+		if !queued[key] {
+			queued[key] = true
+			order = append(order, key)
+		}
+	}
+
+	// livePair names the pairs a live 'supersedes' edge already asserts a
+	// direction for, and it is what separates a reclassification from a fresh
+	// proposal from here on. The live edge's DIRECTION is the one the pair is
+	// judged in, whatever the scan's timestamps say: the edge is the claim the
+	// graph already makes, and judging the pair in that direction is what lets a
+	// REVERSED verdict reach the wrong edge and withdraw it (#641) instead of
+	// confirming the reverse one and leaving the wrong edge in place.
+	livePair := make(map[pairKey]bool, len(order))
+	all := make([]Candidate, 0, len(order))
+	for _, key := range order {
+		links := liveByPair[key]
+		if len(links) > 1 {
+			// Both directions of one pair are already live, which is the state
+			// #778's own bidirectional write leaves behind. There is no third
+			// direction to try, so no orientation of this pair can be judged into
+			// a state worth keeping: a SUPERSEDES would re-affirm one half of a
+			// cycle and a NEITHER/REVERSED would drop an edge whose partner stays.
+			// Refused, counted, and reported with the repair to run — this pass
+			// creates links, and withdrawing one is `ghost supersede --reassess`.
+			res.Bidirectional++
+			if logger != nil {
+				logger.Info("supersede: refusing a pair the graph claims in both directions (run ghost supersede --reassess)",
+					"newer", links[0].SourceID, "older", links[0].TargetID)
+			}
+			continue
+		}
+		cand, isFresh := freshByPair[key]
+		if len(links) == 0 {
+			all = append(all, cand) // a fresh pair, in the scan's own direction
+			continue
+		}
+		l := links[0]
+		livePair[key] = true
+		// The live edge's direction, unless the scan already proposed this pair
+		// that way round — then the scan's candidate carries it (and its
+		// similarity), and the pair is revalidated under skip-if-unchanged below
+		// either way. The comparison is on the ORDERED pair, because agreeing
+		// about which memory is newer is what makes the scan's candidate and the
+		// edge the same candidate.
+		if isFresh && cand.NewerID == l.SourceID && cand.OlderID == l.TargetID {
+			all = append(all, cand)
+			continue
+		}
+		// The scan proposed the REVERSE of an edge the graph already asserts.
+		// The pair is still judged, in the edge's direction, and the refused
+		// proposal is counted so a report can say the scan's orientation lost.
+		if isFresh {
+			res.OppositeLive++
+			if logger != nil {
+				logger.Info("supersede: scan proposed the reverse of a live supersedes link; judging the pair in the link's direction",
+					"link", l.SourceID, l.TargetID, "scan", cand.NewerID, cand.OlderID)
+			}
 		}
 		newerMem, ok1 := memByID[l.SourceID]
 		olderMem, ok2 := memByID[l.TargetID]
@@ -621,9 +831,9 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	}
 	var pending []Candidate
 	for _, c := range all {
-		key := [2]string{c.NewerID, c.OlderID}
-		chk, cached := checked[key]
-		if freshKeys[key] && !reclassifyByKey[key] && cached &&
+		key := newPairKey(c.NewerID, c.OlderID)
+		chk, cached := checked[[2]string{c.NewerID, c.OlderID}]
+		if !livePair[key] && cached &&
 			chk.NewerHash == contentHash(c.NewerContent) && chk.OlderHash == contentHash(c.OlderContent) {
 			res.Skipped++
 			continue
@@ -661,8 +871,8 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			}
 			classified = append(classified, Classified{Candidate: c, Relation: verdict})
 
-			key := [2]string{c.NewerID, c.OlderID}
-			wasReclassify := reclassifyByKey[key]
+			key := newPairKey(c.NewerID, c.OlderID)
+			wasReclassify := livePair[key]
 
 			switch verdict {
 			case RelationSupersedes:
@@ -788,7 +998,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		newNeither := make(map[[2]string]memory.SupersedeCheck)
 		for _, c := range classified {
 			key := [2]string{c.NewerID, c.OlderID}
-			if c.Relation != RelationNeither || !freshKeys[key] || reclassifyByKey[key] || !writable[key] {
+			if c.Relation != RelationNeither || livePair[newPairKey(c.NewerID, c.OlderID)] || !writable[key] {
 				continue
 			}
 			newNeither[key] = memory.SupersedeCheck{
