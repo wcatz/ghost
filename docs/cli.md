@@ -856,8 +856,10 @@ whose WRITER moved `updated_at` in the same statement that filed it** — `save`
 full removal rule: a version is damage when it records the state its predecessor
 recorded, is a `reflect`, was recorded before the bound, and names no other memory.
 The two retention guards — a memory's newest version is spared, and a deleted
-memory's history is left alone — are **not** part of the anchor's definition, and a
-version excluded by either can still be the anchor. A `ghost resolve` changes
+memory's history is left alone — are **not** part of the anchor's definition — which
+is why being spared by one is not what makes a version an anchor, and is not a reason to
+look for one. A version can be the anchor while a guard spares it from removal, but only
+if it repeats nothing; a repeating row is damage at any position in the history. A `ghost resolve` changes
 `resolved_at` and says
 in as many words that it leaves `updated_at` alone; a duplicate save that folds
 changes `importance` and moves nothing. Answering with either would set a memory's
@@ -865,12 +867,14 @@ stamp to an instant the store never held on that column at all, and on a real st
 this did so for 49 of 288 restored stamps. `ghost history compact --fix-updated-at`
 therefore skips over all three and lands on the newest write that really moved the
 stamp without itself being the damage. Note what that does *not* mean: the anchor is
-not necessarily earlier than the last write that moved the stamp. On a damaged memory
-whose newest version is a no-op `reflect` that repeat is spared by the newest-version
-guard, so it is not damage by the rule above and it *is* the anchor. A memory later
-touched by a deliberate `update` or any post-#727 write has the anchor equal to that
-write. "The damage is earlier" is the reason a *flood* does not pin the stamp, not a
-guarantee about any one memory. A version a
+not necessarily earlier than the last write that moved the stamp — a memory later
+touched by a deliberate `update`, or by any post-#727 write, anchors on that write. It
+does *not* mean a newest no-op `reflect` can be one: a pre-#727 no-op repeat is damage
+whatever its position, so being spared by the newest-version guard does not make it an
+anchor, and `TestCompactHistoryFixUpdatedAtRestoresTheLastStampWrite` is the case — its
+newest version is a no-op reflect and the anchor is the `update` beneath the flood. "The
+damage is earlier" is the reason a *flood* does not pin the stamp, not a guarantee about
+any one memory. A version a
 deliberate writer filed *and* moved the stamp is still an anchor: that is what
 `save`/`update`/`reflect` membership means, and `TestCompactHistoryDoesNotRewindADeliberateBumpUnderARemovableRow`
 pins the interleaving.
@@ -905,9 +909,9 @@ it moves **backward** to the recorded time of its anchor: the newest version tha
 does not itself repeat the version before it whose writer moved the stamp in the same
 statement that filed it. That is the field a reader comparing output across the repair
 would notice, and it is the one the flag exists to move. The anchor is not necessarily
-earlier than the last write that moved the stamp: where the newest no-op `reflect` is
-spared as the memory's newest version, it is the anchor itself, and a memory later
-touched deliberately anchors on that later write. The other two fields move only
+earlier than the last write that moved the stamp: a memory later touched by a deliberate
+`update` or any post-#727 write anchors on that write. A newest no-op `reflect` is damage
+all the same and is never the anchor. The other two fields move only
 because they *name* which version
 answered: `VersionRecordedAt` and `VersionPhase` can now describe an earlier,
 equivalent version — a memory that was resolved and unresolved, or folded, may read

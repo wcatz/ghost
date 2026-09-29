@@ -203,9 +203,10 @@ source the memory held once that write landed.
                                 AT a bound.
                 --fix-updated-at  Also move each live memory's updated_at back to
                                  the recorded_at of its ANCHOR — the newest version
-                                 this repair will NOT remove AND whose WRITER moved
-                                 updated_at in the same statement that filed it: a
-                                 save, an update, or a reflection, and nothing else.
+                                 that does not itself REPEAT the version before it
+                                 AND whose WRITER moved updated_at in the same
+                                 statement that filed it: a save, an update, or a
+                                 reflection, and nothing else.
                                  Applied only where a removable version sits ABOVE
                                  that anchor, since that version is the evidence a
                                  reflection run moved the stamp. A writer that
@@ -253,10 +254,13 @@ source the memory held once that write landed.
               does not itself repeat the version before it whose writer moved the
               stamp in the same statement that filed it. That 'repeats' test is the
               DAMAGE rule, not the whole removal rule: a memory's NEWEST version is
-              spared, and a deleted memory's history is left alone, and a version
-              spared by either can still be the anchor. So the anchor is not
-              necessarily earlier than the last write that moved the stamp -- where
-              the newest no-op reflect is spared, it IS the anchor.
+              spared from removal, and a deleted memory's history is left alone,
+              but neither guard is part of the anchor's definition, and being spared
+              by one is not what makes a version an anchor. A pre-#727 no-op repeat
+              is damage at any position, so a newest no-op reflect is never the
+              anchor. The anchor is not necessarily earlier than the last write
+              that moved the stamp: a memory later touched by a deliberate update,
+              or by any post-#727 write, anchors on that write.
               That is what the flag is for, and it is the field that visibly
               changes. So three fields of an as_of answer can move, for those two
               reasons. A DELETED memory is left out of both repairs entirely, so

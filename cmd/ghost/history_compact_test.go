@@ -90,15 +90,34 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 	// test. Each claim is separate because one satisfied another and the mutation
 	// passed on a surface whose definition was wrong.
 	anchorDamageDefinition := map[string]string{
-		"the shipped help (historyUsage)": "its ANCHOR: the newest version that\n              does not itself repeat the version before it whose writer moved the\n              stamp in the same statement that filed it",
+		"the shipped help (historyUsage)": "its ANCHOR: the newest version that does not itself repeat the version before it whose writer moved the stamp in the same statement that filed it",
 		"docs/cli.md's compact section":   "The anchor is the newest version that does not itself repeat the version before it",
 	}
-	anchorRemovalDefinition := map[string]string{
-		"the shipped help (historyUsage)": "its ANCHOR — the newest version\n                                 this repair will NOT remove AND whose WRITER moved\n                                 updated_at in the same statement that filed it",
-		"docs/cli.md's compact section":   "",
+	// The help's --fix-updated-at block states the definition too, in the flag's own
+	// paragraph rather than the as_of one. It is asserted SEPARATELY because the two
+	// needles can be satisfied by the SAME sentence: a check satisfied by one
+	// sentence cannot notice a second one disagreeing, which is how the help came to
+	// carry two definitions of the same term for several rounds. The removal-rule
+	// wording is in the retired list, so correcting that block is now what the suite
+	// asks for rather than what it forbids.
+	anchorDefinitionInFlag := map[string]string{
+		"the shipped help (historyUsage)": "its ANCHOR — the newest version that does not itself REPEAT the version before it AND whose WRITER moved updated_at in the same",
+	}
+	// The counter-example must be stated, because the CLAIM it contradicts is easy to
+	// reintroduce by explaining the general rule with the wrong instance. "The anchor
+	// is not necessarily earlier than the last stamp mover" is true — a memory later
+	// touched by a deliberate `update` anchors on that write — and the tempting way
+	// to illustrate it is the newest no-op `reflect`. That instance is FALSE: a
+	// pre-#727 no-op repeat is damage at any position, so the guards sparing it from
+	// removal does not make it an anchor, and
+	// TestCompactHistoryFixUpdatedAtRestoresTheLastStampWrite is exactly that memory.
+	// A mutation putting the bad instance back passed until this claim existed.
+	anchorNotNewestNoOp := map[string]string{
+		"the shipped help (historyUsage)": "A pre-#727 no-op repeat is damage at any position, so a newest no-op reflect is never the anchor",
+		"docs/cli.md's compact section":   "A newest no-op `reflect` is damage all the same and is never the anchor",
 	}
 	anchorGuardsExcluded := map[string]string{
-		"the shipped help (historyUsage)": "a memory's NEWEST version is spared, and a deleted memory's history is left alone, and a version spared by either can still be the anchor",
+		"the shipped help (historyUsage)": "a memory's NEWEST version is spared from removal, and a deleted memory's history is left alone, but neither guard is part of the anchor's definition",
 		"docs/cli.md's compact section":   "The two retention guards — a memory's newest version is spared, and a deleted memory's history is left alone — are **not** part of the anchor's definition",
 	}
 	// Claims each surface must make, in its own words.
@@ -134,10 +153,12 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 	// in the permissive direction — the one that invents a stamp — so one surviving
 	// anywhere is a live defect rather than a stale phrase.
 	retired := map[string]string{
-		"a non-removable row anchors on its own":        "whether or not it changed state",
-		"an anchor may be a row that changed nothing":   "A row it will not remove is an anchor",
-		"the retention list predates the sixth rule":    "Five things always stay",
-		"the anchor is the last state-changing version": "newest version that CHANGED state",
+		"a non-removable row anchors on its own":                       "whether or not it changed state",
+		"an anchor may be a row that changed nothing":                  "A row it will not remove is an anchor",
+		"the retention list predates the sixth rule":                   "Five things always stay",
+		"the anchor is the last state-changing version":                "newest version that CHANGED state",
+		"the anchor is the newest version this repair will NOT remove": "the newest version this repair will NOT remove AND whose WRITER moved",
+		"a spared newest no-op reflect is the anchor":                  "it is the anchor itself",
 	}
 
 	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "cli.md"))
@@ -167,16 +188,16 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 			t.Errorf("%s does not state that THREE fields of an as_of answer can move rather than two: no %q",
 				surface.name, needle)
 		}
-		// The removal-rule wording is asserted on the help only, and only because the
-		// help's --fix-updated-at block still carries it. The doc's definition was
-		// corrected, so requiring it there would be requiring the bug back. Keeping
-		// the help's copy pinned means the two surfaces cannot drift apart silently
-		// the next time either block is edited — which is how the help ended up
-		// contradicting itself in the first place.
-		if needle := anchorRemovalDefinition[surface.name]; needle != "" && !strings.Contains(flat, squashSpace(needle)) {
-			t.Errorf("the help's --fix-updated-at block no longer defines the anchor with the removal "+
-				"rule: no %q. That wording is what this paragraph corrects, and if it goes away the two "+
-				"statements of the anchor should be reconciled rather than one silently dropped.",
+		if needle := anchorNotNewestNoOp[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
+			t.Errorf("%s does not rule out the counter-example: no %q. A pre-#727 no-op reflect repeats "+
+				"its predecessor, so it is DAMAGE and the anchor skips it whatever the newest-version "+
+				"guard spares it from — being spared is not what makes a version the anchor.",
+				surface.name, needle)
+		}
+		if needle, ok := anchorDefinitionInFlag[surface.name]; ok && !strings.Contains(flat, squashSpace(needle)) {
+			t.Errorf("the help's --fix-updated-at block does not carry the damage-predicate definition of "+
+				"the anchor: no %q. That block and the as_of paragraph are two statements of one term, and "+
+				"asserting only the paragraph lets the block keep a different one.",
 				needle)
 		}
 		if needle := anchorGuardsExcluded[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
