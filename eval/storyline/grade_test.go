@@ -285,6 +285,16 @@ func TestParseJudgeVerdict(t *testing.T) {
 		{"Yesterday the session named the old store.", false, true},
 		{"Notably, nothing in the block marks the reversal.", false, true},
 		{"Nonsense, but it starts with N.", false, true},
+		// The verdict and its justification are separated by WHITESPACE, not by
+		// one particular byte: a judge that puts the answer on its own line is
+		// still answering the question, and refusing it would discard a
+		// three-session run's whole report over line wrapping.
+		{"Yes\nThe session named the new store.", true, false},
+		{"no\tit still described the original decision.", false, false},
+		{"Yes.\nThe session named the new store.", true, false},
+		// Punctuation around the word is not part of the verdict either.
+		{`"Yes."`, true, false},
+		{"(no)", false, false},
 	}
 	for _, tc := range cases {
 		got, err := judgeVerdict(tc.answer)

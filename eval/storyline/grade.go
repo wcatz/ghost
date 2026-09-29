@@ -241,16 +241,25 @@ func judgedCheck(followed bool, verdict string) Check {
 	return Check{name, false, strings.TrimSpace(verdict)}
 }
 
-// judgeVerdict reads the judge's answer. The verdict is its FIRST WORD being
+// judgeVerdict reads the judge's answer. The verdict is its FIRST FIELD being
 // exactly yes or no, and nothing else counts: a prefix match turns the opening
 // of an ordinary sentence into a verdict ("Yesterday's block…" is not a yes, and
 // "Nothing in the block names the new store" is not a no), which would put a
-// number in the report that nothing observed. A first word that IS yes or no
-// followed by the justification the prompt asked for is still a verdict.
+// number in the report that nothing observed.
+//
+// The field is split on WHITESPACE, not on one byte, and the word is stripped of
+// the punctuation a sentence can put around it. Both halves are load-bearing
+// because the alternative is not a failed check but a dead run: a judge that
+// answers "yes" on its own line, or "Yes." with a full stop, is answering the
+// question, and refusing it would throw away a three-session run's report and
+// every deterministic check in it over formatting.
 func judgeVerdict(answer string) (bool, error) {
 	trimmed := strings.TrimSpace(answer)
-	first, _, _ := strings.Cut(trimmed, " ")
-	switch strings.ToUpper(strings.Trim(first, "\t\n\r\"'`.,;:!?()[]{}")) {
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return false, fmt.Errorf("unreadable judge verdict %q: answer yes or no", trimmed)
+	}
+	switch strings.ToUpper(strings.Trim(fields[0], "\"'`.,;:!?()[]{}")) {
 	case "YES":
 		return true, nil
 	case "NO":
