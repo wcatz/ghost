@@ -3099,10 +3099,18 @@ func TestCLIMCPStatusHistoryGrowth(t *testing.T) {
 		// rows in the window, restatements, the share those two make, and the two
 		// pairs of (have, cap).
 		assertHistoryNumbers(t, "mcp status", statusLine, inWindow, restatements, wantShare, perMemory, total)
-		// The finding, and the repair. A warning that names no command is an
-		// observation; this one has to name the one that removes what it reports.
+		// The finding, and the repair — named WITHOUT the promise it cannot keep.
+		// The repair's bound is the instant #727 reached main, so on a store running
+		// a current build every row inside this 24-hour window is one it keeps by
+		// design, and "to remove them" would send an operator after nothing. Pinned on
+		// the BUILT BINARY's output rather than on the unit's Detail string, because
+		// this is the sentence a reader actually sees and the one that can rot
+		// silently: the measurement stays true against a moved bound, only the
+		// advice would lie.
 		mustMatch(t, "mcp status finding", status.stdout, `! \d+% of the \d+ version rows written in the last 24h restate the version before them`)
 		mustContain(t, "mcp status finding", status.stdout, "ghost history compact")
+		mustContain(t, "mcp status finding", status.stdout, "deliberately leaves what this build wrote")
+		mustNotContain(t, "mcp status finding", status.stdout, "to remove them")
 	})
 
 	t.Run("a noisy store does not become a failing mcp status", func(t *testing.T) {

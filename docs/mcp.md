@@ -40,9 +40,24 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 
 ```text
 **History:** 8 version rows in the last 24h, 6 restatements (75%) — deepest memory holds 7 of its 50 versions, store holds 8 of 20000 rows
-  ⚠ 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — run `ghost history compact` to remove them
+  ⚠ 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote
   ⚠ memory 1F2E3D4C5B6A7988 is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
 ```
+
+**The restatement share is pressure, not disposability, and the sentence says so.**
+The share counts every version row that recorded exactly what the row before it held;
+`ghost history compact` removes only a subset — a memory's newest version, a row
+naming another memory, any phase but `reflect`, anything after its own `--before`
+bound, and every row of a memory that has since been deleted. So an agent reading
+this cannot conclude that running the named command reclaims the rows the report
+just counted, and the two halves of the sentence (the caps evict them; the repair
+leaves what this build wrote) are the honest answer to "what frees the room".
+
+That last subset matters more since retention tiers landed: a `delete` freezes a
+memory's history permanently, and `expires_at` now retires memories on a schedule
+nobody asked for. On such a store the compaction is not what is filling the table
+back up — the store cap, trimming oldest-first, is the only thing that reclaims
+anything, which is what the store-cap `⚠` is for.
 
 `deepest memory` is the **store's widest history** — an aggregate for a line of
 totals, and usually not the memory a `⚠` line is about. The per-memory cap is

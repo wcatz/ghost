@@ -109,17 +109,38 @@ func almostEqual(got, want float64) bool { return math.Abs(got-want) < 1e-9 }
 //
 // 12 + 2 + 2 = 16 rows in the window, 12 of them restatements, 17 rows in the
 // table, and 12 versions on the deepest memory.
+//
+// appendWindowRestatement appends a version that restates the memory's current
+// state, recorded NOW — inside the report's 24-hour window.
+//
+// It is deliberately NOT appendVerbatimVersion, which #730's own fixtures use and
+// which stamps `preFixReflectAt` (2026-08-01). That instant is the right one for
+// the repair's tests, which need their rows on the far side of #730's bound, and
+// it is 58 days back: every row it writes is outside a 24-hour window as well, so
+// a #729 fixture built on it measures an empty day. The report measures a WINDOW,
+// so its fixtures have to state one, and this is that statement.
+//
+// The two populations genuinely differ, and that is the point rather than a
+// workaround: what a current build writes today is post-#727 by definition, so it
+// is what the report measures and what the repair will not touch. The test that
+// reconciles the two pins #730's bound explicitly rather than relying on where the
+// wall clock happens to be.
+func appendWindowRestatement(t *testing.T, s *Store, memoryID string) {
+	t.Helper()
+	appendVersionRow(t, s, memoryID, phaseReflect, nil, "", "", nil)
+}
+
 func seedGrowthFixture(t *testing.T, s *Store) {
 	t.Helper()
 	ctx := context.Background()
 
 	busy := createCompactMemory(t, s, compactFirstText)
 	for range 11 {
-		appendVerbatimVersion(t, s, busy)
+		appendWindowRestatement(t, s, busy)
 	}
 
 	quiet := createCompactMemory(t, s, compactSecondText)
-	appendVerbatimVersion(t, s, quiet)
+	appendWindowRestatement(t, s, quiet)
 
 	edited := createCompactMemory(t, s, "the staging relay drains to the tablet nightly")
 	stampHistoryRow(t, s, edited, phaseSave, stampAgo(2*growthDays))
@@ -245,9 +266,34 @@ func TestHistoryGrowthWarningsQuoteTheirOwnNumbers(t *testing.T) {
 	if !ok {
 		t.Fatalf("no %s warning in %v", HistoryWarnNoOpShare, warningKinds(res.Warnings))
 	}
-	for _, want := range []string{"75%", "20%", "16", "ghost history compact"} {
+	// "ghost history compact" is named, and NOT as a promise to remove THESE rows.
+	// The repair's bound is the instant the writer that stopped producing them
+	// reached main, so on a store running a current build every row in this window
+	// is one the repair keeps by design, and a finding that said "to remove them"
+	// would send an operator to a command that removes nothing. Pinned here
+	// because that clause is the one thing in the sentence that can rot silently:
+	// the measurement stays true against a changed bound, only the advice lies.
+	for _, want := range []string{
+		"75%", "20%", "16", "ghost history compact",
+		"deliberately leaves what this build wrote",
+		// The caps, because they are what evicts a restatement this build wrote —
+		// and since #709 gave `expires_at` a day to arrive, on a store that has
+		// been deleting memories they are the ONLY thing that evicts anything.
+		"retention caps are what evict them",
+	} {
 		if !strings.Contains(noOp.Detail, want) {
 			t.Errorf("%s Detail does not mention %q:\n%s", HistoryWarnNoOpShare, want, noOp.Detail)
+		}
+	}
+	// And the promise it must NOT make, which is the half that used to be there.
+	// The repair removes a SUBSET of the rows the share counts — the newest
+	// version, the threads, every phase but `reflect`, everything a current build
+	// wrote, and every row of a memory that has since been deleted — so "to remove
+	// them" is a claim about rows it will keep.
+	for _, forbidden := range []string{"to remove them", "run `ghost history compact` to"} {
+		if strings.Contains(noOp.Detail, forbidden) {
+			t.Errorf("%s Detail promises what the repair will not do (%q):\n%s",
+				HistoryWarnNoOpShare, forbidden, noOp.Detail)
 		}
 	}
 
@@ -293,7 +339,7 @@ func TestHistoryGrowthWarnsOnlyAboveTheNoOpShareThreshold(t *testing.T) {
 			for i := range memories {
 				id := createCompactMemory(t, s, fmt.Sprintf("the relay %d keeps its own address book", i))
 				if i < tc.restated {
-					appendVerbatimVersion(t, s, id)
+					appendWindowRestatement(t, s, id)
 				}
 			}
 			res, err := s.HistoryGrowth(context.Background())
@@ -382,7 +428,7 @@ func TestHistoryGrowthOnAnEmptyHistoryReportsZeros(t *testing.T) {
 func TestHistoryGrowthOnAQuietStoreProjectsNothing(t *testing.T) {
 	s := testStore(t)
 	id := createCompactMemory(t, s, compactFirstText)
-	appendVerbatimVersion(t, s, id)
+	appendWindowRestatement(t, s, id)
 	// Both rows are two days old, so the window is empty while the table is not.
 	for _, phase := range []string{phaseSave, phaseReflect} {
 		stampHistoryRow(t, s, id, phase, stampAgo(2*growthDays))
@@ -430,7 +476,7 @@ func TestHistoryGrowthOnAQuietStoreProjectsNothing(t *testing.T) {
 func TestHistoryGrowthCountsOnlyTheWindow(t *testing.T) {
 	s := testStore(t)
 	id := createCompactMemory(t, s, compactFirstText)
-	appendVerbatimVersion(t, s, id) // in the window
+	appendWindowRestatement(t, s, id) // in the window
 	appendVersionRow(t, s, id, phaseReflect, stampAgo(2*growthDays), "", "", nil)
 	appendVersionRow(t, s, id, phaseReflect, stampAgo(3*growthDays), "", "", nil)
 
@@ -489,12 +535,12 @@ func TestHistoryGrowthNoOpShareAgreesWithWhatCompactWouldRemove(t *testing.T) {
 	// newest is not.
 	noisy := createCompactMemory(t, s, compactFirstText)
 	for range 5 {
-		appendVerbatimVersion(t, s, noisy)
+		appendWindowRestatement(t, s, noisy)
 	}
 
 	// b: a single restatement, which is entirely the newest version.
 	quiet := createCompactMemory(t, s, compactSecondText)
-	appendVerbatimVersion(t, s, quiet)
+	appendWindowRestatement(t, s, quiet)
 
 	// c: a resolve, which really changed resolved_at, then a restatement of the
 	// resolved state.
@@ -502,7 +548,7 @@ func TestHistoryGrowthNoOpShareAgreesWithWhatCompactWouldRemove(t *testing.T) {
 	if _, err := s.SetResolved(ctx, []string{resolved}); err != nil {
 		t.Fatalf("SetResolved: %v", err)
 	}
-	appendVerbatimVersion(t, s, resolved)
+	appendWindowRestatement(t, s, resolved)
 
 	// d: a reflect that names another memory — an edge a reader follows from this
 	// memory's history into its successor's (#648) — and then a restatement.
@@ -510,26 +556,97 @@ func TestHistoryGrowthNoOpShareAgreesWithWhatCompactWouldRemove(t *testing.T) {
 	// rather than a state, the other is the newest version.
 	linked := createCompactMemory(t, s, "the kiosk polls the relay every minute")
 	appendVersionRow(t, s, linked, phaseReflect, nil, quiet, "", nil)
-	appendVerbatimVersion(t, s, linked)
+	appendWindowRestatement(t, s, linked)
+
+	// e: a memory that took damage and was then RETIRED, which is the fifth guard
+	// and the only one #709 turned from rare to routine — retention tiers give
+	// `expires_at` a day to arrive, so a store now deletes memories nobody asked
+	// it to, and each leaves a history no repair will ever reach.
+	//
+	// The restatement goes in BEFORE the delete, so it is not the newest version
+	// and nothing but the tombstone rule keeps it. That is the case worth having
+	// here, because the other four guards are all still true of it: it is before
+	// the stated bound, it names no other memory, and its phase is `reflect`. A
+	// fixture that only listed this guard would prove nothing about it.
+	retired := createCompactMemory(t, s, "the night shift leaves the staging relay warm")
+	appendWindowRestatement(t, s, retired)
+	if err := s.Delete(ctx, retired); err != nil {
+		t.Fatalf("Delete the retired memory: %v", err)
+	}
+	// The tombstone itself restates its predecessor as faithfully as a no-op
+	// reflect does, so the share counts it too. Asserted, because a count of one
+	// here would be the fixture disagreeing with what Delete writes rather than
+	// with what the repair keeps.
+	if n := redundantVersionCount(t, s, retired); n != 2 {
+		t.Fatalf("%d of the retired memory's versions restate their predecessor, want 2 (its "+
+			"restatement and the tombstone Delete files from the last live state): a count of one "+
+			"would mean the fixture is not the case this guard is about", n)
+	}
+	// The other half of that claim, because a guard that cannot fail is not a guard:
+	// its restatement is in the damage shape with NO retention rule at all. Counted
+	// through the production predicate rather than restated here, since a
+	// hand-written copy of the rules would pass on the day the rules changed.
+	//
+	// ONE, not two. The tombstone is spared twice over — it is the newest version
+	// and its phase is not `reflect` — and a count of two here would mean the
+	// fixture staged a row the newest-version guard already spared, and the
+	// tombstone rule would be claiming credit for someone else's work.
+	reachArgs := []any{retired, testProject}
+	for _, p := range compactablePhases() {
+		reachArgs = append(reachArgs, p)
+	}
+	reachArgs = append(reachArgs, "2999-01-01 00:00:00")
+	var inReach int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_history h WHERE h.memory_id = ? AND h.project_id = ? AND `+
+			historyRemovableLikeSQL("h"), reachArgs...).Scan(&inReach); err != nil {
+		t.Fatalf("count the rows the tombstone guard is holding back: %v", err)
+	}
+	if inReach != 1 {
+		t.Fatalf("%d of the retired memory's versions are in the damage shape ignoring every "+
+			"retention rule, want 1: the tombstone guard is only load-bearing if that row is "+
+			"otherwise in reach", inReach)
+	}
 
 	res, err := s.HistoryGrowth(ctx)
 	if err != nil {
 		t.Fatalf("HistoryGrowth: %v", err)
 	}
-	// 5 + 1 + 1 + 2: the resolve is a real change, and so is the edge row's
-	// neighbour; everything else restates the row before it.
-	if res.NoOpRows != 9 {
-		t.Fatalf("NoOpRows = %d, want 9", res.NoOpRows)
+	// 5 + 1 + 1 + 2 + 2: the resolve is a real change, and so is the edge row's
+	// neighbour; everything else restates the row before it, the retired memory's
+	// two included.
+	if res.NoOpRows != 11 {
+		t.Fatalf("NoOpRows = %d, want 11", res.NoOpRows)
 	}
 
 	dryRunStart := historyRowIDs(t, s)
 
+	// The bound is STATED rather than inherited, and that is the whole shape of
+	// this test. The repair defaults to `reflectNoOpCutoff` — the instant #727
+	// reached main — and every row this fixture writes is recorded NOW, which is
+	// after that instant on any clock past #727. With the default the run removes
+	// NOTHING: the numbers reconcile perfectly, they reconcile about zero, and the
+	// test passes while saying nothing about how the two commands relate. An
+	// operator with a store whose clock is behind is the same case, and `--before`
+	// is how they say so.
+	//
+	// The year 2999 is not a magic instant. It is "after every row this fixture
+	// can write", stated once so the reconciliation below is a statement about the
+	// two predicates rather than about today's date.
+	opts := HistoryCompactOptions{Before: "2999-01-01"}
+	if opts.Before == "" {
+		t.Fatal("the stated bound is empty, so the run would use the default")
+	}
+
 	// A dry run first: the count the APPLY would produce, from the same SQL and
 	// the same decision, with nothing written — which is also the assertion that
 	// this report is a preview of that command rather than a rival to it.
-	preview, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{})
+	preview, err := s.CompactHistory(ctx, testProject, opts)
 	if err != nil {
 		t.Fatalf("CompactHistory (dry run): %v", err)
+	}
+	if preview.Before == "" {
+		t.Fatal("the dry run reported no bound, so its counts are counts at no instant")
 	}
 	if preview.Removed != 4 {
 		t.Fatalf("compact dry run removed = %d, want 4", preview.Removed)
@@ -538,7 +655,11 @@ func TestHistoryGrowthNoOpShareAgreesWithWhatCompactWouldRemove(t *testing.T) {
 		t.Fatalf("compact would remove %d rows from a history holding %d restatements — the repair removes a subset, never more",
 			preview.Removed, res.NoOpRows)
 	}
-	if got, want := res.NoOpRows-preview.Removed, int64(5); got != want {
+	// Seven kept, and each for its own named reason rather than as a difference
+	// that happened to come out right: four are a memory's newest version (noisy,
+	// quiet, linked and retired), one is a thread naming another memory, and two
+	// are the retired memory's, kept whole because the memory is gone.
+	if got, want := res.NoOpRows-preview.Removed, int64(7); got != want {
 		t.Errorf("restatements the repair would keep = %d, want %d", got, want)
 	}
 	if after := historyRowIDs(t, s); len(after) != len(dryRunStart) {
@@ -549,9 +670,19 @@ func TestHistoryGrowthNoOpShareAgreesWithWhatCompactWouldRemove(t *testing.T) {
 	// one is named. Every memory keeps its save; the resolved memory keeps the
 	// resolve; the edge row and the four older restatements are gone; and one
 	// restatement survives per memory as that memory's newest version.
-	applied, err := s.CompactHistory(ctx, testProject, HistoryCompactOptions{Apply: true})
+	//
+	// The SAME stated bound, not the default: an apply under the default would
+	// remove nothing and agree with a preview that removed nothing, and this test
+	// would pass having observed no survivors at all.
+	applyOpts := opts
+	applyOpts.Apply = true
+	applied, err := s.CompactHistory(ctx, testProject, applyOpts)
 	if err != nil {
 		t.Fatalf("CompactHistory (apply): %v", err)
+	}
+	if applied.Before != preview.Before {
+		t.Errorf("apply ran at bound %q, the dry run at %q — the preview is not a preview",
+			applied.Before, preview.Before)
 	}
 	if applied.Removed != preview.Removed {
 		t.Errorf("apply removed %d, dry run said %d — the preview is not a preview", applied.Removed, preview.Removed)
@@ -566,6 +697,10 @@ func TestHistoryGrowthNoOpShareAgreesWithWhatCompactWouldRemove(t *testing.T) {
 		// Two reflect rows survive here and they are different rows: the newest
 		// version, and the edge that names another memory.
 		{linked, []string{phaseSave, phaseReflect, phaseReflect}},
+		// All three of the retired memory's versions survive, and the middle one
+		// is the case the fifth guard exists for: before the bound, naming no other
+		// memory, phase `reflect`, and not the newest.
+		{retired, []string{phaseSave, phaseReflect, phaseDelete}},
 	} {
 		if got := historyPhases(t, s, tc.memoryID); !wantPhases(got, tc.want) {
 			t.Errorf("survivors of %s = %v, want %v", tc.memoryID, got, tc.want)
@@ -841,12 +976,12 @@ func TestHistoryGrowthNamesTheMemoryClosestToTheCap(t *testing.T) {
 	for range 38 {
 		appendVersionRow(t, s, deep, phaseReflect, stampAgo(3*growthDays), "", "", nil)
 	}
-	appendVerbatimVersion(t, s, deep)
+	appendWindowRestatement(t, s, deep)
 
 	// fast holds 30 versions and wrote all of them today.
 	fast := createCompactMemory(t, s, "the tablet drains to the relay nightly")
 	for range 29 {
-		appendVerbatimVersion(t, s, fast)
+		appendWindowRestatement(t, s, fast)
 	}
 
 	res, err := s.HistoryGrowth(ctx)
@@ -917,7 +1052,7 @@ func TestHistoryGrowthSaysTheCapHasBeenReached(t *testing.T) {
 		capped := createCompactMemory(t, s, "the relay publishes its own address book")
 		// 50 versions in total: the save plus 49 restatements, all written today.
 		for range historyVersionsPerMemory - 1 {
-			appendVerbatimVersion(t, s, capped)
+			appendWindowRestatement(t, s, capped)
 		}
 
 		// A second memory, DEEPER than the capped one and entirely outside the

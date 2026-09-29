@@ -84,9 +84,25 @@ Status also reports how fast `memory_history` is filling, and how much of that i
 
 ```text
   - history: 8 version rows in 24h, 6 restatements (75%), deepest memory 7/50 versions, store 8/20000 rows
-  ! 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — run `ghost history compact` to remove them
+  ! 75% of the 8 version rows written in the last 24h restate the version before them (warning threshold 20%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote
   ! memory 1F2E3D4C5B6A7988 is closest to the per-memory cap: it holds 7 of its 50 versions and wrote 7 in the last 24h, so the cap is 6.1 days away at that rate (warning threshold 14 days)
 ```
+
+The restatement finding is careful about what it tells you to run, and the care is
+the point. The share counts **every** version row that recorded exactly what the row
+before it held, while the compaction removes only a subset: a memory's newest
+version, a row naming another memory, any phase but `reflect`, anything recorded
+after the repair's own `--before` bound, and every row of a memory that has since
+been deleted. The report therefore measures the **pressure** a store is under rather
+than what a command could reclaim, and the sentence says so — the caps are what
+evict a restatement this build wrote, because the repair will not touch it.
+
+That last guard is why this matters more now than it did. A `delete` tombstones a
+memory and its history is **frozen**: no repair and no compaction will ever remove
+those rows, and since [retention tiers](#ghost-memory-save) give `expires_at` a day
+to arrive, a store now retires memories nobody asked it to. A store that churns
+through session-tier memories fills its table with rows only the store cap can
+reclaim, oldest-first — which is exactly what the store-cap finding below is for.
 
 The line is store-wide, because both retention caps are (see
 [`ghost history compact`](#ghost-history-compact)): how many version rows were
@@ -119,9 +135,9 @@ threshold it tripped against:
 
 | Finding | Fires when |
 |---|---|
-| restatement share | **more than 20%** of the last 24 hours' version rows restated their predecessor. 20% exactly is silent: a small amount of restatement is the ordinary shape of a working store, and a threshold that fires on it teaches an operator to ignore the line. |
+| restatement share | **more than 20%** of the last 24 hours' version rows restated their predecessor. 20% exactly is silent: a small amount of restatement is the ordinary shape of a working store, and a threshold that fires on it teaches an operator to ignore the line. Measures pressure, not what `ghost history compact` would reclaim — see above. |
 | per-memory cap | some memory reaches its 50-version cap **within 14 days** at its own 24-hour rate — the soonest memory, measured against what *it* wrote rather than the store-wide rate. Reaching the cap starts trimming that memory's oldest versions, which may be the only record of what it said first. |
-| store cap | the table reaches 20 000 rows **within 14 days** at the store's 24-hour rate. The store cap trims the **oldest rows in the table**, not the noisiest ones, so what disappears when the table fills is the oldest real change. |
+| store cap | the table reaches 20 000 rows **within 14 days** at the store's 24-hour rate. The store cap trims the **oldest rows in the table**, not the noisiest ones, so what disappears when the table fills is the oldest real change — and on a store that has been retiring memories, it is a deleted memory's frozen history, which no repair can reach. |
 
 **A finding is a `!` line, not a failed check.** It never changes the exit code and
 never brings back the `Run \`ghost mcp init\` to fix issues.` footer, because the

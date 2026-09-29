@@ -43,10 +43,38 @@ import (
 // it reports. The relationship between the two numbers is spelled out on
 // HistoryGrowth and tested by
 // TestHistoryGrowthNoOpShareAgreesWithWhatCompactWouldRemove: the report's share
-// counts every restatement, while the repair removes a SUBSET of them (a
-// memory's newest version is what it says now, and a row naming another memory
-// is a thread rather than a restatement), so the report over-counts on purpose —
-// it is measuring how much noise the table carries, not how much is disposable.
+// counts every restatement, while the repair removes a SUBSET of them, so the
+// report over-counts on purpose — it is measuring how much noise the table
+// carries, not how much is disposable.
+//
+// THE SUBSET IS LARGE, and the finding is worded to match. FIVE guards keep a
+// restatement the report counts: it is the memory's newest version; it names
+// another memory, so it is a thread rather than a state; its phase is not
+// `reflect`, which is the only phase whose entire content is the state it records
+// (a tags-only edit files an `update` version that restates every recorded column
+// and means something this table cannot see); it was recorded at or after the
+// repair's bound, so a row this build wrote is a current writer's business; or
+// its memory has since been DELETED, whose history is frozen because a past read
+// computes a deleted memory's age from the version that answers it.
+//
+// Two of those are what the advice has to respect, and for different reasons.
+//
+// The BOUND is a property of the CLOCK rather than of the store. The report
+// measures the last day and the repair only ever touches what predates #727, so
+// from the day after that fix shipped, every row the share counts is a row the
+// repair keeps. That is why the finding promises no removal: it names the repair,
+// says what the repair reclaims, and says plainly that it leaves a current
+// build's rows alone.
+//
+// The TOMBSTONE guard makes the pressure WORSE rather than the advice weaker, and
+// #709 is what made it reachable on a schedule for the first time: retention
+// tiers give `expires_at` a day to arrive, so a store now deletes memories
+// nobody asked it to, and each one leaves a frozen history that no repair will
+// ever touch. Those rows still count against the store cap, and the trim that
+// reclaims them is oldest-first — so a store churning through session-tier
+// memories fills its table with rows nothing but the cap can remove. That is why
+// the finding names the caps as the thing that actually evicts a restatement,
+// rather than leaving an operator to run the repair and find nothing.
 //
 // A SECOND SAYING OF ANY OF ITS OWN ADVICE. Every warning carries a Detail
 // string built here, and both surfaces print that string rather than composing
@@ -86,14 +114,24 @@ const HistoryCapHorizonDays = 14
 // reworded.
 const (
 	// HistoryWarnNoOpShare: too much of the recent history restated the row
-	// before it. The only warning with a repair attached.
+	// before it. The only warning that names a repair, and it names it WITHOUT
+	// promising it will remove the rows it reports: the repair's bound is the
+	// instant the writer that stopped producing these rows reached main, so on any
+	// store running a current build every row inside this report's window is one
+	// the repair keeps by design, and a deleted memory's rows are kept whatever
+	// their age. They are still worth reporting, because the table fills either way
+	// and the caps trim oldest-first — it is the pressure, not the disposability,
+	// that the share measures.
 	HistoryWarnNoOpShare = "no_op_share"
 	// HistoryWarnPerMemoryCap: a memory will reach the per-memory cap soon, and
 	// reaching it means its oldest versions — which may be the only record of
 	// what it said first — start being trimmed.
 	HistoryWarnPerMemoryCap = "per_memory_cap"
 	// HistoryWarnStoreCap: the table will reach the store cap soon, and reaching
-	// it trims the OLDEST rows in the table, not the noisiest ones.
+	// it trims the OLDEST rows in the table, not the noisiest ones. The oldest rows
+	// of a store that has been deleting memories are a dead memory's frozen
+	// history, which no repair can reach — so on such a store this warning is the
+	// only one that is actionable, and it is not the compaction's job.
 	HistoryWarnStoreCap = "store_cap"
 )
 
@@ -277,10 +315,11 @@ func (s *Store) HistoryGrowth(ctx context.Context) (HistoryGrowthResult, error) 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query, args := historyWindowGrowthStmt()
-	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&res.RowsInWindow, &res.NoOpRows); err != nil {
-		return res, fmt.Errorf("count history versions in the window: %w", err)
+	rows, noOp, err := s.historyWindowCounts(ctx)
+	if err != nil {
+		return res, err
 	}
+	res.RowsInWindow, res.NoOpRows = rows, noOp
 	if res.RowsInWindow > 0 {
 		res.NoOpShare = float64(res.NoOpRows) / float64(res.RowsInWindow)
 	}
@@ -328,6 +367,31 @@ func (s *Store) HistoryGrowth(ctx context.Context) (HistoryGrowthResult, error) 
 
 	res.Warnings = historyGrowthWarnings(res)
 	return res, nil
+}
+
+// historyWindowCounts is the report's FIRST statement, alone in its own function.
+//
+// Alone is the point, and it is a property of #755 rather than of taste. The
+// newer-store scan (`TestEveryWriteRefusesANewerStore`) calls a statement a WRITE
+// whenever it cannot resolve the leading SQL word, and it cannot resolve this one:
+// `query, args := historyWindowGrowthStmt()` binds two names from one call, which
+// the scan deliberately does not follow. An unresolvable statement therefore needs an
+// exemption — and an exemption is granted per FUNCTION, so a read sitting inside the
+// large `HistoryGrowth` would exempt that whole function, and a write added to it
+// tomorrow would pass the scan. Keeping each read in a function that contains
+// nothing but that read makes the exemption cover one statement and nothing else,
+// which is checkable: adding an unguarded ExecContext to `HistoryGrowth` still
+// fails, and this is the shape that lets it.
+//
+// It takes no lock of its own, for the same reason its sibling does: the caller
+// holds the read lock across both statements, and a second lock here would be the
+// same lock twice.
+func (s *Store) historyWindowCounts(ctx context.Context) (rows, noOp int64, err error) {
+	query, args := historyWindowGrowthStmt()
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&rows, &noOp); err != nil {
+		return 0, 0, fmt.Errorf("count history versions in the window: %w", err)
+	}
+	return rows, noOp, nil
 }
 
 // memoryHistoryCounts is one memory's share of the table: its id, every version it
@@ -398,7 +462,7 @@ func historyGrowthWarnings(res HistoryGrowthResult) []HistoryWarning {
 		warnings = append(warnings, HistoryWarning{
 			Kind: HistoryWarnNoOpShare,
 			Detail: fmt.Sprintf(
-				"%.0f%% of the %d version rows written in the last %dh restate the version before them (warning threshold %.0f%%) — run `ghost history compact` to remove them",
+				"%.0f%% of the %d version rows written in the last %dh restate the version before them (warning threshold %.0f%%) — they take up room without recording anything, and the retention caps are what evict them: `ghost history compact` reclaims pre-#727 restatements and deliberately leaves what this build wrote",
 				res.NoOpShare*100, res.RowsInWindow, res.WindowHours, HistoryNoOpShareWarn*100),
 		})
 	}
