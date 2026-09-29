@@ -182,6 +182,61 @@ func projectNotRegistered(asked string) string {
 		"Call ghost_memory_save to create it.", asked)
 }
 
+// projectContextWithNotRegistered appends the not-registered sentence to whatever
+// the surface could still render for an unresolved project, which is the
+// `_global` section and nothing else.
+//
+// It is an APPEND rather than a replacement because those rows do not depend on
+// the project. The base ref delivered them for an unknown name — under
+// `## Memories`, which is the mislabelling this migration removes — and a first
+// session in a project Ghost has never seen is exactly when the cross-project
+// preferences and conventions matter. The server's own SessionStart instructions
+// tell the agent to call these surfaces when the directory matched nothing, and to
+// look for a Global section, so returning the sentence ALONE would leave the
+// answer contradicting the instructions shipped with it.
+func projectContextWithNotRegistered(text, asked string) string {
+	note := projectNotRegistered(asked)
+	if strings.TrimSpace(text) == "" {
+		return note
+	}
+	return strings.TrimRight(text, "\n") + "\n\n" + note
+}
+
+// projectContextGlobalSection renders the `## Global (applies to all projects)`
+// block for this surface, or "" when there is nothing to show under it.
+//
+// It is the ONE render of that section, shared by the tool and by
+// buildProjectContext, so the two cannot spell one heading differently. The
+// `alreadyShown` filter is applied AFTER the cap, and that is the whole reason the
+// section is a second REQUEST rather than a second slice: it is a section
+// boundary, not a selection rule. Filtering it into the store's read would run
+// before the cap and admit up to 15 NEW rows where the shipped code admitted 15
+// rows of which some were repeats. `SlicePolicy.ExcludeSeen` stays unread for
+// that reason.
+func (s *Server) projectContextGlobalSection(ctx context.Context, alreadyShown []assemble.Item) string {
+	seen := make(map[string]bool, len(alreadyShown))
+	for _, it := range alreadyShown {
+		seen[it.ID] = true
+	}
+	globals, err := s.projectContextGlobals(ctx)
+	if err != nil {
+		// A failed global read is silence, exactly as it was when this ran inline:
+		// the block is the answer, and a block without a global section beats an
+		// error here.
+		return ""
+	}
+	var extra []assemble.Item
+	for _, g := range globals.Items {
+		if !seen[g.ID] {
+			extra = append(extra, g)
+		}
+	}
+	if len(extra) == 0 {
+		return ""
+	}
+	return "## Global (applies to all projects)\n\n" + projectContextItems(extra)
+}
+
 // projectContextEmptyNote is what the surface says about a project whose memory
 // rows are all gone, and the reason it is not the sentence the section used to
 // carry.

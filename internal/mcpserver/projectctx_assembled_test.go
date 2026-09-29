@@ -457,9 +457,9 @@ func shippedSeedText(t *testing.T, st *memory.Store) string {
 	return ""
 }
 
-// TestEveryProjectContextSurfaceAnswersAnUnresolvedProject is the second review
-// finding on this theme, and it is the one that shows the first fix was scoped too
-// narrowly.
+// TestEveryProjectContextSurfaceAnswersAnUnresolvedProject is the second and third
+// review findings on this theme, and between them they show why the first fix was
+// scoped too narrowly.
 //
 // `buildProjectContext` is reached by three surfaces, not one: the tool, the
 // `ghost://project/{id}/context` resource template and the `recall_project` prompt.
@@ -470,12 +470,28 @@ func shippedSeedText(t *testing.T, st *memory.Store) string {
 // hard break against the base ref, where the same call returned a block, and an
 // error quoting an empty id rather than the project the caller named.
 //
-// All three are asserted here rather than at each call site, because the failure
-// mode is a guard that exists on one path and not its two siblings — which is
-// invisible until someone reads all three.
+// Then the fix over-corrected: returning the sentence INSTEAD of the block dropped
+// the `## Global (applies to all projects)` section, which the base ref did deliver
+// for an unknown name (under the mislabelled `## Memories`, which is the bug being
+// removed — but delivered). A first session in a project Ghost has never seen is
+// exactly when the cross-project preferences matter, and the server's own
+// SessionStart instructions tell the agent to call these surfaces when the
+// directory matched nothing and to look for a Global section.
+//
+// So the answer is the block PLUS the sentence: the section that does not depend
+// on a project, under the heading that is true of it, and then the fact that this
+// project is unknown.
 func TestEveryProjectContextSurfaceAnswersAnUnresolvedProject(t *testing.T) {
 	srv, session := newValiditySession(t)
 	const wanted = "no-such-project-anywhere"
+	// A cross-project row the store holds, so "did the Global section survive?" is
+	// answerable rather than vacuously true on an empty store.
+	if _, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "ghost_save_global",
+		Arguments: map[string]any{"content": "a cross-project preference", "category": "preference"},
+	}); err != nil {
+		t.Fatalf("save_global: %v", err)
+	}
 
 	// The assertions are LITERALS, not `projectNotRegistered(wanted)`. Comparing a
 	// function's output against itself is a tautology: the first version of this
@@ -483,7 +499,7 @@ func TestEveryProjectContextSurfaceAnswersAnUnresolvedProject(t *testing.T) {
 	// RESOLVED id — which is "" here, so the message read `Project "" is not
 	// registered` — survived it. A test that asks a function whether the function
 	// is right has no failure to fail.
-	assertNotRegistered := func(surface, out string) {
+	assertAnswered := func(surface, out string) {
 		t.Helper()
 		if !strings.Contains(out, "is not registered with Ghost yet") {
 			t.Errorf("%s did not answer the not-registered sentence:\n%s", surface, out)
@@ -496,10 +512,20 @@ func TestEveryProjectContextSurfaceAnswersAnUnresolvedProject(t *testing.T) {
 			t.Errorf("%s rendered a memory listing for a project that does not exist; those rows belong to a "+
 				"different project:\n%s", surface, out)
 		}
+		// The cross-project rows do not depend on the project, and the base ref
+		// delivered them for an unknown name. Dropping them is a regression dressed
+		// as a fix, and it is the one this test exists to hold.
+		if !strings.Contains(out, "## Global (applies to all projects)") {
+			t.Errorf("%s dropped the cross-project section for an unknown project; it does not depend on one, and a "+
+				"first session in a project Ghost has never seen is when it matters most:\n%s", surface, out)
+		}
+		if !strings.Contains(out, "a cross-project preference") {
+			t.Errorf("%s did not deliver the cross-project row:\n%s", surface, out)
+		}
 	}
 
 	// The tool.
-	assertNotRegistered("ghost_project_context", resultText(callTool(t, session, "ghost_project_context",
+	assertAnswered("ghost_project_context", resultText(callTool(t, session, "ghost_project_context",
 		map[string]any{"project_id": wanted})))
 
 	// The resource template.
@@ -512,7 +538,7 @@ func TestEveryProjectContextSurfaceAnswersAnUnresolvedProject(t *testing.T) {
 	if len(rr.Contents) != 1 {
 		t.Fatalf("expected 1 resource content, got %d", len(rr.Contents))
 	}
-	assertNotRegistered("the context RESOURCE", rr.Contents[0].Text)
+	assertAnswered("the context RESOURCE", rr.Contents[0].Text)
 
 	// The recall_project prompt.
 	pr, err := session.GetPrompt(context.Background(), &mcp.GetPromptParams{
@@ -529,8 +555,78 @@ func TestEveryProjectContextSurfaceAnswersAnUnresolvedProject(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected TextContent, got %T", pr.Messages[0].Content)
 	}
-	assertNotRegistered("the recall_project PROMPT", tc.Text)
+	assertAnswered("the recall_project PROMPT", tc.Text)
 	_ = srv
+}
+
+// TestTheUnresolvedProjectBlockStillRendersTheResourceOnItsOwn is the half of the
+// finding that a sentence-in-place-of-the-block fix breaks, stated on the resource
+// alone: `buildProjectContext` is what the resource and the prompt both read, so
+// this asserts that an unresolved project id produces a real block through it and
+// not an empty string, which the prompt's own `if text == ""` fallback would then
+// have rendered as "No memories or learned context saved yet for this project" —
+// naming a project as having nothing saved when it has never been registered.
+func TestTheUnresolvedProjectBlockStillRendersTheResourceOnItsOwn(t *testing.T) {
+	srv, _ := newValiditySession(t)
+	if _, err := srv.store.(*memory.Store).CreateWithIDFromCorpus(
+		context.Background(), memory.GlobalProjectID, "lonelyglobal", memory.Memory{
+			Category: "preference", Content: "a cross-project preference", Source: "manual", Importance: 0.9,
+		}); err != nil {
+		t.Fatalf("seed global: %v", err)
+	}
+	text, err := srv.buildProjectContext(context.Background(), "")
+	if err != nil {
+		t.Fatalf("buildProjectContext(\"\"): %v", err)
+	}
+	if text == "" {
+		t.Fatal("buildProjectContext returned nothing for an unresolved project, so both its callers render their own " +
+			"empty-case text and name a project that was never registered as having nothing saved")
+	}
+	if !strings.Contains(text, "## Global (applies to all projects)") {
+		t.Errorf("no cross-project section in the unresolved block:\n%s", text)
+	}
+}
+
+// TestTheMemoriesListNamesTheProjectItWasAskedAbout is the fourth review finding,
+// which was a pre-existing defect this PR's new helper made visible: the
+// doc comment said there is ONE not-registered sentence, and
+// `ghost_memories_list` was emitting the `Project ""` wording the helper exists to
+// eliminate.
+//
+// Two halves, and both are asserted. The WORDING is fixed here — it is one line,
+// it is the same defect, and leaving it while claiming the helper is the single
+// source would be the claim being false. The READ is NOT: `ListMemories` widens to
+// `(project_id = ? OR project_id = '_global')` whenever a category or retention
+// filter is present, so a FILTERED browse of an unknown project returned the global
+// rows and the not-registered sentence was unreachable. What an unresolved project
+// should browse is its own question and gets its own change; what is fixed here is
+// that the read no longer borrows another project's rows on the way to that
+// question, so the sentence is reachable and the leak is gone.
+func TestTheMemoriesListNamesTheProjectItWasAskedAbout(t *testing.T) {
+	st := newValidityStore(t)
+	_, session := validityServerFor(t, st)
+	// A global row of the category the filtered browse below would match, so the
+	// widening is observable: without the read guard the answer is this row.
+	if _, err := st.CreateWithIDFromCorpus(context.Background(), memory.GlobalProjectID, "leakyglobal", memory.Memory{
+		Category: "gotcha", Content: "a global gotcha that must not leak into a browse", Source: "manual", Importance: 0.9,
+	}); err != nil {
+		t.Fatalf("seed global: %v", err)
+	}
+	const wanted = "no-such-project-either"
+
+	out := resultText(callTool(t, session, "ghost_memories_list", map[string]any{
+		"project_id": wanted, "category": "gotcha",
+	}))
+	if strings.Contains(out, "a global gotcha that must not leak") {
+		t.Errorf("a FILTERED browse of an unknown project returned the _global rows; ListMemories widens to "+
+			"`project_id = ? OR project_id = '_global'` when a filter is set:\n%s", out)
+	}
+	if !strings.Contains(out, wanted) {
+		t.Errorf("ghost_memories_list did not name the project the caller asked for:\n%s", out)
+	}
+	if strings.Contains(out, `Project ""`) {
+		t.Errorf("ghost_memories_list quoted the RESOLVED id, which is empty for an unknown name:\n%s", out)
+	}
 }
 
 // TestProjectContextLoadDoesNotScaleWithStoreSize is the bounded-window check, in
