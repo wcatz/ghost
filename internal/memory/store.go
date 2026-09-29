@@ -4868,16 +4868,22 @@ func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 // reason this predicate is not a plain ==. Memory.Importance is a float32, the
 // column is a float64, and the READ already narrows the column into a Memory
 // (scanMemories), so that is the precision at which anything downstream can tell
-// one value from another. Upsert's strengthen
-// (`SET importance = MIN(1.0, importance + importance * 0.2)`) computes that
-// increment in SQLite's own float64 — it moved there in #655, where it was Go
-// arithmetic on a float32 and the column therefore held a float32-exact value —
-// so a folded row usually holds a value float32 cannot name: 0.55 strengthens to
-// 0.6600000187754631, which widens to 0.6600000262260437. Comparing the two at
-// full width therefore reported a change on a row that had not moved, so every
-// applied reflect appended a byte-identical version of it and stamped it touched
-// — the whole of #727 reinstated for every strengthened memory (15 of 1,170 on
-// the store it was measured on) #750.
+// one value from another. Upsert's strengthen is `SET importance = MIN(1.0,
+// importance + ?)` with `importance*0.2` BOUND as a float32, so the multiply is
+// Go arithmetic on the caller's own value and the ADDITION is the one SQLite
+// does in its own float64 — the add is what #655 moved into SQL, where it had
+// been Go arithmetic on a float32 that left the column holding a float32-exact
+// value. The increment is therefore the caller's float32, NOT the column's value
+// times 0.2, and the two are not the same number. Either way the sum is a float64
+// a float32 cannot name: float32(0.55) is 0.550000011920929, the bound increment
+// widens to 0.11000000685453415, and the column lands at 0.6600000187754631,
+// which narrows to 0.6600000262260437. (The column's own value times 0.2 gives
+// 0.66000001430511479 — a different float64, though it narrows to the same
+// float32, so the defect and the fix are the same either way.) Comparing the two
+// at full width therefore reported a change on a row that had not moved, so
+// every applied reflect appended a byte-identical version of it and stamped it
+// touched — the whole of #727 reinstated for every strengthened memory (15 of
+// 1,170 on the store it was measured on) #750.
 //
 // So the stored value is NARROWED to the emission's precision and the two are
 // then equal. That is the only lossy direction, and what it loses is one float32

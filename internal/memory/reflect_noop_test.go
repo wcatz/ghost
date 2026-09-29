@@ -187,15 +187,17 @@ func TestReplaceNonManualVerbatimReemissionWritesNothing(t *testing.T) {
 // produced.
 //
 // Memory.Importance is a float32 and the column is a float64. Upsert's strengthen
-// computes `MIN(1.0, importance + importance * 0.2)` in SQLite's own float64, so
-// a folded row usually holds a value float32 cannot name — 0.55 + 0.11 lands at
-// 0.6600000187754631, and widening float32(0.55) is 0.550000011920929. Reading
-// the row back narrows it to a float32 (scanMemories), so the keep path re-emits
-// 0.6600000262260437, the no-op predicate compared that against the column's
-// 0.6600000187754631, called the row changed, and every applied reflect wrote a
-// byte-identical version of it and stamped it touched — the exact behaviour
-// #727 removed, restored for 15 of 1,170 memories on the store it was measured
-// on. A corpus that never folds looks fine, which is why #727's tests did too.
+// is `SET importance = MIN(1.0, importance + ?)` with `importance*0.2` bound as a
+// float32, so the add happens in SQLite's own float64 and a folded row usually
+// holds a value float32 cannot name — the column float32(0.55) is
+// 0.550000011920929, the bound increment widens to 0.11000000685453415, and their
+// sum lands at 0.6600000187754631. Reading the row back narrows it to a float32
+// (scanMemories), so the keep path re-emits 0.6600000262260437, the no-op
+// predicate compared that against the column's 0.6600000187754631, called the row
+// changed, and every applied reflect wrote a byte-identical version of it and
+// stamped it touched — the exact behaviour #727 removed, restored for 15 of
+// 1,170 memories on the store it was measured on. A corpus that never folds
+// looks fine, which is why #727's tests did too.
 //
 // The fix is to compare at the precision the emission carries
 // (float32(stored) == emitted.Importance): narrowing is the one lossy direction,
@@ -207,10 +209,10 @@ func TestReplaceNonManualAStrengthenedRowKeptVerbatimIsStillANoOp(t *testing.T) 
 	ctx := context.Background()
 
 	const content = "the release tag is signed, not the release commit"
-	// 0.55 is chosen because 0.55 + 0.55*0.2 is one of the strengthen results
-	// that float32 cannot represent, so the fixture reaches the state under
-	// test without a hand-written column value. Nothing here may assert that
-	// by hand: the value has to come from the writer that produces it.
+	// 0.55 is chosen because this fold's strengthen result is one float32
+	// cannot represent, so the fixture reaches the state under test without a
+	// hand-written column value. Nothing here may assert that by hand: the
+	// value has to come from the writer that produces it.
 	if _, _, _, err := s.Upsert(ctx, testProject, "convention", content, "mcp", 0.55, nil); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
