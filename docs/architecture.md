@@ -1538,7 +1538,19 @@ What exists now:
   ([#758](https://github.com/wcatz/ghost/pull/758)) — a no-query retrieval with
   its own bucket policies, never `weak`, and an empty window reported as
   `no_memories` rather than as a claim about the store — so moving the digest onto
-  it is now only the caller's half.
+  it is now only the caller's half. That seam SERVES two requests by refusing them
+  rather than approximating them, and both refusals are in `validatePassiveBudget`.
+  A slice's **bucket must be the requested project or `_global`**: the bucket is the
+  project predicate (the store binds it as the `WHERE` clause and never consults
+  `Mode`), so a mismatched bucket would read and inject a project the request never
+  named, and stage 3 only records that as `Signals[id].ProjectMatch=false`, which
+  nothing refuses. And a passive request cannot carry a **`Category` or `Retention`
+  filter**: the passive fetch binds neither in SQL, and its window is the policies'
+  own over-fetches rather than a widened one, so the filter would be applied after
+  selection rather than in it — the caller would get `all_out_of_category` while the
+  store held the rows it asked for just below the cut. Refusing is the honest
+  answer to a filter the fetch cannot honour, and a caller that needs one can send
+  a query, which is the shape that already widens for it.
 - **The trace is recorded unconditionally**, with per-stage counts, dropped ids,
   per-row decisions and the exact floors that were evaluated. `explain: true`
   does not read it yet.
