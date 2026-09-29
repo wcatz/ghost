@@ -45,9 +45,10 @@ name: longmemeval
 # Under THIS workflow a cap-cancelled run reports `skipped` rather than a green
 # `success`: the bench shell dies with the cap and never reaches the line that
 # writes `grew`, so the gate below is false. Nothing is stored, but nothing
-# claims otherwise — which is the difference from the run above. `skipped` has
-# other causes too (a warm pass with nothing new to store); docs/benchmarks.md
-# lists them against the log line that distinguishes each.
+# claims otherwise — which is the difference from the run above. That gate has
+# other causes too, including a warm pass with nothing to store and a complete
+# measurement that failed the floors; docs/benchmarks.md lists them against the
+# log evidence that separates each.
 #
 # RE-BASELINE STILL PENDING: the warm local run that set the floors below
 # predates the harness adopting the search_document:/search_query: task
@@ -317,10 +318,14 @@ jobs:
         # them is what keeps the quota available for dispatches that add
         # something.
         #
-        # `skipped` means this gate was false, which has more than one cause.
-        # The bench step's last line tells them apart, and its ABSENCE is a
-        # cause in itself: no size line at all means the bench step never got
-        # that far (the cap, or an earlier step failed), so nothing was stored.
+        # `skipped` means this gate was false, and the gate is the only cause.
+        # The bench step's last line tells the cases apart, and its ABSENCE is a
+        # case in itself — no size line at all means the bench step never got
+        # that far (the cap, or an earlier step failed). `embed cache
+        # unchanged` alone is ambiguous: a green bench step is a warm pass with
+        # nothing to store, but a red one can be a COMPLETE measurement that
+        # failed the floors (nothing embedded, and a real number that matters).
+        # docs/benchmarks.md carries the full list against the log evidence.
         # Unlike the ungated `always()` this replaced, none of these reports a
         # green `success` over a cache that was not saved.
         #
