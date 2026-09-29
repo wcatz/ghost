@@ -417,6 +417,108 @@ func TestRunPassiveRefusesAHistoricalRead(t *testing.T) {
 	}
 }
 
+// TestRunPassiveAnExclusionOutranksALegFact is the precedence rule, built on the
+// shape the review names: a passive set whose only row is removed by stage 2, read
+// by a retriever that reports the vector leg APPLICABLE but not attempted.
+//
+// The query path deliberately consults the stages first (see the fall-through
+// comment on the `len(p.set.Rows) > 0` block): naming a stage that removed rows is
+// the fact the caller can act on, and naming a leg instead would send it to an
+// embedder that was never the reason there is no answer. The passive branch
+// returned the two leg reasons BEFORE that check, so it inverted the precedence
+// the shared path is built to keep — and rendered a passive block with "The query
+// was not wrong", a sentence about a query and an embedder for a surface that had
+// neither.
+func TestRunPassiveAnExclusionOutranksALegFact(t *testing.T) {
+	expired := projectCandidate("p_exp", 0.9)
+	expired.ValidUntil = stampPtr("2026-01-01 00:00:00")
+	f := &fakeRetriever{set: &memory.CandidateSet{
+		Rows: []memory.Candidate{expired},
+		Legs: map[string]memory.LegStatus{
+			"fts":    {Applicable: true, Attempted: true, Available: true},
+			"vector": {Applicable: true, Attempted: false},
+		},
+	}}
+	res := run(t, f, passiveRequest())
+	if res.Reason != reasonAllInvalid {
+		t.Errorf("reason: got %q, want %q — a stage emptied this set, and that outranks a leg that never ran, "+
+			"exactly as it does on the query path", res.Reason, reasonAllInvalid)
+	}
+	// The LEG sentence, not the shared one. "The query was not wrong" is the
+	// trailing clause of every exclusion reason including main's `all_invalid`, so
+	// asserting on it would fail a correct fix; what is wrong here is claiming a
+	// vector leg and a keyword leg ran, on a surface that ran neither.
+	if strings.Contains(res.Abstention, "vector leg could not run") {
+		t.Errorf("the abstention reports a leg failure for a set a stage emptied — the leg never caused this: %q", res.Abstention)
+	}
+}
+
+// TestRunPassiveAnEmptyWindowStillNamesTheLeg is the other half, and it is what
+// keeps the precedence above from swallowing the leg reasons: when NO stage
+// removed anything and the set was empty coming in, the leg facts are the only
+// thing left to explain it, and they must survive. Both arms are asserted by the
+// one pair because fixing the precedence by deleting the leg checks would make the
+// first pass and this one fail.
+func TestRunPassiveAnEmptyWindowStillNamesTheLeg(t *testing.T) {
+	f := &fakeRetriever{set: &memory.CandidateSet{
+		Rows: nil,
+		Legs: map[string]memory.LegStatus{
+			"fts":    {Applicable: true, Attempted: true, Available: true},
+			"vector": {Applicable: true, Attempted: false},
+		},
+	}}
+	res := run(t, f, passiveRequest())
+	if res.Reason != reasonVectorUnavailable {
+		t.Errorf("reason: got %q, want %q — with no stage to blame, a leg that never ran is the only fact left",
+			res.Reason, reasonVectorUnavailable)
+	}
+}
+
+// TestRunPassiveRefusesACategoryPredicate is the filter the passive fetch cannot
+// honour. `passiveFetchSQL` binds `WHERE project_id = ? AND resolved_at IS NULL`
+// plus scope — there is no category and no tier in its SQL — while the query path
+// WIDENS the window when either is set, precisely so a matching row ranked below
+// the cut stays reachable (that widening is what closed #573).
+//
+// The passive branch returns before that widening, so a passive request carrying
+// either predicate is accepted, stage 3 then drops every non-matching row out of a
+// window that was never widened, and the answer is `all_out_of_category` — a
+// short block, or none — while the store holds exactly the rows the caller asked
+// for, just below the over-fetch cut. The caller's category is not a filter that
+// arrived too late to apply; it never applied at all, and a block that cannot be
+// backfilled from a filter the fetch never bound is a false negative with a
+// confident reason attached.
+func TestRunPassiveRefusesACategoryPredicate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*Request)
+		want  string
+	}{
+		{"category", func(r *Request) { r.Category = "gotcha" }, "Category"},
+		{"retention", func(r *Request) { r.Retention = memory.RetentionPersistent }, "Retention"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeRetriever{set: passiveSet(projectCandidate("p1", 0.9))}
+			req := passiveRequest()
+			tc.apply(&req)
+			_, err := Run(context.Background(), f, req)
+			if err == nil {
+				t.Fatalf("a passive request carrying %s must be refused, not served from a window nothing widened",
+					tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal must name the predicate it cannot honour; got %v", err)
+			}
+			if !strings.Contains(err.Error(), "passive") {
+				t.Errorf("the refusal must name the passive shape; got %v", err)
+			}
+			if f.sets != 0 {
+				t.Errorf("the retriever was called %d times for a request this seam refused", f.sets)
+			}
+		})
+	}
+}
+
 // TestRunPassiveTraceReportsTheWindowItActuallyRead: Trace.Limit is a checkable
 // artifact — the next PR projects it — so on a passive run it has to be the width
 // the store was asked for. It was the sum of the slice ITEM CAPS, which is how

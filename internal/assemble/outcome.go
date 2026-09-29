@@ -151,22 +151,6 @@ func (p *pipeline) retrievalPartial() bool {
 // stage is consulted: an absent row is only evidence of absence when the search
 // that failed to find it actually ran.
 func (p *pipeline) emptyReason() string {
-	if p.passive {
-		// Passive retrieval reports the retrieval's own two failures before any
-		// stage is consulted, and they are the same facts they are in query mode (a
-		// leg that never ran, a leg that broke). Only the fallback differs: an empty
-		// passive window is `no_memories`, because no query ran to fail and
-		// `no_candidates` would claim a query matched nothing.
-		if p.legNeverRan("vector") && !p.legFailed("fts") {
-			return reasonVectorUnavailable
-		}
-		if p.legFailed("fts") || p.legFailed("vector") {
-			return reasonRetrievalFailed
-		}
-		if len(p.set.Rows) == 0 {
-			return reasonNoMemories
-		}
-	}
 	if len(p.set.Rows) > 0 {
 		// The response-fit post-pass runs after every stage, so when it removed
 		// the last rows it is the cause the caller has to act on: the block was
@@ -192,6 +176,20 @@ func (p *pipeline) emptyReason() string {
 	}
 	if p.legFailed("fts") || p.legFailed("vector") {
 		return reasonRetrievalFailed
+	}
+	if p.passive {
+		// The last line, and the only one the passive path changes. Reaching here
+		// means no stage removed anything and no leg fact explains the emptiness, so
+		// the window itself is what was empty — and `no_candidates` would claim a
+		// QUERY matched nothing, which is a sentence about a search that never ran.
+		// A passive empty is `no_memories`.
+		//
+		// It sits BELOW the two leg checks deliberately, which is what the block
+		// above says in its own terms: a stage that removed rows is the cause the
+		// caller can act on, and a leg fact is only reached when no stage did. The
+		// two leg reasons are real facts on a passive set — a retriever can report a
+		// leg applicable-but-not-run — so they are kept, not duplicated above.
+		return reasonNoMemories
 	}
 	return reasonNoCandidates
 }

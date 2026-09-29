@@ -678,6 +678,39 @@ func validatePassiveBudget(req Request) error {
 				"if the over-fetch is the same number", s.Bucket)
 		}
 	}
+	// A category or tier filter cannot be honoured here, and the seam would rather
+	// refuse it than serve a confident wrong answer.
+	//
+	// `passiveFetchSQL` binds `WHERE project_id = ? AND resolved_at IS NULL` plus
+	// scope — there is no category and no retention in its SQL at all, because a
+	// passive block is selected by importance, decay and pin rather than by a
+	// predicate. The query path can afford the same filter because it WIDENS the
+	// window when one is set (`predicateFetchWiden`, what closed #573), so a
+	// matching row ranked below the cut stays reachable; the passive branch of
+	// `retrievalWindow` returns before that widening, because the window there is
+	// the policies' own over-fetches.
+	//
+	// So a passive request carrying a category is not "filtered, then assembled" —
+	// it is assembled from rows the filter never touched, and stage 3 then drops
+	// every non-matching one out of a window nothing widened. The caller gets
+	// `all_out_of_category`, or a short block, while the store holds exactly the
+	// rows it asked for just below the over-fetch cut. That is a false negative
+	// with a confident reason attached, and it is worse than a refusal: a caller
+	// that sees the reason concludes its category is absent from the project.
+	//
+	// Refusing also keeps the number honest. `RetrievalWindow` reporting a tripled
+	// window nothing read is a small lie, but the one that does damage is the
+	// filter: it decides membership, and membership is what the caller came for.
+	if req.Category != "" {
+		return fmt.Errorf("assemble: a passive request cannot carry a Category filter (%q): the passive fetch binds no "+
+			"category in SQL and its window is the policies' over-fetches, so nothing widens the read for one — the rows "+
+			"would be dropped after selection rather than fetched by it. Drop the filter, or send a query", req.Category)
+	}
+	if req.Retention != "" {
+		return fmt.Errorf("assemble: a passive request cannot carry a Retention filter (%q): the passive fetch binds no "+
+			"tier in SQL and its window is the policies' over-fetches, so nothing widens the read for one — the rows "+
+			"would be dropped after selection rather than fetched by it. Drop the filter, or send a query", req.Retention)
+	}
 	return nil
 }
 
