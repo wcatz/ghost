@@ -125,6 +125,28 @@ type PruneReport struct {
 	Removed    int
 }
 
+// pruneActivitySQL is the row's last activity, as ONE expression, because three
+// statements have to agree on it: the predicate below, the candidate's own
+// ActivityAt, and the removal order. A grace measured from one expression and
+// ordered by another is a report that describes a different run from the one it
+// previews.
+//
+// A recorded access is the strongest signal and is preferred when it exists.
+// Nothing in production writes last_accessed (Store.Touch has no caller), so
+// what is left is the newest of the row's own stamps: the last write, or the
+// expiry a write REFRESHED. max() rather than another COALESCE term because
+// created_at is NOT NULL, so a trailing term is unreachable — and the newest of
+// the three is the question, not the first one present. The expiry belongs there
+// because a fold is a write that extends a session row's life (raiseRetentionTx)
+// while deliberately leaving updated_at alone, and without this term a row
+// reinforced a moment ago was prunable the instant its fresh expiry arrived: the
+// grace was measured from a stamp the fold never moved (#772). Every term but
+// last_accessed is in the one layout Ghost writes, so the max is a text
+// comparison between like shapes; a hand-set value in another shape sorts by its
+// own characters, which errs towards the newer stamp and so towards keeping the
+// row.
+const pruneActivitySQL = "COALESCE(last_accessed, max(updated_at, created_at, expires_at))"
+
 // prunePredicate is the candidate predicate, and the DELETE runs the identical
 // text. That is not tidiness: the tombstones are appended for the ids the SELECT
 // returned, so the two statements have to name exactly the same rows. One
@@ -132,12 +154,10 @@ type PruneReport struct {
 // BEGIN IMMEDIATE), so they cannot disagree by a row arriving in between — which
 // is the reason to compare them by construction instead of by argument.
 //
-// The activity term is COALESCE(last_accessed, updated_at, created_at): a
-// recorded access is the stronger signal, and nothing in production writes
-// last_accessed (Store.Touch has no caller), so in practice this is the row's
-// last WRITE. It is compared through SQLite's datetime() rather than as text,
-// because the three columns do not all hold the same shape: created_at and
-// updated_at are whatever datetime('now') wrote, and Store.Touch writes
+// The activity term is pruneActivitySQL above, compared through SQLite's
+// datetime() rather than as text, because the columns it coalesces do not all
+// hold the same shape: created_at, updated_at and expires_at are whatever
+// datetime('now') wrote and sessionExpiry formats, while Store.Touch writes
 // last_accessed as RFC 3339. A text comparison between the two errs only WITHIN
 // one calendar day ('T' sorts above ' '), and it errs towards keeping the row — a
 // prune that runs a day late, never one that removes a memory it should not — but
@@ -165,7 +185,7 @@ const prunePredicate = `
 		AND pinned = 0
 		AND expires_at IS NOT NULL
 		AND expires_at <= ?
-		AND datetime(COALESCE(last_accessed, updated_at, created_at)) <= datetime(?)
+		AND datetime(` + pruneActivitySQL + `) <= datetime(?)
 `
 
 // pruneBatchSize bounds the write lock: an apply removes candidates in batches
@@ -219,11 +239,11 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 	// two rows with the same stamp have to come out in an order a second run
 	// would repeat. The order is part of the query so a batch is the same window
 	// the preview named.
-	order := "\n\t\tORDER BY COALESCE(last_accessed, updated_at, created_at), id"
+	order := "\n\t\tORDER BY " + pruneActivitySQL + ", id"
 
 	candQuery := `
 		SELECT id, project_id, category, content, retention, expires_at,
-		       COALESCE(last_accessed, updated_at, created_at)
+		       ` + pruneActivitySQL + `
 		FROM memories
 		WHERE ` + prunePredicate + scope + order
 

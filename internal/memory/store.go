@@ -3093,17 +3093,24 @@ func mergeRetention(current, incoming string) string {
 
 // raiseRetentionTx raises one row's tier to protect, never lowers it, and
 // reports the tier the row ended up with so the save result can name the row
-// that carries the caller's protection.
+// that carries the caller's protection. now is the instant the save's own
+// expiry was derived from, so a refreshed expiry and the inserted copy's are
+// the same value rather than two clock reads.
 //
-// expires_at is cleared when the row leaves the session tier: a durable row with
+// expires_at is cleared when the row LEAVES the session tier: a durable row with
 // an expiry is a claim about when the user stops wanting it that nobody made,
 // and the value a session row carried described the life of a tier it no longer
-// has. It is left alone when the row stays session, because the expiry belongs
-// to that row's own save rather than to the save that happened to fold into it.
+// has. A row that STAYS session has its expiry REFRESHED even though its tier did
+// not move, and that is the whole of what this function does for the common fold
+// (#772). A session→session fold is what "the same fact restated" looks like, and
+// before this it returned early and wrote nothing, so the row kept the expiry its
+// ORIGINAL save derived: a memory about to expire was reinforced and pruned
+// minutes later, by the one command that is allowed to remove a session row.
 //
-// A row already at the merged tier is not written at all, so a fold that changes
-// nothing about protection leaves the row's other columns alone.
-func raiseRetentionTx(ctx context.Context, tx *sql.Tx, id, incoming string) (string, error) {
+// Only expires_at moves with the tier. updated_at and last_accessed are
+// deliberately untouched, for the reason pinMemoryTx gives: they carry the decay
+// recency and the --skip-unchanged fingerprint, and a fold is not a re-save.
+func raiseRetentionTx(ctx context.Context, tx *sql.Tx, id, incoming string, now time.Time) (string, error) {
 	if id == "" {
 		return incoming, nil
 	}
@@ -3117,6 +3124,20 @@ func raiseRetentionTx(ctx context.Context, tx *sql.Tx, id, incoming string) (str
 	}
 	merged := mergeRetention(current, incoming)
 	if merged == current {
+		// The tier did not change. The expiry still did, if the row is a session
+		// row: a fold is a write that says the fact is still wanted, and the tier's
+		// promise is that the row lives for SessionTTL from the last such write.
+		// This is the one write a fold makes to a row whose protection is already
+		// what the caller asked for, and it costs an UPDATE on a row the same
+		// transaction has already strengthened. A DURABLE row at the merged tier is
+		// still not written at all: it has no expiry to refresh and no protection
+		// to add, so a fold that changes nothing about a durable memory stays free.
+		if merged == RetentionSession {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE memories SET expires_at = ? WHERE id = ?`, sessionExpiry(merged, now), id); err != nil {
+				return "", fmt.Errorf("refresh the fold target's session expiry: %w", err)
+			}
+		}
 		return merged, nil
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -3283,7 +3304,11 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if err != nil {
 		return "", "", 0, err
 	}
-	expires := sessionExpiry(retention, time.Now())
+	// One clock read for the whole save, so the copy this call inserts and the
+	// expiry a fold refreshes on the surviving row are the same value rather than
+	// two instants a statement apart.
+	now := time.Now()
+	expires := sessionExpiry(retention, now)
 
 	parentTx, inTx := storeTxFromContext(ctx)
 	if !inTx {
@@ -3716,7 +3741,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// The tier reaches the target here for the same reason the pin does:
 			// this path stores no row of its own, so the target is the only thing
 			// the request can mean.
-			if _, err = raiseRetentionTx(ctx, tx, existingID, retention); err != nil {
+			if _, err = raiseRetentionTx(ctx, tx, existingID, retention, now); err != nil {
 				return "", "", 0, err
 			}
 			if err = commit(); err != nil {
@@ -3771,7 +3796,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// for has to land there rather than only on the copy inserted above.
 		// Same transaction as the strengthen and the link, or a failure here
 		// would report a save whose request was silently dropped.
-		if _, err = raiseRetentionTx(ctx, tx, existingID, retention); err != nil {
+		if _, err = raiseRetentionTx(ctx, tx, existingID, retention, now); err != nil {
 			return "", "", 0, err
 		}
 
@@ -5445,6 +5470,83 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 // durably written but never part of what the consolidator saw. Any non-manual
 // memory created at/after that timestamp is preserved through the replace
 // instead. Pass "" to skip the check (tests that don't exercise the race).
+// inheritedRetention is the tier a consolidation successor takes from the rows it
+// stands in for (#773). It is raiseRetentionTx's rule — mergeRetention, longest
+// life wins, never lower — over the SOURCES rather than over a fold's two tiers,
+// and it is the same rule for the same reason: an emission inherits rather than
+// invents, so a merge of two session memories arrives as a session memory rather
+// than as a project one that nothing will ever prune.
+//
+// Two properties are load-bearing and neither is obvious from the signature.
+//
+// The fold runs over the sources ALONE. The emission's own Retention is used only
+// when no source named a tier, because it is empty on every emission reflection
+// produces and NormalizeRetention would read that silence as the project default
+// — folding it in would raise every merge to project, which is the whole defect
+// this function exists to remove. A caller that states a tier on an emission with
+// no sources still gets it (#587's own save path, one writer down).
+//
+// A keep-forever source is not a consolidation input: retentionExemptSQL keeps it
+// out of the snapshot, the replaceable set and the concurrent-save set, so it is
+// never deleted here. It CAN still be named in ReplacesIDs, and a successor that
+// came out shorter-lived than the one row nobody was allowed to consolidate would
+// be a demotion the user declared against. mergeRetention cannot produce that
+// direction, and reading the sources rather than trusting the emission is what
+// makes it true even when the emission is silent.
+//
+// Read here because the delete below is what takes the sources, exactly as
+// inheritedClaims is read for the same rows. A source the proposal named but this
+// store does not hold contributes nothing, for inheritedClaims' reason: there is
+// nothing to inherit and the row is written on what the emission said.
+func inheritedRetention(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (string, error) {
+	merged := ""
+	for _, id := range m.ReplacesIDs {
+		if id == "" {
+			continue
+		}
+		var current string
+		err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(retention, 'project') FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+		).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("read replaced memory %s retention: %w", id, err)
+		}
+		if merged == "" {
+			merged = current
+			continue
+		}
+		merged = mergeRetention(merged, current)
+	}
+	if merged != "" {
+		return merged, nil
+	}
+	// Nothing to inherit from, so the emission decides — through the one function
+	// that applies the default, so a tier the vocabulary does not hold is refused
+	// with its own wording rather than taking the whole round down on a column
+	// CHECK.
+	return NormalizeRetention(m.Retention)
+}
+
+// ReplaceNonManual's fresh insert is the one writer in the package that mints a
+// row a save did not ask for, so it is the one that has to decide a tier nobody
+// stated: the successor of rows that are being replaced. It inherits
+// (inheritedRetention) beside inheritedClaims, which already carries their
+// validity and provenance, and expires_at follows from that tier through the same
+// sessionExpiry every other writer uses — the ONLY source of an expiry in the
+// product, so a consolidation cannot schedule the memory it just wrote for
+// deletion any more than a save can.
+//
+// consolidatedSince should be a timestamp (see CurrentTimestamp) captured
+// before the caller fetched the memories it fed to the consolidator. ghost
+// reflect runs as a separate process from the long-lived MCP server, so a
+// ghost_memory_save landing on the live server during the multi-minute
+// consolidation round trip would otherwise be silently deleted here — it was
+// durably written but never part of what the consolidator saw. Any non-manual
+// memory created at/after that timestamp is preserved through the replace
+// instead. Pass "" to skip the check (tests that don't exercise the race).
 func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string) (preserved []string, err error) {
 	if len(memories) == 0 {
 		return nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
@@ -5733,18 +5835,33 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		if err != nil {
 			return nil, err
 		}
+		// The tier, from the same rows and for the same reason: the successor
+		// stands in for the memories this pass is about to delete, so it inherits
+		// their life as well as their evidence and their window. Before this the
+		// statement named neither column, so the row took the DEFAULT — and a merge
+		// of two session memories came out as a project memory that nothing will
+		// ever expire, which is the tier the user asked to escape (#773).
+		//
+		// Read here for the same reason as the claims above and for the same
+		// reordering: the delete below is what takes the sources.
+		tier, err := inheritedRetention(ctx, tx, projectID, m)
+		if err != nil {
+			return nil, err
+		}
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags, scope,
 			                      valid_from, valid_until, verified_at,
-			                      confidence, agent, session_id, source_ref)
+			                      confidence, agent, session_id, source_ref,
+			                      retention, expires_at)
 			VALUES (?, ?, ?, 'reflection', ?, ?, ?,
-			        ?, ?, ?, ?, ?, ?, ?)
+			        ?, ?, ?, ?, ?, ?, ?,
+			        ?, ?)
 			RETURNING id
 		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope),
 			nullIfEmptyPtr(claims.validFrom), nullIfEmptyPtr(claims.validUntil), nullIfEmptyPtr(claims.verifiedAt),
 			claims.confidence, nullIfEmpty(claims.agent), nullIfEmpty(claims.sessionID),
-			nullIfEmpty(claims.sourceRef)).Scan(&newID); err != nil {
+			nullIfEmpty(claims.sourceRef), tier, sessionExpiry(tier, time.Now())).Scan(&newID); err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
 		// The support this emission was consolidated FROM, carried onto the row that

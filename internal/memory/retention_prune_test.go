@@ -16,11 +16,36 @@ import (
 // fixture that wants such a row to be prunable has to age updated_at too
 // (backdateWrite); leaving the write at the save instant is the ordinary case
 // and the row is inside the grace.
+//
+// A test that writes SEVERAL rows through this does NOT get the same result: the
+// save half runs the dedup probe, and a store of session notes is a store of
+// near-duplicates, so a later row folds into an earlier one and REFRESHES its
+// expiry (#772) — undoing the ageing. Those tests use pruneRow and agePruneRow and
+// do all the ageing last, which is what makes their rows mean what the test says
+// they mean. The fixture content here is near-duplicate on purpose, so this is
+// not a hypothetical.
 // pruneFixtureIn is pruneFixture for a named project. The `_global` row a
 // `session` save can produce is a normal row in every respect but its project
 // id, and pinning the decision that a store-wide prune reaches it needs a way to
 // write one.
 func pruneFixtureIn(t *testing.T, s *Store, projectID, content, tier, expires, lastAccessed string) string {
+	t.Helper()
+	id := pruneRow(t, s, projectID, content, tier)
+	agePruneRow(t, s, id, expires, lastAccessed)
+	return id
+}
+
+func pruneFixture(t *testing.T, s *Store, content, tier, expires, lastAccessed string) string {
+	t.Helper()
+	id := pruneRow(t, s, testProject, content, tier)
+	agePruneRow(t, s, id, expires, lastAccessed)
+	return id
+}
+
+// pruneRow is the save half of pruneFixture, and agePruneRow is the other half.
+// They are separate so a multi-row fixture can age every row after every save:
+// see pruneFixture for why the interleaved order does not hold (#772).
+func pruneRow(t *testing.T, s *Store, projectID, content, tier string) string {
 	t.Helper()
 	ctx := context.Background()
 	// A project_id that is not in `projects` trips the FK, and `_global` is only
@@ -36,27 +61,16 @@ func pruneFixtureIn(t *testing.T, s *Store, projectID, content, tier, expires, l
 	if err != nil {
 		t.Fatalf("UpsertWithOptions(%s, %s): %v", projectID, tier, err)
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE memories SET expires_at = ?, last_accessed = ? WHERE id = ?`,
-		nullIfEmpty(expires), nullIfEmpty(lastAccessed), id); err != nil {
-		t.Fatalf("age %s: %v", id, err)
-	}
 	return id
 }
 
-func pruneFixture(t *testing.T, s *Store, content, tier, expires, lastAccessed string) string {
+func agePruneRow(t *testing.T, s *Store, id, expires, lastAccessed string) {
 	t.Helper()
-	ctx := context.Background()
-	id, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", content, "mcp", 0.6, nil, UpsertOptions{Retention: tier})
-	if err != nil {
-		t.Fatalf("UpsertWithOptions(%s): %v", tier, err)
-	}
-	if _, err := s.db.ExecContext(ctx,
+	if _, err := s.db.ExecContext(context.Background(),
 		`UPDATE memories SET expires_at = ?, last_accessed = ? WHERE id = ?`,
 		nullIfEmpty(expires), nullIfEmpty(lastAccessed), id); err != nil {
 		t.Fatalf("age %s: %v", id, err)
 	}
-	return id
 }
 
 // backdateWrite ages a row's last write, which is what the grace falls back to
@@ -143,27 +157,41 @@ func TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	longExpired := pruneFixture(t, s, "a session note expired long ago and untouched since", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
-	notExpired := pruneFixture(t, s, "a session note that has not reached its expiry", RetentionSession,
-		stamp(time.Hour), stamp(-29*24*time.Hour))
-	insideGrace := pruneFixture(t, s, "a session note expired but read yesterday", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-24*time.Hour))
-	// No recorded access: the grace falls back to the row's last write, so this
-	// row has to be old in both columns to be a candidate.
-	neverAccessed := pruneFixture(t, s, "a session note expired and never read", RetentionSession,
-		stamp(-30*24*time.Hour), "")
+	// Written first, aged second, for the reason pruneFixture gives: every one of
+	// these is a near-duplicate of another, so a save made after a row was aged
+	// folds into it and refreshes its expiry.
+	rows := []struct{ content, tier, expires, lastAccessed string }{
+		{content: "a session note expired long ago and untouched since", tier: RetentionSession,
+			expires: stamp(-30 * 24 * time.Hour), lastAccessed: stamp(-29 * 24 * time.Hour)},
+		{content: "a session note that has not reached its expiry", tier: RetentionSession,
+			expires: stamp(time.Hour), lastAccessed: stamp(-29 * 24 * time.Hour)},
+		{content: "a session note expired but read yesterday", tier: RetentionSession,
+			expires: stamp(-30 * 24 * time.Hour), lastAccessed: stamp(-24 * time.Hour)},
+		// No recorded access: the grace falls back to the row's last write, so this
+		// row has to be old in both columns to be a candidate.
+		{content: "a session note expired and never read", tier: RetentionSession,
+			expires: stamp(-30 * 24 * time.Hour)},
+		// And the row that is expired, never read, and last written a minute ago:
+		// inside the grace, so kept. This is the default shape of a real session
+		// memory, and it is the case a prune that measured only the expiry would
+		// delete.
+		{content: "a session note expired seconds after it was saved", tier: RetentionSession,
+			expires: stamp(-time.Hour)},
+		{content: "a durable fact that is just as old", tier: RetentionProject,
+			expires: stamp(-30 * 24 * time.Hour), lastAccessed: stamp(-29 * 24 * time.Hour)},
+		{content: "a keep-forever fact with a stale expiry", tier: RetentionPersistent,
+			expires: stamp(-30 * 24 * time.Hour), lastAccessed: stamp(-29 * 24 * time.Hour)},
+	}
+	ids := make([]string, len(rows))
+	for i, r := range rows {
+		ids[i] = pruneRow(t, s, testProject, r.content, r.tier)
+	}
+	for i, r := range rows {
+		agePruneRow(t, s, ids[i], r.expires, r.lastAccessed)
+	}
+	longExpired, notExpired, insideGrace, neverAccessed, freshWrite := ids[0], ids[1], ids[2], ids[3], ids[4]
+	durable, keepForever := ids[5], ids[6]
 	backdateWrite(t, s, neverAccessed, stamp(-30*24*time.Hour))
-	// And the row that is expired, never read, and last written a minute ago:
-	// inside the grace, so kept. This is the default shape of a real session
-	// memory, and it is the case a prune that measured only the expiry would
-	// delete.
-	freshWrite := pruneFixture(t, s, "a session note expired seconds after it was saved", RetentionSession,
-		stamp(-time.Hour), "")
-	durable := pruneFixture(t, s, "a durable fact that is just as old", RetentionProject,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
-	keepForever := pruneFixture(t, s, "a keep-forever fact with a stale expiry", RetentionPersistent,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
 	if err != nil {
@@ -208,11 +236,12 @@ func TestPrunePinsTheGraceBoundaryFromBothSides(t *testing.T) {
 	ctx := context.Background()
 	const grace = 24 * time.Hour
 
-	// Both expired a month ago, so only the grace decides.
-	justOutside := pruneFixture(t, s, "a session note last touched a minute past the grace", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-grace-time.Minute))
-	justInside := pruneFixture(t, s, "a session note last touched a minute inside the grace", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-grace+time.Minute))
+	// Both expired a month ago, so only the grace decides. Aged after both saves
+	// for the reason pruneFixture gives.
+	justOutside := pruneRow(t, s, testProject, "a session note last touched a minute past the grace", RetentionSession)
+	justInside := pruneRow(t, s, testProject, "a session note last touched a minute inside the grace", RetentionSession)
+	agePruneRow(t, s, justOutside, stamp(-30*24*time.Hour), stamp(-grace-time.Minute))
+	agePruneRow(t, s, justInside, stamp(-30*24*time.Hour), stamp(-grace+time.Minute))
 
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: grace})
 	if err != nil {
@@ -233,10 +262,12 @@ func TestPrunePinsTheExpiryBoundaryToo(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	expired := pruneFixture(t, s, "a session note one minute past its expiry", RetentionSession,
-		stamp(-time.Minute), stamp(-30*24*time.Hour))
-	live := pruneFixture(t, s, "a session note one minute short of its expiry", RetentionSession,
-		stamp(time.Minute), stamp(-30*24*time.Hour))
+	expired := pruneRow(t, s, testProject, "a session note one minute past its expiry", RetentionSession)
+	live := pruneRow(t, s, testProject, "a session note one minute short of its expiry", RetentionSession)
+	// Aged after both saves: these two are near-duplicates, so the second save
+	// folds into the first and refreshes its expiry (pruneFixture).
+	agePruneRow(t, s, expired, stamp(-time.Minute), stamp(-30*24*time.Hour))
+	agePruneRow(t, s, live, stamp(time.Minute), stamp(-30*24*time.Hour))
 
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: 0})
 	if err != nil {
@@ -311,10 +342,12 @@ func TestPruneDefaultsToADryRunThatWritesNothing(t *testing.T) {
 func TestPruneLeavesADeleteTombstonePerRemoval(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	first := pruneFixture(t, s, "the first session note a prune will remove", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
-	second := pruneFixture(t, s, "the second session note a prune will remove", RetentionSession,
-		stamp(-31*24*time.Hour), stamp(-30*24*time.Hour))
+	first := pruneRow(t, s, testProject, "the first session note a prune will remove", RetentionSession)
+	second := pruneRow(t, s, testProject, "the second session note a prune will remove", RetentionSession)
+	// Aged after both saves, for the reason pruneFixture gives: a prune backlog is
+	// a store of near-duplicates, and the second save folds into the first.
+	agePruneRow(t, s, first, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	agePruneRow(t, s, second, stamp(-31*24*time.Hour), stamp(-30*24*time.Hour))
 
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
 	if err != nil {
@@ -359,10 +392,14 @@ func TestPruneLeavesADeleteTombstonePerRemoval(t *testing.T) {
 func TestPruneNeverRemovesAPinnedRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	pinned := pruneFixture(t, s, "a pinned session note that expired long ago", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
-	control := pruneFixture(t, s, "an unpinned session note that expired long ago", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	pinned := pruneRow(t, s, testProject, "a pinned session note that expired long ago", RetentionSession)
+	control := pruneRow(t, s, testProject, "an unpinned session note that expired long ago", RetentionSession)
+	// Aged after both saves, for the reason pruneFixture gives: the second save
+	// folds into the first, so a fixture that aged first would be measuring the
+	// refresh rather than the pin — and a pinned row kept because its expiry was
+	// fresh proves nothing about pinned = 0.
+	agePruneRow(t, s, pinned, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	agePruneRow(t, s, control, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, pinned); err != nil {
 		t.Fatalf("pin %s: %v", pinned, err)
 	}
@@ -692,14 +729,19 @@ func TestPruneReadsAnAccessStampInEitherTimestampShape(t *testing.T) {
 	outside := cutoff.Add(-30 * time.Minute)
 	inside := cutoff.Add(30 * time.Minute)
 
-	rfcGone := pruneFixture(t, s, "a session note read half an hour before the cutoff, in RFC 3339", RetentionSession,
-		"2026-08-01 00:00:00", outside.Format(time.RFC3339))
-	sqlGone := pruneFixture(t, s, "a session note read half an hour before the cutoff, in SQLite's shape", RetentionSession,
-		"2026-08-01 00:00:00", outside.Format("2006-01-02 15:04:05"))
-	rfcKept := pruneFixture(t, s, "a session note read half an hour after the cutoff, in RFC 3339", RetentionSession,
-		"2026-08-01 00:00:00", inside.Format(time.RFC3339))
-	sqlKept := pruneFixture(t, s, "a session note read half an hour after the cutoff, in SQLite's shape", RetentionSession,
-		"2026-08-01 00:00:00", inside.Format("2006-01-02 15:04:05"))
+	rfcGone := pruneRow(t, s, testProject, "a session note read half an hour before the cutoff, in RFC 3339", RetentionSession)
+	sqlGone := pruneRow(t, s, testProject, "a session note read half an hour before the cutoff, in SQLite's shape", RetentionSession)
+	rfcKept := pruneRow(t, s, testProject, "a session note read half an hour after the cutoff, in RFC 3339", RetentionSession)
+	sqlKept := pruneRow(t, s, testProject, "a session note read half an hour after the cutoff, in SQLite's shape", RetentionSession)
+	// Aged after all four saves, for the reason pruneFixture gives: the four
+	// differ by a couple of words, so each save folds into an earlier row and
+	// refreshes its expiry.
+	for _, r := range []struct {
+		id, accessed string
+	}{{rfcGone, outside.Format(time.RFC3339)}, {sqlGone, outside.Format("2006-01-02 15:04:05")},
+		{rfcKept, inside.Format(time.RFC3339)}, {sqlKept, inside.Format("2006-01-02 15:04:05")}} {
+		agePruneRow(t, s, r.id, "2026-08-01 00:00:00", r.accessed)
+	}
 
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: grace, Now: now})
 	if err != nil {
@@ -739,10 +781,12 @@ func TestPruneScopesToOneProjectWhenAsked(t *testing.T) {
 	if err := s.EnsureProject(ctx, "other-project", "/tmp/other", "other"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
-	mine := pruneFixture(t, s, "a session note in the project being pruned", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
-	theirs := pruneFixture(t, s, "a session note in another project", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	mine := pruneRow(t, s, testProject, "a session note in the project being pruned", RetentionSession)
+	theirs := pruneRow(t, s, testProject, "a session note in another project", RetentionSession)
+	// Aged after both saves, for the reason pruneFixture gives, and moved before
+	// the prune so the scoping decision is the only thing under test.
+	agePruneRow(t, s, mine, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	agePruneRow(t, s, theirs, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET project_id = 'other-project' WHERE id = ?`, theirs); err != nil {
 		t.Fatalf("move the second row: %v", err)
 	}
