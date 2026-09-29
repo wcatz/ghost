@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -371,6 +372,258 @@ func TestContextEmptyResultCountsOnlyTowardTheResultRate(t *testing.T) {
 	}
 	if got, want := rep.Cost.TokensPerQuery, (Ratio{Num: 4, Den: 1}); got != want {
 		t.Errorf("token cost = %+v, want %+v", got, want)
+	}
+}
+
+// contextTrimFixture is the corpus that makes the BUDGET table falsifiable.
+//
+// contextFixture holds 8 rows against the tool's 10-item cap, so nothing in it is
+// ever trimmed and every trim ratio in that report is a step function with a single
+// reachable value. 1.000 is a true reading there, and it is also exactly what a
+// trim that had stopped firing altogether would print: a ratio that cannot go below
+// 1.000 cannot tell a budget that binds from a budget that was removed, and the
+// graded corpus's 220/220 was true only because the cap binds on every one of its
+// queries.
+//
+// So this fixture is 12 rows against that cap, with its two queries shaped to land
+// on either side of it: q_wide reaches all 12 and is trimmed, q_narrow reaches three
+// and is not. Every row is graded relevant, which is what makes "how many of the
+// relevant rows did the cap cost" a number this fixture can NAME rather than one
+// that happens to coincide with the admitted count — the two coincide only when the
+// other trim dropped nothing.
+//
+// The vector shapes are the reason each candidate set is the size it is. q_wide
+// sets every component, so it has a positive cosine with every embedded row;
+// q_narrow sets the one component no row uses, so its vector leg returns nothing
+// and the keyword leg alone decides its three. That is why dim is rows+1.
+func contextTrimFixture(t *testing.T) (Dataset, Vectors) {
+	t.Helper()
+	const rows = 12
+	dim := rows + 1
+	vec := func(at int) []float32 {
+		out := make([]float32, dim)
+		out[at] = 1
+		return out
+	}
+	every := make([]float32, dim)
+	for i := range every {
+		every[i] = 1
+	}
+
+	// "quorum" is in every row so q_wide's keyword leg reaches all 12; "zephyr" is
+	// in three of them so q_narrow's reaches three. Nothing else is shared, so no
+	// third set of candidates can appear by accident.
+	const shared = "quorum"
+	const narrow = "zephyr"
+	memories := make([]MemorySpec, 0, rows)
+	vecs := Vectors{}
+	keys := make([]string, 0, rows)
+	wideRel := make(map[string]int, rows)
+	for i := 0; i < rows; i++ {
+		key := fmt.Sprintf("row_%02d", i)
+		keys = append(keys, key)
+		content := fmt.Sprintf("%s topic %02d", shared, i)
+		if i < 3 {
+			content += " " + narrow
+		}
+		memories = append(memories, MemorySpec{Key: key, Category: "fact", Content: content, Importance: 0.5})
+		vecs[key] = vec(i)
+		wideRel[key] = 1
+	}
+	narrowRel := map[string]int{keys[0]: 1}
+
+	ds := Dataset{
+		Project:  "ctx-trim",
+		Memories: memories,
+		Queries: []QuerySpec{
+			// Only the shared term, so the keyword leg reaches all twelve.
+			{Name: "q_wide", Text: shared, Rel: wideRel},
+			// Only the term three rows carry. It must NOT also name the shared one:
+			// the keyword leg ORs a query's terms, so a narrow query naming both
+			// reaches all twelve and is trimmed like the wide one — the opposite of
+			// the property this fixture exists to make reachable.
+			{Name: "q_narrow", Text: narrow, Rel: narrowRel},
+		},
+	}
+	vecs["q_wide"] = every
+	vecs["q_narrow"] = vec(rows)
+	return ds, vecs
+}
+
+// contextTrimReport seeds contextTrimFixture and measures it, failing the test on a
+// seeding error. The fixture's queries are graded against the dataset's own keys
+// here, so unlike contextFixture's `_global` row nothing has to be patched onto a
+// relevance map after the seeder has built it.
+func contextTrimReport(t *testing.T) ContextReport {
+	t.Helper()
+	ds, vecs := contextTrimFixture(t)
+	store, db := newBenchStoreWithDB(t)
+	queries, at, err := SeedAt(context.Background(), store, db, ds, vecs, contextFixtureInstant)
+	if err != nil {
+		t.Fatalf("seed the trim fixture: %v", err)
+	}
+	rep, err := RunContext(context.Background(), store, queries, at)
+	if err != nil {
+		t.Fatalf("RunContext: %v", err)
+	}
+	return rep
+}
+
+// TestContextTrimRatiosCountEveryAnsweredQuery is the reviewer's case, end to end.
+//
+// It is the assertion that a trim ratio CAN FALL, and there are two ways it fails,
+// both of which this corpus reaches at once. Counting only the queries a trim
+// shortened puts 1.000 (1/1) here for a trim that shortened one of two — the
+// denominator is the numerator, so the ratio is a constant. And returning early
+// when a trim fired on no rows leaves the OTHER trim's ratios at n/a, which reads
+// as "not measured" for a pass that ran on every query and cut nothing.
+//
+// The populations are all named rather than inherited, so this also pins what each
+// denominator is: the cap saw 12 + 3 = 15 rows (every row of both queries — a
+// fit-dropped row would have passed the cap on its way, so nothing else can be in
+// it), and the fit pass saw 13 (only what the cap left). The relevant denominator
+// is the graded rows that reached the trim, 12 for the cap, so the cap's cost in
+// relevant rows reads 2/12 — NOT 2/13, which is the admitted count and would divide
+// rows the cap threw away by rows the cap kept.
+func TestContextTrimRatiosCountEveryAnsweredQuery(t *testing.T) {
+	rep := contextTrimReport(t)
+	if rep.Answered != 2 || rep.Items != 13 {
+		t.Fatalf("answered %d queries with %d rows, want 2 and 13 (a trimmed 10-row block plus a 3-row one)", rep.Answered, rep.Items)
+	}
+	for _, tc := range []struct {
+		what string
+		got  Ratio
+		want Ratio
+	}{
+		{"cap trimmed 1 of 2 answered queries", rep.Budget.TrimmedQueries, Ratio{Num: 1, Den: 2}},
+		// 15 rows: q_wide's 10 kept plus its 2 cut, and q_narrow's 3 kept. The
+		// untrimmed query contributes, which it did not before.
+		{"cap cut 2 of the 15 rows that reached it", rep.Budget.TrimmedItems, Ratio{Num: 2, Den: 15}},
+		// 13 GRADED rows — not 15, and not the 10 that survived. q_wide grades all
+		// twelve rows it reached and q_narrow grades one of its three, so the three
+		// denominators differ here, which is the point: a reader handed "2 of 13"
+		// can tell what it is a fraction of, and cannot be handed 2/10 by a rule
+		// that reads "the admitted count" and gets the right answer here for the
+		// wrong reason.
+		{"cap cut 2 of the 13 graded rows it saw", rep.Budget.TrimmedRelevant, Ratio{Num: 2, Den: 13}},
+		// The fit pass ran on both queries and cut nothing, which is 0.000 over a
+		// real population — not n/a, and not 1.000.
+		{"fit trimmed 0 of 2 answered queries", rep.Budget.FittedQueries, Ratio{Num: 0, Den: 2}},
+		{"fit cut 0 of the 13 rows that reached it", rep.Budget.FittedItems, Ratio{Num: 0, Den: 13}},
+		{"fit cut 0 of the 11 graded rows it saw", rep.Budget.FittedRelevant, Ratio{Num: 0, Den: 11}},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %+v, want %+v", tc.what, tc.got, tc.want)
+		}
+	}
+
+	// A trim ratio is meaningless as a string unless it can print a fraction that
+	// is not whole, so the rendering is checked here too rather than left to the
+	// format test's fixture, which has no trim to render.
+	if got := rep.Budget.TrimmedQueries.String(); got != "0.500 (1/2)" {
+		t.Errorf("trimmed-queries rendering = %q, want %q", got, "0.500 (1/2)")
+	}
+}
+
+// TestContextTrimRatiosGiveEachStageTheRowsItActuallySaw is the case the two
+// trims' denominators used to share, which is the only way a caller can tell that
+// they no longer do.
+//
+// It is the reviewer's second point as a test. A row the response-fit pass cuts has
+// already passed the item cap on its way, so the cap saw every row and the fit pass
+// only the ones the cap left: one shared "rows that reached it" puts the fit pass's
+// denominator above the population it was ever shown, and the graded denominator
+// that came with it divides by rows no stage looked at.
+//
+// The numbers are chosen so the two candidate answers differ — 3 admitted, 2 cut by
+// the cap, 1 cut by the fit pass, all six graded:
+//
+//   - cap: 3 + 2 + 1 = 6 rows -> 2/6
+//   - fit: 3 + 1 = 4 rows -> 1/4
+//
+// A shared denominator answers 2/6 and 1/6. The old `reached - cut` answers 2/4 and
+// 1/5. Both are plausible-looking numbers, and neither is a claim a stage can make.
+func TestContextTrimRatiosGiveEachStageTheRowsItActuallySaw(t *testing.T) {
+	rel := Relevance{"a": 1, "b": 1, "c": 1, "d": 1, "e": 1, "f": 1}
+	rep := ContextReport{Queries: 1, Answered: 1, Items: 3, Relevant: 3}
+	// The cap cut d and e; the fit pass then cut f from what the cap left.
+	noteTrim(&rep, []string{"d", "e"}, []string{"f"}, rel, 3, 3)
+
+	for _, tc := range []struct {
+		what string
+		got  Ratio
+		want Ratio
+	}{
+		{"cap trimmed queries", rep.Budget.TrimmedQueries, Ratio{Num: 1, Den: 1}},
+		{"cap cut rows", rep.Budget.TrimmedItems, Ratio{Num: 2, Den: 6}},
+		{"cap cut graded rows", rep.Budget.TrimmedRelevant, Ratio{Num: 2, Den: 6}},
+		{"fit trimmed queries", rep.Budget.FittedQueries, Ratio{Num: 1, Den: 1}},
+		{"fit cut rows", rep.Budget.FittedItems, Ratio{Num: 1, Den: 4}},
+		{"fit cut graded rows", rep.Budget.FittedRelevant, Ratio{Num: 1, Den: 4}},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %+v, want %+v", tc.what, tc.got, tc.want)
+		}
+	}
+}
+
+// TestContextTrimRatiosCountQueriesThatWereNotTrimmed is the reviewer's
+// hand-computation as a test: two queries trimmed, one not, and the denominator has
+// to be every query the report measured.
+//
+// Counting only the trimmed queries answers 1.000 (2/2) — the denominator IS the
+// numerator, so the number cannot tell "the budget shortened two of three queries"
+// from "the budget shortened every query it was asked about", and a trim that had
+// stopped firing altogether would print the same 1.000 it prints today. The untrimmed
+// query still contributes to the items and relevant denominators, because it
+// contributed rows to the populations those are fractions of.
+//
+// The three queries are shaped so the graded denominator is NOT the row denominator,
+// which is the point: query 3 admits three rows and grades none of them, so its
+// contribution to the graded ratio is 0/0 — it moves the row counts and the query
+// count, and leaves the graded count alone. Reading the admitted count as the
+// denominator instead would print 0/3 there and claim a measured share of a
+// population that holds no graded rows at all.
+func TestContextTrimRatiosCountQueriesThatWereNotTrimmed(t *testing.T) {
+	rep := ContextReport{Queries: 3}
+	// Query 1: two rows, both graded, and the cap cuts the third — which is graded.
+	noteTrim(&rep, []string{"c1"}, nil, Relevance{"a1": 1, "a2": 1, "c1": 1}, 2, 2)
+	// Query 2: four rows, one graded, and the cap cuts two — neither graded.
+	noteTrim(&rep, []string{"d1", "d2"}, nil, Relevance{"b1": 1, "b2": 0, "b3": 0, "b4": 0}, 4, 1)
+	// Query 3: three rows, none graded, and nothing trimmed at all.
+	noteTrim(&rep, nil, nil, Relevance{"e1": 0, "e2": 0, "e3": 0}, 3, 0)
+
+	for _, tc := range []struct {
+		what string
+		got  Ratio
+		want Ratio
+	}{
+		{"cap trimmed queries", rep.Budget.TrimmedQueries, Ratio{Num: 2, Den: 3}},
+		// The cap saw every row: 2+1, 4+2 and 3, so 12.
+		{"cap cut rows", rep.Budget.TrimmedItems, Ratio{Num: 3, Den: 12}},
+		// The cap saw 3 graded rows and 1 more, so 4 — which is not the 12 rows it
+		// saw, and not the 9 that survived it. That is the population a sentence
+		// about relevant rows is a fraction of.
+		{"cap cut graded rows", rep.Budget.TrimmedRelevant, Ratio{Num: 1, Den: 4}},
+		// The fit pass ran on all three queries and cut nothing, which is 0.000 over
+		// a real population — not n/a, which would read as "not measured" for a pass
+		// that ran on every query and saw every row the cap left.
+		{"fit trimmed queries", rep.Budget.FittedQueries, Ratio{Num: 0, Den: 3}},
+		// 9, not 12: the three rows the cap cut never reached the fit pass, so
+		// including them would make this a fraction of a population it was never
+		// shown.
+		{"fit cut rows", rep.Budget.FittedItems, Ratio{Num: 0, Den: 9}},
+		{"fit cut graded rows", rep.Budget.FittedRelevant, Ratio{Num: 0, Den: 3}},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %+v, want %+v", tc.what, tc.got, tc.want)
+		}
+	}
+
+	// A ratio that can only ever print 1.000 is a ratio nobody can read a change
+	// in, so the rendered fraction is checked here too.
+	if got, want := rep.Budget.TrimmedQueries.String(), "0.667 (2/3)"; got != want {
+		t.Errorf("trimmed-queries rendering = %q, want %q", got, want)
 	}
 }
 

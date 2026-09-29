@@ -459,39 +459,68 @@ func measureQuery(res assemble.Result, q Query, rep *ContextReport) error {
 	// package spelling "budget" and "response_fit": both lists are already
 	// disjoint from the block, because a trimmed row is by definition not in it.
 	capDropped, fitDropped := res.Trace.TrimmedByBudget()
-	noteTrim(rep, capDropped, fitDropped, q.Rel, len(res.Items))
+	noteTrim(rep, capDropped, fitDropped, q.Rel, len(res.Items), relevant)
 	return nil
 }
 
-// noteTrim records one query's two trims and the graded-relevant rows among them.
+// noteTrim folds ONE ANSWERED QUERY's two trims into the budget table. It is called
+// once per answered query, whether or not a trim fired on it, and that is the whole
+// point.
 //
-// The denominators are the rows that REACHED each trim rather than the rows that
-// survived it, because "the cap cut 3 rows" and "the cap cut 3 of 3" are different
-// claims — and a corpus whose blocks never fill the budget has to be able to say
-// so without its numbers looking like a corpus where everything is cut. Rows
-// entering the budget stage are the block plus both trims' removals: nothing after
-// stage 8 adds a row, and the response-fit pass only ever drops from the bottom of
-// the ranking.
-func noteTrim(rep *ContextReport, capDropped, fitDropped []string, rel Relevance, admitted int) {
-	reached := admitted + len(capDropped) + len(fitDropped)
-	record := func(ids []string, queries, items, relevant *Ratio) {
-		if len(ids) == 0 {
-			return
+// Recording a query only when something was cut made every query ratio its own
+// numerator over its own denominator: 1.000 on the graded corpus, 1.000 on a corpus
+// where the budget had stopped binding, and n/a on a corpus where it never bound.
+// Three different behaviours, one number, and a reader with no way to tell them
+// apart. It also dropped the untrimmed query's rows out of the ROW ratios below, so
+// those described a population drawn only from the queries that happened to hit the
+// cap — 2/12 where the rows that reached the cap were 15, and a report that silently
+// measured the queries it found interesting.
+//
+// The two stages also get their own populations rather than one shared one, because
+// a row the response-fit pass cut has already passed the item cap on its way: the cap
+// saw every row, and the fit pass only the ones the cap left. A shared denominator
+// put the fit pass above the population it was ever shown.
+//
+// The graded denominator is the GRADED rows that reached the stage, which is the
+// population a sentence like "the cap cost one graded-relevant row in eight" is a
+// fraction of. `reached - cut` is not that population and is not the admitted count
+// either; the two coincide only when the other trim dropped nothing, which is a
+// coincidence rather than a rule.
+func noteTrim(rep *ContextReport, capDropped, fitDropped []string, rel Relevance, admitted, relevant int) {
+	capGraded, fitGraded := 0, 0
+	for _, id := range capDropped {
+		if rel[id] > 0 {
+			capGraded++
 		}
-		hit := 0
-		for _, id := range ids {
-			if rel[id] > 0 {
-				hit++
-			}
-		}
-		*queries = queries.add(1, 1)
-		*items = items.add(len(ids), reached)
-		*relevant = relevant.add(hit, reached-len(ids))
 	}
-	record(capDropped,
-		&rep.Budget.TrimmedQueries, &rep.Budget.TrimmedItems, &rep.Budget.TrimmedRelevant)
-	record(fitDropped,
-		&rep.Budget.FittedQueries, &rep.Budget.FittedItems, &rep.Budget.FittedRelevant)
+	for _, id := range fitDropped {
+		if rel[id] > 0 {
+			fitGraded++
+		}
+	}
+	noteTrimStage(&rep.Budget.TrimmedQueries, &rep.Budget.TrimmedItems, &rep.Budget.TrimmedRelevant,
+		len(capDropped), capGraded, admitted+len(capDropped)+len(fitDropped), relevant+capGraded+fitGraded)
+	noteTrimStage(&rep.Budget.FittedQueries, &rep.Budget.FittedItems, &rep.Budget.FittedRelevant,
+		len(fitDropped), fitGraded, admitted+len(fitDropped), relevant+fitGraded)
+}
+
+// noteTrimStage folds one stage's row counts for one query into its three ratios.
+//
+// The query ratio's denominator is 1 UNCONDITIONALLY — that is the fix, and it is why
+// this is reached for every answered query rather than only for a trimmed one. The
+// row ratios' denominators are the population that stage saw, which is never zero
+// for an answered query, so a trim that fired on nothing reads 0.000 rather than n/a:
+// it ran, it saw rows, and it cut none. The graded ratio stays n/a when no graded row
+// reached the stage, which is the one case where a share really is not a fraction of
+// anything.
+func noteTrimStage(queries, items, relevant *Ratio, cut, gradedCut, reached, gradedReached int) {
+	trimmed := 0
+	if cut > 0 {
+		trimmed = 1
+	}
+	*queries = queries.add(trimmed, 1)
+	*items = items.add(cut, reached)
+	*relevant = relevant.add(gradedCut, gradedReached)
 }
 
 // bucketOf finds or creates one bucket's row in the diversity table.
@@ -565,10 +594,10 @@ func FormatContext(rep ContextReport) string {
 		fmt.Sprintf("%d (est.)", rep.Budget.MaxTokens),
 		"bytes/4 rounded up per row; an estimate, there is no tokenizer here")
 	fmt.Fprintf(&b, "  %-24s %18s  %s\n", "item cap trimmed", rep.Budget.TrimmedItems,
-		fmt.Sprintf("of the rows that reached it; %s of answered queries, %s of them graded-relevant",
+		fmt.Sprintf("of the rows that reached it; %s of answered queries, %s of the graded ones among them",
 			rep.Budget.TrimmedQueries, rep.Budget.TrimmedRelevant))
 	fmt.Fprintf(&b, "  %-24s %18s  %s\n", "response fit trimmed", rep.Budget.FittedItems,
-		fmt.Sprintf("of the rows that reached it; %s of answered queries, %s of them graded-relevant",
+		fmt.Sprintf("of the rows that reached it; %s of answered queries, %s of the graded ones among them",
 			rep.Budget.FittedQueries, rep.Budget.FittedRelevant))
 
 	fmt.Fprintf(&b, "\n  %-24s %8s %16s %8s\n", "admitted rows by bucket", "rows", "share", "queries")
