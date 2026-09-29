@@ -993,14 +993,27 @@ func TestARestoreDoesNotRevertATierOrAnExpiry(t *testing.T) {
 		}
 	})
 
-	t.Run("a session row keeps the tier and the expiry a fold gave it", func(t *testing.T) {
+	t.Run("a session row keeps its tier and the expiry it was last written with", func(t *testing.T) {
 		// The discriminating case. The row is still session, so preserving and
 		// resetting differ in BOTH columns at once: a restore that grew the column
 		// list would make it project and expiry-less, and both assertions below fail
-		// together. The expiry is the fold's and not the save's, because
-		// raiseRetentionTx refreshes one and deliberately leaves updated_at alone —
-		// so this is also the only shape in which a session row's expiry is newer
-		// than its last write.
+		// together.
+		//
+		// What this subtest does NOT claim, because the fixture cannot establish it:
+		// that the expiry it finds is the FOLD's rather than the save's.
+		// sessionExpiry is a function of now and formats at second precision, and
+		// the save, the reuse, the edit and the fold all run within milliseconds, so
+		// the fold writes a byte-identical value to the one the original save
+		// derived. Ageing the row first does not help — it changes what the fold
+		// REPLACED, not what it writes — and the reason it was tried is worth
+		// recording, because "the fold refreshed it" is the easy wrong conclusion to
+		// draw from a subtest named after a fold.
+		//
+		// What it does pin is the property the restore could break: the column still
+		// holds what was last written to it. sameStrPtr below fails if the restore
+		// clears or rewrites expires_at, and TestAFoldRefreshesASessionRowsExpiry is
+		// the fixture that proves a fold refreshes one at all — it ages the row eight
+		// days first, which is what makes that observable.
 		s := testStore(t)
 		ctx := context.Background()
 		from := time.Now().UTC()
