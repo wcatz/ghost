@@ -272,11 +272,15 @@ func historyNewestVersionSQL(memoryID string) string {
 // for a deleted memory. The reason is as_of rather than this file: with no
 // `memories` row, asOfCreatedAt falls back to the ANSWERING version's recorded_at
 // for the age a historical listing measures, so removing a version from a deleted
-// memory changes what a past read computes. A live memory is unaffected — its
-// created_at answers, and its as_of metadata moves to an earlier EQUIVALENT
-// version, which docs/invariants.md and docs/cli.md both say in as many words. A
-// memory's history is frozen the moment it is deleted, so nothing will ever write
-// there again: the flood this command cleans up stays where it is, at no cost.
+// memory changes what a past read computes. A live memory's STATE is unaffected —
+// its created_at answers, and its as_of metadata moves only to an earlier
+// EQUIVALENT version. Saying "unaffected" without that qualifier was wrong twice
+// over: --fix-updated-at also moves the live row's updated_at, which asof.go
+// reads for every versioned and unrecorded answer, so a live memory's as_of
+// UpdatedAt does move and that is the field the flag exists to move. docs/cli.md
+// and docs/invariants.md both enumerate the three. A memory's history is frozen
+// the moment it is deleted, so nothing will ever write there again: the flood this
+// command cleans up stays where it is, at no cost.
 //
 // It is stable under the deletion, which is what the fixed-point argument on
 // CompactHistory needs: it reads the memory's NEWEST version, and no removable row

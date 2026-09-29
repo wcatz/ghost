@@ -237,8 +237,25 @@ source the memory held once that write landed.
               the report rather than left to a count of zero to explain: a stamp no
               layout reads, and a stamp with no recorded write to restore it from.
               It refuses to run while a lifecycle run holds any of the projects'
-              locks, and it works in bounded transactions so it does not hold the
+              locks, it refuses a store a newer Ghost owns rather than repairing
+              one, and it works in bounded transactions so it does not hold the
               write lock over a whole store's history.
+
+              What a repair changes, and it is worth knowing before running one on
+              a store an 'as_of' read matters for. Removing a redundant version
+              changes nothing a read of the past is FOR: the state, the supersede
+              edges and the creation time all answer as before, and only WHICH
+              version is named can differ, so a memory that was resolved and then
+              unresolved may read as merely saved for an instant whose reflect
+              flood has been compacted away. --fix-updated-at moves because the
+              stamp repair IS a write to the live row's UpdatedAt, and it moves it
+              BACKWARD to the recorded time of the last writer that moved the
+              stamp in the same statement that filed it -- which on a store with
+              this damage is earlier than the reflection time the row held. That
+              is what the flag is for, and it is the field that visibly changes.
+              So three fields of an as_of answer can move, for those two reasons.
+              A DELETED memory is left out of both repairs entirely, so for one of
+              those nothing changes.
 
 The history outlives the memory: a deleted memory's last state is still
 readable here unless it was purged.

@@ -883,17 +883,23 @@ and counted separately (`stamps unreadable`), because a row this run could not
 repair is a row whose supersede orientation is still wrong.
 
 For a memory that is still **live**, neither repair changes what an `as_of` read
-of it returns. Its `content`, `category`, `importance`, `resolved_at`, `source`,
-`project_id`, `created_at` and supersede edges are all read from the live row or
-from a version carrying the same state, so a read of the same instant gives the
-same answer after the repair as before it. Two metadata fields do move, and only
-because they *name* which version answered: `VersionRecordedAt` and `VersionPhase`
-can now describe an earlier, equivalent version — a memory that was resolved and
-unresolved, or folded, may read as merely saved for an instant whose reflect flood
-has been compacted away. Nothing a historical read is *for* changes; the
-attribution does. A **deleted** memory is excluded from both repairs instead, so
-for one of those the fields do not move at all — which is why the exclusion is a
-scope rule rather than a retention one.
+of it returns *for*. Its `content`, `category`, `importance`, `resolved_at`,
+`source`, `project_id`, `created_at` and supersede edges are all read from the live
+row or from a version carrying the same state, so a read of the same instant gives
+the same answer after the repair as before it. Three fields do move, and they move
+for two different reasons. `UpdatedAt` moves because the stamp repair *is* a write
+to `memories.updated_at` — the column the as-of read takes from the live row — and
+it moves **backward** to the recorded time of the last writer that moved the stamp
+in the same statement that filed it, which for a store with this damage is earlier
+than the reflection time the row held. That is the field a reader comparing output
+across the repair would notice, and it is the one the flag exists to move. The other
+two move only because they *name* which version answered: `VersionRecordedAt` and
+`VersionPhase` can now describe an earlier, equivalent version — a memory that was
+resolved and unresolved, or folded, may read as merely saved for an instant whose
+reflect flood has been compacted away. Nothing a historical read is *for* changes;
+the attribution and the stamp do. A **deleted** memory is excluded from both repairs
+instead, so for one of those none of the three fields move at all — which is why the
+exclusion is a scope rule rather than a retention one.
 
 Because the stamp repair needs that evidence, pass both flags in the **same** run:
 `ghost history compact --apply --fix-updated-at`. An earlier run that already

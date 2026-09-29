@@ -51,6 +51,26 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 		// The count is load-bearing in its own right: the review's other finding was
 		// a help still reading "Five things always stay" beside a sixth rule.
 		"the retention list counts the deleted-memory rule": "Six things always stay",
+		// The as_of answer's field count and the reason UpdatedAt moves, on both
+		// surfaces. A later review found BOTH surfaces describing the answer as "two
+		// metadata fields" and omitting UpdatedAt — the column
+		// historyCompactRestoreSQL writes, and the one asof.go reads from the live row
+		// for every versioned and unrecorded answer. It is the field a reader
+		// comparing output across the repair actually sees change.
+		//
+		// Both the COUNT and the attribution are asserted, and a bare "UpdatedAt" is
+		// not enough: the name appears in both surfaces for other reasons, so a needle
+		// of just the field name passes on a document that still says "two" — which
+		// is the defect, and which a mutation of that one number caught.
+	}
+
+	// The field COUNT is per-surface, because only the doc phrases it as a count.
+	// What both must convey is the same thing: three fields can move, not two. The
+	// help states it as a consequence of the two reasons it has just given, and the
+	// doc as the count itself — so the needle differs while the claim does not.
+	asOfCounts := map[string]string{
+		"the shipped help (historyUsage)": "So three fields of an as_of answer can move",
+		"docs/cli.md's compact section":   "Three fields do move",
 	}
 	// Claims each surface must make, in its own words.
 	perSurface := map[string]map[string]string{
@@ -58,12 +78,27 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 			"a resolve is named as a writer that moves no stamp": "writes resolved_at and deliberately leaves updated_at alone",
 			"a fold is named as a writer that moves no stamp":    "folding a duplicate save writes importance and moves nothing",
 			"both kinds of unrestorable stamp are reported":      "a stamp no layout reads, and a stamp with no recorded write",
+			// The as_of claim, per surface: the help capitalises BACKWARD where the
+			// doc italicises **backward**, and each says the field is left out of
+			// both repairs in its own words. Asserting the field's NAME alone was
+			// tried and rejected — it occurs for other reasons on both surfaces, so
+			// it passes on a doc still claiming two fields, which is the defect.
+			"UpdatedAt moves because the repair writes that column": "moves because the stamp repair IS a write to the live row's UpdatedAt",
+			// The direction, in a phrase that cannot be satisfied by the help's
+			// earlier "Only ever BACKWARD" about a stamp no version explains. A bare
+			// BACKWARD needle is satisfied by that sentence, so a mutation dropping
+			// the direction from THIS claim passed — pinning the claim, not the word.
+			"UpdatedAt moves backward to the stamp writer's own time": "moves it BACKWARD to the recorded time of the last writer",
+			"a deleted memory is left out of both repairs entirely":   "is left out of both repairs",
 		},
 		"docs/cli.md's compact section": {
-			"a resolve is named as a writer that moves no stamp": "leaves `updated_at` alone",
-			"a fold is named as a writer that moves no stamp":    "changes `importance` and moves nothing",
-			"both kinds of unrestorable stamp are reported":      "counted separately (`stamps unreadable`)",
-			"the deleted-memory rule gives its reason":           "nobody can restore",
+			"a resolve is named as a writer that moves no stamp":      "leaves `updated_at` alone",
+			"UpdatedAt moves because the repair writes that column":   "moves because the stamp repair *is* a write",
+			"UpdatedAt moves backward to the stamp writer's own time": "it moves **backward** to the recorded time of the last writer",
+			"a deleted memory is left out of both repairs entirely":   "is excluded from both repairs",
+			"a fold is named as a writer that moves no stamp":         "changes `importance` and moves nothing",
+			"both kinds of unrestorable stamp are reported":           "counted separately (`stamps unreadable`)",
+			"the deleted-memory rule gives its reason":                "nobody can restore",
 		},
 	}
 	// Sentences the rule deleted. Each names a reading of the anchor that is wrong
@@ -98,6 +133,10 @@ func TestHistoryCompactHelpAndDocsStateTheSameRule(t *testing.T) {
 					"rule that lives only in a comment has not been shipped.",
 					surface.name, claim, needle)
 			}
+		}
+		if needle := asOfCounts[surface.name]; !strings.Contains(flat, squashSpace(needle)) {
+			t.Errorf("%s does not state that THREE fields of an as_of answer can move rather than two: no %q",
+				surface.name, needle)
 		}
 		for claim, needle := range perSurface[surface.name] {
 			if !strings.Contains(flat, squashSpace(needle)) {
