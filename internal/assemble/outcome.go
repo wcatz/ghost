@@ -308,6 +308,15 @@ func (p *pipeline) verdict() (Outcome, string) {
 	// claim about a question this surface was never asked.
 	if p.passive {
 		p.trace.Floors.FTSApplied = false
+		// VectorApplied goes with it, for the reason the machine line puts its
+		// passive case first: a passive block has no query, so no cosine could have
+		// been compared against it. fitResponse sets VectorApplied from the leg
+		// status and the configured arm, and a retriever that reported the vector
+		// leg `ok` on a passive request would otherwise leave the trace claiming an
+		// arm applied to a block the response says was never judged. Unreachable
+		// through *memory.Store today, which is exactly why it is cleared rather
+		// than left to a leg status that happens not to say `ok`.
+		p.trace.Floors.VectorApplied = false
 		return OutcomeAnswerable, reasonNotApplicable
 	}
 	if !ftsApplied && (!p.trace.Floors.VectorArmOn || !vectorValue) {

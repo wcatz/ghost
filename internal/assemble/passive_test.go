@@ -457,3 +457,91 @@ func containsNote(notes []string, sub string) bool {
 	}
 	return false
 }
+
+// TestRunPassiveTheTraceAgreesWithTheResponseOnBothArms is the half of the floor
+// contract the machine line already had and the trace did not.
+//
+// `fitResponse` sets VectorApplied from the leg status and the configured arm, so
+// a retriever reporting the vector leg `ok` on a passive request left the trace
+// claiming a cosine arm applied to a block the response says was never judged. The
+// machine line is checked first precisely so it cannot be contradicted this way;
+// this is the same property on the artifact the next PR projects into `explain`.
+func TestRunPassiveTheTraceAgreesWithTheResponseOnBothArms(t *testing.T) {
+	set := passiveSet(projectCandidate("p1", 0.9))
+	set.Legs["fts"] = memory.LegStatus{Applicable: true, Attempted: true, Available: true}
+	set.Legs["vector"] = memory.LegStatus{Applicable: true, Attempted: true, Available: true}
+	f := &fakeRetriever{set: set}
+	req := passiveRequest()
+	req.AbstainCosine = 0.6 // the arm is configured
+	res := run(t, f, req)
+
+	if res.Trace.Floors.FTSApplied || res.Trace.Floors.VectorApplied {
+		t.Errorf("both arms ran per the retriever, but a passive block has no query to compare against: FTSApplied=%v VectorApplied=%v "+
+			"while the response says %q", res.Trace.Floors.FTSApplied, res.Trace.Floors.VectorApplied, res.Machine)
+	}
+	// The configured arm is still RECORDED, so a reader can tell "not applied"
+	//	// from "not configured" — the same three-state distinction the machine line makes.
+	if !res.Trace.Floors.VectorArmOn {
+		t.Error("VectorArmOn: the arm was configured, so clearing its application must not erase the configuration")
+	}
+	if res.Trace.Floors.VectorCosine != 0.6 {
+		t.Errorf("VectorCosine: got %v, want the configured 0.6 — the threshold is a fact about the request whatever the verdict", res.Trace.Floors.VectorCosine)
+	}
+}
+
+// TestRunPassiveDedupNoteDoesNotClaimARemovalThatDidNotHappen keeps the stage-6
+// note a statement about policy. The stage cannot know whether the retriever
+// removed anything — it did that over a window whose edges this pipeline never
+// saw — so a note claiming a removal for every `_global` slice that sets the flag
+// would report a prediction, on the common occasion that the window held no
+// near-duplicate edge at all.
+//
+// The control is the point: a retriever that DID drop a loser (fewer rows in than
+// the window would admit, with the edge present) must not change the wording,
+// because the note is not about the count.
+func TestRunPassiveDedupNoteDoesNotClaimARemovalThatDidNotHappen(t *testing.T) {
+	// Nothing was removed: the retriever returned everything, as a window with no
+	// near-duplicate edge does.
+	clean := &fakeRetriever{set: passiveSet(globalCandidate("g1", 0.9), globalCandidate("g2", 0.8))}
+	note := passiveDedupNote(t, run(t, clean, passiveRequest()))
+	if strings.Contains(note, "was REMOVED") || strings.Contains(note, "was removed") {
+		t.Errorf("the note claims a removal on a window where none was evidenced: %q", note)
+	}
+	if !strings.Contains(note, "losers are REMOVED") {
+		t.Errorf("the note must still state the policy; got %q", note)
+	}
+
+	// A retriever that DID drop a loser changes nothing, because the note is not a
+	// count. If this ever wants to differ, it has to read the trace for it.
+	dropped := &fakeRetriever{set: passiveSet(globalCandidate("g1", 0.9))}
+	note = passiveDedupNote(t, run(t, dropped, passiveRequest()))
+	if !strings.Contains(note, "losers are REMOVED") {
+		t.Errorf("the note states the policy, not the outcome, so it is the same either way: %q", note)
+	}
+}
+
+// TestRunPassiveDedupNoteDeniesTheDropWhenNoPolicyAsks: the other half — a
+// request with no dropping policy must not be told a drop happened, and the two
+// sentences have to be distinguishable so the first is not simply always printed.
+func TestRunPassiveDedupNoteDeniesTheDropWhenNoPolicyAsks(t *testing.T) {
+	plain := passiveRequest()
+	plain.Budget.Slices[1].DropDemotedLosers = false
+	f := &fakeRetriever{set: passiveSet(globalCandidate("g1", 0.9))}
+	note := passiveDedupNote(t, run(t, f, plain))
+	if !strings.Contains(note, "no source policy drops losers") {
+		t.Errorf("with no dropping policy the note must say so: %q", note)
+	}
+}
+
+// passiveDedupNote pulls the stage-6 sentence out of the notes, so the assertion
+// is on THAT sentence rather than on a neighbour that happens to share a word.
+func passiveDedupNote(t *testing.T, res Result) string {
+	t.Helper()
+	for _, n := range res.Notes {
+		if strings.Contains(n, "near-duplicate reordering") {
+			return n
+		}
+	}
+	t.Fatalf("no near-duplicate note in %v", res.Notes)
+	return ""
+}

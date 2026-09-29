@@ -362,7 +362,14 @@ func runDedup(p *pipeline) {
 	// asserted, because the request is where the policy is stated.
 	note := "near-duplicate reordering is applied by the retriever over the window"
 	if p.dropsDemotedLosers() {
-		note += "; a near-duplicate loser was REMOVED for the buckets whose policy asks for it, so the block holds one row of each pair"
+		// Stated as a POLICY, not as a removal that happened. The stage cannot know
+		// whether a row was removed — the retriever did it, over a window this
+		// pipeline never saw the edges of — and a note that claims a removal for
+		// every `_global` slice that sets the flag would be a report about a
+		// prediction, on the overwhelmingly common occasion that the window held
+		// no near-duplicate edge at all. Which rows went is in the trace; what this
+		// says is why there is one row of each pair when there is one.
+		note += "; near-duplicate losers are REMOVED for the buckets whose policy asks for it, so the block holds one row of each pair"
 	} else {
 		note += "; no source policy drops losers on this surface yet"
 	}
