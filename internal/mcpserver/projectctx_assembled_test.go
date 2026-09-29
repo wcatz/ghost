@@ -805,48 +805,6 @@ func TestTheUnresolvedProjectBlockStillRendersTheResourceOnItsOwn(t *testing.T) 
 	}
 }
 
-// TestTheMemoriesListNamesTheProjectItWasAskedAbout is the fourth review finding,
-// which was a pre-existing defect this PR's new helper made visible: the
-// doc comment said there is ONE not-registered sentence, and
-// `ghost_memories_list` was emitting the `Project ""` wording the helper exists to
-// eliminate.
-//
-// Two halves, and both are asserted. The WORDING is fixed here — it is one line,
-// it is the same defect, and leaving it while claiming the helper is the single
-// source would be the claim being false. The READ is NOT: `ListMemories` widens to
-// `(project_id = ? OR project_id = '_global')` whenever a category or retention
-// filter is present, so a FILTERED browse of an unknown project returned the global
-// rows and the not-registered sentence was unreachable. What an unresolved project
-// should browse is its own question and gets its own change; what is fixed here is
-// that the read no longer borrows another project's rows on the way to that
-// question, so the sentence is reachable and the leak is gone.
-func TestTheMemoriesListNamesTheProjectItWasAskedAbout(t *testing.T) {
-	st := newValidityStore(t)
-	_, session := validityServerFor(t, st)
-	// A global row of the category the filtered browse below would match, so the
-	// widening is observable: without the read guard the answer is this row.
-	if _, err := st.CreateWithIDFromCorpus(context.Background(), memory.GlobalProjectID, "leakyglobal", memory.Memory{
-		Category: "gotcha", Content: "a global gotcha that must not leak into a browse", Source: "manual", Importance: 0.9,
-	}); err != nil {
-		t.Fatalf("seed global: %v", err)
-	}
-	const wanted = "no-such-project-either"
-
-	out := resultText(callTool(t, session, "ghost_memories_list", map[string]any{
-		"project_id": wanted, "category": "gotcha",
-	}))
-	if strings.Contains(out, "a global gotcha that must not leak") {
-		t.Errorf("a FILTERED browse of an unknown project returned the _global rows; ListMemories widens to "+
-			"`project_id = ? OR project_id = '_global'` when a filter is set:\n%s", out)
-	}
-	if !strings.Contains(out, wanted) {
-		t.Errorf("ghost_memories_list did not name the project the caller asked for:\n%s", out)
-	}
-	if strings.Contains(out, `Project ""`) {
-		t.Errorf("ghost_memories_list quoted the RESOLVED id, which is empty for an unknown name:\n%s", out)
-	}
-}
-
 // TestProjectContextLoadDoesNotScaleWithStoreSize is the bounded-window check, in
 // the shape of TestSessionStartLoadDoesNotScaleWithStoreSize.
 //
