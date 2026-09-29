@@ -927,3 +927,83 @@ func TestCandidatesPassiveAPersistentRowIsNotANearDuplicateLoser(t *testing.T) {
 			"(got %v)", passiveIDs(set))
 	}
 }
+
+// TestCandidatesPassiveSkipsTheEvidenceReadOnAPreProvenanceStore: the version
+// tolerance covered the SELECT list, and the read AFTER it did not follow.
+//
+// `memory_provenance` is a TABLE migrateV18 creates, so a store at v12..v17 has
+// never had it — and that read's error is returned, so on exactly the range
+// passiveColumnsFor exists to support the whole retrieval failed with "no such
+// table: memory_provenance" where the loader it replaces renders the block
+// perfectly well. The demotion lookups degrade to "no penalty" and the edge status
+// to "found nothing"; this one had to degrade the same way, and the fixture has to
+// DROP the table rather than merely stamp an old version, because a stamped version
+// on a fully-migrated database still has every table physically present.
+func TestCandidatesPassiveSkipsTheEvidenceReadOnAPreProvenanceStore(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+	if _, err := st.db.Exec(`DROP TABLE IF EXISTS memory_provenance`); err != nil {
+		t.Fatalf("drop the evidence table: %v", err)
+	}
+	if _, err := st.db.Exec(`PRAGMA user_version = 17`); err != nil {
+		t.Fatalf("stamp a pre-provenance version: %v", err)
+	}
+
+	set, err := st.Candidates(ctx, passiveRequest("proj", projectPassivePolicy()))
+	if err != nil {
+		t.Fatalf("a pre-provenance store must still be read; the evidence read is not evidence of absence: %v", err)
+	}
+	if len(set.Rows) == 0 {
+		t.Fatal("the pre-provenance read returned no rows")
+	}
+	for _, r := range set.Rows {
+		if r.Evidence != (EvidenceCounts{}) {
+			t.Errorf("row %s: Evidence is %+v, want the zero a store with no provenance table can honestly report", r.ID, r.Evidence)
+		}
+	}
+}
+
+// TestCandidatesPassiveANearDuplicateLoserIsDecidedOnThePostSupersedeOrder is the
+// id-order reuse, and it is a MEMBERSHIP decision rather than a presentation one.
+//
+// `nearDuplicatePenaltyRows` decides which member of a pair loses from the order it
+// is handed, so it has to be the order the supersede demote left behind. Reusing
+// the pre-demote slice ranks a row that has just been pushed down as if it had not
+// moved.
+//
+// The fixture is built so the two orders disagree about which row loses, and the
+// bucket DROPS losers so the difference is a row leaving the block:
+//
+//	global order by pin/importance   gp_low (pinned), gp_high, gp_mid
+//	after `gp_low supersedes gp_high`  gp_low, gp_mid, gp_high   <- gp_high demoted
+//	near-duplicate pair gp_mid/gp_high, loser is the LATER one
+//	  correct order -> gp_high is later -> gp_high is dropped
+//	  stale  order  -> gp_mid  is later -> gp_mid  is dropped
+//
+// So asserting which of the two survives pins the order the lookup was given, and
+// both shipped readers rebuild the slice after the reorder for exactly this reason
+// (hook.go:1219, store.go:3955).
+func TestCandidatesPassiveANearDuplicateLoserIsDecidedOnThePostSupersedeOrder(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+	if err := st.CreateLink(ctx, "gp_low", "gp_high", "supersedes", 1, "manual"); err != nil {
+		t.Fatalf("link supersede: %v", err)
+	}
+	if err := st.CreateLink(ctx, "gp_mid", "gp_high", "duplicate", 1, "manual"); err != nil {
+		t.Fatalf("link duplicate: %v", err)
+	}
+	set, err := st.Candidates(ctx, passiveRequest("proj", globalPassivePolicy()))
+	if err != nil {
+		t.Fatalf("passive Candidates: %v", err)
+	}
+	got := passiveIDs(set)
+	if !containsStr(got, "gp_mid") {
+		t.Errorf("gp_mid must survive: the supersede demote put gp_high behind it, so the near-duplicate lookup saw "+
+			"gp_high as the later member and dropped it. Dropping gp_mid instead means the lookup was handed the order "+
+			"from BEFORE the supersede demote (got %v)", got)
+	}
+	if containsStr(got, "gp_high") {
+		t.Errorf("gp_high is the later member after the supersede demote and is the near-duplicate loser, so it must "+
+			"be dropped (got %v)", got)
+	}
+}

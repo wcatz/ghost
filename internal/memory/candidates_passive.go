@@ -144,9 +144,21 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	edges, status := s.loadCandidateEdges(ctx, scope)
 	set.Edges, set.EdgesStatus = edges, status
 
-	counts, err := evidenceCountsFor(ctx, s.queryDB(), scope)
-	if err != nil {
-		return nil, fmt.Errorf("candidates: evidence counts: %w", err)
+	// The evidence counts, or ZERO of them on a store with no provenance table.
+	// Nothing ranks on these counts — stage 4's multiplier is pinned at 1.0 — so the
+	// zero is the honest answer for a store that has never recorded an
+	// observation, and it is the same answer a populated-but-empty table gives. The
+	// error is NOT degraded the same way: on a store that HAS the table and cannot
+	// read it, a zero would be a false claim that no memory is supported, which is
+	// the one thing this read must never produce.
+	counts := map[string]EvidenceCounts{}
+	if cols.HasProvenance {
+		counts, err = evidenceCountsFor(ctx, s.queryDB(), scope)
+		if err != nil {
+			return nil, fmt.Errorf("candidates: evidence counts: %w", err)
+		}
+	} else {
+		s.logger.Debug("candidates: passive read skipped the evidence counts: the store predates memory_provenance")
 	}
 	for i := range rows {
 		rows[i].Evidence = counts[rows[i].ID]
@@ -457,6 +469,15 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 		s.logger.Debug("candidates: passive supersede demotion lookup failed", "error", err)
 	} else if len(penalty) > 0 {
 		rows = StableDemote(rows, func(r passiveRow) string { return r.mem.ID }, penalty)
+		// The near-duplicate lookup decides WHICH member of a pair loses from the
+		// order it is given, so it has to be the order the supersede demote left
+		// behind. Reusing the pre-demote slice ranks a row that has just been
+		// pushed down as if it had not moved, and on a bucket that DROPS losers that
+		// is a membership decision — the wrong row leaving the block. Both shipped
+		// readers rebuild it here for the same reason (hook.go:1219, store.go:3955).
+		for i, r := range rows {
+			ids[i] = r.mem.ID
+		}
 	}
 	// The over-cap gate. A near-duplicate demotion is a REORDER, so on a selected
 	// set that fits entirely under the bucket's cap it can only shuffle rows the
@@ -556,6 +577,13 @@ type passiveColumns struct {
 	list     string
 	HasTier  bool
 	HasScope bool
+	// HasProvenance gates the EVIDENCE read, which is not a column in the memories
+	// table at all: `memory_provenance` is a table migrateV18 creates, so a store
+	// below that floor has never had it. Unlike the demotion lookups, which degrade
+	// to "no penalty", this one is a returned error — and an error here would turn
+	// exactly the pre-tier store the rest of this function exists to support into no
+	// session context at all.
+	HasProvenance bool
 }
 
 // The schema versions that added memories.scope and memories.retention. They are
@@ -565,6 +593,10 @@ type passiveColumns struct {
 const (
 	passiveScopeColumnFloor     = 12
 	passiveRetentionColumnFloor = 19
+	// memory_provenance is a TABLE rather than a column, so it needs its own floor:
+	// the SELECT list cannot express "this table may not exist" the way a column
+	// can be replaced by a NULL literal.
+	passiveProvenanceColumnFloor = 18
 )
 
 // passiveColumnsFor resolves the store's shape through the exported version pair,
@@ -581,7 +613,7 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	// not have is substituted for, so a path that fails to set one loses a label
 	// rather than failing the read. The error branch below leaves them false on
 	// purpose, and says why.
-	var hasScope, hasTier bool
+	var hasScope, hasTier, hasProvenance bool
 
 	// Through the SNAPSHOT, not the pool. This runs inside the read transaction
 	// `Candidates` opened, and that pool is pinned at MaxOpenConns(1): the
@@ -591,6 +623,7 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	if versionErr == nil {
 		hasScope = version >= passiveScopeColumnFloor
 		hasTier = version >= passiveRetentionColumnFloor
+		hasProvenance = version >= passiveProvenanceColumnFloor
 	} else {
 		s.logger.Debug("candidates: passive read could not read the store's schema version", "error", versionErr)
 	}
@@ -618,5 +651,10 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 			names[i] = "NULL AS expires_at"
 		}
 	}
-	return passiveColumns{list: qualifyColumnsFrom(names, ""), HasTier: hasTier, HasScope: hasScope}, nil
+	return passiveColumns{
+		list:          qualifyColumnsFrom(names, ""),
+		HasTier:       hasTier,
+		HasScope:      hasScope,
+		HasProvenance: hasProvenance,
+	}, nil
 }
