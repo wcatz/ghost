@@ -905,7 +905,7 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		}
 		fmt.Fprintf(&sb, "  %s  %s -> %s  [%s]  %s\n", marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, firstLine(l.TargetText, 70))
 	}
-	targets := withdrawnTargets(res.Links)
+	targets := supersede.RepairableTargets(res.Links)
 	if len(targets) == 0 {
 		// Every row was one this call never wrote and never reached, so every
 		// edge is still live and resolve's floor still defends every target: there
@@ -1209,36 +1209,6 @@ func markedMemoryIDs(rows []resolve.MarkedMemory) []string {
 		if m.Marked {
 			out = append(out, m.ID)
 		}
-	}
-	return out
-}
-
-// withdrawnTargets is the follow-up's selector list: the targets this call
-// withdrew, deduplicated, in full. Full ids and not the eight-character
-// abbreviations the reports use — a selector is a repair about to be run, and a
-// prefix that is unambiguous now may not be after the caller's next save.
-//
-// Only rows that were actually withdrawn are in it. A row a concurrent pass took
-// first orphaned nothing, so naming it would point a repair at a target that has
-// no live edge to clear; a row a failed write or an unreached row is in no state
-// to have orphaned anything either.
-func withdrawnTargets(links []supersede.WithdrawnLink) []string {
-	var out []string
-	seen := make(map[string]bool, len(links))
-	for _, l := range links {
-		// A row this call never WROTE still counts when its edge is gone, because
-		// a concurrent pass that took it first left the same state behind: no live
-		// edge, and a resolved_at nothing defends any more. Dropping it would leave
-		// a memory that is just as repairable out of the list the caller is about to
-		// run. A row never reached, or one whose write failed, is the opposite case:
-		// its edge is STILL live, so the target is still held down on purpose and
-		// naming it would send the repair after a row its own floor reports as
-		// still asserted.
-		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
-			continue
-		}
-		seen[l.TargetID] = true
-		out = append(out, l.TargetID)
 	}
 	return out
 }

@@ -110,6 +110,42 @@ type WithdrawnLink struct {
 	NotAttempted     bool
 }
 
+// RepairableTargets is the follow-up's id list: the targets of the edges a
+// withdrawal reported, deduplicated, in the order the rows were reported, and in
+// FULL — not the eight-character abbreviations the reports use, because a
+// selector is a repair about to be run and a prefix that is unambiguous now may
+// not be after the operator's next save.
+//
+// Every row counts except the two whose edge is STILL LIVE. A row this call never
+// WROTE counts when its edge is gone, because a concurrent pass that took it
+// first left the same state behind: no live edge, and a resolved_at nothing
+// defends any more — exactly the state the repair clears, so dropping it would
+// leave a just-as-repairable memory out of the list the caller is about to run. A
+// row never reached, or one whose write failed, is the opposite case: its edge is
+// still live, so the target is still held down on purpose and naming it would
+// send the repair after a row its own floor reports as still asserted. A row
+// with no resolved target is out because there is nothing to name.
+//
+// It is EXPORTED and lives here because two surfaces printed this exact rule
+// (cmd/ghost for `ghost supersede --withdraw`, internal/mcpserver for
+// ghost_link_withdraw) over `[]WithdrawnLink` — the same type, so nothing forced
+// the duplication — and only the CLI's copy had a test. Two copies is two answers
+// to which memories a repair can still clear, and a wrong answer does not print a
+// wrong report, it clears the wrong memories. `TestRepairableTargets*` pins it
+// once, in the package that owns the type.
+func RepairableTargets(links []WithdrawnLink) []string {
+	var out []string
+	seen := make(map[string]bool, len(links))
+	for _, l := range links {
+		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
+			continue
+		}
+		seen[l.TargetID] = true
+		out = append(out, l.TargetID)
+	}
+	return out
+}
+
 // WithdrawResult summarizes a request. Resolved counts the pairs that named a
 // live edge; Withdrawn counts the edges this call actually invalidated, which is
 // 0 for a dry run and can be lower than Resolved under --apply when a

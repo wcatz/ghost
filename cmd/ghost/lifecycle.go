@@ -2017,7 +2017,7 @@ func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog
 	// printing different commands for the same situation. It is printed before
 	// the error below, for the reason that error exists at all: a partial
 	// withdrawal still orphaned the targets it did reach.
-	if targets := withdrawnLinkTargets(res.Links); apply && len(targets) > 0 {
+	if targets := supersede.RepairableTargets(res.Links); apply && len(targets) > 0 {
 		path, werr := writeReassessTargets(projectName, targets, "ghost supersede --withdraw --apply")
 		if werr != nil {
 			// The withdrawal already landed and the command is printed either way,
@@ -2031,32 +2031,6 @@ func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-// withdrawnLinkTargets is the follow-up's id list for a --withdraw run: the
-// targets of the edges it withdrew, deduplicated, in the order the rows were
-// reported. #702's withdrawnTargets does this for the --reassess report's own row
-// type; the two cannot share one function without a type parameter over two
-// structs that differ in one field name, and a wrong answer here clears the
-// wrong memories.
-//
-// Every row counts except the two whose edge is STILL LIVE. A row a concurrent
-// pass took first is in the list, on withdrawnTargets' reasoning above: that pass
-// left the same state behind — no live edge, a resolved_at nothing defends — so
-// the target is just as repairable as one this process withdrew. A row never
-// reached, or one whose write failed, is out: its edge still points at the
-// target, so the repair would report it as still asserted and clear nothing.
-func withdrawnLinkTargets(links []supersede.WithdrawnLink) []string {
-	var out []string
-	seen := make(map[string]bool, len(links))
-	for _, l := range links {
-		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
-			continue
-		}
-		seen[l.TargetID] = true
-		out = append(out, l.TargetID)
-	}
-	return out
 }
 
 // toWithdrawPairs maps the parsed command line onto the core's request, so the
