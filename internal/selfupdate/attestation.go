@@ -385,6 +385,37 @@ func decodeSnappyBundle(compressed []byte) ([]byte, error) {
 	return decoded, nil
 }
 
+// attestationObserverTimestamps is how many trusted timestamps a signature needs
+// before it counts as observed.
+const attestationObserverTimestamps = 1
+
+// newReleaseVerifier is the ONLY place this package configures a sigstore
+// verifier, so the time policy cannot be assembled anywhere else by accident.
+//
+// The policy is: verify at a trusted timestamp's notion of when the signature
+// was made, never at the wall clock. A Fulcio leaf lives about ten minutes, so
+// the certificate on a release published weeks ago is expired right now, and the
+// only thing that lets it verify is the RFC3161 timestamp the bundle carries.
+// Adding a wall-clock option alongside the observer timestamps would keep every
+// test in this package green — every fixture's certificate is valid now — while
+// making every real release unverifiable, and that state is
+// AttestationUnverifiable: fatal, and not reachable by any flag.
+//
+// The behavioural test for this cannot be written here, and
+// TestTheVerifierTakesTheTimestampNotTheWallClock carries the measurements: the
+// two policies are not separable by any bundle this package can mint, because
+// ca.VirtualSigstore cannot issue an expired leaf and the only timestamp signer
+// in the dependency graph stamps the wall clock with no time source. So the
+// policy is asserted on this function's source instead, with a control that
+// proves the assertion is sensitive.
+func newReleaseVerifier(trusted root.TrustedMaterial) (*verify.Verifier, error) {
+	// WithObserverTimestamps(1) and not a wall-clock option: the certificate is
+	// checked at the time a trusted timestamp authority says the signature was
+	// made, not at the wall clock. Every release ever attested would otherwise
+	// be expired.
+	return verify.NewVerifier(trusted, verify.WithObserverTimestamps(attestationObserverTimestamps))
+}
+
 // VerifyReleaseAttestation reports whether any of bundles proves that this
 // repository's release workflow, running from the tag for version, signed
 // artifact — the bytes the client downloaded.
@@ -419,11 +450,12 @@ func VerifyReleaseAttestation(bundles [][]byte, version string, artifact []byte,
 	if err != nil {
 		return fmt.Errorf("build the release workflow identity: %w", err)
 	}
-	// WithObserverTimestamps(1) and not WithCurrentTime: a Fulcio leaf is
-	// valid for about ten minutes, so the certificate is checked at the time
-	// a trusted timestamp authority says the signature was made, not at the
-	// wall clock. Every release ever attested would otherwise be expired.
-	verifier, err := verify.NewVerifier(trusted, verify.WithObserverTimestamps(1))
+	// The time policy lives in newReleaseVerifier, whose comment says why it is
+	// observer-timestamps rather than the wall clock: a Fulcio leaf is valid for
+	// about ten minutes, so the certificate on a release published weeks ago is
+	// expired right now, and only the RFC3161 timestamp the bundle carries can
+	// place verification inside its validity window.
+	verifier, err := newReleaseVerifier(trusted)
 	if err != nil {
 		return fmt.Errorf("configure the attestation verifier: %w", err)
 	}
