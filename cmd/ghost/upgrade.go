@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/selfupdate"
 )
@@ -53,25 +54,38 @@ type upgradeStreams struct{ out, err io.Writer }
 func discardStreams() upgradeStreams { return upgradeStreams{out: io.Discard, err: io.Discard} }
 
 // upgradeDeps is the outside world a run acts on, as parameters: the release
-// lookup and the install step. Production passes selfupdate.LatestRelease and a
-// selfupdate.Replace over the running binary; a test passes a local server and a
-// scratch file, so the decision and verification path can be exercised end to
-// end without GitHub and without the binary the test runner is executing.
+// lookup, the install step, and the attestation check. Production passes
+// selfupdate.LatestRelease, a selfupdate.Replace over the running binary, and
+// selfupdate.LiveAttestationCheck; a test passes a local server, a scratch
+// file, and a verifier pointed at a local endpoint, so the decision and
+// verification path can be exercised end to end without GitHub and without the
+// binary the test runner is executing.
 type upgradeDeps struct {
 	fetch   func(context.Context) (*selfupdate.Release, error)
 	install func([]byte) error
+	// attest decides whether a release archive may be installed, given what
+	// GitHub's attestation service says about the bytes that arrived. It is
+	// nil only in a test that reaches a post-cutover release, and installRelease
+	// treats that as a refusal rather than as a reason to skip the check — a
+	// missing verifier must never read as an archive nothing has to vouch for.
+	attest func(ctx context.Context, archive []byte, version string) selfupdate.AttestationResult
 }
 
 // upgradeOptions is the parsed `ghost upgrade` command line.
 type upgradeOptions struct {
 	allowDowngrade  bool
 	allowPrerelease bool
+	// allowUnattested permits installing a release with no build attestation.
+	// It reaches exactly one state: GitHub holds no attestation for the
+	// archive. It does not reach a bundle that failed to verify, and it is
+	// what makes an unreachable attestation service survivable.
+	allowUnattested bool
 }
 
-// parseUpgradeArgs parses `ghost upgrade` arguments. Only --allow-downgrade and
-// --allow-prerelease are recognized; anything else is an error rather than
-// being ignored, because a flag that does not parse here is a flag the user
-// believes is in effect while the command does something else.
+// parseUpgradeArgs parses `ghost upgrade` arguments. Only --allow-downgrade,
+// --allow-prerelease and --allow-unattested are recognized; anything else is an
+// error rather than being ignored, because a flag that does not parse here is a
+// flag the user believes is in effect while the command does something else.
 func parseUpgradeArgs(args []string) (upgradeOptions, error) {
 	var opts upgradeOptions
 	for _, arg := range args {
@@ -80,8 +94,10 @@ func parseUpgradeArgs(args []string) (upgradeOptions, error) {
 			opts.allowDowngrade = true
 		case "--allow-prerelease":
 			opts.allowPrerelease = true
+		case "--allow-unattested":
+			opts.allowUnattested = true
 		default:
-			return upgradeOptions{}, fmt.Errorf("unknown argument %q (usage: ghost upgrade [--allow-downgrade] [--allow-prerelease])", arg)
+			return upgradeOptions{}, fmt.Errorf("unknown argument %q (usage: ghost upgrade [--allow-downgrade] [--allow-prerelease] [--allow-unattested])", arg)
 		}
 	}
 	return opts, nil
@@ -177,14 +193,61 @@ func prereleaseMessage(latest string) string {
 		latest)
 }
 
+// unattestedMessage is the absence refusal. Absence is a fact about the release,
+// so it is a fact a user can do something permanent about, and the message says
+// what the flag is for rather than merely that there is a flag.
+//
+// It explains what the attestation adds over the two digests already checked,
+// because "refusing, no attestation" on its own reads like a GitHub outage: the
+// user has just been told the digests agree, and the honest difference is that
+// the digests say which file the release is serving while the attestation says
+// which workflow built it.
+func unattestedMessage(latest string) string {
+	return fmt.Sprintf(
+		"refusing to install %s: GitHub publishes no build attestation for its release archive, so nothing says which workflow built these bytes. "+
+			"The published digests confirm this is the file the release is serving, not that this repository's release workflow made it. "+
+			"Re-run with --allow-unattested to install it deliberately, or install the release archive you want from https://github.com/wcatz/ghost/releases",
+		latest)
+}
+
+// attestationUnreachableMessage is the outage refusal, and it is deliberately not
+// the absence message: a service that answered 500, a response that would not
+// parse and a trust root that could not be fetched all leave the question
+// unanswered, and reporting them as "this release has no attestation" would turn
+// a transient fault into a permanent fact about the release in the user's head.
+// So the wording separates the two, names the flag, and points at the manual
+// install as the option that needs no service at all.
+func attestationUnreachableMessage(latest, detail string) string {
+	return fmt.Sprintf(
+		"refusing to install %s: could not check its build attestation (%v). That is not the same as a release with no attestation — nothing was established either way. "+
+			"Re-run with --allow-unattested to install without the check, or install the release archive you want from https://github.com/wcatz/ghost/releases",
+		latest, detail)
+}
+
+// attestationRejectedMessage is the one refusal no flag reaches, and it must not
+// name one. --allow-unattested means "this release has no attestation"; a bundle
+// that is present and did not verify is the opposite claim, and a message that
+// offered the flag would invite a user to override the exact thing the flag must
+// not be able to override. The check is therefore a floor, not a preference.
+//
+// detail comes from the verifier, which classifies its own failures and never
+// quotes a certificate identity — that text is attacker-supplied, and a user
+// reading a name an attacker chose as part of a verdict is the failure mode the
+// classification exists to prevent.
+func attestationRejectedMessage(latest, detail string) string {
+	return fmt.Sprintf("refusing to install %s: %s", latest, detail)
+}
+
 // upgradeUsage is the help for `ghost upgrade`: stdout for -h/--help (see
 // handleHelp), so a help request never checks GitHub Releases, downloads an
 // archive or replaces the running binary.
-const upgradeUsage = `Usage: ghost upgrade [--allow-downgrade] [--allow-prerelease]
+const upgradeUsage = `Usage: ghost upgrade [--allow-downgrade] [--allow-prerelease] [--allow-unattested]
 
 Checks GitHub Releases and replaces this binary after verifying the archive
-against the digest GitHub reports for that release asset and against the
-published checksum manifest. The whole run is bounded by a 12 minute budget.
+against the digest GitHub reports for that release asset, against the published
+checksum manifest, and — for release 0.43.0 onwards — against the build
+attestation GitHub publishes for it, which names this repository's release
+workflow as the signer. The whole run is bounded by a 12 minute budget.
 A plugin-managed binary refuses this path: update it with /plugin update in
 Claude Code instead.
 
@@ -192,6 +255,11 @@ Claude Code instead.
                       older latest release is refused.
   --allow-prerelease  Install a prerelease (an rc, a beta). Without it, a
                       prerelease is refused however new it is.
+  --allow-unattested  Install a release whose attestation could not be checked
+                      — either because the release publishes none, or because
+                      the attestation service could not be reached. It never
+                      permits a release whose attestation is present and did not
+                      verify: that is always refused.
 `
 
 // runUpgrade downloads and installs the latest ghost release.
@@ -227,6 +295,10 @@ func runUpgrade(args []string) {
 			fmt.Printf("Replacing %s...\n", exe)
 			return selfupdate.Replace(exe, binary)
 		},
+		// The verifier is a function of the data directory rather than a path
+		// resolved here, so that the trust-root cache is only located — and, on
+		// a development build, only checked — on a run that reaches a bundle.
+		attest: selfupdate.LiveAttestationCheck(config.DataDirPath),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -316,7 +388,7 @@ func performUpgrade(parent context.Context, streams upgradeStreams, running stri
 	if err != nil {
 		return "", withBudget(parent, ctx, err)
 	}
-	if err := installRelease(ctx, streams.out, rel, asset, deps.install); err != nil {
+	if err := installRelease(ctx, streams, rel, asset, opts, deps); err != nil {
 		return "", withBudget(parent, ctx, err)
 	}
 	return latest, nil
@@ -351,16 +423,18 @@ func withBudget(parent, ctx context.Context, err error) error {
 }
 
 // installRelease downloads the release's archive for asset, verifies it against
-// both digests the release publishes, extracts the binary and hands it to
-// install. Nothing reaches install that has not been verified: the archive is
-// checked before it is parsed, so a substituted release is refused without the
-// attacker-supplied bytes ever being decompressed.
+// all three published proofs — the digest GitHub reports for the asset, the
+// checksum manifest, and from the cutover onwards the build attestation — extracts
+// the binary and hands it to install. Nothing reaches install that has not been
+// verified: the archive is checked before it is parsed, so a substituted release
+// is refused without the attacker-supplied bytes ever being decompressed.
 //
 // install is a parameter so the one property that matters — an unverified
 // archive never reaches the file replacing the running binary — can be asserted
 // directly, against a local server, rather than inferred from the order of the
 // statements above.
-func installRelease(ctx context.Context, out io.Writer, rel *selfupdate.Release, asset *selfupdate.Asset, install func([]byte) error) error {
+func installRelease(ctx context.Context, streams upgradeStreams, rel *selfupdate.Release, asset *selfupdate.Asset, opts upgradeOptions, deps upgradeDeps) error {
+	version := strings.TrimPrefix(rel.TagName, "v")
 	// Fail closed on both published digests. GitHub's is checked first
 	// because it is the one that does not come from a second file in the same
 	// release: checksums.txt is uploaded alongside the binary, so anyone able
@@ -379,7 +453,7 @@ func installRelease(ctx context.Context, out io.Writer, rel *selfupdate.Release,
 	// Progress, not a result: a stdout that has gone away (a closed pipe, a
 	// redirect to a full disk) is not a reason to refuse an upgrade whose
 	// verification has already passed.
-	_, _ = fmt.Fprintf(out, "Downloading %s...\n", asset.Name)
+	_, _ = fmt.Fprintf(streams.out, "Downloading %s...\n", asset.Name)
 	archive, err := downloadCapped(ctx, asset.BrowserDownloadURL, selfupdate.ReadArchive)
 	if err != nil {
 		return fmt.Errorf("downloading %s: %w", asset.Name, err)
@@ -391,12 +465,82 @@ func installRelease(ctx context.Context, out io.Writer, rel *selfupdate.Release,
 	if err := selfupdate.VerifyChecksum(archive, string(manifest), asset.Name); err != nil {
 		return err
 	}
+	// After both digests and before the archive is parsed. The archive is the
+	// input to the lookup, so the check cannot come earlier than the download —
+	// looking it up by the digest the release *reports* instead would consult
+	// the attacker's own metadata about the attacker's own bytes. What this
+	// order buys is the one that matters: nothing that nothing has vouched for is
+	// ever handed to a decompressor.
+	if err := checkAttestation(ctx, streams.err, archive, version, opts, deps); err != nil {
+		return err
+	}
 
 	binary, err := selfupdate.ExtractBinary(archive)
 	if err != nil {
 		return err
 	}
-	return install(binary)
+	return deps.install(binary)
+}
+
+// checkAttestation decides whether archive may be installed, and says why not if
+// it may not.
+//
+// The four states are handled as four things, because collapsing them would
+// quietly undo the feature:
+//
+//   - Verified, including a release published before the cutover, which has no
+//     attestation because none could exist for it. Nothing to do.
+//   - Absent: the release publishes none. The loud flag reaches this and only
+//     this, and it says so on stderr before the install, so proceeding is a
+//     decision the user can see they made.
+//   - Unreachable: nobody could be asked — the service errored, a response would
+//     not parse, the trust root would not fetch. Refused by default and named as
+//     unreachable, never reported as absence, because a network fault must not
+//     read as a permanent property of the release. The flag reaches it too, since
+//     a machine that cannot reach the service has to be able to upgrade at all;
+//     the warning says which of the two happened.
+//   - Unverifiable: a bundle exists and did not verify. Fatal whatever the
+//     flags, and the message does not name one.
+//
+// The absent and unreachable refusals are returned, not warned about: the
+// alternative is an upgrade that replaced the running binary and reported
+// success while the one property it was run for had not been established.
+func checkAttestation(ctx context.Context, warn io.Writer, archive []byte, version string, opts upgradeOptions, deps upgradeDeps) error {
+	if deps.attest == nil {
+		// No verifier is a fail-closed refusal for a release that needs one, and
+		// deliberately not a skip. A missing dependency must never be
+		// indistinguishable from a release nothing has to vouch for — that is
+		// the one place where "I could not check" would silently become "there
+		// is nothing to check". The nil exists only in tests.
+		if !selfupdate.AttestationRequiredFor(version) {
+			return nil
+		}
+		return errors.New(unattestedMessage(version))
+	}
+
+	switch result := deps.attest(ctx, archive, version); result.State {
+	case selfupdate.AttestationVerified:
+		return nil
+	case selfupdate.AttestationAbsent:
+		if !opts.allowUnattested {
+			return errors.New(unattestedMessage(version))
+		}
+		_, _ = fmt.Fprintf(warn, "warning: about to install %s, which publishes no build attestation — nothing says which workflow built it, and --allow-unattested was given\n", version)
+		return nil
+	case selfupdate.AttestationUnreachable:
+		if !opts.allowUnattested {
+			return errors.New(attestationUnreachableMessage(version, result.Detail))
+		}
+		_, _ = fmt.Fprintf(warn, "warning: about to install %s without checking its build attestation (%v) — --allow-unattested was given\n", version, result.Detail)
+		return nil
+	case selfupdate.AttestationUnverifiable:
+		return errors.New(attestationRejectedMessage(version, result.Detail))
+	default:
+		// An unnamed state is a state nobody has written a policy for, so it
+		// gets the treatment a stranger gets rather than the treatment a
+		// passing check would get.
+		return errors.New(attestationUnreachableMessage(version, fmt.Sprintf("the attestation check reported %s", result.State)))
+	}
 }
 
 // downloadCapped fetches url and reads the body through read, which is the only
