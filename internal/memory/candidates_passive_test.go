@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1005,5 +1006,90 @@ func TestCandidatesPassiveANearDuplicateLoserIsDecidedOnThePostSupersedeOrder(t 
 	if containsStr(got, "gp_high") {
 		t.Errorf("gp_high is the later member after the supersede demote and is the near-duplicate loser, so it must "+
 			"be dropped (got %v)", got)
+	}
+}
+
+// TestCandidatesPassiveAnUnreadableVersionStillAttemptsTheEvidenceRead is the third
+// state, and it is the one the previous fix got backwards.
+//
+// Substituting for a column that might not exist is the safe direction, so an
+// unreadable version leaves the COLUMNS at their floor. Skipping a READ that might
+// have succeeded is the opposite: a skipped read reports "no recorded evidence",
+// which is a claim about support that the store may well contradict. The flag
+// therefore distinguishes "known to be below the floor" from "unknown", and only
+// the former skips.
+//
+// The fixture cannot make the PRAGMA fail on demand, so the two halves are pinned
+// separately: the flag's three states through the resolver, and the tolerated
+// failure through the helper that decides it.
+func TestCandidatesPassiveAnUnreadableVersionStillAttemptsTheEvidenceRead(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+
+	// Known and current: the read happens.
+	cols, err := passiveColumnsFor(st)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !cols.ProvenanceKnown || !cols.HasProvenance {
+		t.Errorf("a current store: ProvenanceKnown=%v HasProvenance=%v, want both true — an unknown state would skip the read on a store that has the table",
+			cols.ProvenanceKnown, cols.HasProvenance)
+	}
+
+	// Known and below the floor: the read is skipped, and the flag says so.
+	if _, err := st.db.Exec(`PRAGMA user_version = 17`); err != nil {
+		t.Fatalf("stamp a pre-provenance version: %v", err)
+	}
+	cols, err = passiveColumnsFor(st)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !cols.ProvenanceKnown {
+		t.Error("ProvenanceKnown must be true for a version that WAS read, even when the read says the table is absent")
+	}
+	if cols.HasProvenance {
+		t.Error("a store at v17 has never had memory_provenance, so HasProvenance must be false")
+	}
+
+	// The tolerated failure is specifically a missing TABLE, so the guard cannot
+	// swallow a real one.
+	if !isMissingTable(errors.New("SQL logic error: no such table: memory_provenance")) {
+		t.Error("a missing table must be recognised as the tolerated failure")
+	}
+	for _, other := range []string{
+		"SQL logic error: database is locked",
+		"candidates: evidence counts: context deadline exceeded",
+		"no such column: memory_id",
+	} {
+		if isMissingTable(errors.New(other)) {
+			t.Errorf("%q must NOT be tolerated: only an absent table means 'never recorded', and anything else would turn a "+
+				"failed read into a false claim that no memory is supported", other)
+		}
+	}
+	if isMissingTable(nil) {
+		t.Error("a nil error is not a missing table")
+	}
+	_ = ctx
+}
+
+// TestPassiveColumnsEvidenceReadModeIsThreeStates is the pinning of the branch a
+// test cannot otherwise reach: whether the store is KNOWN to have the evidence
+// table, or merely not known to lack it, decides between reading it, reading it
+// tolerantly, and not reading it at all — and an unreadable version must never
+// take the skipping branch, because a skipped read reports "no recorded evidence"
+// as a fact about support.
+func TestPassiveColumnsEvidenceReadModeIsThreeStates(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cols passiveColumns
+		want evidenceReadMode
+	}{
+		{"known present", passiveColumns{HasProvenance: true, ProvenanceKnown: true}, evidenceReadPlain},
+		{"known absent", passiveColumns{HasProvenance: false, ProvenanceKnown: true}, evidenceReadSkip},
+		{"unknown", passiveColumns{HasProvenance: false, ProvenanceKnown: false}, evidenceReadAttemptTolerating},
+	} {
+		if got := tc.cols.evidenceReadMode(); got != tc.want {
+			t.Errorf("%s: got mode %d, want %d — an unknown version must never take the skipping branch", tc.name, got, tc.want)
+		}
 	}
 }

@@ -152,12 +152,29 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	// read it, a zero would be a false claim that no memory is supported, which is
 	// the one thing this read must never produce.
 	counts := map[string]EvidenceCounts{}
-	if cols.HasProvenance {
+	switch cols.evidenceReadMode() {
+	case evidenceReadPlain:
 		counts, err = evidenceCountsFor(ctx, s.queryDB(), scope)
 		if err != nil {
 			return nil, fmt.Errorf("candidates: evidence counts: %w", err)
 		}
-	} else {
+	case evidenceReadAttemptTolerating:
+		// The version could not be read, so whether the table exists is UNKNOWN —
+		// and skipping the read would report "no recorded evidence" as a fact about
+		// support, which is the one claim this must not invent. So it is attempted,
+		// and the ONLY failure tolerated is the table being absent. Anything else
+		// (a locked file, a corrupt page) is a real error, because a zero in place of
+		// it would be a false statement about the corpus rather than a gap in it.
+		counts, err = evidenceCountsFor(ctx, s.queryDB(), scope)
+		if err != nil {
+			if isMissingTable(err) {
+				s.logger.Debug("candidates: passive read found no evidence table on a store of unknown version", "error", err)
+				counts = map[string]EvidenceCounts{}
+				break
+			}
+			return nil, fmt.Errorf("candidates: evidence counts: %w", err)
+		}
+	case evidenceReadSkip:
 		s.logger.Debug("candidates: passive read skipped the evidence counts: the store predates memory_provenance")
 	}
 	for i := range rows {
@@ -583,7 +600,20 @@ type passiveColumns struct {
 	// to "no penalty", this one is a returned error — and an error here would turn
 	// exactly the pre-tier store the rest of this function exists to support into no
 	// session context at all.
+	//
+	// It is TRUE for a store KNOWN to have the table and FALSE only for one known
+	// to be below the floor. An unreadable version leaves it UNSET, which is the
+	// third state and the one that matters: substituting for a column that might
+	// exist is the safe direction, but SKIPPING a read that might have succeeded is
+	// not, because a skipped read reports "no recorded evidence" — a claim about
+	// support that the store may well be able to contradict. The two directions are
+	// opposite, and the flag only has one of them.
 	HasProvenance bool
+	// ProvenanceKnown reports whether the version was READ. The evidence read uses
+	// it to choose between three behaviours: read it (known and present), report
+	// zero (known and absent), or read it and let a missing table be the only
+	// tolerated failure (unknown).
+	ProvenanceKnown bool
 }
 
 // The schema versions that added memories.scope and memories.retention. They are
@@ -614,6 +644,7 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	// rather than failing the read. The error branch below leaves them false on
 	// purpose, and says why.
 	var hasScope, hasTier, hasProvenance bool
+	var versionKnown bool
 
 	// Through the SNAPSHOT, not the pool. This runs inside the read transaction
 	// `Candidates` opened, and that pool is pinned at MaxOpenConns(1): the
@@ -621,6 +652,7 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	// a connection that cannot be handed out — a deadlock, not an error.
 	version, versionErr := dbUserVersion(s.queryDB())
 	if versionErr == nil {
+		versionKnown = true
 		hasScope = version >= passiveScopeColumnFloor
 		hasTier = version >= passiveRetentionColumnFloor
 		hasProvenance = version >= passiveProvenanceColumnFloor
@@ -652,9 +684,58 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 		}
 	}
 	return passiveColumns{
-		list:          qualifyColumnsFrom(names, ""),
-		HasTier:       hasTier,
-		HasScope:      hasScope,
-		HasProvenance: hasProvenance,
+		list:            qualifyColumnsFrom(names, ""),
+		HasTier:         hasTier,
+		HasScope:        hasScope,
+		HasProvenance:   hasProvenance,
+		ProvenanceKnown: versionKnown,
 	}, nil
+}
+
+// isMissingTable reports whether an error is the absence of a TABLE, which is the
+// one evidence-read failure that means "this store has never recorded an
+// observation" rather than "this read did not work".
+//
+// Matched on the message rather than on a driver type, because both drivers Ghost
+// has used spell it the same way and the alternative — a per-driver probe — would
+// be a second thing to keep correct. The risk of over-matching is bounded: a query
+// that read no table and failed for another reason still returns an error rather
+// than a zero, because only "no such table" carries this wording.
+func isMissingTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
+}
+
+// evidenceReadMode is what a passive read does about the evidence table, and it is
+// a named function returning a closed set of three rather than a condition inline
+// at the call site, for one reason: the middle case — a version that could not be
+// READ — is not reachable from a test by any means short of breaking the database
+// handle, and an unreachable branch in a path that decides whether to claim a
+// memory is supported is exactly the branch that needs pinning.
+type evidenceReadMode int
+
+const (
+	// evidenceReadPlain reads the table and treats any failure as an error.
+	evidenceReadPlain evidenceReadMode = iota
+	// evidenceReadAttemptTolerating reads the table and treats ONLY a missing
+	// table as zero, because the store's version is unknown and a skipped read
+	// would be a claim it might contradict.
+	evidenceReadAttemptTolerating
+	// evidenceReadSkip reports zero without reading, which is honest only when the
+	// store is KNOWN to predate the table.
+	evidenceReadSkip
+)
+
+// evidenceReadMode is the three-way decision, and the order matters: what the store
+// is KNOWN to have is asked first, because "present" is the only state that admits
+// the plain read, and "unknown" is checked before "absent" so an unreadable version
+// never takes the skipping branch.
+func (c passiveColumns) evidenceReadMode() evidenceReadMode {
+	switch {
+	case c.HasProvenance:
+		return evidenceReadPlain
+	case !c.ProvenanceKnown:
+		return evidenceReadAttemptTolerating
+	default:
+		return evidenceReadSkip
+	}
 }
