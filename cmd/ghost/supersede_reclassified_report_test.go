@@ -19,17 +19,28 @@ const (
 	reclassNewer = "aaaaaaaabbbbccccddddeeeeffff0000"
 	reclassOlder = "11111111222233334444555566667777"
 	reclassFresh = "88888888777766665555444433332222"
+	// reclassCauses is a pair of its own for the 'causes'-edge rows below, and it
+	// has to be: a target the follow-up already lists would be deduplicated away,
+	// and a row that cannot change the list cannot prove the list excludes it.
+	reclassCausesNewer  = "ccccccccddddeeeeffff0000aaaaaaaabbbb"
+	reclassCausesTarget = "22222222333344445555666677778888"
 )
 
+// reclassRow is a row the pass produced over a pair that CARRIED a live
+// 'supersedes' edge, which is the shape every case below but the last one is.
+// ReclassifiedFrom names that edge, and a fixture that leaves it empty would be
+// describing a reclassify of nothing: a live edge may be 'causes' as well now
+// (#823), and both the report and the follow-up branch on which relation it was.
 func reclassRow(relation supersede.Relation, reclassified, withdrawn bool) supersede.Classified {
 	return supersede.Classified{
 		Candidate: supersede.Candidate{
 			NewerID: reclassNewer, OlderID: reclassOlder,
 		},
-		Relation:        relation,
-		Reclassified:    reclassified,
-		Withdrawn:       withdrawn,
-		TargetProjectID: "proj",
+		Relation:         relation,
+		Reclassified:     reclassified,
+		ReclassifiedFrom: supersede.RelationSupersedes,
+		Withdrawn:        withdrawn,
+		TargetProjectID:  "proj",
 	}
 }
 
@@ -136,7 +147,7 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			name:  "a withdrawal that also dropped a causes edge says so",
 			apply: true,
 			classified: []supersede.Classified{
-				withCauses(reclassRow(supersede.RelationNeither, true, true), 1),
+				withCauses(reclassRow(supersede.RelationNeither, true, true), 1, 1),
 			},
 			want:    []string{"withdrew", "[+1 causes edge dropped]"},
 			notWant: []string{"+0 causes", "would withdraw"},
@@ -144,14 +155,29 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 		{
 			// The count is what the write returned, so a dry run has none — and a
 			// marker over a pass that deleted nothing is the one line this report
-			// must not print.
-			name:  "a dry run forecasts no causes deletion",
+			// must not print. What it MAY print is the forecast, in its own words,
+			// and the two differ by the tense rather than by the number: the
+			// forecast is counted off the edges the pass read, the marker is
+			// counted off the writes it made.
+			name:  "a dry run names the deletion it would make, in the future tense",
 			apply: false,
 			classified: []supersede.Classified{
-				withCauses(reclassRow(supersede.RelationNeither, true, false), 0),
+				withCauses(reclassRow(supersede.RelationNeither, true, false), 0, 1),
+			},
+			want:    []string{"would withdraw", "[+1 causes edge would be dropped]"},
+			notWant: []string{"[+1 causes edge dropped]"},
+		},
+		{
+			// The control for the row above: a dry run over a pair whose live
+			// 'causes' edges the pass did not read — a fresh pair, which reports
+			// no sweep at all — forecasts nothing rather than forecasting zero.
+			name:  "a dry run with no live causes edge to read forecasts nothing",
+			apply: false,
+			classified: []supersede.Classified{
+				withCauses(reclassRow(supersede.RelationNeither, true, false), 0, 0),
 			},
 			want:    []string{"would withdraw"},
-			notWant: []string{"causes edge dropped"},
+			notWant: []string{"causes edge"},
 		},
 		{
 			// A pair the pass JUDGED and did not write, because the other
@@ -227,8 +253,12 @@ func opposedRow(relation supersede.Relation) supersede.Classified {
 }
 
 // withCauses is reclassRow plus the second graph row a denying verdict moves.
-func withCauses(row supersede.Classified, dropped int) supersede.Classified {
+// withCauses sets both counts, because a row carries both and a fixture that set
+// only the observed one would be asserting against a dry run that has no way to
+// produce the other. droppable is the dry run's forecast of dropped.
+func withCauses(row supersede.Classified, dropped, droppable int) supersede.Classified {
 	row.CausesDropped = dropped
+	row.CausesDroppable = droppable
 	return row
 }
 
@@ -271,9 +301,33 @@ func TestReclassifiedWithdrawalsNamesEveryOrphanedTarget(t *testing.T) {
 			Relation:     supersede.RelationNeither,
 			Reclassified: false,
 		},
+		// A pair that carried a live 'causes' edge and came back NEITHER: a
+		// real graph change, and NO repair. The follow-up is a `ghost resolve
+		// --reassess`, and resolve's supersedes piggyback — the thing that
+		// stamped the resolved_at this repair clears — acts on 'supersedes'
+		// edges alone, so a withdrawn 'causes' edge orphaned nothing and naming
+		// its target would send the operator after a memory nothing is holding
+		// down.
+		{
+			Candidate: supersede.Candidate{
+				NewerID: reclassCausesNewer, OlderID: reclassCausesTarget,
+			},
+			Relation:         supersede.RelationNeither,
+			Reclassified:     true,
+			ReclassifiedFrom: supersede.RelationCauses,
+			Withdrawn:        true,
+			TargetProjectID:  "proj",
+		},
 	}))
 	if len(got) != 1 || len(got[0].Targets) != 1 || got[0].Targets[0] != reclassOlder {
-		t.Errorf("withdrawnTargets(reclassifiedWithdrawals(...)) = %+v, want just [%s]: the two withdrawals, deduplicated, and nothing from a fresh or confirmed pair", got, reclassOlder)
+		t.Errorf("withdrawnTargets(reclassifiedWithdrawals(...)) = %+v, want just [%s]: the two supersedes withdrawals, deduplicated, and nothing from a fresh, confirmed or 'causes'-edge pair", got, reclassOlder)
+	}
+	for _, g := range got {
+		for _, target := range g.Targets {
+			if target == reclassCausesTarget {
+				t.Errorf("the follow-up names %s, the target of a withdrawn 'causes' edge: no 'causes' edge ever stamped a resolved_at, so there is nothing there to clear", reclassCausesTarget)
+			}
+		}
 	}
 
 	// And the two withdrawals really do reach the SAME follow-up the other two
@@ -530,4 +584,315 @@ func seedPromotedSupersedesEdge(t *testing.T, dbPath string) (source, target str
 		t.Fatalf("close the seeding store: %v", err)
 	}
 	return source, target
+}
+
+// seedLiveCausesEdge is seedLiveSupersedesEdge for the other relation, and the
+// pair it writes is a live 'causes' edge — older→newer, so the SOURCE is the
+// older note. Stamped 2020 for the same reason the supersedes fixture is: the
+// pair has to be re-judged for a verdict to exist, and the way to reach the
+// classifier with no vector involved is a pair whose edge predates both
+// endpoints.
+//
+// The first memory is backdated where the supersedes fixture does not have to be,
+// and the asymmetry is the rule rather than an inconvenience. A 'supersedes' edge
+// carries its own direction, so a pair whose rows share a timestamp is still
+// re-judged in the direction the edge names. A 'causes' edge settles nothing about
+// the question, so the pair is asked in the direction `orient` gives — and
+// `orient` refuses two rows that share both timestamps, exactly as it refuses them
+// in a scan. Two memories created in the same instant therefore tie, and the pair
+// would be reported as unproposed; giving the two notes real ages is what makes
+// the fixture reachable at all.
+func seedLiveCausesEdge(t *testing.T, dbPath string) (older, newer string) {
+	t.Helper()
+	ctx := context.Background()
+	store := openStore(t, dbPath)
+	if err := store.EnsureProject(ctx, "projy", "/tmp/projy", "projy"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ids := make([]string, 0, 2)
+	for _, content := range []string{
+		"the deploy pipeline runs the unit suite before it stages a build",
+		"the deploy pipeline now runs the migration check before it stages a build",
+	} {
+		id, err := store.Create(ctx, "projy", memory.Memory{
+			Category: "architecture", Content: content, Source: "mcp", Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("create memory: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	older, newer = ids[0], ids[1]
+	if err := store.CreateLink(ctx, older, newer, string(supersede.RelationCauses), 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the seeding store: %v", err)
+	}
+	raw, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer raw.Close() //nolint:errcheck
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`,
+		older, newer,
+	); err != nil {
+		t.Fatalf("backdate the link row: %v", err)
+	}
+	// The first note gets a real age. BOTH columns, because `orient` reads
+	// updated_at first and falls back to created_at only on a tie, so a backdate
+	// that left updated_at alone would be decided by the column the backdate did
+	// not touch.
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE memories SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE id = ?`,
+		older,
+	); err != nil {
+		t.Fatalf("backdate the older memory row: %v", err)
+	}
+	return older, newer
+}
+
+// TestRunSupersedeReportsACausesEdgeItReplacedWithASupersession is #823 on the
+// report, and it drives the real command because the report is the whole of what
+// an operator is told about a graph change.
+//
+// The pass read a live 'causes' edge, judged the pair SUPERSEDES, and replaced
+// one graph row with another. Three things have to be true of what it printed:
+//
+//   - the reclassified row says the pair is now a SUPERSEDES, in words. The
+//     bracketed finding is what distinguishes a real replacement from a wrong
+//     edge, and an empty one leaves a line that says the run did something and
+//     not what.
+//
+//   - the row names the edge that replaced it. "1 reclassified" in the summary is
+//     a total; a total over a relation change is a number nobody can act on, and
+//     the second graph row the run moved is the half the line used to leave out.
+//
+//   - NO resolve follow-up. The follow-up is a `ghost resolve --reassess`, and
+//     resolve's supersedes piggyback — the thing that stamped the resolved_at it
+//     clears — acts on 'supersedes'/'llm' edges alone. A withdrawn 'causes' edge
+//     orphaned no resolution, so printing the repair would send an operator to
+//     clear a memory nothing is holding down, scoped to a target that is not the
+//     one whose state changed.
+func TestRunSupersedeReportsACausesEdgeItReplacedWithASupersession(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply bool
+		row   string
+	}{
+		{name: "dry run", apply: false, row: "would withdraw"},
+		{name: "applied", apply: true, row: "withdrew"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataHome := isolatedLifecycleEnv(t)
+			binDir := t.TempDir()
+			harness := filepath.Join(binDir, "opencode")
+			// A supersession with a `replaced:` claim, because the rubric requires
+			// one and a verdict without it reads NEITHER — which would make this
+			// test pass for a reason that has nothing to do with the relation.
+			writeExecutable(t, harness, "#!/bin/sh\n"+`printf '{"type":"text","part":{"type":"text","text":"SUPERSEDES\\nreplaced: the deploy pipeline runs the unit suite before it stages a build"}}\n'`+"\n")
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GHOST_CLI_OPENCODE_BINARY", harness)
+
+			dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
+			if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+				t.Fatalf("mkdir data dir: %v", err)
+			}
+			older, newer := seedLiveCausesEdge(t, dbPath)
+
+			origArgs := os.Args
+			args := []string{origArgs[0], "supersede", "projy", "--source", "opencode"}
+			if tc.apply {
+				args = append(args, "--apply")
+			}
+			os.Args = args
+			t.Cleanup(func() { os.Args = origArgs })
+
+			out := captureStdout(t, runSupersede)
+
+			for _, want := range []string{
+				tc.row,
+				"supersedes: the newer note replaces the older one",
+				"re-linked",
+				"supersedes -> " + shortID(older),
+				shortID(newer),
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("`ghost supersede` did not report %q:\n%s", want, out)
+				}
+			}
+			// The summary has to count it too: the row is the detail and this is
+			// the line an operator reads when they only read one.
+			if !strings.Contains(out, "1 reclassified") {
+				t.Errorf("the summary does not count the relation change:\n%s", out)
+			}
+			// And the dry run's hint must be the one that fits what it would do.
+			// The "withdraw these edges" hint is tied to the resolve follow-up,
+			// which this pair does not owe, so a dry run here promises to write a
+			// link — which is exactly what --apply would do.
+			if !tc.apply && !strings.Contains(out, "Re-run with --apply to write these links.") {
+				t.Errorf("a dry run that would replace the edge does not tell the operator to apply:\n%s", out)
+			}
+			if !tc.apply && strings.Contains(out, "Re-run with --apply to withdraw these edges.") {
+				t.Errorf("a dry run promises to withdraw an edge, and this pair's withdrawal orphans no resolution to repair:\n%s", out)
+			}
+			// And the repair that is NOT owed.
+			if strings.Contains(out, "Follow-up:") || strings.Contains(out, "ghost resolve projy --reassess") {
+				t.Errorf("a withdrawn 'causes' edge printed a resolve repair, and no 'causes' edge ever stamped the resolved_at it clears:\n%s", out)
+			}
+
+			// The graph, so the tense above is a claim about something.
+			store := openStore(t, dbPath)
+			ctx := context.Background()
+			causes, err := store.LinksByRelationSource(ctx, "projy", string(supersede.RelationCauses), "llm")
+			if err != nil {
+				t.Fatalf("LinksByRelationSource(causes): %v", err)
+			}
+			supers, err := store.LinksByRelationSource(ctx, "projy", string(supersede.RelationSupersedes), "llm")
+			if err != nil {
+				t.Fatalf("LinksByRelationSource(supersedes): %v", err)
+			}
+			if tc.apply {
+				if len(causes) != 0 {
+					t.Errorf("the report says the 'causes' edge went and %d live edge(s) remain", len(causes))
+				}
+				if len(supers) != 1 {
+					t.Errorf("the report says the pair is now a supersession and %d live edge(s) are", len(supers))
+				}
+			} else {
+				if len(causes) != 1 || len(supers) != 0 {
+					t.Errorf("a dry run left %d 'causes' and %d 'supersedes' edge(s), want 1 and 0: it wrote something", len(causes), len(supers))
+				}
+			}
+		})
+	}
+}
+
+// TestSupersedePairLinesNamesTheEdgeACausesCycleRemoved is the reporting half of
+// the 'causes'-cycle rule, and it is a formatter test on purpose: what the pass
+// writes is held by internal/supersede, and what the operator is TOLD is held
+// here.
+//
+// A 'causes' CYCLE answered CAUSES keeps the direction the pass was asked about
+// and drops the edge asserting the other, so the pair's live claim goes from two
+// edges to one while the relation is unchanged. The row is a reclassified pair
+// whose verdict equals the edge it carried, which is the one combination the
+// report's skip test used to treat as "nothing happened" — so the run deleted a
+// graph row, the summary counted zero reclassifications, and the row printed as an
+// ordinary `causes` line.
+func TestSupersedePairLinesNamesTheEdgeACausesCycleRemoved(t *testing.T) {
+	row := supersede.Classified{
+		Candidate: supersede.Candidate{
+			NewerID: reclassCausesNewer, OlderID: reclassCausesTarget,
+		},
+		Relation:         supersede.RelationCauses,
+		Reclassified:     true,
+		ReclassifiedFrom: supersede.RelationCauses,
+		Withdrawn:        true,
+		CausesDropped:    1,
+		TargetProjectID:  "proj",
+	}
+	// The two halves of the row: the marker, which is a claim about the graph and
+	// has to be the one this run earns, and the clause naming the second row.
+	out := supersedePairLines(true, []supersede.Classified{row})
+	if !strings.Contains(out, "withdrew") {
+		t.Errorf("a row whose live edge this run removed does not carry the `withdrew` marker:\n%s", out)
+	}
+	if strings.Contains(out, "already gone") {
+		t.Errorf("a row this run withdrew claims the edge was already gone:\n%s", out)
+	}
+	if !strings.Contains(out, "[+1 causes edge dropped]") {
+		t.Errorf("the row says nothing about the edge the run removed:\n%s", out)
+	}
+	// And the same pair in a dry run promises rather than claims. Two fields have
+	// to change together, and both changes are what a real dry run produces:
+	// `Withdrawn` is false because the apply block never ran, and
+	// `CausesDropped` is 0 because nothing was invalidated. Setting only the
+	// first would leave a row no dry run can emit — one claiming a deletion —
+	// and this block's own predicate would then admit it on the observed count,
+	// so the forecast below would never be the reason the row was reached and
+	// the assertion would prove nothing about the dry run's own path.
+	promised := row
+	promised.Withdrawn = false
+	promised.CausesDropped = 0
+	promised.CausesDroppable = row.CausesDropped
+	dry := supersedePairLines(false, []supersede.Classified{promised})
+	if !strings.Contains(dry, "would withdraw") {
+		t.Errorf("a dry run's row is not in the would-withdraw tense:\n%s", dry)
+	}
+	if !strings.Contains(dry, "[+1 causes edge would be dropped]") {
+		t.Errorf("a dry run says nothing about the edge it would remove:\n%s", dry)
+	}
+	if strings.Contains(dry, "[+1 causes edge dropped]") {
+		t.Errorf("a dry run's row claims a deletion it did not make:\n%s", dry)
+	}
+	// The re-link clause follows the forecast rather than the relation alone: the
+	// relation did not change, but the edge the verdict wrote is a different edge
+	// from the one the row is about, so `re-affirmed` would be the false one.
+	if !strings.Contains(dry, "re-linked") {
+		t.Errorf("a dry run's row calls a corrected 'causes' edge a re-affirmation:\n%s", dry)
+	}
+
+	// The control: a re-affirmation that moved NOTHING stays off this block. A
+	// predicate that admits every re-classified row would make every quiet
+	// `causes` re-confirmation print as a withdrawal, which is the false claim in
+	// the other direction.
+	quiet := row
+	quiet.Withdrawn = false
+	quiet.CausesDropped = 0
+	if out := supersedePairLines(true, []supersede.Classified{quiet}); strings.Contains(out, "withdrew") {
+		t.Errorf("a re-affirmation that moved nothing is dressed as a withdrawal:\n%s", out)
+	}
+}
+
+// TestSupersedePairLinesSaysKeptWhenTheEdgeItIsAboutSurvived is the shape the
+// second review round found, and it is a line that made THREE claims where two
+// were false.
+//
+// A live 'supersedes' edge re-AFFIRMED beside a 'causes' CYCLE: the pass kept the
+// edge (and re-stamped it), and the verdict removed the cycle's two rows. The row
+// was routed into the withdrawal block because the run did move graph rows, and
+// the block's markers then said `already gone` — a claim about the 'supersedes'
+// edge, which is still live and which this run never removed — over a `re-linked`
+// clause announcing a change of relation that had not happened.
+func TestSupersedePairLinesSaysKeptWhenTheEdgeItIsAboutSurvived(t *testing.T) {
+	row := supersede.Classified{
+		Candidate: supersede.Candidate{
+			NewerID: reclassNewer, OlderID: reclassOlder,
+		},
+		Relation:         supersede.RelationSupersedes,
+		Reclassified:     true,
+		ReclassifiedFrom: supersede.RelationSupersedes,
+		CausesDropped:    2,
+		TargetProjectID:  "proj",
+	}
+	out := supersedePairLines(true, []supersede.Classified{row})
+	for _, want := range []string{
+		"kept",
+		"supersedes: the newer note replaces the older one",
+		"re-affirmed",
+		"[+2 causes edge dropped]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the row does not say %q:\n%s", want, out)
+		}
+	}
+	// The two markers that would be false, named.
+	for _, notWant := range []string{"already gone", "would withdraw", "re-linked"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("the row claims %q, and the edge it is about never left the graph:\n%s", notWant, out)
+		}
+	}
+
+	// The control in the other direction: a row whose edge really WAS taken by a
+	// concurrent pass still says `already gone`, because that is a fact about the
+	// graph and the marker above is only a fact about THIS run.
+	taken := row
+	taken.Relation = supersede.RelationNeither
+	taken.ReclassifiedFrom = supersede.RelationSupersedes
+	taken.CausesDropped = 0
+	if out := supersedePairLines(true, []supersede.Classified{taken}); !strings.Contains(out, "already gone") {
+		t.Errorf("an edge this run did not remove is not reported as already gone:\n%s", out)
+	}
 }

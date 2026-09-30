@@ -5143,6 +5143,53 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 }
 
 // TogglePin sets or clears the pinned flag.
+//
+// It deliberately does NOT move `updated_at`, and that is a decision (#820)
+// rather than an oversight, in the same shape as PromoteToGlobal's above. A pin
+// is a decision about how a memory is SURFACED: the `_global` passive bucket
+// orders by `pinned DESC`, the composite ranking exempts a pinned row from
+// decay, and `ghost resolve`'s hold-back refuses to stamp one. `pinned` is the
+// column those readers read, and it is the one this call writes.
+//
+// `updated_at` is a different column with a different meaning, and two readers
+// in another package take it to mean "the CONTENT of this row changed": the
+// supersede pass orients every candidate pair by it (internal/supersede's
+// orient) and fingerprints a live edge's freshness against it
+// (skip-if-unchanged). So bumping it here made pinning an endpoint of a live
+// edge re-arm the reclassify half — a classify call for a pair nobody edited,
+// which is the paid route to the withdraw-then-recreate cycle #779 measured —
+// and on a pair live in BOTH directions it flipped the direction
+// `ghost supersede --reassess` asks about, standing the backwards edge #641
+// found in the wild. `pinMemoryTx`, the save-time pin on the Upsert path, has
+// always left the stamp alone; this brings the operator's explicit call into
+// step with it.
+//
+// What no longer moves with a pin, named:
+//
+//   - the supersede pass's chronology and its change detector, above.
+//
+//   - `ghost prune`'s grace, which pruneActivitySQL measures from the newest of
+//     `updated_at`, `created_at` and `expires_at`. Pinning a memory no longer
+//     refreshes it, so a pinned row is not thereby held off the prune. That is
+//     the same trade the promotion takes and for the same reason: the grace
+//     measures the row's last WRITE, and a pin is not a write of the note. An
+//     operator who wants a row kept for good says so with the `persistent`
+//     retention tier, and `ghost prune` is never run for anyone (no lifecycle
+//     phase, hook or scheduler calls it).
+//
+//   - the `updated_at` TIE-BREAK in the `_global` passive bucket's own order
+//     (`pinned DESC, importance DESC, updated_at DESC, id`,
+//     OrderPinnedImportanceUpdated). Nothing else about that order changes:
+//     `pinned DESC` is its PRIMARY key, so a pin still reorders the row it
+//     names, and what is given up is only the ability of a pin to reorder two
+//     rows that tie on (pinned, importance) — which is a tie-break deciding a
+//     tie, on a column that is not about the decision the pin records.
+//
+// The pin itself is still a real decision and is still written. What is NOT
+// written is a `memory_history` version: this statement changes none of the
+// columns a version records, and the row that does change (pinned) is one the
+// history table does not carry — the same rule Touch and the resolve KEEP cache
+// already follow.
 func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5151,8 +5198,12 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	if pinned {
 		pinnedInt = 1
 	}
+	// pinned only. The absence of updated_at is visible HERE on purpose, for
+	// the reason PromoteToGlobal's is: a reader diffing this statement against
+	// the comment above has to be able to see that one column is missing rather
+	// than infer it.
 	res, err := s.execGuardedWrite(ctx, "toggle-pin", `
-		UPDATE memories SET pinned = ?, updated_at = datetime('now') WHERE id = ?
+		UPDATE memories SET pinned = ? WHERE id = ?
 	`, pinnedInt, id)
 	if err != nil {
 		return fmt.Errorf("toggle pin: %w", err)

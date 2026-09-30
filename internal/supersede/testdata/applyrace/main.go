@@ -65,11 +65,16 @@ type report struct {
 	// write-time refusal this test is about: the pass had a verdict, wanted to
 	// write the edge, and did not because the pair was already claimed the other
 	// way round.
-	Created   int    `json:"created"`
-	Confirmed int    `json:"confirmed"`
-	Refused   int    `json:"refused"`
-	Opposite  int    `json:"opposite_live"`
-	Error     string `json:"error,omitempty"`
+	Created   int `json:"created"`
+	Confirmed int `json:"confirmed"`
+	Refused   int `json:"refused"`
+	Opposite  int `json:"opposite_live"`
+	// CausesCreated is the 'causes' counterpart of Created, and it exists because
+	// the two relations are written through different writers (the second is
+	// guarded since #823 and the first always was), so one total cannot answer
+	// "did the guarded writer get there" for a run that wrote either.
+	CausesCreated int    `json:"causes_created"`
+	Error         string `json:"error,omitempty"`
 }
 
 // barrierWait is how long a child waits for the parent to release it before
@@ -86,6 +91,11 @@ func main() {
 		barrier   = flag.String("barrier", "", "directory the barriers are files in")
 		label     = flag.String("label", "", "this child's name in the barrier directory")
 		threshold = flag.Float64("threshold", 0.9, "cosine threshold for a candidate pair")
+		// verdict is the relation the fake classifier answers, and it is a flag
+		// because the race this harness stages is the same race for both
+		// relations — two passes writing the two directions of one pair — and
+		// only the WRITE under test differs.
+		verdict = flag.String("verdict", "supersedes", "the relation the classifier answers: supersedes or causes")
 	)
 	flag.Parse()
 
@@ -115,12 +125,18 @@ func main() {
 	store := memory.NewStore(handle, logger)
 	defer store.Close() //nolint:errcheck
 
-	cls := &raceClassifier{barrier: *barrier, label: *label}
+	answer, err := relationFor(*verdict)
+	if err != nil {
+		fail(&rep, err.Error())
+		return
+	}
+	cls := &raceClassifier{barrier: *barrier, label: *label, verdict: answer}
 	res, _, err := supersede.RunWith(ctx, store, cls, *project, supersede.Options{
 		Threshold: float32(*threshold),
 		Apply:     true,
 	}, logger)
 	rep.Created, rep.Confirmed, rep.Refused, rep.Opposite = res.Created, res.Confirmed, res.ReverseLive, res.OppositeLive
+	rep.CausesCreated = res.CausesCreated
 	rep.Asked = cls.asked
 	if err != nil {
 		rep.Error = err.Error()
@@ -130,8 +146,9 @@ func main() {
 }
 
 // raceClassifier is the hostile classifier #778 measured, with the two barrier
-// stops added: it answers SUPERSEDES to every pair, in whichever direction it is
-// handed, after announcing that it has been asked and waiting to be released.
+// stops added: it answers one relation — SUPERSEDES by default, CAUSES on
+// -verdict — to every pair, in whichever direction it is handed, after announcing
+// that it has been asked and waiting to be released.
 //
 // The stop is INSIDE the classify call on purpose. It is the only point in a pass
 // where the graph has been read and the write has not happened, so it is the
@@ -140,14 +157,26 @@ func main() {
 type raceClassifier struct {
 	barrier string
 	label   string
+	verdict supersede.Relation
 	asked   [][2]string
+}
+
+// relationFor turns the -verdict flag into the relation to answer, and refuses a
+// spelling it does not know rather than defaulting to one: a child that answered
+// the wrong relation would report a clean run for a race nobody staged.
+func relationFor(name string) (supersede.Relation, error) {
+	switch supersede.Relation(name) {
+	case supersede.RelationSupersedes, supersede.RelationCauses:
+		return supersede.Relation(name), nil
+	}
+	return "", fmt.Errorf("-verdict %q is not a relation this pass writes", name)
 }
 
 func (c *raceClassifier) ClassifyBatch(ctx context.Context, pairs []supersede.Candidate) ([]supersede.Relation, error) {
 	out := make([]supersede.Relation, len(pairs))
 	for i, p := range pairs {
 		c.asked = append(c.asked, [2]string{p.NewerID, p.OlderID})
-		out[i] = supersede.RelationSupersedes
+		out[i] = c.verdict
 	}
 	if err := c.signal("asked"); err != nil {
 		return nil, err

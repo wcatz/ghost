@@ -1980,9 +1980,15 @@ func supersedeReport(projectName string, res supersede.Result, verb string, call
 		out += fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
 	}
 	if res.Unoriented > 0 {
-		out += fmt.Sprintf("  %d pair(s) not proposed: both notes carry the same updated_at AND the same created_at (a bulk import stamps a whole batch at once), so there is no chronology to order them by — no classify call, no link, and not cached (a live link on such a pair is still re-judged, since it already carries a direction)\n", res.Unoriented)
+		out += fmt.Sprintf("  %d pair(s) not proposed: both notes carry the same updated_at AND the same created_at (a bulk import stamps a whole batch at once), so there is no chronology to order them by — no classify call, no link, and not cached (a live 'supersedes' link on such a pair is still re-judged, since it already carries a direction; a pair whose only live link is a 'causes' one is the shape that is not, because a causes edge carries no direction — the question is asked by the timestamps, and two rows that share both of them cannot answer it)\n", res.Unoriented)
 	}
 	if res.OppositeLive > 0 {
+		// Supersedes alone, and the wording says so rather than leaving the
+		// reader to work it out: a 'causes' link's direction no longer decides
+		// which way round its pair is asked, so it can never be what a proposal
+		// opposed. That edge still HOLDS its pair (skip-if-unchanged reads its
+		// stamp) and is still never cache-skipped, which is what stops the
+		// re-bill; it is reconciled by the verdict rather than by the prompt.
 		out += fmt.Sprintf("  %d pair(s) proposed the reverse of a live supersedes link: the reverse orientation was refused and the pair keeps the link's direction, so one pass never carries a pair both ways round (a pair is re-judged only if an endpoint changed since the link was written)\n", res.OppositeLive)
 	}
 	if res.Bidirectional > 0 {
@@ -2003,7 +2009,7 @@ func supersedeReport(projectName string, res supersede.Result, verb string, call
 	// reporting a link it did not write, and the repair is the next ordinary
 	// pass, which reads the live edge and asks about the pair in ITS direction.
 	if res.ReverseLive > 0 {
-		out += fmt.Sprintf("  %d pair(s) not written: the pair's opposite direction was already live when the write was attempted, so a concurrent pass got there first — this run wrote no edge for them, and the pair keeps the edge that is there; the next pass judges it in the direction the live edge asserts, and `%s` settles it if the two passes disagree about which note is current\n",
+		out += fmt.Sprintf("  %d pair(s) not written: the pair's opposite direction was already live when the write was attempted, so a concurrent pass got there first — this run wrote no edge for them, and the pair keeps the edge that is there; the next pass judges it in the direction the live edge asserts, and for a 'supersedes' edge `%s` settles it if the two passes disagree about which note is current (it loads live 'supersedes' edges only, so on a 'causes' pair the next ordinary pass is the whole of the repair)\n",
 			res.ReverseLive, followup.ReassessCommand(projectName))
 	}
 	out += supersedeNotAgreedLines(res)
@@ -2451,25 +2457,33 @@ func supersedeConsensusDryRunHint(apply bool, res supersede.Result) string {
 }
 
 // reclassifiedWithdrawals projects the pairs whose live 'supersedes' edge this
-// pass withdrew, in the shape the report and the follow-up share. It is
-// []supersede.WithdrawnEdge and not a bespoke struct because those two are the
-// consumers, and a second type here would be a second answer to which memories
-// a repair can still clear.
+// pass withdrew, in the shape the follow-up reads. It is
+// []supersede.WithdrawnEdge and not a bespoke struct because that is the type the
+// repair's own rows use, and a second type here would be a second answer to
+// which memories a repair can still clear.
 //
-// Only a pair that CARRIED a live edge and came back denied counts. A fresh
-// NEITHER is a pair the pass declined to link, so no edge ever justified a
-// resolution on it and there is nothing to repair; a reclassify that came back
-// SUPERSEDES keeps its edge, so nothing was withdrawn either. Every verdict
-// that does withdraw counts, INCLUDING a reversal — the pass drops the same
-// supersedes edge on all three, so the target is left holding the same orphaned
-// resolution.
+// Only a pair that CARRIED a live 'supersedes' edge and came back denied counts.
+// A fresh NEITHER is a pair the pass declined to link, so no edge ever justified
+// a resolution on it and there is nothing to repair; a reclassify that came back
+// SUPERSEDES keeps its edge, so nothing was withdrawn either. Every verdict that
+// does withdraw counts, INCLUDING a reversal — the pass drops the same supersedes
+// edge on all three, so the target is left holding the same orphaned resolution.
+//
+// The RELATION is the filter, and it is there because the live edge is no longer
+// only ever a 'supersedes' one (#823). The follow-up is a `ghost resolve
+// --reassess`, and resolve's supersedes piggyback — the thing that stamped
+// resolved_at, and the only thing that can clear it — acts on 'supersedes'/'llm'
+// edges ALONE. A withdrawn 'causes' edge orphaned no resolution, so naming its
+// target here would send a repair after a memory nothing is holding down. That
+// row is still REPORTED, by supersedePairLines, which reads `classified`
+// directly: this function is the follow-up list and never was the report's.
 //
 // A row this run did not write counts too, and withdrawnTargets says why: a
 // concurrent pass that took the edge first left the identical state behind.
 func reclassifiedWithdrawals(classified []supersede.Classified) []supersede.WithdrawnEdge {
 	var out []supersede.WithdrawnEdge
 	for _, c := range classified {
-		if !c.Reclassified || c.Relation == supersede.RelationSupersedes {
+		if !c.Reclassified || c.ReclassifiedFrom != supersede.RelationSupersedes {
 			continue
 		}
 		switch c.Relation {
@@ -2490,13 +2504,20 @@ func reclassifiedWithdrawals(classified []supersede.Classified) []supersede.With
 	return out
 }
 
-// supersedeReclassifyReason is the finding behind a withdrawn edge, in the same
+// supersedeReclassifyReason is the finding behind a reclassified row, in the same
 // words Reassess uses for the same three verdicts. They are one classifier
 // answering one question about one edge, so a reader who has seen one report
 // reads the other without a glossary — and the reason is the part that tells a
 // wrong edge from a genuinely obsolete one.
+//
+// SUPERSEDES is here for the row that is not a withdrawal: a live 'causes' edge
+// re-judged into a supersession (#823) leaves a real graph change, and a line
+// whose bracketed finding was empty would say the run did something without
+// saying what.
 func supersedeReclassifyReason(relation supersede.Relation) string {
 	switch relation {
+	case supersede.RelationSupersedes:
+		return "supersedes: the newer note replaces the older one"
 	case supersede.RelationNeither:
 		return "neither: both notes are still true"
 	case supersede.RelationCauses:
@@ -2543,7 +2564,28 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 		if c.OpposedLive {
 			notWritten = "  [not written: the pair's reverse direction is already live — a concurrent pass wrote it first]"
 		}
-		if c.Reclassified && c.Relation != supersede.RelationSupersedes {
+		// The pair's live claim moved: the verdict came back as something OTHER
+		// than the relation the edge carried, OR it came back as that relation
+		// and the run still removed a row — which is what a 'causes' CYCLE
+		// answered CAUSES does, keeping the direction it was asked about and
+		// dropping the edge asserting the other one.
+		//
+		// Both of those are this block, and the MARKER is what tells them apart,
+		// because they are two different things that happened to one pair. The
+		// block's last marker used to be `already gone` — a claim about the edge
+		// a concurrent pass took first — and it is also what a row fell through
+		// to when the run had removed NOTHING: a live 'supersedes' edge
+		// re-affirmed beside a 'causes' cycle has its own edge still in the
+		// graph, so `already gone` described an edge that never left. Hence the
+		// `kept` case, which is a statement and not a euphemism.
+		//
+		// The drop is read as the run OBSERVED it under --apply and as what it
+		// READ where nothing was applied, so a dry run's row is reached at all
+		// for a verdict that would only sweep — a 'causes' cycle answered CAUSES
+		// is the case that fell through every row shape here and was reported as
+		// a plain verdict, which said nothing about the half of the cycle it
+		// would have deleted.
+		if c.Reclassified && (c.Relation != c.ReclassifiedFrom || c.CausesDropped > 0 || c.CausesDroppable > 0) {
 			// The markers, spelled as supersedeReassessReport spells them and padded
 			// as it pads them, so a reader moving between the two reports reads one
 			// vocabulary rather than two. A refused write is its own marker rather
@@ -2553,40 +2595,85 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 			switch {
 			case c.OpposedLive:
 				marker = "not written"
+			case !apply:
+				// Nothing has happened yet, so nothing is claimed — including
+				// the second graph row, which the dropped-rows clause below
+				// also holds back.
 			case c.Withdrawn:
 				marker = "withdrew   "
-			case apply:
+			case c.Relation == c.ReclassifiedFrom:
+				// The edge this row is about SURVIVED — the verdict affirmed the
+				// very relation it carried — and the run took rows of the OTHER
+				// relation instead, which the [ +N ] clause below names. Both of
+				// the markers above are false here: nothing is left to withdraw
+				// and a concurrent pass removed nothing, while the edge this
+				// line is about is still in the graph.
+				marker = "kept        "
+			default:
+				// The edge IS gone and this run did not remove it: a concurrent
+				// pass's invalidation won, and the row says so rather than
+				// claiming the write.
 				marker = "already gone"
 			}
-			// Both verdicts that deny the pair move a SECOND graph row, and a line
-			// that named only the supersedes edge would say the run moved one row
-			// when it moved two — the same `[+N causes edge]` marker
-			// supersedeReassessReport puts on its own rows, for the same reason.
-			// A CAUSES verdict CREATES the row; NEITHER and REVERSED drop one.
+			// TWO clauses, and they are independent rather than alternatives,
+			// because a single verdict can do both: a 'causes' CYCLE answered
+			// CAUSES re-affirms the direction the pair was asked about AND drops
+			// the edge asserting the other, so a switch that took one branch or
+			// the other printed a re-link over a run that also deleted a row.
+			//
+			// The first names the edge the pair is NOW linked by, when the
+			// verdict affirmed a relation other than the one it was judged
+			// around; the second names rows the run REMOVED, in the same marker
+			// supersedeReassessReport puts on its own rows for the same reason.
 			extra := ""
 			switch {
 			case c.OpposedLive:
-				// Nothing to add, and saying so is the point: the re-linked
-				// clause below would claim a second graph row this run
-				// declined to write, which is the same false claim the
-				// marker above it exists to prevent. Only a SUPERSEDES row
-				// carries the flag today (see the pass), and a row that
-				// somehow does is held to the same rule rather than to
-				// whatever it happens to hold.
-			case c.Relation == supersede.RelationCauses:
-				verb := "re-linked"
-				if !apply {
-					verb = "re-linked by --apply"
+				// No re-link clause, and saying so is the point: it would claim a
+				// graph row this run declined to write, which is the same false
+				// claim the marker above it exists to prevent. Only an affirmative
+				// verdict carries the flag (see the pass), and a row that
+				// somehow does is held to the same rule rather than to whatever
+				// it happens to hold. The DROPPED clause below is unaffected: it
+				// is about the other relation, not about the refused write.
+			case c.Relation == supersede.RelationCauses, c.Relation == supersede.RelationSupersedes:
+				// What the pass WROTE, and the verb distinguishes the THREE
+				// things writing it can be. A relation CHANGE is a re-link, and
+				// the SUPERSEDES arm here was missing entirely, so a live 'causes'
+				// edge replaced by a supersession went unmentioned while the
+				// summary said "1 reclassified". A relation UNCHANGED with
+				// nothing dropped is a re-affirmation: the upsert re-stamped the
+				// edge the row is about and kept it, and calling that a re-link
+				// announced a change that had not happened. A relation UNCHANGED
+				// WITH a row dropped is neither of those, and the relation test
+				// alone would have called it a re-affirmation: a 'causes' edge
+				// running against the timestamps is dropped and replaced by one
+				// running with them, so the edge the verdict wrote is a DIFFERENT
+				// edge from the one the row is about.
+				verb := "re-affirmed"
+				if c.Relation != c.ReclassifiedFrom || c.CausesDroppable > 0 {
+					verb = "re-linked"
+					if !apply {
+						verb = verb + " by --apply"
+					}
 				}
-				extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
-					shortID(c.OlderID), "causes", shortID(c.NewerID))
-			case apply && c.CausesDropped > 0:
-				// Only what the write actually moved, so a dry run says nothing
-				// here rather than forecasting a deletion nobody performed: Run
-				// makes no prediction read for this, and adding one would put a
-				// second read's failure in a pass whose only fatal error is a
-				// write error.
-				extra = fmt.Sprintf("  [+%d causes edge dropped]", c.CausesDropped)
+				if c.Relation == supersede.RelationCauses {
+					extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
+						shortID(c.OlderID), "causes", shortID(c.NewerID))
+				} else {
+					extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
+						shortID(c.NewerID), "supersedes", shortID(c.OlderID))
+				}
+			}
+			// The rows the run REMOVED: counted from what it moved under
+			// --apply, and counted from what it READ where nothing was applied.
+			// The dry-run half is exact about the pair rather than vague, because
+			// Run forecasts it off the same snapshot its own sweeps are gated on
+			// and never queries for it — so the preview names the deletion instead
+			// of showing a re-link that will also remove an edge.
+			if apply && c.CausesDropped > 0 {
+				extra += fmt.Sprintf("  [+%d causes edge dropped]", c.CausesDropped)
+			} else if !apply && c.CausesDroppable > 0 {
+				extra += fmt.Sprintf("  [+%d causes edge would be dropped]", c.CausesDroppable)
 			}
 			fmt.Fprintf(&b, "  %s  %s -> %s  [%s%s]\n",
 				marker, shortID(c.NewerID), shortID(c.OlderID), supersedeReclassifyReason(c.Relation), extra)

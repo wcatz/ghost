@@ -208,3 +208,86 @@ func TestCreateLinkUnopposedRefusesASymmetricRelationByName(t *testing.T) {
 		t.Errorf("error = %v, want it to name the relation as symmetric", err)
 	}
 }
+
+// TestCreateLinkUnopposedGuardsTheCausesRelation: the guard is about a PAIR, not
+// about a relation, and 'causes' reached it in #823.
+//
+// The pass only ever reached the guarded writer for 'supersedes' until then, and
+// that asymmetry was a decision rather than an oversight — with no direction
+// override for the second relation, a pair whose 'causes' edge ran against the
+// timestamps was re-proposed flipped on every pass, so a guard would have refused
+// it on every pass, forever. The override now covers both relations, so a 'causes'
+// write is in the live edge's own direction and the refusal is a one-off race
+// again. This test holds the store half of that: the method guards whatever
+// relation it is handed, and it is scoped to THAT relation's reverse rather than
+// to the pair's any edge.
+//
+// The last case is the scope, and it is why the guard is not simply "is the pair
+// linked in the other direction": a 'causes' edge and a 'supersedes' edge that
+// agree about the pair are the same claim in two conventions, and the pass's own
+// verdict is what reconciles them. A guard that refused a 'causes' write beside
+// an agreeing 'supersedes' edge would refuse every re-affirmation on such a pair
+// and re-bill it forever.
+func TestCreateLinkUnopposedGuardsTheCausesRelation(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	cause := makeMemory(t, s, "the restore path on one spindle is safe and fast")
+	effect := makeMemory(t, s, "the restore is being rewritten to run on one spindle")
+
+	// Nothing opposed: the guard writes.
+	wrote, err := s.CreateLinkUnopposed(ctx, cause, effect, "causes", 0.9, "llm", "2026-09-01 00:00:00")
+	if err != nil {
+		t.Fatalf("CreateLinkUnopposed(causes): %v", err)
+	}
+	if !wrote {
+		t.Fatal("CreateLinkUnopposed reported no write for a 'causes' pair nothing opposed")
+	}
+	if links, err := s.GetLinks(ctx, cause); err != nil || len(links) != 1 || links[0].TargetID != effect {
+		t.Fatalf("GetLinks(cause) = %+v (err %v), want the one causes edge -> %s", links, err, effect)
+	}
+
+	// The opposite direction, live: refused, and it is (false, nil) rather than an
+	// error, because nothing went wrong and the graph is left in a state the next
+	// pass can act on.
+	wrote, err = s.CreateLinkUnopposed(ctx, effect, cause, "causes", 0.9, "llm", "")
+	if err != nil {
+		t.Fatalf("CreateLinkUnopposed(reverse causes): %v, want a refusal reported as (false, nil)", err)
+	}
+	if wrote {
+		t.Error("CreateLinkUnopposed wrote the second direction of a 'causes' pair already claimed the other way round")
+	}
+	if links, err := s.GetLinks(ctx, cause); err != nil || len(links) != 1 {
+		t.Fatalf("GetLinks(cause) = %+v (err %v), want the FIRST writer's edge alone", links, err)
+	}
+
+	// An AGREEING 'supersedes' edge is not opposition. 'causes' runs older→newer
+	// and 'supersedes' newer→older, so these two say the same thing about the
+	// pair, and the pass's verdict is what reconciles them.
+	if _, err := s.CreateLinkUnopposed(ctx, effect, cause, "supersedes", 0.9, "llm", "2026-09-01 00:00:00"); err != nil {
+		t.Fatalf("CreateLinkUnopposed(supersedes): %v", err)
+	}
+	wrote, err = s.CreateLinkUnopposed(ctx, cause, effect, "causes", 0.9, "llm", "2026-10-01 00:00:00")
+	if err != nil {
+		t.Fatalf("re-confirm causes: %v", err)
+	}
+	if !wrote {
+		t.Error("a 'causes' re-affirmation was refused because an AGREEING 'supersedes' edge exists: the two relations say the same thing about the pair, so refusing here would re-bill it every pass")
+	}
+
+	// And the re-affirmation moved the stamp, which is what skip-if-unchanged
+	// reads on the next pass. A 'causes' edge that could not be re-stamped would
+	// be re-judged forever.
+	links, err := s.GetLinks(ctx, cause)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	var found Link
+	for _, l := range links {
+		if l.Relation == "causes" {
+			found = l
+		}
+	}
+	if found.SourceID != cause || found.TargetID != effect || found.CreatedAt != "2026-10-01 00:00:00" {
+		t.Errorf("causes link = %+v, want %s -> %s with created_at moved to the re-confirming verdict's stamp", found, cause, effect)
+	}
+}

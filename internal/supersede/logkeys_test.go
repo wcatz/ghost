@@ -143,7 +143,7 @@ func isLogKeyLabel(s string) bool {
 // TestRunNamesTheKeyOfEveryValueItLogs is #804.
 //
 // The line it pins is the one that reports a scan proposing the REVERSE of a
-// live supersedes link: the only log line in the package whose subject is two
+// live link: the only log line in the package whose subject is two
 // disagreeing orientations of one pair, so the only one where naming the source
 // of each id is the whole point. It passed `"link", l.SourceID, l.TargetID,
 // "scan", cand.NewerID, cand.OlderID` — six values, four of them with a name and
@@ -152,58 +152,98 @@ func isLogKeyLabel(s string) bool {
 //	link=02EA044F… 3092A7BE…=scan 3092A7BE…=74CE9D10…
 //
 // which reads as three unrelated facts and names neither endpoint.
+//
+// It names the relation as well as the endpoints because a reader given
+// `link_source`/`link_target` and nothing else cannot tell which end of the pair
+// those two ids are: the two relations are written in OPPOSITE directions, so for
+// a 'causes' edge the source is the note a supersedes edge would call the older.
+// The relation is a value like every other one, so it gets a key too — and it is
+// a key rather than part of the message precisely because the line is structured
+// for grep and a bare value would not be findable.
 func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
+	// ONE case, and the fixture is the only shape in which the line is reachable
+	// at all: a live 'supersedes' edge pointing at the OLDER note. A 'causes'
+	// edge cannot produce it, because a causes edge's direction does not decide
+	// the question the pair is asked in (see pairVerdict), so there is never a
+	// proposal to oppose one — which is why the line's relation key is always
+	// 'supersedes' and is nonetheless carried explicitly rather than asserted by
+	// the caller.
+	for _, tc := range []struct {
+		name       string
+		relation   Relation
+		sourceText string
+		targetText string
+		// stamp is the edge's own created_at, so the pair is re-judged; the fresh
+		// scan proposes the timestamps' direction and the edge names the other,
+		// which is what makes them disagree.
+		stamp string
+	}{
+		{
+			name:       "a live supersedes link",
+			relation:   RelationSupersedes,
+			sourceText: "bug: the relay stalls on every consumer rebalance",
+			targetText: "the relay rebalance stall is fixed: pin the consumer",
+			stamp:      "2020-01-01 00:00:00",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, db := seed(t)
+			ctx := context.Background()
 
-	// The #641 damage already in the graph: a live link stale→fix, while the
-	// scan reads the timestamps and proposes the pair the other way round. The
-	// pass refuses that orientation and logs why, which is the record under
-	// test.
-	stale := add(t, store, db, "bug: the relay stalls on every consumer rebalance", []float32{1, 0, 0}, "2026-01-01 00:00:00")
-	fix := add(t, store, db, "the relay rebalance stall is fixed: pin the consumer", []float32{0.98, 0.02, 0}, "2026-09-01 00:00:00")
-	if err := store.CreateLink(ctx, stale, fix, "supersedes", 0.95, "llm"); err != nil {
-		t.Fatal(err)
-	}
-	backdateLink(t, db, stale, fix)
+			// One note a month old and one a month new, so the timestamps have a
+			// chronology, and the edge running old→recent against it: the
+			// supersedes edge names the OLDER note as the one that supersedes,
+			// which is exactly the backwards edge #641 is about and the one shape
+			// the scan's proposal has to be measured against.
+			old := add(t, store, db, tc.sourceText, []float32{1, 0, 0}, "2026-01-01 00:00:00")
+			recent := add(t, store, db, tc.targetText, []float32{0.98, 0.02, 0}, "2026-09-01 00:00:00")
+			linkSource, linkTarget := old, recent
+			if err := store.CreateLinkJudged(ctx, linkSource, linkTarget, string(tc.relation), 0.95, "llm", tc.stamp); err != nil {
+				t.Fatal(err)
+			}
 
-	log := &capturedLog{}
-	res, _, err := Run(ctx, store, &supersedesEverything{}, "p", 0.9, true, log.logger())
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.OppositeLive != 1 {
-		t.Fatalf("Result.OppositeLive = %d, want 1: the fixture must reach the reverse-of-a-live-link line, or this test asserts nothing", res.OppositeLive)
-	}
+			log := &capturedLog{}
+			res, _, err := Run(ctx, store, &supersedesEverything{}, "p", 0.9, true, log.logger())
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if res.OppositeLive != 1 {
+				t.Fatalf("Result.OppositeLive = %d, want 1: the fixture must reach the reverse-of-a-live-link line, or this test asserts nothing", res.OppositeLive)
+			}
 
-	records := log.find("reverse of a live supersedes link")
-	if len(records) != 1 {
-		t.Fatalf("emitted %d record(s) about a reversed live link, want exactly 1: %v", len(records), log.records)
+			records := log.find("reverse of a live link")
+			if len(records) != 1 {
+				t.Fatalf("emitted %d record(s) about a reversed live link, want exactly 1: %v", len(records), log.records)
+			}
+			attrs := records[0].attrs
+			// Each id under the key that says WHICH source asserted it, plus the
+			// relation that says which end of the pair the link's own two ids
+			// are. The link's direction and the scan's proposal disagree, so
+			// "newer"/"older" alone would leave a reader unable to tell which id
+			// came from where.
+			want := map[string]string{
+				"link_relation": string(tc.relation),
+				"link_source":   linkSource,
+				"link_target":   linkTarget,
+				"scan_newer":    recent,
+				"scan_older":    old,
+			}
+			if len(attrs) != len(want) {
+				t.Errorf("the line carries %d attribute(s) %v, want exactly %d %v: every value needs a key of its own, and no value may become one",
+					len(attrs), attrs, len(want), want)
+			}
+			for key, wantValue := range want {
+				if got, ok := attrs[key]; !ok {
+					t.Errorf("no %q attribute; the line's attrs are %v", key, attrs)
+				} else if got != wantValue {
+					t.Errorf("%s = %q, want %q", key, got, wantValue)
+				}
+			}
+			// The general form of the same rule, so the line is also covered by
+			// the shape assertion its siblings get.
+			assertLogKeysAreLabels(t, log)
+		})
 	}
-	attrs := records[0].attrs
-	// Each id under the key that says WHICH source asserted it. The link's own
-	// direction and the scan's proposal disagree, so "newer"/"older" alone would
-	// leave a reader unable to tell which id came from where.
-	want := map[string]string{
-		"link_source": stale,
-		"link_target": fix,
-		"scan_newer":  fix,
-		"scan_older":  stale,
-	}
-	if len(attrs) != len(want) {
-		t.Errorf("the line carries %d attribute(s) %v, want exactly %d %v: every value needs a key of its own, and no value may become one",
-			len(attrs), attrs, len(want), want)
-	}
-	for key, wantValue := range want {
-		if got, ok := attrs[key]; !ok {
-			t.Errorf("no %q attribute; the line's attrs are %v", key, attrs)
-		} else if got != wantValue {
-			t.Errorf("%s = %q, want %q", key, got, wantValue)
-		}
-	}
-	// The general form of the same rule, so the line is also covered by the
-	// shape assertion its siblings get.
-	assertLogKeysAreLabels(t, log)
 }
 
 // assertDrivenLoggers requires every function in this package that actually
@@ -493,7 +533,7 @@ func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 		// logs is RunWith and that is the name the scan reports. The fixture
 		// still calls Run, because Run is the entry point a caller reads.
 		{name: "Run", covers: []string{"RunWith"}, run: runPassesLogKeys, wants: []string{
-			"reverse of a live supersedes link", // the #804 line
+			"reverse of a live link", // the #804 line
 			"refusing a pair the graph claims in both directions",
 			"vetoed pair whose older note states a rule",
 			"skipping pair with an unclassifiable verdict",

@@ -111,7 +111,11 @@ type applyRaceReport struct {
 	Confirmed int         `json:"confirmed"`
 	Refused   int         `json:"refused"`
 	Opposite  int         `json:"opposite_live"`
-	Error     string      `json:"error"`
+	// CausesCreated mirrors the child's `causes_created`: the two relations are
+	// written through different writers, so one total cannot say which of them a
+	// pass reached for.
+	CausesCreated int    `json:"causes_created"`
+	Error         string `json:"error"`
 }
 
 // applyRaceChild is one spawned pass and everything the parent learns from it.
@@ -246,6 +250,114 @@ func TestTwoApplyPassesCannotWriteACycle(t *testing.T) {
 	}
 }
 
+// TestTwoApplyPassesCannotWriteACausesCycle is #823's half of the same race, and
+// it is a separate test rather than a table row because the harm is a different
+// one: two 'causes' edges demote nothing, so what two concurrent passes produce
+// is not a pair that drops out of ranking but a pair whose two notes are recorded
+// as having caused each other — a contradiction a reader of the graph cannot
+// resolve and no repair can see, because `--reassess` loads live 'supersedes'
+// edges only.
+//
+// Everything else is the shape above, unchanged and for the same reasons: two real
+// processes, one file, a barrier held inside the classify call, and a retag
+// between the two scans to make them read the pair in opposite directions. The
+// direction the retag flips matters for 'causes' as it does for 'supersedes' — the
+// pair's chronology is what the scan orients by either way — and the child writes
+// its 'causes' edge in the orientation it was asked about, which is the orientation
+// that moved.
+//
+// The refusal is the store's, inside the write transaction, and the loser is told
+// so. Both halves matter: a pass that wrote nothing and said nothing would look
+// exactly like a pass that found nothing.
+func TestTwoApplyPassesCannotWriteACausesCycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("multi-process test: builds a helper binary and spawns processes; skipped under -short")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*applyRaceBarrierTimeout)
+	defer cancel()
+
+	dir := t.TempDir()
+	db := filepath.Join(dir, "ghost.db")
+	barrier := filepath.Join(dir, "barrier")
+	home := filepath.Join(dir, "home")
+	for _, d := range []string{barrier, home} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("MkdirAll %s: %v", d, err)
+		}
+	}
+
+	handle, store := seedSharedStore(t, db)
+	defer store.Close() //nolint:errcheck
+	// The two notes a retag is enough to swap: a content edit would drop the
+	// embedding and remove the pair from the second pass's scan, which would turn
+	// this into a test of a different thing.
+	first := add(t, store, handle, "the restore path on one spindle is safe and fast", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	second := add(t, store, handle, "the restore is being rewritten to run on one spindle", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+
+	early := startApplyPassAnswering(ctx, t, db, barrier, home, "first", "causes")
+	if err := waitApplyBarrier(barrier, "first-asked"); err != nil {
+		t.Fatalf("%v", err)
+	}
+	retag(t, store, second)
+	late := startApplyPassAnswering(ctx, t, db, barrier, home, "second", "causes")
+	if err := waitApplyBarrier(barrier, "second-asked"); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	releaseApplyPass(barrier, "first")
+	earlyReport := early.wait(t)
+	releaseApplyPass(barrier, "second")
+	lateReport := late.wait(t)
+
+	// The two passes really did ask about the same pair in opposite directions,
+	// so a "no cycle" result is not two passes that agreed and never raced.
+	if len(earlyReport.Asked) != 1 || len(lateReport.Asked) != 1 {
+		t.Fatalf("the two passes asked about %d and %d pair(s), want 1 each: %v / %v",
+			len(earlyReport.Asked), len(lateReport.Asked), earlyReport.Asked, lateReport.Asked)
+	}
+	if earlyReport.Asked[0] == lateReport.Asked[0] {
+		t.Fatalf("both passes asked about %v: the retag did not move the pair's chronology between the two scans, so this run never staged the race", earlyReport.Asked[0])
+	}
+	if earlyReport.Error != "" || lateReport.Error != "" {
+		t.Fatalf("a child pass failed: %q / %q", earlyReport.Error, lateReport.Error)
+	}
+
+	edges := liveCausesEdges(t, store, first, second)
+	if len(edges) != 1 {
+		t.Fatalf("live 'causes' edges = %v, want exactly 1: two passes that each saw an unclaimed pair wrote both directions of it, and a 'causes' cycle asserts that each of the pair's notes caused the other",
+			edges)
+	}
+	// The edge that stands is the FIRST writer's, in 'causes' convention: the pass
+	// asked about (newer, older) and wrote (older → newer), because a cause
+	// precedes its effect. A graph holding the other pass's direction would be the
+	// same state reached by a different route, and this test is about which write
+	// landed, so the direction is checked rather than inferred from the count.
+	wantEdge := [2]string{earlyReport.Asked[0][1], earlyReport.Asked[0][0]}
+	if edges[0] != wantEdge {
+		t.Errorf("live 'causes' edges = %v, want the first writer's direction %v ('causes' is written older → newer, and it asked about %v)",
+			edges, wantEdge, earlyReport.Asked[0])
+	}
+
+	// Both passes reached a verdict — that is what CausesCreated counts, and it is
+	// a VERDICT count while Result.Created is a WRITE count, an asymmetry that
+	// predates this test and that the ReverseLive line on the report is what
+	// makes honest. So the two facts to check are "both were asked" and "exactly
+	// one was refused", not a total of edges written.
+	verdicts, refused := 0, 0
+	for _, rep := range []applyRaceReport{earlyReport, lateReport} {
+		verdicts += rep.CausesCreated
+		refused += rep.Refused
+	}
+	if verdicts != 2 {
+		t.Errorf("the two passes report %d 'causes' verdict(s), want 2: the point of the fixture is that both reach one, in opposite directions (%+v / %+v)",
+			verdicts, earlyReport, lateReport)
+	}
+	if refused != 1 {
+		t.Errorf("the two passes report %d refused write(s), want 1: the pass that lost the race has to say it wrote nothing, or its report claims a link that is not there (%+v / %+v)",
+			refused, earlyReport, lateReport)
+	}
+}
+
 // seedSharedStore opens a FILE-backed store at path, which is the point of the
 // fixture: a second process has to be able to open the same database, and an
 // in-memory handle cannot be shared with anything.
@@ -281,12 +393,21 @@ func retag(t *testing.T, store *memory.Store, id string) {
 // writing the machine's actual Ghost install. The database is passed by path, so
 // nothing in this test needs the real one; the guard is what keeps it that way.
 func startApplyPass(ctx context.Context, t *testing.T, db, barrier, home, label string) *applyRaceChild {
+	return startApplyPassAnswering(ctx, t, db, barrier, home, label, "supersedes")
+}
+
+// startApplyPassAnswering is startApplyPass with the relation the child's fake
+// classifier answers, which is the only difference between the two races this
+// file stages: the interleaving, the barrier and the retag are the same, and only
+// the write under test differs.
+func startApplyPassAnswering(ctx context.Context, t *testing.T, db, barrier, home, label, verdict string) *applyRaceChild {
 	t.Helper()
 	c := &applyRaceChild{
 		label: label,
 		done:  make(chan struct{}),
 		cmd: exec.CommandContext(ctx, applyRaceHelper(t),
-			"-db", db, "-barrier", barrier, "-label", label, "-project", "p", "-threshold", "0.9"),
+			"-db", db, "-barrier", barrier, "-label", label, "-project", "p", "-threshold", "0.9",
+			"-verdict", verdict),
 	}
 	c.cmd.Env = append(os.Environ(),
 		"HOME="+home,
