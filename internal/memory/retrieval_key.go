@@ -152,17 +152,16 @@ func loadOrCreateQueryKey() ([]byte, error) {
 
 	raw, err := os.ReadFile(path)
 	if err == nil {
-		key, decErr := hex.DecodeString(string(raw))
-		if decErr == nil && len(key) >= queryKeyBytes {
+		// Classified by the same function the loser's retry uses, so "too short"
+		// and "not hex" mean the same thing wherever a key file is read. A file we
+		// cannot read is never silently replaced: overwriting it would re-key
+		// every record already written under it, which is a silent loss of the
+		// grouping the column exists to provide.
+		if key, cErr := classifyQueryKey(raw, path); cErr != nil {
+			return nil, cErr
+		} else {
 			return key, nil
 		}
-		// A key file we cannot read is not silently replaced: overwriting it would
-		// re-key every record already written under it, which is a silent loss of
-		// the grouping the column exists to provide. A user who deleted the file
-		// gets the same state honestly, from a stated error.
-		return nil, fmt.Errorf("the retrieval key at %s is unreadable (%d bytes, hex error %v); "+
-			"records already written under it can no longer be grouped with new ones. Delete it to start a "+
-			"new key, knowing that the old records keep their digests and stop grouping", path, len(raw), decErr)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("read the retrieval key at %s: %w", path, err)
@@ -249,20 +248,32 @@ func publishQueryKey(dir, path string, key []byte) ([]byte, error) {
 // retried: that is corruption or a human's edit, and re-reading it on a loop would
 // be work for the same answer.
 func readPublishedQueryKey(path string) ([]byte, error) {
+	var last error
 	for attempt := range readPublishedAttempts {
 		key, err := readPublishedQueryKeyOnce(path)
 		if err == nil {
 			return key, nil
 		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, err // present but unusable: a refusal, not a race
+		last = err
+		// TWO kinds of "not ready", and the difference is the whole reason this
+		// loop exists: a file that is ABSENT, or present but too short to be a
+		// key, is a file still being written — by the no-hard-link fallback, or by
+		// a process that crashed mid-write. A file of full length that is not hex
+		// is corruption or a human's edit, and re-reading that on a loop is work
+		// for the same answer.
+		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errQueryKeyShort) {
+			return nil, err
 		}
 		if attempt == readPublishedAttempts-1 {
-			return nil, fmt.Errorf("the retrieval key another process created at %s did not become readable: %w", path, err)
+			break
 		}
 		time.Sleep(readPublishedRetry)
 	}
-	return nil, fmt.Errorf("read the retrieval key another process created at %s: no attempt was made", path)
+	if errors.Is(last, errQueryKeyShort) {
+		// The classifier's own message already says what is wrong and what to do.
+		return nil, last
+	}
+	return nil, fmt.Errorf("the retrieval key another process created at %s did not become readable: %w", path, last)
 }
 
 const (
@@ -273,15 +284,47 @@ const (
 func readPublishedQueryKeyOnce(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read the retrieval key another process created at %s: %w", path, err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, err // unwrapped: the loop recognises "not there yet"
+		}
+		return nil, fmt.Errorf("read the retrieval key at %s: %w", path, err)
 	}
-	other, decErr := hex.DecodeString(string(raw))
-	if decErr != nil || len(other) < queryKeyBytes {
-		return nil, fmt.Errorf("the retrieval key another process created at %s is unreadable (%d bytes); "+
-			"delete it to start a new key", path, len(raw))
-	}
-	return other, nil
+	return classifyQueryKey(raw, path)
 }
+
+// classifyQueryKey is the ONE reading of a key file, wherever it is read, and it
+// returns two different verdicts because they mean two different things:
+//
+//   - too SHORT to be a key (errQueryKeyShort) is what a half-finished write looks
+//     like, so the retry loop waits for it;
+//   - long enough but not hex is corruption or a human's edit, which no amount of
+//     waiting changes, so the loop refuses it immediately.
+//
+// One function because the loop cannot tell them apart if the two call sites word
+// them differently, and the first version of this had exactly that bug: the
+// loser's retry checked for os.ErrNotExist while the refusal path returned a
+// generic error, so the short-file case -- the one the loop exists for -- was
+// refused on the first attempt.
+func classifyQueryKey(raw []byte, path string) ([]byte, error) {
+	if len(raw) < queryKeyBytes*2 {
+		return nil, fmt.Errorf("%w: %d bytes at %s, %d needed", errQueryKeyShort, len(raw), path, queryKeyBytes*2)
+	}
+	key, decErr := hex.DecodeString(string(raw))
+	if decErr != nil {
+		return nil, fmt.Errorf("the retrieval key at %s is not hex (%d bytes, %v) — it is corrupt or has "+
+			"been edited; delete it to start a new key, knowing that records already written under it stop "+
+			"grouping", path, len(raw), decErr)
+	}
+	if len(key) < queryKeyBytes {
+		return nil, fmt.Errorf("%w: %d bytes decoded at %s, %d needed", errQueryKeyShort, len(raw), path, queryKeyBytes)
+	}
+	return key, nil
+}
+
+// errQueryKeyShort marks a key file too short to be a key, which is a file that
+// may still be being written rather than one that is broken. The retry loop
+// treats it as "not ready"; a full-length non-hex file is a refusal.
+var errQueryKeyShort = errors.New("the retrieval key file is too short to be a key")
 
 // fallbackPublishQueryKey is the O_EXCL create-and-write path, for a filesystem
 // with no hard links. It carries the empty-file window this package exists to

@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -372,5 +373,69 @@ func TestWarmingTheQueryKeyTakesTheFilesystemOffTheSearchPath(t *testing.T) {
 	}
 	if after != warmed {
 		t.Errorf("the warmed digest changed after the key file was removed: %q then %q", warmed, after)
+	}
+}
+
+// TestAShortKeyFileIsTreatedAsStillBeingWrittenRatherThanCorrupt: the retry
+// loop's two verdicts, and the one that was missing.
+//
+// A key file that is ABSENT, and a key file that is present but TOO SHORT, are
+// both what a write in progress looks like — the no-hard-link fallback creates
+// then writes, and a process that crashed mid-write leaves the same state. Both
+// are worth a few tens of milliseconds of retry. A file of full length that is
+// not hex is something else: corruption, or a human's edit, and re-reading it on
+// a loop is work for the same answer.
+//
+// The first version of the loop bailed on anything that was not os.ErrNotExist,
+// so the short-file case -- the one the loop exists for -- was refused on the first
+// attempt. The short read must be a distinguishable verdict, not a generic
+// "unreadable", or the loop cannot tell them apart.
+func TestAShortKeyFileIsTreatedAsStillBeingWrittenRatherThanCorrupt(t *testing.T) {
+	dataDir := fakeDataDir(t)
+	useQueryKeyDir(t, dataDir)
+	keyPath := filepath.Join(dataDir, queryKeyFileName)
+
+	// A full-length but non-hex file: corruption, and an immediate refusal.
+	store := testStore(t)
+	corrupt := strings.Repeat("z", queryKeyBytes*2)
+	if err := os.WriteFile(keyPath, []byte(corrupt), 0o600); err != nil {
+		t.Fatalf("seed a corrupt key: %v", err)
+	}
+	_, err := store.DigestQuery("who owns the k8s cluster")
+	if err == nil {
+		t.Fatal("QueryDigest accepted a full-length non-hex key file")
+	}
+	if !strings.Contains(err.Error(), "not hex") {
+		t.Errorf("a full-length non-hex file is reported as %q, want the corruption verdict", err)
+	}
+	if errors.Is(err, errQueryKeyShort) {
+		t.Error("a full-length non-hex file was reported as short — the retry loop would spin on it")
+	}
+
+	// A short file: the "still being written" verdict, which the loop retries. The
+	// store is warmed between the two scenarios so the second is a REAL attempt and
+	// not the first scenario's cached refusal.
+	//
+	// The content is deliberately NOT valid hex, and that is what makes the test
+	// bite: a short VALID-hex file decodes to a short key and is caught by the
+	// decoded-length check, so removing the raw-length check would not be visible.
+	// A short file that is also not hex can ONLY be reported as short.
+	if err := os.WriteFile(keyPath, []byte("zz"), 0o600); err != nil {
+		t.Fatalf("seed a short key: %v", err)
+	}
+	if wErr := store.WarmQueryKey(); wErr == nil {
+		t.Fatal("WarmQueryKey accepted a 2-byte key file")
+	}
+	_, err = store.DigestQuery("who owns the k8s cluster")
+	if err == nil {
+		t.Fatal("QueryDigest accepted a 2-byte key file")
+	}
+	if !errors.Is(err, errQueryKeyShort) {
+		t.Errorf("a 2-byte file is reported as %v, want the errQueryKeyShort verdict so the loop retries it", err)
+	}
+	// And after the loop's attempts, the message names the size and the remedy,
+	// because a short file a human has to act on is different from a race.
+	if !strings.Contains(err.Error(), "too short") {
+		t.Errorf("the short-file message does not say what is wrong: %v", err)
 	}
 }

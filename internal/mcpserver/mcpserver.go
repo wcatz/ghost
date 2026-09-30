@@ -567,7 +567,11 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 	// Best-effort and logged, never fatal: a store whose records cannot be grouped
 	// by question is a degraded audit, not a server that cannot search, and the
 	// per-call path reports the same failure with the same reason if it persists.
-	if warmer, ok := s.store.(queryKeyWarmer); ok {
+	// Only when the store can actually RECORD, because a key nothing will digest
+	// is a file this startup would create for nobody: a provider that can warm but
+	// not record has no search that will ever ask for a digest, and writing its
+	// per-install secret to disk on its behalf is not the server's business.
+	if warmer, ok := s.store.(queryKeyWarmer); ok && s.recordSink() != nil {
 		if err := warmer.WarmQueryKey(); err != nil {
 			logger.Warn("retrieval key not available at startup; searches will record no query digest until it is",
 				"error", err)

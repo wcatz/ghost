@@ -23,7 +23,9 @@ import (
 	"github.com/wcatz/ghost/internal/provider"
 )
 
-// warmingStore is a store that can be warmed, and counts whether it was.
+// warmingStore can be warmed and CAN record, and counts whether it was — the
+// shape a store whose key is momentarily unavailable arrives in, which is
+// different from warmOnlyStore below and from a store that cannot record at all.
 type warmingStore struct {
 	provider.MemoryStore
 	warm    atomic.Int32
@@ -35,9 +37,22 @@ func (s *warmingStore) WarmQueryKey() error {
 	return s.warmErr
 }
 
-// A warming store that is not also a RecordSink must NOT be warmed: the two
-// capabilities are separate on purpose, and a provider that can warm but not
-// record is not a shape the server has.
+func (s *warmingStore) Candidates(context.Context, memory.CandidateRequest) (*memory.CandidateSet, error) {
+	return &memory.CandidateSet{}, nil
+}
+
+func (s *warmingStore) RecordRetrieval(context.Context, memory.RetrievalRecord) error { return nil }
+
+func (s *warmingStore) DigestQuery(string) (string, error) { return "", nil }
+
+// warmOnlyStore can warm but NOT record, which is a real shape for a provider
+// whose search works and whose audit does not exist.
+//
+// New() must NOT warm it, and the reason is that warming CREATES the key file: a
+// startup that resolved a per-install secret on behalf of a store that will never
+// digest anything has written that store's secret to disk for no reader. The
+// server asks "can this store record?" before it asks "can it warm?", so the two
+// capabilities cannot be used to infer one another.
 type warmOnlyStore struct {
 	provider.MemoryStore
 	warm atomic.Int32
@@ -145,4 +160,22 @@ func TestAStoreThatCannotWarmIsStillBuiltAndSaysSo(t *testing.T) {
 // store satisfies, so a change to either is caught here rather than at a search.
 var _ queryKeyWarmer = (*memory.Store)(nil)
 var _ assemble.RecordSink = (*memory.Store)(nil)
-var _ = warmOnlyStore{}
+
+// TestAStoreThatCanWarmButNotRecordIsNotWarmed: the key is only created for a
+// store that will use it.
+func TestAStoreThatCanWarmButNotRecordIsNotWarmed(t *testing.T) {
+	store := &warmOnlyStore{}
+	if _, ok := any(store).(assemble.RecordSink); ok {
+		t.Fatal("the fixture is a store WITH the record sink, so this test proves nothing")
+	}
+	if _, ok := any(store).(queryKeyWarmer); !ok {
+		t.Fatal("the fixture is a store WITHOUT the warmer, so this test proves nothing")
+	}
+
+	New(store, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), "test")
+
+	if got := store.warm.Load(); got != 0 {
+		t.Errorf("New() warmed a store that cannot record %d time(s) — that creates a per-install key file "+
+			"for a store that will never digest a query", got)
+	}
+}
