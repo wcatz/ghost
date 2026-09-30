@@ -65,11 +65,14 @@ const maxPassiveOverFetch = 200
 //     refuses it too because it is reachable directly.
 //   - a window beyond the ceiling, or no window at all: this path runs at every
 //     session start, so both are a store scan wearing a number.
+//   - a bucket that admits `_global` AND a policy that fetches `_global` in its
+//     own right. The rows overlap, so the set carries every one of them twice.
 func validatePassivePolicies(policies []SlicePolicy) error {
 	if len(policies) == 0 {
 		return ErrPassiveUnsupported
 	}
 	seen := make(map[string]bool, len(policies))
+	mixesGlobal := false
 	for _, pol := range policies {
 		if pol.Bucket == "" {
 			return errors.New("candidates: a passive policy names no bucket, so it would fetch nothing and read as an empty bucket")
@@ -79,6 +82,9 @@ func validatePassivePolicies(policies []SlicePolicy) error {
 				"one of them returned twice; one policy per bucket", pol.Bucket)
 		}
 		seen[pol.Bucket] = true
+		if pol.IncludeGlobal {
+			mixesGlobal = true
+		}
 		if pol.OverFetch <= 0 {
 			return fmt.Errorf("candidates: passive policy for bucket %q states no over-fetch, so its window would be the whole store; "+
 				"this path runs at every session start", pol.Bucket)
@@ -93,6 +99,19 @@ func validatePassivePolicies(policies []SlicePolicy) error {
 		default:
 			return fmt.Errorf("candidates: passive policy for bucket %q names unknown order %q", pol.Bucket, pol.Order)
 		}
+	}
+	// Distinct bucket NAMES, so this is not the repeated-bucket check above. One
+	// policy reading `project_id = ? OR project_id = '_global'` and another reading
+	// `_global` on its own are two different statements over one overlapping set,
+	// and concatenating them returns every global row twice — a duplicate id
+	// reaching the assembler, which would then report two rows that happened to
+	// rank equally. A caller that wants both the union and a globals-only section
+	// runs them as two SEPARATE requests, which is what the project-context
+	// surface does.
+	if mixesGlobal && seen[GlobalProjectID] {
+		return fmt.Errorf("candidates: a policy admits %q into another bucket while a second policy fetches %q on its own; "+
+			"the two row sets overlap, so every global row would be returned twice. Read them as two requests, or fetch "+
+			"_global under the mixing bucket alone", GlobalProjectID, GlobalProjectID)
 	}
 	return nil
 }
@@ -202,7 +221,7 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 	if err != nil {
 		return nil, err
 	}
-	return s.selectPassive(ctx, memories, pol, req.Now)
+	return s.selectPassive(ctx, memories, pol, req.Now, pol.Bucket)
 }
 
 // passiveFetchSQL builds one policy's read and its bindings TOGETHER, because a
@@ -243,6 +262,26 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 		scopeClause = " AND " + ScopeMatchesSQL("scope", req.Scope)
 	}
 
+	// The project predicate: the POLICY'S BUCKET, unioned with `_global` when the
+	// policy says so. It is spelled here rather than borrowed from
+	// CandidateRequest.Mode, because Mode is a property of the REQUEST and this is
+	// a property of the BUCKET — a request can carry both a project bucket and a
+	// `_global` bucket, and only the first of those may admit globals, since the
+	// second would read the same rows a second time. That request is refused (see
+	// validatePassivePolicies) rather than served twice.
+	//
+	// PARENTHESISED, and that is not decoration. `AND` binds tighter than `OR` in
+	// SQL, so an unbracketed `project_id = ? OR project_id = '_global' AND
+	// resolved_at IS NULL` reads as `project_id = ? OR (… AND resolved_at IS NULL)`
+	// — every row of the requesting project escapes the resolved filter, and the
+	// scope clause below it is scoped to the `_global` half alone. The block then
+	// renders resolved rows, and a scope filter that was set does nothing to the
+	// rows that matter. The goldens' resolved-row guard is what caught it.
+	projectClause := "project_id = ?"
+	if pol.IncludeGlobal {
+		projectClause = "(" + projectClause + " OR project_id = '" + GlobalProjectID + "')"
+	}
+
 	// The `_global` order carries a trailing `id` that the shipped loader's query
 	// does not. It is a divergence from the specification and a deliberate one: a
 	// tie on (pinned, importance, updated_at) has no defined order, so the loader
@@ -270,18 +309,22 @@ func passiveFetchSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns)
 	// here would have failed at Scan with a count mismatch, which is a loud failure
 	// but still a second statement of what a Memory is. `memoryColumns` is derived
 	// from `memoryColumnNames`, which is the single list.
+	//
+	// The predicate is a FRAGMENT spliced in, not a bind, because it is built from
+	// a policy field and the constant `_global` — never from caller text. The one
+	// caller-supplied value, the bucket, is bound below and is never interpolated.
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM memories
-		WHERE project_id = ? AND resolved_at IS NULL%s
+		WHERE %s AND resolved_at IS NULL%s
 		ORDER BY %s
-		LIMIT ?`, cols.list, scopeClause, orderBy)
+		LIMIT ?`, cols.list, projectClause, scopeClause, orderBy)
 	return query, append(args, pol.OverFetch)
 }
 
 // selectPassive applies the policy's selection and demotions, and returns the
 // selected rows followed by the rest of the window.
-func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SlicePolicy, now time.Time) ([]Candidate, error) {
+func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SlicePolicy, now time.Time, fetchedBy string) ([]Candidate, error) {
 	scored := make([]passiveRow, 0, len(memories))
 	for _, m := range memories {
 		age := ageDays(m.CreatedAt, now)
@@ -310,7 +353,7 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 
 	out := make([]Candidate, 0, len(scored))
 	for _, r := range append(chosen, rest...) {
-		out = append(out, passiveCandidate(r))
+		out = append(out, passiveCandidate(r, fetchedBy))
 	}
 	return out, nil
 }
@@ -552,13 +595,18 @@ func (s *Store) passiveDemote(ctx context.Context, rows []passiveRow, pol SliceP
 // passiveCandidate materialises one selected row. The rank sentinels are the -1
 // "this leg did not retrieve it" values, because no leg ran: a passive block
 // reports no leg rank rather than a rank of zero, which is a real first place.
-func passiveCandidate(r passiveRow) Candidate {
+func passiveCandidate(r passiveRow, fetchedBy string) Candidate {
 	c := Candidate{Memory: r.mem}
 	c.Base = float64(r.mem.Importance)
 	c.AgeDays = r.age
 	c.Decay = r.decay
 	c.Score = r.score
 	c.FTSRank, c.VectorRank, c.VectorScore = -1, -1, -1
+	// The POLICY, not the row's own project. A bucket that admits `_global` reads
+	// rows belonging to two projects under one name, and the caller's cap belongs
+	// to the name — see Candidate.FetchedBy for why re-deriving it from the row
+	// would leave those rows unbounded.
+	c.FetchedBy = fetchedBy
 	return c
 }
 

@@ -418,7 +418,7 @@ func runBudget(p *pipeline) {
 	// Per-item presentation clamp first: a clamped item is shorter, so it can
 	// only ever help the caps below.
 	for i := range items {
-		if s := p.sliceFor(items[i].Bucket); s != nil && s.ClampBytes > 0 {
+		if s := p.sliceFor(p.capBucket(i)); s != nil && s.ClampBytes > 0 {
 			clamped := clampBytes(items[i].Content, s.ClampBytes)
 			items[i].Content = clamped
 			items[i].Bytes = len(clamped)
@@ -436,13 +436,14 @@ func runBudget(p *pipeline) {
 		bytes := map[string]int{}
 		keepRow := make([]bool, len(rows))
 		for i, it := range items {
-			s := p.sliceFor(it.Bucket)
+			bucket := p.capBucket(i)
+			s := p.sliceFor(bucket)
 			if s == nil {
 				keepRow[i] = true
 				continue
 			}
-			overItems := s.MaxItems > 0 && count[it.Bucket] >= s.MaxItems
-			overBytes := s.MaxBytes > 0 && bytes[it.Bucket]+it.Bytes > s.MaxBytes
+			overItems := s.MaxItems > 0 && count[bucket] >= s.MaxItems
+			overBytes := s.MaxBytes > 0 && bytes[bucket]+it.Bytes > s.MaxBytes
 			if overItems || overBytes {
 				// WHICH bound cut the row is the caller's next step, so it is
 				// counted rather than inferred afterwards: raising the row limit
@@ -458,8 +459,8 @@ func runBudget(p *pipeline) {
 				continue
 			}
 			keepRow[i] = true
-			count[it.Bucket]++
-			bytes[it.Bucket] += it.Bytes
+			count[bucket]++
+			bytes[bucket] += it.Bytes
 		}
 		rows, items, dropped = trim(rows, items, keepRow, dropped, p, "slice_budget")
 	}
@@ -527,6 +528,31 @@ func (p *pipeline) sliceFor(bucket string) *Slice {
 		}
 	}
 	return nil
+}
+
+// capBucket is the bucket whose cap governs row i, which is NOT always the row's
+// own project.
+//
+// It is the policy that FETCHED the row, because that is where the caller stated
+// the bound. A slice with IncludeGlobal set reads one project's rows and
+// `_global`'s under a single cap, and the `_global` rows among them carry their
+// own project id — so keying the cap on the row would find no slice for them at
+// all and leave them unbounded, turning "at most N rows" into "at most N project
+// rows, plus however many globals happened to rank nearby". That is the whole
+// reason the retriever reports which policy admitted a row.
+//
+// The fallback is the row's own bucket, which is what every row with no
+// `FetchedBy` gets: a query-mode candidate, and a passive row read by a policy
+// that admits only its own bucket (the session-start shape, where the two are the
+// same thing anyway).
+func (p *pipeline) capBucket(i int) string {
+	if i < len(p.rows) && p.rows[i].FetchedBy != "" {
+		return p.rows[i].FetchedBy
+	}
+	if i < len(p.items) {
+		return p.items[i].Bucket
+	}
+	return ""
 }
 
 // signal returns a row's starting signal set, built from the retriever's facts.

@@ -1,0 +1,22 @@
+## Memories
+
+- [preference] `pmem00` (1.0 [pinned] tags:["golden","pinned"]) «project memory 00 content for the project context golden»
+- [convention] `pmem01` (1.0) «project memory 01 content for the project context golden»
+- [fact] `pmem02` (1.0 scope{area=payments}) «project memory 02 content for the project context golden»
+- [preference] `pmem05` (0.9) «project memory 05 content for the project context golden»
+- [convention] `pmem06` (0.9) «project memory 06 content for the project context golden»
+- [fact] `pmem07` (0.9) «project memory 07 content for the project context golden»
+- [preference] `pmem12` (0.8) «project memory 12 content for the project context golden»
+- [convention] `pmem13` (0.8) «project memory 13 content for the project context golden»
+- [fact] `pmem14` (0.8) «project memory 14 content for the project context golden»
+- [architecture] `pmem03` (1.0) «project memory 03 content for the project context golden»
+- [pattern] `pmem04` (0.9) «project memory 04 content for the project context golden»
+- [architecture] `pmem08` (0.9) «project memory 08 content for the project context golden»
+- [pattern] `pmem09` (0.9) «project memory 09 content for the project context golden»
+- [pattern] `pmem17` (0.8) «project memory 17 content for the project context golden»
+- [gotcha] `pmem10` (1.0) «project memory 10 content for the project context golden»
+- [decision] `pmem11` (1.0) «project memory 11 content for the project context golden»
+- [decision] `pmem16` (0.8) «project memory 16 content for the project context golden»
+- [preference] `gmem00` (0.1) «global memory 00 content for the project context golden»
+- [preference] `gmem01` (0.1) «global memory 01 content for the project context golden»
+- [preference] `gmem02` (0.1) «global memory 02 content for the project context golden»

@@ -1460,7 +1460,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_save",
 		Title:       "Save Memory",
-		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Save durable knowledge — a rule, a constraint, a decision, or a reason that survives the conversation and is expensive to rediscover — not what the repository already states. 'Production schema changes require explicit approval.' and 'Deployment keeps database migrations separate from application rollout, on purpose.' are memories; 'foo.go contains HandleFoo()' is not, because the repository is authoritative and such a note goes stale silently. Ghost only guides: it never refuses a save on a heuristic. Never save a credential value (API key, access token, password, private key, seed phrase) — Ghost refuses those writes, and stored text is replayed into later sessions and sent to models; save where the value lives instead. Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Set pin=true for a non-negotiable rule, a security constraint or a core invariant: a later 'ghost reflect' consolidation may merge or rewrite any ordinary memory away, and nothing else protects one. For anything with an expiry — a policy, an endpoint, a migration, a temporary workaround — pass valid_until: ghost_memory_search then stops returning it once that moment passes, instead of leaving a stale claim to mislead a later session. A bare date there means the END of that day (valid_until=2026-12-31 is true through the 31st); pass a full timestamp for an exact instant. That is the only surface that filters on it today; ghost_memories_list, ghost_search_all and ghost_project_context still show the memory, marked 'expired', and the session-start block shows it with no marker at all, until those move onto the context pipeline. Optional validity and provenance arguments (valid_from, valid_until, verified_at, verified, confidence, source_ref) all default to nothing stored, so a durable memory needs none of them, and one you set can be replaced but not removed. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.", Annotations: &mcp.ToolAnnotations{
+		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Save durable knowledge — a rule, a constraint, a decision, or a reason that survives the conversation and is expensive to rediscover — not what the repository already states. 'Production schema changes require explicit approval.' and 'Deployment keeps database migrations separate from application rollout, on purpose.' are memories; 'foo.go contains HandleFoo()' is not, because the repository is authoritative and such a note goes stale silently. Ghost only guides: it never refuses a save on a heuristic. Never save a credential value (API key, access token, password, private key, seed phrase) — Ghost refuses those writes, and stored text is replayed into later sessions and sent to models; save where the value lives instead. Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Set pin=true for a non-negotiable rule, a security constraint or a core invariant: a later 'ghost reflect' consolidation may merge or rewrite any ordinary memory away, and nothing else protects one. For anything with an expiry — a policy, an endpoint, a migration, a temporary workaround — pass valid_until: ghost_memory_search then stops returning it once that moment passes, instead of leaving a stale claim to mislead a later session. A bare date there means the END of that day (valid_until=2026-12-31 is true through the 31st); pass a full timestamp for an exact instant. ghost_project_context and the session-start block run the same context pipeline and so filter on it too; the browsing surfaces (ghost_memories_list, ghost_search_all, the ghost://memories/global resource) still show the memory, marked 'expired', because they browse rather than filter. Optional validity and provenance arguments (valid_from, valid_until, verified_at, verified, confidence, source_ref) all default to nothing stored, so a durable memory needs none of them, and one you set can be replaced but not removed. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.", Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
 			OpenWorldHint:   boolPtr(false),
@@ -1609,7 +1609,7 @@ func (s *Server) registerTools() {
 	type contextArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops')"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max memories to return (default 20)"`
-		AsOf      string `json:"as_of,omitempty" jsonschema:"Show the project as it stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'): the wording each memory held then, including memories deleted since, and without memories that did not exist yet. Omit it for the present. Learned context, tasks and decisions are not historical — they are omitted rather than shown as they are now."`
+		AsOf      string `json:"as_of,omitempty" jsonschema:"Show the project as it stood at this instant, RFC 3339 (e.g. '2026-09-20T09:00:00Z'): the wording each memory held then, including memories deleted since, and without memories that did not exist yet. Omit it for the present. Learned context, tasks and decisions are not historical — they are omitted rather than shown as they are now. A project name Ghost has never been registered is refused for as_of rather than read from the present, and the answer names the instant."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1634,6 +1634,10 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
+		// The NAME is kept for the not-registered sentence below, because the id
+		// ResolveProject returns for an unknown name is "" and the message has to
+		// name what the caller asked for rather than nothing.
+		asked := args.ProjectID
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
@@ -1658,6 +1662,65 @@ func (s *Server) registerTools() {
 			}
 		}
 
+		// The store's ability to read its own history is asserted BEFORE the
+		// unresolved-name case below, which is a statement about the store and is
+		// true of any `as_of` request. Ordering it after that case would let an
+		// unregistered name report success on a store that cannot read history at
+		// all, losing a diagnostic the caller may need.
+		//
+		// The narrowed value is carried down rather than re-asserted, so the one
+		// assertion in this handler is the checked `ok` form — a bare assertion
+		// further down would panic on exactly the store this guard exists to name.
+		var historyReader asOfCapableStore
+		if asOf != nil {
+			var ok bool
+			if historyReader, ok = s.store.(asOfCapableStore); !ok {
+				return nil, nil, fmt.Errorf("ghost_project_context: this store cannot read its own history, so it cannot answer an as_of request")
+			}
+		}
+
+		// An UNRESOLVED project name. `ResolveProject` answers an unknown name with
+		// `("", "", nil)`, and both the historical and the current read were handed
+		// that empty id and read `project_id = '' OR project_id = '_global'`
+		// (`asOfScopeClause` builds the same union). So `as_of` on an unknown name
+		// printed the cross-project rows under a `## Memories` heading for a project
+		// that does not exist, and never said the project was unknown — the
+		// mislabelling this migration removes on the other branch, left in place on
+		// this one, against the prose this same PR adds.
+		//
+		// The two branches get DIFFERENT answers, deliberately, and the difference
+		// is the whole point of putting the check here rather than in each branch:
+		//
+		//   - The present-tense call APPENDS the cross-project section, because the
+		//     rows do not depend on a project, the base ref delivered them, and the
+		//     SessionStart instructions send an agent here precisely when the
+		//     directory matched nothing and tell it to look for them.
+		//   - The `as_of` call REFUSES, naming the instant. Answering it from the
+		//     present would hand back today's rows to a caller who asked for
+		//     yesterday's, with nothing in the payload to say so — the caller states
+		//     one thing and is silently given another, which the seam's own rule
+		//     refuses rather than clamps. A past reading of a project Ghost has
+		//     never seen is not a reading of anything, so there is no set to show and
+		//     the honest answer is that the project is not there to be read.
+		if args.ProjectID == "" {
+			if asOf != nil {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: projectNotRegisteredAsOf(asked, *asOf)}},
+				}, nil, nil
+			}
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{
+					// `args.Limit` and NOT a fixed cap: origin/main's
+					// `GetTopMemories(ctx, "", limit)` honoured the tool's own
+					// argument for a name that resolves to nothing, so hard-coding
+					// the Global section's 15 here would have overridden
+					// `limit` — which the tool publishes as "Max memories to
+					// return" — and returned 15 rows for a `limit: 3` request.
+					Text: projectContextWithNotRegistered(s.projectContextGlobalSection(ctx, args.Limit, nil), asked),
+				}},
+			}, nil, nil
+		}
+
 		var sb strings.Builder
 
 		if asOf != nil {
@@ -1665,11 +1728,11 @@ func (s *Server) registerTools() {
 			// Only the memories are historical: the learned context below is derived
 			// from the memories as they stand now, so it is omitted rather than
 			// printed under a heading that says the block is a past reading.
-			reader, ok := s.store.(asOfCapableStore)
-			if !ok {
-				return nil, nil, fmt.Errorf("ghost_project_context: this store cannot read its own history, so it cannot answer an as_of request")
-			}
-			set, err := reader.MemoriesAsOf(ctx, args.ProjectID, *asOf)
+			//
+			// The capability assertion was made once, above the unresolved-name case,
+			// and the narrowed value carried down here — so there is exactly one
+			// type assertion on this path and it is the checked form.
+			set, err := historyReader.MemoriesAsOf(ctx, args.ProjectID, *asOf)
 			if err != nil {
 				return nil, nil, fmt.Errorf("read memories as of %s: %w", asOf.Format(time.RFC3339), err)
 			}
@@ -1696,13 +1759,27 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		memories, err := s.store.GetTopMemories(ctx, args.ProjectID, args.Limit)
-		if err != nil {
-			return nil, nil, fmt.Errorf("get memories: %w", err)
-		}
-		if len(memories) > 0 {
-			sb.WriteString("## Memories\n\n")
-			sb.WriteString(formatMemories(memories))
+		// The unresolved-name case was answered ABOVE, before the as_of return,
+		// because both branches of this handler were handed the empty id and both
+		// mislabelled the cross-project rows. From here on the project resolved.
+		//
+		// So the case is answered, and answered the same way whatever else the
+		// store holds — which is the half the old behaviour varied on.
+		//
+		// `if args.ProjectID != ""` is therefore belt-and-braces on the assemble
+		// rather than the case's guard: the assembler refuses a project context
+		// with no project, and this is the seam that would refuse it if the check
+		// above were ever moved back down here.
+		var memories assemble.Result
+		if args.ProjectID != "" {
+			memories, err = s.projectContextMemories(ctx, args.ProjectID, args.Limit)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(memories.Items) > 0 {
+				sb.WriteString("## Memories\n\n")
+				sb.WriteString(projectContextItems(memories.Items))
+			}
 		}
 
 		learned, err := s.store.GetLearnedContext(ctx, args.ProjectID)
@@ -1716,6 +1793,14 @@ func (s *Server) registerTools() {
 
 		text := sb.String()
 		if text == "" {
+			// A block the stages EMPTIED is not an empty project, and the census
+			// below would say it is. So the two are separated by the verdict, and
+			// only an empty over-fetched window may claim absence.
+			if note := projectContextEmptyNote(memories); note != "" {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: note}},
+				}, nil, nil
+			}
 			exists, existsErr := s.projectExists(ctx, args.ProjectID)
 			switch {
 			case existsErr != nil:
@@ -1723,8 +1808,16 @@ func (s *Server) registerTools() {
 			case exists:
 				text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
 			default:
-				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. Call ghost_memory_save to create it.", args.ProjectID)
+				text = projectNotRegistered(asked)
 			}
+		} else if note := s.projectContextOwnRowsNote(ctx, args.ProjectID, memories); note != "" {
+			// A block made entirely of cross-project rows is not this project's
+			// context, and it is only visible from OUTSIDE the empty gate: with
+			// `IncludeGlobal` the section is populated by `_global` whenever the
+			// store holds any, so this case never reached an empty block. Appended
+			// rather than substituted, because there IS an answer above — the
+			// cross-project rows are wanted, they are simply not this project's.
+			text += "\n\n" + note
 		}
 
 		return &mcp.CallToolResult{
@@ -2920,9 +3013,17 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// An unresolved name resolves to "". The block is still built — its
+		// `_global` section does not depend on the project, and the base ref
+		// delivered those rows for an unknown name — and the not-registered
+		// sentence is appended rather than returned in place of it. See
+		// projectNotRegistered and buildProjectContext.
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
-			return nil, fmt.Errorf("reading project context %q: %w", projectID, err)
+			return nil, fmt.Errorf("reading project context %q: %w", rawID, err)
+		}
+		if projectID == "" {
+			text = projectContextWithNotRegistered(text, rawID)
 		}
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
@@ -3081,9 +3182,15 @@ func (s *Server) registerPrompts() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
+		// The same unresolved-name case the tool and the resource handle, and the
+		// same block-plus-sentence: the `_global` section does not depend on the
+		// project. See projectNotRegistered.
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("recall project context for %q: %w", rawID, err)
+		}
+		if projectID == "" {
+			text = projectContextWithNotRegistered(text, rawID)
 		}
 		if text == "" {
 			text = "No memories or learned context saved yet for this project."
@@ -3126,69 +3233,140 @@ func (s *Server) registerPrompts() {
 }
 
 // buildProjectContext assembles the text body for a project context resource read.
-// Returns top 20 memories (project + global) plus any learned context summary.
+// Returns the top 20 memories (project + global) plus any learned context summary.
 // Extracted from the resource handler for direct testability.
 // Returns an error if the memory store is unavailable.
+//
+// The memory rows are an `assemble.Run` — the same two requests the tool makes,
+// at this surface's fixed caps — and everything else here is still a direct read.
+// That split is deliberate rather than partial: the assembler's `Item` carries no
+// field for a decision or a learned summary, and moving those would be a
+// different migration in a commit about which reader selects the rows.
 func (s *Server) buildProjectContext(ctx context.Context, projectID string) (string, error) {
 	var sb strings.Builder
 
-	memories, err := s.store.GetTopMemories(ctx, projectID, 20)
-	if err != nil {
-		return "", fmt.Errorf("get memories for %q: %w", projectID, err)
-	}
-	if len(memories) > 0 {
-		sb.WriteString("## Memories\n\n")
-		sb.WriteString(formatMemories(memories))
-	}
-
-	decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
-	if err != nil {
-		return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
-	}
-	if len(decisions) > 0 {
-		sb.WriteString("\n\n## Recent Decisions\n\n")
-		for _, d := range decisions {
-			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", d.ID, d.Title, d.Decision)
+	var memories assemble.Result
+	if projectID != "" {
+		var err error
+		memories, err = s.projectContextMemories(ctx, projectID, projectContextMemoriesCap)
+		if err != nil {
+			return "", fmt.Errorf("get memories for %q: %w", projectID, err)
+		}
+		if len(memories.Items) > 0 {
+			sb.WriteString("## Memories\n\n")
+			sb.WriteString(projectContextItems(memories.Items))
 		}
 	}
 
-	learned, err := s.store.GetLearnedContext(ctx, projectID)
-	if err != nil {
-		return "", fmt.Errorf("get learned context for %q: %w", projectID, err)
-	}
-	if learned != "" {
-		sb.WriteString("\n\n## Learned Context\n\n")
-		sb.WriteString(learned)
+	// Everything keyed on the project is skipped for an unresolved one, and
+	// `projectID == ""` matches nothing, so these two reads are a no-op rather than
+	// a second way to read a project that is not there. That is stated here rather
+	// than left to the reader of `if projectID != ""` above: a decisions read and a
+	// learned read are separate writers with their own SQL, and only the
+	// `Ghost memory is active but no project matched this directory` style of
+	// emptiness is a claim this surface may make.
+	if projectID != "" {
+		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
+		if err != nil {
+			return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
+		}
+		if len(decisions) > 0 {
+			sb.WriteString("\n\n## Recent Decisions\n\n")
+			for _, d := range decisions {
+				fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", d.ID, d.Title, d.Decision)
+			}
+		}
+
+		learned, err := s.store.GetLearnedContext(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("get learned context for %q: %w", projectID, err)
+		}
+		if learned != "" {
+			sb.WriteString("\n\n## Learned Context\n\n")
+			sb.WriteString(learned)
+		}
 	}
 
 	// Include global memories (preferences, conventions) that apply to all
-	// projects. GetTopMemories above already mixes '_global' rows into the
-	// project list, so skip any global already shown there rather than
-	// repeating the highest-value preferences in the token budget.
-	if projectID != "_global" {
-		seen := make(map[string]bool, len(memories))
-		for _, m := range memories {
-			seen[m.ID] = true
+	// projects. The read above already mixes '_global' rows into the project list,
+	// so skip any global already shown there rather than repeating the
+	// highest-value preferences in the token budget.
+	//
+	// It runs for an UNRESOLVED project too, and that is the point: the section
+	// does not depend on the project, and the base ref delivered these rows for an
+	// unknown name — under `## Memories`, which is the mislabelling this migration
+	// removes, but delivered. A first session in a project Ghost has never seen is
+	// exactly when the cross-project preferences and conventions matter, and the
+	// server's own instructions tell the agent to look for this section. Dropping
+	// it would leave the answer contradicting the instructions shipped with it.
+	//
+	// The `seen` filter, the second REQUEST and the `ExcludeSeen` field it is why
+	// we do not use are all explained on projectContextGlobalSection, which is
+	// where the render now lives so the tool and this function cannot drift.
+	if projectID != memory.GlobalProjectID {
+		// 15 for the resolved case (projectContextGlobalsCap, unchanged) and 20 for
+		// an unresolved name (projectContextMemoriesCap), because the row COUNT is
+		// what a caller observes and origin/main's `GetTopMemories(ctx, "", 20)`
+		// returned 20 for it. Only the heading moved.
+		limit := projectContextGlobalsCap
+		if projectID == "" {
+			limit = projectContextMemoriesCap
 		}
-		globals, gErr := s.store.GetTopMemories(ctx, "_global", 15)
-		if gErr == nil {
-			var extra []memory.Memory
-			for _, g := range globals {
-				if !seen[g.ID] {
-					extra = append(extra, g)
-				}
-			}
-			if len(extra) > 0 {
-				sb.WriteString("\n\n## Global (applies to all projects)\n\n")
-				sb.WriteString(formatMemories(extra))
-			}
+		if section := s.projectContextGlobalSection(ctx, limit, memories.Items); section != "" {
+			sb.WriteString("\n\n")
+			sb.WriteString(section)
 		}
 	}
 
 	if sb.Len() == 0 {
+		// Same two cases as the tool's, for the same reason: a block the stages
+		// emptied is not an empty project, and "No memories found for this
+		// project" would say it is.
+		if note := projectContextEmptyNote(memories); note != "" {
+			return note, nil
+		}
 		return "No memories found for this project.", nil
 	}
+	// The same note the tool appends, for the same reason, and at the same place:
+	// a block whose rows are all cross-project is not this project's context, and
+	// `## Recent Decisions` or `## Learned Context` above do not change that.
+	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(note)
+	}
 	return sb.String(), nil
+}
+
+// projectContextMemories assembles the mixed project + `_global` block for one
+// project at one cap, which is the read both surfaces make.
+func (s *Server) projectContextMemories(ctx context.Context, projectID string, limit int) (assemble.Result, error) {
+	return assembleProjectContext(ctx, s, assemble.Request{
+		ProjectID: projectID,
+		// The empty Query IS the passive shape, for the same reason the session
+		// start's is: it is what makes the retriever take the passive branch, and a
+		// non-empty query here would answer a different question with a fused
+		// window. It is not a placeholder.
+		Query:  "",
+		Budget: projectContextBudget(projectID, limit),
+	})
+}
+
+// projectContextGlobals is the Global section's own read, on its own request and
+// at the cap its CALLER asked for. See buildProjectContext's comment on why it is
+// not a second slice, and projectContextGlobalBudget on why the cap is a parameter.
+//
+// The two callers pass different numbers and both are parity with origin/main:
+// the resolved resource's `## Global` section keeps projectContextGlobalsCap (15),
+// and the UNRESOLVED-name case passes the cap the caller asked for — `limit` for
+// the tool, projectContextMemoriesCap (20) for the resource and prompt, because
+// that is what `GetTopMemories(ctx, "", 20)` returned for a name that resolves to
+// nothing.
+func (s *Server) projectContextGlobals(ctx context.Context, limit int) (assemble.Result, error) {
+	return assembleProjectContext(ctx, s, assemble.Request{
+		ProjectID: memory.GlobalProjectID,
+		Query:     "",
+		Budget:    projectContextGlobalBudget(limit),
+	})
 }
 
 // parseProjectIDFromURI extracts and URL-decodes the project_id segment from
