@@ -550,15 +550,9 @@ func TestWithdrawRefusalNamesBothRelations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A pair with no live edge in EITHER direction from this source.
-	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: holder, Target: holder}}, false, discardLogger())
-	if err == nil {
-		t.Fatal("Withdraw accepted a self pair with no edge")
-	}
-
-	// And the suffix a missing pair gets, with both relations live into the same
+	// The suffix a missing pair gets, with both relations live into the same
 	// target, names both holders rather than filtering to the pinned relation.
-	_, err = Withdraw(ctx, store, "p",
+	_, err := Withdraw(ctx, store, "p",
 		[]WithdrawPair{{Source: add(t, store, db, "A note with no claim on the effect at all.", []float32{0, 0, 1, 0}, "2026-08-01 00:00:00"), Target: effect}},
 		false, discardLogger())
 	if err == nil {
@@ -568,6 +562,69 @@ func TestWithdrawRefusalNamesBothRelations(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal omits the holder %s, which points at the target in the other relation: %v", want, err)
 		}
+	}
+}
+
+// TestIntoSuffixNamesTheRelationWithoutClaimingItBuries pins the refusal's whole
+// vocabulary, arm by arm, because all four of its branches were unasserted and one
+// of them was a false claim.
+//
+// The false one is the closing clause. It used to read "or note that the other edge
+// still buries it" for every holder set, which was true while the read returned
+// only 'supersedes' rows. A 'causes' edge buries nothing — both the demotion
+// penalty and resolve's piggyback filter `relation = 'supersedes'` — so over a
+// 'causes'-only holder set the sentence told an operator to worry about a memory
+// nothing holds down, and named the wrong remedy. The VERB and the ADVICE are
+// therefore different questions, and are asked of different helpers: "still caused
+// by C" is accurate, "that edge still buries it" is not.
+//
+// Reachable from the CLI: `ghost supersede p --withdraw C B --relation supersedes
+// --apply` over a pair whose only live edge is `C causes→B`.
+func TestIntoSuffixNamesTheRelationWithoutClaimingItBuries(t *testing.T) {
+	const id = "A1B2C3D4E5F60718293A4B5C6D7E8F90"
+	sup := []memory.Link{{SourceID: id, Relation: string(RelationSupersedes)}}
+	causes := []memory.Link{{SourceID: id, Relation: string(RelationCauses)}}
+	both := []memory.Link{{SourceID: id, Relation: string(RelationSupersedes)}, {SourceID: id, Relation: string(RelationCauses)}}
+
+	for _, c := range []struct {
+		name  string
+		links []memory.Link
+		want  string
+	}{
+		{"a supersedes holder buries the target", sup, "still superseded by A1B2C3D4"},
+		{"a causes holder does not", causes, "still caused by A1B2C3D4"},
+		{"both relations are named as such", both, "still linked (superseded or caused) by A1B2C3D4"},
+		{"no holder is scoped to the project", nil, "no memory in this project links it"},
+		{"an empty holder set is the same sentence", []memory.Link{}, "no memory in this project links it"},
+	} {
+		got := intoSuffix(c.links)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%s: intoSuffix = %q, want it to contain %q", c.name, got, c.want)
+		}
+	}
+
+	// The advice is the whole of the claim, so it is checked in both directions: it
+	// must be there exactly where a 'supersedes' edge is among the holders — and
+	// the `both` case is on THAT side, because one of its two edges really does
+	// bury the target. Only the 'causes'-only set has no edge that holds it down.
+	for _, links := range [][]memory.Link{sup, both} {
+		if got := intoSuffix(links); !strings.Contains(got, "still buries it") {
+			t.Errorf("intoSuffix(%v) = %q, and a live 'supersedes' edge among the holders means the target IS still held down", links, got)
+		}
+	}
+	if got := intoSuffix(causes); strings.Contains(got, "still buries it") {
+		t.Errorf("intoSuffix(causes-only) = %q claims an edge still buries the target, and a 'causes' edge buries nothing", got)
+	}
+	// A 'causes'-only suffix must instead say the reassuring thing, so the reader is
+	// not left with a bare list of ids and no guidance.
+	if got := intoSuffix(causes); !strings.Contains(got, "does not bury its target") {
+		t.Errorf("a 'causes'-only suffix does not say the target is not held down: %q", got)
+	}
+	// And the empty case must not claim a relation it has none of: before #833 it
+	// said "no memory in this project supersedes it", which is false over a pair
+	// whose only edge is a 'causes' one.
+	if got := intoSuffix(nil); strings.Contains(got, "supersedes it") {
+		t.Errorf("the empty suffix = %q, which claims a 'supersedes' edge it cannot see", got)
 	}
 }
 

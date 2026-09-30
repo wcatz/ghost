@@ -444,7 +444,7 @@ The report says which relation each row was, in the row and in the header, becau
 
 ```
 projy: 2 causes edge(s) named, withdrew 2
-  withdrew  a1b2c3d4 -> e5f6a7b8  [causes, source llm, strength 0.81]  January's migration notes predate the…
+  withdrew     a1b2c3d4 -> e5f6a7b8  [causes, source llm, strength 0.81]  January's migration notes predate the…
 ```
 
 Withdrawing a `causes` edge invalidates that edge and writes **no** `unsupersede` history row, because a `causes` claim never held its target down; it also prints no resolve follow-up, for the same reason a reclassified `causes` withdrawal does not (see the reclassified-row rules above).

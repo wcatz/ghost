@@ -415,7 +415,12 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		return link, err
 	}
 	if sourceID == targetID {
-		return link, fmt.Errorf("%s supersedes itself: both refs are memory %s", short(targetID), targetID)
+		// No relation is named, and deliberately: `CreateLink` refuses a self-link
+		// for every relation, so this pair can never be one whichever was asked
+		// for, and "A1B2C3D4 supersedes or causes itself" is a sentence that names a
+		// choice this refusal never made. Saying the two refs are the same memory
+		// IS the whole fact.
+		return link, fmt.Errorf("%s is linked to itself: both refs are memory %s", short(targetID), targetID)
 	}
 	// The RELATION this pair resolves to, and the reason the loop is ordered
 	// rather than a single scan: an unset Relation means "whichever of the two the
@@ -495,8 +500,29 @@ func resolveSource(ctx context.Context, store WithdrawStore, projectID string, i
 	if !errors.Is(scopedErr, memref.ErrNoMatch) {
 		return "", scopedErr
 	}
+	// DEDUPLICATED, and #833 is why that is load-bearing rather than tidiness.
+	// `into` is one row per EDGE now, not one per holder: a source holding both a
+	// 'supersedes' and a 'causes' edge on the same target appears twice. The set
+	// this read is named as is the set of MEMORIES a ref may name, and
+	// `memref.ResolveIn` reads its input that way — it matches by prefix and
+	// refuses a match set that is ambiguous after case folding, so a duplicated id
+	// is a prefix matching twice, a byte-exact lookup that misses, and a refusal
+	// describing two memories whose ids are identical. It is not escapable by
+	// typing more characters, because every prefix of one id is a prefix of both
+	// copies. The shape it closes is this function's own reason to exist: a source
+	// in a THIRD project, which is the `ghost project merge` case.
+	//
+	// The order of the set is the read's, not this loop's: `LinksInto` orders by
+	// relation and then `created_at`, so the first occurrence of an id is its
+	// 'supersedes' row when it has one. A ref cannot select between them anyway —
+	// it names a MEMORY, and the pair picks the edge.
 	ids := make([]string, 0, len(into))
+	seen := make(map[string]bool, len(into))
 	for _, l := range into {
+		if l.SourceID == "" || seen[l.SourceID] {
+			continue
+		}
+		seen[l.SourceID] = true
 		ids = append(ids, l.SourceID)
 	}
 	if id, err := memref.ResolveIn(ids, "source", ref); err == nil {
@@ -554,6 +580,15 @@ func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref 
 // The empty case is scoped on purpose and says "in this project": with no holder
 // the sentence is a claim about the whole graph, and one is false whenever the
 // edge exists under a scope this read cannot see.
+//
+// The closing clause is the RELATION's, not the sentence's, and #833 is why: it
+// used to read "or note that the other edge still buries it" for every holder set,
+// which was true while the read returned only 'supersedes' rows. A 'causes' edge
+// buries NOTHING — the demotion and the `resolved_at` piggyback both filter
+// `relation = 'supersedes'` — so over a 'causes'-only holder set that clause told
+// an operator to worry about a memory nothing is holding down, and told them the
+// wrong remedy for it. It is said only where a 'supersedes' edge is actually
+// present, and the 'causes'-only case gets the advice that is true of it.
 func intoSuffix(links []memory.Link) string {
 	if len(links) == 0 {
 		return " (no memory in this project links it)"
@@ -562,8 +597,26 @@ func intoSuffix(links []memory.Link) string {
 	for _, l := range links {
 		parts = append(parts, short(l.SourceID))
 	}
-	return " (still " + relationWords(links) + " by " + strings.Join(parts, ", ") +
-		" — withdraw that pair as well, or note that the other edge still buries it)"
+	suffix := " — withdraw that pair as well, or note that the other edge still buries it"
+	if !hasSupersedes(links) {
+		suffix = " — withdraw that pair as well; a 'causes' edge does not bury its target, " +
+			"so nothing else here is holding it down"
+	}
+	return " (still " + relationWords(links) + " by " + strings.Join(parts, ", ") + suffix + ")"
+}
+
+// hasSupersedes reports whether any of the holders is reached by a 'supersedes'
+// edge, which is the only relation that demotes a target or stamps its
+// `resolved_at`. It is asked separately from relationWords because the VERB and
+// the ADVICE are different questions: "still caused by C" is accurate, and "that
+// edge still buries it" is not.
+func hasSupersedes(links []memory.Link) bool {
+	for _, l := range links {
+		if l.Relation == string(RelationSupersedes) {
+			return true
+		}
+	}
+	return false
 }
 
 // relationWords picks the verb phrase that matches the relations actually present.

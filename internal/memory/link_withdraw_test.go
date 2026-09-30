@@ -212,9 +212,13 @@ func TestLinksInto(t *testing.T) {
 	}
 
 	// A relation a withdrawal cannot act on is NOT returned by the empty form.
-	// 'related' is a symmetric similarity edge that nothing in the ranking reads
-	// and no repair surface names, so listing it would send an operator after an
-	// edge neither `--withdraw` nor ghost_link_withdraw was asked about.
+	// The fixture links 'contradicts': a directed disagreement edge that nothing in
+	// the ranking reads as a supersession and no repair surface names, so listing
+	// it would send an operator after an edge neither `--withdraw` nor
+	// ghost_link_withdraw was asked about. ('related' is excluded for the same
+	// reason and additionally because it is symmetric, so its direction is not
+	// even meaningful; 'contradicts' is the stricter fixture, since it IS
+	// directed.)
 	mustLink(t, s, newer, older, "contradicts", 0.8, "llm")
 	links, err = s.LinksInto(ctx, "p1", older, "")
 	if err != nil {

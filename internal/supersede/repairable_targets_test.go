@@ -112,6 +112,19 @@ func TestRepairableTargetsSkipsACausesWithdrawal(t *testing.T) {
 			t.Errorf("Targets[%d] = %q, want %q", i, got[0].Targets[i], want[i])
 		}
 	}
+	// The filter runs BEFORE the dedup, and that ordering is load-bearing: a
+	// 'causes' row for T1 must not consume T1's slot, or a later 'supersedes' row
+	// for the same target would be dropped as a duplicate of a row that was never
+	// added. Two rows, one target, one relation each — the shape
+	// `RepairableTargets` reaches when a request names both edges of one pair.
+	both := RepairableTargets([]WithdrawnLink{
+		{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Relation: "causes", Withdrawn: true},
+		{SourceID: "B", TargetID: "T1", TargetProjectID: "p", Relation: "supersedes", Withdrawn: true},
+	})
+	if len(both) != 1 || len(both[0].Targets) != 1 || both[0].Targets[0] != "T1" {
+		t.Errorf("RepairableTargets(causes then supersedes on one target) = %+v, want T1 once: a filtered row must not consume the target's slot", both)
+	}
+
 	// A request that withdrew only 'causes' edges has no follow-up at all, rather
 	// than an empty group the caller would render as a command naming nothing.
 	if n := len(RepairableTargets([]WithdrawnLink{

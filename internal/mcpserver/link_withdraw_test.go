@@ -334,6 +334,20 @@ func TestLinkWithdrawRemovesACausesEdge(t *testing.T) {
 	if err := store.CreateLink(ctx, cause, effect, "causes", 0.9, "llm"); err != nil {
 		t.Fatalf("CreateLink(causes): %v", err)
 	}
+	// The premise, established rather than assumed: both rows on both stamps. This
+	// is the pair no ordinary pass will ever judge, which is the whole reason the
+	// tool has to be able to reach it.
+	rows, err := store.GetByIDs(ctx, []string{cause, effect})
+	if err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("GetByIDs = %d row(s), want 2", len(rows))
+	}
+	if rows[0].CreatedAt != rows[1].CreatedAt || rows[0].UpdatedAt != rows[1].UpdatedAt {
+		t.Fatalf("the fixture's two rows do NOT share created_at/updated_at (%q/%q vs %q/%q): the pair is orientable, so this is no longer the #778 shape the test is about",
+			rows[0].CreatedAt, rows[0].UpdatedAt, rows[1].CreatedAt, rows[1].UpdatedAt)
+	}
 
 	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", cause, effect, "causes")
 	if err != nil {
@@ -344,6 +358,31 @@ func TestLinkWithdrawRemovesACausesEdge(t *testing.T) {
 	// and the wrong one is the edge it would then try to repair.
 	if !strings.Contains(msg, "named causes link(s)") {
 		t.Errorf("the result does not name the relation it withdrew: %q", msg)
+	}
+	// The ROW's bracket, not only the header's: an agent (and a human reading the
+	// transcript) reads the row, and the relation is what says whether this
+	// withdrawal had consequences beyond the edge. The `source` column is kept
+	// beside it because it is what an existing consumer matched the row on.
+	if !strings.Contains(msg, "[causes, source llm]") {
+		t.Errorf("the row does not carry the relation and the edge's own source: %q", msg)
+	}
+	// The TAIL, and it is the half that was wrong. A 'causes' withdrawal has no
+	// repairable target — `RepairableTargets` filters it, because a 'causes' claim
+	// never stamped the `resolved_at` the repair clears — so this call reaches the
+	// empty-group branch while having SUCCEEDED. The sentence that branch used to
+	// print ("the edges it named are still live") therefore contradicted the two
+	// lines above it, and an agent repeating it to its user would report the edge
+	// still in the graph: the exact condition the call was made to fix.
+	if strings.Contains(msg, "still live") {
+		t.Errorf("a successful 'causes' withdrawal tells the agent the edge is still live:\n%s", msg)
+	}
+	if !strings.Contains(msg, "orphans nothing") {
+		t.Errorf("a 'causes' withdrawal does not say why there is no repair to run:\n%s", msg)
+	}
+	// And it names no command, because there is none: `ghost resolve --reassess`
+	// over a 'causes' target would clear a memory nothing is holding down.
+	if strings.Contains(msg, "ghost resolve") {
+		t.Errorf("a 'causes' withdrawal prints a resolve repair that has nothing to clear:\n%s", msg)
 	}
 	if links, lerr := store.LinksInto(ctx, "test-project", effect, "causes"); lerr != nil {
 		t.Fatalf("LinksInto: %v", lerr)

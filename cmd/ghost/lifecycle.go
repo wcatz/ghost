@@ -1529,6 +1529,15 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			i++
 		case strings.HasPrefix(args[i], "--relation="):
 			relation = strings.TrimPrefix(args[i], "--relation=")
+			// An EMPTY value is refused here rather than left to fall through as
+			// "auto-select", because `--project=` next to it refuses an empty value
+			// and a flag that means two different things depending on whether it was
+			// spelled with an `=` is a flag nobody can predict. `--relation` as the
+			// final argument falls to the unknown-flag branch below, exactly as
+			// `--consensus` does, and that is the smaller surprise.
+			if relation == "" {
+				return "", "", false, false, 0, 0, nil, "", errors.New("--relation requires a value: supersedes or causes")
+			}
 		case args[i] == "--project":
 			if i+1 >= len(args) {
 				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
@@ -1617,12 +1626,16 @@ Flags:
                       wrong supersession is repaired. --threshold is not used: there
                       are no candidates to select.
   --withdraw <source-id> <target-id>
-                      Withdraw the ONE supersedes link from source-id to target-id.
-                      Each id may be a full memory id or an unambiguous prefix of
-                      one (8 or more characters). Repeatable. --apply writes the
-                      unsupersede history row; without it nothing is written.
-                      --source and --threshold are not used: nothing is classified.
-                      Cannot be combined with --reassess (run them as two commands).
+                      Withdraw the ONE link from source-id to target-id: the
+                      supersedes link if the pair has one, else the causes link
+                      (see --relation). Each id may be a full memory id or an
+                      unambiguous prefix of one (8 or more characters).
+                      Repeatable. --apply on a supersedes edge writes the
+                      unsupersede history row; on a causes edge it writes no row,
+                      because a causes claim never held its target down. Without
+                      --apply nothing is written. --source and --threshold are not
+                      used: nothing is classified. Cannot be combined with
+                      --reassess (run them as two commands).
   --relation supersedes|causes
                       Which edge --withdraw acts on, for a pair that holds more
                       than one. Default: the 'supersedes' edge if the pair has
@@ -1689,8 +1702,8 @@ pair is the case where guessing wrong withdraws the edge you did not mean. A
 refusal names the live edges of BOTH relations, since the missing one is the
 common case for an operator who has the pair but not the relation.
 
-Withdrawing an edge (--withdraw --apply, or --reassess --apply) writes the
-unsupersede history row and leaves the resolution it may have caused in place:
+Withdrawing a SUPERSEDES edge (--withdraw --apply, or --reassess --apply) writes
+the unsupersede history row and leaves the resolution it may have caused in place:
 resolve treats a live edge as a floor, so that resolution becomes clearable only
 now. BOTH runs therefore print their own follow-up — the exact
 
@@ -1700,6 +1713,11 @@ now. BOTH runs therefore print their own follow-up — the exact
 --only-file. Prefer that scoped command over a bare "ghost resolve <project>
 --reassess": an unscoped repair re-judges every resolved memory in the project,
 not only the ones this withdrawal orphaned.
+
+Withdrawing a CAUSES edge writes no history row and prints NO follow-up, because a
+'causes' claim never demoted its target and never stamped resolved_at on it: there
+is no resolution for the repair to clear, and naming the target would send you to
+clear a memory nothing is holding down.
 `
 
 // supersedeWithdrawReport renders the --withdraw result: the count, then one line

@@ -1122,15 +1122,47 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		}
 		fmt.Fprintf(&sb, "  %s  %s -> %s  [%s, source %s]  %s\n", marker, shortID(l.SourceID), shortID(l.TargetID), rel, l.LinkSource, assemble.PreviewLine(l.TargetText, 70))
 	}
+	// Invalidating a live edge changes what the context resource serves: the
+	// supersede ranking guard demotes an edge's target while the edge stands, so
+	// ghost://project/<id>/context is stale the moment this call returns. Every
+	// other mutating handler in this file pushes that update after its write, and
+	// this was the only write path that did not — a client subscribed to the
+	// resource would keep serving a ranking the withdrawal just invalidated.
+	//
+	// ABOVE the follow-up block, and driven by `res.Withdrawn` alone, so it cannot
+	// be coupled to whether there is a repair to print. It used to sit at the very
+	// end, after an early return that only a 'causes'-only withdrawal could reach
+	// (#833 gave `RepairableTargets` a relation filter, and a 'causes' claim has
+	// no repairable target) — so a 'causes' withdrawal would have gone unnotified
+	// while reporting success.
+	if res.Withdrawn > 0 {
+		s.notifyProjectResource(ctx, resolvedProjectID, "context")
+	}
 	groups := supersede.RepairableTargets(res.Links)
 	if len(groups) == 0 {
-		// Every row was one this call never wrote and never reached, so every
-		// edge is still live and resolve's floor still defends every target: there
-		// is nothing repairable to name. (A row a CONCURRENT pass took is not this
-		// case — its target is repairable, which is why withdrawnTargets keeps it.)
-		sb.WriteString("\nNothing was orphaned by this call: the edges it named are still live, so no target is " +
-			"repairable yet. A target stamped resolved while an edge still points at it is held down deliberately, " +
-			"and clearing it is what withdrawing that edge is for.")
+		// TWO different situations reach an empty group, and before #833 only one
+		// of them could: `RepairableTargets` filters a 'causes' withdrawal out
+		// because a 'causes' claim never stamped the `resolved_at` the repair
+		// clears. So "no groups" stopped meaning "nothing was written" and this
+		// sentence became a claim about the opposite of what the two lines above it
+		// said — a successful withdrawal answering "the edges it named are still
+		// live".
+		//
+		// So it is asked of `res.Withdrawn`, which is the fact both situations can
+		// be told apart by: a write that LANDED is a change, and a 'causes' write
+		// that landed has nothing to repair; a write that did not land means the
+		// edge is still there, which is the case the original sentence was for.
+		// (A row a CONCURRENT pass took is not that case — its target IS
+		// repairable, which is why `RepairableTargets` keeps it.)
+		if res.Withdrawn > 0 {
+			sb.WriteString("\nThe edge is gone, and there is no repair to run: a 'causes' claim never demoted its target " +
+				"or stamped resolved_at on it, so withdrawing one orphans nothing. The follow-up the repair path " +
+				"prints is for a 'supersedes' edge, and this was not one.")
+		} else {
+			sb.WriteString("\nNothing was orphaned by this call: the edges it named are still live, so no target is " +
+				"repairable yet. A target stamped resolved while an edge still points at it is held down deliberately, " +
+				"and clearing it is what withdrawing that edge is for.")
+		}
 		return sb.String(), nil
 	}
 	// The repair as a CLI COMMAND, rendered by the same helper the CLI uses, and
@@ -1161,24 +1193,19 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		}
 		sb.WriteString(repairInstructions(spelling, g.Targets))
 	}
-
-	// Invalidating a live edge changes what the context resource serves: the
-	// supersede ranking guard demotes an edge's target while the edge stands, so
-	// ghost://project/<id>/context is stale the moment this call returns. Every
-	// other mutating handler in this file pushes that update after its write, and
-	// this was the only write path that did not — a client subscribed to the
-	// resource would keep serving a ranking the withdrawal just invalidated.
-	if res.Withdrawn > 0 {
-		s.notifyProjectResource(ctx, resolvedProjectID, "context")
-	}
 	return sb.String(), nil
 }
 
-// withdrawnRelations names the relations the rows of one withdrawal resolved to,
-// for the tool's header. One call takes one pair, so the ordinary answer is one
-// relation; the two-relation form exists because the pair resolution may settle
-// either way and a header that named only 'supersedes' over a 'causes' row would
-// contradict the row printed under it.
+// withdrawnRelations names the relations the rows of a withdrawal resolved to,
+// for the tool's header.
+//
+// One call takes ONE pair, so the shipped answer is one relation and the join is
+// never exercised by the handler — it is here because the CLI's sibling
+// (`relationsNamed`) aggregates a multi-pair request and the two must not be able
+// to print the same request's relations differently, and because a helper that
+// cannot express two relations is one call away from a caller that can. The
+// "pairs holding both relations" case is NOT the justification: a single pair
+// resolves to exactly one edge, so `res.Links` is empty or one row.
 //
 // An empty relation renders 'supersedes', the same default the row below it uses
 // and the same one the withdrawal resolves with — and it is read ONCE into `rel`
@@ -2687,15 +2714,15 @@ func (s *Server) registerTools() {
 	// ghost_link_withdraw — remove one named 'supersedes' or 'causes' edge.
 	type linkWithdrawArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project the edge belongs to (required for ownership check). Ownership is EITHER endpoint, plus _global, which every project owns: a memory promoted to _global keeps its links, so a project may withdraw the edge burying one of its own memories, and _global may withdraw an edge whose endpoint is in any project. Under _global a ref may also name a memory in any project. An edge with neither endpoint in this project or _global is another project's and is neither withdrawable nor discoverable here."`
-		SourceID  string `json:"source_id" jsonschema:"ID of the SUPERSEDING memory — the newer note the edge points FROM. A full id, or 8 or more characters of one."`
-		TargetID  string `json:"target_id" jsonschema:"ID of the SUPERSEDED memory — the older note the edge points AT, the one being buried. A full id, or 8 or more characters of one."`
+		SourceID  string `json:"source_id" jsonschema:"ID of the memory the edge points FROM — the SUPERSEDING (newer) note when relation is supersedes, the CAUSING note when it is causes, which is written older to newer. A full id, or 8 or more characters of one."`
+		TargetID  string `json:"target_id" jsonschema:"ID of the memory the edge points AT — the SUPERSEDED (older) note that was being buried when relation is supersedes, and the note the claim CAUSED when it is causes. A full id, or 8 or more characters of one."`
 		Relation  string `json:"relation,omitempty" jsonschema:"Which edge of the pair to withdraw: 'supersedes' or 'causes'. Omit it and the 'supersedes' edge is withdrawn if the pair has one, else the 'causes' edge — so a pair holding BOTH needs it, because that is the case where the wrong guess withdraws the edge you did not mean. A 'causes' edge is withdrawable for the same reason a 'supersedes' one is: its direction now decides which way the pair is judged, so a 'causes' CYCLE the ordinary pass cannot settle (both notes share updated_at and created_at, so it has no chronology to order them by) has to be repairable by a person. A 'causes' withdrawal writes no 'unsupersede' history row — a 'causes' claim never held its target down, so there is no resolution for the repair to clear."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_link_withdraw",
 		Title:       "Withdraw a supersedes or causes link",
-		Description: "Withdraw ONE wrong 'supersedes' or 'causes' link, naming the memory it points from and the memory it points at. Pass relation when the pair holds both: 'supersedes' is the default and 'causes' is the other, and a pair holding both is the case where the guess is wrong half the time. Use it when a supersession is wrong for a reason no classifier can see — the newer note is not a replacement of the older one at all, or the 'newer' note is the stale one — or when a 'causes' claim is wrong: a 'causes' edge's direction decides which way the pair is judged, and a 'causes' cycle whose two notes share updated_at and created_at has no direction the ordinary pass can settle, so a person has to be able to name it. The link is not informational: ranking demotes its target and resolve's supersedes piggyback stamps resolved_at on it, so a wrong edge takes a live memory out of every later session, and a repair path is the only way to undo it — the `ghost supersede --reassess` CLI pass withdraws only what the current rules reject, so an edge they still accept needs this. a ref may be a full memory id or an unambiguous 8-or-more-character prefix of one, as every Ghost report abbreviates them. A pair with no live link is an error and nothing is written; an ambiguous prefix is refused with the matches listed rather than guessed at. The withdrawal writes the 'unsupersede' history row, so the audit shows the claim and the withdrawal, and it is soft — a later pass that still judges the pair a supersession re-creates the edge. It does NOT un-bury the target by itself: the resolved_at the edge caused stays until a SCOPED `ghost resolve <project> --reassess --only <those ids> --apply` clears it, and the result prints that command — scoped, because an unscoped repair re-judges every resolved memory in the project. That repair is a CLI command, not a tool: ghost_resolve is the FORWARD pass and would stamp MORE memories resolved. Do not use this to retire a memory — the target stays searchable and editable, which is the point.",
+		Description: "Withdraw ONE wrong 'supersedes' or 'causes' link, naming the memory it points from and the memory it points at. Pass relation when the pair holds both: 'supersedes' is the default and 'causes' is the other, and a pair holding both is the case where the guess is wrong half the time. Use it when a supersession is wrong for a reason no classifier can see — the newer note is not a replacement of the older one at all, or the 'newer' note is the stale one — or when a 'causes' claim is wrong: a 'causes' edge's direction decides which way the pair is judged, and a 'causes' cycle whose two notes share updated_at and created_at has no direction the ordinary pass can settle, so a person has to be able to name it. A 'supersedes' link is not informational: ranking demotes its target and resolve's supersedes piggyback stamps resolved_at on it, so a wrong edge takes a live memory out of every later session, and a repair path is the only way to undo it — the `ghost supersede --reassess` CLI pass withdraws only what the current rules reject, so an edge they still accept needs this. A 'causes' link demotes nothing and stamps nothing, so those consequences are a 'supersedes' edge's alone — and a 'causes' withdrawal writes no 'unsupersede' row, prints no follow-up, and leaves no resolution orphaned. a ref may be a full memory id or an unambiguous 8-or-more-character prefix of one, as every Ghost report abbreviates them. A pair with no live link is an error and nothing is written; an ambiguous prefix is refused with the matches listed rather than guessed at. Withdrawing a 'supersedes' link writes the 'unsupersede' history row, so the audit shows the claim and the withdrawal, and the withdrawal is soft — a later pass that still judges the pair a supersession re-creates the edge. That one does NOT un-bury the target by itself: the resolved_at the edge caused stays until a SCOPED `ghost resolve <project> --reassess --only <those ids> --apply` clears it, and the result prints that command — scoped, because an unscoped repair re-judges every resolved memory in the project. Expect that command only for relation 'supersedes'. That repair is a CLI command, not a tool: ghost_resolve is the FORWARD pass and would stamp MORE memories resolved. Do not use this to retire a memory — the target stays searchable and editable, which is the point.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			IdempotentHint:  false,
