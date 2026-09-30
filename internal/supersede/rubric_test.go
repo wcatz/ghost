@@ -274,22 +274,186 @@ func TestClassifyRubricAgreesWithItselfAboutTheStatusReportPair(t *testing.T) {
 			}
 		}
 	}
-	// The two halves are held against the labeled set rather than against prose:
-	// #641's `status-report-fix` must not be reachable as NEITHER by any reading
-	// of the two paragraphs, so the fixtures' own labels are re-read here.
-	for _, key := range []string{"status-report-fix", "status-report-divergence"} {
-		var found bool
+	// The half that was missing, and the reason the review that asked for it was
+	// right: re-reading a fixture's LABEL only proves the table and the prose
+	// were not edited together. It cannot tell whether the rubric's own clauses
+	// REACH that label — the first version of this guard asserted
+	// status-report-divergence was SUPERSEDES while the prompt's own
+	// "NARROWING IS NOT CLOSING" clause made that pair NEITHER, and the guard
+	// passed. So each labeled case is held to a clause that can produce it, and
+	// a case whose label the rubric cannot reach is a failure.
+	//
+	// The three shapes a label can be unreachable because of, and each is
+	// checked rather than assumed:
+	//
+	//   - SUPERSEDES needs a clause that RETAIRES something. Every labeled
+	//     SUPERSEDES case must therefore be one the coverage rule reaches, which
+	//     in this set means the later note has to retire the earlier one's claim
+	//     rather than add a sighting to it.
+	//   - NEITHER is the default, so it is always reachable — and that is exactly
+	//     why relabelling a pair to NEITHER is safe while relabelling it to
+	//     SUPERSEDES is not.
+	//   - REVERSED needs the REVERSED paragraph, which both prompts carry.
+	//
+	// The reachability check is per-CLASS and the label set is read from the
+	// fixtures, so a fixture relabeled to a class no clause covers fails without
+	// anyone having to remember to write a clause test for it. Being honest
+	// about its weight: for TODAY's fixture set it is not the only thing holding
+	// those clauses — removing the coverage clause is already caught by
+	// TestClassifyRubricCarriesEverySupersedeRule and
+	// TestClassifierPromptAsksTheBothTrueQuestion, and dropping the REVERSED
+	// paragraph fails the same way. What it adds is the GENERAL form, which is
+	// the one that was missing: the guard as written before could only re-read
+	// a label, and a label re-read cannot tell whether the rubric can answer
+	// it.
+	for name, prompt := range map[string]string{
+		"single-pair": classifySystemPrompt,
+		"batched":     classifyBatchSystemPrompt,
+	} {
 		for _, c := range regressionRelationCases {
-			if c.key != key {
+			var clause string
+			switch c.want {
+			case RelationSupersedes:
+				clause = "A SUPERSEDES must retire EVERY claim the OLDER note makes"
+			case RelationReversed:
+				clause = "REVERSED — the same-fact replacement runs the other way"
+			case RelationNeither:
+				clause = "Two notes that are both still true are NEITHER"
+			default:
+				t.Errorf("%s is labeled %q, which no clause is held for; a fifth verdict needs a paragraph and a test, not a fixture edit", c.name, c.want)
 				continue
 			}
-			found = true
-			if c.want != RelationSupersedes {
-				t.Errorf("%s is labeled %q; the rubric's status-report clause is written around a supersession, and a fixture change would have to be made deliberately with the rubric", key, c.want)
+			if !strings.Contains(prompt, clause) {
+				t.Errorf("the %s prompt cannot reach %q, and %s is labeled %q: a labeled case the shipped rubric cannot answer is a case the eval silently stops scoring", name, c.want, c.name, c.want)
 			}
 		}
-		if !found {
-			t.Errorf("the labeled regression set has no %q case, so the rubric's status-report clause is unscored", key)
+	}
+
+	// And the specific pair the review caught, held by NAME rather than by
+	// class, because the class check above is satisfied by any SUPERSEDES clause
+	// and this is about THIS pair's shape. Both notes are OPEN reports of one
+	// still-reproducing problem, so the later report is a second sighting rather
+	// than a retirement — the coverage rule's own NEITHER, and the shape of the
+	// "recurring defect is not a fix chain" bullet. It was SUPERSEDES in #641,
+	// with #641's own comment calling that "at most right".
+	divergence := regressionCase(t, "status-report-divergence")
+	if divergence.want != RelationNeither {
+		t.Errorf("status-report-divergence is labeled %q; both its notes are OPEN reports of one still-open problem and the later one retires nothing, so the shipped rubric's own coverage rule answers NEITHER and the label has to say so", divergence.want)
+	}
+	if !strings.Contains(divergence.older, "still present") || !strings.Contains(divergence.newer, "still reproduces") {
+		t.Error("the status-report-divergence fixture no longer reads as two OPEN reports; the NEITHER label rests on both notes being still-true, and a fixture that drifts from that shape makes the label wrong for a new reason")
+	}
+	// Its sibling is the one status-report pair that IS a supersession, so
+	// holding it keeps the relabel from reading as "status reports are never
+	// supersessions" — which would be a different over-refusal, and the one the
+	// veto's own comment already reports paying for.
+	fix := regressionCase(t, "status-report-fix")
+	if fix.want != RelationSupersedes {
+		t.Errorf("status-report-fix is labeled %q; its later report does retire the earlier blocker, so it is the one status-report pair the rubric must still reach as SUPERSEDES", fix.want)
+	}
+}
+
+// readDocFile reads one documentation file for a cross-file agreement check, and
+// names the file it could not read rather than only that a read failed.
+func readDocFile(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(raw)
+}
+
+// TestTheDocPagesStateTheSameVerdictsAsThePrompt exists because a rubric and its
+// documentation may disagree for exactly as long as nobody reads both, and #779
+// shipped that way twice: `docs/cli.md` and `docs/architecture.md` both kept
+// the pre-tightening prose ("or `causes`", "resolved or changed", "resolves or
+// narrows") after `classifyRubric` had moved to "never CAUSES", "CLOSED" and
+// "NARROWING IS NOT CLOSING". An operator reading either page would draw the
+// opposite conclusion from the one the shipped prompt hands the model, and the
+// two are the same rules stated twice.
+//
+// Each page is an operator's route to those rules, so each is held to the three
+// load-bearing statements AND to the ABSENCE of the readings this change
+// reversed. The absence half is the half a "must contain" test alone cannot do:
+// requiring the new wording still passes with the old sentence sitting beside
+// it, which is exactly what happened.
+func TestTheDocPagesStateTheSameVerdictsAsThePrompt(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		// must is verbatim text the page has to carry, taken from the shipped
+		// rubric so the two cannot drift without one of them failing.
+		must []string
+		// mustNot is the superseded reading. Each entry is a distinct wrong
+		// answer someone could act on, so each is listed rather than matched by
+		// pattern — a pattern would also reject the corrected sentence that
+		// quotes it to say it is gone.
+		mustNot []string
+	}{
+		{
+			path: "../../docs/cli.md",
+			must: []string{
+				"specifically **not** `causes`",
+				"**The exception, which overrides this rule only and not the coverage rule above: an entry that reports the open issue closed.**",
+				"**Narrowing is not closing:**",
+				"`status-report-divergence` pair is labeled `neither`",
+			},
+			mustNot: []string{
+				"or `causes`, when it is an elaboration",
+				"an entry that reports the open issue resolved or changed",
+				"resolves or narrows an earlier one supersedes it",
+			},
+		},
+		{
+			path: "../../docs/architecture.md",
+			must: []string{
+				"**never `causes`**",
+				"reports the open issue CLOSED, and it overrides the log rule only — not the coverage rule above",
+				"**NARROWING IS NOT CLOSING**",
+				"**`status-report-divergence` was relabeled to `NEITHER` by this change**",
+			},
+			mustNot: []string{
+				"or `causes` when it is an elaboration acting on the older one",
+				"an entry that reports the open issue resolved or changed",
+				"resolves or narrows an earlier one supersedes it",
+			},
+		},
+		{
+			path: "../../docs/invariants.md",
+			must: []string{
+				"`neither` and NEVER `causes`",
+				"an entry reporting the open issue CLOSED",
+				"NARROWING is not closing",
+			},
+			mustNot: []string{
+				"is `neither`, or `causes` when it is an elaboration acting on the older one",
+			},
+		},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			text := readDocFile(t, tc.path)
+			for _, want := range tc.must {
+				if !strings.Contains(text, want) {
+					t.Errorf("%s does not carry %q, so the page states a different verdict for a pair shape than the shipped rubric does: a reader of the docs and the model of the prompt are then answering different questions about the same two notes", tc.path, want)
+				}
+			}
+			for _, gone := range tc.mustNot {
+				if strings.Contains(text, gone) {
+					t.Errorf("%s still carries %q, the reading this change deliberately reversed: the rubric now says the opposite, and a page that says otherwise hands an operator the wrong verdict for a pair shape", tc.path, gone)
+				}
+			}
+		})
+	}
+	// And the pages must agree with the RUBRIC rather than only with each other,
+	// so a future rubric change the docs have not followed fails here rather
+	// than waiting for a reader to notice.
+	for _, want := range []string{
+		"the answer is NEITHER — never CAUSES, and never SUPERSEDES",
+		"an entry that reports the open issue CLOSED",
+		"NARROWING IS NOT CLOSING",
+	} {
+		if !strings.Contains(classifyRubric, want) {
+			t.Errorf("classifyRubric does not carry %q, so the three pages above are now describing a rubric that does not exist; the doc test would then hold prose the prompt no longer sends", want)
 		}
 	}
 }
@@ -334,11 +498,7 @@ func TestTheRubricUpgradeNoteReachesExistingEdges(t *testing.T) {
 		},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
-			raw, err := os.ReadFile(tc.path)
-			if err != nil {
-				t.Fatalf("read %s: %v", tc.path, err)
-			}
-			text := string(raw)
+			text := readDocFile(t, tc.path)
 			for _, want := range tc.want {
 				if !strings.Contains(text, want) {
 					t.Errorf("%s does not carry %q about the #779 upgrade step: the NEITHER cache clears itself and a live supersedes edge does not, so a note naming only the cache tells an operator to do nothing and keeps every wrong edge", tc.path, want)
