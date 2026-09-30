@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // The Stop hook fires after EVERY assistant turn, and the only guard on the
@@ -93,7 +94,12 @@ func TouchLifecycleStart(project string) error {
 	}
 	id := resolveMarkerProject(dataDir, project)
 	if id == "" {
-		return fmt.Errorf("cannot record a lifecycle start for %q: no project resolves to it", project)
+		// `memory.ProjectArg` for the same reason as the refusal in
+		// `acquireLifecycleLock`: this is the caller's `--project` operand, and a
+		// session routinely supplies the clone URL it is standing in, credentials
+		// included (#839). A value the guard recognises would otherwise be quoted
+		// into the operator's stderr by the one package that never asked.
+		return fmt.Errorf("cannot record a lifecycle start for %s: no project resolves to it", memory.ProjectArg("project", project))
 	}
 	if !safeProjectIDComponent(id) {
 		return fmt.Errorf("project id %q is not a safe filename component", id)

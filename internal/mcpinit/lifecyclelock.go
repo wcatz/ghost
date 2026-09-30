@@ -70,7 +70,13 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 
 	id, _, err := memory.NewStore(db, nil).ResolveProject(context.Background(), project)
 	if err != nil {
-		return noop, true, fmt.Errorf("resolve project %q: %w", project, err)
+		// The wrapped error is already safely rendered — it is the store's own
+		// refusal, which goes through `memory.ProjectArg` — but the operand printed
+		// beside it is the caller's, and `--project` is the session's own clone URL
+		// about as often as it is a project name (#839). Quoting it here put a
+		// credential-shaped operand into the operator's stderr in the one package
+		// that had no call to the renderer.
+		return noop, true, fmt.Errorf("resolve project %s: %w", memory.ProjectArg("project", project), err)
 	}
 	if id == "" {
 		// Unknown project: nothing to lock, and the phases will report it.

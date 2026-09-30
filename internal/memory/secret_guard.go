@@ -81,6 +81,81 @@ func RejectSecret(field, text string) error {
 	return rejectSecret(field, text)
 }
 
+// ProjectIdentifierLabel is what a store-level refusal names the value as when
+// the store cannot see the argument's own name.
+//
+// It is the honest answer rather than a default, because a refusal's whole job on
+// the credential path is to tell the caller WHICH argument to fix, and a name the
+// store guessed is worse than no name: `ghost_resolve` passes `project`,
+// `ghost_project_delete` passes `project`, and every other tool passes
+// `project_id`, so a store sentence that named a field would be naming an
+// argument the caller never passed on two of the three shapes.
+//
+// The boundary is where the field name belongs, because the boundary is what
+// knows it: those sentences render through `ProjectArg` with the caller's own
+// name, and this is what a store sentence uses when it is the one refusing.
+const ProjectIdentifierLabel = "project identifier"
+
+// ProjectArg renders a caller's project argument — the value a `project_id` or
+// `project` tool parameter carries, or a CLI's project operand — for a sentence
+// that REFUSES it.
+//
+// It is a RENDERER, and saying so is not the same as saying it is everywhere: a
+// refusal that quotes a project argument has to come through here, and one that
+// does not is a hole in the rule rather than a variation of it.
+//
+// Naming the value is the diagnostic and it is the reason every one of these
+// sentences wrote `%q`: `matches multiple projects: foo` is how an operator finds
+// the duplicate, `project "foo" not found` is how an agent learns its own project
+// is misspelled, and `does not belong to project "foo"` is how it learns the
+// memory it addressed is someone else's. So for every value the credential guard
+// does not recognise this is exactly `%q` and the sentence is byte-identical to
+// what it was.
+//
+// A credential is the one value that cannot be named, for the reason
+// *SecretContentError gives: the sentence reaches the log file, the calling
+// agent's context, and — for the paths a reflection prompt is built from — a
+// third-party model, so quoting it relocates the secret rather than containing
+// it. Those render as a placeholder carrying the guard's FORMAT instead, which is
+// the same disclosure *SecretContentError makes and the part that makes the
+// refusal actionable: an agent that pasted a clone URL with inline auth into
+// `project_id` is told which argument to change and what to take out of it. Not
+// one character of the value appears.
+//
+// The placeholder is shaped like a quoted value, with the quotes inside it, so it
+// drops into the `%q` slot these sentences were written with — which is why every
+// call site changed from `%q` to `%s`. Dropping it into the `%q` slot instead
+// would have put a second layer of Go quoting around it and read as a path
+// spelled with backslashes.
+//
+// It is a RENDERER, not a check: nothing here refuses a call. The refusal is
+// whichever predicate the sentence was about — ambiguous, not found, not
+// registered, not this project — and the only thing this changes is whether the
+// value is inside it. Asking the guard a second time for the value's own sake
+// would be a different decision, taken by a caller that has one, and #839's
+// sibling on the save path takes it in `ensureProjectFor`.
+//
+// It lives here, beside the guard, rather than at each boundary because the store
+// and the MCP handlers owe the same sentence: `ResolveProject`'s ambiguity
+// refusals are returned to the caller by every read and update handler as
+// `resolve project: %w`, so a second rendering at each of them is nineteen
+// chances to get one wrong.
+func ProjectArg(field, value string) string {
+	refusal := rejectSecret(field, value)
+	if refusal == nil {
+		return fmt.Sprintf("%q", value)
+	}
+	var detected *SecretContentError
+	if errors.As(refusal, &detected) {
+		return fmt.Sprintf("%q", "<"+field+" withheld: it holds a "+detected.Format+">")
+	}
+	// Unreachable while rejectSecret returns only *SecretContentError, and stated
+	// rather than assumed because the wrong default for this function is the leak
+	// this whole comment exists to prevent: a guard that grew a second error type
+	// must still refuse to quote, not fall through to naming the value.
+	return fmt.Sprintf("%q", "<"+field+" withheld: it holds a credential>")
+}
+
 // secretField is one caller-supplied text to check, named the way the caller
 // named the argument so the refusal says which one to fix.
 type secretField struct{ name, text string }

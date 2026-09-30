@@ -831,3 +831,130 @@ func TestListUnboundProjects(t *testing.T) {
 		t.Errorf("got %+v, want the project with a sentinel path and no remote", got[0])
 	}
 }
+
+// TestBindProjectPathRefusesAPathTheImporterWouldRefuse is #840.
+//
+// #824 refused an unexportable project at both CREATION routes, on the importer's
+// own predicate. `projects.path` has exactly one writer — the UPDATE inside
+// BindProjectPath — and it had no such rule, so bind was a way into the same state
+// through an update: record a checkout called `«ghost»`, and `ghost export` then
+// refuses that project, and with it every memory, task and decision beneath it,
+// under a named non-zero exit. Nothing on the way in had said the directory was
+// ineligible.
+//
+// Every leaf below is a legal POSIX directory name, which is the point: «, » and a
+// backtick all survive `os.Mkdir`, `storedPathIsUsable` asks only whether the path
+// is absolute and is not a bare root, and a checkout inside a directory whose owner
+// likes «» is an ordinary thing to have on a disk. The credential case is the same
+// hole with a token in it, and it is asked first so a path that is BOTH comes back
+// as the answer an operator can act on.
+func TestBindProjectPathRefusesAPathTheImporterWouldRefuse(t *testing.T) {
+	for _, tc := range []struct {
+		name, leaf string
+		// wantFormat is the guard's finding for the credential cases, empty for the
+		// shape ones. Asserted only where the guard is the rule that fires, so the
+		// test states which of the two sentences is the one being read.
+		wantFormat string
+		wantRule   string
+	}{
+		{name: "«data delimiter»", leaf: "«ghost»", wantRule: "project path must hold no control character"},
+		{name: "a closing delimiter", leaf: "checkout»", wantRule: "project path must hold no control character"},
+		{name: "a backtick", leaf: "ghost`checkout", wantRule: "project path must hold no control character"},
+		{name: "a control character", leaf: "ghost\ncheckout", wantRule: "project path must hold no control character"},
+		{
+			name: "a credential", leaf: credentialToken,
+			wantFormat: "GitHub personal access token",
+			wantRule:   "refusing to store credential-shaped content",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := bindStore(t)
+			sentinelProject(t, s, "infra", "infrastructure")
+			dir := filepath.Join(t.TempDir(), tc.leaf)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Skipf("this filesystem will not hold %q in a directory name: %v", tc.leaf, err)
+			}
+
+			_, err := s.BindProjectPath(ctx, "infra", dir, "")
+
+			if !errors.Is(err, ErrBindPathUnprintable) {
+				t.Fatalf("err = %v, want ErrBindPathUnprintable", err)
+			}
+			if got := projectPath(t, s, "infra"); got != "infra" {
+				t.Errorf("the refused bind wrote path %q, want the id sentinel unchanged", got)
+			}
+			// The refusal is the IMPORTER's sentence, verbatim, because the operator
+			// who hits it is the one running `ghost export` and the two explanations
+			// of one decision have to be the same explanation. It carries no value,
+			// so the directory is not in it either — which is the property the CLI
+			// boundary adds its own named rendering beside, and this asserts the half
+			// that makes that necessary.
+			if !strings.Contains(err.Error(), tc.wantRule) {
+				t.Errorf("refusal does not carry the importer's own sentence %q: %v", tc.wantRule, err)
+			}
+			if strings.Contains(err.Error(), tc.leaf) {
+				t.Errorf("the refusal quoted the directory it refused: %v", err)
+			}
+			if tc.wantFormat != "" && !strings.Contains(err.Error(), tc.wantFormat) {
+				t.Errorf("refusal names the shape rule rather than the %s it found: %v", tc.wantFormat, err)
+			}
+		})
+	}
+}
+
+// TestABoundProjectWithAnUnprintablePathStaysUsable is the other half of #840, and
+// the half that decides whether the rule above is a fix or a regression.
+//
+// A project already carrying a path `ghost export` refuses — planted before the
+// guard existed, restored from an artifact, written by an older Ghost — must keep
+// working, and above all must stay REPAIRABLE. Judging the stored value at bind
+// time would refuse the one command that gets a user out of the state, and would do
+// it on the project the rule exists to protect. So: the planted path resolves, a
+// save into it lands, and binding a clean directory rewrites the column.
+//
+// The project is planted with SQL rather than through a bind because that is how
+// such a row actually arrives, and because the test would otherwise be testing the
+// guard with the guard.
+func TestABoundProjectWithAnUnprintablePathStaysUsable(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	hostile := filepath.Join(t.TempDir(), "«ghost»")
+	if err := os.MkdirAll(hostile, 0o755); err != nil {
+		t.Skipf("this filesystem will not hold a data delimiter in a directory name: %v", err)
+	}
+	stored := physical(t, hostile)
+	plantRawProject(t, s, "infra", stored, "infrastructure")
+
+	// The state the guard protects against, asserted directly: the exporter
+	// refuses this project today, which is why the bind has to stop producing one.
+	if err := CheckImportedProject(PortableProject{ID: "infra", Name: "infrastructure", Path: stored}); err == nil {
+		t.Fatalf("the fixture is supposed to be a project `ghost export` refuses; it now passes")
+	}
+
+	id, _, err := s.ResolveProject(ctx, hostile)
+	if err != nil {
+		t.Fatalf("resolving a session directory inside an unexportable project: %v", err)
+	}
+	if id != "infra" {
+		t.Fatalf("resolved %q, want the project that records the path", id)
+	}
+	if _, _, _, err := s.Upsert(ctx, id, "convention", "the path column is judged on write, not on read", "mcp", 0.5, nil); err != nil {
+		t.Errorf("a save into an unexportable project is now refused: %v", err)
+	}
+
+	clean := t.TempDir()
+	binding, err := s.BindProjectPath(ctx, "infra", clean, "")
+	if err != nil {
+		t.Fatalf("rebinding to a clean directory is the documented remedy and must not be refused: %v", err)
+	}
+	if !binding.PathChanged {
+		t.Errorf("the rebind reported no path change: %+v", binding)
+	}
+	if got, want := projectPath(t, s, "infra"), physical(t, clean); got != want {
+		t.Errorf("path = %q, want the clean directory %q", got, want)
+	}
+	if err := CheckImportedProject(PortableProject{ID: "infra", Name: "infrastructure", Path: projectPath(t, s, "infra")}); err != nil {
+		t.Errorf("the project is still unexportable after the rebind: %v", err)
+	}
+}

@@ -532,3 +532,82 @@ func TestUnboundProjectNotice(t *testing.T) {
 		t.Errorf("the notice should qualify which MEMORY.md init leaves alone, got:\n%s", after)
 	}
 }
+
+// TestRunProjectBindCoreNamesTheDirectoryItRefused is #840 at the boundary.
+//
+// The store's refusal for an unprintable path is deliberately the exporter's own
+// sentence, which carries no value — correct for `ghost export`, where the caller's
+// text is noise, and wrong for a person who just typed a directory and needs to be
+// told which one was refused. So the command names it, through `assemble.Label`,
+// and this holds both halves of that: the directory IS named (escaped, so the
+// sentence holds none of the characters it is refusing) and nothing else is.
+//
+// The credential case is the reason the naming is skipped there, and it is the half
+// that is easy to get wrong in the other direction: `assemble.Label` renders a value
+// for a line, it does not withhold a secret, so naming the path beside
+// `refusing to store credential-shaped content in path: …` would put the token back
+// into the one answer that says Ghost never stores credential values. That refusal
+// must come back naming the field and the format and nothing else.
+func TestRunProjectBindCoreNamesTheDirectoryItRefused(t *testing.T) {
+	const token = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, tc := range []struct {
+		name, leaf string
+		// wantNamed is the escaped leaf the refusal has to carry; empty means it
+		// must not name the directory at all.
+		wantNamed string
+		wantRule  string
+	}{
+		{name: "a data delimiter", leaf: "«ghost»", wantNamed: `ghost`, wantRule: "must hold no control character"},
+		{name: "a backtick", leaf: "ghost`checkout", wantNamed: "ghost\\`checkout", wantRule: "must hold no control character"},
+		{name: "a credential", leaf: token, wantRule: "GitHub personal access token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := bindStore(t)
+			if err := store.EnsureProject(ctx, "infra", "", "infrastructure"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			dir := filepath.Join(t.TempDir(), tc.leaf)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Skipf("this filesystem will not hold %q in a directory name: %v", tc.leaf, err)
+			}
+
+			var out bytes.Buffer
+			err := runProjectBindCore(ctx, store, &out, "infra", dir, noRemote)
+
+			if !errors.Is(err, memory.ErrBindPathUnprintable) {
+				t.Fatalf("err = %v, want ErrBindPathUnprintable", err)
+			}
+			if !strings.Contains(err.Error(), tc.wantRule) {
+				t.Errorf("refusal %q does not carry the rule that fired (%q)", err, tc.wantRule)
+			}
+			if out.Len() != 0 {
+				t.Errorf("a refusal must not print a success report, got:\n%s", out.String())
+			}
+			// The directory is named through the safe renderer, so the escaped leaf
+			// is there and none of the refused characters are.
+			if tc.wantNamed != "" {
+				if !strings.Contains(err.Error(), tc.wantNamed) {
+					t.Errorf("refusal %q does not name the directory it refused", err)
+				}
+				if strings.Contains(err.Error(), tc.leaf) {
+					t.Errorf("refusal %q quoted a directory it is refusing", err)
+				}
+			}
+			// And whatever happened, the token is not in the answer and the column
+			// did not move.
+			if strings.Contains(err.Error(), token) {
+				t.Errorf("refusal %q echoed the credential", err)
+			}
+			projects, listErr := store.ListProjects(ctx)
+			if listErr != nil {
+				t.Fatalf("ListProjects: %v", listErr)
+			}
+			for _, p := range projects {
+				if p.ID == "infra" && p.Path != "infra" {
+					t.Errorf("a refused bind wrote path %q", p.Path)
+				}
+			}
+		})
+	}
+}

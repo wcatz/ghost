@@ -319,13 +319,17 @@ the session's directory resolves by path prefix to the project's stored id, and 
 write still lands in the project you already have instead of being refused as an
 invalid id. The full resolution is what makes that true, because a project can hold
 a refused character in a field the write boundary does not own: `ghost project bind`
-records `projects.path` through a check that asks only whether the path is absolute,
-and «, » and a backtick are all legal in a directory name. The credential guard
-below is gated the same way, so a bound path carrying a token cannot make a project
-unwritable by the address a session actually uses — and it is asked a SECOND time on
-the resolution's own failure path, because the two ambiguity refusals name the
-caller's argument and a token that happened to be ambiguous would otherwise reach the
-answer through them. Nothing echoes it either way.
+is the only writer of `projects.path`, and it asks the exporter's own shape rule
+(`CheckImportedProjectText("path", …)`, after the credential guard) about the path
+**about to be recorded** — never about the one already stored, which is what keeps
+a project that already records such a path repairable by binding it to a directory
+that passes. The credential guard below is gated the same way, so a bound path
+carrying a token cannot make a project unwritable by the address a session actually
+uses — and a token that happened to be ambiguous reaches no answer either, because
+the ambiguity refusals render their argument through the same guard instead of
+quoting it: an ordinary value comes back as `"foo"`, and a credential-shaped one as
+a placeholder naming the argument and the credential's **format** and none of the
+value. Nothing echoes it either way.
 
 The answer names the refused `project_id` through `assemble.Token` — the renderer the
 row itself uses — because a caller that passed the value can fix it, and it holds
