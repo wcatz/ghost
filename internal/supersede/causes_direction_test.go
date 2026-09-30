@@ -1,0 +1,561 @@
+package supersede
+
+import (
+	"context"
+	"testing"
+
+	"github.com/wcatz/ghost/internal/memory"
+)
+
+// This file is #823: what a live 'causes' edge does to the pass, and what it does
+// NOT do.
+//
+// `ghost supersede` writes two directed relations and reconciled only one of
+// them. A 'supersedes' edge is reconciled on the UNORDERED pair and its direction
+// beats the scan's, skip-if-unchanged holds a pair whose endpoints have not moved
+// since the edge was written, a pair a live edge names is never cache-skipped,
+// and a write that would create the reverse of a live 'supersedes' edge is
+// refused inside the write transaction (memory.Store.CreateLinkUnopposed, #806).
+// A 'causes' edge got NONE of that: it is written older→newer, and the pair it
+// belongs to was reconciled by the same `pairKey` with no direction override, so
+// the direction came from the scan — from `orient`, from `updated_at`.
+//
+// So a pair carrying a live 'causes' edge whose direction disagrees with the
+// timestamps today:
+//
+//  1. is re-proposed by the scan every pass, in the direction the timestamps
+//     give, because nothing about a 'causes' edge holds the pair quiet — only a
+//     'supersedes' pair is ever stamped and only a 'supersedes' pair is ever
+//     cache-skipped;
+//  2. pays a classify call for that re-ask, on every pass, for as long as the
+//     edge lives;
+//  3. and answers CAUSES again, so the pass writes a 'causes' edge in the NEW
+//     direction — leaving the pair live in BOTH directions, a 'causes' cycle the
+//     store can produce and nothing demotes.
+//
+// Point 2 is the re-bill. Point 3 is the contradiction, and #819 refused to guard
+// the 'causes' write precisely because of point 2: a guard alone, with no
+// override, is a refusal that never converges, which costs a call per pass
+// forever. The two have to land TOGETHER, in this order — with the override in
+// place the pair is judged in the live edge's own direction, so the guarded
+// write is in that direction too and the refusal becomes the one-off race it is
+// for 'supersedes', rather than a state the pass re-enters. That ordering is the
+// whole fix, and it is why TestTheCausesWriteIsNotGuarded had to CHANGE rather
+// than be deleted: it pinned the asymmetry, and the asymmetry was the trap.
+
+// recordingCauses answers CAUSES to every pair and records every orientation it
+// was asked about, so a test can ask both questions at once: was the pair asked
+// about at all, and in which direction.
+//
+// CAUSES is the verdict that writes a 'causes' edge — the relation whose
+// direction is under test — so a fake answering anything else would settle the
+// question by never asking it.
+type recordingCauses struct {
+	judged [][2]string
+}
+
+func (c *recordingCauses) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
+	out := make([]Relation, len(pairs))
+	for i, p := range pairs {
+		c.judged = append(c.judged, [2]string{p.NewerID, p.OlderID})
+		out[i] = RelationCauses
+	}
+	return out, nil
+}
+
+// retagBoth moves both endpoints' updated_at through the REAL writer, which is
+// what an operator's edit through a live `ghost mcp` does and what re-arms
+// skip-if-unchanged. A fixture that poked the column directly would be asserting
+// something about the column rather than about the pass's freshness test — and
+// the tag is a real change, so the write is a real one.
+func retagBoth(t *testing.T, store *memory.Store, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if err := store.UpdateMemory(context.Background(), "p", id, nil, nil, nil, []string{"retagged-mid-pass"}); err != nil {
+			t.Fatalf("retag %s: %v", id, err)
+		}
+	}
+}
+
+// TestALiveCausesEdgeHoldsItsPairInItsOwnDirection is the ordinary pass's half,
+// and it is the re-bill: a live 'causes' edge whose direction disagrees with the
+// scan's must produce NO classify call, because neither endpoint has moved since
+// the edge was written.
+//
+// The observable is the call count, not the graph. A graph assertion alone would
+// be satisfied by a pass that asked the question and then declined to act on the
+// answer — which is the state #819 documented, and the one that costs a call per
+// pass forever.
+func TestALiveCausesEdgeHoldsItsPairInItsOwnDirection(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	older := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// A live 'causes' edge running NEWER→OLDER, which is the reverse of the
+	// direction 'causes' is written in and so the reverse of what the timestamps
+	// propose. Stamped at the freshness of what a verdict was made against, which
+	// is what lets skip-if-unchanged hold the pair at all.
+	if err := store.CreateLinkJudged(ctx, newer, older, string(RelationCauses), 0.9, "llm", "2026-09-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+
+	cls := &recordingCauses{}
+	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(cls.judged) != 0 {
+		t.Errorf("the pass asked about %d pair-orientation(s) %v, want none: neither endpoint has moved since the edge was written, and a pair a live 'causes' edge names is held by skip-if-unchanged exactly as a live 'supersedes' edge is",
+			len(cls.judged), cls.judged)
+	}
+	if len(classified) != 0 {
+		t.Errorf("classified = %+v, want no rows", classified)
+	}
+	if res.Candidates != 0 {
+		t.Errorf("Candidates = %d, want 0: the pair's edge stamp is the freshness of the text it was judged against", res.Candidates)
+	}
+	// The graph, read from the store rather than from the pass's counters: the
+	// reverse of the live edge was never written, so the pair is NOT live in both
+	// directions. Before the fix a second edge appears here.
+	edges := liveCausesEdges(t, store, newer, older)
+	if len(edges) != 1 || edges[0] != [2]string{newer, older} {
+		t.Errorf("live 'causes' edges = %v, want exactly [%s %s]: the pass must never write the reverse of a live 'causes' edge, and nothing was re-decided here so nothing was written at all",
+			edges, newer, older)
+	}
+	// And the refusal is COUNTED, because a pass that declined to re-ask has to
+	// say so rather than reporting the totals of a pass that found nothing.
+	if res.OppositeLive != 1 {
+		t.Errorf("OppositeLive = %d, want 1: the scan proposed the reverse of a live edge and that orientation was refused, which is a different fact from the pass having nothing to do",
+			res.OppositeLive)
+	}
+	if res.Bidirectional != 0 {
+		t.Errorf("Bidirectional = %d, want 0: the pair is claimed in ONE direction, so there is no cycle to refuse", res.Bidirectional)
+	}
+}
+
+// TestAPassNeverWritesTheReverseOfALiveCausesEdgeWhenItDoesReAsk is the half
+// that cannot be reached through quiet: the endpoints HAVE moved, so
+// skip-if-unchanged releases the pair and the pass really does spend a classify
+// call — and the edge it writes must still be the live edge's own direction.
+//
+// This is the test that makes the direction override load-bearing rather than
+// merely quiet. A guard alone (what #819 shipped, and shipped on purpose) would
+// refuse this write, because the reverse of what the timestamps say is exactly
+// what is live; and then the pair is re-asked on every pass and refused on every
+// pass, for as long as the edge lives. A pass that asks and writes the live edge's
+// direction converges; a pass that asks and refuses does not.
+func TestAPassNeverWritesTheReverseOfALiveCausesEdgeWhenItDoesReAsk(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	older := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// A live 'causes' edge, and STAMPED OLD: the edge claims a judgement made
+	// long ago, so both endpoints have since moved and the pair is re-judged.
+	if err := store.CreateLinkJudged(ctx, newer, older, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	// Both endpoints move, so nothing about the quiet can be the reason the
+	// assertions below hold.
+	retagBoth(t, store, newer, older)
+
+	cls := &recordingCauses{}
+	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(cls.judged) != 1 {
+		t.Fatalf("the pass asked about %d pair-orientation(s) %v, want exactly 1: both endpoints moved, so skip-if-unchanged cannot hold this pair and the re-ask is the point of the test",
+			len(cls.judged), cls.judged)
+	}
+	// The direction asked is the live edge's, read the way 'causes' is WRITTEN,
+	// and that is the reverse of the edge's own two ids: a 'causes' edge runs
+	// cause→effect, so its SOURCE is the note the edge calls older. The edge here
+	// says `newer` is the cause, so the pair is asked with `older` as the newer
+	// endpoint — the claim the graph makes, not the one the timestamps make.
+	if cls.judged[0] != [2]string{older, newer} {
+		t.Errorf("the pair was asked about as %v, want [%s %s]: a live edge's direction is the one the pair is judged in, and a REVERSED verdict has to be shown it or the wrong edge is the one that survives",
+			cls.judged[0], older, newer)
+	}
+	if res.OppositeLive != 1 {
+		t.Errorf("OppositeLive = %d, want 1: the scan's orientation was the reverse of the live edge and was refused", res.OppositeLive)
+	}
+	if len(classified) != 1 || !classified[0].Reclassified {
+		t.Fatalf("classified = %+v, want one row marked reclassified: this is a verdict about an edge in the store, not about a proposal", classified)
+	}
+	// The write landed in the edge's OWN direction, so the graph still holds one
+	// 'causes' edge and the pair is not a cycle.
+	edges := liveCausesEdges(t, store, newer, older)
+	if len(edges) != 1 || edges[0] != [2]string{newer, older} {
+		t.Errorf("live 'causes' edges = %v, want exactly [%s %s]: a CAUSES verdict re-affirmed the live edge rather than writing its reverse",
+			edges, newer, older)
+	}
+	// The row names the relation it acted on, so a report can tell a
+	// re-affirmation from a change of relation — which is the difference between
+	// "the edge held" and "the edge became something else".
+	if got := classified[0].ReclassifiedFrom; got != RelationCauses {
+		t.Errorf("ReclassifiedFrom = %q, want %q: the pair carried a live 'causes' edge, and that is the fact a report needs to know whether the verdict changed the graph's relation",
+			string(got), string(RelationCauses))
+	}
+	if res.ReverseLive != 0 {
+		t.Errorf("ReverseLive = %d, want 0: the write was in the live edge's own direction, so nothing opposed it", res.ReverseLive)
+	}
+	if res.Reclassified != 0 {
+		t.Errorf("Reclassified = %d, want 0: a CAUSES verdict on a live 'causes' edge re-affirmed it, and the relation did not change", res.Reclassified)
+	}
+}
+
+// guardedWriterSpy records which of the two link writers the pass reached for.
+// It is a behavioural probe, not a source check: the defect this file is about is
+// WHICH writer a verdict uses, and the two writers differ in nothing a caller
+// can otherwise observe except whether the graph can end up holding a pair in
+// both directions.
+type guardedWriterSpy struct {
+	*memory.Store
+	unopposed []string
+	judged    []string
+}
+
+func (s *guardedWriterSpy) CreateLinkUnopposed(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) (bool, error) {
+	s.unopposed = append(s.unopposed, relation)
+	return s.Store.CreateLinkUnopposed(ctx, sourceID, targetID, relation, strength, source, judgedAt)
+}
+
+func (s *guardedWriterSpy) CreateLinkJudged(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) error {
+	s.judged = append(s.judged, relation)
+	return s.Store.CreateLinkJudged(ctx, sourceID, targetID, relation, strength, source, judgedAt)
+}
+
+// TestTheCausesWriteIsNowGuarded replaces TestTheCausesWriteIsNotGuarded, and
+// it changes its mind for the reason #823 gives rather than for tidiness.
+//
+// #819 shipped the 'causes' write unguarded and said why: the direction override
+// was built from live SUPERSEDES edges, so a pair whose 'causes' edge ran against
+// the timestamps was re-proposed flipped on every pass, answered CAUSES, and
+// would have been refused on every one — a refusal that never converges, at a
+// classify call per pass, for as long as the edge lives. That trade was worse
+// than the contradiction it prevented, and the asymmetry was pinned from the
+// pass's side so a later change could not "tidy" the guard onto both relations
+// for the sake of symmetry.
+//
+// The override is now built from BOTH relations, so a pair is judged in the live
+// edge's own direction and the write is in that direction too. The refusal is
+// therefore the same one 'supersedes' has: a cross-process race that costs one
+// call, not a state the pass re-enters. And the write has to go through the
+// guarded writer, because the state it closes is exactly one the pass's own
+// reads cannot see — two passes, or a pass and a pre-#823 store.
+func TestTheCausesWriteIsNowGuarded(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	spy := &guardedWriterSpy{Store: store}
+
+	older := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{1, 0, 0}, "2026-01-01 00:00:00")
+	newer := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{0.98, 0.02, 0}, "2026-09-01 00:00:00")
+
+	res, _, err := Run(ctx, spy, &recordingCauses{}, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.CausesCreated != 1 {
+		t.Errorf("CausesCreated = %d, want 1: nothing opposed this write, and a guard that refuses an unopposed pair is not a guard", res.CausesCreated)
+	}
+	// The pair is unclaimed, so the guarded writer is the one that has to be
+	// reached for — and it wrote.
+	if len(spy.unopposed) != 1 || spy.unopposed[0] != string(RelationCauses) {
+		t.Errorf("guarded writer saw %v, want exactly [%q]: a 'causes' edge is a directed claim about a pair, and the second direction of one another writer has already claimed is the state this fix exists to prevent",
+			spy.unopposed, string(RelationCauses))
+	}
+	if len(spy.judged) != 0 {
+		t.Errorf("unguarded writer saw %v, want none: the unguarded spell is CreateLink's, and it is what the linker's 'related' edges and the bench seeders use",
+			spy.judged)
+	}
+	if edges := liveCausesEdges(t, store, older, newer); len(edges) != 1 || edges[0] != [2]string{older, newer} {
+		t.Errorf("live 'causes' edges = %v, want exactly [%s %s]: 'causes' is written older→newer", edges, older, newer)
+	}
+}
+
+// TestACausesVerdictReportsTheRelationItReplaced is the report's half, and it is
+// the reason Classified carries ReclassifiedFrom.
+//
+// A live 'causes' edge re-judged into SUPERSEDES is a change of relation: the
+// pair is now linked in the other relation, and the 'causes' row is gone. The
+// pass's own counter has to say so (Result.Reclassified) and the row has to carry
+// which relation it replaced, or a report prints the new 'supersedes' edge and
+// says nothing about the graph row that was removed — "0 reclassified" over a
+// pair whose relation changed is the same misleading line in a new place.
+func TestACausesVerdictReportsTheRelationItReplaced(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer := add(t, store, db, "kubernetes runs on 1.31 everywhere", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	older := add(t, store, db, "kubernetes cluster runs 1.27", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// A live 'causes' edge in the direction the timestamps agree with, stamped
+	// old so the pair is re-judged. The verdict is SUPERSEDES, so the relation
+	// changes.
+	if err := store.CreateLinkJudged(ctx, older, newer, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	retagBoth(t, store, newer, older)
+
+	res, classified, err := Run(ctx, store, &supersedesEverything{}, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(classified) != 1 {
+		t.Fatalf("classified = %+v, want one row", classified)
+	}
+	c := classified[0]
+	if c.ReclassifiedFrom != RelationCauses {
+		t.Errorf("ReclassifiedFrom = %q, want %q", string(c.ReclassifiedFrom), string(RelationCauses))
+	}
+	if c.Relation != RelationSupersedes {
+		t.Fatalf("Relation = %q, want %q", string(c.Relation), string(RelationSupersedes))
+	}
+	if res.Reclassified != 1 {
+		t.Errorf("Reclassified = %d, want 1: a 'causes' edge became a 'supersedes' edge, which is a change to what the graph holds", res.Reclassified)
+	}
+	if res.ReclassifiedNoWrite != 0 {
+		t.Errorf("ReclassifiedNoWrite = %d, want 0: this pair's --apply effect was a WRITE (the new edge), not purely destructive", res.ReclassifiedNoWrite)
+	}
+	// The graph, not the counters: the 'causes' edge is gone and the
+	// 'supersedes' one is in its place. Nothing demotes on a 'causes' edge, so
+	// this is a contradiction the pass settles rather than harm in flight.
+	if liveRelations(t, store, older)[string(RelationCauses)] {
+		t.Error("the 'causes' edge is still live after a SUPERSEDES verdict re-judged that pair")
+	}
+	if got := liveSupersedesEdges(t, store, newer, older); len(got) != 1 || got[0] != [2]string{newer, older} {
+		t.Errorf("live supersedes edges = %v, want exactly [%s %s]", got, newer, older)
+	}
+}
+
+// TestALiveCausesEdgeIsNeverCacheSkipped is the NEITHER cache's half, and it is
+// the third thing a live 'causes' edge did not get.
+//
+// A cache skip is treated as equivalent to a NEITHER verdict — a pair whose
+// endpoints' text still matches a stored verdict is not re-asked. For a pair a
+// live 'supersedes' edge names that is impossible, and for a pair a live
+// 'causes' edge names it was a live hole until #823: the cache skip asserted the
+// edge was not there, and the edge's direction is what decides how the pair is
+// judged, so a skipped pair is a pair the graph and the pass disagree about while
+// the pass reports itself quiet.
+//
+// The fixture is the one state where the two rules collide: a stored NEITHER
+// verdict for the SCAN's orientation (which is what a previous pass would have
+// cached, before it could see the edge), a live 'causes' edge in the other
+// direction, and endpoints that have moved since both — so skip-if-unchanged
+// releases the pair and the cache is the only thing that could skip it.
+func TestALiveCausesEdgeIsNeverCacheSkipped(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	const newerText = "the restore is being rewritten to run on one spindle"
+	const olderText = "the restore path on one spindle is safe and fast"
+	newer := add(t, store, db, newerText, []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	older := add(t, store, db, olderText, []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// The live 'causes' edge runs the other way, stamped old.
+	if err := store.CreateLinkJudged(ctx, newer, older, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	// The cache rows a previous pass would have left. BOTH orientations, and that
+	// is what makes this a test of the rule rather than of a lookup that happens
+	// to miss: the cache is keyed by the ORDERED pair, and the pair's orientation
+	// is exactly what #823 changed — a pass before it asked in the scan's order, a
+	// pass after it asks in the live edge's. A store that has been through both
+	// holds a row under each, and only the one the pass will look up is
+	// load-bearing, so seeding just the old one would let a regression hide behind
+	// a cache MISS.
+	//
+	// Each row carries the hashes of the notes ITS OWN key names — a row keyed
+	// (older, newer) records the older note's text under NewerHash — because the
+	// lookup reads them against the candidate's own orientation. Both rows are
+	// real hits: the retag below moves updated_at and changes no text, which is
+	// the whole point of a content-keyed cache and the reason a tag edit is the
+	// write that reaches it.
+	if err := store.MarkSupersedeNeither(ctx, "p", map[[2]string]memory.SupersedeCheck{
+		{newer, older}: {NewerHash: contentHash(newerText), OlderHash: contentHash(olderText)},
+		{older, newer}: {NewerHash: contentHash(olderText), OlderHash: contentHash(newerText)},
+	}); err != nil {
+		t.Fatalf("MarkSupersedeNeither: %v", err)
+	}
+	// Both endpoints have moved since, so nothing but the cache could hold this
+	// pair quiet.
+	retagBoth(t, store, newer, older)
+
+	cls := &recordingCauses{}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Skipped != 0 {
+		t.Errorf("Skipped = %d, want 0: a pair a live 'causes' edge names is never cache-skipped, because a cache skip is a NEITHER verdict and this pair is linked", res.Skipped)
+	}
+	if len(cls.judged) != 1 {
+		t.Fatalf("the pass asked about %d pair(s) %v, want exactly 1", len(cls.judged), cls.judged)
+	}
+	if cls.judged[0] != [2]string{older, newer} {
+		t.Errorf("asked about %v, want [%s %s]: the live edge's direction, not the orientation the cache row was keyed by", cls.judged[0], older, newer)
+	}
+}
+
+// TestASupersedesVerdictDropsTheCausesEdgeThatContradictsIt is the sweep a
+// verdict owes in BOTH directions, and it is a shape the pass used to leave
+// behind.
+//
+// A live 'supersedes' edge A→B says A is the newer note. A 'causes' edge A→B
+// says the opposite — its source is the CAUSE, so A is the older one and B the
+// effect. The two cannot both be true of the pair, and a SUPERSEDES verdict
+// denies the 'causes' claim whichever end it is written from: a pair whose newer
+// note retires the older one is not one note having caused the other.
+//
+// The pass has always swept the 'causes' edge in the direction a supersession
+// implies (older→newer), and the contradicting one was left in place — invisible
+// until the 'causes' edges became load-bearing and this shape became a pair the
+// reconciliation had to read rather than a row nobody looked at.
+func TestASupersedesVerdictDropsTheCausesEdgeThatContradictsIt(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer := add(t, store, db, "kubernetes runs on 1.31 everywhere", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	older := add(t, store, db, "kubernetes cluster runs 1.27", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// Both edges named by the same two ids, in the two relations' conventions, so
+	// they contradict. Stamped old so the pair is re-judged.
+	if err := store.CreateLinkJudged(ctx, newer, older, string(RelationSupersedes), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateLinkJudged(ctx, newer, older, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+
+	cls := &supersedesEverything{}
+	_, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(cls.judged) != 1 || cls.judged[0] != [2]string{newer, older} {
+		t.Fatalf("asked about %v, want exactly [%s %s]: the 'supersedes' edge decides the pair's direction, and it is the edge a contradiction has to be settled against",
+			cls.judged, newer, older)
+	}
+	if len(classified) != 1 {
+		t.Fatalf("classified = %+v, want one row", classified)
+	}
+	if got := classified[0].CausesDropped; got != 1 {
+		t.Errorf("CausesDropped = %d, want 1: the SUPERSEDES verdict denies the contradicting 'causes' claim, and the row has to say the run moved a second graph row", got)
+	}
+	if liveRelations(t, store, older)[string(RelationCauses)] {
+		t.Error("the contradicting 'causes' edge is still live after the verdict that denies it")
+	}
+	if got := liveSupersedesEdges(t, store, newer, older); len(got) != 1 || got[0] != [2]string{newer, older} {
+		t.Errorf("live supersedes edges = %v, want exactly [%s %s]: the edge the verdict re-affirmed is not the one it drops", got, newer, older)
+	}
+	// And the row is a RE-AFFIRMATION, not a withdrawal: the edge the pair was
+	// judged around survived, so a report must not call it withdrawn.
+	if classified[0].ReclassifiedFrom != RelationSupersedes || classified[0].Withdrawn {
+		t.Errorf("row = %+v, want a reclassified supersedes pair that was NOT withdrawn: %q vs %q, withdrawn %v",
+			classified[0], string(classified[0].ReclassifiedFrom), string(RelationSupersedes), classified[0].Withdrawn)
+	}
+}
+
+// TestACausesCycleIsSettledRatherThanFrozen is the case the pass does NOT
+// refuse, and the reason is in Result.Bidirectional.
+//
+// Two 'causes' edges in opposite directions assert that each of the pair's notes
+// caused the other, which is a contradiction rather than a cycle with harm in
+// flight: a 'supersedes' cycle is refused because both its edges demote one of
+// the pair's two memories, and no orientation of it can be judged into a state
+// worth keeping. Nothing demotes on a 'causes' edge.
+//
+// So this pair is judged ONCE, in the direction the timestamps give — the only
+// direction a pair whose two edges disagree has — and the ordinary verdict
+// converges it: an affirming verdict keeps the direction it was asked about and
+// drops the edge asserting the other, a denying one drops both. The alternative,
+// refusing it, would leave a contradiction no repair can reach, because
+// `ghost supersede --reassess` loads live 'supersedes'/'llm' edges and cannot see
+// a 'causes' one at all.
+func TestACausesCycleIsSettledRatherThanFrozen(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	// Two notes whose timestamps DO order them, so the pair is judgeable.
+	first := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	second := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// Both directions, the state a pass before #823 could leave.
+	for _, dir := range [][2]string{{first, second}, {second, first}} {
+		if err := store.CreateLinkJudged(ctx, dir[0], dir[1], string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cls := &recordingCauses{}
+	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Bidirectional != 0 {
+		t.Errorf("Bidirectional = %d, want 0: this is a 'causes' cycle, and the refusal is for a 'supersedes' one — refusing this would leave a contradiction `--reassess` cannot see",
+			res.Bidirectional)
+	}
+	if len(cls.judged) != 1 {
+		t.Fatalf("asked about %d pair(s) %v, want exactly 1: a cycle is ONE question", len(cls.judged), cls.judged)
+	}
+	// Asked in the direction the timestamps give, since neither stored edge is
+	// preferred over the other.
+	if cls.judged[0] != [2]string{first, second} {
+		t.Errorf("asked about %v, want [%s %s]: the two 'causes' edges disagree, so the only direction available is the one the timestamps give",
+			cls.judged[0], first, second)
+	}
+	edges := liveCausesEdges(t, store, first, second)
+	if len(edges) != 1 || edges[0] != [2]string{second, first} {
+		t.Errorf("live 'causes' edges = %v, want exactly [%s %s]: the verdict keeps the direction it was asked about and drops the edge asserting the other",
+			edges, second, first)
+	}
+	if len(classified) != 1 || !classified[0].Withdrawn {
+		t.Errorf("classified = %+v, want one row marked withdrawn: the run dropped a live graph row and the row has to say so", classified)
+	}
+	// The standing edge carries THIS verdict's stamp, and that is the ordering
+	// inside the apply block rather than an incidental detail: settled by writing
+	// first and sweeping after, the guarded write finds the cycle's other half
+	// live, refuses (correctly — it is the reverse of what it is about to write),
+	// and the sweep then drops that half, leaving the OLD edge with its OLD stamp.
+	// The graph looks the same and the pair is re-billed on the next pass for ever,
+	// which is the re-bill this whole change is about arriving through the back
+	// door.
+	var standing memory.Link
+	for _, l := range mustGetLinks(t, store, second) {
+		if l.Relation == string(RelationCauses) {
+			standing = l
+		}
+	}
+	if standing.CreatedAt != "2026-09-01 00:00:00" {
+		t.Errorf("the standing 'causes' edge is stamped %q, want this verdict's judgement stamp 2026-09-01 00:00:00: an edge left holding an old stamp is a pair the next pass asks about again",
+			standing.CreatedAt)
+	}
+
+	// And it CONVERGES: a second pass finds the pair in one direction, holds it
+	// quiet, and spends nothing. A rule that asked the question every pass would
+	// pass every assertion above and still be the re-bill #823 is about.
+	quiet := &recordingCauses{}
+	second_res, _, err := Run(ctx, store, quiet, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run (second): %v", err)
+	}
+	if len(quiet.judged) != 0 {
+		t.Errorf("the second pass asked about %v, want nothing: the pair is now claimed in ONE direction with neither endpoint moved since the verdict, which is what skip-if-unchanged reads",
+			quiet.judged)
+	}
+	if second_res.Bidirectional != 0 || second_res.Unoriented != 0 {
+		t.Errorf("the second pass reported Bidirectional=%d Unoriented=%d, want 0/0: a settled pair is an ordinary quiet one",
+			second_res.Bidirectional, second_res.Unoriented)
+	}
+}
+
+// mustGetLinks reads one memory's live links or fails the test, so an assertion
+// about which edge survived a pass does not quietly pass against an empty read.
+func mustGetLinks(t *testing.T, store *memory.Store, id string) []memory.Link {
+	t.Helper()
+	links, err := store.GetLinks(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetLinks(%s): %v", id, err)
+	}
+	return links
+}

@@ -46,20 +46,20 @@
 //
 // Fresh NEITHER verdicts are cached by pair and both endpoints' content hashes
 // (supersede_checked, schema v8): unchanged fresh pairs are skipped on later
-// passes — a cache skip is equivalent to a NEITHER verdict, so a stale
-// 'causes' link is not invalidated on that pass if the endpoints' text reverted
-// to a previously cached version (graph-only staleness; ranking consumes only
-// 'supersedes') — while live-link pairs (reclassify) are still validated each
-// pass. A REVERSED verdict is never cached, or the pair would be skipped for the
+// passes. A cache skip is equivalent to a NEITHER verdict, which is what bounds
+// it — so a pair the graph is linked in EITHER relation is never skipped, live
+// edge or not (#823; until then only a 'supersedes' edge was exempt, and a
+// 'causes' edge could be left stale by a skipping pass under a bargain this
+// package no longer makes). A REVERSED verdict is never cached, or the pair would
+// be skipped for the
 // life of its text — so a converged project makes zero classify calls for its
 // fresh candidates EXCEPT reversed ones, which are re-asked on every pass until
 // the verdict changes. That is a deliberate billable repeat per reversed pair,
 // paid so the refusal is never frozen; it is not zero calls overall.
-// Run() also re-classifies existing 'supersedes'/'llm' links whose endpoints
-// have changed since the link was written, invalidating the link (flipping it
-// to 'causes', or dropping it on a reversed verdict) when the verdict no longer
-// matches. The pass is
-// re-runnable and self-heals after reflection's cascade-delete of links, like
+// Run() also re-classifies existing 'llm' links — of EITHER relation (#823) —
+// whose endpoints have changed since the link was written, invalidating the link
+// (flipping it to the other relation, or dropping it on a reversed verdict) when
+// the verdict no longer matches. The pass is re-runnable and self-heals after reflection's cascade-delete of links, like
 // the cosine linking worker rebuilds 'related' edges — though reclassification
 // of existing links only fires for a pair whose endpoint content actually
 // changed after the link was written; pairs whose link predates this 4-way
@@ -409,15 +409,183 @@ func orient(a, b memory.Memory) (newer, older memory.Memory, ok bool) {
 	return memory.Memory{}, memory.Memory{}, false
 }
 
+// liveEdge is one live directed edge, read as a CLAIM about which of its two
+// memories is the newer one. It is the unit the reconciliation below reasons
+// about, and it exists because the two relations are written in OPPOSITE
+// directions: a 'supersedes' edge runs newer→older and a 'causes' edge
+// older→newer, so a shape carrying (source, target) directly would assert two
+// different directions for one pair depending on which relation the read came
+// from. Normalising at the read is what lets every rule below be about the PAIR's
+// direction rather than about a relation's.
+//
+// `source`/`target` are kept alongside the normalised pair because the one log
+// line about two disagreeing orientations (#804) has to say which id came from
+// where, and re-deriving them from the relation would be a second spelling of the
+// convention this type exists to hold in one place.
+type liveEdge struct {
+	relation Relation
+	newer    string
+	older    string
+	source   string
+	target   string
+	// stamp is the edge's own created_at, which is the judgement freshness
+	// skip-if-unchanged reads (see CreateLinkJudged). It is per-edge, so a pair
+	// claimed by more than one edge has more than one, and the quiet below is
+	// taken on the NEWEST of them: the question that quiet asks is whether
+	// anything moved since the graph last described this pair, and the newest
+	// claim is the last time it did.
+	stamp    string
+	strength float32
+}
+
+// claimsFor reads a pair's live edges as the directions they assert, in the
+// convention each relation is WRITTEN in. A relation the pass did not ask for is
+// skipped rather than guessed at, so a store holding a third relation on the pair
+// cannot make this read into a claim nobody asserted.
+func claimsFor(links []memory.Link) []liveEdge {
+	out := make([]liveEdge, 0, len(links))
+	for _, l := range links {
+		e := liveEdge{source: l.SourceID, target: l.TargetID, stamp: l.CreatedAt, strength: l.Strength}
+		switch l.Relation {
+		case string(RelationSupersedes):
+			e.relation, e.newer, e.older = RelationSupersedes, l.SourceID, l.TargetID
+		case string(RelationCauses):
+			e.relation, e.newer, e.older = RelationCauses, l.TargetID, l.SourceID
+		default:
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// pairDirection decides which way round a pair holding live edges is judged, and
+// which relation's edge says so. It is the whole of the reconciliation in one
+// function because the three cases are three different answers, not one answer
+// with a flag.
+//
+//  1. TWO 'supersedes' edges disagreeing is a CYCLE, and it is refused rather than
+//     judged. Both edges demote one of the pair's two memories, neither withdraws
+//     the other, and no orientation of it can be judged into a state worth keeping
+//     (#778). The sweeps below cannot rescue it either: they are scoped to the
+//     OTHER relation, so a SUPERSEDES verdict in one direction re-affirms that
+//     half and leaves its partner exactly as demoting as before.
+//
+//  2. Otherwise a 'supersedes' edge's direction wins, even where a 'causes' edge
+//     contradicts it. That is not a cycle: only one of the two edges demotes, and
+//     a verdict settles both — an affirming one writes the relation it was asked
+//     about and drops the other's edge in EITHER direction, a denying one drops
+//     both relations. Refusing the pair instead would leave a contradiction that
+//     the ordinary pass used to clear for free, and hand it to an operator.
+//
+//  3. Otherwise the 'causes' edges' direction wins, and a pair whose 'causes'
+//     edges DISAGREE has no stored direction at all: it is a 'causes' cycle, the
+//     caller judges it in the timestamps' direction, and the verdict settles it.
+//
+// A pair with no live edge returns ok=false with no relation, which is the
+// ordinary fresh case and not a failure — the two refusals above are counted by
+// the caller, because only it knows which of them it hit.
+func pairDirection(edges []liveEdge) (claim liveEdge, ok bool) {
+	if len(edges) == 0 {
+		return liveEdge{}, false
+	}
+	var sup, cau liveEdge
+	haveSup, haveCau := false, false
+	for _, e := range edges {
+		switch e.relation {
+		case RelationSupersedes:
+			if !haveSup {
+				sup, haveSup = e, true
+				continue
+			}
+			if sup.newer != e.newer || sup.older != e.older {
+				// Case 1: a 'supersedes' cycle.
+				return liveEdge{}, false
+			}
+			if e.stamp > sup.stamp {
+				sup = e
+			}
+		case RelationCauses:
+			if !haveCau {
+				cau, haveCau = e, true
+				continue
+			}
+			if cau.newer != e.newer || cau.older != e.older {
+				// Case 3, second half: a 'causes' cycle, and there is no single
+				// stored direction to prefer. Reporting it as "no direction" is
+				// the WHOLE of the difference from the first half of this case,
+				// and returning the first edge's direction instead would hand
+				// the pair's chronology to whichever row the query returned
+				// first — LinksByRelationSource has no ORDER BY, so that is a
+				// coin flip on a pair of hex ids, which is the #641 harm wearing
+				// a different hat. The caller tells the two apart with
+				// pairIsSupersedesCycle and judges this one in the timestamps'
+				// direction instead.
+				return liveEdge{}, false
+			}
+			if e.stamp > cau.stamp {
+				cau = e
+			}
+		}
+	}
+	switch {
+	case haveSup:
+		// Case 2. A contradicting 'causes' edge is deliberately not consulted.
+		return sup, true
+	case haveCau:
+		// Case 3, first half. A pair the timestamps disagree with about is
+		// judged in the edge's own direction, so a REVERSED verdict reaches the
+		// edge that is actually there.
+		return cau, true
+	}
+	return liveEdge{}, false
+}
+
+// pairIsSupersedesCycle reports whether a pair holds two live 'supersedes' edges
+// in opposite directions, which is the one shape this pass refuses to judge
+// (pairDirection, case 1). It is asked separately because a causes cycle and a
+// supersedes cycle are both "no single stored direction" and only one of them is
+// the demoting cycle the refusal is for.
+func pairIsSupersedesCycle(edges []liveEdge) bool {
+	var first liveEdge
+	seen := false
+	for _, e := range edges {
+		if e.relation != RelationSupersedes {
+			continue
+		}
+		if !seen {
+			first, seen = e, true
+			continue
+		}
+		if first.newer != e.newer || first.older != e.older {
+			return true
+		}
+	}
+	return false
+}
+
+// claimsHold reports whether the pass read a live edge of this relation in this
+// direction on this pair. The apply block's extra sweeps are gated on it, and
+// they have to be: each is a second write in the run, and one that can only ever
+// move a row the pass has already seen is a write worth making only then.
+func claimsHold(claims map[pairKey][]liveEdge, newer, older string, relation Relation) bool {
+	for _, e := range claims[newPairKey(newer, older)] {
+		if e.relation == relation && e.newer == newer && e.older == older {
+			return true
+		}
+	}
+	return false
+}
+
 // Classified pairs a Candidate with the verdict Run() reached for it — used
 // by callers (the CLI) to report the actual relation written, not just that
 // "something" was confirmed.
 //
 // Reclassified and Withdrawn are what make a row about an EXISTING edge rather
 // than about a proposal, and they are two fields because they are two facts a
-// report must not merge. Reclassified says the pair carried a live 'supersedes'
-// edge, so any verdict but SUPERSEDES withdrew something the graph already
-// held; Withdrawn says this call's invalidation actually moved that edge, which
+// report must not merge. Reclassified says the pair carried a live edge, so any
+// verdict but a re-affirmation of THAT edge withdrew something the graph already
+// held; Withdrawn says this call's invalidation actually moved it, which
 // is 0 in a dry run and can be lower than the count under --apply when a
 // concurrent pass took the edge first. A row that carried only the verdict was
 // indistinguishable from a fresh pair the pass declined (#785), so a caller
@@ -434,14 +602,30 @@ type Classified struct {
 	// set out. Empty only when an endpoint is missing from that snapshot, which
 	// the existence check has already refused by then.
 	JudgedAt string
-	// Reclassified marks a pair the graph already asserted: a live 'supersedes'
-	// edge decided which way round it was judged, so the verdict is about an
-	// edge in the store and not about a proposal.
+	// Reclassified marks a pair the graph already asserted: a live edge decided
+	// which way round it was judged, so the verdict is about an edge in the store
+	// and not about a proposal. That edge is 'supersedes' or 'causes' (#823), so
+	// the relation it carried is named rather than assumed.
 	Reclassified bool
+	// ReclassifiedFrom is the relation the live edge carried, and empty for a
+	// fresh pair. It is what tells a RE-AFFIRMATION from a CHANGE, and it exists
+	// because the relation became load-bearing rather than incidental.
+	//
+	// While a live edge could only be 'supersedes', "the pair held a live edge"
+	// and "the pair held a live 'supersedes' edge" were the same fact and a
+	// verdict that was not SUPERSEDES was necessarily a change. A live 'causes'
+	// edge makes the second reading fail in both directions: a CAUSES verdict on
+	// such a pair re-affirms it, and a SUPERSEDES verdict on it REPLACES it.
+	// Counting the first as a change (or the second as a re-affirmation) makes
+	// Result.Reclassified mean whichever of the two the pass happened to take,
+	// which is the property every counted outcome in this file is shaped to
+	// avoid.
+	ReclassifiedFrom Relation
 	// Withdrawn is true only when --apply invalidated that live edge in THIS
-	// run. It is false in a dry run, and false under --apply when a concurrent
-	// pass withdrew the edge first — the same distinction Reassess draws, for
-	// the same reason: the report must not claim a graph change it did not make.
+	// run, whichever relation it carried. It is false in a dry run, and false
+	// under --apply when a concurrent pass withdrew the edge first — the same
+	// distinction Reassess draws, for the same reason: the report must not claim
+	// a graph change it did not make.
 	Withdrawn bool
 	// OpposedLive marks a row whose edge this run did NOT write because the
 	// pair's opposite direction was already live when the write was attempted
@@ -451,9 +635,9 @@ type Classified struct {
 	//
 	// It is false in a dry run, where nothing is attempted and so nothing can
 	// be opposed: a dry run's promise is about the verdict, and the race is a
-	// property of the write. Only a SUPERSEDES row can carry it, because only
-	// that write is guarded — and a reclassified row cannot, since the live
-	// edge decides the direction a reclassified pair is asked about, so its
+	// property of the write. Only an AFFIRMATIVE verdict can carry it, because
+	// only those writes are guarded — and a reclassified row cannot, since the
+	// live edge decides the direction a reclassified pair is asked about, so its
 	// write is in the edge's own direction and nothing opposes it.
 	OpposedLive bool
 	// TargetProjectID is the project the target lives in, and the follow-up the
@@ -461,11 +645,11 @@ type Classified struct {
 	// against: a resolve repair's pool is filtered by project, so a repair scoped
 	// to the wrong one silently clears nothing. See RepairableTargets.
 	TargetProjectID string
-	// CausesDropped is how many live 'causes' edges this pair's withdrawal ALSO
-	// removed, and it is the second graph mutation a denying verdict performs —
-	// Reassess reports it on the row for the same reason, and a report that
-	// names the supersedes edge and not the causes edge says the run moved one
-	// row when it moved two.
+	// CausesDropped is how many live 'causes' edges this pair's verdict ALSO
+	// removed, and it is the second graph mutation a verdict performs — Reassess
+	// reports it on the row for the same reason, and a report that names the
+	// supersedes edge and not the causes edge says the run moved one row when it
+	// moved two.
 	//
 	// It counts only what --apply actually invalidated, so it is 0 in a dry run
 	// and there is NO prediction for it: reading the pair's live 'causes' edges to
@@ -487,11 +671,15 @@ type Result struct {
 	Confirmed     int // SUPERSEDES verdicts
 	Created       int // supersedes links written (0 in dry-run)
 	CausesCreated int // CAUSES verdicts (causes links written when apply)
-	Reclassified  int // existing links whose relation changed or was invalidated
-	StaleSkipped  int
-	Skipped       int // fresh pairs skipped via the NEITHER cache
-	Unclassified  int // pairs skipped because the classifier answer was unparseable
-	Reversed      int // REVERSED verdicts: refused, never written
+	// Reclassified counts the pairs whose live edge's RELATION changed, or whose
+	// live edge was invalidated — a verdict that re-affirmed the relation the
+	// pair already held is not one of them, and the distinction is what
+	// Classified.ReclassifiedFrom is for.
+	Reclassified int // existing links whose relation changed or was invalidated
+	StaleSkipped int
+	Skipped      int // fresh pairs skipped via the NEITHER cache
+	Unclassified int // pairs skipped because the classifier answer was unparseable
+	Reversed     int // REVERSED verdicts: refused, never written
 	// Vetoed counts pairs the deterministic imperative veto settled as
 	// no-supersedes-edge with no harness call (see VetoSupersede). They are
 	// counted rather than silently dropped, because a run that declines work it
@@ -526,8 +714,9 @@ type Result struct {
 	// direction invented from a hash is the #641 harm wearing a tiebreak.
 	Unoriented int
 	// OppositeLive counts the pairs whose fresh proposal was the REVERSE of a
-	// live 'supersedes' edge, and whose fresh orientation the pass therefore
-	// refused (#778). It counts REFUSED PROPOSALS, not classifications: a
+	// live edge — 'supersedes' or 'causes' (#823) — and whose fresh orientation
+	// the pass therefore refused (#778). It counts REFUSED PROPOSALS, not
+	// classifications: a
 	// refused pair still has to survive the endpoint-existence check,
 	// skip-if-unchanged (a live edge whose endpoints have not moved since it was
 	// last judged is not re-judged, whichever way the scan proposed it), the
@@ -540,17 +729,29 @@ type Result struct {
 	// Candidate/Reclassified totals above. A proposal that AGREED with the edge
 	// is not counted at all: nothing was refused.
 	OppositeLive int
-	// Bidirectional counts the pairs the graph already claims in BOTH
-	// directions — the cycle a pass before #778 could write, left in place for
+	// Bidirectional counts the pairs the graph already claims in BOTH directions
+	// in 'supersedes' — the cycle a pass before #778 could write, left in place for
 	// `--reassess` to withdraw. This pass refuses the pair outright: it judges
 	// nothing, writes nothing, and withdraws nothing (that is
 	// `ghost supersede <project> --reassess`, the repair path), because a cycle
 	// demotes both endpoints and no orientation of it can be judged into a
 	// state worth keeping.
+	//
+	// 'supersedes' and only 'supersedes' — and that is not a gap in the count but
+	// the consequence of the harm the rule exists for. A 'causes' cycle demotes
+	// nothing, and neither of its two edges can be re-read as a claim about which
+	// note is current, so the ordinary pass settles such a pair instead of
+	// refusing it: it is judged ONCE in the direction the timestamps give (the
+	// only direction a pair claimed both ways has) and whichever verdict comes
+	// back converges, because an affirming verdict writes that direction and drops
+	// the other and a denying one drops both. A refused pair is a pair nothing
+	// will ever judge, and `--reassess` cannot reach a 'causes' edge at all, so
+	// refusing one would leave a contradiction in the graph with a repair line
+	// pointing at a command that cannot see it.
 	Bidirectional int
-	// ReverseLive counts the 'supersedes' edges this run had a verdict for and
-	// did NOT write, because the pair's opposite direction was already live by
-	// the time the write reached the store — a concurrent `ghost supersede
+	// ReverseLive counts the edges this run had a verdict for and did NOT write,
+	// because the pair's opposite direction was already live by the time the
+	// write reached the store — a concurrent `ghost supersede
 	// --apply` that read the same unclaimed pair, scanned it the other way round,
 	// and wrote first (#806). It is the write-time twin of OppositeLive: that one
 	// is the graph's direction beating this pass's SCAN, this one is the graph
@@ -565,13 +766,15 @@ type Result struct {
 	// direction — and `ghost supersede --reassess` if the two disagree about
 	// which of them is current.
 	//
-	// 'supersedes' and only 'supersedes'. The guarded writer refuses the second
-	// direction of a pair, and a 'causes' pair cannot be settled by refusing: the
-	// direction override is built from live supersedes edges, so such a pair is
-	// re-proposed the other way round on every pass and would be refused on every
-	// one, forever. Nothing demotes on a 'causes' edge, so the second direction
-	// is left writable there and the trap is not entered — see the CAUSES branch
-	// of the apply block for the whole of it.
+	// BOTH relations since #823. The guarded writer refuses the second direction
+	// of a pair whatever the relation is, and a pair can only reach the guarded
+	// write in the direction the live edge asserts — so the refusal is a one-off
+	// race for 'causes' exactly as it is for 'supersedes'. Before #823 the
+	// 'causes' write went through the unguarded spell, because with no direction
+	// override for that relation the pair was re-proposed in the flipped direction
+	// on every pass and a guard would have refused it on every pass, forever: a
+	// permanent paid refusal is worse than the contradiction it prevents, which
+	// is why the override and the guard had to land together.
 	ReverseLive int
 	// Consensus is the number of classification passes this run made over the
 	// candidate set: 1 for the ordinary pass, N for a consensus-gated one. It is
@@ -847,15 +1050,14 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // edit landing between them must not be covered by a stamp written after it.
 // So an edge costs one call per endpoint EDIT rather than one per pass forever. Fresh candidates
 // are classified unless both endpoints' content still matches a cached NEITHER
-// verdict (the content-keyed NEITHER cache, schema v8): a cache skip is treated
-// as a NEITHER verdict, so if a 'causes' link existed and the endpoints' text
-// later reverted to a previously cached version, that link is not invalidated
-// on the skipping pass — graph-only staleness, since ranking consumes only
-// 'supersedes'. Reclassify candidates are never cache-skipped, so a live edge
-// whose endpoints HAVE moved is still judged on every pass and self-healing is
-// untouched — and a pair a live edge names is never cache-skipped for the same
-// reason, whichever source proposed its direction, since the edge still has to
-// keep self-healing. Cache rows are recorded on apply only — dry-run stays
+// verdict (the content-keyed NEITHER cache, schema v8). A cache skip is treated
+// as a NEITHER verdict, and that is the whole of its warrant: it may not stand in
+// for one on a pair the graph is linked in EITHER relation, so a pair a live
+// edge names is never cache-skipped, whichever source proposed its direction and
+// whichever relation the edge is (#823) — the graph-only-staleness bargain this
+// pass used to make, and has withdrawn. Reclassify candidates are therefore never
+// cache-skipped, so a live edge whose endpoints HAVE moved is still judged on
+// every pass and self-healing is untouched. Cache rows are recorded on apply only — dry-run stays
 // side-effect-free — and cascade away with their memories via the FK.
 //
 // Pairs whose endpoints are replaced by a concurrent reflect pass (the stop
@@ -907,7 +1109,10 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // counted and on the report, and each a refusal rather than a guess:
 //
 //   - One pass classifies a pair at most once, in the direction the GRAPH
-//     asserts whenever a live edge names one. The edge's direction is the one a
+//     asserts whenever a live edge names one — and a live edge is 'supersedes'
+//     OR 'causes' (#823), read through liveEdge so that the two relations'
+//     opposite writing conventions are normalised before the rules apply. The
+//     edge's direction is the one a
 //     REVERSED verdict has to be shown, because that is the wrong edge --reassess
 //     and this pass's own withdrawal both have to reach. A scan proposal that
 //     contradicted it is refused AS A DIRECTION and counted
@@ -917,10 +1122,13 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 //     A scan proposal that AGREED with it is not counted and buys nothing either,
 //     because the edge already describes the pair and the edge's stamp — not the
 //     scan's vectors — is what says whether it still holds (#787).
-//   - A pair the graph already claims in BOTH directions is refused outright
-//     (Result.Bidirectional): no third direction exists, so no orientation of it
-//     can be judged into a state worth keeping, and the repair is the withdrawal
-//     pass, not a verdict.
+//   - A pair the graph already claims in BOTH directions in 'supersedes' is
+//     refused outright (Result.Bidirectional): no third direction exists, both
+//     edges demote one of the pair's two memories, and the repair is the
+//     withdrawal pass, not a verdict. A 'causes' cycle is NOT refused: nothing
+//     demotes on a 'causes' edge and --reassess cannot see one, so it is judged
+//     once in the timestamps' direction and the ordinary apply block converges
+//     it. See pairDirection and Result.Bidirectional.
 //   - A fresh pair whose rows tie on updated_at AND created_at is not proposed at
 //     all (Result.Unoriented), because a bulk import stamps a whole batch with
 //     one timestamp and the only remaining "chronology" is a pair of hex ids. A
@@ -1022,14 +1230,27 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 	// wants precisely on the fully-vetoed path.
 	res := Result{Unscored: sel.Unscored, Unoriented: sel.Unoriented, Consensus: passes}
 
-	existingLinks, err := store.LinksByRelationSource(ctx, projectID, string(RelationSupersedes), "llm")
+	// BOTH relations, read before the scan is reconciled against anything. A
+	// 'causes' edge was absent from this read until #823, and every rule below
+	// was written as though the only live edge a pair could carry was a
+	// 'supersedes' one — so a pair whose 'causes' edge disagreed with the
+	// timestamps was re-proposed in the flipped direction on every pass, paid a
+	// classify call for the re-ask, and answered CAUSES again, which wrote the
+	// second direction of the pair. Reading the two together is the fix's whole
+	// shape: the graph's direction wins whichever relation asserted it, and the
+	// write guard (below) only becomes safe once it does.
+	liveLinks, err := store.LinksByRelationSource(ctx, projectID, string(RelationSupersedes), "llm")
 	if err != nil {
 		return res, nil, fmt.Errorf("load existing supersedes links: %w", err)
+	}
+	causeLinks, err := store.LinksByRelationSource(ctx, projectID, string(RelationCauses), "llm")
+	if err != nil {
+		return res, nil, fmt.Errorf("load existing causes links: %w", err)
 	}
 
 	var lookupIDs []string
 	seenID := make(map[string]bool)
-	for _, l := range existingLinks {
+	for _, l := range append(append([]memory.Link{}, liveLinks...), causeLinks...) {
 		for _, id := range []string{l.SourceID, l.TargetID} {
 			if !seenID[id] {
 				seenID[id] = true
@@ -1055,14 +1276,24 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 	// cannot decline a direction wrote both edges, a cycle whose two
 	// SupersedePenalties demote BOTH endpoints. Keyed unordered, the two sources
 	// meet: a pair is on the schedule exactly once.
-	liveByPair := make(map[pairKey][]memory.Link, len(existingLinks))
-	for _, l := range existingLinks {
-		key := newPairKey(l.SourceID, l.TargetID)
-		liveByPair[key] = append(liveByPair[key], l)
+	//
+	// `claims` is the graph's half and it is kept in the apply block below, where
+	// a sweep is only worth a second write if the pass has already read the row
+	// it would move.
+	claims := make(map[pairKey][]liveEdge, len(liveLinks)+len(causeLinks))
+	claimOrder := make([]pairKey, 0, len(liveLinks)+len(causeLinks))
+	for _, links := range [][]memory.Link{liveLinks, causeLinks} {
+		for _, l := range links {
+			key := newPairKey(l.SourceID, l.TargetID)
+			if _, ok := claims[key]; !ok {
+				claimOrder = append(claimOrder, key)
+			}
+			claims[key] = append(claims[key], claimsFor([]memory.Link{l})...)
+		}
 	}
 	freshByPair := make(map[pairKey]Candidate, len(fresh))
-	order := make([]pairKey, 0, len(fresh)+len(existingLinks))
-	queued := make(map[pairKey]bool, len(fresh)+len(existingLinks))
+	order := make([]pairKey, 0, len(fresh)+len(claimOrder))
+	queued := make(map[pairKey]bool, len(fresh)+len(claimOrder))
 	for _, c := range fresh {
 		key := newPairKey(c.NewerID, c.OlderID)
 		freshByPair[key] = c
@@ -1071,47 +1302,109 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			order = append(order, key)
 		}
 	}
-	for _, l := range existingLinks {
-		key := newPairKey(l.SourceID, l.TargetID)
+	for _, key := range claimOrder {
 		if !queued[key] {
 			queued[key] = true
 			order = append(order, key)
 		}
 	}
 
-	// livePair names the pairs a live 'supersedes' edge already asserts a
-	// direction for, and it is what separates a reclassification from a fresh
-	// proposal from here on. The live edge's DIRECTION is the one the pair is
-	// judged in, whatever the scan's timestamps say: the edge is the claim the
-	// graph already makes, and judging the pair in that direction is what lets a
-	// REVERSED verdict reach the wrong edge and withdraw it (#641) instead of
-	// confirming the reverse one and leaving the wrong edge in place.
-	livePair := make(map[pairKey]bool, len(order))
+	// livePair names the pairs a live edge already asserts a direction for, and it
+	// is what separates a reclassification from a fresh proposal from here on.
+	// The live edge's DIRECTION is the one the pair is judged in, whatever the
+	// scan's timestamps say: the edge is the claim the graph already makes, and
+	// judging the pair in that direction is what lets a REVERSED verdict reach the
+	// wrong edge and withdraw it (#641) instead of confirming the reverse one and
+	// leaving the wrong edge in place.
+	livePair := make(map[pairKey]Relation, len(order))
 	all := make([]Candidate, 0, len(order))
 	for _, key := range order {
-		links := liveByPair[key]
-		if len(links) > 1 {
-			// Both directions of one pair are already live, which is the state
-			// #778's own bidirectional write leaves behind. There is no third
-			// direction to try, so no orientation of this pair can be judged into
-			// a state worth keeping: a SUPERSEDES would re-affirm one half of a
-			// cycle and a NEITHER/REVERSED would drop an edge whose partner stays.
-			// Refused, counted, and reported with the repair to run — this pass
-			// creates links, and withdrawing one is `ghost supersede --reassess`.
-			res.Bidirectional++
-			if logger != nil {
-				logger.Info("supersede: refusing a pair the graph claims in both directions (ghost supersede --reassess --apply withdraws one)",
-					"newer", links[0].SourceID, "older", links[0].TargetID)
-			}
-			continue
-		}
+		edges := claims[key]
 		cand, isFresh := freshByPair[key]
-		if len(links) == 0 {
+		if len(edges) == 0 {
 			all = append(all, cand) // a fresh pair, in the scan's own direction
 			continue
 		}
-		l := links[0]
-		livePair[key] = true
+		l, ok := pairDirection(edges)
+		if !ok {
+			if pairIsSupersedesCycle(edges) {
+				// A 'supersedes' CYCLE, the state #778's own bidirectional
+				// write leaves behind and the one shape this pass refuses to
+				// judge: both edges demote one of the pair's two memories,
+				// neither withdraws the other, and no orientation of it can be
+				// judged into a state worth keeping. Refused, counted, and
+				// reported with the repair to run — this pass creates links, and
+				// withdrawing one is `ghost supersede --reassess`, which is the
+				// one repair that can see a 'supersedes' edge.
+				res.Bidirectional++
+				if logger != nil {
+					logger.Info("supersede: refusing a pair the graph claims in both directions (ghost supersede --reassess --apply withdraws one)",
+						"newer", edges[0].source, "older", edges[0].target)
+				}
+				continue
+			}
+			// A 'causes' CYCLE, and NOT refused — see pairDirection case 1 for
+			// why the argument that refuses a 'supersedes' cycle does not reach
+			// this one, and case 3 for why refusing it would be worse still:
+			// `--reassess` loads live 'supersedes'/'llm' edges and can never see
+			// a 'causes' one, so a refusal here is a contradiction with no
+			// repair. The pair is judged ONCE in the direction the timestamps
+			// give — the only direction a pair with no single stored direction
+			// has — and the ordinary apply block converges it: an affirming
+			// verdict writes that direction and drops the other, a denying one
+			// drops both.
+			//
+			// It is deliberately NOT held quiet. A quiet asserts that the
+			// endpoints have not moved since the graph last described the pair,
+			// and this pair's edges disagree with each other; freezing that is
+			// the one outcome with no repair at all.
+			newerMem, okNewer := memByID[edges[0].newer]
+			olderMem, okOlder := memByID[edges[0].older]
+			if !okNewer || !okOlder {
+				continue // an endpoint no longer exists
+			}
+			cm, co, oriented := orient(newerMem, olderMem)
+			if !oriented {
+				// The #778 tie, and a refusal here for the same reason it is
+				// one in a scan: both rows carry no chronology at all, so there
+				// is no direction to ask "which is newer" about. It is counted
+				// as Unoriented rather than as a refusal of its own because it
+				// is the same finding — a pair with no knowable direction —
+				// reached from the live edges instead of from the scan. A live
+				// 'supersedes' link on a tied pair IS still re-judged, and this
+				// is the one shape in the rule set that is not, which is why the
+				// report line has to say which.
+				res.Unoriented++
+				if logger != nil {
+					logger.Info("supersede: a pair with 'causes' edges in both directions whose two rows share both timestamps; no direction to judge it in",
+						"a", edges[0].newer, "b", edges[0].older)
+				}
+				continue
+			}
+			if isFresh && (cand.NewerID != cm.ID || cand.OlderID != co.ID) {
+				// Barely possible, and counted rather than assumed away:
+				// `orient` reads the rows this pass loaded and
+				// SelectCandidates read its own snapshot, so a write landing
+				// between the two reads is the only way they disagree — and the
+				// count is what says which orientation a verdict will be read
+				// as.
+				res.OppositeLive++
+				if logger != nil {
+					logger.Info("supersede: scan proposed the reverse of the direction a 'causes' cycle was oriented in; keeping the cycle's own orientation",
+						"link_relation", string(RelationCauses),
+						"link_source", edges[0].source, "link_target", edges[0].target,
+						"scan_newer", cand.NewerID, "scan_older", cand.OlderID)
+				}
+			}
+			livePair[key] = RelationCauses
+			all = append(all, Candidate{
+				NewerID: cm.ID, NewerContent: cm.Content, NewerCreatedAt: cm.CreatedAt,
+				OlderID: co.ID, OlderContent: co.Content, OlderCreatedAt: co.CreatedAt,
+				Similarity: edges[0].strength,
+			})
+			continue
+		}
+		livePair[key] = l.relation
 		// The live edge decides the pair's DIRECTION. A scan proposal that
 		// contradicts it is refused as a direction and counted; a proposal that
 		// AGREES with it is not refused — and it is no reason to spend anything
@@ -1122,28 +1415,32 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 		// candidate outright, which billed and re-rolled every edge the scan
 		// could still see (#787) — and a scan that CAN see it is the ordinary
 		// case, not an edge case, because writing an edge retires no vector.
-		agree := isFresh && cand.NewerID == l.SourceID && cand.OlderID == l.TargetID
+		agree := isFresh && cand.NewerID == l.newer && cand.OlderID == l.older
 		if isFresh && !agree {
 			res.OppositeLive++
 			if logger != nil {
-				// Four values, four keys. The line reports TWO disagreeing
+				// Five values, five keys (#804). The line reports TWO disagreeing
 				// orientations of one pair, and the labels say which source
-				// asserted which: the link's own source and target, and the
-				// scan's proposed newer and older. A shared "link"/"scan"
-				// key with an unnamed value after it left slog pairing the
-				// arguments itself, so l.TargetID became a KEY and the line
-				// printed as `link=02EA044F… 3092A7BE…=scan …` (#804).
-				logger.Info("supersede: scan proposed the reverse of a live supersedes link; keeping the link's direction",
-					"link_source", l.SourceID, "link_target", l.TargetID,
+				// asserted which: the relation and the link's own source and
+				// target, and the scan's proposed newer and older. A shared
+				// "link"/"scan" key with an unnamed value after it left slog
+				// pairing the arguments itself, so a target became a KEY and the
+				// line printed as `link=02EA044F… 3092A7BE…=scan …`. The relation
+				// is on the line because 'supersedes' runs newer→older and
+				// 'causes' older→newer: without it, source and target do not even
+				// say which end of the pair the link's own ids are (#823).
+				logger.Info("supersede: scan proposed the reverse of a live link; keeping the link's direction",
+					"link_relation", string(l.relation),
+					"link_source", l.source, "link_target", l.target,
 					"scan_newer", cand.NewerID, "scan_older", cand.OlderID)
 			}
 		}
-		newerMem, ok1 := memByID[l.SourceID]
-		olderMem, ok2 := memByID[l.TargetID]
+		newerMem, ok1 := memByID[l.newer]
+		olderMem, ok2 := memByID[l.older]
 		if !ok1 || !ok2 {
 			continue // an endpoint no longer exists
 		}
-		if newerMem.UpdatedAt <= l.CreatedAt && olderMem.UpdatedAt <= l.CreatedAt {
+		if newerMem.UpdatedAt <= l.stamp && olderMem.UpdatedAt <= l.stamp {
 			continue // skip-if-unchanged: neither endpoint changed since this edge was last judged
 		}
 		if agree {
@@ -1156,9 +1453,9 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			continue
 		}
 		all = append(all, Candidate{
-			NewerID: l.SourceID, NewerContent: newerMem.Content, NewerCreatedAt: newerMem.CreatedAt,
-			OlderID: l.TargetID, OlderContent: olderMem.Content, OlderCreatedAt: olderMem.CreatedAt,
-			Similarity: l.Strength,
+			NewerID: l.newer, NewerContent: newerMem.Content, NewerCreatedAt: newerMem.CreatedAt,
+			OlderID: l.older, OlderContent: olderMem.Content, OlderCreatedAt: olderMem.CreatedAt,
+			Similarity: l.strength,
 		})
 	}
 
@@ -1269,9 +1566,17 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 
 	// NEITHER-cache partition, after the existence re-check so only live pairs
 	// can be skipped. A fresh pair whose endpoints' text still matches a stored
-	// NEITHER verdict is skipped — no harness call, no write; reclassify pairs
-	// are never skipped, since their job is to revalidate a live link as content
+	// NEITHER verdict is skipped — no harness call, no write; a pair a live edge
+	// names is never skipped, since its job is to revalidate that edge as content
 	// evolves.
+	//
+	// "A live edge" is EITHER relation, and that used to be the one live shape
+	// this cache held quiet that it should not have (#823). A cached NEITHER is
+	// equivalent to a verdict saying the pair is no relation at all, so skipping a
+	// pair a live 'causes' edge names asserts that the edge is not there — which
+	// is graph-only staleness and was harmless while a 'causes' edge was only
+	// swept, and is not harmless now that its DIRECTION decides which way the pair
+	// is judged and therefore what the pass may write.
 	checked, err := store.SupersedeChecked(ctx, projectID)
 	if err != nil {
 		return res, nil, fmt.Errorf("load supersede checks: %w", err)
@@ -1280,7 +1585,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 	for _, c := range all {
 		key := newPairKey(c.NewerID, c.OlderID)
 		chk, cached := checked[[2]string{c.NewerID, c.OlderID}]
-		if !livePair[key] && cached &&
+		if livePair[key] == "" && cached &&
 			chk.NewerHash == contentHash(c.NewerContent) && chk.OlderHash == contentHash(c.OlderContent) {
 			res.Skipped++
 			continue
@@ -1381,7 +1686,13 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				continue
 			}
 			key := newPairKey(c.NewerID, c.OlderID)
-			wasReclassify := livePair[key]
+			// The relation the pair's live edge carried, or "" for a fresh
+			// pair. It is what separates a verdict that RE-AFFIRMED the graph
+			// from one that changed it, in the row and in the counter below — and
+			// it cannot be inferred from the verdict, because a live edge may be
+			// either relation (#823) and both readings are reachable.
+			liveRelation := livePair[key]
+			wasReclassify := liveRelation != ""
 			// Carried on the row rather than left to the caller to reconstruct:
 			// `livePair` dies with this call, and a caller reading only the
 			// report could not tell a withdrawal from a fresh pair's silence
@@ -1390,11 +1701,12 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			// TargetProjectID comes from the same existence check, so the follow-up
 			// can be scoped to the project whose repair pool holds that memory.
 			classified = append(classified, Classified{
-				Candidate:       c,
-				Relation:        verdict,
-				JudgedAt:        judgedAt(aliveByID, c),
-				Reclassified:    wasReclassify,
-				TargetProjectID: aliveByID[c.OlderID].ProjectID,
+				Candidate:        c,
+				Relation:         verdict,
+				JudgedAt:         judgedAt(aliveByID, c),
+				Reclassified:     wasReclassify,
+				ReclassifiedFrom: liveRelation,
+				TargetProjectID:  aliveByID[c.OlderID].ProjectID,
 			})
 
 			switch verdict {
@@ -1413,10 +1725,16 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 						"newer", c.NewerID, "older", c.OlderID)
 				}
 			}
-			if wasReclassify && verdict != RelationSupersedes {
+			// A verdict that came back as the relation the live edge already
+			// held changed nothing and is not counted; any other verdict replaced
+			// that edge's relation or dropped it, and both are the mutation this
+			// count has always meant. The two tests were the same test before
+			// #823, because a live edge could only be 'supersedes' — see
+			// Classified.ReclassifiedFrom for why they stopped being one.
+			if wasReclassify && verdict != liveRelation {
 				res.Reclassified++
-				// A CAUSES verdict re-links the pair; NEITHER and a reversal
-				// only drop what is there.
+				// The other affirmative verdict re-links the pair; NEITHER and a
+				// reversal only drop what is there.
 				if verdict == RelationNeither || verdict == RelationReversed {
 					res.ReclassifiedNoWrite++
 				}
@@ -1487,38 +1805,133 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 							"newer", c.NewerID, "older", c.OlderID)
 					}
 				}
-				if _, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
+				// The 'causes' sweep, and it now has a direction to sweep in.
+				// A verdict of SUPERSEDES says the pair IS a replacement, which
+				// denies a 'causes' claim in EITHER direction: 'causes' asserts
+				// that one note is the cause of the other, and a pair whose newer
+				// note retires the older one is not that. The existing statement
+				// took the one direction the verdict implies; the other is the
+				// same denial read from the other end, and leaving it behind is
+				// how a 'causes' cycle survives a pass that had every reason to
+				// end it. It costs a second write only when the pass has already
+				// read an edge that way (claimsHold), which is the only state in
+				// which the statement can move a row.
+				causesDropped, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses))
+				if err != nil {
 					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
-			case RelationCauses:
-				// CreateLinkJudged and NOT the guarded writer, and the asymmetry is the
-				// point rather than an oversight. The guard exists because a pair live in
-				// BOTH directions demotes BOTH endpoints, and only 'supersedes' is read
-				// by the ranking guards — a 'causes' cycle demotes nothing, so refusing
-				// the second 'causes' edge would buy a graph that does not contradict
-				// itself at the price of a PERMANENT paid refusal. The direction
-				// override above is built from live SUPERSEDES edges, so a pair whose
-				// 'causes' edge runs against the timestamps is re-proposed in the
-				// flipped direction on EVERY pass, answered CAUSES again and refused
-				// again, forever: a refusal that never converges costs a call per pass
-				// for as long as the edge lives, which is worse than the contradiction
-				// it prevents. A supersedes pair has no such trap — there the live edge
-				// decides the direction, so its write is in the edge's own direction and
-				// the refusal is a one-off race rather than a state.
-				//
-				// What this leaves is a pre-existing gap rather than a new one, and it
-				// has its own issue: nothing reconciles a live 'causes' edge's
-				// direction with the timestamps, and only a supersedes pair is ever
-				// cache-skipped, so such a pair is re-asked on every pass whatever
-				// this writer does.
-				if err := store.CreateLinkJudged(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm", c.JudgedAt); err != nil {
-					return res, nil, fmt.Errorf("create causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+				c.CausesDropped = int(causesDropped)
+				// The sweep above takes the 'causes' edge that AGREES with the
+				// supersession (older→newer), which is the one this pair would
+				// otherwise have held. This one takes the edge that CONTRADICTS
+				// it — 'causes' source→target, the same two ids the supersedes
+				// edge runs, so it claims the reverse chronology — and the two are
+				// the same denial read from the other end, so a verdict that
+				// keeps leaving one of them behind is a verdict that half-settled
+				// the pair. Gated on having read it, because a sweep that can only
+				// move a row the pass has already seen is the one worth making.
+				if claimsHold(claims, c.OlderID, c.NewerID, RelationCauses) {
+					reverseDropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationCauses))
+					if err != nil {
+						return res, nil, fmt.Errorf("invalidate reverse causes link %s→%s: %w", c.NewerID, c.OlderID, err)
+					}
+					c.CausesDropped += int(reverseDropped)
 				}
+				// A live 'causes' edge replaced by a 'supersedes' one IS the
+				// withdrawal this row reports; a live 'supersedes' edge
+				// re-affirmed beside a stale 'causes' edge is not, because the
+				// edge the pair is JUDGED around survived. The relation the live
+				// edge carried is what tells the two apart, which is the whole
+				// reason Classified.ReclassifiedFrom exists.
+				c.Withdrawn = c.Reclassified && c.ReclassifiedFrom == RelationCauses && c.CausesDropped > 0
+			case RelationCauses:
+				// The GUARDED writer, and the reason it could not be before #823
+				// is the whole shape of this fix rather than a footnote to it.
+				//
+				// A guard refuses the second direction of a pair, and while the
+				// only live edge the pass read was a 'supersedes' one, a pair
+				// whose 'causes' edge ran against the timestamps was re-proposed
+				// in the flipped direction on EVERY pass, answered CAUSES again,
+				// and would have been refused again, forever: a refusal that never
+				// converges costs a classify call per pass for as long as the
+				// edge lives, which is worse than the contradiction it prevents.
+				// That is why #819 shipped this unguarded and pinned the
+				// asymmetry, and it was right to.
+				//
+				// The direction override above is now built from live edges of
+				// BOTH relations, so a pair holding a 'causes' edge is judged in
+				// THAT edge's direction and the write here is in the same
+				// direction. The refusal is therefore the same one 'supersedes'
+				// has: a cross-process race that costs one call, and a state the
+				// next pass settles by reading the live edge. A 'causes' cycle
+				// demotes nothing, which is why it was ever worth writing — but
+				// the contradiction it creates is read as "these two notes
+				// caused each other", and the pass can no longer produce one.
+				// The SWEEPS first, and the order is the point rather than a
+				// style choice.
+				//
+				// A CAUSES verdict denies a same-fact replacement in either
+				// direction, so the 'supersedes' sweep goes both ways for the same
+				// reason the SUPERSEDES branch's 'causes' sweep does: the
+				// statement below takes the edge that agrees with this
+				// supersession (newer→older), and the one inside the guard takes
+				// the 'causes' cycle's other half.
+				//
+				// Sweeping before writing is what lets a 'causes' CYCLE converge
+				// in the pass that settles it. Written first, the guarded write
+				// finds the cycle's other half live and refuses — correctly, it
+				// is the reverse of what it is about to write — and the sweep
+				// below then drops that half, so the pair ends up holding the
+				// OLD edge with its OLD stamp and the next pass asks about it
+				// again. Swept first, the write is unopposed, lands with this
+				// verdict's stamp, and the pair is quiet from here on. The race
+				// the guard exists for is unaffected either way: another process
+				// writing the reverse between the sweep and the write is what
+				// makes the write refuse, which is the same one-off race
+				// 'supersedes' has.
 				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
 				if err != nil {
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
-				c.Withdrawn = c.Reclassified && dropped > 0
+				causesDropped := 0
+				if claimsHold(claims, c.OlderID, c.NewerID, RelationCauses) {
+					// A 'causes' CYCLE this pass judged: the verdict keeps the
+					// direction it was asked about and the edge asserting the
+					// other one goes. This is the statement that ends the cycle,
+					// and it is why a 'causes' cycle is judged rather than refused
+					// (see the reconciliation above).
+					reverseDropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationCauses))
+					if err != nil {
+						return res, nil, fmt.Errorf("invalidate reverse causes link %s→%s: %w", c.NewerID, c.OlderID, err)
+					}
+					causesDropped = int(reverseDropped)
+				}
+				wrote, err := store.CreateLinkUnopposed(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm", c.JudgedAt)
+				if err != nil {
+					return res, nil, fmt.Errorf("create causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+				}
+				if !wrote {
+					// The pair's other 'causes' direction was already live when
+					// this write reached the store, which after the sweeps above
+					// is a CONCURRENT writer: this pass's graph read predates its
+					// commit. The edge that exists is the other writer's, the
+					// next pass judges the pair in ITS direction, and this run says
+					// so rather than reporting a link it did not write.
+					res.ReverseLive++
+					c.OpposedLive = true
+					if logger != nil {
+						logger.Info("supersede: causes link not written, the pair's reverse causes edge is already live (a concurrent pass wrote it first)",
+							"older", c.OlderID, "newer", c.NewerID)
+					}
+				}
+				c.CausesDropped = causesDropped
+				// The withdrawal this row reports is the pair's live edge
+				// whichever relation carried it, so the flag is the sum of the two
+				// sweeps rather than the 'supersedes' one alone: a live
+				// 'causes' cycle judged CAUSES dropped an edge here, and a
+				// report that said "would withdraw" over a row this run removed
+				// is the same false claim in the other direction.
+				c.Withdrawn = c.Reclassified && (dropped > 0 || causesDropped > 0)
 			case RelationNeither:
 				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
 				if err != nil {
@@ -1579,7 +1992,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 		newNeither := make(map[[2]string]memory.SupersedeCheck)
 		for _, c := range classified {
 			key := [2]string{c.NewerID, c.OlderID}
-			if c.Relation != RelationNeither || livePair[newPairKey(c.NewerID, c.OlderID)] || !writable[key] {
+			if c.Relation != RelationNeither || livePair[newPairKey(c.NewerID, c.OlderID)] != "" || !writable[key] {
 				continue
 			}
 			newNeither[key] = memory.SupersedeCheck{

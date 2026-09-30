@@ -378,6 +378,19 @@ func TestRunNeitherInvalidatesExistingCausesLink(t *testing.T) {
 	if err := store.CreateLink(ctx, older, newer, "causes", 0.9, "llm"); err != nil {
 		t.Fatal(err)
 	}
+	// The edge's stamp is rewound so the pair is re-judged, and that is now a
+	// REQUIREMENT for this test to reach a verdict at all (#823).
+	//
+	// It used not to be. A live 'causes' edge was invisible to the pass, so such
+	// a pair was re-proposed by the scan on every pass whatever its endpoints had
+	// been doing — the re-bill that issue is about, and the reason this verdict
+	// was reachable for free. A live edge of either relation now holds its pair
+	// by skip-if-unchanged, so a NEITHER verdict on an untouched pair is a
+	// question the pass no longer asks: the edge's own stamp says the text has
+	// not moved since it was judged, which is the claim the whole skip rests on.
+	// What is still true — and what this test still holds the pass to — is that
+	// when the pair IS re-judged, a NEITHER verdict drops the 'causes' edge.
+	backdateLink(t, db, older, newer)
 
 	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
 	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, nil); err != nil {
