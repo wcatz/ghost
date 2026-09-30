@@ -270,6 +270,85 @@ func TestCandidatesPassiveOverFetchBoundsTheRead(t *testing.T) {
 	}
 }
 
+// TestCandidatesPassiveReturnsTheTailBehindThePool is the backfill supply the
+// whole seam exists for, at its only reachable size.
+//
+// A policy's selection REORDERS its window rather than truncating it, and the rows
+// the pool leaves behind come back behind the selection — undemoted, in the
+// policy's own order, so a later stage that drops a selected row has something to
+// reach. The tail is only reachable when the window is WIDER than twice the item
+// cap, which is why nothing else in this file reaches it: `passiveFixture` holds
+// six rows and every policy here states an over-fetch the pool swallows whole, so
+// `passiveSelect` returns an empty rest and the property is never exercised. An
+// item cap of 1 makes the pool two rows and the four-row window leaves a tail of
+// two, which is the smallest shape the claim is true of.
+//
+// The control run is what makes the tail's ORDER checkable rather than asserted
+// twice: with the reservation off, the same policy returns the window in the SQL
+// order, so the tail has to be that order with the selected rows taken out of it.
+// A tail returned in the selection's order, reversed, or demoted would all differ
+// from it.
+func TestCandidatesPassiveReturnsTheTailBehindThePool(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+	pol := projectPassivePolicy()
+	pol.OverFetch = 6
+	pol.ItemCap = 1 // pool = 2*1 = 2, so four of the six window rows are the tail
+	// The gotcha weight is what makes the reservation REORDER rather than merely
+	// confirm: at 3.0 the top gotcha outscores the convention row it trails in the
+	// window order, so the pool is not a prefix of the control and the tail can be
+	// checked against the window rather than against the selection.
+	pol.CategoryWeights = map[string]float64{"gotcha": 3.0}
+	pol.CategoryCaps = map[string]int{"gotcha": 1}
+
+	control := pol
+	control.TwoPass = false
+	window, err := st.Candidates(ctx, passiveRequest("proj", control))
+	if err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	windowIDs := passiveIDs(window)
+	if len(windowIDs) != pol.OverFetch {
+		t.Fatalf("precondition: the window is %d rows, want the over-fetch of %d", len(windowIDs), pol.OverFetch)
+	}
+
+	set, err := st.Candidates(ctx, passiveRequest("proj", pol))
+	if err != nil {
+		t.Fatalf("passive Candidates: %v", err)
+	}
+	got := passiveIDs(set)
+	// The whole window, not the pool: the tail travels with the set.
+	if len(got) != pol.OverFetch {
+		t.Errorf("rows = %d %v, want the whole window of %d: the selection REORDERS rather than truncates, and the "+
+			"rows the pool left are the assembler's backfill supply — returning only the selection would leave a "+
+			"dropped row with nothing to backfill it from", len(got), got, pol.OverFetch)
+	}
+	if len(got) < 2*pol.ItemCap {
+		t.Fatalf("precondition: %d rows is not enough to hold a pool of %d and a tail", len(got), 2*pol.ItemCap)
+	}
+	pool, tail := got[:2*pol.ItemCap], got[2*pol.ItemCap:]
+	if len(tail) == 0 {
+		t.Fatalf("precondition: the window is exactly the pool, so there is no tail and this test proves nothing")
+	}
+	// The reserved gotcha is lifted to the front of the pool even though the
+	// window ranks it third, which is the reordering the tail is defined against.
+	if pool[0] != "pp_beh_a" {
+		t.Errorf("pool = %v, want the weighted gotcha first: the reservation is what makes the pool differ from the "+
+			"window, so a test that could not see that difference would not be testing the tail", pool)
+	}
+	want := make([]string, 0, len(tail))
+	for _, id := range windowIDs {
+		if !containsStr(pool, id) {
+			want = append(want, id)
+		}
+	}
+	if !eqStrings(tail, want) {
+		t.Errorf("tail = %v, want %v: the rows the pool left behind travel in the POLICY's order, so a stage that "+
+			"drops a selected row backfills with the next row the policy ranked rather than with a row some other "+
+			"stage chose", tail, want)
+	}
+}
+
 // TestCandidatesPassiveRejectsAnEmptyPolicySet: an empty query with no policy
 // is the request that cannot be served honestly. It is refused rather than
 // answered with an empty set, because an empty set reads as an empty store.
@@ -403,6 +482,119 @@ func TestCandidatesPassiveReadsEdges(t *testing.T) {
 	if set.EdgesStatus.Status == "not_applicable" {
 		t.Error("a passive (present) read must read the link graph; not_applicable is reserved for a historical read")
 	}
+}
+
+// passiveTieFixture seeds two buckets whose rows TIE on every key their policy's
+// ORDER BY names, and writes each pair in the REVERSE of the order the tiebreak
+// has to produce.
+//
+// Both halves matter. A tie is the only thing that can reach the trailing `id`,
+// and `passiveFixture` has no tie on (pinned, importance, updated_at) or on the
+// decay composite anywhere, which is why the goldens cannot see the tiebreaker at
+// all. And the insertion order has to be the wrong way round: without the
+// tiebreak the rows come back in whatever order the scan produced, which for a
+// table scan is the order they were written, so a pair written high-id-first is
+// the only fixture shape where dropping `, id` changes the answer rather than
+// leaving it accidentally right.
+//
+// The two orders tie on DIFFERENT keys, which is the point of testing both: the
+// `_global` order is pinned/importance/updated_at and never reads created_at, the
+// decay order is the rank composite then importance/created_at and never reads
+// updated_at. So each pair differs on the key its own order ignores.
+func passiveTieFixture(t *testing.T) *Store {
+	t.Helper()
+	db, err := OpenDB(filepath.Join(t.TempDir(), "passive-tie.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	st := NewStore(db, nil)
+	ctx := context.Background()
+	for _, p := range []string{"tieproj", GlobalProjectID} {
+		if err := st.EnsureProject(ctx, p, p, p); err != nil {
+			t.Fatalf("EnsureProject %s: %v", p, err)
+		}
+	}
+	rows := []struct {
+		id, project, cat string
+		imp              float32
+		created, updated string
+	}{
+		// _global: identical pinned (false), importance and updated_at, and
+		// different created_at — the key that order does not read.
+		{"g_b", GlobalProjectID, "preference", 0.5, "2026-01-01 00:00:00", "2026-03-01 00:00:00"},
+		{"g_a", GlobalProjectID, "preference", 0.5, "2026-01-09 00:00:00", "2026-03-01 00:00:00"},
+		// project: identical importance, created_at and category, so the decay
+		// composite is the same number for both, and different updated_at — the
+		// key that order does not read.
+		{"p_b", "tieproj", "fact", 0.6, "2026-02-02 00:00:00", "2026-04-01 00:00:00"},
+		{"p_a", "tieproj", "fact", 0.6, "2026-02-02 00:00:00", "2026-04-02 00:00:00"},
+	}
+	for _, r := range rows {
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'manual', ?, 0, ?, ?)`,
+			r.id, r.project, r.cat, "content of "+r.id, r.imp, r.created, r.updated,
+		); err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
+		}
+	}
+	return st
+}
+
+// TestThePassiveOrderBreaksTiesByID: both passive orders end in `id`, and the
+// comment above each says why: a tie has no defined order, so without the
+// tiebreak the block is a function of the DATABASE FILE rather than of the store's
+// contents, which is exactly what a golden comparison across machines cannot
+// tolerate. `passiveFixture` cannot see either tiebreak — nothing in it ties on
+// (pinned, importance, updated_at) or on the decay composite — so this fixture
+// exists to make both reachable.
+//
+// TwoPass is off deliberately: the reservation REORDERS the window it is given,
+// so a test that left it on would be asserting the reservation's order and could
+// pass with a missing tiebreak. With it off the order under test is the SQL
+// order, unmodified.
+func TestThePassiveOrderBreaksTiesByID(t *testing.T) {
+	st := passiveTieFixture(t)
+	for _, tc := range []struct {
+		name   string
+		policy SlicePolicy
+		want   []string
+	}{
+		{
+			name:   "the _global order",
+			policy: SlicePolicy{Bucket: GlobalProjectID, Order: OrderPinnedImportanceUpdated, OverFetch: 4},
+			want:   []string{"g_a", "g_b"},
+		},
+		{
+			name:   "the decay order",
+			policy: SlicePolicy{Bucket: "tieproj", Order: OrderDecay, OverFetch: 4},
+			want:   []string{"p_a", "p_b"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			set, err := st.Candidates(context.Background(), passiveRequest("tieproj", tc.policy))
+			if err != nil {
+				t.Fatalf("passive Candidates: %v", err)
+			}
+			if got := passiveIDs(set); !eqStrings(got, tc.want) {
+				t.Errorf("rows = %v, want %v: the two rows tie on every other key in this ORDER BY, so the order is "+
+					"decided by the trailing `id` alone — and it was written the other way round", got, tc.want)
+			}
+		})
+	}
+}
+
+func eqStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func assertIDs(t *testing.T, got, want []string) {
@@ -611,6 +803,71 @@ func TestCandidatesPassiveNearDuplicateDemotionIsSkippedUnderTheCap(t *testing.T
 	}
 	if indexOf(overIDs, "pp_beh_a") < indexOf(overIDs, "pp_pin") {
 		t.Errorf("over the cap the demotion must run, but the loser still outranks its target: %v", overIDs)
+	}
+}
+
+// TestTheOverCapGateIsExactAtTheItemCap is the boundary the near-duplicate gate
+// above never reached: a selected set of EXACTLY ItemCap rows.
+//
+// The shipped loaders skip the reorder on `len(memories) > cap` — WIDER than the
+// cap, not "at or wider" — and the passive gate is `<=`, so a set that fills the
+// cap to the row is still a set the answer shows in full and the reorder is still
+// the specification to skip. Relaxing `<=` to `<` runs it there, which is a
+// different ORDER for the same rows: a golden comparison against the old loader
+// would read it as a regression, and on a store whose cap happens to equal its
+// memory count there is no other evidence at all.
+//
+// The fixture is `passiveFixture`'s, whose six unresolved project rows are the
+// window, and the cap is set to that six so the comparison is on the boundary
+// itself rather than near it. The three arms are the whole statement: at the cap
+// the pair keeps its selection order, one row under it does too, and one row over
+// it reorders. Without the third arm a gate that never fired would pass the first
+// two.
+func TestTheOverCapGateIsExactAtTheItemCap(t *testing.T) {
+	st := passiveFixture(t)
+	ctx := context.Background()
+	// pp_beh_a carries the duplicate edge and is unpinned; pp_pin is its pinned
+	// target, so nearDuplicatePenaltyRows makes the EARLIER row the loser and the
+	// demotion has something real to move.
+	if err := st.CreateLink(ctx, "pp_beh_a", "pp_pin", "duplicate", 1, "manual"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	pol := projectPassivePolicy()
+	pol.OverFetch = 6   // the fixture's whole project window
+	pol.TwoPass = false // the pool IS the window here, so the gate sees all six rows
+	pol.DemoteOnlyWhenOverCap = true
+
+	for _, tc := range []struct {
+		name      string
+		itemCap   int
+		wantMoved bool
+	}{
+		{"one row under the cap", 7, false},
+		{"exactly at the cap", 6, false},
+		{"one row over the cap", 5, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := pol
+			p.ItemCap = tc.itemCap
+			set, err := st.Candidates(ctx, passiveRequest("proj", p))
+			if err != nil {
+				t.Fatalf("ItemCap %d: %v", tc.itemCap, err)
+			}
+			ids := passiveIDs(set)
+			if len(ids) != p.OverFetch {
+				t.Fatalf("ItemCap %d: window rows = %d, want the over-fetch of %d; the gate is decided on the "+
+					"SELECTED set and the fixture is what sizes it", tc.itemCap, len(ids), p.OverFetch)
+			}
+			loser, target := indexOf(ids, "pp_beh_a"), indexOf(ids, "pp_pin")
+			if loser < 0 || target < 0 {
+				t.Fatalf("both endpoints must be in the window: %v", ids)
+			}
+			if moved := loser > target; moved != tc.wantMoved {
+				t.Errorf("the near-duplicate loser moved = %v, want %v: on a set of %d selected rows against a cap "+
+					"of %d the reorder runs only when the set is WIDER than the cap, and %v is the order either way",
+					moved, tc.wantMoved, len(ids), tc.itemCap, ids)
+			}
+		})
 	}
 }
 
