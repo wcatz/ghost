@@ -2038,15 +2038,15 @@ func runSupersede() {
 		// that did land orphaned resolutions that only a scoped resolve repair
 		// can clear, and an operator who does not learn that from this run
 		// learns it from a memory that stayed out of every session.
-		if targets := withdrawnTargets(withdrawn); apply && len(targets) > 0 {
-			path, werr := writeReassessTargets(projectName, targets, "ghost supersede --reassess --apply")
-			if werr != nil {
-				// The repair already landed and the command is printed either
-				// way, so a scratch file that could not be written is a warning
-				// and not a failed run.
-				fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", werr)
+		if apply {
+			// Per project, because the target's own project is what a resolve
+			// repair can reach — a target promoted to `_global` is not in
+			// `ResolvedCandidates(<project>)`, so a block scoped to the pass's
+			// project would name a command that resolves the selector and then
+			// finds nothing to clear.
+			for _, group := range withdrawnTargets(withdrawn) {
+				fmt.Print(printReassessFollowup(group.ProjectID, group.Targets, "ghost supersede --reassess --apply"))
 			}
-			fmt.Print(supersedeReassessFollowup(projectName, targets, path))
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -2100,15 +2100,15 @@ func runSupersede() {
 	// three surfaces printing three versions of one command is how a repair ends
 	// up run against the wrong list (#785).
 	withdrawn := reclassifiedWithdrawals(classified)
-	if targets := withdrawnTargets(withdrawn); apply && len(targets) > 0 {
-		path, werr := writeReassessTargets(projectName, targets, "ghost supersede --apply")
-		if werr != nil {
-			// The withdrawal already landed and the command is printed either
-			// way, so a scratch file that could not be written is a warning and
-			// not a failed run — the same trade the two repair paths make.
-			fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", werr)
+	if apply {
+		// One scoped repair per project the targets live in, which is one project
+		// in every ordinary case — and the difference is not cosmetic, because a
+		// resolve repair's pool is filtered by project, so a block scoped to a
+		// project that does not hold the memory promises a clear it cannot
+		// perform. Only an --apply run has anything to follow up on.
+		for _, group := range withdrawnTargets(withdrawn) {
+			fmt.Print(printReassessFollowup(group.ProjectID, group.Targets, "ghost supersede --apply"))
 		}
-		fmt.Print(supersedeReassessFollowup(projectName, targets, path))
 	}
 	if !apply {
 		if res.WouldWriteLinks() {
@@ -2150,10 +2150,11 @@ func reclassifiedWithdrawals(classified []supersede.Classified) []supersede.With
 			continue
 		}
 		out = append(out, supersede.WithdrawnEdge{
-			NewerID: c.NewerID,
-			OlderID: c.OlderID,
-			Reason:  supersedeReclassifyReason(c.Relation),
-			Written: c.Withdrawn,
+			NewerID:         c.NewerID,
+			OlderID:         c.OlderID,
+			Reason:          supersedeReclassifyReason(c.Relation),
+			Written:         c.Withdrawn,
+			TargetProjectID: c.TargetProjectID,
 		})
 	}
 	return out
@@ -2295,15 +2296,16 @@ func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog
 	// printing different commands for the same situation. It is printed before
 	// the error below, for the reason that error exists at all: a partial
 	// withdrawal still orphaned the targets it did reach.
-	if targets := supersede.RepairableTargets(res.Links); apply && len(targets) > 0 {
-		path, werr := writeReassessTargets(projectName, targets, "ghost supersede --withdraw --apply")
-		if werr != nil {
-			// The withdrawal already landed and the command is printed either way,
-			// so a scratch file that could not be written is a warning and not a
-			// failed run — the same trade --reassess makes.
-			fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", werr)
+	if apply {
+		// Scoped to the project that OWNS each target, not to the project the
+		// command was named with: they are the same project for a project's own
+		// edge, and different exactly for a `ghost supersede _global --withdraw`
+		// whose target stayed in a project — where `ghost resolve _global
+		// --reassess` resolves the selector and then finds nothing, because
+		// ResolvedCandidates filters `project_id = ?` (#786).
+		for _, group := range supersede.RepairableTargets(res.Links) {
+			fmt.Print(printReassessFollowup(group.ProjectID, group.Targets, "ghost supersede --withdraw --apply"))
 		}
-		fmt.Print(supersedeReassessFollowup(projectName, targets, path))
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

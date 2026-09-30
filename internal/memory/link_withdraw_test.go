@@ -338,21 +338,27 @@ func TestLinksByRelationSourceReachesAGlobalSource(t *testing.T) {
 	if len(links) != 1 || links[0].SourceID != source || links[0].TargetID != target {
 		t.Fatalf("LinksByRelationSource(p1) = %+v, want the %s→%s edge whose source is in the shared scope", links, source, target)
 	}
-	// p2 owns the two edges it sources, and it also sees p1's promoted one — the
-	// shared scope is in scope from every project, so a claim a global note makes
-	// is one every project can judge. What p2 does NOT get is p1's ownership of
-	// its own target, which is the other read's rule and not this one's: this read
-	// is about who can JUDGE the edge, and the source is who makes the claim.
+	// p2 owns the one edge it sources into p2. It does NOT get the edge p2
+	// sources into a p1 memory, and it does not get p1's promoted one: this read
+	// is about who may JUDGE an edge, and judging one acts on both its endpoints,
+	// so an edge with an endpoint outside the caller's project is that other
+	// project's edge to correct.
 	links, err = s.LinksByRelationSource(ctx, "p2", "supersedes", "llm")
 	if err != nil {
 		t.Fatalf("LinksByRelationSource(p2): %v", err)
 	}
-	if len(links) != 3 {
-		t.Fatalf("LinksByRelationSource(p2) = %+v, want p2's own two edges plus the one its shared-scope source makes", links)
+	if len(links) != 1 || links[0].SourceID != foreignNewer {
+		t.Fatalf("LinksByRelationSource(p2) = %+v, want only the edge with BOTH endpoints in p2 or _global", links)
 	}
-	for _, l := range links {
-		if l.SourceID != foreignNewer && l.SourceID != foreignIntoOurs && l.SourceID != source {
-			t.Errorf("LinksByRelationSource(p2) = %+v, want only edges sourced in p2 or in _global", links)
-		}
+	// The shared scope is not every project, and the TARGET half is what makes
+	// that so here: from `_global`, p1's promoted edge does not load, because one
+	// of its endpoints is a p1 memory and judging the edge means acting on that
+	// memory. A pass is run against a project, and this is the read a pass uses.
+	got, err := s.LinksByRelationSource(ctx, GlobalProjectID, "supersedes", "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource(_global): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("LinksByRelationSource(_global) = %+v, want none: the one edge with a _global source has a p1 target", got)
 	}
 }

@@ -26,9 +26,10 @@ func reclassRow(relation supersede.Relation, reclassified, withdrawn bool) super
 		Candidate: supersede.Candidate{
 			NewerID: reclassNewer, OlderID: reclassOlder,
 		},
-		Relation:     relation,
-		Reclassified: reclassified,
-		Withdrawn:    withdrawn,
+		Relation:        relation,
+		Reclassified:    reclassified,
+		Withdrawn:       withdrawn,
+		TargetProjectID: "proj",
 	}
 }
 
@@ -193,8 +194,8 @@ func TestReclassifiedWithdrawalsNamesEveryOrphanedTarget(t *testing.T) {
 			Reclassified: false,
 		},
 	}))
-	if len(got) != 1 || got[0] != reclassOlder {
-		t.Errorf("withdrawnTargets(reclassifiedWithdrawals(...)) = %v, want just [%s]: the two withdrawals, deduplicated, and nothing from a fresh or confirmed pair", got, reclassOlder)
+	if len(got) != 1 || len(got[0].Targets) != 1 || got[0].Targets[0] != reclassOlder {
+		t.Errorf("withdrawnTargets(reclassifiedWithdrawals(...)) = %+v, want just [%s]: the two withdrawals, deduplicated, and nothing from a fresh or confirmed pair", got, reclassOlder)
 	}
 
 	// And the two withdrawals really do reach the SAME follow-up the other two
@@ -202,9 +203,13 @@ func TestReclassifiedWithdrawalsNamesEveryOrphanedTarget(t *testing.T) {
 	// never the project-wide re-judge. This is the sentence the operator was
 	// never given. The command goes through the shared renderer, so the id is
 	// quoted the way a shell reads it as one argument.
-	block := supersedeReassessFollowup("proj", withdrawnTargets(reclassifiedWithdrawals([]supersede.Classified{
+	one := withdrawnTargets(reclassifiedWithdrawals([]supersede.Classified{
 		reclassRow(supersede.RelationNeither, true, true),
-	})), "")
+	}))
+	if len(one) != 1 {
+		t.Fatalf("withdrawnTargets = %+v, want one project group", one)
+	}
+	block := supersedeReassessFollowup(one[0].ProjectID, one[0].Targets, "")
 	if !strings.Contains(block, "ghost resolve proj --reassess --only '"+reclassOlder+"' --apply") {
 		t.Errorf("the follow-up an ordinary pass prints is not the scoped resolve repair:\n%s", block)
 	}
@@ -360,4 +365,91 @@ func seedLiveSupersedesEdge(t *testing.T, dbPath string) (newer, older string) {
 		t.Fatalf("backdate the link row: %v", err)
 	}
 	return newer, older
+}
+
+// TestSupersedeWithdrawFollowsTheTargetIntoItsOwnProject is the second half of
+// #786, and it is a promise the first half would otherwise break. A `ghost
+// supersede _global --withdraw` whose target stayed in a project is the whole
+// point of reaching such a pair from `_global` — and the follow-up it printed was
+// `ghost resolve _global --reassess --only <target> --apply`, which resolves the
+// selector (a `_global` ref scope reaches a project memory) and then finds
+// nothing: `ResolvedCandidates` filters `project_id = ?`, so a memory in `p` is
+// not in the `_global` pool. Every selector comes back a miss and the orphaned
+// `resolved_at` is never cleared, under a block that says it can now be cleared.
+//
+// So the repair is scoped to the project that owns the memory being un-hidden,
+// which is the project its `resolved_at` lives in. The common case — a target in
+// the project the command was run against — is unchanged, because that is the same
+// project.
+func TestSupersedeWithdrawFollowsTheTargetIntoItsOwnProject(t *testing.T) {
+	dataHome := isolatedLifecycleEnv(t)
+	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	source, target := seedPromotedSupersedesEdge(t, dbPath)
+
+	origArgs := os.Args
+	os.Args = []string{origArgs[0], "supersede", "_global",
+		"--withdraw", source[:8], target[:8], "--apply"}
+	t.Cleanup(func() { os.Args = origArgs })
+
+	out := captureStdout(t, runSupersede)
+
+	// The edge is gone, and the report says so.
+	store := openStore(t, dbPath)
+	links, err := store.LinksByRelationSource(context.Background(), "projy", string(supersede.RelationSupersedes), "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource: %v", err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("live edge(s) = %d after the withdrawal, want 0: the run did not reach the edge at all", len(links))
+	}
+	// And the follow-up names the project whose pool holds the target, not the one
+	// the command was run against.
+	if !strings.Contains(out, "ghost resolve projy --reassess --only") {
+		t.Errorf("the follow-up is not scoped to the TARGET's project, so its repair cannot reach the memory it un-hides:\n%s", out)
+	}
+	if strings.Contains(out, "ghost resolve _global --reassess --only") {
+		t.Errorf("the follow-up is scoped to _global, whose repair pool holds no project memory:\n%s", out)
+	}
+	if !strings.Contains(out, target) {
+		t.Errorf("the follow-up names no target id:\n%s", out)
+	}
+}
+
+// seedPromotedSupersedesEdge writes a project with a live 'supersedes'/'llm' edge
+// and then promotes the SOURCE into `_global`, which is the shape
+// `ghost_memory_promote` leaves behind. It returns the two ids.
+func seedPromotedSupersedesEdge(t *testing.T, dbPath string) (source, target string) {
+	t.Helper()
+	ctx := context.Background()
+	store := openStore(t, dbPath)
+	if err := store.EnsureProject(ctx, "projy", "/tmp/projy", "projy"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	ids := make([]string, 0, 2)
+	for _, content := range []string{
+		"the ingest service now writes both replicas before acknowledging",
+		"the ingest service acknowledges after the primary replica only",
+	} {
+		id, err := store.Create(ctx, "projy", memory.Memory{
+			Category: "architecture", Content: content, Source: "mcp", Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("create memory: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	source, target = ids[0], ids[1]
+	if err := store.CreateLink(ctx, source, target, string(supersede.RelationSupersedes), 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	if err := store.PromoteToGlobal(ctx, "projy", source); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the seeding store: %v", err)
+	}
+	return source, target
 }

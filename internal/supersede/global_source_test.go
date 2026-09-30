@@ -86,8 +86,13 @@ func TestWithdrawReachesAnEdgeWhoseSourceWasPromoted(t *testing.T) {
 			assertUnsupersedeHistory(t, store, target)
 			// The target is repairable again, which is the state the follow-up
 			// exists to hand over.
-			if got := RepairableTargets(applied.Links); len(got) != 1 || got[0] != target {
-				t.Errorf("RepairableTargets = %v, want [%s]: the memory whose resolution the edge justified", got, target)
+			// The follow-up is grouped by the project that OWNS the target, and
+			// the target is in "p" whichever scope the withdrawal ran from — so
+			// `ghost resolve p --reassess` reaches it and `ghost resolve
+			// _global --reassess` never would.
+			got := RepairableTargets(applied.Links)
+			if len(got) != 1 || got[0].ProjectID != "p" || len(got[0].Targets) != 1 || got[0].Targets[0] != target {
+				t.Errorf("RepairableTargets = %+v, want one group for p naming [%s]: the memory the edge justified a resolution for, in the only project whose repair can clear it", got, target)
 			}
 		})
 	}
@@ -372,4 +377,41 @@ func (n *neitherReassessClassifier) ClassifyBatch(_ context.Context, pairs []Can
 		out[i] = RelationNeither
 	}
 	return out, nil
+}
+
+// TestARefusalNamesTheHoldersWithoutClaimingWhoseTheyAre is finding one of #786's
+// review: the refusal for a pair with no live edge names the edges that DO bury
+// the target, and it used to call them "from this project". Once the ownership
+// rule reached a `_global` source, that sentence became false — the holder is as
+// likely to be a memory in the shared scope as one in the project — and a report
+// that asserts ownership it has not checked sends a reader looking for a
+// boundary the command does not actually enforce.
+//
+// The sentence still has to be an ANSWER, because "no live supersedes link A→B"
+// is a dead end and "B is superseded by C and D" is not. So the ids stay and the
+// claim goes.
+func TestARefusalNamesTheHoldersWithoutClaimingWhoseTheyAre(t *testing.T) {
+	store, _ := seed(t)
+	ctx := context.Background()
+	holder := mustCreatePlain(t, store, "A global note that supersedes a project note of its own.")
+	target := mustCreatePlain(t, store, "The project note the global one superseded.")
+	other := mustCreatePlain(t, store, "A note nothing supersedes, so the pair asked about has no edge at all.")
+	if err := store.CreateLink(ctx, holder, target, string(RelationSupersedes), 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PromoteToGlobal(ctx, "p", holder); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: other, Target: target}}, true, discardLogger())
+	if err == nil {
+		t.Fatal("Withdraw accepted a pair with no live edge")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, short(holder)) {
+		t.Errorf("the refusal does not name the edge that does bury the target, which is the answer:\n%v", err)
+	}
+	if strings.Contains(msg, "from this project") {
+		t.Errorf("the refusal claims the holder belongs to the project, which the read no longer establishes:\n%v", err)
+	}
 }

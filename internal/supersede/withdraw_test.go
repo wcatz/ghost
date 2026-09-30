@@ -302,8 +302,10 @@ func TestWithdrawRefusesAPairWithNoLiveLink(t *testing.T) {
 	}
 	// The refusal names the target's remaining live edges, because "no live
 	// supersedes link A→B" on its own is a dead end and "B is still superseded by
-	// C" is an answer.
-	if !strings.Contains(err.Error(), "superseded, from this project, by "+b[:8]) {
+	// C" is an answer. It says nothing about WHOSE the holder is: the read reaches
+	// a `_global` source as well as the project's own, so a claim of ownership
+	// would be one the read has not established (#786).
+	if !strings.Contains(err.Error(), "still superseded by "+b[:8]) {
 		t.Errorf("the refusal does not name the target's live edges: %v", err)
 	}
 	if got := liveEdgeCount(t, store, target); got != 1 {

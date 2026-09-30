@@ -420,30 +420,41 @@ func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string
 }
 
 // LinksByRelationSource returns all valid (non-invalidated) links of the given
-// relation and source whose SOURCE endpoint belongs to projectID or to
-// `_global`. Used by ghost supersede to find previously-created 'supersedes'/llm
-// links so it can reclassify them alongside freshly-discovered candidate pairs,
-// by the repair pass to load what it re-judges, and by resolve's supersedes
-// piggyback and its repair pass's floor.
+// relation and source whose BOTH endpoints belong to projectID or to `_global`.
+// Used by ghost supersede to find previously-created 'supersedes'/llm links so it
+// can reclassify them alongside freshly-discovered candidate pairs, by the repair
+// pass to load what it re-judges, and by resolve's supersedes piggyback and its
+// repair pass's floor.
 //
-// The scope is the SOURCE in the named project PLUS the shared scope, and the
-// half that matters is `_global`. A promotion (`ghost_memory_promote`,
-// `ghost reflect --promote-globals`) moves a memory into `_global` and KEEPS its
-// links, so a live edge is left with its source in the shared scope and its
-// target where it was — and the target is the memory the edge demotes and the one
-// whose resolved_at resolve's piggyback stamps. Scoping on the source's project
-// alone therefore put that edge outside all four of these readers at once:
-// SupersedePenalties, which carries no project predicate at all, went on
-// demoting the target, while the repair pass could not load the edge to withdraw
-// it and the floor let go of the resolution the demotion was still justifying.
-// Every reader of a 'supersedes' edge has to see the same edges, and this is the
-// one read all of the project-scoped ones share.
+// The scope is BOTH endpoints, and it is deliberately STRICTER than
+// SupersedesLinksInto's, because the two reads answer different questions. That
+// one is a targeted withdrawal, and the caller has already NAMED the target: the
+// question is which edges bury this memory, and the memory's own project may
+// answer it however the edge came to be sourced. This one feeds a PASS, and a pass
+// judges a pair and then WRITES links on it -- so an edge with an endpoint outside
+// the caller's project is that other project's pair, and a pass that judged it
+// would be writing on a graph it was not run against.
+//
+// That half is what a promotion creates. `ghost_memory_promote` and `ghost reflect
+// --promote-globals` move a memory into `_global` and KEEP its links, so a live
+// edge is left with its source in the shared scope and its target where it was --
+// and a predicate on the source alone put that edge outside all four of these
+// readers at once (#786). SupersedePenalties, which carries no project predicate
+// at all, went on demoting the target, while the repair pass could not load the
+// edge to withdraw it and the floor let go of the resolution the demotion was
+// still justifying. The TARGET half is what fixes that, and what keeps the pass
+// inside its project: from `p` the promoted edge's two endpoints are the shared
+// scope and `p`, so it loads; from `q` the target is a `p` memory, so it does not.
+//
+// Nothing downstream of this read re-filters the target either, which is why the
+// exclusion half is load-bearing rather than tidiness: Run's apply block
+// invalidates AND creates links on whatever pair it loaded, so a read that
+// admitted an edge whose target belongs to a third project would let
+// `ghost supersede p --reassess` delete a claim in `q`'s graph.
 //
 // `_global` is in scope from every project and NO other project is, which is the
 // same rule the ref resolver follows (MemoryIDsByIDPrefix): a memory in the
-// shared scope is visible in every project, and a project is a boundary. A pair
-// with both endpoints in another project is that project's edge, and this read
-// still says nothing about it.
+// shared scope is visible in every project, and a project is a boundary.
 func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]Link, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -451,10 +462,12 @@ func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT l.source_id, l.target_id, l.relation, l.strength, l.source, l.created_at, l.invalidated_at
 		FROM memory_links l
-		JOIN memories m ON m.id = l.source_id
-		WHERE (m.project_id = ? OR m.project_id = ?)
+		JOIN memories source_mem ON source_mem.id = l.source_id
+		JOIN memories target_mem ON target_mem.id = l.target_id
+		WHERE (source_mem.project_id = ? OR source_mem.project_id = ?)
+		  AND (target_mem.project_id = ? OR target_mem.project_id = ?)
 		  AND l.relation = ? AND l.source = ? AND l.invalidated_at IS NULL
-	`, projectID, GlobalProjectID, relation, source)
+	`, projectID, GlobalProjectID, projectID, GlobalProjectID, relation, source)
 	if err != nil {
 		return nil, fmt.Errorf("links by relation source: %w", err)
 	}

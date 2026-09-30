@@ -907,8 +907,8 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		}
 		fmt.Fprintf(&sb, "  %s  %s -> %s  [%s]  %s\n", marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, firstLine(l.TargetText, 70))
 	}
-	targets := supersede.RepairableTargets(res.Links)
-	if len(targets) == 0 {
+	groups := supersede.RepairableTargets(res.Links)
+	if len(groups) == 0 {
 		// Every row was one this call never wrote and never reached, so every
 		// edge is still live and resolve's floor still defends every target: there
 		// is nothing repairable to name. (A row a CONCURRENT pass took is not this
@@ -934,57 +934,19 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	// this string is the tool's whole answer, and a clause addressed to the
 	// implementer inside it reads as an instruction to the agent reading it. That
 	// guidance lives in this function's doc comment instead.
-	cmd, viaFileOnly, unnameable := followup.ResolveCommand(projectID, targets)
-	// The heading says "a SCOPED repair" because the command below it is scoped —
-	// so when no id is carriable there is no command, and the sentence has to
-	// change rather than dangle over an empty line. The unscoped form is never
-	// printed: it is the project-wide re-judge #698 measured, and an agent handed
-	// it verbatim would run the one command that does the most harm.
-	if cmd != "" {
-		fmt.Fprintf(&sb, "\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of\n"+
-			"ranked injection until a SCOPED repair clears it. There is no MCP tool for that repair, so it is a CLI\n"+
-			"command — an agent with no shell cannot run it, and should say so rather than reach for ghost_resolve,\n"+
-			"which is the forward pass and would stamp more memories resolved:\n  %s\n", cmd)
-		sb.WriteString("That pass honours a live edge as a floor, which is why the edge has to go first.")
-	}
-	if len(viaFileOnly) > 0 {
-		// Named rather than omitted, because this surface writes no --only-file and
-		// the command cannot carry these ids at all: `--only` splits on commas, so
-		// an id holding one becomes two selectors that name nothing however it is
-		// quoted. An agent told nothing would run the command above, judge fewer
-		// memories than this call orphaned, and report a repair that did not
-		// happen. The id is given verbatim so a person can put it in a file
-		// themselves — one id per line, and the --only-file reader never splits.
-		if cmd == "" {
-			sb.WriteString("\nNo --only command can name the target: its id holds a comma, which --only splits on.")
+	for _, g := range groups {
+		// The project that can reach these targets, spelled the way the CALLER
+		// spelled its own project when these are its own targets. That keeps the
+		// ordinary answer byte-identical to what it always was; a group for some
+		// other project — a `_global` call over a target in a project — is spelled
+		// by its id, which ResolveProject accepts.
+		spelling := g.ProjectID
+		if g.ProjectID == resolvedProjectID {
+			spelling = projectID
 		}
-		// The unscoped repair is described, never written out: a copy-pasteable
-		// line that re-judges every resolved memory in the project is exactly what
-		// this answer must not hand an agent.
-		fmt.Fprintf(&sb, "\n%d id(s) below are reachable only through `ghost resolve --reassess --only-file` with\n"+
-			"one id per line — write that file yourself, or hand the ids to someone with a shell. Do NOT fall\n"+
-			"back on the same command without --only: that re-judges every resolved memory in the project.\n",
-			len(viaFileOnly))
-		for _, id := range viaFileOnly {
-			fmt.Fprintf(&sb, "  %s\n", id)
-		}
+		sb.WriteString(repairInstructions(spelling, g.Targets))
 	}
-	if len(unnameable) > 0 {
-		// The file is one id per line, so an id holding a newline is two selectors
-		// there too. No surface can name it, and the only honest answer says so:
-		// an agent that believes otherwise leaves a memory resolved with nothing
-		// able to clear it.
-		fmt.Fprintf(&sb, "\n%d id(s) can be named by NO surface — the id holds a newline, which both --only (it\n"+
-			"splits on commas) and --only-file (one id per line) cannot carry. These memories stay resolved\n"+
-			"until the row is rewritten: delete and re-save the memory, or re-import it under an id with no\n"+
-			"newline.\n", len(unnameable))
-		for _, id := range unnameable {
-			fmt.Fprintf(&sb, "  %q\n", id)
-		}
-	}
-	if cmd == "" && len(viaFileOnly) == 0 && len(unnameable) == 0 {
-		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
-	}
+
 	// Invalidating a live edge changes what the context resource serves: the
 	// supersede ranking guard demotes an edge's target while the edge stands, so
 	// ghost://project/<id>/context is stale the moment this call returns. Every
@@ -2353,7 +2315,7 @@ func (s *Server) registerTools() {
 
 	// ghost_link_withdraw — remove one named 'supersedes' edge.
 	type linkWithdrawArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project name the superseding memory belongs to (required for ownership check)"`
+		ProjectID string `json:"project_id" jsonschema:"Project the edge belongs to (required for ownership check). Ownership is EITHER endpoint, plus _global, which every project owns: a memory promoted to _global keeps its links, so a project may withdraw the edge burying one of its own memories, and _global may withdraw an edge whose endpoint is in any project. Under _global a ref may also name a memory in any project. An edge with neither endpoint in this project or _global is another project's and is neither withdrawable nor discoverable here."`
 		SourceID  string `json:"source_id" jsonschema:"ID of the SUPERSEDING memory — the newer note the edge points FROM. A full id, or 8 or more characters of one."`
 		TargetID  string `json:"target_id" jsonschema:"ID of the SUPERSEDED memory — the older note the edge points AT, the one being buried. A full id, or 8 or more characters of one."`
 	}
@@ -3469,4 +3431,70 @@ func sourceLabel(source string) string {
 		return ""
 	}
 	return " source=" + label
+}
+
+// repairInstructions renders the follow-up for ONE project's repairable targets:
+// the scoped `ghost resolve <project> --reassess --only … --apply` an agent runs in
+// a shell, plus what to do about the ids that command cannot carry.
+//
+// It takes ONE project and that project's ids, because a resolve repair's pool is
+// ResolvedCandidates(projectID), which filters `project_id = ?` — so a selector
+// resolved against one project and repaired against another is a SILENT no-op,
+// every id reported as a miss, under a message that says the repair is available.
+// The caller therefore calls it once per project, and the grouping that decides
+// how many is supersede.RepairableTargets' (#786).
+func repairInstructions(project string, targets []string) string {
+	var sb strings.Builder
+	cmd, viaFileOnly, unnameable := followup.ResolveCommand(project, targets)
+	// The heading says "a SCOPED repair" because the command below it is scoped —
+	// so when no id is carriable there is no command, and the sentence has to
+	// change rather than dangle over an empty line. The unscoped form is never
+	// printed: it is the project-wide re-judge #698 measured, and an agent handed
+	// it verbatim would run the one command that does the most harm.
+	if cmd != "" {
+		fmt.Fprintf(&sb, "\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of\n"+
+			"ranked injection until a SCOPED repair clears it. There is no MCP tool for that repair, so it is a CLI\n"+
+			"command — an agent with no shell cannot run it, and should say so rather than reach for ghost_resolve,\n"+
+			"which is the forward pass and would stamp more memories resolved:\n  %s\n", cmd)
+		sb.WriteString("That pass honours a live edge as a floor, which is why the edge has to go first.")
+	}
+	if len(viaFileOnly) > 0 {
+		// Named rather than omitted, because this surface writes no --only-file and
+		// the command cannot carry these ids at all: `--only` splits on commas, so
+		// an id holding one becomes two selectors that name nothing however it is
+		// quoted. An agent told nothing would run the command above, judge fewer
+		// memories than this call orphaned, and report a repair that did not
+		// happen. The id is given verbatim so a person can put it in a file
+		// themselves — one id per line, and the --only-file reader never splits.
+		if cmd == "" {
+			sb.WriteString("\nNo --only command can name the target: its id holds a comma, which --only splits on.")
+		}
+		// The unscoped repair is described, never written out: a copy-pasteable
+		// line that re-judges every resolved memory in the project is exactly what
+		// this answer must not hand an agent.
+		fmt.Fprintf(&sb, "\n%d id(s) below are reachable only through `ghost resolve --reassess --only-file` with\n"+
+			"one id per line — write that file yourself, or hand the ids to someone with a shell. Do NOT fall\n"+
+			"back on the same command without --only: that re-judges every resolved memory in the project.\n",
+			len(viaFileOnly))
+		for _, id := range viaFileOnly {
+			fmt.Fprintf(&sb, "  %s\n", id)
+		}
+	}
+	if len(unnameable) > 0 {
+		// The file is one id per line, so an id holding a newline is two selectors
+		// there too. No surface can name it, and the only honest answer says so:
+		// an agent that believes otherwise leaves a memory resolved with nothing
+		// able to clear it.
+		fmt.Fprintf(&sb, "\n%d id(s) can be named by NO surface — the id holds a newline, which both --only (it\n"+
+			"splits on commas) and --only-file (one id per line) cannot carry. These memories stay resolved\n"+
+			"until the row is rewritten: delete and re-save the memory, or re-import it under an id with no\n"+
+			"newline.\n", len(unnameable))
+		for _, id := range unnameable {
+			fmt.Fprintf(&sb, "  %q\n", id)
+		}
+	}
+	if cmd == "" && len(viaFileOnly) == 0 && len(unnameable) == 0 {
+		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
+	}
+	return sb.String()
 }

@@ -108,6 +108,17 @@ type WithdrawnLink struct {
 	LinkSource string  // the edge's own `source` column
 	Strength   float32 // the edge's stored similarity, as written
 	Withdrawn  bool    // this call moved it out of the live set
+	// TargetProjectID is the project the target lives in, and the follow-up the
+	// withdrawal prints is SCOPED TO IT rather than to the project the command was
+	// run against. That is the same project in every ordinary case and a
+	// different one exactly where it has to be: a `ghost supersede _global
+	// --withdraw` whose target stayed in a project, where `ResolvedCandidates`
+	// filters `project_id = ?` and a `ghost resolve _global --reassess` can
+	// therefore never see the memory. Scoping the repair to the wrong project
+	// does not fail loudly — the selector resolves and the row is not in the pool
+	// — so a block promising a clear that cannot happen is the one failure this
+	// field exists to prevent (#786).
+	TargetProjectID string
 	// WithdrawalFailed marks the row whose own write errored, and NotAttempted
 	// the rows after it, which this run never reached because each invalidation
 	// is its own transaction. They are separate states because a report that
@@ -118,9 +129,22 @@ type WithdrawnLink struct {
 	NotAttempted     bool
 }
 
-// RepairableTargets is the follow-up's id list: the targets of the edges a
-// withdrawal reported, deduplicated, in the order the rows were reported, and in
-// FULL — not the eight-character abbreviations the reports use, because a
+// ProjectTargets is one project's share of a repairable set: the ids to name, and
+// the project whose repair can reach them. It exists because the two are not
+// separable — a resolve repair's pool is `ResolvedCandidates(projectID)`, which
+// filters `project_id = ?`, so a selector resolved against one project and
+// repaired against another is a silent no-op, not an error (#786).
+type ProjectTargets struct {
+	ProjectID string
+	Targets   []string
+}
+
+// RepairableTargets is the follow-up: the targets of the edges a withdrawal
+// reported, DEDUPLICATED, in FULL, and GROUPED by the project each one lives in,
+// in the order the rows were reported. A caller prints one scoped repair per
+// group, and every group is a project the repair can actually reach.
+//
+// In FULL, not the eight-character abbreviations the reports use, because a
 // selector is a repair about to be run and a prefix that is unambiguous now may
 // not be after the operator's next save.
 //
@@ -134,6 +158,12 @@ type WithdrawnLink struct {
 // send the repair after a row its own floor reports as still asserted. A row
 // with no resolved target is out because there is nothing to name.
 //
+// The grouping is nearly always ONE project — the one the command named — and a
+// caller that gets a single group cannot tell the difference from today's flat
+// list, which is the point: `ghost supersede _global --withdraw` on a pair whose
+// target stayed in a project is the case that needs the split, and it is exactly
+// the case a flat list got wrong.
+//
 // It is EXPORTED and lives here because two surfaces printed this exact rule
 // (cmd/ghost for `ghost supersede --withdraw`, internal/mcpserver for
 // ghost_link_withdraw) over `[]WithdrawnLink` — the same type, so nothing forced
@@ -141,15 +171,54 @@ type WithdrawnLink struct {
 // to which memories a repair can still clear, and a wrong answer does not print a
 // wrong report, it clears the wrong memories. `TestRepairableTargets*` pins it
 // once, in the package that owns the type.
-func RepairableTargets(links []WithdrawnLink) []string {
-	var out []string
+func RepairableTargets(links []WithdrawnLink) []ProjectTargets {
+	rows := make([]RepairTarget, 0, len(links))
 	seen := make(map[string]bool, len(links))
 	for _, l := range links {
 		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
 			continue
 		}
 		seen[l.TargetID] = true
-		out = append(out, l.TargetID)
+		rows = append(rows, RepairTarget{ID: l.TargetID, ProjectID: l.TargetProjectID})
+	}
+	return GroupByProject(rows)
+}
+
+// RepairTarget is one memory a repair can still clear, with the project it lives
+// in — the pair a follow-up command has to name, and the only two things a
+// grouping needs. It is its own type so one grouping rule serves both withdrawal
+// row types (`WithdrawnLink` and `WithdrawnEdge`) rather than being written twice
+// over two structs that differ in everything but these two fields.
+type RepairTarget struct {
+	ID        string
+	ProjectID string
+}
+
+// GroupByProject groups a repairable set by the project that owns each memory,
+// preserving the order the rows were reported in, and in that same order among the
+// projects — so a report's list of repairs reads in the order the rows did.
+//
+// A row with no project keeps its own single-member group under the empty id, and
+// the id is never dropped: a caller that cannot name the project it repairs in
+// has to render the unscoped form, and dropping the row would hide a memory that
+// is still stuck. A caller that groups by the project it was run against instead
+// is the bug this replaces.
+func GroupByProject(rows []RepairTarget) []ProjectTargets {
+	var out []ProjectTargets
+	index := make(map[string]int, len(rows))
+	seen := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		if r.ID == "" || seen[r.ID] {
+			continue
+		}
+		seen[r.ID] = true
+		i, ok := index[r.ProjectID]
+		if !ok {
+			i = len(out)
+			index[r.ProjectID] = i
+			out = append(out, ProjectTargets{ProjectID: r.ProjectID})
+		}
+		out[i].Targets = append(out[i].Targets, r.ID)
 	}
 	return out
 }
@@ -271,12 +340,17 @@ func attachTargetText(ctx context.Context, store WithdrawStore, links []Withdraw
 	if err != nil {
 		return fmt.Errorf("load withdrawn targets: %w", err)
 	}
-	textByID := make(map[string]string, len(mems))
+	type loaded struct {
+		content string
+		project string
+	}
+	byID := make(map[string]loaded, len(mems))
 	for _, m := range mems {
-		textByID[m.ID] = m.Content
+		byID[m.ID] = loaded{content: m.Content, project: m.ProjectID}
 	}
 	for i := range links {
-		links[i].TargetText = textByID[links[i].TargetID]
+		links[i].TargetText = byID[links[i].TargetID].content
+		links[i].TargetProjectID = byID[links[i].TargetID].project
 	}
 	return nil
 }
@@ -362,10 +436,20 @@ func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref 
 }
 
 // intoSuffix names the live edges that DO point at a target, for the refusal
-// that follows a missing one. It is project-scoped by the read it came from, so
-// it cannot report another project's edge — and every sentence it produces says
-// so, because an edge whose source was promoted to `_global` exists without
-// being visible here and "nothing supersedes that memory" would be false.
+// that follows a missing one.
+//
+// It names the holders and says NOTHING about whose they are, which is a change
+// and not an omission. The read is scoped to "either endpoint is ours", so a
+// holder is as likely to be a memory in `_global` — promoted there with its links
+// intact — as one in the project itself, and the sentence that claimed otherwise
+// was asserting an ownership the read does not establish (#786's review). Every
+// claim it does make is about the TARGET, which the caller named and which is in
+// scope by construction: these edges bury that memory, and one of them may still
+// hold it down after the pair they asked about is withdrawn.
+//
+// The empty case is scoped on purpose and says "in this project": with no holder
+// the sentence is a claim about the whole graph, and one is false whenever the
+// edge exists under a scope this read cannot see.
 func intoSuffix(links []memory.Link) string {
 	if len(links) == 0 {
 		return " (no memory in this project supersedes it)"
@@ -374,7 +458,7 @@ func intoSuffix(links []memory.Link) string {
 	for _, l := range links {
 		parts = append(parts, short(l.SourceID))
 	}
-	return " (superseded, from this project, by " + strings.Join(parts, ", ") +
+	return " (still superseded by " + strings.Join(parts, ", ") +
 		" — withdraw that pair as well, or note that the other edge still buries it)"
 }
 

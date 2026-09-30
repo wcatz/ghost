@@ -417,6 +417,11 @@ type Classified struct {
 	// pass withdrew the edge first — the same distinction Reassess draws, for
 	// the same reason: the report must not claim a graph change it did not make.
 	Withdrawn bool
+	// TargetProjectID is the project the target lives in, and the follow-up the
+	// CLI prints is scoped to IT rather than to the project the pass was run
+	// against: a resolve repair's pool is filtered by project, so a repair scoped
+	// to the wrong one silently clears nothing. See RepairableTargets.
+	TargetProjectID string
 }
 
 // Result summarizes a pass.
@@ -960,9 +965,14 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			// report could not tell a withdrawal from a fresh pair's silence
 			// (#785). JudgedAt is #792's: the content freshness the apply block
 			// stamps onto the edge it creates, read from this pass's own snapshot.
+			// TargetProjectID comes from the same existence check, so the follow-up
+			// can be scoped to the project whose repair pool holds that memory.
 			classified = append(classified, Classified{
-				Candidate: c, Relation: verdict, JudgedAt: judgedAt(aliveByID, c),
-				Reclassified: wasReclassify,
+				Candidate:       c,
+				Relation:        verdict,
+				JudgedAt:        judgedAt(aliveByID, c),
+				Reclassified:    wasReclassify,
+				TargetProjectID: aliveByID[c.OlderID].ProjectID,
 			})
 
 			switch verdict {
