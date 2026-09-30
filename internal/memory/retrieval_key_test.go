@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -447,103 +448,190 @@ func TestAShortKeyFileIsTreatedAsStillBeingWrittenRatherThanCorrupt(t *testing.T
 	}
 }
 
-// TestTheLosersRetryWaitsForAKeyThatIsStillBeingWritten: the loop's reason to
-// exist, asserted by making the wait SUCCEED rather than by reading the code.
+// scriptedKeyReader hands out a fixed sequence of outcomes and counts the calls,
+// which is how "keeps looking" and "refuses immediately" are asserted at all:
+// both are claims about the NUMBER of attempts, and with a real file that number
+// would have to be observed through a 40ms window and a goroutine, which is a
+// clock in a test of a clock.
 //
-// The earlier test for this seeded a short key file and then asked for a digest,
-// which pins the CLASSIFIER — but the top-level read answers that shape and never
-// reaches the loop, so deleting the loop's `errQueryKeyShort` arm left every test
-// in the package green. That is the regression the classifier's own comment claims
-// to have fixed, unpinned.
-//
-// So this drives readPublishedQueryKey directly and changes the file UNDER it: a
-// short file is what a half-finished write looks like, and if the loop waits for
-// it to finish then it gets the key; if it refuses on the first attempt, it gets
-// the error it would have given all along.
-func TestTheLosersRetryWaitsForAKeyThatIsStillBeingWritten(t *testing.T) {
-	dataDir := fakeDataDir(t)
-	useQueryKeyDir(t, dataDir)
-	path := filepath.Join(dataDir, queryKeyFileName)
+// The first version of these tests did exactly that, and a reviewer's point about
+// it was correct: with attempts at ~0/10/20/30/40ms and the writer publishing at
+// 30ms, only ~10ms of slack remained, and a late timer under a saturated runner
+// would fail them with the production code perfectly correct. The filesystem
+// version readPublishedKey sits behind is now covered by the entry-point test
+// below; the POLICY is here, with no clock in it at all.
+type scriptedKeyReader struct {
+	outcomes []keyOutcome
+	calls    int
+}
 
-	// A short file, and deliberately not valid hex — "zz" can only be reported as
-	// too short, whereas a short VALID-hex file would also decode to a short key.
-	if err := os.WriteFile(path, []byte("zz"), 0o600); err != nil {
-		t.Fatalf("seed a half-written key: %v", err)
+type keyOutcome struct {
+	key []byte
+	err error
+}
+
+func (s *scriptedKeyReader) read() ([]byte, error) {
+	i := s.calls
+	s.calls++
+	if i >= len(s.outcomes) {
+		// Past the end: repeat the last outcome, so a loop that keeps going is
+		// visibly still going rather than panicking.
+		i = len(s.outcomes) - 1
 	}
-	// It finishes being written, inside the window the loop is willing to wait for.
-	want := strings.Repeat("ab", queryKeyBytes)
-	go func() {
-		time.Sleep(readPublishedRetry * 3)
-		_ = os.WriteFile(path, []byte(want), 0o600)
-	}()
+	return s.outcomes[i].key, s.outcomes[i].err
+}
 
-	key, err := readPublishedQueryKey(path)
+func shortKeyError() error {
+	return fmt.Errorf("%w: 2 bytes at /somewhere, %d needed", errQueryKeyShort, queryKeyBytes*2)
+}
+
+func corruptKeyError() error {
+	return errors.New("the retrieval key at /somewhere is not hex (64 bytes) — it is corrupt or has been " +
+		"edited; delete it to start a new key")
+}
+
+// TestTheLosersRetryKeepsLookingWhileAKeyIsStillBeingWritten: the first "not
+// ready" state, asserted by attempt COUNT rather than by elapsed time.
+func TestTheLosersRetryKeepsLookingWhileAKeyIsStillBeingWritten(t *testing.T) {
+	want := []byte("a finished key")
+	reader := &scriptedKeyReader{outcomes: []keyOutcome{
+		{err: shortKeyError()},
+		{err: shortKeyError()},
+		{key: want},
+	}}
+
+	key, err := readPublishedKey(reader.read, readPublishedAttempts, 0, "/somewhere")
 	if err != nil {
-		t.Fatalf("readPublishedQueryKey gave up on a key that was still being written: %v — the loop "+
+		t.Fatalf("readPublishedKey gave up on a key that was still being written: %v — the loop "+
 			"refused the short-file verdict instead of waiting for it", err)
 	}
-	if got := digestWith(key, "q"); got != digestWith(mustDecodeHex(t, want), "q") {
-		t.Errorf("the key read as %x, want the one the writer published", key)
+	if !bytes.Equal(key, want) {
+		t.Errorf("the key read as %q, want the finished one", key)
+	}
+	if reader.calls != 3 {
+		t.Errorf("the read was attempted %d times, want 3 — two shorts and then the key", reader.calls)
 	}
 }
 
-// TestTheLosersRetryWaitsForAKeyThatIsNotThereYet: the other "not ready" state.
-// Pre-existing behaviour, previously untested, and it is the arm the short-file
-// fix sits next to — so the pair is pinned together.
-func TestTheLosersRetryWaitsForAKeyThatIsNotThereYet(t *testing.T) {
-	dataDir := fakeDataDir(t)
-	useQueryKeyDir(t, dataDir)
-	path := filepath.Join(dataDir, queryKeyFileName)
+// TestTheLosersRetryKeepsLookingWhileAKeyIsNotThereYet: the other "not ready"
+// state, previously untested, and the arm the short-file fix sits beside — so the
+// pair is pinned together.
+func TestTheLosersRetryKeepsLookingWhileAKeyIsNotThereYet(t *testing.T) {
+	want := []byte("a key that appeared")
+	reader := &scriptedKeyReader{outcomes: []keyOutcome{
+		{err: os.ErrNotExist},
+		{key: want},
+	}}
 
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("remove the key: %v", err)
-	}
-	want := strings.Repeat("cd", queryKeyBytes)
-	go func() {
-		time.Sleep(readPublishedRetry * 3)
-		_ = os.WriteFile(path, []byte(want), 0o600)
-	}()
-
-	key, err := readPublishedQueryKey(path)
+	key, err := readPublishedKey(reader.read, readPublishedAttempts, 0, "/somewhere")
 	if err != nil {
-		t.Fatalf("readPublishedQueryKey gave up on a key that had not appeared yet: %v", err)
+		t.Fatalf("readPublishedKey gave up on a key that had not appeared yet: %v", err)
 	}
-	if got := digestWith(key, "q"); got != digestWith(mustDecodeHex(t, want), "q") {
-		t.Errorf("the key read as %x, want the one that appeared", key)
+	if !bytes.Equal(key, want) {
+		t.Errorf("the key read as %q, want the one that appeared", want)
+	}
+	if reader.calls != 2 {
+		t.Errorf("the read was attempted %d times, want 2", reader.calls)
 	}
 }
 
-// TestTheLosersRetryRefusesACorruptKeyInsteadOfWaitingForIt: the third state, and
-// the reason the other two are distinguished from it.
+// TestTheLosersRetryRefusesACorruptKeyWithoutLookingAgain: the third state, and
+// the reason the other two are told apart.
 //
-// A file of full length that is not hex will not become hex by waiting, so the
-// loop must refuse it on the first attempt. The test proves that WITHOUT a clock
-// by making a valid key appear mid-window: a loop that retried would pick it up
-// and return it, so returning the refusal is the observable claim that no retry
-// happened.
-func TestTheLosersRetryRefusesACorruptKeyInsteadOfWaitingForIt(t *testing.T) {
-	dataDir := fakeDataDir(t)
-	useQueryKeyDir(t, dataDir)
-	path := filepath.Join(dataDir, queryKeyFileName)
+// The claim is that a corrupt key is refused on the FIRST attempt, and one
+// attempted read is exactly that claim — where the earlier version had to publish
+// a valid key mid-window and infer it from the absence of a result. Corrupt however
+// many times it is offered; if the loop retried, calls would exceed 1.
+func TestTheLosersRetryRefusesACorruptKeyWithoutLookingAgain(t *testing.T) {
+	reader := &scriptedKeyReader{outcomes: []keyOutcome{
+		{err: corruptKeyError()},
+		{key: []byte("a key that would be wrong to accept")},
+	}}
 
-	// Full length, not hex: corruption, or a human's edit.
-	if err := os.WriteFile(path, []byte(strings.Repeat("z", queryKeyBytes*2)), 0o600); err != nil {
-		t.Fatalf("seed a corrupt key: %v", err)
-	}
-	// A valid key appears well inside the window the loop would retry across.
-	go func() {
-		time.Sleep(readPublishedRetry * 3)
-		_ = os.WriteFile(path, []byte(strings.Repeat("ab", queryKeyBytes)), 0o600)
-	}()
-
-	_, err := readPublishedQueryKey(path)
+	_, err := readPublishedKey(reader.read, readPublishedAttempts, 0, "/somewhere")
 	if err == nil {
-		t.Fatal("readPublishedQueryKey accepted a corrupt key")
+		t.Fatal("readPublishedKey accepted a corrupt key")
+	}
+	if reader.calls != 1 {
+		t.Errorf("the read was attempted %d times, want exactly 1 — a key that will not become a key "+
+			"by being read again is refused, not retried", reader.calls)
 	}
 	if errors.Is(err, errQueryKeyShort) {
-		t.Error("a full-length non-hex file was reported as too short, so the loop would spin on corruption")
+		t.Error("a corrupt key was reported as too short, so the loop would spin on corruption")
 	}
 	if !strings.Contains(err.Error(), "not hex") {
 		t.Errorf("the refusal is %v, want the corruption verdict — this error is what an operator reads", err)
+	}
+}
+
+// TestTheLosersRetryTellsItsTwoExhaustedStatesApart: after its attempts are spent,
+// the loop still says WHICH state it gave up on, because the two call for different
+// remedies — a truncated file an operator can act on, versus a file that never
+// appeared at all.
+func TestTheLosersRetryTellsItsTwoExhaustedStatesApart(t *testing.T) {
+	short := &scriptedKeyReader{outcomes: []keyOutcome{{err: shortKeyError()}}}
+	_, shortErr := readPublishedKey(short.read, readPublishedAttempts, 0, "/somewhere")
+	if !errors.Is(shortErr, errQueryKeyShort) {
+		t.Errorf("a key that stayed short is reported as %v, want the too-short verdict", shortErr)
+	}
+	if !strings.Contains(shortErr.Error(), "too short") {
+		t.Errorf("the too-short message does not say what is wrong: %v", shortErr)
+	}
+	// The short verdict is returned AS IT IS, with no wrapper of its own, and that
+	// is the assertion that actually pins the branch: the never-appeared case adds
+	// "did not become readable" because os.ErrNotExist says nothing about the file
+	// an operator would need to look at, while the classifier's message already
+	// names the size, the file and the remedy. errors.Is alone cannot tell these
+	// apart, because the wrapper preserves both the verdict and the inner text —
+	// deleting the branch left every assertion here passing.
+	if strings.Contains(shortErr.Error(), "did not become readable") {
+		t.Errorf("a too-short key is reported as merely unreadable: %v \u2014 the two exhausted states "+
+			"are then indistinguishable in the message, and the size and remedy are buried", shortErr)
+	}
+	if short.calls != readPublishedAttempts {
+		t.Errorf("a key that stayed short was read %d times, want all %d attempts", short.calls, readPublishedAttempts)
+	}
+
+	absent := &scriptedKeyReader{outcomes: []keyOutcome{{err: os.ErrNotExist}}}
+	_, absentErr := readPublishedKey(absent.read, readPublishedAttempts, 0, "/somewhere")
+	if errors.Is(absentErr, errQueryKeyShort) {
+		t.Error("a key that never appeared was reported as too short, which is a different problem")
+	}
+	if !strings.Contains(absentErr.Error(), "did not become readable") {
+		t.Errorf("the never-appeared message is %v, want the readability verdict", absentErr)
+	}
+}
+
+// TestReadPublishedQueryKeyReachesThePolicyThroughTheFile: the entry point, so
+// the split is not a way to leave the real path untested. A good file is read on
+// the first attempt, and a corrupt one is refused with the classifier's verdict —
+// which also pins that the wrapper passes the CLASSIFIER's errors through rather
+// than swallowing them.
+func TestReadPublishedQueryKeyReachesThePolicyThroughTheFile(t *testing.T) {
+	dataDir := fakeDataDir(t)
+	useQueryKeyDir(t, dataDir)
+	path := filepath.Join(dataDir, queryKeyFileName)
+
+	good := strings.Repeat("ab", queryKeyBytes)
+	if err := os.WriteFile(path, []byte(good), 0o600); err != nil {
+		t.Fatalf("seed a good key: %v", err)
+	}
+	start := time.Now()
+	key, err := readPublishedQueryKey(path)
+	if err != nil {
+		t.Fatalf("readPublishedQueryKey on a good key: %v", err)
+	}
+	if !bytes.Equal(key, mustDecodeHex(t, good)) {
+		t.Error("the good key did not read back as itself")
+	}
+	if elapsed := time.Since(start); elapsed >= readPublishedRetry {
+		t.Errorf("a good key took %v to read, so the loop slept before succeeding", elapsed)
+	}
+
+	if err := os.WriteFile(path, []byte(strings.Repeat("z", queryKeyBytes*2)), 0o600); err != nil {
+		t.Fatalf("seed a corrupt key: %v", err)
+	}
+	if _, err := readPublishedQueryKey(path); err == nil || !strings.Contains(err.Error(), "not hex") {
+		t.Errorf("a corrupt key through the entry point is %v, want the corruption verdict refused at once", err)
 	}
 }

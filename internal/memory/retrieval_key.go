@@ -244,30 +244,53 @@ func publishQueryKey(dir, path string, key []byte) ([]byte, error) {
 // the expensive case: without it this store falls through to the failure path, and
 // the failure path now costs every search a cached refusal for the backoff window.
 //
-// A file that is PRESENT but unreadable is a different thing entirely and is never
-// retried: that is corruption or a human's edit, and re-reading it on a loop would
-// be work for the same answer.
+// The policy — which failures mean "keep looking" and which mean "refuse" — is
+// readPublishedKey below, and it is tested there without a clock.
 func readPublishedQueryKey(path string) ([]byte, error) {
+	return readPublishedKey(
+		func() ([]byte, error) { return readPublishedQueryKeyOnce(path) },
+		readPublishedAttempts, readPublishedRetry, path,
+	)
+}
+
+// readPublishedKey is the loop's POLICY, with the filesystem taken out of it.
+//
+// Splitting the two is what makes this testable at all, and the part that needed
+// testing is the part that has no filesystem in it. "Refuses immediately" and
+// "keeps looking" are claims about HOW MANY TIMES the read is attempted, and
+// asserting either through a real file means a goroutine publishing the key inside
+// a 40ms window — a clock, in a test of a clock, which flakes on a loaded runner
+// for reasons that have nothing to do with the code. Here the read is a supplied
+// function, so a test scripts "not there, not there, now it is" and counts the
+// attempts outright. No sleeps, no goroutines, no margin.
+//
+// The three states, and the third is the reason the first two are told apart:
+//
+//   - ABSENT (os.ErrNotExist) and TOO SHORT (errQueryKeyShort) are a file still
+//     being written — the no-hard-link fallback creates then writes, and a crashed
+//     process leaves the same state — so both are retried;
+//   - anything else, which in practice is a full-length file that is not hex, is
+//     corruption or a human's edit, and no amount of waiting changes it.
+//
+// wait is a parameter rather than a constant so the policy is exercisable without
+// sleeping; the production values are the constants below.
+func readPublishedKey(read func() ([]byte, error), attempts int, wait time.Duration, path string) ([]byte, error) {
 	var last error
-	for attempt := range readPublishedAttempts {
-		key, err := readPublishedQueryKeyOnce(path)
+	for attempt := range attempts {
+		key, err := read()
 		if err == nil {
 			return key, nil
 		}
 		last = err
-		// TWO kinds of "not ready", and the difference is the whole reason this
-		// loop exists: a file that is ABSENT, or present but too short to be a
-		// key, is a file still being written — by the no-hard-link fallback, or by
-		// a process that crashed mid-write. A file of full length that is not hex
-		// is corruption or a human's edit, and re-reading that on a loop is work
-		// for the same answer.
 		if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errQueryKeyShort) {
 			return nil, err
 		}
-		if attempt == readPublishedAttempts-1 {
+		if attempt == attempts-1 {
 			break
 		}
-		time.Sleep(readPublishedRetry)
+		if wait > 0 {
+			time.Sleep(wait)
+		}
 	}
 	if errors.Is(last, errQueryKeyShort) {
 		// The classifier's own message already says what is wrong and what to do.
