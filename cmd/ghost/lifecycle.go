@@ -1438,13 +1438,16 @@ Classifies each candidate as supersedes, causes, reversed, or neither. A
 supersedes answer has to name the older note's claim that no longer holds, and
 one that cannot is neither: a supersedes link demotes its target in ranking and
 marks it resolved, so an edge between two notes that are both still true takes a
-live memory out of every later session. A reversed verdict — the older note is
-the current one and the newer note restates an obsolete claim — is refused
-rather than written, because a supersedes link only ever points from the newer
-note to the older one. Runs through the configured CLI harness of the calling
-session (--source overrides; otherwise detected from the environment and process
-ancestry — an undetectable caller is an error, never a fallback to a different
-harness). The harness owns its authentication and billing.
+live memory out of every later session. It has to retire EVERY claim the older
+note makes, not one of them, and a release/status/changelog/incident entry, a
+recurring defect seen twice, and two parallel investigation notes are never a
+chain of replacements. A reversed verdict — the older note is the current one
+and the newer note restates an obsolete claim — is refused rather than written,
+because a supersedes link only ever points from the newer note to the older one.
+Runs through the configured CLI harness of the calling session (--source
+overrides; otherwise detected from the environment and process ancestry — an
+undetectable caller is an error, never a fallback to a different harness). The
+harness owns its authentication and billing.
 
 --withdraw is the other repair, and the one for an edge the rules still accept:
 --reassess withdraws what the current rubric rejects, so a pair that is wrong for

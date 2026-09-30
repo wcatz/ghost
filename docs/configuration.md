@@ -319,14 +319,49 @@ supersede pass was measured at 43% precision on a real store
 proposed joined two notes that were both still true, and an edge is not an
 annotation — it demotes the older note in ranking and `ghost resolve` then stamps
 `resolved_at` on it, which takes a live memory out of every later session. The
-pass is now KEEP-biased (the rubric asks whether the older claim is still false, a
+pass is KEEP-biased (the rubric asks whether the older claim is still false, a
 `supersedes` answer must name the claim in a `replaced:` field, and a standing
 rule the newer note never retires is vetoed before any harness call) and its
-labeled eval reads 1.00 precision / 1.00 recall against the free
-`opencode/big-pickle`, but the eval is synthetic and the corpus it came from is
-not. Turning the phase on means writing real edges from a model that has not yet
-been measured on your notes; running `ghost supersede <project>` by hand and
-reading the list is free of that, and it is dry-run by default.
+labeled eval read 1.00 precision / 1.00 recall against the free
+`opencode/big-pickle` — a figure from the 28-pair set, measured before the four
+fixtures below existed, so it does not cover them. The eval is synthetic and the
+corpus it came from is not.
+
+A second measurement over three more real stores
+([#779](https://github.com/wcatz/ghost/issues/779)) read **55% precision** over
+108 distinct proposals, with the wrong edges in four classes the rubric now
+names outright: a newer note retiring one claim of a many-claim older note, a
+release or status log treated as a chain of replacements, a recurring defect
+treated as a fix chain, and parallel investigation notes treated as a linear
+one. A `supersedes` now has to retire **every** claim of the older note, and a
+log entry, a recurring defect and a parallel investigation are not chains. The
+same measurement found the wrong edges are an *unstable* classifier as much as a
+wrong one — 79% precision on edges proposed in all three passes, 33% on those
+proposed in one — which is why a plain `--apply` is still not the way to turn this
+phase on. (The second half of that measurement, a gate on agreement between
+repeated passes, is not in this PR.) Turning the phase on still means writing
+real edges from a model that
+has not been measured on your notes; running `ghost supersede <project>` by hand
+and reading the list is free of that, and it is dry-run by default.
+
+**Upgrading from before #779: run `--reassess` once.** The tightened rubric
+applies to pairs judged from here on — the NEITHER cache's key prefix moved with
+the rubric, so every cached verdict is re-asked. Edges **already in the graph**
+are a different thing: `skip-if-unchanged` holds a live `supersedes` edge quiet
+until one of its endpoints changes, so a passing pass never re-judges one written
+under the old rules. `ghost supersede <project> --reassess` re-judges every live
+edge under the current rules and, with `--apply`, withdraws the ones they no
+longer support:
+
+```bash
+ghost supersede <project> --reassess            # dry run
+ghost supersede <project> --reassess --apply    # withdraw, and print the resolve repair
+```
+
+It is worth doing once after the upgrade and then not routinely. The repair pass
+is where the rubric's error argument does not apply — a false veto there deletes
+a correct edge, and being deterministic it re-fires until a note changes — so
+read the dry run before applying.
 
 When enabled, the Stop hook spawns one detached lifecycle process and runs the phases in this order:
 
