@@ -91,25 +91,52 @@ type Signals struct {
 }
 
 // StageTrace is one stage's counts and the rows it removed.
+//
+// There is deliberately no "did this stage reorder" field, and the absence is
+// the record rather than a gap. The retriever's order is authoritative — it
+// carries the keyword reservation, the status demotion, decay and both
+// demotions, none of which a second pass could recover — so every stage here
+// either filters or records and none of them moves a row. A field for it could
+// therefore only ever read false, and a trace projection that read a permanently
+// false flag as a fact would be wrong about a stage that had reordered. A stage
+// that starts reordering has to add the field back WITH the stage.
 type StageTrace struct {
 	Stage      string
 	In, Out    int
 	DroppedIDs []string
-	Reordered  bool
 	Notes      []string
 }
 
-// Decision is one row's fate at one stage, with the row it was decided against
-// where there was one.
+// Decision is one row's fate at one stage: whether it was kept or dropped, the
+// stage that decided it, the reason that stage gave, and the score the row held
+// when the decision was made.
+//
+// It records no row the decision was made AGAINST and no score AFTER it, and both
+// are absences rather than omissions — which is the opposite of what a trace
+// consumer would assume of a struct whose fields are simply unset. No stage here
+// decides one row against another: the pairwise judgements are the retriever's,
+// made over a window this pipeline never saw the edges of, and stage 5 records a
+// `contradicts` pair without separating it. And no stage re-scores a row, so
+// there is no "after" to record — stage 4's weight is pinned at 1.0 and both the
+// contributions it writes are zero, so Before is still the row's final score.
+// Whichever stage first does either has to add the field here, because a Decision
+// that carries an unset one is indistinguishable from a stage that judged it.
 type Decision struct {
-	ID, Stage, Reason, AgainstID string
-	Kept                         bool
-	Before, After                float64
+	ID, Stage, Reason string
+	Kept              bool
+	Before            float64
 }
 
 // stage names, in pipeline order.
+//
+// Retrieval is NOT one of them, and the reason is the seam's shape rather than an
+// omission: it is the one step that needs the Retriever, so Run performs it
+// before the pipeline starts and has no In/Out pair to record — the store was
+// asked a question and it answered. The trace describes it instead through
+// Trace.Limit (the window asked for) and Trace.Legs (what each leg did), and a
+// `retrieve` name with no stage behind it is exactly the kind of declaration a
+// reader cannot tell from a stage that ran and removed nothing.
 const (
-	stageRetrieve    = "retrieve"
 	stageValidity    = "validity"
 	stagePredicates  = "predicates"
 	stageProvenance  = "provenance"
@@ -158,10 +185,11 @@ func newTrace(req Request, set *memory.CandidateSet) *Trace {
 
 // record appends one stage's entry, always. In and Out are what the stage saw
 // and what it left, so a reader can tell a stage that changed nothing from one
-// that was never reached.
-func (t *Trace) record(stage string, in, out int, dropped []string, reordered bool, notes ...string) {
+// that was never reached. It takes no "reordered" argument because no stage
+// reorders — see StageTrace.
+func (t *Trace) record(stage string, in, out int, dropped []string, notes ...string) {
 	t.Stages = append(t.Stages, StageTrace{
-		Stage: stage, In: in, Out: out, DroppedIDs: dropped, Reordered: reordered, Notes: notes,
+		Stage: stage, In: in, Out: out, DroppedIDs: dropped, Notes: notes,
 	})
 }
 

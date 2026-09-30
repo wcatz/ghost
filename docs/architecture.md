@@ -1460,12 +1460,14 @@ Axis interaction rules:
 > it with both filters applied before the window closes, a derived abstention
 > outcome and a response-fit byte cap
 > ([#580](https://github.com/wcatz/ghost/issues/580)), and the session-start
-> surface renders and applies `memories.scope` from the shared label and the
-> shared rule ([#577](https://github.com/wcatz/ghost/issues/577)). What does not
-> exist yet: the session-start injector still runs its own ad-hoc pipeline rather
-> than `assemble.Run` — the seam now SERVES passive retrieval, so the migration is
-> the caller's half — the conflict and diversity stages are pass-throughs, and
-> `explain: true` still
+> injector now runs on it too — a PASSIVE request through `loadSessionPassive`
+> (`internal/mcpinit/session_passive.go`), so the selection, the caps, the order
+> and the near-duplicate pass are the assembler's rather than a second
+> implementation of them, while the per-item PREVIEW budget stayed with the
+> renderer that has to say a line was cut. It therefore renders and applies
+> `memories.scope` from the shared label and the shared rule
+> ([#577](https://github.com/wcatz/ghost/issues/577)). What does not exist yet:
+> the conflict and diversity stages are pass-throughs, and `explain: true` still
 > calls the store's own diagnosis rather than projecting the assembler's trace
 > ([#583](https://github.com/wcatz/ghost/issues/583), [#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
 > [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
