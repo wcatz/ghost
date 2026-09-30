@@ -142,6 +142,19 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		return resolvedID, nil, nil
 	}
 
+	// Resolve ONCE, here, for two reasons that are really one. The answer says
+	// whether the store already holds whatever this argument addresses — which is
+	// what decides whether the two guards below apply at all — and it is the same
+	// answer the non-repository branch below would have asked for anyway, so
+	// hoisting it costs the repository branch one read and nothing else. It does
+	// not change ROUTING: the repository branch still goes through
+	// `ResolveOrCreateRepoProject`, which repeats exact and longest-prefix path
+	// resolution without the basename fallback for the reason in its own comment.
+	resolvedID, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve project: %w", err)
+	}
+
 	// The SHAPE of the project this save would OPEN, refused here rather than only
 	// in the store (#824).
 	//
@@ -156,16 +169,28 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// through `assemble.Token` — the renderer the row itself uses — and the sentence
 	// holds NONE of the three characters it refuses.
 	//
-	// It runs AFTER the exact-id lookup above, which is the load-bearing part: a
-	// store that already holds a project of this shape (a pre-guard save, a
-	// restored snapshot, a hand edit) keeps accepting saves into it. Placing the
-	// check first would refuse every save into such a project and orphan its
-	// memories with nothing reported — the user would be told their project_id was
-	// invalid while the session they were working in said otherwise. It matches the
-	// store's own routes, which ask the predicate on the arm that is about to
-	// INSERT and skip it for a row the transaction already finds there, so a legacy
-	// project addressed by its PATH — which resolves to its hostile id — is judged
-	// the same way here as it is there: not at all.
+	// It is gated on `resolvedID == ""`, and that gate is the whole rule: a project
+	// the store ALREADY holds is not judged, because it is not being created, and
+	// the failure mode of judging it is a project the user is working in becoming
+	// unwritable. The exact-id lookup above settles one way of addressing such a
+	// project; this settles every other way, which is where the rule actually bites.
+	// A checkout whose DIRECTORY carries a refused character is not exotic — «, »
+	// and a backtick are all legal in a POSIX path, and `ghost project bind` writes
+	// `projects.path` through `storedPathIsUsable`, which asks only whether the path
+	// is absolute and is not a bare root. That project then has a clean id and a
+	// hostile recorded path, an agent's `project_id` is routinely the session
+	// directory, and the path resolves to the id by longest prefix — so a check asked
+	// before this resolution refused every save into it, which is the bug the gate
+	// fixes. The credential guard below is gated identically, and for the same
+	// reason: a bound path that is credential-shaped must not make a project
+	// unwritable by the address a session actually uses, and nothing prints the value
+	// on the route that resolves.
+	//
+	// It matches the store's own routes, which ask the predicate on the arm that is
+	// about to INSERT and skip it for a row the transaction already finds there, so a
+	// legacy project addressed by its PATH — which resolves to its hostile id — is
+	// judged the same way here as it is there: not at all.
+	//
 	// The record is the caller's argument in all three fields, which is what both
 	// branches below store: the non-remote route passes path="" and the store
 	// normalizes it to the id, and the repository route passes the same value three
@@ -185,13 +210,15 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// afterwards because the predicate judges SHAPE first: a value that is both
 	// hostile and credential-shaped comes back as a shape error with the credential
 	// behind it, which `errors.Is` cannot see and the append below would print.
-	if err := memory.RejectSecret("project_id", projectID); err != nil {
-		return "", nil, err
-	}
-	if err := memory.CheckImportedProject(memory.PortableProject{
-		ID: projectID, Name: projectID, Path: projectID,
-	}); err != nil {
-		return "", nil, fmt.Errorf("%w — project_id %s", err, assemble.Token(projectID))
+	if resolvedID == "" {
+		if err := memory.RejectSecret("project_id", projectID); err != nil {
+			return "", nil, err
+		}
+		if err := memory.CheckImportedProject(memory.PortableProject{
+			ID: projectID, Name: projectID, Path: projectID,
+		}); err != nil {
+			return "", nil, fmt.Errorf("%w — project_id %s", err, assemble.Token(projectID))
+		}
 	}
 
 	pathShaped := strings.ContainsAny(projectID, `/\`)
@@ -201,19 +228,15 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	}
 	if pathShaped && memory.NormalizeRepoRemote(remote) != "" {
 		// The transactional store operation repeats exact/longest-prefix path
-		// resolution without the basename fallback. Going through ResolveProject
-		// first could turn an arbitrary duplicate basename into an explicit id
-		// and bypass the unique-name rule.
+		// resolution without the basename fallback. Going through its own
+		// resolution first could turn an arbitrary duplicate basename into an
+		// explicit id and bypass the unique-name rule.
 		return s.ensureProjectForWithRemote(ctx, projectID, remote)
 	}
 
 	// With no usable repository identity, retain ordinary id/name/path lookup.
-	id, _, err := s.store.ResolveProject(ctx, projectID)
-	if err != nil {
-		return "", nil, fmt.Errorf("resolve project: %w", err)
-	}
-	if id != "" {
-		projectID = id
+	if resolvedID != "" {
+		projectID = resolvedID
 	}
 	return s.ensureProjectForWithRemote(ctx, projectID, remote)
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -327,6 +328,75 @@ func TestAShapeRefusedOnCreateStillAcceptsTheProjectThatAlreadyHasThatShape(t *t
 	}
 	if n := len(projectsOf(t, srv)); n != 4 {
 		t.Errorf("the store holds %d project(s), want the two fixtures, _global and the planted legacy row", n)
+	}
+}
+
+// TestABoundPathThePredicateRefusesStillAcceptsASaveAddressedByThatPath is the half
+// of the creation rule that the exact-id lookup alone cannot settle, and it is why
+// `ensureProjectFor`'s two guards sit behind the resolution rather than in front of
+// it.
+//
+// A project the store already holds can carry a refused character in a field the
+// write boundary does not own. `ghost project bind` writes `projects.path` through
+// `storedPathIsUsable`, which asks only whether the path is absolute and is not a
+// bare root — it says nothing about «, » or a backtick, and all three are legal in a
+// POSIX directory name. So a checkout called `«ghost»` binds to an ordinary project
+// with a perfectly clean id, and the guard reads the CALLER's argument, which is
+// that directory, because an agent's `project_id` is routinely the session
+// directory. `ResolveExactProjectID` misses (the argument is not an id), the path
+// resolves by longest prefix to the project's clean id, and the write lands in the
+// project the session has been working in all along. Asked before the resolution, the
+// guard refuses it — "project id must hold no data delimiter" for a project whose
+// memories are all still there, which is the exact failure the creation-only rule
+// exists to prevent.
+//
+// The credential case is the same gate on the other guard, and it is why the gate is
+// on both rather than one: a bound path carrying a token would otherwise make the
+// project unwritable by the only address a session uses. Nothing prints the value on
+// a route that resolves, so nothing leaks by skipping the check here.
+func TestABoundPathThePredicateRefusesStillAcceptsASaveAddressedByThatPath(t *testing.T) {
+	// Two shapes in the LEAF of the recorded path, each one the predicate (or the
+	// credential guard) refuses on its own. The directory is created for real:
+	// `ResolveProject` runs path candidates through `pathsAgree`, which resolves
+	// symlinks on both sides, so a path that does not exist is unreachable BY its
+	// path and the save would open a project of its own — passing for the wrong
+	// reason.
+	for _, tc := range []struct {
+		name string
+		leaf string
+	}{
+		{"a refused data delimiter", "«ghost»"},
+		{"a credential-shaped leaf", "ghp_" + strings.Repeat("a", 36)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, srv, session := projectShapeSession(t)
+			dir := filepath.Join(t.TempDir(), tc.leaf)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("create the checkout directory: %v", err)
+			}
+			// A CLEAN id and name, which is the whole point: only the recorded path
+			// fails, so nothing here looks like a row a guard should have refused.
+			plantProject(t, db, "boundid", "boundid", dir)
+
+			out := resultText(callTool(t, session, "ghost_memory_save", map[string]any{
+				"content": "a claim saved from the bound checkout", "category": "fact", "project_id": dir,
+			}))
+			if out == "" || strings.Contains(out, "must hold no") || strings.Contains(out, "credential") {
+				t.Fatalf("a save addressed by a bound path the predicate refuses was refused (answer: %s)", out)
+			}
+			if n := countProjectMemories(t, srv, "boundid"); n == 0 {
+				t.Errorf("the bound project holds no memory row after the call; the write should have landed " +
+					"in the project the path resolves to")
+			}
+			// And nothing was opened beside it, which is what "resolve, do not
+			// create" has to mean for a path that resolves.
+			if n := len(projectsOf(t, srv)); n != 4 {
+				t.Errorf("the store holds %d project(s), want the two fixtures, _global and the planted bound row", n)
+			}
+			if projectExists(t, srv, dir) {
+				t.Errorf("the save opened a project under the directory it should have resolved to")
+			}
+		})
 	}
 }
 

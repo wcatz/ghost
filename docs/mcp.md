@@ -311,12 +311,18 @@ is covered by the renderer above.
 `memory.CheckImportedProject` out of the artifact entirely — and with it every
 memory, task and decision under it, because the importer resolves each record's
 project against the artifact. So the same predicate is applied where a project is
-**created**, which is `ensureProjectFor`: the exact-id lookup runs FIRST, so a store
+**created**, which is `ensureProjectFor`: the resolution runs FIRST, so a store
 that already holds a project of this shape keeps accepting writes into it and its
 memories stay reachable, and only a project about to be opened is judged. That
-holds for the ordinary way of naming it too — a `project_id` that is the session's
-directory resolves by path prefix to the project's stored id, and the write still
-lands in the project you already have instead of being refused as an invalid id.
+holds for every ordinary way of naming it, not just the id — a `project_id` that is
+the session's directory resolves by path prefix to the project's stored id, and the
+write still lands in the project you already have instead of being refused as an
+invalid id. The full resolution is what makes that true, because a project can hold
+a refused character in a field the write boundary does not own: `ghost project bind`
+records `projects.path` through a check that asks only whether the path is absolute,
+and «, » and a backtick are all legal in a directory name. The credential guard
+below is gated the same way, so a bound path carrying a token cannot make a project
+unwritable by the address a session actually uses.
 
 The answer names the refused `project_id` through `assemble.Token` — the renderer the
 row itself uses — because a caller that passed the value can fix it, and it holds
