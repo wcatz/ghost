@@ -233,7 +233,7 @@ func runE2EHook(t *testing.T, tree string, w hookWiring, dataDir, home, stdin st
 
 // TestPluginE2E drives an installed plugin tree end to end: zip round-trip,
 // MCP stdio handshake, both lifecycle hooks, and mcp init deferral. It runs
-// on every platform's CI (linux proof) and on the windows-latest /
+// on every platform's CI (linux proof) and on the windows-2025-vs2026 /
 // windows-11-arm legs (native ghost.exe proof).
 func TestPluginE2E(t *testing.T) {
 	requireBash(t)

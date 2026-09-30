@@ -24,6 +24,12 @@ permissions:
 # run and every release attestation to date was produced on 24.04, so the
 # attested artifact of a known image is what is being protected.
 #
+# WINDOWS, same rule: the matrix names `windows-2025-vs2026`, which is the image
+# `windows-latest` resolves to today (run 36772364289, "Image:
+# windows-2025-vs2026"). Pinned to that name rather than to the OS version so
+# that neither the Windows release nor the Visual Studio toolset can move under
+# the matrix; `windows-11-arm` was already explicit.
+#
 # Bump the pin deliberately, with the evidence below: `ubuntu-26-canary` runs
 # build-and-test's own steps on ubuntu-26.04 and is NOT a required status
 # check (main-branch-protection requires exactly build-and-test, lint and
@@ -258,12 +264,12 @@ jobs:
   #
   # No -race: these are OS/ARCH legs — linux's build-and-test owns race.
   # If windows-11-arm cannot queue for this repo, trim the matrix to
-  # windows-latest.
+  # windows-2025-vs2026.
   windows-plugin:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, windows-11-arm]
+        os: [windows-2025-vs2026, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
