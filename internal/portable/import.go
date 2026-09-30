@@ -471,7 +471,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	for _, p := range memories {
 		m := p.rec.Memory
 		m.ProjectID = under(m.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeMemory, detail: safeDetail(contentPrefix(m.Content), m.Content, m.ID), check: checkFor(m.ProjectID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeMemory, detail: safeDetail(assemble.PreviewLine(m.Content, contentPreviewMax), m.Content, m.ID), check: checkFor(m.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				created, clamped, downgraded, err := s.ImportMemory(ctx, *m, opts)
 				if err != nil {
@@ -733,21 +733,11 @@ func labelOrID(r RecordResult, err error) string {
 	}
 }
 
-// contentPrefix is the first line of a memory's content, capped, for a report
-// line. firstLine keeps the report readable without inventing a summary of the
-// memory.
-func contentPrefix(content string) string {
-	const max = 60
-	line := content
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
-	}
-	r := []rune(line)
-	if len(r) > max {
-		return string(r[:max]) + "…"
-	}
-	return line
-}
+// contentPreviewMax is the cap on the content preview a report line carries. It
+// is 60 rather than the 70 the MCP resolve reports use because an import report
+// line is narrower — it shares its line with an action, a type, a line number and
+// an id — and a preview that wraps is a preview nobody reads.
+const contentPreviewMax = 60
 
 // orderTasks returns the task records in an order where a task's blocker comes
 // before it.

@@ -334,6 +334,37 @@ func labelNeedsEscaping(s string) bool {
 	return false
 }
 
+// PreviewLine returns the first line of stored text, capped at max runes with an
+// ellipsis, for the places that name a record by a glimpse of its content rather
+// than by printing all of it.
+//
+// It exists as ONE function because there were three copies of it, and the copies
+// had already drifted: two cut at '\n' and one did too, and then the answer to
+// "which byte ends a line" changed and only two of the three were updated. A
+// helper whose correctness is "a line is one line" is exactly the kind that must
+// not be copyable, so the logic lives here and the three call sites call it.
+//
+// Cut at the first of EITHER byte, which is the whole reason this is a function
+// rather than a one-liner at each site. A preview is rendered raw — that is what
+// makes it a preview — so any line-breaking character a memory's content holds
+// would otherwise be rendered too. IndexByte('\n') alone left a lone carriage
+// return, and a lone CR is enough: a terminal reads it as "return to column 0 and
+// overwrite", so content of `legitimate claim\roverwrite this` previewed as
+// `overwrite this` and the honest prefix was gone. Several renderers also split on
+// CR as readily as on LF, so this was never terminal-specific. Cutting at
+// whichever comes first drops the CR of a CRLF pair too, since s[:i] ends
+// immediately before it (#791).
+func PreviewLine(s string, max int) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
+
 // isTokenRune is the set Token writes bare. It is the scope-name set the label
 // has always used, widened by nothing: the id column's own values are 32 hex
 // characters, and the other ids a real store holds (a bench corpus id, a restored

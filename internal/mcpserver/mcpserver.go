@@ -342,30 +342,6 @@ func shortID(id string) string {
 	return id
 }
 
-// firstLine returns the first line of s, truncated to at most n runes with an
-// ellipsis, mirroring cmd/ghost's firstLine for compact tool-output preview.
-//
-// Cut at the first of EITHER byte, and that is the whole reason this function
-// exists rather than a one-liner at each call site: a preview is rendered raw
-// into a tool answer, so whatever line-breaking character a memory's content
-// holds would otherwise be rendered raw too. IndexByte('\n') alone left a lone
-// carriage return in the output, and a lone CR is enough — a terminal treats it
-// as "return to column 0 and overwrite", so a memory whose content was
-// `legitimate claim\roverwrite this` printed a preview that showed only
-// `overwrite this`, and several renderers split on CR as readily as on LF.
-// Cutting at whichever comes first also drops the CR of a CRLF pair, since
-// s[:i] ends immediately before it (#791).
-func firstLine(s string, n int) string {
-	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
-		s = s[:i]
-	}
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}
-
 // validateTags enforces tag limits: max 10 tags, max 64 chars each.
 func validateTags(tags []string) []string {
 	if len(tags) > 10 {
@@ -932,7 +908,7 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		default:
 			marker = "already gone"
 		}
-		fmt.Fprintf(&sb, "  %s  %s -> %s  [%s]  %s\n", marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, firstLine(l.TargetText, 70))
+		fmt.Fprintf(&sb, "  %s  %s -> %s  [%s]  %s\n", marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, assemble.PreviewLine(l.TargetText, 70))
 	}
 	targets := supersede.RepairableTargets(res.Links)
 	if len(targets) == 0 {
@@ -1116,7 +1092,7 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 		case m.Declined:
 			marker = "not marked (no longer eligible: pinned, recategorized, or moved since this call read it)"
 		}
-		fmt.Fprintf(&sb, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, firstLine(m.Content, 70))
+		fmt.Fprintf(&sb, "  %s  %s  [%s]  %s\n", marker, shortID(m.ID), m.Category, assemble.PreviewLine(m.Content, 70))
 	}
 	if res.AlreadyResolved > 0 || res.Pinned > 0 || res.ExemptCategory > 0 || res.Declined > 0 {
 		fmt.Fprintf(&sb, "\nA memory that is already resolved, pinned, or in a standing category is left as it is, and a\n"+
@@ -1211,7 +1187,7 @@ func markFailureRows(rows []resolve.MarkedMemory) string {
 	if len(live) > 0 {
 		fmt.Fprintf(&b, "\nNothing was marked: the stamp, its history row and its cache clear are one transaction, so this rolled all %d back. These are unchanged and still live:", len(live))
 		for _, m := range live {
-			fmt.Fprintf(&b, "\n  %s  [%s]  %s", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+			fmt.Fprintf(&b, "\n  %s  [%s]  %s", shortID(m.ID), m.Category, assemble.PreviewLine(m.Content, 70))
 		}
 	}
 	if len(already) > 0 {
@@ -1221,7 +1197,7 @@ func markFailureRows(rows []resolve.MarkedMemory) string {
 			fmt.Fprintf(&b, "\nThe %d below were already resolved before this call: nothing was written for them and nothing was rolled back.", len(already))
 		}
 		for _, m := range already {
-			fmt.Fprintf(&b, "\n  already resolved  %s  [%s]  %s", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+			fmt.Fprintf(&b, "\n  already resolved  %s  [%s]  %s", shortID(m.ID), m.Category, assemble.PreviewLine(m.Content, 70))
 		}
 	}
 	return b.String()
@@ -2378,7 +2354,7 @@ func (s *Server) registerTools() {
 				res.Superseded, res.Corrected, res.Confirmed)
 		}
 		for _, m := range confirmed {
-			fmt.Fprintf(&sb, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+			fmt.Fprintf(&sb, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, assemble.PreviewLine(m.Content, 70))
 		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}}}, nil, nil
 	})

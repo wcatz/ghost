@@ -555,24 +555,3 @@ func runProjectMerge() {
 		os.Exit(1)
 	}
 }
-
-// firstLine returns the first line of s, truncated to at most n runes with an
-// ellipsis, for compact CLI preview.
-//
-// Cut at the first of EITHER byte, as internal/mcpserver's firstLine does, and
-// this CLI's copy exists to stay parallel with it. A lone carriage return in a
-// preview is not a cosmetic artefact on the surface this one writes to: it is a
-// terminal, and a terminal treats CR as "return to column 0 and overwrite", so a
-// memory whose content was `legitimate claim\roverwrite this` would print a
-// preview showing only `overwrite this`. Cutting at whichever comes first also
-// drops the CR of a CRLF pair (#791).
-func firstLine(s string, n int) string {
-	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
-		s = s[:i]
-	}
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}

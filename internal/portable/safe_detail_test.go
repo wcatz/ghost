@@ -3,6 +3,8 @@ package portable
 import (
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/assemble"
 )
 
 // TestSafeDetailScansTheWholeFieldNotThePrintPrefix is the fourth layer of the
@@ -49,17 +51,17 @@ func TestSafeDetailScansTheWholeFieldNotThePrintPrefix(t *testing.T) {
 			// point of printing a prefix at all.
 			name:  "a long clean memory keeps its preview",
 			field: "the relay listens on 2222 and the tablet is provisioned " + strings.Repeat("in every zone ", 20),
-			want:  contentPrefix("the relay listens on 2222 and the tablet is provisioned " + strings.Repeat("in every zone ", 20)),
+			want:  assemble.PreviewLine("the relay listens on 2222 and the tablet is provisioned "+strings.Repeat("in every zone ", 20), contentPreviewMax),
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := safeDetail(contentPrefix(tc.field), tc.field, tc.want)
+			got := safeDetail(assemble.PreviewLine(tc.field, contentPreviewMax), tc.field, tc.want)
 			if strings.Contains(got, credential) || strings.Contains(got, "ghp_") {
 				t.Fatalf("safeDetail returned something holding the credential: %q", got)
 			}
-			if tc.want == contentPrefix(tc.field) {
+			if tc.want == assemble.PreviewLine(tc.field, contentPreviewMax) {
 				// The clean case must return the label unchanged.
 				if got != tc.want {
 					t.Errorf("safeDetail(%q) = %q, want the prefix unchanged", tc.field, got)

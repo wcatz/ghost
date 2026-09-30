@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -661,8 +662,24 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	switch {
 	case detail == "":
 		detail = id
-	case r.ID != "":
-		detail = fmt.Sprintf("%q (%s)", detail, id)
+	default:
+		// Quoted on BOTH arms, not only when there is an id. The old switch
+		// reached `%q` only through `case r.ID != ""`, so a RecordResult with no
+		// id and a non-empty detail fell through both arms and reached Fprintf
+		// with no quoting at all — and `detail` holds a memory's content, which
+		// may hold a carriage return, which a terminal reads as "return to
+		// column 0 and overwrite". A created memory always has an id, so this
+		// was not reachable from `ghost import`; the switch had no reason to
+		// depend on that, though, and a record type added later need not (#791).
+		//
+		// `%q` is also what neutralises a CR reaching here from a store written
+		// before the preview cut at one — defence in depth, not the reason for
+		// the arm.
+		if r.ID != "" {
+			detail = fmt.Sprintf("%q (%s)", detail, id)
+		} else {
+			detail = strconv.Quote(detail)
+		}
 	}
 	_, err := fmt.Fprintf(out, "  %-7s %-9s line %d  %s\n", r.Action, r.Type+":", r.Line, detail)
 	return err
