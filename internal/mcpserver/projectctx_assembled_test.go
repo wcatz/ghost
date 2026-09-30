@@ -1089,74 +1089,114 @@ func TestAProjectHoldingNothingSaysSoWhenOnlyCrossProjectRowsAreShown(t *testing
 	}
 }
 
-// TestTheOwnRowsNoteNeverClaimsThatARowAboveIsCrossProjectWhenThereIsNone is the
-// guard the mutations found missing, and it is about the sections this surface
-// keeps OUTSIDE the assembler's reach.
+// TestTheOwnRowsNoteNeverClaimsThatARowAboveIsCrossProjectWhenThereIsNone is a
+// review should-fix, and the first version of it PASSED VACUOUSLY. Both facts
+// about it matter more than the fix.
 //
-// `buildProjectContext` renders `## Recent Decisions` and `## Learned Context` from
-// direct reads, and `ghost_project_context` renders `## Learned Context`, so a
-// project with no live MEMORY rows can still produce a non-empty block. The note
-// would then be appended to a block whose rows above are neither its own nor
-// cross-project: "every row above applies to all projects" would be false of a
-// decision, which belongs to this project and to no other.
+// **The vacuity.** It seeded the project-keyed section with `RecordDecision`, and
+// `RecordDecision` also writes a COMPANION MEMORY ROW into the project
+// (`internal/memory/decisions.go`). So a row of the project's own was admitted, the
+// note returned "" at the `it.ProjectID == projectID` loop rather than at any
+// section guard, and the test asserted a case it never reached. Reached with a
+// decision whose memory row is deleted, it fails — which is what a reviewer's read
+// of the fixture was worth.
 //
-// So the note is gated on there being at least one admitted memory row to be
-// silent about. Asserted against the RESOURCE body, which is where the sections
-// that leave the assembler live — the tool has no `## Recent Decisions` section, so
-// a fixture built on the tool would pass vacuously, which is exactly how the
-// missing guard survived the first version of these tests.
+// **The defect.** `projectContextOwnRowsNote`'s `n == 0` sentence claimed "every
+// row above applies to all projects", and the only structural guard was
+// `len(res.Items) == 0` — which says nothing about the sections these surfaces
+// render outside the assembler. A project can hold zero memory rows and still have
+// both: `ghost reflect` writes learned context into `ghost_state`,
+// `ghost_decision_record` writes an active decision, and `ghost_memory_delete`
+// removes only the `memories` row. With a live `_global` row admitted, the tool
+// shipped:
 //
-// The counter-case is the one a fix can get wrong in the other direction: a project
-// whose own memory IS in the block alongside a decision must not be told it holds
-// none.
+//	## Memories
+//
+//	- [preference] `liveglobal` (0.8 source=builtin) «a live cross-project preference»
+//
+//	## Learned Context
+//
+//	what reflection concluded about this project
+//
+//	Ghost holds no memories for this project; every row above applies to all projects.
+//
+// which is the same misattribution the note exists to remove, one section further
+// down: the learned summary is THIS project's.
+//
+// Fixed by REWORDING rather than by the alternative fix — threading a
+// caller-supplied flag for "did you render a project-keyed section". That flag's only
+// job would be to suppress a sentence that a narrower wording makes unnecessary, and
+// it would have to be threaded through two callers that each already know the answer.
 func TestTheOwnRowsNoteNeverClaimsThatARowAboveIsCrossProjectWhenThereIsNone(t *testing.T) {
 	st := newValidityStore(t)
 	srv, session := validityServerFor(t, st)
 	seedCrossProjectRow(t, st, "liveglobal", "a live cross-project preference")
 	ctx := context.Background()
 
-	// A project with no memories of its own, a decision, and — the part that makes
-	// the case reachable — a live cross-project row, so the memory read is not
-	// empty and the block is not either.
-	if _, _, _, err := st.RecordDecision(ctx, "bare",
-		"does a project with only a decision still render?", "yes",
-		"so the own-rows note has something to be wrong about", nil, nil); err != nil {
-		t.Fatalf("seed a decision: %v", err)
+	// LEARNED CONTEXT, not a decision: it is a column in `ghost_state` and writes no
+	// memory row at all, so `bare` really does hold none. `RecordDecision` would have
+	// written a companion memory row and put the note's own loop in the way.
+	if err := st.UpdateLearnedContext(ctx, "bare", "what reflection concluded about this project", ""); err != nil {
+		t.Fatalf("seed a learned context: %v", err)
 	}
+
+	// The precondition, asserted rather than assumed — this is what the first version
+	// of this test failed to do, and it is the whole reason it passed vacuously.
+	res, err := srv.projectContextMemories(ctx, "bare", projectContextMemoriesCap)
+	if err != nil {
+		t.Fatalf("projectContextMemories bare: %v", err)
+	}
+	if len(res.Items) != 1 || res.Items[0].ProjectID != memory.GlobalProjectID {
+		t.Fatalf("fixture: expected exactly one admitted row and it must be the cross-project one, got %d rows "+
+			"(%v). A row of the project's own here would make this test vacuous again.", len(res.Items), res.Items)
+	}
+
+	// BOTH surfaces, because `## Learned Context` is the section each one renders and
+	// the tool is where a project-keyed section above the note is reachable at all.
+	tool := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "bare"}))
 	body, err := srv.buildProjectContext(ctx, "bare")
 	if err != nil {
 		t.Fatalf("buildProjectContext bare: %v", err)
 	}
-	if !strings.Contains(body, "Recent Decisions") {
-		t.Fatalf("fixture: the resource body does not carry a decision, so the zero-own-row case is not "+
-			"exercised:\n%s", body)
-	}
-	if !strings.Contains(body, "a live cross-project preference") {
-		t.Fatalf("fixture: the resource body is not populated by the cross-project row:\n%s", body)
-	}
-	if strings.Contains(body, "Ghost holds no memories for this project") {
-		t.Errorf("a block told that every row above applies to all projects, above a decision that belongs to "+
-			"this project and to no other:\n%s", body)
+	for name, block := range map[string]string{"ghost_project_context": tool, "the project-context resource": body} {
+		if !strings.Contains(block, "a live cross-project preference") {
+			t.Fatalf("fixture: %s does not carry the cross-project row:\n%s", name, block)
+		}
+		if !strings.Contains(block, "Learned Context") {
+			t.Fatalf("fixture: %s does not carry a learned context, so the project-keyed section above the note "+
+				"is not exercised:\n%s", name, block)
+		}
+		if !strings.Contains(block, "what reflection concluded about this project") {
+			t.Fatalf("fixture: %s does not carry the learned text:\n%s", name, block)
+		}
+		if strings.Contains(block, "every row above applies to all projects") {
+			t.Errorf("%s told the reader that every row above applies to all projects, above a learned summary "+
+				"that belongs to this project and to no other:\n%s", name, block)
+		}
 	}
 
-	// The same project after one memory of its own: the note must NOT appear, or a
-	// project with rows in the block would be told it holds none.
+	// And the fact that was missing is still reported, on both surfaces.
+	for name, block := range map[string]string{"ghost_project_context": tool, "the project-context resource": body} {
+		if !strings.Contains(block, "Ghost holds no memories for this project") {
+			t.Errorf("%s no longer says the project holds no memories, so it is back to listing the "+
+				"cross-project row alone:\n%s", name, block)
+		}
+	}
+
+	// The counter-case, on the OTHER side of the same rewording: a project whose own
+	// memory IS in the block must not be told it holds none.
 	if _, err := st.CreateWithIDFromCorpus(ctx, "bare", "ownrow", memory.Memory{
 		Category: "fact", Content: "a live memory of its own", Source: "manual", Importance: 0.9,
 	}); err != nil {
 		t.Fatalf("seed bare's own row: %v", err)
 	}
-	after, err := srv.buildProjectContext(ctx, "bare")
-	if err != nil {
-		t.Fatalf("buildProjectContext bare after seeding: %v", err)
-	}
+	after := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "bare"}))
 	if !strings.Contains(after, "a live memory of its own") {
-		t.Fatalf("fixture: the control project has no row of its own in the body:\n%s", after)
+		t.Fatalf("fixture: the control project has no row of its own in the block:\n%s", after)
 	}
 	if strings.Contains(after, "Ghost holds") {
 		t.Errorf("a project whose own row IS in the block was told it holds nothing above it:\n%s", after)
 	}
-	_ = session
 }
 
 // TestTheOwnRowsNoteRefusesTheTwoProjectsItHasNothingToSayAbout is the SEAM-level

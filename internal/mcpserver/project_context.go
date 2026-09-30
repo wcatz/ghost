@@ -367,9 +367,33 @@ func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string
 		// nothing. This is a parity CHANGE where the withheld half is a parity fix —
 		// `GetTopMemories(ctx, "", 20)` returned exactly this — and it is here
 		// because repairing the gate halfway would leave the same defect with fewer
-		// words. The sentence names only the absence, because a `## Learned Context`
-		// or `## Recent Decisions` section above may well hold something.
-		return "Ghost holds no memories for this project; every row above applies to all projects."
+		// words.
+		//
+		// The first version of this sentence claimed "every row above applies to all
+		// projects", and the guard it needed could not be here: this function sees the
+		// memory read, and the sections it would be wrong about — `## Learned
+		// Context` on the tool, `## Recent Decisions` and `## Learned Context` in
+		// buildProjectContext — are rendered by direct reads the assembler never
+		// sees. A project can hold zero memory rows and still have both:
+		// `ghost reflect` writes learned context into `ghost_state`,
+		// `ghost_decision_record` writes an active decision, and
+		// `ghost_memory_delete` removes only the `memories` row, so both survive it.
+		//
+		// So the sentence claims nothing about the rows above. "every row above
+		// applies to all projects" is true of a block that is only the memory
+		// section, and false of one that also carries this project's own summary —
+		// which is the same misattribution the note exists to remove, one section
+		// further down. The narrower wording is true in BOTH shapes, and it is still
+		// the fact that was missing.
+		//
+		// So this is a REWORDING rather than a caller-supplied flag, and that is the
+		// whole reason the flag was not added: a parameter that suppresses this
+		// sentence whenever a project-keyed section sits above would have to be
+		// threaded through two callers that each know the answer, and the flag's
+		// only job would be to make a narrower sentence unnecessary. The withheld
+		// sentence below needed no flag either — "none of them is in the block above"
+		// is about the project's MEMORY rows, and a learned summary is not one.
+		return "Ghost holds no memories for this project; the memory rows above are the cross-project ones."
 	}
 	if n == 1 {
 		return "Ghost holds 1 memory for this project and none of it is in the block above. Call " +
