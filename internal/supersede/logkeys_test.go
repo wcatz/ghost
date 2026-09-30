@@ -468,7 +468,11 @@ func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 		run    func(t *testing.T, log *capturedLog)
 		wants  []string
 	}{
-		{name: "Run", covers: []string{"Run"}, run: runPassesLogKeys, wants: []string{
+		// `Run` is a one-line wrapper since #799 moved the pass into RunWith
+		// (the per-call decisions became an Options value), so the function that
+		// logs is RunWith and that is the name the scan reports. The fixture
+		// still calls Run, because Run is the entry point a caller reads.
+		{name: "Run", covers: []string{"RunWith"}, run: runPassesLogKeys, wants: []string{
 			"reverse of a live supersedes link", // the #804 line
 			"refusing a pair the graph claims in both directions",
 			"vetoed pair whose older note states a rule",
