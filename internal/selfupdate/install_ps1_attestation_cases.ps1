@@ -34,6 +34,25 @@ function Check-Equal {
     Check $Name (($Want | ConvertTo-Json -Compress) -eq ($Got | ConvertTo-Json -Compress)) "want $(($Want | ConvertTo-Json -Compress)), got $(($Got | ConvertTo-Json -Compress))"
 }
 
+function Invoke-Safely {
+    <#
+    .SYNOPSIS
+        A scriptblock's value, or a marker saying it threw.
+    .DESCRIPTION
+        A malformed version must be REFUSED, and refusing means returning an
+        answer. `[int]'3000000000'` threw, and a throw here is not a refusal: it
+        propagates out of Test-AttestationRequired, out of the verdict, out of
+        Main, and takes the installer down with a message about an Int32 rather
+        than about a version. So every call that judges a version goes through
+        here, and a throw becomes a value the comparison can fail on BY NAME —
+        which it did not before: with the [int] casts back, the case file simply
+        stopped, printed no FAIL line, and the only evidence was a non-zero exit.
+    #>
+    param([scriptblock]$Block, [string]$What)
+    try { return (& $Block) }
+    catch { return "<THREW: $($_.Exception.Message)> from $What" }
+}
+
 # --- the version boundary ----------------------------------------------------
 
 # Every row here is a decision `ghost upgrade` makes in
@@ -106,10 +125,40 @@ $boundary = @(
     @{ Version = '10.20.30'; Required = $true },
     @{ Version = '0.43.0-00'; Required = $true },
     @{ Version = '0.43.0-0'; Required = $true },
-    @{ Version = '0.43.0+a-b'; Required = $true }
+    @{ Version = '0.43.0+a-b'; Required = $true },
+    # --- characters that fold onto ASCII under .NET's case-insensitive default.
+    # --- -notmatch folds these onto k / i / s, so they were accepted as a
+    # --- prerelease — on an OLDER line, where accepting it means the check is
+    # --- skipped. Go's validPrerelease tests bytes, so all three are unparseable.
+    @{ Version = "0.42.9-$([char]0x212A)"; Required = $true },  # KELVIN SIGN, folds to k
+    @{ Version = "0.42.9-$([char]0x0130)"; Required = $true },  # DOTLESS I,    folds to i
+    @{ Version = "0.42.9-$([char]0x017F)"; Required = $true },  # LONG S,       folds to s
+    @{ Version = "0.42.9-$([char]0x212A)rc"; Required = $true },
+    # --- a trailing NEWLINE. A `$` anchor in .NET matches before a final newline
+    # --- and [int] casts "9\n" to 9 without complaint, so "0.42.9\n" parsed as
+    # --- 0.42.9 and skipped the check. The table is emitted as JSON, which carries
+    # --- a real newline fine — so this row does not need a fiction to be tested.
+    @{ Version = "0.42.9`n"; Required = $true },
+    @{ Version = "0.42.9-rc`n"; Required = $true },
+    @{ Version = "0.42.9`r`n"; Required = $true },
+    @{ Version = "0.42.9-rc`r"; Required = $true },
+    # --- a component past Int32. [int] cast THROWS on these, so the installer died
+    # --- with an exception that said nothing about a version, while Go's
+    # --- strconv.Atoi accepts 3000000000 and calls it newer than the cutover.
+    @{ Version = '3000000000.0.0'; Required = $true },
+    @{ Version = '2147483648.0.0'; Required = $true },
+    @{ Version = '0.3000000000.0'; Required = $true },
+    @{ Version = '99999999999999999999.0.0'; Required = $true }
 )
 foreach ($row in $boundary) {
-    Check-Equal "attestation required for '$($row.Version)'" $row.Required (Test-AttestationRequired $row.Version)
+    $label = ($row.Version -replace "`r", '\r') -replace "`n", '\n'
+    $got = Invoke-Safely { Test-AttestationRequired $row.Version } "Test-AttestationRequired('$label')"
+    # Explicitly: a throw is its own failure, not a value. The comparison below
+    # would catch it anyway, but a named check says what is wrong.
+    if ($got -is [string] -and $got.StartsWith('<THREW')) {
+        Check "attestation required for '$label' returns an answer" $false $got
+    }
+    Check-Equal "attestation required for '$label'" $row.Required $got
 }
 
 # Emitted so the Go side can check these against selfupdate.AttestationRequiredFor
@@ -124,7 +173,10 @@ foreach ($row in $boundary) {
 # at all. A key that is only distinct by case is not a key.
 $emitted = @(
     foreach ($row in $boundary) {
-        [ordered]@{ Version = $row.Version; Required = [bool](Test-AttestationRequired $row.Version) }
+        [ordered]@{
+            Version  = $row.Version
+            Required = [bool](Invoke-Safely { Test-AttestationRequired $row.Version } 'the emitted boundary')
+        }
     }
 )
 # The control for that: a payload that quietly lost rows would still be valid JSON
@@ -417,6 +469,89 @@ if ($iCheck -ge 0 -and $iUnpack -ge 0) {
     Check-Equal 'the refusal is between the check and the unpack' $true `
         ($iDecision -gt $iCheck -and $iDecision -lt $iUnpack)
 }
+
+# --- the version as the INSTALLER derives it, not as the table spells it -----
+#
+# Everything above drives Test-AttestationRequired with a version the case file
+# chose. That cannot see where a version actually comes from, and the site that
+# mattered was exactly there: Main passes the version Get-LatestReleaseInfo
+# derives, and that function did its own `-replace '^v', ''` — case-INsensitive —
+# so a tag of V0.42.9 arrived at the check as 0.42.9, an older version than the
+# cutover, and the check was SKIPPED. Every boundary row was green throughout,
+# because the table never goes through the derivation.
+#
+# So this drives the real function, with Invoke-RestMethod shadowed by a function
+# (PowerShell resolves a function before a cmdlet, so a function of the same name
+# wins) that returns a release whose tag is whatever the row asks for.
+$script:StubTag = $null
+
+function Invoke-RestMethod {
+    <#
+    .SYNOPSIS
+        A stand-in for the real Invoke-RestMethod, returning a release whose
+        tag_name is $script:StubTag. Shadows the cmdlet for this process only.
+    #>
+    param([string]$Uri, [hashtable]$Headers)
+    $bare = $script:StubTag -creplace '^v', ''
+    $lower = $script:StubTag -creplace '^[vV]', ''
+    $assets = @(
+        # Every spelling a release could plausibly publish the archive under: the
+        # tag verbatim, the tag with only a lower-case v stripped, and the tag with
+        # either case stripped. Which one GoReleaser would use for a capital-V tag is
+        # GoReleaser's business, and this test is about the version the installer
+        # DERIVES — so the fixture must not depend on that answer. Without the third
+        # spelling, a case-insensitive strip in the installer surfaced as "Release
+        # V0.42.9 has no asset named ghost_0.42.9_windows_amd64.zip", which reads as
+        # a broken fixture rather than as the case bug it was.
+        [PSCustomObject]@{ name = "ghost_$($script:StubTag)_windows_amd64.zip"; browser_download_url = 'https://example.invalid/ghost.zip' }
+        [PSCustomObject]@{ name = "ghost_${bare}_windows_amd64.zip"; browser_download_url = 'https://example.invalid/ghost.zip' }
+        [PSCustomObject]@{ name = "ghost_${lower}_windows_amd64.zip"; browser_download_url = 'https://example.invalid/ghost.zip' }
+        [PSCustomObject]@{ name = 'checksums.txt'; browser_download_url = 'https://example.invalid/checksums.txt' }
+    )
+    return [PSCustomObject]@{ tag_name = $script:StubTag; assets = $assets }
+}
+
+# The stub is defined AFTER install.ps1 was dot-sourced above, which is fine:
+# PowerShell resolves a name at call time, not at parse time.
+$stub = New-Stub
+
+function Get-VerdictForTag {
+    <#
+    .SYNOPSIS
+        The version the installer derives from a tag, and the verdict it gets.
+    #>
+    param([string]$Tag)
+
+    $script:StubTag = $Tag
+    $info = Get-LatestReleaseInfo -Arch 'amd64'
+    # No network, no gh: the probe and runner are the same stubs the rest of this
+    # file uses, and what is under test is the VERSION that came out, not gh.
+    $verdict = Get-AttestationVerdict -FilePath '/tmp/ghost.zip' -Version $info.Version -Probe $stub.Probe -Run $stub.Run
+    return @{ Version = $info.Version; Verdict = $verdict }
+}
+
+foreach ($row in @(
+    @{ Tag = 'V0.42.9'; WantVersion = 'V0.42.9'; WantState = 'Verified'; WantRequired = $true },
+    @{ Tag = 'v0.43.0'; WantVersion = '0.43.0'; WantState = 'Verified'; WantRequired = $true },
+    @{ Tag = 'v0.42.9'; WantVersion = '0.42.9'; WantState = 'Skipped'; WantRequired = $false }
+)) {
+    $got = Get-VerdictForTag $row.Tag
+    Check-Equal "tag $($row.Tag) derives the version $($row.WantVersion)" $row.WantVersion $got.Version
+    Check-Equal "tag $($row.Tag) reaches state $($row.WantState)" $row.WantState $got.Verdict.State
+    # The capital is the whole point, so the derived version is also required to
+    # agree with the state it reached: an UNVERIFIABLE or VERIFIED state means the
+    # cutover demanded an attestation, and a Skipped one means it did not. Stating
+    # it per row rather than as a blanket TRUE is what makes the pre-cutover row
+    # meaningful instead of contradictory.
+    Check-Equal "tag $($row.Tag) derives a version requiring an attestation = $($row.WantRequired)" `
+        $row.WantRequired (Test-AttestationRequired $got.Version)
+}
+
+# ...and the control that makes the first row mean something. If every tag
+# produced a required version, the capital would prove nothing.
+$lower = Get-VerdictForTag 'v0.42.9'
+Check-Equal 'a lowercase v is still stripped' '0.42.9' $lower.Version
+Check-Equal 'a pre-cutover release is still skipped through the real derivation' 'Skipped' $lower.Verdict.State
 
 # --- the 5.1 target ----------------------------------------------------------
 #

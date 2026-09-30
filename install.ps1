@@ -88,7 +88,14 @@ function Get-LatestReleaseInfo {
 
     $apiUrl = "https://api.github.com/repos/$script:Repo/releases/latest"
     $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ 'User-Agent' = 'ghost-install-script' }
-    $version = $release.tag_name -replace '^v', ''
+    # -creplace, NOT -replace, and this is the site that actually mattered. The
+    # version derived here is what Main hands to the attestation check, so a
+    # case-insensitive strip turned a tag of V0.42.9 into 0.42.9 on the way in —
+    # an older version than the cutover, so the check was SKIPPED, while
+    # `ghost upgrade` called the same tag unparseable and required an attestation.
+    # Get-ComparableVersion is case-sensitive for the same reason; the two have to
+    # agree, and they can only agree if the capital survives all the way here.
+    $version = $release.tag_name -creplace '^v', ''
 
     $zipName = "ghost_${version}_windows_${Arch}.zip"
     $asset = $release.assets | Where-Object { $_.name -eq $zipName }
@@ -198,7 +205,14 @@ function Get-ComparableVersion {
     $parts = $rest -split '\.'
     if ($parts.Count -ne 3) { return $null }
     foreach ($p in $parts) {
-        if ($p -notmatch '^(0|[1-9][0-9]*)$') { return $null }
+        # \A and \z, not ^ and $: a `$` anchor in .NET also matches just BEFORE a
+        # trailing newline, so "9\n" satisfied `^(0|[1-9][0-9]*)$` and [int] then
+        # cast "9\n" to 9 without complaint. A tag carrying a newline is not a
+        # version, and the client says so.
+        # -cnotmatch because -notmatch is case-INsensitive, and a digits-only class
+        # is only accidentally immune to that: the case that matters is the
+        # prerelease's letters, below.
+        if ($p -cnotmatch '\A(0|[1-9][0-9]*)\z') { return $null }
     }
     return ($parts -join '.')
 }
@@ -225,7 +239,13 @@ function Test-ValidPrerelease {
     param([AllowEmptyString()][string]$Prerelease)
 
     foreach ($id in ($Prerelease -split '\.')) {
-        if ($id -notmatch '^[0-9A-Za-z-]+$') { return $false }
+        # -cnotmatch, and \A..\z. -notmatch is case-insensitive with .NET Unicode
+        # case folding, so '0.42.9-K' (U+212A KELVIN SIGN), '0.42.9-s' (U+017F
+        # LONG S) and '0.42.9-I' (U+0130 DOTLESS I) all folded onto ASCII and were
+        # accepted — as a prerelease, on an older line, which is a version the
+        # check was skipped for. validPrerelease in Go tests the bytes, so all
+        # three are unparseable there.
+        if ($id -cnotmatch '\A[0-9A-Za-z-]+\z') { return $false }
     }
     return $true
 }
@@ -267,8 +287,18 @@ function Compare-CoreVersion {
     $l = $lc -split '\.'
     $r = $rc -split '\.'
     for ($i = 0; $i -lt 3; $i++) {
-        $lv = [int]$l[$i]
-        $rv = [int]$r[$i]
+        # [long]::TryParse, not a cast. `[int]'3000000000'` THROWS, so a tag with a
+        # component past Int32 took the whole installer down with an exception that
+        # said nothing about a version — while Go's strconv.Atoi accepts it on a
+        # 64-bit platform and calls 3000000000.0.0 newer than the cutover, i.e.
+        # REQUIRED. Overflow is the same thing as any other unorderable input here,
+        # so it answers $null and the caller requires the attestation. A component
+        # too long for Int64 fails TryParse and takes the same path, which is also
+        # what strconv.Atoi does with it.
+        $lv = 0L
+        $rv = 0L
+        if (-not [long]::TryParse($l[$i], [ref]$lv)) { return $null }
+        if (-not [long]::TryParse($r[$i], [ref]$rv)) { return $null }
         if ($lv -ne $rv) { return [Math]::Sign($lv - $rv) }
     }
     return 0
