@@ -212,3 +212,88 @@ func plantExportRow(t *testing.T, db *sql.DB, query, id string) {
 // The report reads Skipped[].ID and Skipped[].Type, so a rename that left one of
 // them printing "" would compile and print nothing. This names both.
 var _ = func(sk portable.SkippedRecord) string { return sk.Type + sk.ID + sk.Reason }
+
+// TestTheRepairAdviceNamesOnlyCommandsThatCanDeleteTheRow is the kind-awareness of
+// the export report, and it exists because the advice was wrong for two of the four
+// kinds. It named `ghost project delete <id>` and `ghost_memory_delete` regardless
+// of what had been left out, so for a skipped TASK or DECISION the operator was
+// told to delete the row and then handed two commands that cannot: there is no
+// `ghost task delete` or `ghost decision delete`, no MCP tool for either, and no
+// DELETE against those two tables anywhere in internal/memory.
+//
+// A command that cannot do the job is worse than no command. It sends someone to
+// run a delete and reports "project not found" or a silent no-op, and it teaches
+// them that the report's instructions are approximate.
+func TestTheRepairAdviceNamesOnlyCommandsThatCanDeleteTheRow(t *testing.T) {
+	planters := map[string]func(t *testing.T, db *sql.DB){
+		portable.TypeMemory: func(t *testing.T, db *sql.DB) {
+			plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, created_at, updated_at)
+			                        VALUES (?, 'p1', 'gotcha', 'x', 'mcp', datetime('now'), datetime('now'))`, "M BAD")
+		},
+		portable.TypeTask: func(t *testing.T, db *sql.DB) {
+			plantExportRow(t, db, `INSERT INTO tasks (id, project_id, title, description, status, priority, created_at, updated_at)
+			                        VALUES (?, 'p1', 't', '', 'pending', 2, datetime('now'), datetime('now'))`, "T BAD")
+		},
+		portable.TypeDecision: func(t *testing.T, db *sql.DB) {
+			plantExportRow(t, db, `INSERT INTO decisions (id, project_id, title, decision, rationale, status, created_at, updated_at)
+			                        VALUES (?, 'p1', 't', 'd', 'r', 'active', datetime('now'), datetime('now'))`, "D BAD")
+		},
+		portable.TypeProject: func(t *testing.T, db *sql.DB) {
+			// A backtick, not a space: CheckImportedProjectID allows whitespace
+			// precisely because a project id is often a path, so "P BAD" would
+			// NOT be refused and the case would assert nothing.
+			plantExportRow(t, db, `INSERT INTO projects (id, path, name) VALUES (?, '/src/x', 'n')`, "P`BAD")
+		},
+	}
+	// Only project and memory have a delete surface, and the claim is per KIND, so
+	// every kind is driven on its own — a batch of all four would pass if the
+	// advice were right for any one of them.
+	for kind, plant := range planters {
+		t.Run(kind, func(t *testing.T) {
+			store, db := exportTestStore(t)
+			plant(t, db)
+			var summary, warn strings.Builder
+			_ = runExportCore(context.Background(), store, &summary, &warn,
+				filepath.Join(t.TempDir(), "artifact.jsonl"), "")
+			report := warn.String()
+			namesACommand := strings.Contains(report, "To include it, delete the row")
+			namesNoSurface := strings.Contains(report, "NO delete surface")
+			switch kind {
+			case portable.TypeMemory, portable.TypeProject:
+				if !namesACommand || namesNoSurface {
+					t.Errorf("a %s IS deletable, so the report must name the command; it printed:\\n%s", kind, report)
+				}
+			case portable.TypeTask, portable.TypeDecision:
+				if namesACommand {
+					t.Errorf("a %s has NO delete surface, so the report must not hand the operator a command that cannot run; it printed:\\n%s", kind, report)
+				}
+				if !namesNoSurface {
+					t.Errorf("a %s has NO delete surface and the report must say so; it printed:\\n%s", kind, report)
+				}
+				// And it must name the kind, so the reader knows which row the
+				// sentence is about rather than which of several.
+				if !strings.Contains(report, kind) {
+					t.Errorf("the no-delete sentence does not name the %s kind:\\n%s", kind, report)
+				}
+			}
+		})
+	}
+
+	// A mixed batch gets BOTH sentences, and the unrepairable one wins where they
+	// would conflict: naming a project command for a task is the mistake.
+	t.Run("a mixed batch names both", func(t *testing.T) {
+		store, db := exportTestStore(t)
+		planters[portable.TypeProject](t, db)
+		planters[portable.TypeTask](t, db)
+		var summary, warn strings.Builder
+		_ = runExportCore(context.Background(), store, &summary, &warn,
+			filepath.Join(t.TempDir(), "artifact.jsonl"), "")
+		report := warn.String()
+		if !strings.Contains(report, "To include it, delete the row") {
+			t.Errorf("a mixed batch lost the command for the memory/project it holds:\\n%s", report)
+		}
+		if !strings.Contains(report, "NO delete surface") {
+			t.Errorf("a mixed batch lost the no-surface warning for its task:\\n%s", report)
+		}
+	})
+}

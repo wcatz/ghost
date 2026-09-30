@@ -622,6 +622,18 @@ func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Wr
 	return reportSkippedRecords(warn, stats.Skipped)
 }
 
+// repairableKinds are the record kinds Ghost can actually delete, which is not
+// every kind it exports. A project goes through `ghost project delete`; a memory
+// through the `ghost_memory_delete` tool. A task and a decision have no delete
+// surface anywhere — no CLI subcommand, no MCP tool, and no DELETE against either
+// table in internal/memory — so the report must not hand the operator a command
+// that cannot do the job. A command that fails is worse than no command: it sends
+// someone to run a delete and then reports "project not found" or a silent no-op.
+var repairableKinds = map[string]bool{
+	portable.TypeProject: true,
+	portable.TypeMemory:  true,
+}
+
 // reportSkippedRecords names every record an export left out and returns an error
 // when there was one, so the command exits non-zero and a backup script notices.
 //
@@ -634,6 +646,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
+	var hasRepairable, hasUnrepairable bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
@@ -642,15 +655,51 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, assemble.Token(sk.ID), sk.Reason); err != nil {
 			return err
 		}
+		// A batch can hold both kinds, so the advice is collected rather than
+		// decided from the first row: naming a project command for a task is the
+		// mistake this exists to stop, and deciding from row one would do exactly
+		// that to every task after a project.
+		if repairableKinds[sk.Type] {
+			hasRepairable = true
+		} else {
+			hasUnrepairable = true
+		}
 	}
 	if _, err := fmt.Fprintf(out, "  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.\n"); err != nil {
 		return err
 	}
-	// Only a project has a delete surface on the CLI, and naming a command that
-	// does not exist is worse than naming none — so the sentence below is the
-	// whole of the repair, and it says which half of the row is the problem.
-	if _, err := fmt.Fprintf(out, "  To include it, delete the row and re-save it under an id this build accepts: `ghost project delete <id>` drops a project and everything under it, and a memory goes through the ghost_memory_delete tool.\n"); err != nil {
-		return err
+	// Both advice sentences below are per-BATCH and each names only the kinds it
+	// applies to, so a mixed batch gets both: an operator with a skipped project
+	// still needs the command even when the same artifact also skipped a task.
+	//
+	// The repair is KIND-AWARE, because a command that cannot delete the row is
+	// worse than no command at all: the operator is told what to type, types it,
+	// and gets "project not found" or a no-op. Only a project and a memory have a
+	// delete surface — `ghost project delete <id>` (which is `ghost delete`, and
+	// drops everything under the project) and the `ghost_memory_delete` tool. A
+	// task and a decision have NEITHER: there is no `ghost task delete`, no
+	// `ghost decision delete`, and no DELETE against either table anywhere in
+	// internal/memory. So for those two the sentence says so, because the honest
+	// answer is that the row cannot be removed through Ghost at all.
+	if hasRepairable {
+		if _, err := fmt.Fprintf(out, "  To include it, delete the row and re-save it under an id this build accepts: `ghost project delete <id>` drops a project and everything under it, and a memory goes through the ghost_memory_delete tool.\n"); err != nil {
+			return err
+		}
+	}
+	if hasUnrepairable {
+		unrepairable := []string{}
+		for _, kind := range []string{portable.TypeTask, portable.TypeDecision} {
+			for _, sk := range skipped {
+				if sk.Type == kind {
+					unrepairable = append(unrepairable, kind)
+					break
+				}
+			}
+		}
+		if _, err := fmt.Fprintf(out, "  Ghost has NO delete surface for a %s: no `ghost %s delete`, no tool for it, and no DELETE against the table, so such a row cannot be removed through Ghost at all. It stays in the store and stays out of every artifact until the database is edited directly.\n",
+			strings.Join(unrepairable, " or a "), unrepairable[len(unrepairable)-1]); err != nil {
+			return err
+		}
 	}
 	return fmt.Errorf("%s left out of this artifact because this build cannot import them — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)))
 }
