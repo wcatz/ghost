@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/followup"
@@ -827,7 +828,7 @@ func runReflect() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("Restored %d memories from snapshot for %s\n", n, projectName)
+		fmt.Printf("Restored %d memories from snapshot for %s\n", n, assemble.Label(projectName))
 		return
 	}
 
@@ -950,7 +951,7 @@ func runReflect() {
 		fmt.Println("DRY RUN (use --apply to save results)")
 		fmt.Println()
 	}
-	fmt.Printf("Project:      %s (%s)\n", projectName, projectID)
+	fmt.Printf("Project:      %s (%s)\n", assemble.Label(projectName), assemble.Token(projectID))
 	fmt.Printf("Consolidator: %s\n", consolidator.Name())
 
 	// Captured BEFORE fetching the consolidation input, then handed to
@@ -1009,7 +1010,7 @@ func runReflect() {
 	// loudly rather than emit a partial or truncated result.
 	const maxConsolidationInput = 2000
 	if len(live) > maxConsolidationInput {
-		fmt.Fprintf(os.Stderr, "error: project %s has %d consolidatable memories, above the %d limit for a single consolidation — nothing written\n", projectName, len(live), maxConsolidationInput)
+		fmt.Fprintf(os.Stderr, "error: project %s has %d consolidatable memories, above the %d limit for a single consolidation — nothing written\n", assemble.Label(projectName), len(live), maxConsolidationInput)
 		os.Exit(1)
 	}
 	currentContext, _ := store.GetLearnedContext(ctx, projectID)
@@ -1669,7 +1670,7 @@ func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, a
 		verb, count = "withdrew", res.Withdrawn
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d supersedes edge(s) named, %s %d\n", projectName, res.Resolved, verb, count)
+	fmt.Fprintf(&b, "%s: %d supersedes edge(s) named, %s %d\n", assemble.Label(projectName), res.Resolved, verb, count)
 	for _, l := range res.Links {
 		marker := "would withdraw"
 		if apply {
@@ -1751,7 +1752,7 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		unjudgedNote = fmt.Sprintf(", %d unjudged (no verdict: the classify call failed or answered with the wrong number of verdicts; their edges stand)", n)
 	}
 	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN%s, %s %d, %s %d causes edge(s)%s (%d classify call(s)%s)\n",
-		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
+		assemble.Label(projectName), res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
 		res.Unclassified, unjudgedNote, verb, count, causesVerb, res.CausesWithdrawn, sweptNote, calls, retryNote(retries))
 	for _, w := range withdrawn {
 		// Three markers, because under --apply a row can be neither of the two
@@ -1848,7 +1849,8 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 				fmt.Fprintf(&b, "      %s -> %s  [not nameable from the CLI: an id beginning with a dash is a flag to the\n"+
 					"       argument parser, so no --withdraw command can carry it. Withdraw it with the MCP tool\n"+
 					"       ghost_link_withdraw, which parses no flags: project_id %s, source_id %s, target_id %s]\n",
-					shortID(e.SourceID), shortID(e.TargetID), projectName, e.SourceID, e.TargetID)
+					shortID(e.SourceID), shortID(e.TargetID), assemble.Label(projectName),
+					assemble.Token(e.SourceID), assemble.Token(e.TargetID))
 			}
 		}
 	}
@@ -1947,7 +1949,7 @@ func cycleEdgeState(c supersede.CyclicPair, edge supersede.CycleOutcome, apply b
 // the flagless one is a dry run that withdraws nothing.
 func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
 	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
-		projectName, res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+		assemble.Label(projectName), res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
 	// The gate's own line, and it is printed BEFORE the not-agreed rows because
 	// it is what makes those rows readable: without the multiplier on the page, a
 	// reader cannot tell an empty consensus result from a pass that found nothing
@@ -2645,6 +2647,15 @@ func toWithdrawPairs(pairs []supersedePair) []supersede.WithdrawPair {
 // way, because the premise of the feature is that the printed id is the one you
 // can hand back.
 func shortID(id string) string {
+	// An empty id stays empty rather than becoming the quoted empty string
+	// assemble.Token renders it as: a preview column showing `""` for a row with
+	// no id is noise, and an id that is empty cannot forge a line.
+	if id == "" {
+		return ""
+	}
+	if rendered := assemble.Token(id); rendered != id {
+		return rendered
+	}
 	if utf8.RuneCountInString(id) > 8 {
 		return string([]rune(id)[:8])
 	}
@@ -3043,7 +3054,7 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %d named, %s %d, %d already resolved, %d pinned, %d in a standing category, %d declined\n",
-		projectName, res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.Declined)
+		assemble.Label(projectName), res.Resolved, verb, count, res.AlreadyResolved, res.Pinned, res.ExemptCategory, res.Declined)
 	for _, m := range res.Memories {
 		// The default is the CLAIM, not the absence of one, and that ordering is
 		// deliberate: a state this switch does not know about must fall through
@@ -3100,14 +3111,16 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 				fmt.Fprintf(&b, "  (%d id(s) hold a comma, which --only cannot carry, so they are named here; put each on\n"+
 					"   its own line in a file and use --only-file)\n", len(viaFileOnly))
 				for _, id := range viaFileOnly {
-					fmt.Fprintf(&b, "    %s\n", id)
+					fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
 				}
 			}
 			if len(unnameable) > 0 {
 				fmt.Fprintf(&b, "  (%d id(s) hold a newline, which no --only or --only-file form can carry, so they stay\n"+
 					"   resolved until the row is rewritten — delete and re-save the memory)\n", len(unnameable))
 				for _, id := range unnameable {
-					fmt.Fprintf(&b, "    %q\n", id)
+					// The same renderer as the comma bucket above, so the id half of
+					// the contract is one rule rather than two spellings of it.
+					fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
 				}
 			}
 		}
@@ -3141,7 +3154,7 @@ func resolveSummaryLine(projectName string, res resolve.Result, apply bool, conf
 		count = res.Resolved
 	}
 	return fmt.Sprintf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))\n",
-		projectName, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
+		assemble.Label(projectName), res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
 		res.Vetoed, res.Skipped, res.Unknown, verb, count, calls)
 }
 
@@ -3170,7 +3183,7 @@ func reassessSummaryLine(projectName string, res resolve.ReassessResult, apply b
 		scoped = fmt.Sprintf("%d already resolved", res.Loaded)
 	}
 	return fmt.Sprintf("%s: %s, %d KEEP vetoed, %d KEEP cached, %d still RESOLVED, %d still asserted by a link or correction, %d UNKNOWN, %s %d (%d classify call(s))\n",
-		projectName, scoped, res.Vetoed, res.Cached, res.StillResolved, res.Demoted, res.Unknown, verb, count, calls)
+		assemble.Label(projectName), scoped, res.Vetoed, res.Cached, res.StillResolved, res.Demoted, res.Unknown, verb, count, calls)
 }
 
 // reassessMissLines renders one line per selector that named no memory the
@@ -3217,7 +3230,11 @@ func reassessHeldLines(held []resolve.HeldMemory) string {
 			// count with a silently shorter list under it.
 			reason = "held by an unnamed assertion"
 		}
-		fmt.Fprintf(&b, "  %s  [%s]  %s  %s\n", h.Memory.ID, h.Memory.Category, reason,
+		// The id goes through assemble.Token rather than printing whole, which is
+		// what this line did: a well-formed id is Token's bare case and prints
+		// byte-identical, so the operand is still pasteable, and an id holding a
+		// newline is quoted instead of starting a line of its own.
+		fmt.Fprintf(&b, "  %s  [%s]  %s  %s\n", assemble.Token(h.Memory.ID), h.Memory.Category, reason,
 			displayStored(h.Memory.Content, h.Memory.Category, 70))
 	}
 	return b.String()

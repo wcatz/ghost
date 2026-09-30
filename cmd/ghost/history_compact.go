@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -186,7 +187,7 @@ func printHistoryCompact(w io.Writer, r historyCompactReport) error {
 // the partial report is not a report the operator can compare against.
 func printHistoryCompactLines(w io.Writer, r historyCompactReport) error {
 	for _, p := range r.Projects {
-		if _, err := fmt.Fprintf(w, "  %s  %d redundant version(s), %d updated_at restored", p.ProjectID, p.Removed, p.UpdatedAt); err != nil {
+		if _, err := fmt.Fprintf(w, "  %s  %d redundant version(s), %d updated_at restored", assemble.Token(p.ProjectID), p.Removed, p.UpdatedAt); err != nil {
 			return err
 		}
 		// Disclosed rather than folded into a total: a row whose stamp no layout

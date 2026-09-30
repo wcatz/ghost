@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/config"
 	"io"
 	"os"
@@ -29,11 +30,24 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 		if listErr != nil || len(names) == 0 {
 			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
 		} else {
-			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, strings.Join(names, ", "))
+			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, knownProjectsSentence(names))
 		}
 		os.Exit(1)
 	}
 	return projectID
+}
+
+// knownProjectsSentence is the list of names a refusal offers, each rendered as a
+// label and joined. It is a function because resolveProjectOrExit ends in
+// os.Exit, so the sentence is not reachable from a test — and the names are
+// stored text, so the one place that renders them has to be the place that is
+// tested.
+func knownProjectsSentence(names []string) string {
+	labeled := make([]string, 0, len(names))
+	for _, n := range names {
+		labeled = append(labeled, assemble.Label(n))
+	}
+	return strings.Join(labeled, ", ")
 }
 
 // confirmProjectDeleteName reports whether typed (a raw scanned line, not
@@ -49,7 +63,7 @@ func confirmProjectDeleteName(typed, expected string) bool {
 // format shared by both the dry-run preview and the post-apply report. It
 // returns the first write error encountered, if any.
 func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb string) error {
-	if _, err := fmt.Fprintf(out, "%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID); err != nil {
+	if _, err := fmt.Fprintf(out, "%s %s (%s):\n", verb, assemble.Label(summary.ProjectName), assemble.Token(summary.ProjectID)); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(out, "  memories:     %d\n", summary.Memories); err != nil {
@@ -312,20 +326,26 @@ func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer,
 // the output instead of having to look.
 func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 	label := projectLabel(binding.Name, binding.ProjectID)
+	// The path is a LABEL rather than a token: it is normally full of spaces and
+	// slashes, and it is what a reader passes to `ghost project bind`. It is
+	// still stored text — a portable artifact carries one verbatim — so it goes
+	// through the same renderer as the name, which keeps ordinary paths
+	// byte-identical and neutralises only what could end the line.
+	path := assemble.Label(binding.Path)
 	if !binding.Changed() {
-		_, err := fmt.Fprintf(out, "already bound: %s → %s\n", label, binding.Path)
+		_, err := fmt.Fprintf(out, "already bound: %s → %s\n", label, path)
 		return err
 	}
-	if _, err := fmt.Fprintf(out, "bound %s → %s\n", label, binding.Path); err != nil {
+	if _, err := fmt.Fprintf(out, "bound %s → %s\n", label, path); err != nil {
 		return err
 	}
 	if binding.PathChanged {
-		if _, err := fmt.Fprintf(out, "  path: %s → %s\n", binding.PreviousPath, binding.Path); err != nil {
+		if _, err := fmt.Fprintf(out, "  path: %s → %s\n", assemble.Label(binding.PreviousPath), path); err != nil {
 			return err
 		}
 	}
 	if binding.RemoteSet {
-		if _, err := fmt.Fprintf(out, "  repo_remote: (none) → %s\n", binding.RepoRemote); err != nil {
+		if _, err := fmt.Fprintf(out, "  repo_remote: (none) → %s\n", assemble.Label(binding.RepoRemote)); err != nil {
 			return err
 		}
 	}
@@ -371,11 +391,19 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 
 // projectLabel names a project for a human, preferring "name (id)" so the id
 // the command needs stays visible even when the name is what the user knows.
+//
+// Both halves are stored text and both are rendered: the name through
+// assemble.Label, because a name is a label and is normally full of spaces, and
+// the id through assemble.Token, because an id is a key. A project created over
+// MCP records the caller's `project_id` argument as its name as well as its id,
+// so a save carrying a newline creates a project whose name AND id are one — and
+// this label is printed on the delete summary, the bind report and the unbound
+// notice alike.
 func projectLabel(name, id string) string {
 	if name == "" || name == id {
-		return id
+		return assemble.Token(id)
 	}
-	return fmt.Sprintf("%s (%s)", name, id)
+	return fmt.Sprintf("%s (%s)", assemble.Label(name), assemble.Token(id))
 }
 
 // openDiagnosticStore opens the Ghost database for a command that only
@@ -421,7 +449,7 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 	}
 	for _, p := range unbound {
 		if _, err := fmt.Fprintf(out, "  %s — run: ghost project bind %s /path/to/checkout\n",
-			projectLabel(p.Name, p.ID), p.ID); err != nil {
+			projectLabel(p.Name, p.ID), assemble.Token(p.ID)); err != nil {
 			return err
 		}
 	}

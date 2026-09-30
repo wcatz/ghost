@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/scratch"
 	"github.com/wcatz/ghost/internal/supersede"
@@ -154,9 +155,11 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 	if fileHoldsSomething {
 		// Quoted for the same reason as the project name, and because the path
 		// is not Ghost's to control: $GHOST_SCRATCH_DIR and a data directory
-		// under a spaced path both reach it.
+		// under a spaced path both reach it. Both go through assemble.Label
+		// first, because shellQuote only escapes a quote: a newline inside single
+		// quotes still starts a line, and the name and the path are stored text.
 		fmt.Fprintf(&b, "  (the same ids are in %s, for `ghost resolve --project %s --reassess --only-file %s --apply`)\n",
-			path, shellQuote(projectName), shellQuote(path))
+			assemble.Label(path), shellQuote(assemble.Label(projectName)), shellQuote(assemble.Label(path)))
 	}
 	// Every branch is driven by the buckets, not by `cmd == ""`, which has two
 	// causes: ids holding a comma (the file reaches them) and ids holding a
@@ -180,7 +183,7 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 				"   named here: put each on its own line in a file and use --only-file. Do NOT fall back on the\n"+
 				"   same command without --only: that re-judges every resolved memory in the project)\n")
 			for _, id := range viaFileOnly {
-				fmt.Fprintf(&b, "    %s\n", id)
+				fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
 			}
 		}
 	case len(viaFileOnly) > 0 && fileHoldsSomething:
@@ -210,7 +213,10 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 			"   name them, so these stay resolved until the row is rewritten — delete and re-save the memory,\n"+
 			"   or re-import it under an id without a newline)\n", len(unnameable))
 		for _, id := range unnameable {
-			fmt.Fprintf(&b, "    %q\n", id)
+			// The same renderer rather than %q, so the id half of the contract is
+			// one rule: %q escapes a newline and Token quotes the whole value, and
+			// the two cannot disagree about what a hostile id looks like.
+			fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
 		}
 	}
 	return b.String()

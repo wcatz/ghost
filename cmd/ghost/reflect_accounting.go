@@ -5,8 +5,23 @@ import (
 	"io"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/reflection"
 )
+
+// tokenList renders a list of stored ids for a report line, each through the same
+// renderer every other id on the command goes through. The ids are joined rather
+// than printed one per line because the line is a count's worth of them and the
+// reader is meant to be able to add the section up — but each one is still a
+// stored value, and a comma-joined list of raw ids is exactly where a newline in
+// one of them would start a line.
+func tokenList(ids []string) string {
+	rendered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		rendered = append(rendered, assemble.Token(id))
+	}
+	return strings.Join(rendered, ", ")
+}
 
 // reflectRun is what the section needs to know about one round: the round itself,
 // and the two flags a reader asked for. A struct rather than positional
@@ -101,7 +116,7 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 	// check that says the preview accounts for the whole corpus.
 	_, _ = fmt.Fprintf(w, "Merges (%d):\n", merged)
 	for _, m := range acc.Merges {
-		line := fmt.Sprintf("  new <- %s   (%d B from %d B)", strings.Join(m.IDs, ", "), len(m.Text), m.SourceBytes)
+		line := fmt.Sprintf("  new <- %s   (%d B from %d B)", tokenList(m.IDs), len(m.Text), m.SourceBytes)
 		if !m.In {
 			line += "; the merged text is not in this result"
 		}
@@ -114,12 +129,12 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 		// names nothing, so the clause that explains the refusal would be the
 		// one part of the report that cannot be read.
 		_, _ = fmt.Fprintf(w, "  %s <- the %s introduced identifiers no source carries: %s; the sources are kept unchanged\n",
-			strings.Join(r.IDs, ", "), r.Kind, displayClaim(strings.Join(r.Identifiers, ", "), 0))
+			tokenList(r.IDs), r.Kind, displayClaim(strings.Join(r.Identifiers, ", "), 0))
 	}
 
 	_, _ = fmt.Fprintf(w, "Rewrites (%d):\n", len(acc.Rewrites))
 	for _, rw := range acc.Rewrites {
-		line := fmt.Sprintf("  %s -> %s", rw.ID, displayClaim(rw.Text, limit))
+		line := fmt.Sprintf("  %s -> %s", assemble.Token(rw.ID), displayClaim(rw.Text, limit))
 		if !rw.In {
 			line += "; the replacement is not in this result"
 		}
@@ -138,9 +153,9 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 		// normalises only the successor target.
 		reason := d.Reason
 		if d.Successor != "" {
-			reason += " " + d.Successor
+			reason += " " + assemble.Token(d.Successor)
 		}
-		_, _ = fmt.Fprintf(w, "  %s reason: %s — %s%s\n", d.ID, reason, outcome, guardClause(boolCount(d.Guarded), run.allowDrops, "row"))
+		_, _ = fmt.Fprintf(w, "  %s reason: %s — %s%s\n", assemble.Token(d.ID), reason, outcome, guardClause(boolCount(d.Guarded), run.allowDrops, "row"))
 	}
 
 	// The rows this round removes, and the only bucket that is not an operation
@@ -157,7 +172,7 @@ func reportInputAccounting(w io.Writer, run reflectRun) {
 	}
 	_, _ = fmt.Fprintln(w, deleted)
 	for _, d := range acc.Deleted {
-		_, _ = fmt.Fprintf(w, "  %s  %s\n", d.ID, d.Reason)
+		_, _ = fmt.Fprintf(w, "  %s  %s\n", assemble.Token(d.ID), d.Reason)
 	}
 
 	_, _ = fmt.Fprintf(w, "Kept verbatim: %d    Passed through (not named): %d\n", len(acc.Kept), len(acc.Passed))

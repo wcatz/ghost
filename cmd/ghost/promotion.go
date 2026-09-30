@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/secret"
@@ -200,9 +201,9 @@ func withheld(finding secret.Finding, category, content string) string {
 // the writer's content cap applies.
 func displayText(content string, limit int) string {
 	if limit <= 0 {
-		return content
+		return assemble.Data(content)
 	}
-	return truncateForDisplay(content, limit)
+	return assemble.PreviewLine(content, limit)
 }
 
 // dropCredentialProposals removes the proposals whose content holds a

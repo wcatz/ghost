@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/memref"
 )
@@ -297,25 +298,25 @@ func printMemoryHistory(w io.Writer, v historyView) error {
 	}
 	switch {
 	case v.Live != nil:
-		if _, err := fmt.Fprintf(w, "memory %s (%s/%s, live)\n", v.MemoryID, v.Live.Category, v.Live.Source); err != nil {
+		if _, err := fmt.Fprintf(w, "memory %s (%s/%s, live)\n", assemble.Token(v.MemoryID), v.Live.Category, v.Live.Source); err != nil {
 			return err
 		}
 	case len(v.Entries) > 0:
 		// Not an error: the history outliving the row is the feature, and this
 		// line is what tells a reader that the entries below are tombstones
 		// rather than a live memory's recent edits.
-		if _, err := fmt.Fprintf(w, "memory %s (no longer live — the entries below are all it left behind)\n", v.MemoryID); err != nil {
+		if _, err := fmt.Fprintf(w, "memory %s (no longer live — the entries below are all it left behind)\n", assemble.Token(v.MemoryID)); err != nil {
 			return err
 		}
 	default:
 		// No row and no history: an id that was never written, or one whose
 		// history has already been pruned. Saying "deleted" here would claim a
 		// tombstone that is not there.
-		_, err := fmt.Fprintf(w, "no memory and no history recorded for %s — it was never written, or its history has been pruned\n", v.MemoryID)
+		_, err := fmt.Fprintf(w, "no memory and no history recorded for %s — it was never written, or its history has been pruned\n", assemble.Token(v.MemoryID))
 		return err
 	}
 	if len(v.Entries) == 0 {
-		_, err := fmt.Fprintf(w, "no history recorded for %s — nothing has written it since this store reached schema v17\n", v.MemoryID)
+		_, err := fmt.Fprintf(w, "no history recorded for %s — nothing has written it since this store reached schema v17\n", assemble.Token(v.MemoryID))
 		return err
 	}
 	for _, e := range v.Entries {
@@ -343,9 +344,14 @@ func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
 	shown := displayedHistoryEntry(e)
 	who := "agent unknown"
 	if e.Agent != "" {
-		who = "agent " + e.Agent
+		// The agent and the session are stored text, and a portable artifact
+		// carries an `agent` field written by whoever exported it, so both are
+		// delimited like every other stored free text on this command. The
+		// vocabulary is closed on the write path (ai.SourceForClientName), which
+		// is exactly why the renderer cannot assume it.
+		who = "agent " + assemble.Data(e.Agent)
 		if e.SessionID != "" {
-			who += " session " + e.SessionID
+			who += " session " + assemble.Data(e.SessionID)
 		}
 	}
 	if _, err := fmt.Fprintf(w, "\n%s  %s  (%s)\n", e.RecordedAt, e.Phase, who); err != nil {
@@ -356,14 +362,16 @@ func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
 		resolved = "resolved at " + *e.ResolvedAt
 	}
 	if _, err := fmt.Fprintf(w, "  %s/%s importance %.2f, %s, project %s\n",
-		e.Category, e.Source, e.Importance, resolved, e.ProjectID); err != nil {
+		e.Category, e.Source, e.Importance, resolved, assemble.Token(e.ProjectID)); err != nil {
 		return err
 	}
 	// The other end of the event, when it has one. A reader asking "what
 	// replaced this" or "what is claiming it" needs it on the same screen as the
-	// text, not in the JSON.
+	// text, not in the JSON. It is an id, so it goes through the same renderer
+	// every other id on this command goes through: an id has no excuse for being
+	// printed raw, because it is not user data the command exists to show.
 	if e.RelatedID != "" {
-		if _, err := fmt.Fprintf(w, "  related memory: %s\n", e.RelatedID); err != nil {
+		if _, err := fmt.Fprintf(w, "  related memory: %s\n", assemble.Token(e.RelatedID)); err != nil {
 			return err
 		}
 	}
@@ -373,6 +381,9 @@ func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
 	// merged_content is a plain column beside it. So this is the field most likely
 	// to still hold a value on a store where the content column does not.
 	if shown.MergedContent != "" {
+		// Already delimited by displayedHistoryEntry's substitution, which takes
+		// the whole of a field the write-time filter never saw; delimiting it again
+		// would print a double block.
 		if _, err := fmt.Fprintf(w, "  folded-in text: %s\n", shown.MergedContent); err != nil {
 			return err
 		}
@@ -607,13 +618,13 @@ func purgeHistoryMemory(ctx context.Context, s *memory.Store, memoryID string) e
 	}
 	switch {
 	case len(live) > 0:
-		fmt.Printf("Purging memory %s and %d recorded version(s) of its text.\n", memoryID, len(entries))
+		fmt.Printf("Purging memory %s and %d recorded version(s) of its text.\n", assemble.Token(memoryID), len(entries))
 		if err := s.DeleteWithOptions(ctx, memoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
 			return err
 		}
 	default:
 		// Already deleted. The row is not coming back and nothing asked for it to.
-		fmt.Printf("Memory %s is already deleted; purging its %d recorded version(s) of text.\n", memoryID, len(entries))
+		fmt.Printf("Memory %s is already deleted; purging its %d recorded version(s) of text.\n", assemble.Token(memoryID), len(entries))
 		if _, err := s.PurgeMemoryHistory(ctx, memoryID); err != nil {
 			return err
 		}

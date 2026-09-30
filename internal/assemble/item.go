@@ -89,7 +89,7 @@ func (i Item) Line() string {
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
 		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin +
-		") " + quoteData(i.Content)
+		") " + Data(i.Content)
 }
 
 // AgentLabel renders the writing harness, or "" when the row records none.
@@ -111,7 +111,7 @@ func AgentLabel(agent string) string {
 	if len(agent) > MaxRenderedAgentLen {
 		agent = clampBytes(agent, MaxRenderedAgentLen) + "…[agent truncated]"
 	}
-	return " agent=" + quoteData(agent)
+	return " agent=" + Data(agent)
 }
 
 // MaxRenderedAgentLen is what a listing prints of an agent. It is a DISPLAY
@@ -151,7 +151,7 @@ func SourceRefLabel(ref string) string {
 		// put an invalid byte inside the data block.
 		ref = clampBytes(ref, MaxRenderedSourceRefLen) + "…[reference truncated]"
 	}
-	return " source_ref=" + quoteData(ref)
+	return " source_ref=" + Data(ref)
 }
 
 // ConfidenceLabel renders a recorded belief, or "" when the row records none.
@@ -379,10 +379,19 @@ func isTokenRune(r rune) bool {
 	return strings.ContainsRune("._-:/@+", r)
 }
 
-// quoteData wraps untrusted stored text in «...» data delimiters, first
-// rewriting any literal « or » inside it so embedded delimiters cannot
-// terminate the data block early and smuggle text back out as instructions.
-func quoteData(s string) string {
+// Data wraps untrusted stored text in «...» data delimiters, first rewriting
+// any literal « or » inside it so embedded delimiters cannot terminate the
+// data block early and smuggle text back out as instructions.
+//
+// It is exported for the same reason Token is: a second renderer printing the
+// same field must reach the SAME function, and the single-record CLI dumps
+// (#802) are that second renderer. `Item.Line`, the session-start block and the
+// MCP listings each had their own copy of this rule before, and a copy is how
+// a rule drifts — the copy that is not tested is the one that ships the bug.
+// The delimiters are the reader's contract, not the caller's: text between «
+// and » is DATA, so a newline inside the block is still data and a line that
+// begins "- [" inside it is not Ghost's own output.
+func Data(s string) string {
 	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
 }
 
