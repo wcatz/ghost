@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/memref"
 )
 
 // pipeline is the working state the stages share. Stages run in the order of
@@ -134,7 +135,7 @@ func runValidity(p *pipeline) {
 			// RestoreSnapshot. %q escapes a delimiter without delimiting it, so
 			// a value carrying one could close the data block and continue as
 			// instruction. Delimited like every other stored text in an answer.
-			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%s), treated as unset", shortID(c.ID), Data(raw)))
+			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%s), treated as unset", ShortID(c.ID), Data(raw)))
 		}
 		if v.state == validityExpired || v.state == validityFuture {
 			dropped = append(dropped, c.ID)
@@ -342,7 +343,7 @@ func runConflicts(p *pipeline) {
 			}
 			seen[pair] = true
 			p.contradictPairs = append(p.contradictPairs, pair)
-			stageNotes = append(stageNotes, formatNote("contradicts pair recorded, not separated: %s and %s were both candidates at this stage", shortID(pair[0]), shortID(pair[1])))
+			stageNotes = append(stageNotes, formatNote("contradicts pair recorded, not separated: %s and %s were both candidates at this stage", ShortID(pair[0]), ShortID(pair[1])))
 		}
 	}
 	p.blockNotes = append(p.blockNotes, notes...)
@@ -643,7 +644,7 @@ func (p *pipeline) notes() []string {
 			if i == maxRenderedConflictPairs {
 				break
 			}
-			all = append(all, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", shortID(pair[0]), shortID(pair[1])))
+			all = append(all, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", ShortID(pair[0]), ShortID(pair[1])))
 		}
 	}
 	all = append(all, p.noteBuf...)
@@ -705,10 +706,64 @@ func scopeKeys(scope map[string]string) []string {
 	return keys
 }
 
-// shortID truncates an id for a note, so a trace line stays readable.
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
+// ShortID renders a row id for a note, so a trace line stays readable.
+//
+// It is EXPORTED, and it is the one implementation, because there were four
+// spellings of "the first eight characters of an id" and this one had drifted
+// from all of them (#810). A helper whose correctness is "a line is one line" and
+// "eight is eight characters" is exactly the kind that must not be copyable.
+//
+// Two rules, and the order between them is the whole argument.
+//
+// EIGHT CHARACTERS, not bytes, and the measurement is `memref.Short`'s rather
+// than a slice written here. An id is not necessarily hex — `ghost import` writes
+// an artifact's ids verbatim, `RestoreSnapshot` reinstates what it recorded,
+// `internal/bench` seeds `bench:<project>:<key>` — so `id[:8]` on a CJK id
+// returned the first two runes and two bytes of the third, which is not text:
+// a note a reader cannot read, and a ref the prefix query can never match. The
+// hazard is recorded in three other places already (`memref.Short`'s own comment,
+// `cmd/ghost/lifecycle.go`, and the resolution helpers), which is what a copied
+// rule looks like once it is copied.
+//
+// It is worth being exact about how much of that is still load-bearing HERE,
+// because the honest answer is "less than it looks" and the reader deserves it.
+// Every rune `isTokenRune` writes bare is ASCII, so an id that reaches the
+// measurement below is pure ASCII and byte count equals rune count — a byte cut
+// at that line is unobservable today, and a mutation that restored one survives
+// the suite. The call is kept anyway, for the two reasons that are not the test:
+// it is the shared rule rather than a fourth spelling of it, and `isTokenRune`
+// admitting a non-ASCII name — a plausible change for a user whose ids are not
+// hex — is the one edit that would make the difference observable, and this keeps
+// the note correct when it lands. What IS observable, and what the tests pin, is
+// the property the byte cut broke: a note naming a multi-byte id is readable
+// text, and a note is never invalid UTF-8.
+//
+// THEN through Token, and only a well-formed id is abbreviated. A note is
+// rendered BARE — `assemblerNotes` writes it between "(Note: " and ")" with no
+// «...» around it — so an id holding a newline forges a line and a `«` opens a
+// data block of its own. An id Token had to quote is therefore returned WHOLE
+// rather than truncated first. Truncating first is safe, because a cut of a
+// newline-bearing id holds no newline once quoted; it is useless, because
+// eight runes of an escape renders as `"AAAA\n- ["` — half an escape and nothing
+// a reader can act on. So this ordering is a LEGIBILITY property and the test
+// says so, which is the wording `internal/mcpserver`'s copy of this rule uses.
+//
+// A non-ASCII id is one Token must quote — `isTokenRune` writes bare only the
+// ASCII set a stored name plausibly uses — so a CJK id arrives here in the
+// ASCII-only quoted form rather than abbreviated. That is the same answer the
+// mcpserver listings give for the same id, which is the point of sharing the
+// function, and it is deliberately NOT what `cmd/ghost`'s and `memref`'s report
+// forms do: those print to a terminal for a human to paste, where an id must
+// stay copyable, and no note is pasted.
+func ShortID(id string) string {
+	// Empty stays empty rather than becoming the quoted empty string Token
+	// renders it as: a note column showing `""` for a row with no id is noise,
+	// and an empty id cannot forge a line.
+	if id == "" {
+		return ""
 	}
-	return id
+	if rendered := Token(id); rendered != id {
+		return rendered
+	}
+	return memref.Short(id)
 }

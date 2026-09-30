@@ -68,9 +68,7 @@ func (i Item) Line() string {
 	}
 	tags := ""
 	if len(i.Tags) > 0 {
-		if b, err := json.Marshal(i.Tags); err == nil {
-			tags = " tags:" + string(b)
-		}
+		tags = TagsLabel(i.Tags)
 	}
 	resolved := ""
 	if i.ResolvedAt != nil {
@@ -391,9 +389,125 @@ func isTokenRune(r rune) bool {
 // The delimiters are the reader's contract, not the caller's: text between «
 // and » is DATA, so a newline inside the block is still data and a line that
 // begins "- [" inside it is not Ghost's own output.
+//
+// It is the ONE delimiter renderer in this package, and it reaches
+// `neutralizeDelimiters` rather than building its own substitution: that is the
+// same rule the tag label (#811) needs, and two spellings of a substitution a
+// reader parses visually is two things to keep in step.
 func Data(s string) string {
-	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
+	return "«" + neutralizeDelimiters(s) + "»"
 }
+
+// TagsLabel renders a row's tag list as the ` tags:[…]` label a memory line
+// carries, or "" when the row records no tag.
+//
+// It is EXPORTED, and it is the one implementation, because the label was written
+// twice — here and in `mcpserver.formatMemories` — and two implementations of one
+// rule are two rules, with the untested one shipping the bug. `formatMemories`
+// renders the same field for the surfaces that have not moved to the assembler
+// yet, and it now calls this.
+//
+// WHY the label is a JSON array and not a delimited one, which is the decision
+// that makes the escaping below necessary: the line already delimits the one
+// field that is free prose (the content, through Data), and tags are short
+// keyword labels a reader scans. A second «...» pair per row would be a second
+// thing to explain on every listing, so the label is the JSON array, and the array
+// is what makes it safe — with one gap that had to be closed rather than assumed.
+//
+// THAT GAP is #811. `json.Marshal` escapes a newline, a quote and a backslash, and
+// HTML-escapes `<`, `>` and `&`, so a tag cannot forge a line or break out of its
+// own JSON string. It does NOT escape « or », and the label is printed OUTSIDE the
+// «...» data delimiters, on the same line as the content. So a tag holding a «
+// opened a data block of its own mid-metadata: the reader met « twice on the row
+// before reaching the content, and the span between them read as data rather than
+// as the tag list. It cannot CLOSE a block, so nothing was smuggled OUT as
+// instruction — which is why this is a lower-severity sibling of the id defect
+// (#791) rather than a copy of it — but the delimiter contract in docs/mcp.md is
+// one contract, and a field that can open a block breaks it.
+//
+// So a « becomes `<<` and a » becomes `>>`, through `neutralizeDelimiters` — the
+// ONE function that does it, and the one `Data` already used, because a
+// second copy of a substitution a reader parses visually is a second thing to keep
+// in step. `<<` is the same spelling the content uses, so a reader who has met one
+// knows the other. A backtick is neutralised too, and differently; see
+// `tagBacktickEscape`, which is where the two rules diverge and why.
+//
+// THE ORDER IS THE INTERESTING PART, and it took one reversal to get right.
+// Substituting BEFORE the marshal was the first attempt and it is wrong: the
+// substitution introduces ASCII `<` and `>`, which `json.Marshal` HTML-escapes in
+// turn, so a tag of `a«b` came out as `["a\u003c\u003cb"]` — twenty-two characters
+// of escape for a two-character substitution, and a reader scanning a tag list sees
+// noise. Substituting AFTER the marshal cannot do that, and cannot break the JSON
+// either: « and » are not JSON metacharacters, so rewriting one cannot unbalance
+// the string it sits in. And the ordinary cases come out byte-identical, which is
+// the point of doing it this way rather than routing the list through `Token` or
+// `Label` — those would quote every tag holding a space, which is most of them,
+// and `tags:["golden","pinned"]` is what every existing store, golden and test
+// already asserts on.
+func TagsLabel(tags []string) string {
+	if len(tags) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(tags)
+	if err != nil {
+		// Unreachable: tags is a []string, which json.Marshal always encodes. A
+		// dropped label is the answer if it ever were not, because a raw
+		// concatenation is the one rendering that cannot be escaped at all.
+		return ""
+	}
+	return " tags:" + neutralizeTagLabel(string(b))
+}
+
+// tagBacktickEscape is what a backtick in a tag prints as.
+//
+// A JSON ESCAPE rather than a substitution like the guillemet's `<<`, and the
+// reason is that `<<` already means something to a reader of a Ghost line: it is
+// what `Data` writes for a literal `«`, so a reader who sees `<<` in a tag
+// list knows it came from a delimiter. There is no such convention for a backtick
+// in a tag, so the honest form is the one the surrounding JSON already uses for a
+// character it must not print literally — and it stays VALID JSON, so a reader
+// decoding the array gets the backtick back rather than losing it.
+//
+// It matters because `json.Marshal` does not escape a backtick, and a lone one in
+// a listing row opens a markdown code span that swallows the rest of the line. The
+// MCP write path refuses a backtick in a tag (mcpserver.validateTags), but a store
+// can already hold one — a pre-guard save, a restored snapshot, a hand edit — and
+// the renderer is the layer that covers those. Same reason the guillemets are
+// handled here and not refused at import: refusing a stored value on the way OUT of
+// a backup costs the user the whole memory, which is a far worse outcome than
+// printing one backtick as an escape.
+const tagBacktickEscape = "\\u0060"
+
+// neutralizeTagLabel is the label's own neutralisation, and it is separate from
+// `neutralizeDelimiters` rather than an extension of it.
+//
+// `neutralizeDelimiters` is shared with `Data`, where a backtick is NOT a
+// threat — the content sits inside «...», so a backtick in it cannot close anything
+// Ghost printed. Widening that function would change how every content block in
+// every answer renders, on no evidence that a content backtick is unsafe. So the
+// label has its own, and this is the one place the two rules differ.
+func neutralizeTagLabel(s string) string {
+	return strings.ReplaceAll(neutralizeDelimiters(s), "`", tagBacktickEscape)
+}
+
+// neutralizeDelimiters rewrites the « and » that open and close a data block into
+// the fixed `<<` and `>>` a reader cannot mistake for one.
+//
+// It is the ONE function that does it, and the fact that the tag list needed it
+// (#811) is the argument: `Data` has done this for the content since the
+// delimiters existed, and a field that renders its own copy of the substitution is
+// a field whose copy will drift.
+func neutralizeDelimiters(s string) string {
+	return delimiterReplacer.Replace(s)
+}
+
+// delimiterReplacer is the substitution itself, hoisted out of Data for the
+// same reason the three copies of the preview cut were hoisted into PreviewLine: a
+// strings.Replacer is safe for concurrent use, and a rule that must never drift is
+// the kind that must not be copyable. It is a package var rather than a per-call
+// NewReplacer so it is built once instead of once per tag on every line of every
+// listing.
+var delimiterReplacer = strings.NewReplacer("«", "<<", "»", ">>")
 
 // itemOf materialises one item from a candidate. The fields are copied, not
 // re-read, so an item cannot disagree with the row that produced it.

@@ -361,7 +361,13 @@ func TestBuildReflectionPrompt_IncludesTags(t *testing.T) {
 			{Category: "gotcha", Content: "no tags on this one", Importance: 0.5},
 		},
 	})
-	if !strings.Contains(prompt, "tags:[obsidian,vault]") {
+	// `|` rather than `,` since the tag list is now escaped rather than joined: a
+	// tag holding a comma or a pipe must not read as a different tag count, and a
+	// comma cannot be the separator for that reason. An ordinary two-tag list is
+	// byte-identical apart from the one character — see
+	// TestTheOrdinaryTagListIsUnchanged, which is where the invisibility claim is
+	// pinned.
+	if !strings.Contains(prompt, "tags:[obsidian|vault]") {
 		t.Errorf("prompt missing serialized tags:\n%s", prompt)
 	}
 	// Since #639 the tags are no longer the model's to state: a keep carries the

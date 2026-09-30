@@ -131,12 +131,33 @@ func CheckImportedProject(p PortableProject) error {
 //     the operator can see that the stored text is shorter than the artifact's. A
 //     predicate that refused an over-long content would turn a documented,
 //     reported cut into a lost row.
+//
 //   - The provenance downgrade. It depends on `ImportOptions.TrustProvenance`, and
 //     it is a rewrite the report states, not a refusal.
+//
 //   - The recorded-history check. See ImportMemory for why it must run against the
 //     DESTINATION and after the presence check; screening on it here would be
 //     actively wrong, since every write appends a history row and so every memory
 //     this store exports has one.
+//
+//   - A tag's SHAPE. This is the omission most likely to look like one, so it is
+//     stated rather than left to be found: a control character, a backtick or a
+//     data delimiter in a tag is accepted here and carried byte for byte.
+//
+//     The reason is that every OTHER check in this function is a fact about a
+//     RECORD, while a tag's characters are a fact about a RENDERING — and
+//     `ghost export` calls this predicate to decide what may be left out of a
+//     backup. So a shape check here would make a memory with a hostile tag
+//     UNBACKED UP, on the day the operator needs the file, for a label the user
+//     cannot even see (#811). Nothing on the MCP write path refused such a tag for
+//     the whole life of the feature, so any store written through it can hold one.
+//
+//     Safety is the renderer's, on every surface a tag reaches: `assemble.TagsLabel`
+//     on a memory row, and `internal/reflection`'s `tagSubstitution` in the
+//     consolidation prompt, which needs the LARGER class because its list is neither
+//     JSON nor delimited. The class is refused where a NEW tag can arrive —
+//     `validateTags` in `internal/mcpserver`, on all four tools that write a tag list,
+//     which is the only boundary an ordinary save passes through.
 func CheckImportedMemory(m PortableMemory) error {
 	// The id's SHAPE, and above every message that could name the id. The id is
 	// the one field of this record that reaches a rendered line OUTSIDE the
