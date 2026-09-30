@@ -690,7 +690,7 @@ These things are deliberately **not** exported:
 
 That last row is why an export's memory count can be one lower than the row count `ghost backup` prints for the same store: the seed is in the database copy and deliberately not in the artifact.
 
-**A record this build cannot import is left out and named.** The exporter applies the *importer's own* id checks, because a store can already hold an id `ghost import` refuses — written by a pre-`#791` import, reinstated by `ghost reflect --restore`, seeded by another tool, or edited by hand. Exporting one produced an artifact its own importer then rejected record by record, so the backup was not a backup and nothing said so until you needed it. Such a record is **left out** and reported on stderr, one `!` line each, with the id rendered so it cannot forge a line of its own:
+**A record whose id, name or path this build would refuse on shape is left out and named.** The exporter applies the *importer's own* shape checks, because a store can already hold such a value — written by a pre-`#791` import, reinstated by `ghost reflect --restore`, seeded by another tool, or edited by hand. Exporting one produced an artifact its own importer then rejected record by record, so the backup was not a backup and nothing said so until you needed it. Such a record is **left out** and reported on stderr, one `!` line each, with the id rendered so it cannot forge a line of its own:
 
 ```
 exported 1 project, 1 memory to backups/one.jsonl — 1 record left out, see below
@@ -698,9 +698,11 @@ exported 1 project, 1 memory to backups/one.jsonl — 1 record left out, see bel
   Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.
 ```
 
-The file is **kept** and the command **exits non-zero**, the same convention the importer uses for a rejected record: what it wrote is complete and importable, it is just not the whole store, and a partial export reported as a success is the failure mode worth spending an exit code on. So a `ghost export && …` backup script notices.
+The file is **kept** and the command **exits non-zero**, the same convention the importer uses for a rejected record: what it wrote is a valid artifact, it is just not the whole store, and a partial export reported as a success is the failure mode worth spending an exit code on. So a `ghost export && …` backup script notices.
 
 A record is left out when its id carries a control character, whitespace, a backtick or a `«»`, or is over 128 bytes — a project's id, name or path is held to the same characters *except* whitespace, because a project id is often a filesystem path. **A project's records go with it**: the importer resolves each record's project against the artifact, so a memory under an absent project would be rejected as project-not-found. Ghost will not re-key a row to fit — a different id is a different row, and the links, the recorded history and every `ghost history` read are attached to the one this store holds.
+
+**Shape is the whole of the guarantee, not importability.** The exporter screens for the id, name and path shape only, so a record the importer would refuse on some *other* ground still exports at exit 0 and fails on a restore: an empty project name or path, credential-shaped `content`, `tags` or `source_ref`, an id that still has recorded history, a hand-edited category or status. Those are **#813**, which extends this screening to every check the importer applies; until then, a `ghost import` that reports rejections is telling you something an export at exit 0 did not.
 
 ### `ghost import`
 
