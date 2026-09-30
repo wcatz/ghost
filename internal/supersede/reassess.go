@@ -154,13 +154,19 @@ type ReassessResult struct {
 	// direction is the operator's to decide.
 	Cyclic []CyclicPair
 	// Unjudged names the pairs the classifier produced no verdict for, because
-	// the call failed on both attempts or the reply's verdict count did not
-	// match the pairs asked about (#699). Their edges are LEFT ALIVE: nothing
-	// was decided about them, and the next pass re-asks them, so this is the
-	// list of what a rerun still owes. It is a list rather than a count because
-	// "a project of 87 edges, 6 of them unjudged" is a different thing for an
-	// operator than "6 unjudged" with no way to find them — and one failed call
-	// can be the whole set.
+	// the call that carried them failed on both attempts or the reply's verdict
+	// count did not match the pairs asked about (#699). Their edges are LEFT
+	// ALIVE: nothing was decided about them, and the next pass re-asks them, so
+	// this is the list of what a rerun still owes. It is a list rather than a
+	// count because "a project of 87 edges, 6 of them unjudged" is a different
+	// thing for an operator than "6 unjudged" with no way to find them — and one
+	// failed call can be the whole set.
+	//
+	// It is the pairs the FAILED calls carried, not every open pair: a project's
+	// open pairs are chunked across several harness calls, and a call that fails
+	// answers nothing about the pairs IT carried while saying everything about
+	// the pairs the calls before it already answered (#808). Those verdicts are
+	// applied like any others, so a rerun owes this list and not the whole pass.
 	Unjudged []UnjudgedPair
 }
 
@@ -412,6 +418,18 @@ func retriesOf(cls Classifier) int {
 // reply whose verdict count does not match the pairs asked about — both are the
 // same state here, no verdict for any open pair.
 //
+// The partial repair is per CALL, not per pass (#808). A project's open pairs are
+// chunked across several harness calls, and a call that fails says nothing about
+// the pairs the calls before it already answered: those verdicts are complete,
+// parsed and indexed by pair number, and there is nothing downstream that needs
+// the whole set at once — a cycle contributes one candidate and so lives in one
+// chunk, and an ordinary edge's verdict is read on its own. So the chunks that
+// answered are applied like any other verdicts and only the failed call's pairs
+// are reported unjudged; the error, and the non-zero exit it produces, are
+// unchanged. What #699's rehearsal lost 76 edges to was a failure with nothing
+// decided behind it, and that case is unchanged: a failure on the FIRST chunk
+// still decides nothing.
+//
 // An unparseable verdict is not an error at all: the edge stays, and the pair is
 // counted as Unclassified, so a later pass can ask again.
 //
@@ -591,10 +609,27 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		if err == nil && len(verdicts) != len(open) {
 			err = fmt.Errorf("classifier returned %d verdict(s) for %d pair(s)", len(verdicts), len(open))
 		}
+		// How much of the question was answered, which is not always none of it
+		// (#808). ClassifyBatch chunks a project's open pairs across several
+		// harness calls, and a transport failure in one of them leaves the
+		// chunks before it holding complete, parsed, number-indexed verdicts.
+		// Nothing downstream needs the whole set — a cycle is ONE candidate and
+		// so lives in a single chunk, and an ordinary edge's verdict is read on
+		// its own — so the answered prefix is settled below and only the pairs
+		// the failed call carried are reported unjudged. A reply whose verdict
+		// count does not match is NOT a partial answer: the mapping from reply
+		// to pair is exactly what is in doubt there, so nothing is settled.
+		answered := len(open)
+		if err != nil {
+			answered = answeredPrefix(verdicts, len(open), err)
+		}
 		switch {
 		case err != nil:
+			if answered > 0 {
+				settleOpen(&res, &settled, open[:answered], verdicts[:answered], openCycles[:answered])
+			}
 			fail = fmt.Errorf("classify %d live supersedes edge(s): %w", len(open), err)
-			res.Unjudged = unjudgedPairs(open)
+			res.Unjudged = unjudgedPairs(open[answered:])
 			// A cycle whose question was on the failed call is reported NO-VERDICT
 			// alongside the ordinary unjudged pairs, and for the same reason: the
 			// call answered nothing about any pair it carried, so no edge of the
@@ -606,39 +641,17 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			// step: the harness died, so the report tells them to RE-RUN this pass.
 			// Only a pair with no knowable direction is theirs to settle, and that
 			// one is the report's --withdraw commands.
-			for _, dec := range openCycles {
+			for _, dec := range openCycles[answered:] {
 				if dec != nil {
 					res.Cyclic = append(res.Cyclic, CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleNoVerdict})
 				}
 			}
 			if logger != nil {
 				logger.Warn("supersede reassess: the classifier failed; the edges it would have judged stand",
-					"unjudged", len(res.Unjudged), "settled", len(settled), "error", err)
+					"answered", answered, "unjudged", len(res.Unjudged), "settled", len(settled), "error", err)
 			}
 		default:
-			for i, c := range open {
-				if dec := openCycles[i]; dec != nil {
-					settled = append(settled, settleCycle(dec, verdicts[i], &res)...)
-					continue
-				}
-				switch verdicts[i] {
-				case RelationSupersedes:
-					res.Confirmed++
-				case RelationCauses:
-					res.Causes++
-					settled = append(settled, judged{cand: c, reason: "causes: the older note is still independently true"})
-				case RelationReversed:
-					res.Reversed++
-					settled = append(settled, judged{cand: c, reason: "reversed: the older note is the current one", sweep: true})
-				case RelationNeither:
-					res.Neither++
-					settled = append(settled, judged{cand: c, reason: "neither: both notes are still true", sweep: true})
-				default:
-					// Relation("") and any invalid value are a missing judgment, not a
-					// denial: the edge stays, counted, and the pair is offered again.
-					res.Unclassified++
-				}
-			}
+			settleOpen(&res, &settled, open, verdicts, openCycles)
 		}
 	}
 
@@ -782,11 +795,50 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	return res, withdrawn, nil
 }
 
-// unjudgedPairs projects the open pairs a failed classify call left without a
-// verdict. It is every open pair, not the subset the harness named: a call that
-// failed answers nothing about anything it carried, and the next pass re-asks all
-// of them anyway (nothing is cached for an unanswered edge), so a narrower list
-// would be a claim the pass cannot make.
+// settleOpen reads one verdict per pair into the counts it moves and the
+// withdrawals it implies. It is a named function because Reassess now calls it
+// twice — once for the whole set and once for the prefix a failed classify call
+// left answered (#808) — and the two must settle a verdict by the same rules,
+// which a copy of this switch would not guarantee.
+//
+// The three slices are parallel and are the SAME slice of the pass's work:
+// pairs[i] is what verdicts[i] is about, and cycles[i] is the cycle that pair
+// contributed (nil for an ordinary edge). A cycle is settled by settleCycle,
+// which reads the verdict as a direction, and an ordinary edge by the four-way
+// switch below. A missing verdict is neither a denial nor a withdrawal in either
+// path: the edge stays, the pair is counted, and the next pass asks again.
+func settleOpen(res *ReassessResult, settled *[]judged, pairs []Candidate, verdicts []Relation, cycles []*cycleDecision) {
+	for i, c := range pairs {
+		if dec := cycles[i]; dec != nil {
+			*settled = append(*settled, settleCycle(dec, verdicts[i], res)...)
+			continue
+		}
+		switch verdicts[i] {
+		case RelationSupersedes:
+			res.Confirmed++
+		case RelationCauses:
+			res.Causes++
+			*settled = append(*settled, judged{cand: c, reason: "causes: the older note is still independently true"})
+		case RelationReversed:
+			res.Reversed++
+			*settled = append(*settled, judged{cand: c, reason: "reversed: the older note is the current one", sweep: true})
+		case RelationNeither:
+			res.Neither++
+			*settled = append(*settled, judged{cand: c, reason: "neither: both notes are still true", sweep: true})
+		default:
+			// Relation("") and any invalid value are a missing judgment, not a
+			// denial: the edge stays, counted, and the pair is offered again.
+			res.Unclassified++
+		}
+	}
+}
+
+// unjudgedPairs projects the open pairs no verdict arrived for: the tail a
+// failed classify call carried, and — when the first call itself failed — every
+// open pair, because that call answered nothing about anything it carried. The
+// next pass re-asks all of them either way (nothing is cached for an unanswered
+// edge), so this list is what a rerun still owes rather than a claim about which
+// of them the harness had looked at.
 func unjudgedPairs(open []Candidate) []UnjudgedPair {
 	out := make([]UnjudgedPair, 0, len(open))
 	for _, c := range open {

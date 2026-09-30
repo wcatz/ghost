@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Link is an edge between two memories. 'related' links are symmetric and
@@ -53,8 +54,66 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 // the linker's `related` edges, the bench seeders and the restore paths make no
 // judgement, so the write clock is the honest stamp.
 func (s *Store) CreateLinkJudged(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) error {
+	_, err := s.createLink(ctx, sourceID, targetID, relation, strength, source, judgedAt, false)
+	return err
+}
+
+// CreateLinkUnopposed is CreateLinkJudged for a DIRECTED relation whose pair may
+// be claimed in at most one direction: it writes the edge only while no live edge
+// already runs the OTHER way, and reports whether it wrote.
+//
+// It is a separate method rather than a rule inside CreateLinkJudged because the
+// two spellings want different things of a cycle, and only one of them is
+// PRODUCING one. `ghost supersede` is the only writer of a directed edge in
+// production, and the state it must not create is a pair live in both directions
+// — which demotes BOTH endpoints in ranking and leaves neither edge able to
+// withdraw the other (#778). The bench seeders and the cycle fixtures, on the
+// other hand, have to be able to WRITE that state: it is what a real store already
+// holds, put there by a pass before #778, and both the repair pass and the tests
+// that prove the repair works can only describe it by building it. A rule inside
+// the shared writer would take that ability away from the only callers that need
+// it.
+//
+// So the guard is in the caller's contract, and it is ATOMIC with the write: the
+// reverse edge is read inside the same BEGIN IMMEDIATE transaction that inserts
+// this one, and BEGIN IMMEDIATE takes the database write lock before the first
+// statement. Two processes writing the two directions of one pair are therefore
+// serialised — the second one's read happens after the first one's commit, sees
+// the edge, and writes nothing (#806). A check outside the transaction would not
+// close this at all: both writers could read "no reverse edge" and both would
+// insert. That is also why this is not a lifecycle lock: a lock is a convention
+// between the processes that take it, while this is a property of the graph that
+// has to hold whatever the callers turn out to be — and `ghost supersede` is a
+// command an operator runs twice, so "the other process took the lock first" is
+// not a thing either of them can be asked to guarantee.
+//
+// A refusal is a normal outcome rather than an error, and it is the SAFE
+// direction: the edge that exists is the one an earlier writer put there, and the
+// pair is re-offered on the next pass, which reads the live edge and judges the
+// pair in ITS direction. The caller is told, for the two reasons every other
+// refusal in that pass is counted — a pass that declined a write and reported the
+// totals of one that found nothing to do reads as "nothing was skipped", and a
+// report that claims a link this run did not write is the one thing a report
+// whose whole job is auditability may not be.
+func (s *Store) CreateLinkUnopposed(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) (bool, error) {
+	if symmetricRelations[relation] {
+		// A symmetric relation is stored in normalized order, so its two
+		// directions are ONE row and "is the reverse already live" is a question
+		// about the row this call would write. Refusing by name beats answering
+		// it: the caller asked for a directed claim.
+		return false, fmt.Errorf("create link: relation %q is symmetric and cannot be unopposed", relation)
+	}
+	return s.createLink(ctx, sourceID, targetID, relation, strength, source, judgedAt, true)
+}
+
+// createLink is the one implementation both spellings above share, so the history
+// row a 'supersedes' edge files and the transaction that files it cannot drift
+// apart between them. requireUnopposed is the whole difference, and it is read
+// and acted on INSIDE the transaction (see CreateLinkUnopposed) — which is why it
+// is a parameter here and not something a wrapper could add around the call.
+func (s *Store) createLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string, requireUnopposed bool) (bool, error) {
 	if sourceID == targetID {
-		return fmt.Errorf("create link: self-links not allowed (id %s)", sourceID)
+		return false, fmt.Errorf("create link: self-links not allowed (id %s)", sourceID)
 	}
 	if symmetricRelations[relation] && sourceID > targetID {
 		sourceID, targetID = targetID, sourceID
@@ -63,15 +122,57 @@ func (s *Store) CreateLinkJudged(ctx context.Context, sourceID, targetID, relati
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if relation == "supersedes" {
-		// One transaction for the edge and its history row: a supersedes edge
-		// with no record of it, or a record of one that was never written, are
-		// both states this call must not be able to commit.
-		tx, _, err := s.beginWrite(ctx, "create-link")
+	// A 'supersedes' edge, and every guarded write, takes the explicit
+	// transaction: the first because its history row has to share one with the
+	// edge, the second because the reverse-edge check has to share one with the
+	// insert. Only the ungated non-supersedes write is left on the autocommit
+	// path, which is where it has always been.
+	if requireUnopposed || relation == "supersedes" {
+		return s.createLinkTx(ctx, sourceID, targetID, relation, strength, source, judgedAt, requireUnopposed)
+	}
+
+	if _, err := s.execGuardedWrite(ctx, "create-link-autocommit", linkInsertSQL,
+		sourceID, targetID, relation, strength, source, judgedAt); err != nil {
+		return false, fmt.Errorf("create link: %w", err)
+	}
+	return true, nil
+}
+
+// createLinkTx writes one edge inside a write transaction, refusing the write
+// when the pair is already claimed the other way round. A false return with a nil
+// error IS the refusal, and never a failure: nothing went wrong, and the graph is
+// left in a state the next pass can act on.
+func (s *Store) createLinkTx(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string, requireUnopposed bool) (bool, error) {
+	// One transaction for the edge and its history row: a supersedes edge
+	// with no record of it, or a record of one that was never written, are
+	// both states this call must not be able to commit.
+	tx, lock, err := s.beginWrite(ctx, "create-link")
+	if err != nil {
+		return false, fmt.Errorf("begin create link: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if requireUnopposed {
+		// The REVERSE edge, read through the transaction and never through the
+		// pool: this transaction holds the write lock from its first statement,
+		// so no other process can commit this pair's other direction between the
+		// read and the insert below. A pool read would not merely be racy here,
+		// it would deadlock — MaxOpenConns(1) means the open transaction is
+		// holding the only connection the read would need.
+		opposed, err := linkIsActive(ctx, tx, targetID, sourceID, relation)
 		if err != nil {
-			return fmt.Errorf("begin create link: %w", err)
+			return false, err
 		}
-		defer tx.Rollback() //nolint:errcheck
+		if opposed {
+			// No write and no history row: nothing became true, so there is
+			// nothing to record, and the transaction rolls back. It reports
+			// nothing to the write-lock seam either, which measures committed
+			// transactions — see writeLock.reportHold.
+			return false, nil
+		}
+	}
+
+	if relation == "supersedes" {
 		// Whether the edge is already active is read inside the transaction,
 		// which holds the write lock from its first statement, so the decision
 		// below cannot be overtaken by another process between the read and the
@@ -81,10 +182,10 @@ func (s *Store) CreateLinkJudged(ctx context.Context, sourceID, targetID, relati
 		// would have had to choose one of the two.
 		active, err := linkIsActive(ctx, tx, sourceID, targetID, relation)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source, judgedAt); err != nil {
-			return err
+			return false, err
 		}
 		// Only when the edge BECOMES active. `ghost supersede` re-writes a pair
 		// whose endpoint moved since the edge was written, and re-writing a
@@ -102,21 +203,18 @@ func (s *Store) CreateLinkJudged(ctx context.Context, sourceID, targetID, relati
 				phase:     phaseSupersede,
 				relatedID: sourceID,
 			}}, []string{targetID}); err != nil {
-				return err
+				return false, err
 			}
 		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit create link: %w", err)
-		}
-		return nil
+	} else if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source, judgedAt); err != nil {
+		return false, err
 	}
 
-	_, err := s.execGuardedWrite(ctx, "create-link-autocommit", linkInsertSQL,
-		sourceID, targetID, relation, strength, source, judgedAt)
-	if err != nil {
-		return fmt.Errorf("create link: %w", err)
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit create link: %w", err)
 	}
-	return nil
+	lock.reportHold("create-link", time.Now())
+	return true, nil
 }
 
 // linkInsertSQL is the upsert CreateLink performs: re-inserting an existing

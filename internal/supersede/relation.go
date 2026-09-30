@@ -720,6 +720,15 @@ func (h *RelationClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 // is counted, never fatal), and a fresh candidate is re-proposed on the next
 // pass; the zero-verdict fallback exists only so an ignored numbering
 // convention cannot drop a whole chunk at once.
+//
+// A chunk whose CALL fails returns the verdicts the earlier chunks produced
+// alongside the error, as a *PartialVerdictsError (#808), and the returned slice
+// is the prefix of the input those verdicts answer for. Nothing is inferred from
+// the failure about the chunks that succeeded: they returned complete, parsed,
+// number-indexed answers, and a caller that throws them away pays twice for one
+// question — once for the call that died and again for the rerun. Reassess is
+// the caller that acts on that; Run deliberately does not, and says so where it
+// ignores the prefix.
 func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidate) ([]Relation, error) {
 	if len(pairs) == 0 {
 		return nil, nil
@@ -748,18 +757,84 @@ func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidat
 					out = append(out, "")
 					continue
 				}
-				return nil, fmt.Errorf("%s→%s: %w", chunk[0].NewerID, chunk[0].OlderID, err)
+				return out, partialVerdicts(out, fmt.Errorf("%s→%s: %w", chunk[0].NewerID, chunk[0].OlderID, err))
 			}
 			out = append(out, rel)
 			continue
 		}
 		rels, err := h.classifyChunk(ctx, chunk)
 		if err != nil {
-			return nil, fmt.Errorf("pairs %d-%d (%s→%s): %w", start+1, end, chunk[0].NewerID, chunk[0].OlderID, err)
+			return out, partialVerdicts(out, fmt.Errorf("pairs %d-%d (%s→%s): %w", start+1, end, chunk[0].NewerID, chunk[0].OlderID, err))
 		}
 		out = append(out, rels...)
 	}
 	return out, nil
+}
+
+// PartialVerdictsError is the error ClassifyBatch returns when one chunk's call
+// failed after the chunks before it had already answered, and it is what lets a
+// caller tell "nothing was decided" from "everything up to here was decided and
+// the rest was not" — which used to be the same error, so a repair pass over 87
+// edges threw away the calls it had already paid for and paid again for the
+// rerun (#808).
+//
+// It answers for the PREFIX, not for a subset: the returned verdicts are a
+// complete answer for the first Answered pairs, in the order they were given,
+// because the chunks are contiguous slices of that order. A caller that wanted
+// some other subset could not have it — the calls after the failure were never
+// made — which is why the field is a count and not a set of indices.
+//
+// A caller that does not handle it behaves exactly as it did before, so Error
+// and Unwrap are the underlying failure and nothing else: errors.Is against the
+// transport error, a log line, and a non-zero exit all keep working without the
+// caller knowing this type exists.
+type PartialVerdictsError struct {
+	// Answered is how many of the pairs the returned verdicts are a complete
+	// answer for. It is never larger than the length of that slice, and a
+	// caller that trusts it over the slice it holds is trusting a claim about
+	// an answer it cannot see.
+	Answered int
+	Err      error
+}
+
+func (e *PartialVerdictsError) Error() string { return e.Err.Error() }
+func (e *PartialVerdictsError) Unwrap() error { return e.Err }
+
+// partialVerdicts wraps err as the partial answer for the first len(answered)
+// pairs, or returns it unchanged when no chunk had answered — a failure on the
+// very first chunk really is "nothing was decided", and a caller must not have to
+// learn that from a count of zero.
+func partialVerdicts(answered []Relation, err error) error {
+	if len(answered) == 0 {
+		return err
+	}
+	return &PartialVerdictsError{Answered: len(answered), Err: err}
+}
+
+// answeredPrefix is how much of a classify call's question its returned verdicts
+// answer: nothing unless the error says how much, and on a
+// *PartialVerdictsError that count clamped TWICE — to the slice actually held, and to
+// the number of pairs the caller asked about. Both clamps are there because the
+// answer is about to be used as a SLICE BOUND: a Classifier that over-reports (a
+// test double, a future implementation, a bug) would otherwise have the caller
+// walk off the end of its own pair list and panic, where the honest report of a
+// classifier that does not add up is a number it can act on. The shipped
+// classifier can over-report neither, which is exactly why the guard is here
+// rather than argued away.
+//
+// It is the only place in the package that reads that error, so every caller's
+// answer to "how much of this was decided?" is this one function rather than a
+// re-derivation of the rule at each call site.
+func answeredPrefix(verdicts []Relation, pairs int, err error) int {
+	var partial *PartialVerdictsError
+	if !errors.As(err, &partial) {
+		return 0
+	}
+	answered := min(partial.Answered, len(verdicts), pairs)
+	if answered < 0 {
+		return 0
+	}
+	return answered
 }
 
 // classifyChunk issues one batched call for a chunk of two or more pairs and
