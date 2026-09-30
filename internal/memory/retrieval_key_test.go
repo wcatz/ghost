@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // useQueryKeyDir points the key at a temp tree and clears the per-process cache,
@@ -264,44 +265,64 @@ func TestQueryDigestSaysSoWhenTheKeyCannotBeRead(t *testing.T) {
 	}
 }
 
-// TestAKeyFailureIsNotRememberedForTheLifeOfTheProcess: a transient failure must
-// not become a permanent one.
+// TestAFailedKeyIsRetriedOnABackoffRatherThanEverySearch: the cost of not having
+// a key, which has two wrong answers and one right one.
 //
-// The key is cached once per process, which is what keeps a file read off the
-// search path. Caching the FAILURE as well as the success is the trap: a store
-// that loses the startup race, or starts a moment before the key's directory
-// exists, would record an empty query_hash on every call for the rest of its life
-// — and report the FIRST failure's reason for all of them, which is a diagnostic
-// that points at the wrong cause.
-//
-// So: fail, repair the environment, call again, and the call must succeed. The
-// 0-byte key file is the standing example — it is exactly what a lost race or a
-// crash mid-write leaves behind, and it is the one state that used to be both
-// reachable and permanent.
-func TestAKeyFailureIsNotRememberedForTheLifeOfTheProcess(t *testing.T) {
+// Caching the failure forever makes one unlucky moment permanent — a server that
+// started a moment before its key existed would record an empty hash forever.
+// NEVER caching it is worse than that: every search would re-run the whole
+// resolution — data-directory lookup, read, mkdir, rand, a temp file, an fsync
+// and a link — while holding the cache mutex, for a store that simply cannot keep
+// a key. So a failure is remembered WITH A BACKOFF: cheap to repeat, and not
+// permanent.
+func TestAFailedKeyIsRetriedOnABackoffRatherThanEverySearch(t *testing.T) {
 	dataDir := fakeDataDir(t)
 	useQueryKeyDir(t, dataDir)
 	keyPath := filepath.Join(dataDir, queryKeyFileName)
 
-	// A key file that exists and holds nothing: the state a lost race leaves.
-	if err := os.WriteFile(keyPath, nil, 0o600); err != nil {
-		t.Fatalf("seed an empty key file: %v", err)
+	// Present but unusable: a corrupt key file is a refusal, not a race.
+	if err := os.WriteFile(keyPath, []byte("not hex at all"), 0o600); err != nil {
+		t.Fatalf("seed a corrupt key: %v", err)
 	}
-	if _, err := QueryDigest("who owns the k8s cluster"); err == nil {
-		t.Fatal("QueryDigest accepted a 0-byte key file")
+	store := testStore(t)
+	_, first := store.DigestQuery("who owns the k8s cluster")
+	if first == nil {
+		t.Fatal("QueryDigest accepted a key file that is not hex")
+	}
+	// Within the backoff the SAME failure comes back, and the cost is a map
+	// lookup rather than the whole resolution.
+	_, second := store.DigestQuery("who owns the k8s cluster")
+	if second == nil {
+		t.Fatal("QueryDigest succeeded on the second call inside the backoff")
+	}
+	if second.Error() != first.Error() {
+		t.Errorf("the cached failure changed between calls:\n first:  %v\n second: %v", first, second)
+	}
+	// The backoff is bounded, or "not permanent" would be a claim with no number
+	// behind it.
+	if queryKeyRetryDelay <= 0 || queryKeyRetryDelay > 5*time.Minute {
+		t.Errorf("the retry delay is %v, want a positive value short enough that a recovered key is "+
+			"picked up while a server runs", queryKeyRetryDelay)
 	}
 
-	// Repair it, the way an operator would, and the NEXT call must succeed.
+	// Repair it the way an operator would. An ordinary call is still inside the
+	// backoff, so it does NOT pick it up — and that is the point of the backoff.
 	good := strings.Repeat("ab", queryKeyBytes)
 	if err := os.WriteFile(keyPath, []byte(good), 0o600); err != nil {
-		t.Fatalf("repair the key file: %v", err)
+		t.Fatalf("repair the key: %v", err)
 	}
-	digest, err := QueryDigest("who owns the k8s cluster")
+	if _, err := store.DigestQuery("who owns the k8s cluster"); err == nil {
+		t.Error("a call inside the backoff picked up a repaired key — the backoff is not being honoured")
+	}
+	// And the warm path forces the attempt, which is what a server restart is.
+	if err := store.WarmQueryKey(); err != nil {
+		t.Fatalf("WarmQueryKey after a repair: %v — startup must not inherit a cached failure", err)
+	}
+	digest, err := store.DigestQuery("who owns the k8s cluster")
 	if err != nil {
-		t.Fatalf("QueryDigest after repair: %v — the first failure was cached for the process", err)
+		t.Fatalf("DigestQuery after warming: %v", err)
 	}
-	want := digestWith(mustDecodeHex(t, good), "who owns the k8s cluster")
-	if digest != want {
+	if want := digestWith(mustDecodeHex(t, good), "who owns the k8s cluster"); digest != want {
 		t.Errorf("digest %q does not match the repaired key's HMAC %q", digest, want)
 	}
 }

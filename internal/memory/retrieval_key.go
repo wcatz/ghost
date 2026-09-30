@@ -25,6 +25,8 @@ package memory
 // A key that cannot be loaded is a REFUSAL, not a fallback: see QueryDigest.
 
 import (
+	"time"
+
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -53,7 +55,23 @@ var (
 	queryKeyMu     sync.Mutex
 	queryKeyLoaded bool
 	queryKeyBytes_ []byte
+	// queryKeyErr is cached WITH A BACKOFF rather than not cached at all. Neither
+	// extreme is right: caching it forever makes one unlucky moment permanent (a
+	// server that started a moment before its key existed), and never caching it
+	// re-runs the whole resolution — data-directory lookup, read, mkdir, rand, a
+	// temp file, an fsync and a link — on EVERY search, while holding this mutex,
+	// for a store that simply cannot keep a key. The backoff turns that from
+	// per-search cost into per-interval cost, and WarmQueryKey bypasses it so
+	// startup gets a real attempt rather than an inherited failure.
+	queryKeyErr        error
+	queryKeyRetryAfter time.Time
 )
+
+// queryKeyRetryDelay is how long a FAILED resolution is remembered before it is
+// retried. Long enough that a store without a usable key costs one resolution per
+// interval instead of one per search, short enough that a key that becomes
+// available is picked up while a server is still running.
+const queryKeyRetryDelay = 30 * time.Second
 
 // resetQueryKeyCache clears the cache so a test can resolve the key against a
 // different directory. Production never calls it.
@@ -61,6 +79,7 @@ func resetQueryKeyCache() {
 	queryKeyMu.Lock()
 	defer queryKeyMu.Unlock()
 	queryKeyLoaded, queryKeyBytes_ = false, nil
+	queryKeyErr, queryKeyRetryAfter = nil, time.Time{}
 }
 
 // queryKey returns the per-install key, loading it or creating it on first use.
@@ -71,20 +90,28 @@ func resetQueryKeyCache() {
 func queryKey() ([]byte, error) {
 	queryKeyMu.Lock()
 	defer queryKeyMu.Unlock()
+	return queryKeyLocked()
+}
+
+// queryKeyLocked is queryKey without the lock, so WarmQueryKey can force a real
+// attempt past a cached failure without unlocking in between.
+func queryKeyLocked(force ...bool) ([]byte, error) {
 	if queryKeyLoaded {
 		return queryKeyBytes_, nil
 	}
+	now := time.Now()
+	// A forced attempt SKIPS the cached failure rather than returning it: that is
+	// the whole point of forcing, and returning the cached error here would mean
+	// startup reports a stale reason for a condition that may already be gone.
+	if queryKeyErr != nil && len(force) == 0 && now.Before(queryKeyRetryAfter) {
+		return nil, queryKeyErr
+	}
 	key, err := loadOrCreateQueryKey()
 	if err != nil {
-		// NOT cached. A failure here is usually transient -- a directory that did
-		// not exist a moment ago, a file another process had not finished
-		// publishing -- and caching it would make one unlucky moment permanent: an
-		// MCP server that lost the startup race would record an empty query_hash on
-		// every call for the rest of its life, all reporting the first failure's
-		// reason. Only a SUCCESS is a fact worth remembering.
+		queryKeyErr, queryKeyRetryAfter = err, now.Add(queryKeyRetryDelay)
 		return nil, err
 	}
-	queryKeyBytes_, queryKeyLoaded = key, true
+	queryKeyBytes_, queryKeyLoaded, queryKeyErr, queryKeyRetryAfter = key, true, nil, time.Time{}
 	return queryKeyBytes_, nil
 }
 
@@ -103,7 +130,13 @@ func queryKey() ([]byte, error) {
 // is not broken by a store whose records cannot be grouped by question, and the
 // per-call path reports the same failure with the same reason anyway.
 func (s *Store) WarmQueryKey() error {
-	_, err := queryKey()
+	queryKeyMu.Lock()
+	defer queryKeyMu.Unlock()
+	// force: startup is exactly when a cached failure should be retried, because
+	// the thing that failed may be true now (the directory exists, the other
+	// process has published its key) and this is the one call whose whole purpose
+	// is to try.
+	_, err := queryKeyLocked(true)
 	return err
 }
 
@@ -204,7 +237,40 @@ func publishQueryKey(dir, path string, key []byte) ([]byte, error) {
 
 // readPublishedQueryKey is the loser's half of the race: read the winner's key
 // rather than publish our own.
+//
+// It retries BRIEFLY, because the window it is closing is microseconds wide — the
+// winner is between publishing the file and closing its descriptor, or a process
+// that published between our read and our link has not finished returning yet.
+// Waiting a few tens of milliseconds here is what stops a lost race from becoming
+// the expensive case: without it this store falls through to the failure path, and
+// the failure path now costs every search a cached refusal for the backoff window.
+//
+// A file that is PRESENT but unreadable is a different thing entirely and is never
+// retried: that is corruption or a human's edit, and re-reading it on a loop would
+// be work for the same answer.
 func readPublishedQueryKey(path string) ([]byte, error) {
+	for attempt := range readPublishedAttempts {
+		key, err := readPublishedQueryKeyOnce(path)
+		if err == nil {
+			return key, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err // present but unusable: a refusal, not a race
+		}
+		if attempt == readPublishedAttempts-1 {
+			return nil, fmt.Errorf("the retrieval key another process created at %s did not become readable: %w", path, err)
+		}
+		time.Sleep(readPublishedRetry)
+	}
+	return nil, fmt.Errorf("read the retrieval key another process created at %s: no attempt was made", path)
+}
+
+const (
+	readPublishedAttempts = 5
+	readPublishedRetry    = 10 * time.Millisecond
+)
+
+func readPublishedQueryKeyOnce(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read the retrieval key another process created at %s: %w", path, err)
