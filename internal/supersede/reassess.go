@@ -239,9 +239,10 @@ const (
 )
 
 // cycleDecision is the working state of one cyclic pair while its single verdict
-// is outstanding: the two live edges, which of them the pass asked about, and
-// what the verdict settled. It is filled in one step and read once, so a verdict
-// cannot land on a cycle whose state was never set.
+// is outstanding: the two live edges it holds, and which of them the pass asked
+// about. It carries nothing else — the verdict's outcome is returned to the caller
+// as the CyclicPair and the withdrawals, so there is no second copy of a decision
+// to read back and no field a verdict could set without anyone consulting.
 type cycleDecision struct {
 	first  CyclicEdge
 	second CyclicEdge
@@ -249,8 +250,6 @@ type cycleDecision struct {
 	// direction, so a verdict that keeps "the direction it was asked about" is
 	// about First.
 	askedFirst bool
-	outcome    CycleOutcome
-	settled    bool
 }
 
 // keptOutcome is the outcome for a verdict that named ONE of the two live edges
@@ -588,13 +587,17 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		case err != nil:
 			fail = fmt.Errorf("classify %d live supersedes edge(s): %w", len(open), err)
 			res.Unjudged = unjudgedPairs(open)
-			// A cycle whose question was on the failed call is reported UNDECIDED
-			// alongside the ordinary unjudged pairs, and the same way: no verdict
-			// for any pair the call carried, so no edge of the cycle moves and the
-			// report names the --withdraw commands for it. Silently omitting the
-			// cycle from a report that is otherwise listing every unjudged pair
-			// would leave the operator believing its two edges were left alone on
-			// purpose.
+			// A cycle whose question was on the failed call is reported NO-VERDICT
+			// alongside the ordinary unjudged pairs, and for the same reason: the
+			// call answered nothing about any pair it carried, so no edge of the
+			// cycle moves. Silently omitting the cycle from a report that is
+			// otherwise listing every unjudged pair would leave the operator
+			// believing its two edges were left alone on purpose.
+			//
+			// NoVerdict, not Unoriented, and the difference is the operator's next
+			// step: the harness died, so the report tells them to RE-RUN this pass.
+			// Only a pair with no knowable direction is theirs to settle, and that
+			// one is the report's --withdraw commands.
 			for _, dec := range openCycles {
 				if dec != nil {
 					res.Cyclic = append(res.Cyclic, CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleNoVerdict})
@@ -804,7 +807,6 @@ func settleCycle(dec *cycleDecision, verdict Relation, res *ReassessResult) []ju
 	case RelationSupersedes:
 		res.Confirmed++
 		cyc.Outcome = dec.keptOutcome(dec.askedFirst)
-		dec.outcome, dec.settled = cyc.Outcome, true
 		out = append(out, judged{
 			cand:   reverse(other),
 			reason: "the reverse of the direction the verdict confirmed: this edge asserts the opposite, and both directions at once demote both endpoints",
@@ -813,7 +815,6 @@ func settleCycle(dec *cycleDecision, verdict Relation, res *ReassessResult) []ju
 	case RelationReversed:
 		res.Reversed++
 		cyc.Outcome = dec.keptOutcome(!dec.askedFirst)
-		dec.outcome, dec.settled = cyc.Outcome, true
 		out = append(out, judged{
 			cand:   reverse(judgedEdge),
 			reason: "reversed: the note this edge supersedes is the current one, so this edge runs against the pair and the reverse is the direction that stands",
@@ -822,7 +823,6 @@ func settleCycle(dec *cycleDecision, verdict Relation, res *ReassessResult) []ju
 	case RelationCauses:
 		res.Causes++
 		cyc.Outcome = CycleBothWithdrawn
-		dec.outcome, dec.settled = cyc.Outcome, true
 		out = append(out,
 			judged{cand: reverse(judgedEdge), reason: "causes: the older note is still independently true"},
 			judged{cand: reverse(other), reason: "causes: the older note is still independently true, and its reverse asserts the opposite"},
@@ -830,7 +830,6 @@ func settleCycle(dec *cycleDecision, verdict Relation, res *ReassessResult) []ju
 	case RelationNeither:
 		res.Neither++
 		cyc.Outcome = CycleBothWithdrawn
-		dec.outcome, dec.settled = cyc.Outcome, true
 		out = append(out,
 			judged{cand: reverse(judgedEdge), reason: "neither: both notes are still true", sweep: true},
 			judged{cand: reverse(other), reason: "neither: both notes are still true, and its reverse asserts the opposite", sweep: true},

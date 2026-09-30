@@ -105,6 +105,45 @@ func liveEdges(t *testing.T, store *memory.Store, ids ...string) [][2]string {
 	return pairs
 }
 
+// liveCausesEdges reads the live 'causes' edges touching any of ids, as the graph
+// holds them. 'causes' is written older→newer, the reverse of 'supersedes', so a
+// withdrawal of stale→fix is the one whose sweep takes fix→stale — and getting
+// that backwards is what a sweep test has to be able to see, which is why the
+// reader returns the direction rather than a count.
+func liveCausesEdges(t *testing.T, store *memory.Store, ids ...string) [][2]string {
+	t.Helper()
+	seen := make(map[[2]string]bool)
+	var out [][2]string
+	for _, id := range ids {
+		links, err := store.GetLinks(context.Background(), id)
+		if err != nil {
+			t.Fatalf("GetLinks(%s): %v", id, err)
+		}
+		for _, l := range links {
+			if l.Relation != string(RelationCauses) {
+				continue
+			}
+			edge := [2]string{l.SourceID, l.TargetID}
+			if !seen[edge] {
+				seen[edge] = true
+				out = append(out, edge)
+			}
+		}
+	}
+	return out
+}
+
+// seedCauses writes a live 'causes'/'llm' edge, which is what a withdrawal
+// sweeps: a 'causes' link pointing INTO a note the pass just decided is still
+// current asserts the opposite of that decision, and 'causes' runs older→newer,
+// so the edge is (older of the supersedes edge, newer of it).
+func seedCauses(t *testing.T, store *memory.Store, from, to string) {
+	t.Helper()
+	if err := store.CreateLink(context.Background(), from, to, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestReassessJudgesACycleOnceAndWithdrawsTheEdgeItsVerdictDenies is the reason
 // the advertised repair works. Reassess used to load every live edge and judge
 // each as an INDEPENDENT candidate, so a pair claimed in both directions was
@@ -398,4 +437,189 @@ func TestReassessCycleSurvivesADryRunUnwritten(t *testing.T) {
 	if edges := liveEdges(t, store, stale, fix); len(edges) != 2 {
 		t.Errorf("live supersedes edges = %v, want the cycle untouched by a dry run", edges)
 	}
+}
+
+// TestReassessSweepsTheCausesEdgeOfEveryCycleWithdrawalItDenies is the
+// both-relations sweep on a cycle, and it is quieter here than it is for an
+// ordinary edge — which is the whole reason it needs its own test.
+// InvalidateLink writes a history row for a 'supersedes' edge and NONE for a
+// 'causes' one, so a cycle withdrawal that drops its sweep deletes a second graph
+// row with nothing in memory_history to show it ever happened, and a review found
+// two mutations that turned the sweep off without any test noticing: one on the
+// SUPERSEDES branch and one on the second row of the NEITHER branch.
+//
+// Three shapes, because the sweep is a per-ROW decision and each row's arm
+// differs:
+//
+//   - SUPERSEDES keeps one edge and denies the other: that row sweeps.
+//   - NEITHER denies both: BOTH rows sweep, and each sweeps the 'causes' edge
+//     running the other way, so a pair holding two of them loses both.
+//   - CAUSES denies both but sweeps NEITHER, because a causes verdict AFFIRMS that
+//     relation — the same rule the ordinary path follows, and the one a "sweep
+//     everything on a cycle" simplification would break.
+func TestReassessSweepsTheCausesEdgeOfEveryCycleWithdrawalItDenies(t *testing.T) {
+	t.Run("one edge denied, its causes edge swept", func(t *testing.T) {
+		base, db := seed(t)
+		store := linkOrderStore{Store: base, reversed: false}
+		ctx := context.Background()
+		stale, fix := seedCycle(t, base, db,
+			"bug: the relay stalls on every consumer rebalance",
+			"the relay rebalance stall is fixed: pin the consumer", false)
+		// The denied edge is stale→fix, so the 'causes' edge its withdrawal
+		// sweeps is fix→stale: 'causes' runs older→newer, and the sweep is
+		// InvalidateLink(older, newer). Both are seeded, so the assertion can also
+		// see that the KEPT edge's own 'causes' counterpart survives — only the
+		// denied edge sweeps, and a 'causes' edge pointing INTO the note the
+		// verdict affirmed may well be true.
+		seedCauses(t, base, fix, stale)
+		seedCauses(t, base, stale, fix)
+
+		res, withdrawn, err := Reassess(ctx, store, &supersedesEverything{}, "p", true, discardLogger())
+		if err != nil {
+			t.Fatalf("Reassess: %v", err)
+		}
+		if res.Withdrawn != 1 || len(withdrawn) != 1 {
+			t.Fatalf("withdrawn=%d rows=%d, want 1 and 1", res.Withdrawn, len(withdrawn))
+		}
+		if res.CausesWithdrawn != 1 || withdrawn[0].CausesSwept != 1 {
+			t.Errorf("CausesWithdrawn=%d, row CausesSwept=%d, want 1 and 1: a withdrawal that denies the pair also drops the 'causes' edge that contradicts it",
+				res.CausesWithdrawn, withdrawn[0].CausesSwept)
+		}
+		edges := liveCausesEdges(t, base, stale, fix)
+		if len(edges) != 1 || edges[0] != [2]string{stale, fix} {
+			t.Errorf("live causes edges = %v, want only [%s %s]: the denied edge's 'causes' row is swept, and the KEPT edge's is not this pass's to remove", edges, stale, fix)
+		}
+	})
+
+	t.Run("both edges denied, both causes edges swept", func(t *testing.T) {
+		base, db := seed(t)
+		store := linkOrderStore{Store: base, reversed: false}
+		ctx := context.Background()
+		stale, fix := seedCycle(t, base, db,
+			"A restore that spanned two spindles took 41 minutes and the row count matched afterwards.",
+			"The restore path on one spindle is safe and takes under a minute.", false)
+		// One 'causes' edge per direction, so each of the two rows has its own to
+		// sweep and a pass that swept only the first is visible in the graph.
+		seedCauses(t, base, fix, stale)
+		seedCauses(t, base, stale, fix)
+
+		res, withdrawn, err := Reassess(ctx, store, &mockClassifier{verdict: func(string, string) Relation { return RelationNeither }}, "p", true, discardLogger())
+		if err != nil {
+			t.Fatalf("Reassess: %v", err)
+		}
+		if len(withdrawn) != 2 {
+			t.Fatalf("rows = %d, want 2: a NEITHER verdict denies both edges of the cycle", len(withdrawn))
+		}
+		for i, w := range withdrawn {
+			if w.CausesSwept != 1 {
+				t.Errorf("row %d (%s→%s): CausesSwept = %d, want 1", i, w.NewerID, w.OlderID, w.CausesSwept)
+			}
+		}
+		if res.CausesWithdrawn != 2 {
+			t.Errorf("Result.CausesWithdrawn = %d, want 2: each denied edge sweeps its own 'causes' edge", res.CausesWithdrawn)
+		}
+		if edges := liveCausesEdges(t, base, stale, fix); len(edges) != 0 {
+			t.Errorf("live causes edges = %v, want none", edges)
+		}
+	})
+
+	t.Run("a reversed verdict sweeps the edge it denied, not the one it kept", func(t *testing.T) {
+		base, db := seed(t)
+		store := linkOrderStore{Store: base, reversed: false}
+		ctx := context.Background()
+		stale, fix := seedCycle(t, base, db,
+			"bug: the relay stalls on every consumer rebalance",
+			"the relay rebalance stall is fixed: pin the consumer", false)
+		seedCauses(t, base, fix, stale)
+		seedCauses(t, base, stale, fix)
+
+		// REVERSED names the note the pass was asked ABOUT as the obsolete one, so
+		// the row it withdraws is the edge in the JUDGED direction — the mirror of
+		// the SUPERSEDES arm, and a different row, which is why it needs its own
+		// assertion rather than a shared one.
+		res, withdrawn, err := Reassess(ctx, store, &mockClassifier{verdict: func(string, string) Relation { return RelationReversed }}, "p", true, discardLogger())
+		if err != nil {
+			t.Fatalf("Reassess: %v", err)
+		}
+		if res.Withdrawn != 1 || len(withdrawn) != 1 {
+			t.Fatalf("withdrawn=%d rows=%d, want 1 and 1", res.Withdrawn, len(withdrawn))
+		}
+		if res.CausesWithdrawn != 1 || withdrawn[0].CausesSwept != 1 {
+			t.Errorf("CausesWithdrawn=%d, row CausesSwept=%d, want 1 and 1: a REVERSED verdict is a denial like any other, so its row sweeps too",
+				res.CausesWithdrawn, withdrawn[0].CausesSwept)
+		}
+		// The withdrawn edge is fix→stale, so the 'causes' row it sweeps is
+		// stale→fix, and the KEPT edge's (fix→stale) survives.
+		edges := liveCausesEdges(t, base, stale, fix)
+		if len(edges) != 1 || edges[0] != [2]string{fix, stale} {
+			t.Errorf("live causes edges = %v, want only [%s %s]: the denied edge's 'causes' row is swept, and the KEPT edge's is not this pass's to remove", edges, fix, stale)
+		}
+	})
+
+	t.Run("a causes verdict sweeps nothing, because it affirms that relation", func(t *testing.T) {
+		base, db := seed(t)
+		store := linkOrderStore{Store: base, reversed: false}
+		ctx := context.Background()
+		stale, fix := seedCycle(t, base, db,
+			"A restore that spanned two spindles took 41 minutes and the row count matched afterwards.",
+			"The restore path on one spindle is safe and takes under a minute.", false)
+		seedCauses(t, base, fix, stale)
+		seedCauses(t, base, stale, fix)
+
+		res, withdrawn, err := Reassess(ctx, store, &mockClassifier{verdict: func(string, string) Relation { return RelationCauses }}, "p", true, discardLogger())
+		if err != nil {
+			t.Fatalf("Reassess: %v", err)
+		}
+		if len(withdrawn) != 2 {
+			t.Fatalf("rows = %d, want 2: both supersedes edges are denied", len(withdrawn))
+		}
+		for i, w := range withdrawn {
+			if w.CausesSwept != 0 {
+				t.Errorf("row %d swept %d 'causes' edge(s): a CAUSES verdict affirms that relation, so its rows sweep nothing", i, w.CausesSwept)
+			}
+		}
+		if res.CausesWithdrawn != 0 {
+			t.Errorf("Result.CausesWithdrawn = %d, want 0", res.CausesWithdrawn)
+		}
+		// Left live, and the ordinary pass writes the replacement: a repair pass
+		// that also created 'causes' edges would have two jobs and one dry-run
+		// answer.
+		if edges := liveCausesEdges(t, base, stale, fix); len(edges) != 2 {
+			t.Errorf("live causes edges = %v, want both still there", edges)
+		}
+		if edges := liveEdges(t, base, stale, fix); len(edges) != 0 {
+			t.Errorf("live supersedes edges = %v, want none: both were denied", edges)
+		}
+	})
+
+	// A DRY RUN is the other half of the sweep's contract: an operator deciding
+	// about --apply is deciding about that second deletion too, and this reads it
+	// through a different code path from the --apply sweep above (a GetLinks
+	// prediction rather than the invalidation's own count).
+	t.Run("a dry run predicts the sweep it would perform", func(t *testing.T) {
+		base, db := seed(t)
+		store := linkOrderStore{Store: base, reversed: false}
+		ctx := context.Background()
+		stale, fix := seedCycle(t, base, db,
+			"A restore that spanned two spindles took 41 minutes and the row count matched afterwards.",
+			"The restore path on one spindle is safe and takes under a minute.", false)
+		seedCauses(t, base, fix, stale)
+		seedCauses(t, base, stale, fix)
+
+		res, withdrawn, err := Reassess(ctx, store, &mockClassifier{verdict: func(string, string) Relation { return RelationNeither }}, "p", false, discardLogger())
+		if err != nil {
+			t.Fatalf("Reassess: %v", err)
+		}
+		if res.CausesWithdrawn != 2 {
+			t.Errorf("Result.CausesWithdrawn = %d, want the PREDICTION 2: a dry run that hides the second deletion is deciding for the operator", res.CausesWithdrawn)
+		}
+		for i, w := range withdrawn {
+			if w.CausesSwept != 1 || w.Written {
+				t.Errorf("row %d: CausesSwept = %d, Written = %v, want 1 and false", i, w.CausesSwept, w.Written)
+			}
+		}
+		if edges := liveCausesEdges(t, base, stale, fix); len(edges) != 2 {
+			t.Errorf("live causes edges = %v, want both untouched by a dry run", edges)
+		}
+	})
 }
