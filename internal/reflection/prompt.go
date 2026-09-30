@@ -276,31 +276,21 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 			// tags of the ids it names, so they are shown for the model to reason
 			// about rather than to re-emit.
 			//
-			// The `|` separator is not decorative, and neither is the trailing `,`
-			// inside a tag. This list is NOT JSON and NOT delimited: it is metadata
-			// on a line the model is told to emit `keep`/`merge`/`rewrite`/`drop`
-			// operations against, so a tag holding a comma or a `|` changes what the
-			// model reads as the boundary between two tags. A newline is the worse
-			// case: it ends the record, and the next line is a full line in a prompt
-			// that reads as Ghost's own instructions. `ghost import` carries a tag
-			// byte for byte — a delimiter in a label must not cost a memory its place
-			// in a backup — so the only thing standing between a hostile artifact and
-			// this prompt is the substitution below, and it runs on every stored tag
-			// rather than on the ones a writer vouched for.
+			// A tag list here is NOT JSON and NOT delimited, so it needs its own
+			// substitution rather than `assemble.TagsLabel`'s — see `tagSubstitution`,
+			// which is where the class and the reason for it are. Every stored tag goes
+			// through it, not only the ones a writer vouched for: `ghost import`
+			// carries a tag byte for byte, so a label must not cost a memory its place
+			// in a backup, and a restored snapshot or a hand edit is the other two
+			// routes named by the id guard.
 			//
-			// The three characters are exactly the ones `mcpserver.validateTags`
-			// refuses on the four MCP writers, plus the two separators this
-			// particular surface adds. A tag cannot contain them through any of
-			// Ghost's own writers; it can arrive through an import, a restored
-			// snapshot, or a hand edit, which is the same three routes the id guard's
-			// own comment names. `,` is escaped rather than dropped so a reader can
-			// tell a tag that held one from a tag that did not, and the replacements
-			// are the ones `assemble.TagsLabel` uses for a delimiter so that a tag
-			// reads the same in this prompt as on a memory row.
+			// The separator is `|`, and that is not cosmetic: the model is told to emit
+			// operations against these lines, so a tag that reads as two tags is a
+			// wrong ANSWER rather than an unreadable one.
 			if len(m.Tags) > 0 {
 				escaped := make([]string, len(m.Tags))
 				for i, t := range m.Tags {
-					escaped[i] = strings.NewReplacer("|", "ǁ", ",", "‚").Replace(neutralizeDelimiters(t))
+					escaped[i] = tagSubstitution(t)
 				}
 				line += fmt.Sprintf(", tags:[%s]", strings.Join(escaped, "|"))
 			}
@@ -348,13 +338,125 @@ func quoteData(s string) string {
 // neutralizeDelimiters rewrites the « and » that open and close a data block into
 // the fixed `<<` and `>>` a reader cannot mistake for one.
 //
-// It is the local copy of `assemble.neutralizeDelimiters`, and the duplication is
-// forced rather than chosen: `internal/assemble` imports `internal/memory`, and
-// this package imports `internal/memory` too, so assemble cannot import reflection
-// and reflection importing assemble would close a cycle through the store. The
-// same substitution, written twice, with the test below asserting the two agree on
-// a corpus of shapes — which is the only way a copy that cannot be shared is kept
-// honest.
+// The same two substitutions `assemble.neutralizeDelimiters` makes, written here
+// because a package cycle forbids sharing them: `assemble` imports `memory`, and
+// this package would import `assemble` to reach an UNEXPORTED function, which is
+// only possible if the exporter exports it and every other caller of
+// `neutralizeDelimiters` is also in `assemble` — which `quoteData` is not.
+//
+// So the duplication is forced, and the only thing that keeps a forced copy honest
+// is a test that says the two agree: `TestTheTwoDelimiterSubstitutionsAgree` asserts
+// the two functions produce the same bytes over a corpus, and spells the expected
+// spelling out rather than calling the function it is checking, because a test that
+// computes its expectation with the code under test is a tautology.
+//
+// It cannot assert the RENDERED agreement — that a memory row and this prompt print
+// the same tag the same way — because reaching `assemble` from here is the thing the
+// import cycle forbids. Each side therefore pins its own rendered form:
+// `TestTheTwoTagSubstitutionsAgreeOnDelimiters` here, and the `tags:[…]` cases in
+// `internal/mcpserver` on the row. Between them the shared spelling is pinned twice,
+// which is what a duplicated rule can be given.
 func neutralizeDelimiters(s string) string {
 	return strings.NewReplacer("«", "<<", "»", ">>").Replace(s)
 }
+
+// tagSubstitution rewrites a tag for THIS surface's tag list, and it is a separate
+// function from neutralizeDelimiters because the class is a function of the
+// rendering, not of the field.
+//
+// `mcpserver.validateTags` refuses the class that can end a LINE and a
+// `assemble.TagsLabel` neutralises what can end a data block, but this list is
+// neither JSON nor delimited: a newline ends the RECORD, and a control character
+// is not something a reader of this prompt can be asked to interpret. So control
+// characters are joined to their own name here, which is a form no control
+// character can take — the same trick `strconv.QuoteToASCII` uses and for the same
+// reason, and it is the reason a lone backtick cannot open a code span here even
+// though nothing in the renderer replaces it.
+//
+// The list's own separators are escaped too, and they are a different question: a
+// tag holding this surface's separator would read as a different tag COUNT, which
+// is a wrong answer rather than an unreadable one. A comma is escaped because a
+// comma is what a reader expects to see between tags, and a pipe cannot be.
+//
+// A stored tag is escaped rather than refused, everywhere. `ghost import` carries
+// it byte for byte, because a label must not cost a memory its place in a backup,
+// and the three routes that can put a hostile one here — an import, a restored
+// snapshot, a hand edit — are the same three the id guard names.
+//
+// The class is NOT the same as `assemble.TagsLabel`'s, and it is not a subset
+// either. A memory row is a JSON array, so `json.Marshal` already escapes a newline,
+// a quote and a backslash, and the only characters left to neutralise are the data
+// delimiters and the backtick. This list is neither JSON nor delimited, so the
+// newline, the carriage return and every other control character are live here and
+// are the larger half of the class. Anything smaller would leave a tag free to end
+// the record, which is the hazard this function exists for.
+//
+// The class also has one member `assemble`'s does not: this surface's own
+// separators. That is not a rendering concern but a SEMANTIC one — a tag holding the
+// separator reads as a different tag COUNT, and the count is what the model reasons
+// about. `assemble` has the opposite situation: JSON already quotes a comma, so a
+// comma there needs no treatment at all, and the two renderers legitimately disagree
+// about it.
+func tagSubstitution(t string) string {
+	var b strings.Builder
+	b.Grow(len(t))
+	for _, r := range t {
+		switch {
+		case r == '«':
+			// The assemble spelling, deliberately, and then MARKED: the same tag
+			// should read the same in this prompt as on a memory row, and a reader who
+			// has met one delimiter spelling knows both. The marker is what tells an
+			// altered tag from one that merely contains the letters — without it a
+			// tag whose text is genuinely `<<` is indistinguishable from an escaped
+			// «, which is the one ambiguity a substitution of this kind cannot have.
+			b.WriteString(tagEscape)
+			b.WriteString("<<")
+		case r == '»':
+			b.WriteString(tagEscape)
+			b.WriteString(">>")
+		case r == '|':
+			// MARKED too, and for the same reason: `ǁ` alone would be an unmarkable
+			// collision with a tag that genuinely holds that character, and this
+			// surface feeds a list whose element COUNT is the model's answer.
+			b.WriteString(tagEscape)
+			b.WriteString("ǁ") // U+01C1, a modifier letter apostrophe
+		case r == ',':
+			b.WriteString(tagEscape)
+			b.WriteString("‚") // U+201A, a single low-9 quotation mark
+		case r < 0x20 || r == 0x7f:
+			// Spelled, not dropped: a reader can tell this tag was altered, and no
+			// control character survives to alter anything.
+			fmt.Fprintf(&b, "%s<0x%02X>", tagEscape, r)
+		case r == 0x85 || r == 0xA0:
+			// The two Unicode controls the C0 test above does not catch and that a
+			// terminal or a markdown renderer may still treat as a break.
+			fmt.Fprintf(&b, "%s<U+%04X>", tagEscape, r)
+		case r == '`':
+			// A lone backtick opens a markdown code span that swallows the rest of
+			// the line, and nothing else in this file replaces one — so this branch
+			// exists for its own sake rather than because the substitution is general.
+			//
+			// It is the one branch that DROPS the character rather than renaming it,
+			// and that is deliberate on the idempotence requirement: a backtick has no
+			// escaped form to be written as, so the only way to make the substitution
+			// idempotent — which matters because a store's tags can pass through it
+			// more than once over its life — is to remove it. The escape mark still
+			// records that the tag was altered, so nothing is silently lost.
+			b.WriteString(tagEscape)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// tagEscape is the single character that precedes every substitution here, chosen
+// so a reader can recognise an altered tag and so no altered tag can begin with
+// something the list's syntax gives a meaning to.
+//
+// It is U+2426 SYMBOL FOR ESCAPE: not a control character, not a delimiter, not a
+// separator, not a space, and not a character a tag can be expected to contain
+// unescaped. `TestTheEscapeMarkerIsNotACharacterATagCanHold` pins each of those,
+// because the whole scheme rests on the marker being unforgeable by the field it
+// marks.
+const tagEscape = "␦"

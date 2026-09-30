@@ -188,8 +188,14 @@ as the JSON escape `\u0060` — there is no reader-facing convention for a backt
 so it gets the form the surrounding array already uses. The consolidation prompt is a fourth printing surface for the same field, and the
 worse one: its list is neither JSON nor delimited, it sits on a line the model emits
 `keep`/`merge`/`rewrite`/`drop` operations against, and a newline in a tag would end
-the record. Its separators are escaped for the same reason, and its list is `|`
-separated because a comma cannot be a separator on a surface that has to survive one.
+the record. So its class is the larger one — every control character, not just the
+delimiters and the backtick — and its **separators** are escaped too, which is a
+different kind of problem: a tag holding the separator reads as a different tag
+*count*, and the count is what the model reasons about. Its list is `|`-separated
+because a comma cannot be a separator on a surface that has to survive one, and every
+altered tag is marked so a reader can tell a substituted label from a genuine one. A
+delimiter still prints as `<<`/`>>` there, so the same tag reads the same in both
+places.
 A space and any length are fine: a tag is a label, not a key, and "ci timeouts" is a
 real one. A row's
 **`source=`** label comes from a closed vocabulary (`reflection`, `chat`, `manual`,
