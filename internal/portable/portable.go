@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -143,6 +144,15 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 	// refuse, BEFORE anything is written, so the counts below describe the
 	// artifact rather than the store.
 	//
+	// The four predicates are the IMPORTER's own, called here exactly as
+	// `ImportProject`, `ImportMemory`, `ImportTask` and `ImportDecision` call them
+	// (#813). That is the whole of the change and the whole of the guarantee: an
+	// export cannot exit 0 with a record its own importer will refuse, because the
+	// two ask one function rather than two that have to agree. #796 closed this for
+	// the id-shape checks alone and the other refusals — an empty project name, a
+	// credential-shaped content — still exported at 0 and failed on a restore, so a
+	// backup that looked clean lost rows when it was needed.
+	//
 	// The project split comes first and its CHILDREN follow it, because a
 	// project left out of the artifact takes every record naming it with it: the
 	// importer resolves each record's project against the artifact, so a memory
@@ -153,8 +163,8 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 	droppedProjects := make(map[string]bool)
 	keptProjects := make([]memory.PortableProject, 0, len(selected))
 	for _, p := range selected {
-		if reason := projectExportRefusal(p); reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeProject, ID: p.ID, Reason: reason})
+		if reason, secret := exportRefusal(memory.CheckImportedProject(p)); reason != "" {
+			skipped = append(skipped, SkippedRecord{Type: TypeProject, ID: p.ID, Reason: reason, Secret: secret})
 			droppedProjects[p.ID] = true
 			continue
 		}
@@ -165,36 +175,48 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 
 	keptMemories := make([]memory.PortableMemory, 0, len(memories))
 	for _, m := range memories {
+		reason, secret := "", false
 		switch {
 		case orphaned(m.ProjectID):
-			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: orphanReason})
-		case recordExportRefusal(m.ID) != "":
-			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: recordExportRefusal(m.ID)})
+			reason = orphanReason
 		default:
-			keptMemories = append(keptMemories, m)
+			reason, secret = exportRefusal(memory.CheckImportedMemory(m))
 		}
+		if reason != "" {
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: reason, Secret: secret})
+			continue
+		}
+		keptMemories = append(keptMemories, m)
 	}
 	keptTasks := make([]memory.Task, 0, len(tasks))
 	for _, t := range tasks {
+		reason, secret := "", false
 		switch {
 		case orphaned(t.ProjectID):
-			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: orphanReason})
-		case recordExportRefusal(t.ID) != "":
-			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: recordExportRefusal(t.ID)})
+			reason = orphanReason
 		default:
-			keptTasks = append(keptTasks, t)
+			reason, secret = exportRefusal(memory.CheckImportedTask(t))
 		}
+		if reason != "" {
+			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: reason, Secret: secret})
+			continue
+		}
+		keptTasks = append(keptTasks, t)
 	}
 	keptDecisions := make([]memory.Decision, 0, len(decisions))
 	for _, d := range decisions {
+		reason, secret := "", false
 		switch {
 		case orphaned(d.ProjectID):
-			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: orphanReason})
-		case recordExportRefusal(d.ID) != "":
-			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: recordExportRefusal(d.ID)})
+			reason = orphanReason
 		default:
-			keptDecisions = append(keptDecisions, d)
+			reason, secret = exportRefusal(memory.CheckImportedDecision(d))
 		}
+		if reason != "" {
+			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: reason, Secret: secret})
+			continue
+		}
+		keptDecisions = append(keptDecisions, d)
 	}
 
 	stats := Stats{
@@ -252,18 +274,21 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 
 // SkippedRecord is one record an export left out of the artifact, and why.
 //
-// The exporter applies the IMPORTER's own shape checks (`memory.CheckImportedID`
-// and the two project checks), because a store can already hold an id this build
+// The exporter applies the IMPORTER's own refusal predicates
+// (`memory.CheckImportedProject`, `CheckImportedMemory`, `CheckImportedTask`,
+// `CheckImportedDecision`), because a store can already hold a record this build
 // refuses to import: written by a pre-#791 `ghost import`, reinstated by
 // `RestoreSnapshot`, seeded by another tool, or edited by hand. Exporting one
 // produced an artifact that `ghost import` then rejected record by record, so the
 // backup was not a backup — and the operator never learned it until they needed
-// it.
+// it. #796 closed that for the id-shape checks; #813 closed it for every refusal
+// the importers make about a record, so a new one cannot be missed here.
 //
-// Leaving the record OUT is the only honest option. A different id is a different
-// row: `memory_links`, the recorded history and every `ghost history` read are
-// attached to the id this store holds, so re-keying one would orphan all of them.
-// So the id is named and the operator decides what to do with the row.
+// Leaving the record OUT is the only honest option for a refusal Ghost cannot
+// repair. A different id is a different row: `memory_links`, the recorded history
+// and every `ghost history` read are attached to the id this store holds, so
+// re-keying one would orphan all of them. So the id is named and the operator
+// decides what to do with the row.
 //
 // ID is the RAW id, and a caller MUST render it through `assemble.Token` before
 // printing it — the same obligation `RecordResult.ID` carries. An id carrying a
@@ -272,6 +297,17 @@ type SkippedRecord struct {
 	Type   string
 	ID     string
 	Reason string
+	// Secret marks a record the CREDENTIAL guard refused, which is a different
+	// kind of news from every other reason here and gets its own advice from the
+	// report: the row is refused on import BY DESIGN rather than being a value
+	// Ghost happens to judge malformed, and the way out is to edit the field the
+	// Reason names. The caller uses it to name that command — see
+	// `reportSkippedRecords`.
+	//
+	// It carries nothing about the credential. The Reason names the field and
+	// nothing else, and there is no second copy of the value anywhere in this
+	// struct: a report built from a SkippedRecord must not be able to print one.
+	Secret bool
 }
 
 // Stats is what an export wrote, and what it deliberately left out.
@@ -287,32 +323,38 @@ type Stats struct {
 	Skipped []SkippedRecord
 }
 
-// projectExportRefusal reports why the importer would refuse this project, or
-// "" when it would accept it. The three checks are the importer's own, not a
-// second rule: a second spelling of "which ids are importable" is a second thing
-// to keep in step, and this one already drifted once — the exporter wrote exactly
-// what the importer refused.
-func projectExportRefusal(p memory.PortableProject) string {
-	switch {
-	case memory.CheckImportedProjectID(p.ID) != nil:
-		return "its id is not one this build will import"
-	case memory.CheckImportedProjectText("name", p.Name) != nil:
-		return "its name is not one this build will import"
-	case memory.CheckImportedProjectText("path", p.Path) != nil:
-		return "its path is not one this build will import"
+// exportRefusal renders one refusal from a CheckImported* predicate for the
+// export report: the reason to print beside the record, and whether it was the
+// credential guard. It takes the predicate's OWN error rather than the record,
+// so it cannot re-judge anything and cannot disagree with the importer about
+// which records are refused — it only decides how to phrase what the predicate
+// already decided.
+//
+// The phrasing is the importer's message, prefixed with who is refusing, because
+// the reader is looking at an export and the sentence they need to hear is that
+// this artifact is not the whole store and why. Spelling the rules out a second
+// time here is what drifted before: a second phrasing is a second thing to keep in
+// step, and the version #796 shipped is a documented admission that it had.
+//
+// A CREDENTIAL refusal is the one case that gets its own sentence, for two
+// reasons. It is not a malformed value to be tidied but a design decision — Ghost
+// never stores a credential — and it is the only case with a different way out
+// (edit the field, don't delete the row). And its message must not be the one
+// printed: `SecretContentError` names the field and the detected FORMAT, which is
+// a label rather than a value, but the surrounding sentence is advice aimed at a
+// caller about to EDIT the artifact, and an operator reading an export report has
+// no artifact to edit. So the line says which field, says the refusal is by
+// design, and stops. The value is in neither the message nor the struct.
+func exportRefusal(err error) (reason string, secret bool) {
+	if err == nil {
+		return "", false
 	}
-	return ""
-}
-
-// recordExportRefusal reports why the importer would refuse this record's id, or
-// "". A memory, a task and a decision are one rule between them, because the
-// importer holds them to one: a record id is a primary key, so a shortened one
-// names a different row.
-func recordExportRefusal(id string) string {
-	if memory.CheckImportedID(id) != nil {
-		return "its id is not one this build will import"
+	var refused *memory.SecretContentError
+	if errors.As(err, &refused) {
+		return fmt.Sprintf("its %s is credential-shaped, and ghost import refuses to store one by design — Ghost never stores a credential value",
+			refused.Field), true
 	}
-	return ""
+	return "ghost import refuses it: " + err.Error(), false
 }
 
 // selectProjects filters an already-read project list by id or exact name.

@@ -102,6 +102,12 @@ the embedding worker rebuilds them. Memory links are not exported either — the
 only mean something between two memories that are both present, and the linking
 worker recomputes related edges after an import.
 
+A record ` + "`ghost import`" + ` would refuse is LEFT OUT and named on stderr, and
+the command exits non-zero. The exporter applies the importer's own refusal
+predicates, so what is left out is exactly what a restore would reject. A
+credential-shaped field is refused by design and the report names the field, never
+the value; see the export section of "ghost help" for the whole rule.
+
 Two exports of an unchanged database are byte-identical, so an artifact can be
 diffed against the previous one. Use ` + "`ghost import`" + ` to load one back.
 `
@@ -657,12 +663,17 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable bool
+	var hasRepairable, hasUnrepairable, hasSecret bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
 		// very report that exists to name it (#791). Such an id is exactly what
 		// gets here, so this is not a precaution.
+		//
+		// The reason beside it is the importer's own message, and for a credential
+		// refusal it names the FIELD and nothing else — so this line is safe to
+		// print for the same reason the import report's is. The value itself is in
+		// no SkippedRecord field and never reaches this writer.
 		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, assemble.Token(sk.ID), sk.Reason); err != nil {
 			return err
 		}
@@ -674,6 +685,29 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			hasRepairable = true
 		} else {
 			hasUnrepairable = true
+		}
+		if sk.Secret {
+			hasSecret = true
+		}
+	}
+	// The credential advice is printed FIRST and separately, because it is not an
+	// alternative to the re-key advice below but a different thing entirely, and
+	// an operator who read the re-key sentence first would conclude that a
+	// credential-shaped row has to be DELETED to get rid of the value. It has not:
+	// the row is fine apart from the one field, the field is the value, and
+	// replacing the value with a pointer to where it lives is both the documented
+	// policy and the fix that keeps the memory.
+	//
+	// The command is named per KIND, for the reason repairableKinds is: the two
+	// kinds that can have a field edited are the two that have an update surface,
+	// and naming an MCP tool for a project or a decision would send someone to
+	// call something that does not exist. A project and a decision are fixed by
+	// editing the database or by deleting the row, and the delete sentence below
+	// already says which commands can do that — so this sentence points there
+	// rather than inventing a third.
+	if hasSecret {
+		if _, err := fmt.Fprintf(out, "  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. To fix it, edit that field so it records WHERE the value lives and how to read it, never the value itself, then re-export. `ghost_memory_update` edits a memory's content, tags, source_ref, agent and session_id; `ghost_task_update` edits a task's title, description and notes. A project's name and path and a decision's title, decision, rationale and alternatives have no update surface: delete the row as below, or correct the field in the database directly.\n"); err != nil {
+			return err
 		}
 	}
 	if _, err := fmt.Fprintf(out, "  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.\n"); err != nil {
@@ -691,7 +725,17 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	// decision cannot, and for those two the sentence says so while naming the
 	// blunt repair that does work.
 	if hasRepairable {
-		if _, err := fmt.Fprintf(out, "  To include it, delete the row and re-save it under an id this build accepts: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n"); err != nil {
+		// "an id this build accepts" was the whole sentence when a shape refusal was
+		// the only possible reason, and it is now too narrow: a project refused for
+		// an empty name, or a memory refused for credential-shaped content, is not
+		// fixed by re-saving it under a different id. So the sentence names the
+		// reason the report already gave and points at the other one, which is the
+		// edit the field needs.
+		phrase := "delete the row and re-save it under an id this build accepts"
+		if hasSecret {
+			phrase = "delete the row and re-save it (for a credential-shaped field, editing the field is usually what you want instead — see above)"
+		}
+		if _, err := fmt.Fprintf(out, "  To include it, %s: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n", phrase); err != nil {
 			return err
 		}
 	}
@@ -710,7 +754,16 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			return err
 		}
 	}
-	return fmt.Errorf("%s left out of this artifact because this build cannot import them — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)))
+	// "because this build cannot import them" was accurate while a shape refusal was
+	// the only possible reason and is too narrow now: the exporter applies the
+	// importer's own predicates (#813), so a record is left out for exactly the
+	// reasons `ghost import` would give — which is the whole point, and is what
+	// the sentence has to say rather than implying a Ghost quirk.
+	why := "because `ghost import` would refuse them"
+	if hasSecret {
+		why = "because `ghost import` refuses them — the credential guard by design"
+	}
+	return fmt.Errorf("%s left out of this artifact, %s — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)), why)
 }
 
 // printExportSummary states where the artifact is and what it holds, and says in

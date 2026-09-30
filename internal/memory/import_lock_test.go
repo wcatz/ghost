@@ -14,11 +14,17 @@ import (
 //
 // The ordering in all four importers has to be:
 //
-//	s.mu.Lock()  →  presence check  →  shape check  →  field checks  →  INSERT
+//	s.mu.Lock()  →  presence check  →  record checks  →  INSERT
 //
-// and each arrow was broken at some point:
+// where "record checks" is the one shared predicate each importer now calls
+// (CheckImportedMemory and friends, #813) — it used to be the shape check followed
+// by the field checks, and one call is both the reason this test could be simplified
+// and the reason it still holds: the exporter calls the same function, so a refusal
+// that is not behind the presence check is one `ghost export` cannot honour.
 //
-//   - The shape check ahead of the presence check broke idempotence: a record
+// Each arrow was broken at some point:
+//
+//   - The record checks ahead of the presence check broke idempotence: a record
 //     already in the store was refused rather than skipped, so a store holding
 //     a pre-#791 id made a re-run fail over a row that was not being written.
 //     Fixed in 0e5ef92c.
@@ -53,7 +59,15 @@ func TestThePresenceCheckIsUnderTheLockAndBeforeTheShapeCheck(t *testing.T) {
 			if j < 0 {
 				t.Fatalf("end of func %s not found", fn)
 			}
-			body := text[i : i+j]
+			// COMMENTS ARE BLANKED, and that is a fix rather than a nicety. This
+			// test is about where STATEMENTS sit, and a comment naming the shape
+			// check is not a call to it: an explanatory paragraph above the
+			// presence check ("THEN CheckImportedMemory, ...") read as a shape
+			// check positioned before it, and the test failed a file whose order
+			// was correct. The offset arithmetic below is only meaningful over
+			// code, and blanking keeps the positions of the four statements
+			// comparable — which is the whole assertion.
+			body := blankLineComments(text[i : i+j])
 
 			lock := strings.Index(body, "s.mu.Lock()")
 			presence := strings.Index(body, "SELECT 1 FROM")
@@ -70,12 +84,12 @@ func TestThePresenceCheckIsUnderTheLockAndBeforeTheShapeCheck(t *testing.T) {
 					"with a UNIQUE constraint error instead of returning a skip", lock, presence)
 			}
 			if presence >= shape {
-				t.Errorf("the shape check is NOT after the presence check: SELECT at %d, CheckImported at %d — "+
+				t.Errorf("the record checks are NOT after the presence check: SELECT at %d, CheckImported at %d — "+
 					"a record already in the store would be refused rather than skipped, breaking "+
 					"re-run-is-always-safe", presence, shape)
 			}
 			if shape >= insert {
-				t.Errorf("the shape check is NOT before the INSERT: CheckImported at %d, INSERT at %d", shape, insert)
+				t.Errorf("the record checks are NOT before the INSERT: CheckImported at %d, INSERT at %d", shape, insert)
 			}
 			// And the re-check that closes the cross-process race: after
 			// beginWrite, before the INSERT. s.mu is a per-Store lock and closes
@@ -97,12 +111,20 @@ func TestThePresenceCheckIsUnderTheLockAndBeforeTheShapeCheck(t *testing.T) {
 	}
 }
 
-// TestNoImporterErrorAboveTheShapeCheckNamesTheID is the companion assertion,
-// and it is the reason the presence check can sit above the shape check without
-// reintroducing the round-2 forgery. The only message between them is the
-// presence check's own database error, and it must not name the id: a hostile id
-// reaching that message would reach a report line without the shape check ever
-// running.
+// TestNoImporterErrorAboveTheRecordCheckNamesTheID is the companion assertion,
+// and it is the reason the presence check can sit above the record checks without
+// reintroducing the round-2 forgery. The only message between them is the presence
+// check's own database error, and it must not name the id: a hostile id reaching
+// that message would reach a report line without the record checks ever running.
+//
+// The record checks are now ONE call to a shared predicate rather than three inline
+// checks, and the property is unchanged. It is worth being precise about WHY, since
+// the ordering used to be the only thing holding it up: it no longer is. No message
+// in CheckImported* interpolates a record's id, so even a check placed above the
+// shape check could not carry the payload — the predicate's messages name a FIELD.
+// This test still guards the one message that remains above the call, and
+// TestAPredicateRefusalNeverCarriesTheIDOrTheValue in internal/portable guards the
+// predicate itself.
 func TestNoImporterErrorAboveTheShapeCheckNamesTheID(t *testing.T) {
 	src, err := os.ReadFile("portable.go")
 	if err != nil {
@@ -120,14 +142,17 @@ func TestNoImporterErrorAboveTheShapeCheckNamesTheID(t *testing.T) {
 			if j < 0 {
 				t.Fatalf("end of func %s not found", fn)
 			}
-			body := text[i : i+j]
+			// Comments blanked, for the reason the sibling test gives: a comment
+			// that NAMES a check is not a call to it, and a paragraph explaining
+			// the ordering must not be read as the ordering.
+			body := blankLineComments(text[i : i+j])
 
 			shape := strings.Index(body, "CheckImported")
 			if shape < 0 {
-				t.Fatalf("no shape check in %s", fn)
+				t.Fatalf("no record check in %s", fn)
 			}
 			above := body[:shape]
-			// Every error message above the shape check, and none of them may
+			// Every error message above the record check, and none of them may
 			// interpolate the id. The id-presence check's own database error is
 			// the one that could have.
 			for _, line := range strings.Split(above, "\n") {
@@ -136,9 +161,28 @@ func TestNoImporterErrorAboveTheShapeCheckNamesTheID(t *testing.T) {
 					continue
 				}
 				if strings.Contains(trimmed, ".ID") {
-					t.Errorf("an error message above the shape check names the id:\n%s", trimmed)
+					t.Errorf("an error message above the record check names the id:\n%s", trimmed)
 				}
 			}
 		})
 	}
+}
+
+// blankLineComments replaces every `//` comment with spaces, preserving length so
+// the offsets a caller computes over the result still index the same bytes.
+//
+// Only whole-line comments are blanked, and that is deliberate: the assertions
+// above look at STATEMENTS on their own lines, so a trailing comment on a
+// statement's line cannot move anything. Block comments are not handled, and none
+// of the four importers has one inside a function body.
+func blankLineComments(src string) string {
+	lines := strings.Split(src, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		lines[i] = strings.Repeat(" ", len(line))
+	}
+	return strings.Join(lines, "\n")
 }
