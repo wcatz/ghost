@@ -255,14 +255,16 @@ type resolveCapableStore interface {
 }
 
 // linkCapableStore narrows provider.MemoryStore's concrete backing store to what
-// ghost_link_withdraw needs beyond it: the ref resolution, the live-edge read
-// scoped to the project that owns the edge, and the invalidation that writes the
-// `unsupersede` history row. None of those three is on provider.MemoryStore, so
-// s.store is type-asserted to this interface at call time; *memory.Store
-// satisfies it — the same shape resolveCapableStore and historyCapableStore
-// take. The fourth method it embeds, GetByIDs, IS on provider.MemoryStore and
-// needs no assertion: the result quotes the memory each edge was burying, and
-// that read is one the interface already offers.
+// ghost_link_withdraw needs beyond it: the ref resolution (twice over — the
+// project's, and the shared scope's, which is what makes a pair whose source was
+// promoted to _global nameable at all), the live-edge read scoped to the edges
+// the project owns through EITHER endpoint or the shared scope, and the
+// invalidation that writes the `unsupersede` history row. None of those is on
+// provider.MemoryStore, so s.store is type-asserted to this interface at call
+// time; *memory.Store satisfies it — the same shape resolveCapableStore and
+// historyCapableStore take. The fourth method it embeds, GetByIDs, IS on
+// provider.MemoryStore and needs no assertion: the result quotes the memory each
+// edge was burying, and that read is one the interface already offers.
 type linkCapableStore interface {
 	supersede.WithdrawStore
 }

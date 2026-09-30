@@ -67,8 +67,14 @@ type WithdrawStore interface {
 	// MemoryIDsByIDPrefix resolves one ref to the memory ids it can mean,
 	// scoped to the project (plus _global).
 	MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix string) ([]string, error)
+	// MemoryIDsByIDPrefixAnyProject resolves one ref to the ids it can mean
+	// across the whole store's live rows, with no project predicate. It is
+	// reached only when the named project IS `_global` — the shared scope,
+	// where an edge's endpoint may live in any project (#786).
+	MemoryIDsByIDPrefixAnyProject(ctx context.Context, prefix string) ([]string, error)
 	// SupersedesLinksInto returns the live 'supersedes' edges pointing at a
-	// memory, restricted to the ones the project owns through their source.
+	// memory, restricted to the ones the project owns through EITHER endpoint
+	// (or through the shared scope).
 	SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]memory.Link, error)
 	// GetByIDs loads the targets' text, so the report can answer "did I
 	// withdraw the right edge?" from its own output.
@@ -325,7 +331,33 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 // rules in internal/memref. It stays a named function so the two call sites in
 // resolvePair read as what they are — the SOURCE and the TARGET — and so `which`
 // reaches the refusal.
+//
+// `_global` is the one project whose refs are not project-scoped, and the reason
+// is the same one makes it the shared scope everywhere else: an edge whose source
+// was promoted out of a project is a claim made FROM `_global`, and the endpoint
+// it buries may be in any project. Naming such a pair from `_global` — which is
+// where `ghost supersede _global --reassess` finds it, and what an operator
+// reaches for after the project's own surfaces refuse — needs both refs to resolve
+// without a project predicate, or the pair is unnameable and the repair #786 is
+// about does not exist (#786).
+//
+// This is the WIDENING of a ref's scope and nothing else. It decides which
+// memories may be NAMED, never which edge may be changed: the request still ends
+// at SupersedesLinksInto, whose ownership rule requires an endpoint in `_global`
+// itself, so a ref that resolves into some other project buys the operator
+// nothing but an honest refusal about the edge. And it is not reachable for a
+// named project — `ghost supersede p --withdraw` still cannot name a memory in q.
 func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref string) (string, error) {
+	if projectID == memory.GlobalProjectID {
+		ids, err := store.MemoryIDsByIDPrefixAnyProject(ctx, ref)
+		if err != nil {
+			return "", err
+		}
+		// The rules, not a second copy: ResolveIn is memref's unscoped entry
+		// point, so a ref is judged identically here and a refusal names no
+		// project, because the set it searched is not confined to one.
+		return memref.ResolveIn(ids, which, ref)
+	}
 	return memref.Resolve(ctx, store, projectID, which, ref)
 }
 
