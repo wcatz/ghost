@@ -233,6 +233,53 @@ func TestRunPassiveRetriesTheWindowWhenScopeExcludesEveryRow(t *testing.T) {
 	}
 }
 
+// TestRunPassiveBackfillsFromTheTailBehindThePool: the store's two-pass
+// selection keeps a POOL of twice the item cap and returns everything past it,
+// undemoted, as the backfill supply. Only the pool is "selected", so a stage
+// that drops pool rows has to be able to reach the tail or the block is a hole —
+// and the hole is worse than a short block, because the caller reads the block
+// as everything there was.
+//
+// The fixture puts the retired rows where the pool is and the live rows past it,
+// and the shape is what makes the property checkable: stage 8's slice cap is two
+// rows, so a window that closed BEFORE validity would admit two retired rows and
+// then empty itself, reporting `no memories` for a project that holds four. It
+// reaches the tail only because every stage that can affect membership runs
+// before the closure, which is the reason the store returns an untrimmed set at
+// all.
+//
+// This is the assembler's half of the property; the store's half — that the tail
+// is returned at all, in the policy's order — is pinned in
+// `internal/memory`'s passive tests, because a fake retriever cannot see it.
+func TestRunPassiveBackfillsFromTheTailBehindThePool(t *testing.T) {
+	const itemCap = 2
+	expired := "2026-01-01 00:00:00"
+	rows := make([]memory.Candidate, 0, 12)
+	// The pool: twice the item cap, every row retired.
+	for i := range 2 * itemCap {
+		c := projectCandidate("pool"+string(rune('a'+i)), 0.9-float64(i)*0.01)
+		c.ValidUntil = &expired
+		rows = append(rows, c)
+	}
+	// The tail: live rows behind the pool, in the order the policy returned them.
+	for i := range 4 {
+		rows = append(rows, projectCandidate("tail"+string(rune('a'+i)), 0.4-float64(i)*0.01))
+	}
+
+	req := passiveRequest()
+	req.Budget.Slices[0].MaxItems = itemCap
+	res := run(t, &fakeRetriever{set: passiveSet(rows...)}, req)
+
+	want := []string{"taila", "tailb"}
+	if got := itemIDs(res.Items); !eq(got, want) {
+		t.Errorf("items = %v, want %v: stage 2 dropped every selected row, so the block can only be filled from the "+
+			"backfill supply the widened set carries", got, want)
+	}
+	if res.Outcome != OutcomeAnswerable {
+		t.Errorf("outcome = %q/%q, want answerable: the bucket holds four live rows", res.Outcome, res.Reason)
+	}
+}
+
 // TestRunPassiveMapsSlicesOntoPolicies: the retriever needs the bucket's
 // over-fetch, order, floor and threshold, and the budget is where the caller
 // states them. A slice that did not reach the retriever would leave the passive
