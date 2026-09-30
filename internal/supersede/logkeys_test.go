@@ -58,6 +58,26 @@ func (c *capturedLog) WithGroup(_ string) slog.Handler      { return c }
 
 func (c *capturedLog) logger() *slog.Logger { return slog.New(c) }
 
+// onlyRecordFor returns the single record whose message contains substr and whose
+// attr key carries the given value, failing if there is none. "The record that
+// names this pair" is the identity of the thing under test; a count of one is
+// not, because a line that starts firing twice (a fixture change, a pass run
+// twice) would then quietly stop being checked.
+func (c *capturedLog) onlyRecordFor(t *testing.T, substr, key, value string) capturedRecord {
+	t.Helper()
+	var matches []capturedRecord
+	for _, r := range c.find(substr) {
+		if r.attrs[key] == value {
+			matches = append(matches, r)
+		}
+	}
+	if len(matches) != 1 {
+		t.Fatalf("%d record(s) matching %q with %s=%s, want exactly 1:\n%s",
+			len(matches), substr, key, value, dumpRecords(c))
+	}
+	return matches[0]
+}
+
 // find returns every record whose message contains substr.
 func (c *capturedLog) find(substr string) []capturedRecord {
 	c.mu.Lock()
@@ -575,24 +595,28 @@ func runPassesLogKeys(t *testing.T, log *capturedLog) {
 	// A line that names a pair is only useful if it names the RIGHT pair, and
 	// the shape assertion cannot tell a correctly-keyed id from a swapped one.
 	// The unclassifiable pair and the vetoed pair are the two whose ids the
-	// fixture knows, so read both back — each guarded by its own count, so a
-	// line that stopped firing is reported by the case's own coverage loop.
-	if got := log.find("skipping pair with an unclassifiable verdict"); len(got) == 1 {
-		attrs := got[0].attrs
-		if attrs["newer"] != blankNewer || attrs["older"] != blankOlder {
-			t.Errorf("the unclassifiable line names (%s, %s), want the grafana pair (%s, %s): the fixture exists so the line's keys carry the pair that produced them",
-				attrs["newer"], attrs["older"], blankNewer, blankOlder)
-		}
+	// fixture knows, so read both back.
+	//
+	// The record is found by ITS OWN IDS, not by there being exactly one: this
+	// fixture emits several veto lines, because the friday-train note is the
+	// older endpoint of every candidate that clears the threshold and the veto
+	// fires on it each time. Guarding the assertion on a count of one therefore
+	// made it dead code that only a reviewer could see — a count of zero is
+	// caught by the case's coverage floor, and a count above one silently
+	// disables the check, which is the failure this whole guard exists to
+	// remove. Selecting by identity runs whatever the count is.
+	unclassified := log.onlyRecordFor(t, "skipping pair with an unclassifiable verdict", "newer", blankNewer)
+	if unclassified.attrs["older"] != blankOlder {
+		t.Errorf("the unclassifiable line names older=%s, want %s: the fixture exists so the line's keys carry the pair that produced them",
+			unclassified.attrs["older"], blankOlder)
 	}
-	if got := log.find("vetoed pair whose older note states a rule"); len(got) == 1 {
-		attrs := got[0].attrs
-		if attrs["older"] != vetoOlder || attrs["newer"] != vetoNewer {
-			t.Errorf("the veto line names (%s, %s), want the friday-train pair (%s, %s)",
-				attrs["newer"], attrs["older"], vetoNewer, vetoOlder)
-		}
-		if attrs["reason"] == "" {
-			t.Error("the veto line carries no reason; the whole point of the line is naming the imperative that fired")
-		}
+
+	vetoed := log.onlyRecordFor(t, "vetoed pair whose older note states a rule", "newer", vetoNewer)
+	if vetoed.attrs["older"] != vetoOlder {
+		t.Errorf("the veto line names older=%s, want %s", vetoed.attrs["older"], vetoOlder)
+	}
+	if vetoed.attrs["reason"] == "" {
+		t.Error("the veto line carries no reason; the whole point of the line is naming the imperative that fired")
 	}
 }
 
