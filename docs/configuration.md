@@ -319,14 +319,27 @@ supersede pass was measured at 43% precision on a real store
 proposed joined two notes that were both still true, and an edge is not an
 annotation — it demotes the older note in ranking and `ghost resolve` then stamps
 `resolved_at` on it, which takes a live memory out of every later session. The
-pass is now KEEP-biased (the rubric asks whether the older claim is still false, a
+pass is KEEP-biased (the rubric asks whether the older claim is still false, a
 `supersedes` answer must name the claim in a `replaced:` field, and a standing
 rule the newer note never retires is vetoed before any harness call) and its
 labeled eval reads 1.00 precision / 1.00 recall against the free
 `opencode/big-pickle`, but the eval is synthetic and the corpus it came from is
-not. Turning the phase on means writing real edges from a model that has not yet
-been measured on your notes; running `ghost supersede <project>` by hand and
-reading the list is free of that, and it is dry-run by default.
+not.
+
+A second measurement over three more real stores
+([#779](https://github.com/wcatz/ghost/issues/779)) read **55% precision** over
+108 distinct proposals, with the wrong edges in four classes the rubric now
+names outright: a newer note retiring one claim of a many-claim older note, a
+release or status log treated as a chain of replacements, a recurring defect
+treated as a fix chain, and parallel investigation notes treated as a linear
+one. A `supersedes` now has to retire **every** claim of the older note, and a
+log entry, a recurring defect and a parallel investigation are not chains. The
+same measurement found the wrong edges are an *unstable* classifier as much as a
+wrong one — 79% precision on edges proposed in all three passes, 33% on those
+proposed in one — which is why a plain `--apply` is still not the way to turn this
+phase on. Turning the phase on still means writing real edges from a model that
+has not been measured on your notes; running `ghost supersede <project>` by hand
+and reading the list is free of that, and it is dry-run by default.
 
 When enabled, the Stop hook spawns one detached lifecycle process and runs the phases in this order:
 

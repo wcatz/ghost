@@ -49,8 +49,9 @@ type supersedeEvalCase struct {
 	want  Relation
 }
 
-// liveSupersedeCases is the labeled set: 14 true supersessions and 14 pairs
-// whose two notes are both still true, drawn from the classes the judge named.
+// liveSupersedeCases is the labeled set: 14 true supersessions and 18 pairs
+// whose two notes are both still true, drawn from the classes the judge named
+// (#686's 14, plus #779's four).
 //
 // The text is synthetic — an invented ingest/pricing/ledger service estate with
 // invented versions, ports and hosts. No real memory text goes into the repo,
@@ -258,6 +259,46 @@ var liveSupersedeCases = []supersedeEvalCase{
 		class: "an addendum beside the fact it leaves alone",
 		older: "The API answers 429 once a client passes 100 requests per minute.",
 		newer: "The 429 body now carries a Retry-After header, which is new; the limit itself is unchanged at 100 requests per minute.",
+		want:  RelationNeither,
+	},
+
+	// ---- #779's four measured classes, one fixture each ----
+	//
+	// #686's set asked whether two notes can both be true. These four ask the
+	// harder question that 55% precision over 108 distinct proposals on three
+	// more real stores turned up: both notes are still true AND the newer one is
+	// plainly about the older one, so a classifier reading for "did this change
+	// that?" reaches SUPERSEDES. They are in this file rather than only in a
+	// unit test because they are the fixtures the live eval scores against a
+	// real harness, and a rubric clause with no labeled pair under it is a
+	// clause nothing measures. The class strings are the four classes the issue
+	// names, so the by-class table in the eval report reads back the issue.
+	{
+		name:  "partial-claim",
+		class: "#779: a partial-claim supersession (one claim of four retired)",
+		older: "Four things about the nightly run: the audit copy is verified by row count, the ledger snapshot is taken at 02:00, a failed batch is retried once, and the warehouse export is skipped when the ledger is empty.",
+		newer: "A failed nightly batch is now retried three times with a backoff, instead of once.",
+		want:  RelationNeither,
+	},
+	{
+		name:  "release-log",
+		class: "#779: a sequential release log read as a chain of replacements",
+		older: "Released billing 4.2: the settlement worker moved onto the new queue.",
+		newer: "Released billing 4.3: the settlement worker gained a dead-letter topic.",
+		want:  RelationNeither,
+	},
+	{
+		name:  "recurring-defect",
+		class: "#779: a recurring defect read as a fix chain",
+		older: "A fresh ingest container comes up without the index on ledger.entries.settled_at, so the first reconciliation scans the whole table.",
+		newer: "A fresh ingest container again came up without the index on ledger.entries.settled_at, because the bootstrap migration still does not create it.",
+		want:  RelationNeither,
+	},
+	{
+		name:  "parallel-investigation",
+		class: "#779: two parallel investigation notes read as a linear chain",
+		older: "The reconciliation stall is not the tokenizer: profiling shows the checkpoint writer emitting 40k rows per commit with nothing throttling it.",
+		newer: "The reconciliation stall is not the checkpoint writer: the FTS tokenizer manages 12k tokens per second on one thread, which is the ceiling we hit.",
 		want:  RelationNeither,
 	},
 }
