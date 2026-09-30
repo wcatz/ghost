@@ -5066,6 +5066,37 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 // naming the project the memory just left are taken by the next
 // `ghost project delete` of that project — while the promoted memory, now in
 // _global, survives with no recorded past at all.
+//
+// It does NOT touch memories.updated_at, and that is the whole of what this
+// write leaves alone (#807). A promotion is a MOVE: the note's text, its
+// created_at, its category and its importance are all exactly what they were,
+// and updated_at is the column two supersede readers take to mean "the CONTENT
+// of this row changed". `ghost supersede` orients every candidate pair by it
+// (orient) and fingerprints a live edge's freshness with it (skip-if-unchanged),
+// so a bump here claims the note was just rewritten when nothing about it was.
+// The consequences were measured, not argued: a pair re-classified for an edit
+// nobody made — which is a paid way to reach the re-rolling #792 removed and
+// #779 measured — and, on a CYCLE, the repair pass asked which of the two notes
+// is newer in the wrong direction, so `ghost supersede --reassess` stood the
+// backwards edge #641 found in the wild and withdrew the correct one. Neither is
+// hypothetical: `ghost_memory_promote` is an MCP tool an agent calls mid-session,
+// over the same graph a stop hook's lifecycle phase or a manual pass is reading,
+// and it is the only caller of this method in production.
+//
+// `ghost reflect --promote-globals` is a DIFFERENT write and none of this reaches
+// it, because it does not move a live row between projects: it folds the candidate
+// into an existing `_global` row or inserts a new one, and the project's own row
+// goes with the consolidation that produced the candidate. A fold is a content
+// rewrite of that `_global` row, so its `updated_at` moving is correct, and a row
+// that is deleted takes its edges with it rather than reorienting them.
+//
+// One reader's view of the world does change, and it is stated here rather than
+// left to be discovered: `ghost prune` measures a row's grace from
+// pruneActivitySQL, whose newest term is updated_at, so a promotion no longer
+// refreshes it. That is the right direction for a column that means content
+// freshness — a memory promoted because it holds everywhere is not thereby
+// rewritten — and the operator who wants it kept says so with a `persistent`
+// retention tier or a pin, which is what those two are for.
 func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5084,8 +5115,13 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 	}
 	_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
 
+	// project_id only. The absence of updated_at is the decision the doc comment
+	// above sets out, and it is visible HERE on purpose: this statement used to
+	// carry `updated_at = datetime('now')` beside the move, and a reader who has
+	// to diff it against the comment has to be able to see that one column is
+	// missing rather than infer it.
 	res, err := tx.ExecContext(ctx, `
-		UPDATE memories SET project_id = '_global', updated_at = datetime('now')
+		UPDATE memories SET project_id = '_global'
 		WHERE id = ? AND project_id = ?
 	`, id, projectID)
 	if err != nil {
