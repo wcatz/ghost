@@ -622,13 +622,24 @@ func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Wr
 	return reportSkippedRecords(warn, stats.Skipped)
 }
 
-// repairableKinds are the record kinds Ghost can actually delete, which is not
+// repairableKinds are the record kinds Ghost can delete SELECTIVELY, which is not
 // every kind it exports. A project goes through `ghost project delete`; a memory
-// through the `ghost_memory_delete` tool. A task and a decision have no delete
-// surface anywhere — no CLI subcommand, no MCP tool, and no DELETE against either
-// table in internal/memory — so the report must not hand the operator a command
-// that cannot do the job. A command that fails is worse than no command: it sends
-// someone to run a delete and then reports "project not found" or a silent no-op.
+// through the `ghost_memory_delete` tool. A task and a decision have no such
+// surface — no CLI subcommand, no MCP tool, and no DELETE against either table in
+// internal/memory.
+//
+// "Selectively" is the whole distinction, and an earlier version of this comment
+// got it wrong in both directions. `tasks.project_id` and `decisions.project_id`
+// are both `REFERENCES projects(id) ON DELETE CASCADE` (schema.go), and
+// Store.DeleteProject counts both, so `ghost project delete` DOES remove a task or
+// a decision row — just never alone. The report therefore says "by itself" and
+// names the blunt repair, because "cannot be removed through Ghost at all" would
+// stop an operator looking for a repair that is one command away.
+//
+// And there is no top-level `ghost delete`: `case "delete"` sits inside
+// `case "project":` in dispatchCommand, so the only spelling is
+// `ghost project delete`. Naming a bare `delete` would send someone to a
+// top-level usageError and exit 2.
 var repairableKinds = map[string]bool{
 	portable.TypeProject: true,
 	portable.TypeMemory:  true,
@@ -674,15 +685,13 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	//
 	// The repair is KIND-AWARE, because a command that cannot delete the row is
 	// worse than no command at all: the operator is told what to type, types it,
-	// and gets "project not found" or a no-op. Only a project and a memory have a
-	// delete surface — `ghost project delete <id>` (which is `ghost delete`, and
-	// drops everything under the project) and the `ghost_memory_delete` tool. A
-	// task and a decision have NEITHER: there is no `ghost task delete`, no
-	// `ghost decision delete`, and no DELETE against either table anywhere in
-	// internal/memory. So for those two the sentence says so, because the honest
-	// answer is that the row cannot be removed through Ghost at all.
+	// and gets "project not found" or a no-op. Only a project and a memory can be
+	// deleted SELECTIVELY — `ghost project delete <project>` (there is no
+	// top-level `ghost delete`) and the `ghost_memory_delete` tool. A task and a
+	// decision cannot, and for those two the sentence says so while naming the
+	// blunt repair that does work.
 	if hasRepairable {
-		if _, err := fmt.Fprintf(out, "  To include it, delete the row and re-save it under an id this build accepts: `ghost project delete <id>` drops a project and everything under it, and a memory goes through the ghost_memory_delete tool.\n"); err != nil {
+		if _, err := fmt.Fprintf(out, "  To include it, delete the row and re-save it under an id this build accepts: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n"); err != nil {
 			return err
 		}
 	}
@@ -696,7 +705,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 				}
 			}
 		}
-		if _, err := fmt.Fprintf(out, "  Ghost has NO delete surface for a %s: no `ghost %s delete`, no tool for it, and no DELETE against the table, so such a row cannot be removed through Ghost at all. It stays in the store and stays out of every artifact until the database is edited directly.\n",
+		if _, err := fmt.Fprintf(out, "  Ghost has NO delete surface for a %s BY ITSELF: no `ghost %s delete`, no tool for it, and no DELETE against the table, so removing that row on its own means editing the database directly. `ghost project delete <project>` does remove it, along with every other row in that project — the blunt repair is available, it just is not selective. Until then the row stays in the store and out of every artifact.\n",
 			strings.Join(unrepairable, " or a "), unrepairable[len(unrepairable)-1]); err != nil {
 			return err
 		}

@@ -263,6 +263,16 @@ func TestTheRepairAdviceNamesOnlyCommandsThatCanDeleteTheRow(t *testing.T) {
 				if !namesACommand || namesNoSurface {
 					t.Errorf("a %s IS deletable, so the report must name the command; it printed:\\n%s", kind, report)
 				}
+				// There is no top-level `ghost delete`: `case "delete"` sits
+				// inside `case "project":` in dispatchCommand, so a bare
+				// `ghost delete` is a top-level usageError and exit 2. Naming it
+				// sends someone to run a command that cannot work — the same harm
+				// as the missing task delete. Asserted HERE, in the branch that
+				// actually prints a command: in a task-only report the sentence is
+				// absent and the claim would be vacuous.
+				if strings.Contains(report, "`ghost delete`") || strings.Contains(report, "`ghost delete ") {
+					t.Errorf("the report names a top-level `ghost delete`, which does not exist:\\n%s", report)
+				}
 			case portable.TypeTask, portable.TypeDecision:
 				if namesACommand {
 					t.Errorf("a %s has NO delete surface, so the report must not hand the operator a command that cannot run; it printed:\\n%s", kind, report)
@@ -296,4 +306,37 @@ func TestTheRepairAdviceNamesOnlyCommandsThatCanDeleteTheRow(t *testing.T) {
 			t.Errorf("a mixed batch lost the no-surface warning for its task:\\n%s", report)
 		}
 	})
+}
+
+// TestTheUnrepairableSentenceNamesTheRepairThatDoesWork is the other half of the
+// kind-awareness, and it exists because the first version of that sentence was
+// wrong in the opposite direction. It said a task or a decision "cannot be
+// removed through Ghost at all" — which is false. `tasks.project_id` and
+// `decisions.project_id` are both `REFERENCES projects(id) ON DELETE CASCADE`
+// (internal/memory/schema.go) and `Store.DeleteProject` counts both, so
+// `ghost project delete <project>` does remove such a row; it just cannot remove
+// it alone.
+//
+// An operator told a row is unremovable stops looking, and the working repair was
+// in the sentence the report deliberately withheld. So the claim is pinned in both
+// directions: the sentence must scope the absence to "by itself", and it must name
+// `ghost project delete` as the blunt repair.
+func TestTheUnrepairableSentenceNamesTheRepairThatDoesWork(t *testing.T) {
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO tasks (id, project_id, title, description, status, priority, created_at, updated_at)
+	                        VALUES (?, 'p1', 't', '', 'pending', 2, datetime('now'), datetime('now'))`, "T BAD")
+	var summary, warn strings.Builder
+	_ = runExportCore(context.Background(), store, &summary, &warn,
+		filepath.Join(t.TempDir(), "artifact.jsonl"), "")
+	report := warn.String()
+
+	if !strings.Contains(report, "BY ITSELF") {
+		t.Errorf("the no-delete sentence does not scope the absence to a row alone:\n%s", report)
+	}
+	if strings.Contains(report, "cannot be removed through Ghost at all") {
+		t.Errorf("the report still claims the row is unremovable, which the projects CASCADE contradicts:\n%s", report)
+	}
+	if !strings.Contains(report, "ghost project delete") {
+		t.Errorf("the report does not name the repair that does work:\n%s", report)
+	}
 }
