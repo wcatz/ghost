@@ -405,7 +405,7 @@ func portableEvidence(ctx context.Context, db *sql.DB, ids []string) (map[string
 // normalized form because that is the form stored, and an artifact carrying a
 // raw `git@host:owner/repo.git` has to collide with the canonical spelling of
 // the same repository rather than slip past it.
-func (s *Store) projectCollision(ctx context.Context, p PortableProject) error {
+func (s *Store) projectCollision(ctx context.Context, q Queryer, p PortableProject) error {
 	remote := NormalizeRepoRemote(p.RepoRemote)
 	// `repo_remote <> ''` is what keeps an absent — or unrecognizable, since
 	// NormalizeRepoRemote answers "" for a bare host or a filesystem path — from
@@ -415,7 +415,7 @@ func (s *Store) projectCollision(ctx context.Context, p PortableProject) error {
 	// Without the guard an ordinary import of a remote-less project would be
 	// refused, naming an unrelated project and an empty repository.
 	var byPath, foundRemote string
-	err := s.db.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT
 			coalesce((SELECT id FROM projects WHERE path = ? AND id != ? LIMIT 1), ''),
 			coalesce((SELECT id FROM projects
@@ -618,7 +618,7 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	// guarantees is that a collision which survives that decision arrives as a
 	// sentence naming the project it collides with, in the dry run as well as the
 	// apply — so the preview cannot promise a create the write would refuse.
-	if err := s.projectCollision(ctx, p); err != nil {
+	if err := s.projectCollision(ctx, s.db, p); err != nil {
 		return false, err
 	}
 	// Same window as the other three importers: after the presence check, before
@@ -665,6 +665,18 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 		}
 	} else {
 		return false, nil
+	}
+	// And the collision check again, inside the transaction. projects.path is
+	// UNIQUE and repo_remote carries a partial UNIQUE index, so two processes
+	// importing artifacts that name the same checkout or repository under
+	// DIFFERENT project ids both pass the pre-check and the second one's INSERT
+	// dies on the unique index with a bare "UNIQUE constraint failed" — the
+	// outcome the pre-check exists to replace with a named sentence. The
+	// re-check runs through the transaction, not the pool: the pool is pinned
+	// to one connection and the transaction holds it, so a pool read here would
+	// deadlock. The pre-check stays for the dry run, which writes nothing.
+	if err := s.projectCollision(ctx, tx, p); err != nil {
+		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO projects (id, path, name, repo_remote, created_at, updated_at)
