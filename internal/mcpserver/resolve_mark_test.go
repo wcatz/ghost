@@ -320,8 +320,11 @@ func TestResolveMarkNamesAnIDNoFlagCanCarry(t *testing.T) {
 	srv, store := linkWithdrawServer(t)
 	session := connectedClient(t, srv)
 	// The id is written by an import, which is what makes it hold a comma at all:
-	// `ghost import` writes an artifact's ids verbatim and ImportMemory refuses
-	// only an empty one, so this is what such a row looks like in a real store.
+	// `ghost import` writes an artifact's ids verbatim, and since #791
+	// ImportMemory refuses only the shapes that can break a rendered LINE — a
+	// control character, whitespace, a backtick or a «». A comma breaks a
+	// SELECTOR, not a line, so it still reaches the store, and this is what such
+	// a row looks like in a real one.
 	ctx := context.Background()
 	commy := "imported,note"
 	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {

@@ -240,9 +240,13 @@ func TestResolveMarkReportQuotesAProjectNameThatNeedsIt(t *testing.T) {
 }
 
 // TestResolveMarkReportNamesIdsNoFlagCanCarry: `ghost import` writes an
-// artifact's ids verbatim, so an id can hold a comma or a newline. `--only`
-// splits on commas, so such an id is not nameable by that flag however it is
-// quoted, and the one-per-line file is the only surface that reaches it; a
+// artifact's ids verbatim, so an id can hold a comma, and a store can already
+// hold one holding a newline. (`ImportMemory` has refused the line-breaking
+// class — a control character, whitespace, a backtick or a «» — since #791, so a
+// newline id is a row written before that landed, restored from a snapshot, or
+// hand-edited; it is still a row a real store holds, which is all this needs.)
+// `--only` splits on commas, so such an id is not nameable by that flag however
+// it is quoted, and the one-per-line file is the only surface that reaches it; a
 // newline reaches nothing at all. An operator told nothing would run the command
 // above, clear fewer memories than the run stamped, and report a repair that did
 // not happen — so they are named, and which surface can reach them is said.

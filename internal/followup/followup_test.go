@@ -52,9 +52,10 @@ func TestResolveCommandQuotesAnythingButABareWord(t *testing.T) {
 	}
 }
 
-// An id is quoted like a project name, for the same reason and because an
-// imported artifact can hold anything: `ghost import` writes ids verbatim and
-// ImportMemory refuses only an empty one. Unquoted, an id holding a space
+// An id is quoted like a project name, for the same reason and because an id is
+// caller-supplied text: `ghost import` writes an artifact's ids verbatim, and
+// ImportMemory refuses only the shapes that can break a rendered LINE (#791) —
+// a space and a `;` are not among them. Unquoted, an id holding a space
 // word-splits into two selectors the repair refuses, and one holding a `;` is a
 // second command for whoever pastes the line.
 func TestResolveCommandQuotesAnIDThatIsNotHex(t *testing.T) {

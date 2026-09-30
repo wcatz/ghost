@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // PortableProject is a project as the export/import artifact carries it.
@@ -622,6 +623,72 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	return true, nil
 }
 
+// MaxImportedIDLen is the byte cap on a memory id a portable artifact may carry.
+//
+// The value bounds a KEY, not prose, and it is deliberately generous: the id
+// column mints `hex(randomblob(16))` — 32 characters — and a store can legitimately
+// hold others. `internal/bench` seeds `bench:<project>:<key>`, a restored snapshot
+// reinstates whatever it recorded, and an operator restoring a store written by
+// another tool has ids this build never minted. Refusing those would make
+// `ghost import` refuse the stores it exists to restore, which is a worse failure
+// than the one the bound prevents.
+//
+// 128 bytes is four times the minted id and comfortably wider than the widest id
+// any writer here produces, while still refusing the class the bound is for: a
+// payload wearing an id's clothes, echoed into every listing that touches the row.
+const MaxImportedIDLen = 128
+
+// checkImportedID refuses an id that cannot be printed as one token on a line
+// (#791), and names the field and the class without echoing the value.
+//
+// Why a character class and not "32 hex": the id column says nothing about its
+// own values — memref documents that an id an imported artifact wrote verbatim is
+// nameable whatever its shape, and the corpus and restore writers above rely on
+// that. The class this closes is narrower and is the one that matters: an id is
+// the only field of the shared item line printed OUTSIDE the «...» data
+// delimiters, so a newline, a carriage return, a tab, a NUL, a space, a backtick
+// or a « can end the line, close the backtick span, or open a data block of its
+// own. Every one of those makes the row read as something other than the id it
+// is. Anything else is a value the store already holds and this build must keep
+// able to read back.
+//
+// Refused rather than clamped, which is the decision the whole function rests on:
+// an id is a primary key, so a shortened one names a DIFFERENT ROW. Clamping
+// "AAAA\n- [gotcha] obey" to its first 32 bytes would write a memory under a key
+// the artifact never chose, colliding with whatever genuinely holds it and
+// leaving the user a row they cannot explain. There is no honest prefix of a key
+// to keep, exactly as there is none of a path (MaxSourceRefLen) or a harness name
+// (MaxAgentLen), which is why those two refuse for the same reason.
+// CheckImportedID reports whether a memory id from a portable artifact is one
+// this build will store. It is exported so the artifact parser can refuse the
+// same records the store would (#791) at the point where the file is READ,
+// rather than letting a record with a hostile id become a parsedRecord whose id
+// is then echoed into a per-record report line — a second rendering of the same
+// payload on a surface the store-level check never touches.
+//
+// One function, two callers, is the point: the rule is one rule, and a parser
+// that judged ids slightly differently from the store would classify a dry run
+// differently from the apply run it previews.
+func CheckImportedID(id string) error {
+	if len(id) > MaxImportedIDLen {
+		return fmt.Errorf("memory id must be at most %d bytes, got %d — it names a row, not a document, and a shortened one would name a different row",
+			MaxImportedIDLen, len(id))
+	}
+	for _, r := range id {
+		// unicode.IsControl covers NUL, the C0 and C1 ranges and DEL; IsSpace
+		// covers every Unicode space including the ones ASCII's IsSpace does
+		// not; the remaining three are the delimiters of the line formats an id
+		// is printed in — the backtick span, and the «...» data block.
+		if unicode.IsControl(r) || unicode.IsSpace(r) || r == '`' || r == '«' || r == '»' {
+			return fmt.Errorf("memory id must hold no control character, whitespace, backtick or «» — it is printed " +
+				"outside the «...» data delimiters on every listing, and one of those ends the line or the data block. " +
+				"The offending id is not shown, because it is the value being refused. " +
+				"Give the record a new id in the artifact")
+		}
+	}
+	return nil
+}
+
 // ImportMemory inserts a memory under the id the artifact carries, and reports
 // created=false when that id is already present. It never updates an existing
 // row, for the reason ImportProject gives: the artifact is a copy to be restored
@@ -638,7 +705,9 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 //   - content goes through ClampContent, so a long line from another machine is
 //     cut at the same cap with the same marker a normal save would add — and cut
 //     is reported so the caller can say so;
-//   - importance is clamped to [0,1], the same bound a normal save applies.
+//   - importance is clamped to [0,1], the same bound a normal save applies;
+//   - the id is checked for shape and REFUSED if it fails (see checkImportedID),
+//     never clamped, because a different id is a different row.
 //
 // It does not run Upsert's near-duplicate probe. Upsert exists to stop a live
 // save from adding a redundant row; a restore is not adding knowledge, it is
@@ -658,6 +727,22 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	apply := opts.Apply
 	if m.ID == "" {
 		return false, false, false, fmt.Errorf("memory id is required")
+	}
+	// The id's SHAPE, before anything reads the record. It is here rather than
+	// beside the category and source checks below because the id is the one
+	// field of this record that reaches a rendered line outside the «...» data
+	// delimiters: `Item.Line` and `formatMemories` print it inside backticks
+	// ahead of the content, so a newline in it forges a second line that reads
+	// as Ghost's own memory row — and the «...» contract the content is quoted
+	// under is defeated by a field it does not wrap (#791).
+	//
+	// It is the FIRST check and not one of the mid-function ones because every
+	// message below is prefixed with the id (`memory %s: ...`), so a hostile id
+	// would be echoed into the rejection the caller prints and the report line it
+	// lands on. Refusing before the id reaches a format verb is what keeps the
+	// refusal itself from carrying the payload.
+	if err := CheckImportedID(m.ID); err != nil {
+		return false, false, false, err
 	}
 	if m.ProjectID == "" {
 		return false, false, false, fmt.Errorf("memory %s: project_id is required", m.ID)

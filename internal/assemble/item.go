@@ -85,7 +85,7 @@ func (i Item) Line() string {
 	if _, label := memory.OriginClass(memory.CanonicalOriginSourceForProject(i.ProjectID, i.Source, i.Content)); label != "" {
 		origin = " source=" + label
 	}
-	return "- [" + i.Category + "] `" + i.ID + "` (" +
+	return "- [" + i.Category + "] `" + Token(i.ID) + "` (" +
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
 		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin +
@@ -249,34 +249,51 @@ func ScopeLabel(scope map[string]string) string {
 		if i > 0 {
 			b.WriteString(" ")
 		}
-		b.WriteString(scopeToken(k))
+		b.WriteString(Token(k))
 		b.WriteString("=")
-		b.WriteString(scopeToken(scope[k]))
+		b.WriteString(Token(scope[k]))
 	}
 	b.WriteString("}")
 	return b.String()
 }
 
-// scopeToken renders one scope key or value. The label is printed OUTSIDE the
-// «...» data delimiters, and a scope is text Ghost did not author (a save
-// argument, an imported artifact), so a value is written bare only when every
-// character is one a scope name plausibly uses. Anything else is written as an
-// ASCII-only Go quoted string: a newline cannot start a line of its own, a `}`
-// cannot close the label early, and a «, » or other non-ASCII rune cannot open
-// a data block of its own.
-func scopeToken(s string) string {
+// Token renders one stored value that a line prints OUTSIDE the «...» data
+// delimiters: a scope key or value, or a memory id. Both are text Ghost did not
+// author — a save argument, an imported artifact's verbatim value — and both are
+// printed on a line an agent reads as Ghost's own, so neither may be able to
+// start a line, close the construct it sits in, or open a data block of its own.
+//
+// A value is written bare only when every character is one a stored name
+// plausibly uses. Anything else is written as an ASCII-only Go quoted string: a
+// newline cannot start a line of its own, a `}` or a backtick cannot close the
+// label or the id span early, and a «, » or other non-ASCII rune cannot open a
+// data block of its own.
+//
+// The bare case is the one every real row takes — the ids Ghost mints are 32 hex
+// characters and a scope name is a word — so this is invisible on every honest
+// listing and costs nothing. It is exported because a second renderer printing
+// the same fields (mcpserver's formatMemories) must reach the SAME function: two
+// implementations of one rule are two rules, and the one that is not tested here
+// is the one that ships the bug.
+func Token(s string) string {
 	if s == "" {
 		return `""`
 	}
 	for _, r := range s {
-		if !isScopeNameRune(r) {
+		if !isTokenRune(r) {
 			return strconv.QuoteToASCII(s)
 		}
 	}
 	return s
 }
 
-func isScopeNameRune(r rune) bool {
+// isTokenRune is the set Token writes bare. It is the scope-name set the label
+// has always used, widened by nothing: the id column's own values are 32 hex
+// characters, and the other ids a real store holds (a bench corpus id, a restored
+// snapshot's) are words with separators. Nothing else needs to be bare to be
+// legible, and every character outside this set is exactly the class that can
+// break a line or a data block.
+func isTokenRune(r rune) bool {
 	switch {
 	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 		return true

@@ -2,6 +2,7 @@ package obsidian
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,6 +15,21 @@ import (
 
 func seedStore(t *testing.T) *memory.Store {
 	t.Helper()
+	_, store := seedStoreWithDB(t)
+	return store
+}
+
+// seedStoreWithDB is seedStore plus the *sql.DB behind it, for the adversarial
+// fixtures that have to plant a row under an id no writer accepts.
+//
+// `Store.ImportMemory` REFUSES an id carrying a control character, whitespace, a
+// backtick or a «» since #791 — a newline in an id forges a second memory line
+// on every assembled surface, so it is not written any more. The rows the
+// exporter has to survive are still reachable, and still the exporter's problem:
+// a store written before the refusal landed, one restored from a snapshot an
+// older Ghost took, a hand-edited database. So the fixture plants them in SQL.
+func seedStoreWithDB(t *testing.T) (*sql.DB, *memory.Store) {
+	t.Helper()
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -24,7 +40,7 @@ func seedStore(t *testing.T) *memory.Store {
 	if err := store.EnsureProject(ctx, "ghost", "/tmp/ghost", "ghost"); err != nil {
 		t.Fatal(err)
 	}
-	return store
+	return db, store
 }
 
 func TestExport(t *testing.T) {

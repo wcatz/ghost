@@ -151,7 +151,11 @@ func Import(ctx context.Context, s *memory.Store, r io.Reader, opts ImportOption
 	return report, nil
 }
 
-// unreadable is one line the parser could not turn into a record.
+// unreadable is one line the parser refused: either it is not JSON, or it is a
+// record whose memory id is a shape this build will not store (#791). Both are
+// per-line refusals for the same reason and with the same consequence — the rest
+// of the file still imports — and neither names the offending id, because a line
+// that forges a rendering must not be reprinted by the report that names it.
 type unreadable struct {
 	line   int
 	result RecordResult
@@ -163,9 +167,12 @@ type unreadable struct {
 //
 // The two outcomes are deliberately different. A file-level problem — no header,
 // an unknown schema version — is returned as an error that stops the run before
-// anything is written. A line that is not JSON is collected and returned
-// alongside the records: the rest of the file is still readable, and Import
-// reports the line and carries on.
+// anything is written. A per-LINE problem is collected and returned alongside the
+// records: the rest of the file is still readable, and Import reports the line and
+// carries on. There are two of them today — a line that is not JSON, and a
+// memory record whose id `memory.CheckImportedID` refuses — and they share the
+// treatment because they share the property that makes it right: one damaged
+// record must not abandon a file that may hold ten thousand good ones.
 func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 	scanner := bufio.NewScanner(r)
 	// A memory is capped at MaxContentLen bytes, so a line can be larger than
@@ -225,6 +232,41 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 		}
 		if rec.Type == TypeHeader {
 			return nil, nil, fmt.Errorf("line %d: a second %q line — an artifact has exactly one header", lineNum, TypeHeader)
+		}
+		// The memory id's SHAPE, refused here rather than at the store
+		// (#791). The store refuses it too — `ImportMemory` is the write
+		// boundary and has to hold for any caller — but refusing at PARSE time
+		// is what keeps the value out of this package's own report: every
+		// rejected record's id is echoed into a per-record line and into
+		// `labelOrID`, and a stored id is printed inside backticks and OUTSIDE
+		// the «...» data delimiters on every assembled surface, so an id holding
+		// a newline forges a line that reads as Ghost's own memory row. A record
+		// refused here never becomes a parsedRecord, so there is no id left to
+		// print.
+		//
+		// It is the same treatment an unparseable line gets, for the same
+		// reason: one damaged line must not abandon a file that may hold ten
+		// thousand good records, and the rejection is counted and named by line
+		// number so a partial import cannot be mistaken for a complete one.
+		// `memory.CheckImportedID` is the store's own function rather than a
+		// second copy, because a parser judging ids slightly differently from
+		// the store would classify a dry run differently from the apply run it
+		// previews — the one property this package is built around.
+		if rec.Memory != nil {
+			if err := memory.CheckImportedID(rec.Memory.ID); err != nil {
+				unread = append(unread, unreadable{
+					line: lineNum,
+					result: RecordResult{
+						Type:   TypeMemory,
+						Line:   lineNum,
+						Action: ActionReject,
+						Detail: "memory id this build will not store",
+						Error:  err,
+					},
+					err: fmt.Errorf("line %d: %s: %w", lineNum, TypeMemory, err),
+				})
+				continue
+			}
 		}
 		recs = append(recs, parsedRecord{rec: rec, line: lineNum})
 	}
