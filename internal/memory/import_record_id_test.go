@@ -127,7 +127,6 @@ func TestImportProjectRefusesAFieldThatCanForgeALine(t *testing.T) {
 		},
 		"a guillemet in the name": {PortableProject{ID: "p1", Name: "«n»", Path: "/p"}, "project name"},
 		"a newline in the path":   {PortableProject{ID: "p1", Name: "n", Path: "/p\n" + forged}, "project path"},
-		"an over-long id":         {PortableProject{ID: strings.Repeat("a", MaxImportedIDLen+1), Name: "n", Path: "/p"}, "project id"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := portableTestStore(t)
@@ -152,6 +151,15 @@ func TestImportProjectRefusesAFieldThatCanForgeALine(t *testing.T) {
 		"a spaced project name": {ID: "p2", Name: "My Project", Path: "/src/p2"},
 		"a spaced path":         {ID: "p3", Name: "three", Path: "/src/My Projects/three"},
 		"a non-ascii name":      {ID: "p4", Name: "日本語", Path: "/src/p4"},
+		// An over-long id was in the REFUSED half of this table until a review
+		// pointed out what a project id is: a filesystem path. A deep checkout or
+		// a long macOS/Windows username makes one exceed the record bound
+		// easily, `ghost export` writes it into the artifact, and the project
+		// step's refusal then rejects every memory, task and decision naming
+		// that project. Length is not what forges a line; the characters that end
+		// one are, and those are refused above. See
+		// TestALongPathShapedProjectIDStillImports for the cascade.
+		"an over-long id": {ID: strings.Repeat("a", MaxImportedIDLen*4), Name: "five", Path: "/src/five"},
 	} {
 		t.Run("accepts/"+name, func(t *testing.T) {
 			s := portableTestStore(t)

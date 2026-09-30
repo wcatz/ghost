@@ -217,15 +217,26 @@ because a store can hold anything and the renderer never has to ask.
 **Validation is separate, and refuses rather than clamps.** `ghost import`
 refuses a record id — a memory's, a task's or a decision's — carrying a control
 character, whitespace, a backtick or a `«»`, and one longer than 128 bytes. A
-project's id, name and path are refused the same characters *except* whitespace,
-because a project id is routinely a filesystem path and `/Users/w/My Projects/ghost`
-is a real one. An id is a primary key, so a shortened one would name a *different
-row* — a memory under a key the artifact never chose, colliding with whatever
-genuinely holds it. Every one of these checks runs before any message that would
-interpolate the id, and the refusal never echoes the value, so the `ghost import`
-report cannot be forged by the record it is refusing. The rejection is per-record
-and named by artifact line number, so one damaged line does not abandon a file
-that may hold ten thousand good ones, and a dry run classifies the file exactly as
-the apply run it previews.
+project's id, name and path are refused the same characters *except* whitespace
+and *except* any length, because a project id is routinely a filesystem path and
+`/Users/w/My Projects/ghost` is a real one; a deep checkout is a longer one, and
+`ghost export` writes it into the artifact, so bounding it would make `ghost
+import` refuse a file `ghost export` had just written. An id is a primary key, so
+a shortened one would name a *different row* — a memory under a key the artifact
+never chose, colliding with whatever genuinely holds it.
+
+Those checks run **after** the importer's id-presence check and before every
+message that would interpolate the id, and both positions are load-bearing. After
+the presence check, because a record already in the store is a *skip* and never a
+rejection: that is what makes re-running an import always safe, so a store holding
+a pre-guard id (a space, a guillemet, a hand edit) must not fail a re-run over a
+row that is not being written. Before the messages, because every field check is
+prefixed with the id, and a refusal that carried the payload would be the forgery
+it exists to stop. The one message between the two checks therefore names no id at
+all. The refusal never echoes the value, so the `ghost import` report cannot be
+forged by the record it is refusing. The rejection is per-record and named by
+artifact line number, so one damaged line does not abandon a file that may hold ten
+thousand good ones, and a dry run classifies the file exactly as the apply run it
+previews.
 
 For the underlying server implementation, see [`architecture.md`](architecture.md). For client setup, see [`installation.md`](installation.md).

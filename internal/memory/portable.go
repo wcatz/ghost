@@ -553,17 +553,39 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	if p.ID == "" {
 		return false, fmt.Errorf("project id is required")
 	}
-	// The id's SHAPE, the name's and the path's, before anything reads the record
-	// and above every message below — each prefixed with the id (#791).
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, p.ID).Scan(&present); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import project: check whether the id is present: %w", err)
+		}
+	} else {
+		return false, nil
+	}
+	// Three shape checks, then two required-field checks, with the id-presence
+	// check above all of them — the same order as ImportMemory's and for the same
+	// two opposite reasons: a row already in the store is a skip rather than a
+	// rejection, and a hostile id never reaches a message (#791).
 	//
-	// They are three rules because a project is printed in three places with
-	// three different shapes: its id inside backticks in a listing, its name as a
-	// bare label that is also the session-start block's own `## Ghost context:`
-	// heading, and its path inside backticks for a human to copy. The name and the
-	// path are the ones a space belongs in — `ensureProjectFor` stores a caller's
-	// `project_id` argument as BOTH the id and the name, and that argument is
-	// routinely a filesystem path — so their rule refuses the line-forging
-	// characters and nothing more. See CheckImportedProjectID.
+	// Three fields and three rules, because a project is printed in three places
+	// with three different shapes: its id inside backticks in a listing, its name
+	// as a bare label that is also the session-start block's own `## Ghost
+	// context:` heading, and its path inside backticks for a human to copy. The
+	// name and the path are the ones a space belongs in — `ensureProjectFor`
+	// stores a caller's `project_id` argument as BOTH the id and the name, and
+	// that argument is routinely a filesystem path — so their rule refuses the
+	// line-forging characters and nothing else. See CheckImportedProjectID.
+	//
+	// Placement after the presence check matters MORE for a project than for the
+	// other three records, because a project refusal CASCADES: a failed project
+	// step never records its id, so every memory, task and decision naming that
+	// project is then rejected for a project "not found". A check that rejected
+	// a project the store legitimately holds would therefore take its whole
+	// contents with it — which is what the length bound on CheckImportedProjectID
+	// did, and why that bound is gone.
 	if err := CheckImportedProjectID(p.ID); err != nil {
 		return false, err
 	}
@@ -573,23 +595,15 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	if err := CheckImportedProjectText("path", p.Path); err != nil {
 		return false, err
 	}
+	//
+	// And only now the two required-field checks, which name the id and so have
+	// to sit below all three shape checks. Their order among themselves is
+	// unchanged, and neither was moved past the apply=false early return.
 	if p.Path == "" {
 		return false, fmt.Errorf("project %s: path is required", p.ID)
 	}
 	if p.Name == "" {
 		return false, fmt.Errorf("project %s: name is required", p.ID)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var present int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, p.ID).Scan(&present); err != nil {
-		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import project %s: %w", p.ID, err)
-		}
-	} else {
-		return false, nil
 	}
 	// The two UNIQUE constraints projects carries are checked here, in both
 	// modes, and reported by name. A bare "UNIQUE constraint failed" from the
@@ -713,7 +727,7 @@ func CheckImportedID(id string) error {
 }
 
 // CheckImportedProjectID is CheckImportedID for a project's id, and it is
-// deliberately WEAKER: a space is allowed.
+// deliberately WEAKER on two counts: a space is allowed, and so is any length.
 //
 // A project id is not always a short name. `ensureProjectFor` passes a caller's
 // `project_id` argument straight through as the id, and that argument is routinely
@@ -725,15 +739,24 @@ func CheckImportedID(id string) error {
 // What is refused is the part that forges a LINE: a control character, a backtick
 // that closes the span it is printed in, or a «» that opens a data block of its
 // own. A space does none of those.
+//
+// There is deliberately NO LENGTH BOUND, and the first version of this function
+// had MaxImportedIDLen here, which was wrong in a way that reached much further
+// than one refused record. A deep checkout or a long macOS/Windows username makes
+// a path-shaped id exceed 128 bytes easily, and `ghost export` writes that id into
+// the artifact — so `ghost import` would refuse a file `ghost export` had just
+// written. Worse, the refusal cascades: a project step that fails never records
+// its id, so `checkFor` then rejects EVERY memory, task and decision naming that
+// project, and a fresh-store restore of that project imports nothing while
+// reporting a reason that names neither the length nor the path. Length is not the
+// threat class for an id rendered by a line-safe renderer; the characters that end
+// a line are. See CheckImportedProjectText, which has never had a bound.
 func CheckImportedProjectID(id string) error {
-	if len(id) > MaxImportedIDLen {
-		return fmt.Errorf("project id must be at most %d bytes, got %d — it names a project, not a document",
-			MaxImportedIDLen, len(id))
-	}
 	if unprintableInIdentifier(id, false) != "" {
 		return fmt.Errorf("project id must hold no control character, backtick or «» — it is printed inside backticks " +
-			"and outside the «...» data delimiters, and one of those ends the line or the span. A space is fine: a " +
-			"project id is often a filesystem path. The offending id is not shown, because it is the value being refused")
+			"and outside the «...» data delimiters, and one of those ends the line or the span. A space is fine, and so " +
+			"is any length: a project id is often a filesystem path, and a deep checkout is a longer one. The offending " +
+			"id is not shown, because it is the value being refused")
 	}
 	return nil
 }
@@ -821,22 +844,67 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if m.ID == "" {
 		return false, false, false, fmt.Errorf("memory id is required")
 	}
-	// The id's SHAPE, before anything reads the record. It is here rather than
-	// beside the category and source checks below because the id is the one
-	// field of this record that reaches a rendered line outside the «...» data
-	// delimiters: `Item.Line` and `formatMemories` print it inside backticks
-	// ahead of the content, so a newline in it forges a second line that reads
-	// as Ghost's own memory row — and the «...» contract the content is quoted
-	// under is defeated by a field it does not wrap (#791).
+	// The order of the next three blocks is load-bearing in BOTH directions, and
+	// this branch got it wrong twice before getting it right: presence, then
+	// shape, then the field checks. Neither rule alone picks this order; both
+	// have to hold at once, and only this sequence satisfies them.
 	//
-	// It is the FIRST check and not one of the mid-function ones because every
-	// message below is prefixed with the id (`memory %s: ...`), so a hostile id
-	// would be echoed into the rejection the caller prints and the report line it
-	// lands on. Refusing before the id reaches a format verb is what keeps the
-	// refusal itself from carrying the payload.
+	// FIRST the id-presence check, and above everything that can refuse. A record
+	// already in the store is a SKIP, never a rejection, and that is the portable
+	// format's own promise — "never overwrites an id that already exists, so
+	// re-running is always safe" — which docs/invariants.md states for importer
+	// guards in the same words. Ahead of this check, a store holding a pre-#791 id
+	// (a space, a guillemet, a backtick, an over-long one: a pre-guard write, a
+	// restored snapshot, a hand edit) would make a re-run FAIL over a row that is
+	// not being written and could not be. The shape check was in front of this for
+	// a round, and the fix is this position, not a weakened rule.
+	//
+	// It is a read, so it needs no lock. It was previously below `s.mu.Lock()`
+	// with everything else, and moving it up does not weaken anything: the
+	// mutex serialises WRITES, and the check is a SELECT whose answer is a
+	// statement about the moment it ran. Two imports racing the same new id both
+	// see it absent and both attempt the INSERT, and the second is stopped by the
+	// primary key exactly as it was before.
+	//
+	// It names the id in neither arm, deliberately. This is the only message
+	// between the two checks, and a message carrying the id here would be a way
+	// for a hostile id to reach a report line without the shape check ever
+	// running. A database failure is not a fact about the record, so the operator
+	// does not need the id to act on it — the artifact line number in the report
+	// is what they act on.
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, m.ID).Scan(&present); err != nil {
+		if err != sql.ErrNoRows {
+			return false, false, false, fmt.Errorf("import memory: check whether the id is present: %w", err)
+		}
+	} else {
+		return false, false, false, nil
+	}
+	//
+	// THEN the id's SHAPE, and above every message that could name the id. The id
+	// is the one field of this record that reaches a rendered line OUTSIDE the
+	// «...» data delimiters — `Item.Line` and `formatMemories` print it inside
+	// backticks ahead of the content, so a newline in it forges a second line
+	// reading as Ghost's own memory row, and the «...» contract the content is
+	// quoted under is defeated by a field it does not wrap (#791). Every message
+	// below is prefixed with the id (`memory %s: ...`), so a hostile id would
+	// reach the rejection the caller prints and the report line it lands on.
+	// Refusing before the id reaches a format verb is what keeps the refusal
+	// itself from carrying the payload.
+	//
+	// A check added ABOVE this one must therefore not name the id in any message.
+	// That is a real constraint on the next person to add one here, and it is the
+	// price of the two rules coexisting.
 	if err := CheckImportedID(m.ID); err != nil {
 		return false, false, false, err
 	}
+	//
+	// THEN the field checks, gathered here from the top of the function for the
+	// same reason. They are validation rather than precondition — none of them is
+	// about whether this record may be written at all — and every one of them
+	// names the id, so every one of them has to sit below the shape check. Their
+	// order among themselves is unchanged, and none of them was moved past the
+	// apply=false early return, so dry-run/apply parity still holds.
 	if m.ProjectID == "" {
 		return false, false, false, fmt.Errorf("memory %s: project_id is required", m.ID)
 	}
@@ -846,8 +914,10 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if !IsValidCategory(m.Category) {
 		return false, false, false, fmt.Errorf("memory %s: invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", m.ID, m.Category)
 	}
-	// Guarded below, after the id-presence check and before the apply=false
-	// early return.
+	// The source is checked here rather than in the guarded block below, which is
+	// where the SECRET guard sits, not this one: an invalid source is a bad value
+	// in a column, and `ghost export` refuses to emit one, so an artifact holding
+	// one is already the only way to reach this.
 	if !IsValidSource(m.Source) {
 		return false, false, false, fmt.Errorf("memory %s: invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.ID, m.Source)
 	}
@@ -882,14 +952,12 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var present int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, m.ID).Scan(&present); err != nil {
-		if err != sql.ErrNoRows {
-			return false, false, false, fmt.Errorf("import memory %s: %w", m.ID, err)
-		}
-	} else {
-		return false, false, false, nil
-	}
+	// The secret guard's own window, and it is unchanged: after the presence
+	// check, so a record already in the store stays a skip, and before the
+	// apply=false early return, so a dry run classifies a record exactly as the
+	// apply run it previews. The presence check has moved above the mutex, so
+	// "after the presence check" is still literally true here and for one
+	// stronger reason: a skip has already returned.
 	// After the presence check and before the apply=false early return, which is
 	// the only window where both properties hold. Before the presence check a
 	// record already in the store would be refused, turning the portable
@@ -1106,11 +1174,34 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.ID == "" {
 		return false, fmt.Errorf("task id is required")
 	}
-	// The id's SHAPE, before anything reads the record and above every message
-	// below — each of which is prefixed with the id, so a check that ran later
-	// would echo a hostile id into the refusal and then into the import report
-	// line that prints it (#791). Same rule and same bound as a memory's; see
-	// CheckImportedID.
+	// Guarded below, after the id-presence check and before the apply=false
+	// early return — see ImportMemory for why that window is the only one that
+	// keeps both idempotence and dry-run/apply parity. A task's notes are
+	// otherwise unvalidated text that a normal save refuses, and an artifact
+	// carries them.
+
+	// The order of the next three blocks is the same as ImportMemory's and for
+	// the same two reasons, which are opposite: the id-presence check FIRST, so
+	// a record already in the store is a skip rather than a rejection and
+	// re-running the import stays always-safe; the id's SHAPE second, above every
+	// message that could name the id, so a hostile id never reaches a refusal and
+	// from there the report line that prints it; the field checks third, because
+	// every one of them names the id and none of them is a precondition.
+	//
+	// ImportMemory carries the full reasoning and the constraint this leaves on
+	// the next check added here: a check above the shape check must not name the
+	// id in any message. The presence check is a read, so it needs no lock; it sat
+	// below `s.mu.Lock()` before, and moving it up weakens nothing, because the
+	// mutex serialises writes and the answer is a statement about the moment the
+	// SELECT ran.
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&present); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import task: check whether the id is present: %w", err)
+		}
+	} else {
+		return false, nil
+	}
 	if err := CheckImportedID(t.ID); err != nil {
 		return false, err
 	}
@@ -1126,23 +1217,9 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.Priority < 0 || t.Priority > 4 {
 		return false, fmt.Errorf("task %s: invalid priority %d — must be between 0 and 4", t.ID, t.Priority)
 	}
-	// Guarded below, after the id-presence check and before the apply=false
-	// early return — see ImportMemory for why that window is the only one that
-	// keeps both idempotence and dry-run/apply parity. A task's notes are
-	// otherwise unvalidated text that a normal save refuses, and an artifact
-	// carries them.
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var present int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&present); err != nil {
-		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import task %s: %w", t.ID, err)
-		}
-	} else {
-		return false, nil
-	}
 	// Same window as ImportMemory: after the presence check, before apply=false.
 	if err := rejectSecretFields(
 		secretField{"title", t.Title},
@@ -1205,10 +1282,33 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	if d.ID == "" {
 		return false, fmt.Errorf("decision id is required")
 	}
-	// The id's SHAPE, first and for the reason ImportTask gives: every message
-	// below is prefixed with the id, and `decision %s: invalid status %q` was
-	// reachable with a raw newline in that id, which then reached the import
-	// report line that prints it (#791).
+	// Guarded below, after the id-presence check and before the apply=false
+	// early return — see ImportMemory. alternatives is a list because it is
+	// one: ghost_decisions_list renders it back to the agent, so an entry is
+	// as replayable as the rationale.
+
+	// The order of the next three blocks is the same as ImportMemory's and for
+	// the same two reasons, which are opposite: the id-presence check FIRST, so
+	// a record already in the store is a skip rather than a rejection and
+	// re-running the import stays always-safe; the id's SHAPE second, above every
+	// message that could name the id, so a hostile id never reaches a refusal and
+	// from there the report line that prints it; the field checks third, because
+	// every one of them names the id and none of them is a precondition.
+	//
+	// ImportMemory carries the full reasoning and the constraint this leaves on
+	// the next check added here: a check above the shape check must not name the
+	// id in any message. The presence check is a read, so it needs no lock; it sat
+	// below `s.mu.Lock()` before, and moving it up weakens nothing, because the
+	// mutex serialises writes and the answer is a statement about the moment the
+	// SELECT ran.
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&present); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import decision: check whether the id is present: %w", err)
+		}
+	} else {
+		return false, nil
+	}
 	if err := CheckImportedID(d.ID); err != nil {
 		return false, err
 	}
@@ -1227,22 +1327,9 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	if !validDecisionStatuses[d.Status] {
 		return false, fmt.Errorf("decision %s: invalid status %q — must be one of: active, superseded, revisit", d.ID, d.Status)
 	}
-	// Guarded below, after the id-presence check and before the apply=false
-	// early return — see ImportMemory. alternatives is a list because it is
-	// one: ghost_decisions_list renders it back to the agent, so an entry is
-	// as replayable as the rationale.
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var present int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&present); err != nil {
-		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import decision %s: %w", d.ID, err)
-		}
-	} else {
-		return false, nil
-	}
 	// Same window as ImportMemory: after the presence check, before apply=false.
 	if err := rejectSecretFields(
 		secretField{"title", d.Title},
