@@ -186,6 +186,28 @@ type ReflectionConfig struct {
 	AutoResolve   bool `koanf:"auto_resolve"`
 	AutoSupersede bool `koanf:"auto_supersede"`
 	AutoReflect   bool `koanf:"auto_reflect"`
+	// SupersedeConsensus is how many classification passes the AUTOMATIC
+	// supersede phase must agree on before it writes an edge (#779). It is read
+	// ONLY when auto_supersede is true, because the phase that would use it does
+	// not otherwise run — a key that silently affected a hand-run
+	// `ghost supersede` would make the automatic and manual paths differ for a
+	// reason no command line shows.
+	//
+	// 1 means no gate, which is the ungated historical pass. The default is 3,
+	// the number #779's measurement used: edges the classifier proposed in all
+	// three of three dry runs scored 0.79 precision against 0.55 over distinct
+	// proposals and 0.33 for one proposed in a single run, so unanimity across
+	// three is the only subset that cleared a bar worth automating. A lower
+	// default would be a gate chosen for costing less than the evidence supports,
+	// and 2 is accepted because an operator who wants two is entitled to it.
+	//
+	// A value below 1 is CLAMPED to 1 rather than refused, and that is a
+	// deliberate difference from the CLI flag. A typo in a config file should not
+	// fail a lifecycle phase at 2am with a message about quorum arithmetic; it
+	// should run the pass the operator already had, and the clamping is reported
+	// in the phase's own output. Zero is not an error because "off" is a
+	// reasonable thing to mean by it.
+	SupersedeConsensus int `koanf:"supersede_consensus"`
 	// ConsolidationTimeoutMinutes bounds a single `ghost reflect`
 	// consolidation call. It was hardcoded at 3 minutes, which the LLM tier
 	// hits on a large project: a ~190-memory prompt takes about that long on
@@ -279,6 +301,7 @@ var defaults = map[string]interface{}{
 	"reflection.auto_resolve":                  false,
 	"reflection.auto_supersede":                false,
 	"reflection.auto_reflect":                  false,
+	"reflection.supersede_consensus":           3,
 	"reflection.lifecycle_timeout_minutes":     60,
 	"reflection.consolidation_timeout_minutes": 10,
 	"lifecycle.min_interval":                   defaultLifecycleMinInterval,
@@ -568,6 +591,7 @@ func defaultConfig() *Config {
 		Reflection: ReflectionConfig{
 			ConsolidationTimeoutMinutes: 10,
 			LifecycleTimeoutMinutes:     60,
+			SupersedeConsensus:          3,
 		},
 		Lifecycle: LifecycleConfig{MinInterval: defaultLifecycleMinInterval},
 		Linking: LinkingConfig{
@@ -979,6 +1003,7 @@ var envOverrides = []envOverride{
 	{"GHOST_REFLECTION_AUTO_REFLECT", "reflection.auto_reflect", boolValue},
 	{"GHOST_REFLECTION_AUTO_RESOLVE", "reflection.auto_resolve", boolValue},
 	{"GHOST_REFLECTION_AUTO_SUPERSEDE", "reflection.auto_supersede", boolValue},
+	{"GHOST_REFLECTION_SUPERSEDE_CONSENSUS", "reflection.supersede_consensus", intValue},
 	{"GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES", "reflection.lifecycle_timeout_minutes", intValue},
 	{"GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES", "reflection.consolidation_timeout_minutes", intValue},
 	// GHOST_LIFECYCLE_MIN_INTERVAL: the generic transformer replaces every

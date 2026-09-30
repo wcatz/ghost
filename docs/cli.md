@@ -323,6 +323,7 @@ ghost supersede myproject --withdraw a1b2c3d4 e5f6a7b8 --apply
 | `--reassess` | Re-judge the `supersedes` links already in the graph under the current rules and withdraw the ones they no longer support. Not combinable with `--withdraw`. |
 | `--withdraw <source-id> <target-id>` | Withdraw one named `supersedes` link — the edge from `source-id` (the newer note) to `target-id` (the older, buried one). Repeatable. `--source` and `--threshold` are not used: nothing is classified. |
 | `--threshold <float>` | Minimum cosine similarity for a candidate pair; default `0.80`. |
+| `--consensus <N>` | Classify the candidate set **N times** and write only what *all N* passes proposed, in the same direction. `N` ≥ 2; default `1`, which is no gate. A pair the passes split on is reported as "not agreed" and nothing is written for it. Costs N times the classify calls. Refused with `--reassess` and `--withdraw`. |
 | `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
@@ -338,6 +339,31 @@ Each candidate is classified as `supersedes`, `causes`, `reversed`, or `neither`
 | **Parallel investigation** | Two notes on one stall, each about a different layer. | Neither retired the other; the timestamps say only which was written last. |
 
 That pass measured 55% precision over its 108 distinct proposals, rising to 79% for the edges proposed in all three passes and falling to 33% for those proposed in one. The wrong edges are an unstable classifier as much as a wrong one, which is what `--consensus` is for. The measured numbers live in `docs/benchmarks.md`; this table is the rule the prompt carries, not a measurement of it.
+
+### Gate the `--apply` on agreement between passes
+
+`ghost supersede <project> --apply --consensus 3` classifies the candidate set **three times** and writes only the edges all three passes proposed, in the same direction. A pair the passes split on is reported as **not agreed**, with its count and its ids, and nothing at all is written for it.
+
+```
+projy: 6 candidate pairs in 3 classify call(s), 0 cached, 1 supersedes, 0 causes, 0 reclassified, would link
+  consensus 3: 18 pair(s) asked, and only what all 3 passes proposed was would link
+  1 pair(s) not agreed: the classification passes split, so no edge was written and none was cached — re-run to ask again, or raise --consensus
+  4b1c9e2a -> f0a3d5c7  [not agreed: 2 supersedes, 1 neither]
+  91ee6b04 -> 2a7c1f88  [not agreed: 1 reversed, 1 causes, 1 unreadable]
+```
+
+**Unanimity, not a majority.** A 2-of-3 majority would write exactly the 0.56 row of that measurement. A pair the model read in one pass and answered differently in another is a pair whose verdict it has not settled, and the gate writes only settled ones.
+
+Three things are worth knowing before you turn it on:
+
+- **The gate is off unless you type it.** The default is one pass, so a hand-run pass is never silently tripled, and an existing script's bill does not change.
+- **It does not multiply the pairs that were already going to be skipped.** A pair `skip-if-unchanged` or the NEITHER cache would have skipped is skipped **once**, and an unchanged live edge is not re-asked at all — so on a converged project the gate costs almost nothing, and the multiplier falls on the pairs that were going to be asked anyway. `consensus N: N × pairs asked` on the summary is the number to check the bill against.
+- **A split is not a withdrawal, and not a cache row.** Nothing is written, nothing is withdrawn, and the pair is not cached — so it is asked again next pass rather than frozen on a verdict nobody reached. A live edge on such a pair is untouched and can still be withdrawn later, on a quorum.
+
+`--consensus` is refused with `--reassess` and `--withdraw`: those judge edges the graph **already holds**, and a gate that refused to withdraw an edge the passes happened to split on would disable the repair that exists to do it.
+
+`auto_supersede: true` runs the automatic phase through this gate by default, with the pass count from `reflection.supersede_consensus` (default 3, read only when `auto_supersede` is true). `auto_supersede` itself remains **off by default**.
+
 
 
 

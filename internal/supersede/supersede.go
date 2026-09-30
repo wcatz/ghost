@@ -517,6 +517,190 @@ type Result struct {
 	// demotes both endpoints and no orientation of it can be judged into a
 	// state worth keeping.
 	Bidirectional int
+	// Consensus is the number of classification passes this run made over the
+	// candidate set: 1 for the ordinary pass, N for a consensus-gated one. It is
+	// on the report because it is the multiplier on the pass's cost, and a caller
+	// reporting classify calls without it cannot say what was paid for.
+	Consensus int
+	// ConsensusPairsAsked is how many PAIRS the passes were asked about in
+	// total, which is Consensus times the pairs that survived every free filter.
+	// It is not the provider call count — batching means one call carries up to
+	// eight pairs — so it is the number a caller compares against the candidate
+	// total to see the multiplier actually applied, and the number a test asserts
+	// against rather than inferring from a mock's call log.
+	ConsensusPairsAsked int
+	// NotAgreed counts the pairs the N passes did not all answer the same way,
+	// and Disputed is one record per such pair. Nothing was written for any of
+	// them: no link, no withdrawal, no NEITHER cache row, no decided row.
+	//
+	// It is a counted, named outcome rather than a silent drop for the reason
+	// every other refusal here is: a gated run that proposed edges and wrote none
+	// reads exactly like a run that found nothing, and an operator deciding
+	// whether to keep a consensus gate needs the count of what it suppressed to
+	// judge the gate at all.
+	NotAgreed int
+	// Disputed names the pairs NotAgreed counts, one record each with the tally
+	// that failed to reach a quorum — because "not agreed" without the numbers is
+	// not actionable, and the ids are what the operator reads or re-runs.
+	Disputed []Disputed
+}
+
+// Disputed is one pair the consensus gate refused, and it carries the evidence
+// for the refusal rather than only its existence.
+//
+// The two verdicts it must be able to distinguish are the ones that call for
+// different next steps. A split between two READABLE verdicts is a model that
+// cannot decide the pair, and the remedy is a re-run with a higher N or a
+// different harness. A tally short because some pass's reply could not be parsed
+// is a harness or prompt problem, and the remedy is neither of those. Collapsing
+// them into one count would send an operator to raise N for what is really an
+// unreadable answer.
+type Disputed struct {
+	NewerID string
+	OlderID string
+	// Tally is how many passes said each verdict, keyed by Relation. It is a map
+	// rather than a slice because the question a reader asks is "how many said
+	// supersedes", and a fixed-order list makes them count the entries.
+	Tally map[Relation]int
+	// Unreadable is how many passes answered with something the parser could not
+	// read. Those passes voted for no verdict, which is why they are held apart
+	// from Tally rather than counted as an empty verdict: the report says
+	// "2 supersedes, 1 reversed" and "2 supersedes, 1 unreadable" are different
+	// findings.
+	Unreadable int
+}
+
+// voteCount is one pair's tally across the N passes. It is a small struct rather
+// than a map per pair because it is built once per pass per pair and read once:
+// a map allocation per pair per pass is work the N-fold multiplier should not
+// add, and the four verdicts plus the unreadable case are a fixed set.
+type voteCount struct {
+	supersedes int
+	causes     int
+	neither    int
+	reversed   int
+	// unreadable counts Relation("") — a reply the parser could not read. It is
+	// its own bucket and NOT a vote, because an unparseable answer expresses no
+	// opinion about the pair and counting it as agreement with NEITHER would
+	// write a decision nobody made.
+	unreadable int
+}
+
+func (v *voteCount) add(r Relation) {
+	switch r {
+	case RelationSupersedes:
+		v.supersedes++
+	case RelationCauses:
+		v.causes++
+	case RelationNeither:
+		v.neither++
+	case RelationReversed:
+		v.reversed++
+	default:
+		// Relation("") and anything else the parser invented: no opinion.
+		v.unreadable++
+	}
+}
+
+// quorum is what the N passes decided about one pair: an agreed verdict to act
+// on, no agreement at all, or no readable answer from any of them.
+//
+// The rule is UNANIMITY over all N passes, not a majority, and that is the whole
+// design rather than a simplification. #779's measurement is the argument: an
+// edge proposed in all three runs scored 0.79 precision, one proposed in two
+// scored 0.56, and one proposed in a single run scored 0.33 — so the number that
+// predicted correctness was the count of runs that proposed it, and a 2-of-3
+// majority writes exactly the middle row. A plurality rule would be cheaper to
+// explain and would write the edges the measurement says are 56%.
+//
+// The unreadable bucket votes for nothing, so any unreadable pass blocks a
+// quorum — a pair the model read in one pass and garbled in another is a pair
+// whose verdict the model has not settled, and the gate's whole claim is that it
+// writes only settled ones. But "all N unreadable" is a THIRD outcome and not a
+// disagreement: nothing was decided, nothing is claimed, and the pair must be
+// re-asked on the next pass. So it reads as Unclassified (Result.Unclassified),
+// which is the bucket the single-pass path has always put it in, and never as
+// NotAgreed — a report that called a broken harness "N pairs the model did not
+// agree on" would send an operator to raise the quorum for what is really a
+// prompt or transport problem.
+func (v *voteCount) quorum(passes int) (Relation, verdictState) {
+	if v.unreadable >= passes {
+		return "", undecided
+	}
+	if v.unreadable > 0 {
+		return "", disputed
+	}
+	switch {
+	case v.supersedes == passes:
+		return RelationSupersedes, agreed
+	case v.causes == passes:
+		return RelationCauses, agreed
+	case v.neither == passes:
+		return RelationNeither, agreed
+	case v.reversed == passes:
+		return RelationReversed, agreed
+	}
+	return "", disputed
+}
+
+// verdictState is the outcome of the quorum test: one verdict, a split, or
+// nothing readable. A named set of three rather than two booleans, because
+// "disagreed" and "unreadable" are different findings with different remedies
+// and folding them into one is how a harness fault gets reported as model
+// instability.
+type verdictState int
+
+const (
+	// agreed means all N passes gave the same verdict.
+	agreed verdictState = iota
+	// disputed means the passes split, or some answered and some did not.
+	disputed
+	// undecided means no pass produced a readable verdict.
+	undecided
+)
+
+// tally renders the count as the map a Disputed record carries, and it reports
+// the unreadable passes under Relation("") as well as in their own field: a
+// caller rendering the map alone must not silently drop a pass that voted for
+// nothing, and one rendering both must not count it twice. The map is the
+// evidence, the field is the diagnosis.
+func (v *voteCount) tally() map[Relation]int {
+	m := make(map[Relation]int, 4)
+	for rel, n := range map[Relation]int{
+		RelationSupersedes: v.supersedes,
+		RelationCauses:     v.causes,
+		RelationNeither:    v.neither,
+		RelationReversed:   v.reversed,
+	} {
+		if n > 0 {
+			m[rel] = n
+		}
+	}
+	if v.unreadable > 0 {
+		m[Relation("")] = v.unreadable
+	}
+	return m
+}
+
+// best is the verdict the most passes gave, for the log line. It reports a tie
+// by the first verdict in a fixed order, which is a display choice and not a
+// decision: nothing is written from it.
+func (v *voteCount) best() (Relation, int) {
+	best, n := Relation(""), 0
+	for _, cand := range []struct {
+		rel Relation
+		n   int
+	}{
+		{RelationSupersedes, v.supersedes},
+		{RelationCauses, v.causes},
+		{RelationNeither, v.neither},
+		{RelationReversed, v.reversed},
+	} {
+		if cand.n > n {
+			best, n = cand.rel, cand.n
+		}
+	}
+	return best, n
 }
 
 // judgedAt is the freshness of the content a verdict was made against: the
@@ -683,7 +867,70 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 //     LIVE edge naming such a pair is still revalidated: it already carries a
 //     direction, so the tie rules out proposing one and says nothing about
 //     judging one.
+//
+// Run makes ONE classification pass. RunWith with Options.Consensus above 1 makes
+// N of them over the same candidate set and writes only what all N proposed, in
+// the same direction; see Options.Consensus for the measurement that motivates
+// unanimity over a majority, and for why the filters above it are applied once
+// rather than per pass.
 func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Classified, error) {
+	return RunWith(ctx, store, cls, projectID, Options{Threshold: threshold, Apply: apply}, logger)
+}
+
+// MinConsensus is the smallest consensus N that gates anything.
+//
+// 1 is the ungated pass and is not an offer: a gate that always agrees is a
+// flag that reads like a safety control and is not one, and the CLI therefore
+// refuses `--consensus 1` rather than running a second pass to produce the same
+// answer twice. Every value at or above it costs N times the classify calls of
+// the ungated pass, which is the price the operator is choosing.
+const MinConsensus = 2
+
+// Options are Run's per-call decisions. They are one struct rather than a
+// seventh and eighth positional argument because every one of them is a THRESHOLD
+// on how willing the pass is to act, and a caller that reaches for
+// RunWith(ctx, store, cls, project, 0.8, true, 3, nil) cannot tell which is
+// which. The zero value is the ordinary single-pass run.
+//
+// Threshold and Apply keep their Run parameter names and meanings exactly, so
+// the two entry points are the same decision and a reader who knows one knows
+// both.
+type Options struct {
+	// Threshold is the minimum cosine similarity for a candidate pair, the same
+	// value the CLI's --threshold flag carries.
+	Threshold float32
+	// Apply writes what the verdicts decide. False is a dry run: the pass
+	// classifies and reports and touches nothing, which is the ordinary way to
+	// read a corpus before agreeing to any edges at all.
+	Apply bool
+	// Consensus is how many INDEPENDENT classification passes must answer a pair
+	// the same way before its edge is written (#779). 0 and 1 mean the ungated
+	// pass: one verdict, acted on. 2 or more runs the candidate set through that
+	// many passes and writes only what ALL of them proposed, in the same
+	// direction — see RunWith for what a disagreement does, which is nothing.
+	//
+	// It gates the WRITE, not the question, and the two halves compose with the
+	// rules that already existed: skip-if-unchanged and the NEITHER cache are
+	// applied ONCE, before the first pass, so a pair either of them would skip is
+	// not asked N times; and every pass re-asks the pairs that DO get asked, so
+	// no pass can answer from a verdict another pass already made. Those two
+	// properties are the whole reason the cost is N times the number of pairs
+	// that survive the filters and not N times the candidate set.
+	Consensus int
+}
+
+// RunWith is Run with the per-call decisions in one value: see Options, whose
+// fields carry the reasoning. A Consensus below MinConsensus is treated as 1
+// (the ungated pass) rather than refused, so a config key an operator set to 0
+// degrades to today's behaviour instead of failing a lifecycle phase at 2am —
+// the refusal, with its reason, belongs at the flag and the config boundary.
+func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID string, opts Options, logger *slog.Logger) (Result, []Classified, error) {
+	passes := opts.Consensus
+	if passes < 1 {
+		passes = 1
+	}
+	threshold := opts.Threshold
+	apply := opts.Apply
 	sel, err := SelectCandidates(ctx, store, projectID, threshold)
 	if err != nil {
 		return Result{}, nil, err
@@ -956,31 +1203,97 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		pending = append(pending, c)
 	}
 
+	// The consensus loop, and it sits HERE — after the NEITHER cache, after the
+	// veto, after skip-if-unchanged and after the existence check — because that
+	// ordering is what makes the multiplier worth paying. Every filter above is a
+	// question the pass can settle about a pair for free, and every one of them
+	// is a question whose answer cannot change between two passes over the same
+	// text. So the N passes are spent on `pending` alone, and the cost is
+	// N x len(pending) pairs asked rather than N x the candidate set: a pair the
+	// NEITHER cache would have skipped is skipped ONCE, and a #787-era live edge
+	// whose endpoints have not moved since it was last judged is not re-asked at
+	// all, let alone N times.
+	//
+	// It is also what makes each pass a real re-ask. The cache is READ once, here,
+	// and nothing writes a cache row until every pass is in hand and the apply
+	// block runs, so pass 2 cannot be answered out of pass 1's NEITHER: the rows
+	// MarkSupersedeNeither writes are this run's own output, not an input to it.
+	// The store is not re-read between passes either, so pass 2 sees the same
+	// text pass 1 saw — which is the point of asking again, and is also why an
+	// edit landing mid-run is caught by the pre-write existence check rather
+	// than by a fresher read (see the apply block).
+	//
+	// Each pass is an independent ClassifyBatch over the SAME candidate set in
+	// the SAME order, so the only thing that can differ between two passes is the
+	// model's own answer to the same question. That is the whole measurement
+	// #779 asks for: 0.79 precision for an edge proposed in all three runs,
+	// against 0.55 over distinct proposals and 0.33 for one proposed in a single
+	// run. The gate writes the first number's subset and refuses the rest.
+	//
+	// A disputed pair is DROPPED before the classified slice, before the counts
+	// below and before the apply block, which is what "never written" has to
+	// mean: no link, no withdrawal, no NEITHER cache row and no row in the
+	// report's decided list, only its own "not agreed" line carrying the ids and
+	// the tally.
+	//
+	// It is also not a reversal, and must not be read as one. The pass asked N
+	// times and got N different answers, which is a statement about the model's
+	// stability and not about which endpoint is current, so it neither writes a
+	// backwards link nor withdraws a live one: a live edge on such a pair is
+	// re-judged on the next pass and can still be withdrawn there, on a quorum.
 	var classified []Classified
+
+	// The multiplier, set UNCONDITIONALLY including for a pass with nothing to
+	// ask about. A converged project is the case where a gated run did exactly
+	// what it was built to do, and a report reading "consensus 0" would say the
+	// opposite — "consensus 3: 0 pair(s) asked" is the sentence an operator wants
+	// precisely there, because it is the difference between a gate that found
+	// nothing to disagree about and a gate that was never run.
+	res.Consensus = passes
+	res.ConsensusPairsAsked = passes * len(pending)
 	if len(pending) > 0 {
-		relations, err := cls.ClassifyBatch(ctx, pending)
-		if err != nil {
-			return res, nil, fmt.Errorf("classify %d candidate pair(s): %w", len(pending), err)
+		votes := make([]voteCount, len(pending))
+		for pass := 0; pass < passes; pass++ {
+			relations, err := cls.ClassifyBatch(ctx, pending)
+			if err != nil {
+				return res, nil, fmt.Errorf("classify %d candidate pair(s) (pass %d of %d): %w", len(pending), pass+1, passes, err)
+			}
+			if len(relations) != len(pending) {
+				return res, nil, fmt.Errorf("classifier returned %d verdicts for %d pairs (pass %d of %d)", len(relations), len(pending), pass+1, passes)
+			}
+			for i, r := range relations {
+				votes[i].add(r)
+			}
 		}
-		if len(relations) != len(pending) {
-			return res, nil, fmt.Errorf("classifier returned %d verdicts for %d pairs", len(relations), len(pending))
-		}
+
 		for i, c := range pending {
-			verdict := relations[i]
-			if verdict == "" {
-				// An odd *phrasing* must not abort the pass: a single unparseable
-				// verdict ended a 9-minute run after links for earlier pairs had
-				// already been written, so the graph never converged whenever the
-				// model used wording the parser did not know. Skip that pair and
-				// count it (reported by the caller).
-				//
-				// A transport failure stays fatal inside ClassifyBatch: skipping
-				// every pair would write nothing and still report success,
-				// blaming the model for a transport failure.
+			verdict, state := votes[i].quorum(passes)
+			switch state {
+			case undecided:
+				// No pass produced a readable verdict. The single-pass branch's
+				// behaviour verbatim, and for the same reason: an odd *phrasing*
+				// must not abort the pass (a single unparseable verdict ended a
+				// 9-minute run after links for earlier pairs had already been
+				// written), so the pair is skipped, counted, logged, and left
+				// uncached so the next pass re-asks it. A transport failure is
+				// not this and stays fatal inside ClassifyBatch.
 				res.Unclassified++
 				if logger != nil {
 					logger.Warn("supersede: skipping pair with an unclassifiable verdict",
-						"newer", c.NewerID, "older", c.OlderID)
+						"newer", c.NewerID, "older", c.OlderID, "passes", passes)
+				}
+				continue
+			case disputed:
+				res.NotAgreed++
+				res.Disputed = append(res.Disputed, Disputed{
+					NewerID: c.NewerID, OlderID: c.OlderID,
+					Tally: votes[i].tally(), Unreadable: votes[i].unreadable,
+				})
+				if logger != nil {
+					top, n := votes[i].best()
+					logger.Info("supersede: passes did not agree; no edge written",
+						"newer", c.NewerID, "older", c.OlderID,
+						"passes", passes, "top", string(top), "top_votes", n)
 				}
 				continue
 			}
