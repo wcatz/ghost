@@ -2,6 +2,7 @@ package obsidian
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -31,7 +32,17 @@ import (
 // defence.
 
 // hostileIDs are record ids that only an artifact can produce: ghost mints hex,
-// and Store.ImportMemory writes an artifact's ids verbatim.
+// and an artifact carries whatever ids its writer chose.
+//
+// Since #791 `Store.ImportMemory` refuses the ones holding a control character,
+// whitespace, a backtick or a «», so the fixtures below plant those in SQL rather
+// than through the import path. That is the honest route for them now and was
+// always the honest ROUTE for the state itself: a store written before the
+// refusal landed, one restored from a snapshot an older Ghost took, a
+// hand-edited database. None of those consult this build's writers, and the
+// exporter has to survive all of them — refusing the id on the way in says
+// nothing about the ones already in the store, and the note filename is built
+// from the stored id on every export.
 var hostileIDs = []struct{ name, id string }{
 	{"parent-escape", "../../../../tmp/ghost-pwned"},
 	{"parent-escape-short", "../../evil"},
@@ -116,25 +127,36 @@ func TestFileNameStaysInsideItsDirectory(t *testing.T) {
 	})
 }
 
+// plantMemory writes one memory row under a caller-chosen id, in SQL.
+//
+// It replaces `Store.ImportMemory` in the fixtures below, which #791 turned into
+// the wrong route for them: the import refuses an id holding a control character,
+// whitespace, a backtick or a «», so the store can no longer be SEEDED with one
+// that way. The state is still real and the exporter still has to survive it —
+// see hostileIDs for why — and writing the row directly is how a store that
+// already holds one is reached.
+func plantMemory(t *testing.T, db *sql.DB, projectID, id, content string) {
+	t.Helper()
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, created_at, updated_at)
+	                      VALUES (?, ?, 'fact', ?, 'mcp', 0.5, datetime('now'), datetime('now'))`,
+		id, projectID, content); err != nil {
+		t.Fatalf("plant a memory under id %q: %v", id, err)
+	}
+}
+
 // TestExportKeepsHostileRecordIDsInsideTheVault is the end-to-end half of the
-// same rule: a store seeded through the documented artifact path must export
-// every note into <vault>/<project>/Memories, every pass, with the tree itself
-// inside the vault and a canary outside it untouched.
+// same rule: a store holding a hostile id must export every note into
+// <vault>/<project>/Memories, every pass, with the tree itself inside the vault
+// and a canary outside it untouched.
 func TestExportKeepsHostileRecordIDsInsideTheVault(t *testing.T) {
 	for _, tc := range hostileIDs {
 		if tc.id == "" {
 			continue // an empty id is refused at the store boundary, not exported
 		}
 		t.Run(tc.name, func(t *testing.T) {
-			store := seedStore(t)
+			db, store := seedStoreWithDB(t)
 			ctx := context.Background()
-			if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
-				ID: tc.id, ProjectID: "ghost", Category: "fact",
-				Content: "A body long enough to be a real memory about the exporter.",
-				Source:  "mcp",
-			}, memory.ImportOptions{Apply: true}); err != nil {
-				t.Fatalf("import memory with id %q: %v", tc.id, err)
-			}
+			plantMemory(t, db, "ghost", tc.id, "A body long enough to be a real memory about the exporter.")
 
 			// The canary lives in a SIBLING of the vault, not in the vault's
 			// parent: the vault is supposed to appear under its parent, so a
@@ -175,19 +197,14 @@ func TestExportKeepsHostileRecordIDsInsideTheVault(t *testing.T) {
 // filesystem cannot name took down every OTHER project's notes too, on every run
 // and every retry, and no error said which record did it.
 func TestExportSurvivesEveryHostileRecordAtOnce(t *testing.T) {
-	store := seedStore(t)
+	db, store := seedStoreWithDB(t)
 	ctx := context.Background()
 	for i, tc := range hostileIDs {
 		if tc.id == "" {
 			continue
 		}
-		if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
-			ID: fmt.Sprintf("%s%d", tc.id, i), ProjectID: "ghost", Category: "fact",
-			Content: fmt.Sprintf("A body long enough to be a real memory, case %d.", i),
-			Source:  "mcp",
-		}, memory.ImportOptions{Apply: true}); err != nil {
-			t.Fatalf("import %q: %v", tc.id, err)
-		}
+		plantMemory(t, db, "ghost", fmt.Sprintf("%s%d", tc.id, i),
+			fmt.Sprintf("A body long enough to be a real memory, case %d.", i))
 	}
 	// An ordinary project alongside the hostile ones, because the point is that
 	// it is not dragged down with them.
@@ -277,17 +294,12 @@ func TestFolderNameStaysCreatable(t *testing.T) {
 // per-id fixture in TestExportKeepsHostileRecordIDsInsideTheVault passes for a
 // keep-set that dropped the note, and this is the case that separates the two.
 func TestExportKeepsEveryNoteOfACollidingIdSet(t *testing.T) {
-	store := seedStore(t)
+	db, store := seedStoreWithDB(t)
 	ctx := context.Background()
 	ids := []string{"tab\tid-xyz", "tab\r\nid-xyz", "tab id-xyz"}
 	for i, id := range ids {
-		if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
-			ID: id, ProjectID: "ghost", Category: "fact",
-			Content: fmt.Sprintf("A body long enough to be a real memory, record %d of the colliding set.", i),
-			Source:  "mcp",
-		}, memory.ImportOptions{Apply: true}); err != nil {
-			t.Fatalf("import %q: %v", id, err)
-		}
+		plantMemory(t, db, "ghost", id,
+			fmt.Sprintf("A body long enough to be a real memory, record %d of the colliding set.", i))
 	}
 
 	// The three really do render to one line, or this fixture is testing nothing.

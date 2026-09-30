@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/portable"
 )
@@ -557,7 +559,7 @@ func runExport() {
 	if dest == "-" {
 		summary = os.Stderr
 	}
-	if err := runExportCore(context.Background(), store, summary, dest, opts.Project); err != nil {
+	if err := runExportCore(context.Background(), store, summary, os.Stderr, dest, opts.Project); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -567,13 +569,21 @@ func runExport() {
 // destination the file is created with the same 0600 width the database has,
 // before any record is written, so a failure part-way leaves a file only the
 // user can read.
-func runExportCore(ctx context.Context, store *memory.Store, summary io.Writer, dest, projectFilter string) error {
+//
+// summary is where the run states what it did, and warn is where it names the
+// records it could not write. They are separate writers because the artifact may
+// BE stdout (`ghost export -`), and a warning that lands inside a JSONL stream
+// corrupts it for the reader that is piping it straight into an import.
+func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Writer, dest, projectFilter string) error {
 	if dest == "-" {
 		stats, err := portable.Export(ctx, store, os.Stdout, projectFilter)
 		if err != nil {
 			return err
 		}
-		return printExportSummary(summary, "-", stats)
+		if err := printExportSummary(summary, "-", stats); err != nil {
+			return err
+		}
+		return reportSkippedRecords(warn, stats.Skipped)
 	}
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -601,13 +611,119 @@ func runExportCore(ctx context.Context, store *memory.Store, summary io.Writer, 
 		}
 		return exportErr
 	}
-	return printExportSummary(summary, dest, stats)
+	// From here the artifact is COMPLETE and importable, so the file is KEPT even
+	// when records were left out of it. That is the whole difference from the
+	// branch above: this artifact imports cleanly, it is just not the whole
+	// store, and deleting it would destroy a working backup over a warning about
+	// the rows it does not contain.
+	if err := printExportSummary(summary, dest, stats); err != nil {
+		return err
+	}
+	return reportSkippedRecords(warn, stats.Skipped)
 }
 
-// printExportSummary states where the artifact is and what it holds.
+// repairableKinds are the record kinds Ghost can delete SELECTIVELY, which is not
+// every kind it exports. A project goes through `ghost project delete`; a memory
+// through the `ghost_memory_delete` tool. A task and a decision have no such
+// surface — no CLI subcommand, no MCP tool, and no DELETE against either table in
+// internal/memory.
+//
+// "Selectively" is the whole distinction, and an earlier version of this comment
+// got it wrong in both directions. `tasks.project_id` and `decisions.project_id`
+// are both `REFERENCES projects(id) ON DELETE CASCADE` (schema.go), and
+// Store.DeleteProject counts both, so `ghost project delete` DOES remove a task or
+// a decision row — just never alone. The report therefore says "by itself" and
+// names the blunt repair, because "cannot be removed through Ghost at all" would
+// stop an operator looking for a repair that is one command away.
+//
+// And there is no top-level `ghost delete`: `case "delete"` sits inside
+// `case "project":` in dispatchCommand, so the only spelling is
+// `ghost project delete`. Naming a bare `delete` would send someone to a
+// top-level usageError and exit 2.
+var repairableKinds = map[string]bool{
+	portable.TypeProject: true,
+	portable.TypeMemory:  true,
+}
+
+// reportSkippedRecords names every record an export left out and returns an error
+// when there was one, so the command exits non-zero and a backup script notices.
+//
+// The error mirrors the importer's: import counts its rejections and returns an
+// error AFTER printing the per-record report, and this does the same for the rows
+// it could not write. A count of what was written is not a count of what exists,
+// and a partial export reported as a success is the failure mode worth spending
+// an exit code on.
+func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error {
+	if len(skipped) == 0 {
+		return nil
+	}
+	var hasRepairable, hasUnrepairable bool
+	for _, sk := range skipped {
+		// The id through assemble.Token, the same renderer the import report uses
+		// for the id it names: an id carrying a newline would forge a line on the
+		// very report that exists to name it (#791). Such an id is exactly what
+		// gets here, so this is not a precaution.
+		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, assemble.Token(sk.ID), sk.Reason); err != nil {
+			return err
+		}
+		// A batch can hold both kinds, so the advice is collected rather than
+		// decided from the first row: naming a project command for a task is the
+		// mistake this exists to stop, and deciding from row one would do exactly
+		// that to every task after a project.
+		if repairableKinds[sk.Type] {
+			hasRepairable = true
+		} else {
+			hasUnrepairable = true
+		}
+	}
+	if _, err := fmt.Fprintf(out, "  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.\n"); err != nil {
+		return err
+	}
+	// Both advice sentences below are per-BATCH and each names only the kinds it
+	// applies to, so a mixed batch gets both: an operator with a skipped project
+	// still needs the command even when the same artifact also skipped a task.
+	//
+	// The repair is KIND-AWARE, because a command that cannot delete the row is
+	// worse than no command at all: the operator is told what to type, types it,
+	// and gets "project not found" or a no-op. Only a project and a memory can be
+	// deleted SELECTIVELY — `ghost project delete <project>` (there is no
+	// top-level `ghost delete`) and the `ghost_memory_delete` tool. A task and a
+	// decision cannot, and for those two the sentence says so while naming the
+	// blunt repair that does work.
+	if hasRepairable {
+		if _, err := fmt.Fprintf(out, "  To include it, delete the row and re-save it under an id this build accepts: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n"); err != nil {
+			return err
+		}
+	}
+	if hasUnrepairable {
+		unrepairable := []string{}
+		for _, kind := range []string{portable.TypeTask, portable.TypeDecision} {
+			for _, sk := range skipped {
+				if sk.Type == kind {
+					unrepairable = append(unrepairable, kind)
+					break
+				}
+			}
+		}
+		if _, err := fmt.Fprintf(out, "  Ghost has NO delete surface for a %s BY ITSELF: no `ghost %s delete`, no tool for it, and no DELETE against the table, so removing that row on its own means editing the database directly. `ghost project delete <project>` does remove it, along with every other row in that project — the blunt repair is available, it just is not selective. Until then the row stays in the store and out of every artifact.\n",
+			strings.Join(unrepairable, " or a "), unrepairable[len(unrepairable)-1]); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("%s left out of this artifact because this build cannot import them — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)))
+}
+
+// printExportSummary states where the artifact is and what it holds, and says in
+// the SAME line when it does not hold everything — because a headline that counts
+// only what was written reads as a count of the store, which is the claim a
+// backup script is about to act on.
 func printExportSummary(out io.Writer, path string, stats portable.Stats) error {
-	_, err := fmt.Fprintf(out, "exported %s to %s\n",
+	headline := fmt.Sprintf("exported %s to %s",
 		pluralRecords(stats.Projects, stats.Memories, stats.Tasks, stats.Decisions), path)
+	if len(stats.Skipped) > 0 {
+		headline += fmt.Sprintf(" — %s left out, see below", countLabel(len(stats.Skipped)))
+	}
+	_, err := fmt.Fprintln(out, headline)
 	return err
 }
 
@@ -617,6 +733,18 @@ func printExportSummary(out io.Writer, path string, stats portable.Stats) error 
 // reviewable: the reader sees each memory's content prefix, not just a count.
 func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	detail := r.Detail
+	// The id through assemble.Token, once, for every line it reaches. A record's
+	// id is a key this line prints with no quoting of its own, so an id carrying a
+	// newline forges a report line here — the same class as the rendered memory
+	// line, on a surface a store written before the import shape check existed
+	// can still reach (#791). A well-formed id is written bare, so the report is
+	// byte-identical for every ordinary artifact.
+	//
+	// It is the SAME id printed by portable's labelOrID, and both render it
+	// through the one function rather than each choosing a spelling, because a
+	// report whose headline and whose per-record lines disagree about how an id
+	// looks is worse than either choice.
+	id := assemble.Token(r.ID)
 	// A credential refusal prints the id and nothing else. portable's
 	// safeDetail already reduces the detail to the id for any record whose text
 	// holds one — see the note there — and this is the second line for a
@@ -625,7 +753,7 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	// report.Errors, which is the part needed to fix the artifact.
 	var refused *memory.SecretContentError
 	if errors.As(r.Error, &refused) {
-		detail = r.ID
+		detail = id
 	}
 	// Only a memory has provenance to speak of. A project or a task line that
 	// said "provenance kept as exported" would be a sentence about a field the
@@ -647,9 +775,25 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	}
 	switch {
 	case detail == "":
-		detail = r.ID
-	case r.ID != "":
-		detail = fmt.Sprintf("%q (%s)", detail, r.ID)
+		detail = id
+	default:
+		// Quoted on BOTH arms, not only when there is an id. The old switch
+		// reached `%q` only through `case r.ID != ""`, so a RecordResult with no
+		// id and a non-empty detail fell through both arms and reached Fprintf
+		// with no quoting at all — and `detail` holds a memory's content, which
+		// may hold a carriage return, which a terminal reads as "return to
+		// column 0 and overwrite". A created memory always has an id, so this
+		// was not reachable from `ghost import`; the switch had no reason to
+		// depend on that, though, and a record type added later need not (#791).
+		//
+		// `%q` is also what neutralises a CR reaching here from a store written
+		// before the preview cut at one — defence in depth, not the reason for
+		// the arm.
+		if r.ID != "" {
+			detail = fmt.Sprintf("%q (%s)", detail, id)
+		} else {
+			detail = strconv.Quote(detail)
+		}
 	}
 	_, err := fmt.Fprintf(out, "  %-7s %-9s line %d  %s\n", r.Action, r.Type+":", r.Line, detail)
 	return err

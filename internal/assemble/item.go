@@ -85,7 +85,7 @@ func (i Item) Line() string {
 	if _, label := memory.OriginClass(memory.CanonicalOriginSourceForProject(i.ProjectID, i.Source, i.Content)); label != "" {
 		origin = " source=" + label
 	}
-	return "- [" + i.Category + "] `" + i.ID + "` (" +
+	return "- [" + i.Category + "] `" + Token(i.ID) + "` (" +
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
 		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin +
@@ -249,34 +249,129 @@ func ScopeLabel(scope map[string]string) string {
 		if i > 0 {
 			b.WriteString(" ")
 		}
-		b.WriteString(scopeToken(k))
+		b.WriteString(Token(k))
 		b.WriteString("=")
-		b.WriteString(scopeToken(scope[k]))
+		b.WriteString(Token(scope[k]))
 	}
 	b.WriteString("}")
 	return b.String()
 }
 
-// scopeToken renders one scope key or value. The label is printed OUTSIDE the
-// «...» data delimiters, and a scope is text Ghost did not author (a save
-// argument, an imported artifact), so a value is written bare only when every
-// character is one a scope name plausibly uses. Anything else is written as an
-// ASCII-only Go quoted string: a newline cannot start a line of its own, a `}`
-// cannot close the label early, and a «, » or other non-ASCII rune cannot open
-// a data block of its own.
-func scopeToken(s string) string {
+// Token renders one stored value that a line prints OUTSIDE the «...» data
+// delimiters: a scope key or value, or a memory id. Both are text Ghost did not
+// author — a save argument, an imported artifact's verbatim value — and both are
+// printed on a line an agent reads as Ghost's own, so neither may be able to
+// start a line, close the construct it sits in, or open a data block of its own.
+//
+// A value is written bare only when every character is one a stored name
+// plausibly uses. Anything else is written as an ASCII-only Go quoted string: a
+// newline cannot start a line of its own, a `}` or a backtick cannot close the
+// label or the id span early, and a «, » or other non-ASCII rune cannot open a
+// data block of its own.
+//
+// The bare case is the one every real row takes — the ids Ghost mints are 32 hex
+// characters and a scope name is a word — so this is invisible on every honest
+// listing and costs nothing. It is exported because a second renderer printing
+// the same fields (mcpserver's formatMemories) must reach the SAME function: two
+// implementations of one rule are two rules, and the one that is not tested here
+// is the one that ships the bug.
+func Token(s string) string {
 	if s == "" {
 		return `""`
 	}
 	for _, r := range s {
-		if !isScopeNameRune(r) {
+		if !isTokenRune(r) {
 			return strconv.QuoteToASCII(s)
 		}
 	}
 	return s
 }
 
-func isScopeNameRune(r rune) bool {
+// Label renders one stored value that must occupy a single line of output and is
+// read as a LABEL rather than as a key — a project's name, a project's path.
+//
+// It exists because Token is the wrong renderer for those two, and using it would
+// have been a visible regression rather than a safe default: Token writes a space
+// as a quoted string, so every project named "my project" or living at
+// "/Users/w/My Projects/ghost" would print as `"my project"` on every listing and
+// in the session-start block's own heading. A space is not what makes a line, and
+// a name is not what gets used as a `--only` selector.
+//
+// So Label keeps ordinary text exactly as written — spaces, slashes, dots, every
+// word a name is made of — and neutralises only what could end the line or open a
+// construct around it. Three things are printed around a project name and path, so
+// three characters are delimiters here that are not delimiters for an id: a
+// control character, which ends the line; «», which opens a data block; and the
+// backtick and the double quote, which close the backtick span a path is printed
+// in and the `"…"` the session-start block tells the reader to pass to every tool.
+//
+// The escaping is `strconv.QuoteToASCII` — the same call Token makes, so the two
+// renderers cannot disagree about what a newline looks like — with the surrounding
+// quotes dropped and the backtick fixed up, because a backtick is printable and is
+// not a delimiter in Go, so quoting alone would hand back the one character this
+// exists to neutralise.
+func Label(s string) string {
+	if !labelNeedsEscaping(s) {
+		return s
+	}
+	q := strconv.QuoteToASCII(s)
+	q = strings.ReplaceAll(q, "`", "\\`")
+	// The quotes are the only thing dropped: a value that needed escaping always
+	// comes back with both, so the slice cannot run off the ends.
+	return q[1 : len(q)-1]
+}
+
+// labelNeedsEscaping reports whether s holds anything Label would have to escape.
+func labelNeedsEscaping(s string) bool {
+	for _, r := range s {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			return true
+		case r == '`', r == '"', r == '«', r == '»':
+			return true
+		}
+	}
+	return false
+}
+
+// PreviewLine returns the first line of stored text, capped at max runes with an
+// ellipsis, for the places that name a record by a glimpse of its content rather
+// than by printing all of it.
+//
+// It exists as ONE function because there were three copies of it, and the copies
+// had already drifted: two cut at '\n' and one did too, and then the answer to
+// "which byte ends a line" changed and only two of the three were updated. A
+// helper whose correctness is "a line is one line" is exactly the kind that must
+// not be copyable, so the logic lives here and the three call sites call it.
+//
+// Cut at the first of EITHER byte, which is the whole reason this is a function
+// rather than a one-liner at each site. A preview is rendered raw — that is what
+// makes it a preview — so any line-breaking character a memory's content holds
+// would otherwise be rendered too. IndexByte('\n') alone left a lone carriage
+// return, and a lone CR is enough: a terminal reads it as "return to column 0 and
+// overwrite", so content of `legitimate claim\roverwrite this` previewed as
+// `overwrite this` and the honest prefix was gone. Several renderers also split on
+// CR as readily as on LF, so this was never terminal-specific. Cutting at
+// whichever comes first drops the CR of a CRLF pair too, since s[:i] ends
+// immediately before it (#791).
+func PreviewLine(s string, max int) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
+
+// isTokenRune is the set Token writes bare. It is the scope-name set the label
+// has always used, widened by nothing: the id column's own values are 32 hex
+// characters, and the other ids a real store holds (a bench corpus id, a restored
+// snapshot's) are words with separators. Nothing else needs to be bare to be
+// legible, and every character outside this set is exactly the class that can
+// break a line or a data block.
+func isTokenRune(r rune) bool {
 	switch {
 	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 		return true

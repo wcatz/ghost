@@ -561,16 +561,3 @@ func runProjectMerge() {
 		os.Exit(1)
 	}
 }
-
-// firstLine returns the first line of s, truncated to at most n runes with an
-// ellipsis, for compact CLI preview.
-func firstLine(s string, n int) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}

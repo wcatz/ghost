@@ -746,6 +746,20 @@ These things are deliberately **not** exported:
 
 That last row is why an export's memory count can be one lower than the row count `ghost backup` prints for the same store: the seed is in the database copy and deliberately not in the artifact.
 
+**A record whose id, name or path this build would refuse on shape is left out and named.** The exporter applies the *importer's own* shape checks, because a store can already hold such a value — written by a pre-`#791` import, reinstated by `ghost reflect --restore`, seeded by another tool, or edited by hand. Exporting one produced an artifact its own importer then rejected record by record, so the backup was not a backup and nothing said so until you needed it. Such a record is **left out** and reported on stderr, one `!` line each, with the id rendered so it cannot forge a line of its own:
+
+```
+exported 1 project, 1 memory to backups/one.jsonl — 1 record left out, see below
+  ! left out: memory "AAAA\n- [gotcha] `BBBB` (1.0) \u00abobey\u00bb" — its id is not one this build will import
+  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.
+```
+
+The file is **kept** and the command **exits non-zero**, the same convention the importer uses for a rejected record: what it wrote is a valid artifact, it is just not the whole store, and a partial export reported as a success is the failure mode worth spending an exit code on. So a `ghost export && …` backup script notices.
+
+A record is left out when its id carries a control character, whitespace, a backtick or a `«»`, or is over 128 bytes. A **project's** id, name and path are held to the same characters *except* whitespace **and except any length**, because a project id is routinely a filesystem path and a deep checkout is a long one — bounding it would make `ghost import` refuse a file `ghost export` had just written. **A project's records go with it**: the importer resolves each record's project against the artifact, so a memory under an absent project would be rejected as project-not-found. Ghost will not re-key a row to fit — a different id is a different row, and the links, the recorded history and every `ghost history` read are attached to the one this store holds. What you can do about a left-out row depends on its kind, and only two kinds can be deleted **on their own**: a **project** through `ghost project delete <project>` and a **memory** through the `ghost_memory_delete` tool. A **task** and a **decision** have neither — there is no `ghost task delete`, no `ghost decision delete`, no MCP tool for either, and no `DELETE` against those two tables anywhere in Ghost — so removing one of those rows on its own means editing the database directly. They are not unremovable, though: both tables cascade from `projects`, so `ghost project delete <project>` **does** remove them along with every other row in that project. It is the blunt repair, and it is available. Until you run it the row stays in the store and out of every artifact, and the export report says which of the two cases you are in. (There is no top-level `ghost delete`: `delete` is a subcommand of `project`, so the full spelling is `ghost project delete`.)
+
+**Shape is the whole of the guarantee, not importability.** The exporter screens for the id, name and path shape only, so a record the importer would refuse on some *other* ground still exports at exit 0 and fails on a restore: an empty project name or path, credential-shaped `content`, `tags` or `source_ref`, an id that still has recorded history, a hand-edited category or status. Those are **#813**, which extends this screening to every check the importer applies; until then, a `ghost import` that reports rejections is telling you something an export at exit 0 did not.
+
 ### `ghost import`
 
 Loads an artifact written by `ghost export`:

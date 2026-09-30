@@ -154,8 +154,15 @@ func projectArg(projectName string) string {
 //     would become two selectors, and no surface can carry it: the memory stays
 //     stamped resolved until the row itself is rewritten.
 //
-// Both are real: `ghost import` writes an artifact's ids verbatim and
-// ImportMemory refuses only an empty one.
+// Both are real. `ghost import` writes an artifact's ids verbatim, and
+// ImportMemory refuses an empty one and — since #791 — one holding a control
+// character, whitespace, a backtick or a «». A COMMA is not in that class, which
+// is the point of the split: the refused characters are the ones that can end a
+// rendered line, and a comma breaks a selector rather than a line. A NEWLINE is
+// refused now, so the unnameable case above is a row a store already held
+// rather than one a file can plant — a store written before the refusal landed,
+// a restored snapshot, a hand edit. Either way the memory stays stamped, and
+// this is the sentence an operator holding one needs.
 //
 // The command is EMPTY when no id is carriable, and that is deliberate in the
 // other direction too. Printing `ghost resolve <project> --reassess --apply` — no

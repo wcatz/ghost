@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/secret"
 )
@@ -151,7 +152,11 @@ func Import(ctx context.Context, s *memory.Store, r io.Reader, opts ImportOption
 	return report, nil
 }
 
-// unreadable is one line the parser could not turn into a record.
+// unreadable is one line the parser refused: either it is not JSON, or it is a
+// record whose memory id is a shape this build will not store (#791). Both are
+// per-line refusals for the same reason and with the same consequence — the rest
+// of the file still imports — and neither names the offending id, because a line
+// that forges a rendering must not be reprinted by the report that names it.
 type unreadable struct {
 	line   int
 	result RecordResult
@@ -163,9 +168,12 @@ type unreadable struct {
 //
 // The two outcomes are deliberately different. A file-level problem — no header,
 // an unknown schema version — is returned as an error that stops the run before
-// anything is written. A line that is not JSON is collected and returned
-// alongside the records: the rest of the file is still readable, and Import
-// reports the line and carries on.
+// anything is written. A per-LINE problem is collected and returned alongside the
+// records: the rest of the file is still readable, and Import reports the line and
+// carries on. There are two of them today — a line that is not JSON, and a
+// memory record whose id `memory.CheckImportedID` refuses — and they share the
+// treatment because they share the property that makes it right: one damaged
+// record must not abandon a file that may hold ten thousand good ones.
 func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 	scanner := bufio.NewScanner(r)
 	// A memory is capped at MaxContentLen bytes, so a line can be larger than
@@ -225,6 +233,41 @@ func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 		}
 		if rec.Type == TypeHeader {
 			return nil, nil, fmt.Errorf("line %d: a second %q line — an artifact has exactly one header", lineNum, TypeHeader)
+		}
+		// The memory id's SHAPE, refused here rather than at the store
+		// (#791). The store refuses it too — `ImportMemory` is the write
+		// boundary and has to hold for any caller — but refusing at PARSE time
+		// is what keeps the value out of this package's own report: every
+		// rejected record's id is echoed into a per-record line and into
+		// `labelOrID`, and a stored id is printed inside backticks and OUTSIDE
+		// the «...» data delimiters on every assembled surface, so an id holding
+		// a newline forges a line that reads as Ghost's own memory row. A record
+		// refused here never becomes a parsedRecord, so there is no id left to
+		// print.
+		//
+		// It is the same treatment an unparseable line gets, for the same
+		// reason: one damaged line must not abandon a file that may hold ten
+		// thousand good records, and the rejection is counted and named by line
+		// number so a partial import cannot be mistaken for a complete one.
+		// `memory.CheckImportedID` is the store's own function rather than a
+		// second copy, because a parser judging ids slightly differently from
+		// the store would classify a dry run differently from the apply run it
+		// previews — the one property this package is built around.
+		if rec.Memory != nil {
+			if err := memory.CheckImportedID(rec.Memory.ID); err != nil {
+				unread = append(unread, unreadable{
+					line: lineNum,
+					result: RecordResult{
+						Type:   TypeMemory,
+						Line:   lineNum,
+						Action: ActionReject,
+						Detail: "memory id this build will not store",
+						Error:  err,
+					},
+					err: fmt.Errorf("line %d: %s: %w", lineNum, TypeMemory, err),
+				})
+				continue
+			}
 		}
 		recs = append(recs, parsedRecord{rec: rec, line: lineNum})
 	}
@@ -428,7 +471,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	for _, p := range memories {
 		m := p.rec.Memory
 		m.ProjectID = under(m.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeMemory, detail: safeDetail(contentPrefix(m.Content), m.Content, m.ID), check: checkFor(m.ProjectID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeMemory, detail: safeDetail(assemble.PreviewLine(m.Content, contentPreviewMax), m.Content, m.ID), check: checkFor(m.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				created, clamped, downgraded, err := s.ImportMemory(ctx, *m, opts)
 				if err != nil {
@@ -664,39 +707,37 @@ func safeDetail(label, full, id string) string {
 // directly or a kind added later that safeDetail does not know about. The format
 // still reaches the reader through the wrapped error, which is the part they need
 // in order to fix the artifact.
+//
+// The id goes through assemble.Token on every path, including the credential one.
+// That is not a contradiction: a credential refusal reducing the line to the id is
+// about not reprinting the CONTENT, and the id is a key this report prints inside
+// no quoting at all — so a store holding one that carries a newline, a store
+// written before the shape check existed, would forge a report line here (#791).
+// A well-formed id is written bare and this is invisible; a hostile one is
+// rendered inert on the very line that is naming it.
 func labelOrID(r RecordResult, err error) string {
 	var refused *memory.SecretContentError
 	if errors.As(err, &refused) {
 		if r.ID != "" {
-			return r.ID
+			return assemble.Token(r.ID)
 		}
 		return "(no id)"
 	}
 	switch {
 	case r.Detail != "" && r.ID != "":
-		return fmt.Sprintf("%q (%s)", r.Detail, r.ID)
+		return fmt.Sprintf("%q (%s)", r.Detail, assemble.Token(r.ID))
 	case r.ID != "":
-		return r.ID
+		return assemble.Token(r.ID)
 	default:
 		return "(no id)"
 	}
 }
 
-// contentPrefix is the first line of a memory's content, capped, for a report
-// line. firstLine keeps the report readable without inventing a summary of the
-// memory.
-func contentPrefix(content string) string {
-	const max = 60
-	line := content
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = line[:i]
-	}
-	r := []rune(line)
-	if len(r) > max {
-		return string(r[:max]) + "…"
-	}
-	return line
-}
+// contentPreviewMax is the cap on the content preview a report line carries. It
+// is 60 rather than the 70 the MCP resolve reports use because an import report
+// line is narrower — it shares its line with an action, a type, a line number and
+// an id — and a preview that wraps is a preview nobody reads.
+const contentPreviewMax = 60
 
 // orderTasks returns the task records in an order where a task's blocker comes
 // before it.

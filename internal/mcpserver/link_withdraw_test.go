@@ -310,8 +310,11 @@ func TestLinkWithdrawNamesAnIDThatOnlyTheFileFormCanCarry(t *testing.T) {
 	// the file said. The seeding helper names its own ids, so this one is renamed
 	// through the store to make the pair a real edge pointing at it.
 	// The edge points at an id an import brought in, and that id holds a comma:
-	// `ghost import` writes an artifact's ids verbatim and ImportMemory refuses
-	// only an empty one, so this is what such a row looks like in a real store.
+	// `ghost import` writes an artifact's ids verbatim, and since #791
+	// ImportMemory refuses only the shapes that can break a rendered LINE — a
+	// control character, whitespace, a backtick or a «». A comma breaks a
+	// SELECTOR rather than a line, so it still reaches the store, and this is
+	// what such a row looks like in a real one.
 	commy := "imported,note"
 	ctx := context.Background()
 	// ImportMemory checks the project exists, and Create does not, so the
@@ -366,19 +369,23 @@ func TestLinkWithdrawNamesAnIDThatOnlyTheFileFormCanCarry(t *testing.T) {
 // --only-file is one id per line — so the answer has to say the memory stays
 // resolved rather than implying a repair exists. An agent that believes otherwise
 // leaves a memory out of every session with nothing able to clear it.
+//
+// The row is written in SQL rather than through ImportMemory, which now REFUSES
+// such an id (#791). The state under test is still reachable and the answer is
+// still the only correct one: this is a store written before the refusal landed,
+// one restored from a snapshot taken by an older Ghost, or a hand-edited
+// database. Refusing the id on the way in says nothing about what to do about the
+// ones already there, and "the memory stays resolved, re-import it under an id
+// this build accepts" has to be what an agent holding one is told.
 func TestLinkWithdrawSaysNoSurfaceCanNameANewlineID(t *testing.T) {
-	srv, store := linkWithdrawServer(t)
+	db, store, srv := newStoreWithDB(t)
 	ctx := context.Background()
 	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	wrapped := "imported\nnote"
-	if _, _, _, err := store.ImportMemory(ctx, memory.PortableMemory{
-		ID: wrapped, ProjectID: "test-project", Category: "fact",
-		Content: "The restore path needs two spindles to be safe.", Source: "mcp",
-	}, memory.ImportOptions{Apply: true}); err != nil {
-		t.Fatalf("ImportMemory: %v", err)
-	}
+	plantMemoryWithID(t, db, "test-project", wrapped, "fact",
+		"The restore path needs two spindles to be safe.")
 	newer, err := store.Create(ctx, "test-project", memory.Memory{
 		Category: "fact", Content: "The restore path is safe on one spindle.", Source: "mcp", Importance: 0.7,
 	})

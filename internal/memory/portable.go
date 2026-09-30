@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // PortableProject is a project as the export/import artifact carries it.
@@ -404,7 +405,7 @@ func portableEvidence(ctx context.Context, db *sql.DB, ids []string) (map[string
 // normalized form because that is the form stored, and an artifact carrying a
 // raw `git@host:owner/repo.git` has to collide with the canonical spelling of
 // the same repository rather than slip past it.
-func (s *Store) projectCollision(ctx context.Context, p PortableProject) error {
+func (s *Store) projectCollision(ctx context.Context, q Queryer, p PortableProject) error {
 	remote := NormalizeRepoRemote(p.RepoRemote)
 	// `repo_remote <> ''` is what keeps an absent — or unrecognizable, since
 	// NormalizeRepoRemote answers "" for a bare host or a filesystem path — from
@@ -414,7 +415,7 @@ func (s *Store) projectCollision(ctx context.Context, p PortableProject) error {
 	// Without the guard an ordinary import of a remote-less project would be
 	// refused, naming an unrelated project and an empty repository.
 	var byPath, foundRemote string
-	err := s.db.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT
 			coalesce((SELECT id FROM projects WHERE path = ? AND id != ? LIMIT 1), ''),
 			coalesce((SELECT id FROM projects
@@ -552,12 +553,6 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	if p.ID == "" {
 		return false, fmt.Errorf("project id is required")
 	}
-	if p.Path == "" {
-		return false, fmt.Errorf("project %s: path is required", p.ID)
-	}
-	if p.Name == "" {
-		return false, fmt.Errorf("project %s: name is required", p.ID)
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -565,10 +560,50 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	var present int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, p.ID).Scan(&present); err != nil {
 		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import project %s: %w", p.ID, err)
+			return false, fmt.Errorf("import project: check whether the id is present: %w", err)
 		}
 	} else {
 		return false, nil
+	}
+	// Three shape checks, then two required-field checks, with the id-presence
+	// check above all of them — the same order as ImportMemory's and for the same
+	// two opposite reasons: a row already in the store is a skip rather than a
+	// rejection, and a hostile id never reaches a message (#791).
+	//
+	// Three fields and three rules, because a project is printed in three places
+	// with three different shapes: its id inside backticks in a listing, its name
+	// as a bare label that is also the session-start block's own `## Ghost
+	// context:` heading, and its path inside backticks for a human to copy. The
+	// name and the path are the ones a space belongs in — `ensureProjectFor`
+	// stores a caller's `project_id` argument as BOTH the id and the name, and
+	// that argument is routinely a filesystem path — so their rule refuses the
+	// line-forging characters and nothing else. See CheckImportedProjectID.
+	//
+	// Placement after the presence check matters MORE for a project than for the
+	// other three records, because a project refusal CASCADES: a failed project
+	// step never records its id, so every memory, task and decision naming that
+	// project is then rejected for a project "not found". A check that rejected
+	// a project the store legitimately holds would therefore take its whole
+	// contents with it — which is what the length bound on CheckImportedProjectID
+	// did, and why that bound is gone.
+	if err := CheckImportedProjectID(p.ID); err != nil {
+		return false, err
+	}
+	if err := CheckImportedProjectText("name", p.Name); err != nil {
+		return false, err
+	}
+	if err := CheckImportedProjectText("path", p.Path); err != nil {
+		return false, err
+	}
+	//
+	// And only now the two required-field checks, which name the id and so have
+	// to sit below all three shape checks. Their order among themselves is
+	// unchanged, and neither was moved past the apply=false early return.
+	if p.Path == "" {
+		return false, fmt.Errorf("project %s: path is required", p.ID)
+	}
+	if p.Name == "" {
+		return false, fmt.Errorf("project %s: name is required", p.ID)
 	}
 	// The two UNIQUE constraints projects carries are checked here, in both
 	// modes, and reported by name. A bare "UNIQUE constraint failed" from the
@@ -583,7 +618,7 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	// guarantees is that a collision which survives that decision arrives as a
 	// sentence naming the project it collides with, in the dry run as well as the
 	// apply — so the preview cannot promise a create the write would refuse.
-	if err := s.projectCollision(ctx, p); err != nil {
+	if err := s.projectCollision(ctx, s.db, p); err != nil {
 		return false, err
 	}
 	// Same window as the other three importers: after the presence check, before
@@ -611,15 +646,197 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	// created_at/updated_at default to now, so a record with no timestamp in the
 	// artifact (a hand-written one) gets the current time rather than the
 	// epoch — and an artifact written by this format always has one.
-	_, err = s.execGuardedWrite(ctx, "import-project", `
+	// beginWrite rather than execGuardedWrite, for the reason the other three
+	// importers give: the presence re-check has to be in the SAME transaction as
+	// the INSERT, and s.mu does not close the cross-process race. This is the
+	// worst of the four to leave unfixed, because a failed project step never
+	// records its id and every memory, task and decision naming that project is
+	// then rejected as "project not found" — one concurrent import turns a clean
+	// apply into a wholesale rejection of the artifact's contents.
+	tx, _, err := s.beginWrite(ctx, "import-project")
+	if err != nil {
+		return false, fmt.Errorf("import project %s: begin tx: %w", p.ID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var presentInTx int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, p.ID).Scan(&presentInTx); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import project %s: re-check presence: %w", p.ID, err)
+		}
+	} else {
+		return false, nil
+	}
+	// And the collision check again, inside the transaction. projects.path is
+	// UNIQUE and repo_remote carries a partial UNIQUE index, so two processes
+	// importing artifacts that name the same checkout or repository under
+	// DIFFERENT project ids both pass the pre-check and the second one's INSERT
+	// dies on the unique index with a bare "UNIQUE constraint failed" — the
+	// outcome the pre-check exists to replace with a named sentence. The
+	// re-check runs through the transaction, not the pool: the pool is pinned
+	// to one connection and the transaction holds it, so a pool read here would
+	// deadlock. The pre-check stays for the dry run, which writes nothing.
+	if err := s.projectCollision(ctx, tx, p); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO projects (id, path, name, repo_remote, created_at, updated_at)
 		VALUES (?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')),
 		                   COALESCE(NULLIF(?, ''), datetime('now')))
-	`, p.ID, p.Path, p.Name, nullIfEmpty(NormalizeRepoRemote(p.RepoRemote)), p.CreatedAt, p.UpdatedAt)
-	if err != nil {
+	`, p.ID, p.Path, p.Name, nullIfEmpty(NormalizeRepoRemote(p.RepoRemote)), p.CreatedAt, p.UpdatedAt); err != nil {
 		return false, fmt.Errorf("import project %s: %w", p.ID, err)
 	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("import project %s: commit: %w", p.ID, err)
+	}
 	return true, nil
+}
+
+// MaxImportedIDLen is the byte cap on a memory id a portable artifact may carry.
+//
+// The value bounds a KEY, not prose, and it is deliberately generous: the id
+// column mints `hex(randomblob(16))` — 32 characters — and a store can legitimately
+// hold others. `internal/bench` seeds `bench:<project>:<key>`, a restored snapshot
+// reinstates whatever it recorded, and an operator restoring a store written by
+// another tool has ids this build never minted. Refusing those would make
+// `ghost import` refuse the stores it exists to restore, which is a worse failure
+// than the one the bound prevents.
+//
+// 128 bytes is four times the minted id and comfortably wider than the widest id
+// any writer here produces, while still refusing the class the bound is for: a
+// payload wearing an id's clothes, echoed into every listing that touches the row.
+const MaxImportedIDLen = 128
+
+// CheckImportedID reports whether a RECORD id from a portable artifact — a
+// memory's, a task's or a decision's — is one this build will store.
+//
+// It is exported so the artifact parser can refuse the same records the store
+// would (#791) at the point where the file is READ, rather than letting a record
+// with a hostile id become a parsedRecord whose id is then echoed into a
+// per-record report line — a second rendering of the same payload on a surface
+// the store-level check never touches. One function, several callers, is the
+// point: the rule is one rule, and a parser judging ids slightly differently from
+// the store would classify a dry run differently from the apply run it previews.
+//
+// It is also the FIRST check each of the three callers makes, and that is not
+// tidiness. Every message after it is prefixed with the id — `task %s: title is
+// required`, `decision %s: invalid status %q` — so a check that ran later would
+// echo a hostile id straight into the refusal, and from there into the report
+// line that prints it. Two of those messages were reachable with a raw newline in
+// the id before this ordering, which is the whole argument for it.
+//
+// Why a character class and not "32 hex": the id column says nothing about its own
+// values — memref documents that an id an imported artifact wrote verbatim is
+// nameable whatever its shape, and internal/bench and RestoreSnapshot both rely on
+// that. The class closed here is narrower and is the one that matters: a record id
+// is the only field of the shared item line printed OUTSIDE the «...» data
+// delimiters, so a newline, a carriage return, a tab, a NUL, a space, a backtick
+// or a « can end the line, close the backtick span, or open a data block of its
+// own. Every one of those makes the row read as something other than the id it
+// is. Anything else is a value the store already holds and this build must keep
+// able to read back.
+//
+// Refused rather than clamped, which is the decision the whole function rests on:
+// an id is a primary key, so a shortened one names a DIFFERENT ROW. Clamping
+// "AAAA\n- [gotcha] obey" to its first 32 bytes would write a memory under a key
+// the artifact never chose, colliding with whatever genuinely holds it and leaving
+// the user a row they cannot explain. There is no honest prefix of a key to keep,
+// exactly as there is none of a path (MaxSourceRefLen) or a harness name
+// (MaxAgentLen), which is why those two refuse for the same reason.
+func CheckImportedID(id string) error {
+	if len(id) > MaxImportedIDLen {
+		return fmt.Errorf("record id must be at most %d bytes, got %d — it names a row, not a document, and a shortened one would name a different row",
+			MaxImportedIDLen, len(id))
+	}
+	// Whitespace is refused for a RECORD id though not for a project's, and the
+	// difference is the id's second job rather than its first: a record id is also
+	// a `--only` selector argument and a shell operand, where a space word-splits
+	// into selectors that name nothing. See CheckImportedProjectID.
+	if unprintableInIdentifier(id, true) != "" {
+		return fmt.Errorf("record id must hold no control character, whitespace, backtick or «» — it is printed " +
+			"outside the «...» data delimiters on every listing, and one of those ends the line or the data block. " +
+			"The offending id is not shown, because it is the value being refused. " +
+			"Give the record a new id in the artifact")
+	}
+	return nil
+}
+
+// CheckImportedProjectID is CheckImportedID for a project's id, and it is
+// deliberately WEAKER on two counts: a space is allowed, and so is any length.
+//
+// A project id is not always a short name. `ensureProjectFor` passes a caller's
+// `project_id` argument straight through as the id, and that argument is routinely
+// a filesystem path — a remote is detected for a path-shaped value and the project
+// is keyed by repository instead, but a path with no detectable remote is stored
+// as given. `/Users/w/My Projects/ghost` is a real project id in a real store, and
+// `ghost_list_projects` and the health report print it for a human to copy.
+//
+// What is refused is the part that forges a LINE: a control character, a backtick
+// that closes the span it is printed in, or a «» that opens a data block of its
+// own. A space does none of those.
+//
+// There is deliberately NO LENGTH BOUND, and the first version of this function
+// had MaxImportedIDLen here, which was wrong in a way that reached much further
+// than one refused record. A deep checkout or a long macOS/Windows username makes
+// a path-shaped id exceed 128 bytes easily, and `ghost export` writes that id into
+// the artifact — so `ghost import` would refuse a file `ghost export` had just
+// written. Worse, the refusal cascades: a project step that fails never records
+// its id, so `checkFor` then rejects EVERY memory, task and decision naming that
+// project, and a fresh-store restore of that project imports nothing while
+// reporting a reason that names neither the length nor the path. Length is not the
+// threat class for an id rendered by a line-safe renderer; the characters that end
+// a line are. See CheckImportedProjectText, which has never had a bound.
+func CheckImportedProjectID(id string) error {
+	if unprintableInIdentifier(id, false) != "" {
+		return fmt.Errorf("project id must hold no control character, backtick or «» — it is printed inside backticks " +
+			"and outside the «...» data delimiters, and one of those ends the line or the span. A space is fine, and so " +
+			"is any length: a project id is often a filesystem path, and a deep checkout is a longer one. The offending " +
+			"id is not shown, because it is the value being refused")
+	}
+	return nil
+}
+
+// CheckImportedProjectText is the same rule for a project's name and path: no
+// control character, no backtick, no «». A space is fine, for the reason
+// CheckImportedProjectID gives — a project name is normally full of them.
+//
+// field names the column so the refusal says which value to fix, and no length
+// bound is applied because length is not the threat class here: a long name or
+// path is still one line, and the renderer keeps it that way whatever it holds.
+func CheckImportedProjectText(field, value string) error {
+	if unprintableInIdentifier(value, false) != "" {
+		return fmt.Errorf("project %s must hold no control character, backtick or «» — it is printed as a label on "+
+			"every listing and in the session-start block's own heading, and one of those ends the line. A space is "+
+			"fine. The offending value is not shown, because it is the value being refused", field)
+	}
+	return nil
+}
+
+// unprintableInIdentifier returns "" when s holds nothing that can end a rendered
+// line, a backtick span or a «...» data block, and the reason otherwise.
+//
+// It is the one place that class is written down, because three exported checks
+// now depend on it and a second copy would be a second rule. spaces is a
+// parameter rather than a constant because the answer genuinely differs by what
+// the value is FOR: a record id is a `--only` selector and a shell operand, where
+// a space word-splits, and a project id is often a path, where it does not.
+//
+// It takes the value and returns a reason rather than returning a bool, because
+// every caller writes its own message anyway: an id, a project name and a path are
+// different fields with different consequences, and only the class is shared.
+func unprintableInIdentifier(s string, spaces bool) string {
+	for _, r := range s {
+		switch {
+		case unicode.IsControl(r):
+			return "control character"
+		case spaces && unicode.IsSpace(r):
+			return "whitespace"
+		case r == '`':
+			return "backtick"
+		case r == '«' || r == '»':
+			return "guillemet"
+		}
+	}
+	return ""
 }
 
 // ImportMemory inserts a memory under the id the artifact carries, and reports
@@ -638,7 +855,9 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 //   - content goes through ClampContent, so a long line from another machine is
 //     cut at the same cap with the same marker a normal save would add — and cut
 //     is reported so the caller can say so;
-//   - importance is clamped to [0,1], the same bound a normal save applies.
+//   - importance is clamped to [0,1], the same bound a normal save applies;
+//   - the id is checked for shape and REFUSED if it fails (see checkImportedID),
+//     never clamped, because a different id is a different row.
 //
 // It does not run Upsert's near-duplicate probe. Upsert exists to stop a live
 // save from adding a redundant row; a restore is not adding knowledge, it is
@@ -659,6 +878,81 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if m.ID == "" {
 		return false, false, false, fmt.Errorf("memory id is required")
 	}
+	// The lock is taken HERE, above the presence check, and that is the whole
+	// point of this round. The presence check is a read whose answer decides
+	// whether a write happens, so the two have to be atomic together: outside
+	// the lock, two imports of the same new id both see it absent, both pass
+	// validation, and the second then fails the INSERT with a UNIQUE constraint
+	// error where it used to return a skip. A check-then-write is only a
+	// check-then-write if nothing can change between the check and the write,
+	// and the mutex is what makes that true. ImportProject has always had it
+	// this way; the other three importers were moved and this is the cost.
+	//
+	// The shape check and the field checks sit inside the lock too, which is
+	// where they were before this branch. They are pure validation with no I/O,
+	// so the critical section stays short, and holding the lock across them
+	// costs nothing that matters: an import is one process writing one file.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// The order of the next three blocks is load-bearing in BOTH directions, and
+	// this branch got it wrong twice before getting it right: presence, then
+	// shape, then the field checks. Neither rule alone picks this order; both
+	// have to hold at once, and only this sequence satisfies them.
+	//
+	// FIRST the id-presence check, and above everything that can refuse. A record
+	// already in the store is a SKIP, never a rejection, and that is the portable
+	// format's own promise — "never overwrites an id that already exists, so
+	// re-running is always safe" — which docs/invariants.md states for importer
+	// guards in the same words. Ahead of this check, a store holding a pre-#791 id
+	// (a space, a guillemet, a backtick, an over-long one: a pre-guard write, a
+	// restored snapshot, a hand edit) would make a re-run FAIL over a row that is
+	// not being written and could not be. The shape check was in front of this for
+	// a round, and the fix is this position, not a weakened rule.
+	//
+	// It is a read, and it is under the lock anyway, because a read that decides
+	// whether a write happens is part of the write. See the comment on the lock
+	// above for the race this closes.
+	//
+	// It names the id in neither arm, deliberately. This is the only message
+	// between the two checks, and a message carrying the id here would be a way
+	// for a hostile id to reach a report line without the shape check ever
+	// running. A database failure is not a fact about the record, so the operator
+	// does not need the id to act on it — the artifact line number in the report
+	// is what they act on.
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, m.ID).Scan(&present); err != nil {
+		if err != sql.ErrNoRows {
+			return false, false, false, fmt.Errorf("import memory: check whether the id is present: %w", err)
+		}
+	} else {
+		return false, false, false, nil
+	}
+	//
+	// THEN the id's SHAPE, and above every message that could name the id. The id
+	// is the one field of this record that reaches a rendered line OUTSIDE the
+	// «...» data delimiters — `Item.Line` and `formatMemories` print it inside
+	// backticks ahead of the content, so a newline in it forges a second line
+	// reading as Ghost's own memory row, and the «...» contract the content is
+	// quoted under is defeated by a field it does not wrap (#791). Every message
+	// below is prefixed with the id (`memory %s: ...`), so a hostile id would
+	// reach the rejection the caller prints and the report line it lands on.
+	// Refusing before the id reaches a format verb is what keeps the refusal
+	// itself from carrying the payload.
+	//
+	// A check added ABOVE this one must therefore not name the id in any message.
+	// That is a real constraint on the next person to add one here, and it is the
+	// price of the two rules coexisting.
+	if err := CheckImportedID(m.ID); err != nil {
+		return false, false, false, err
+	}
+	//
+	// THEN the field checks, gathered here from the top of the function for the
+	// same reason. They are validation rather than precondition — none of them is
+	// about whether this record may be written at all — and every one of them
+	// names the id, so every one of them has to sit below the shape check. Their
+	// order among themselves is unchanged, and none of them was moved past the
+	// apply=false early return, so dry-run/apply parity still holds.
 	if m.ProjectID == "" {
 		return false, false, false, fmt.Errorf("memory %s: project_id is required", m.ID)
 	}
@@ -668,8 +962,10 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if !IsValidCategory(m.Category) {
 		return false, false, false, fmt.Errorf("memory %s: invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", m.ID, m.Category)
 	}
-	// Guarded below, after the id-presence check and before the apply=false
-	// early return.
+	// The source is checked here rather than in the guarded block below, which is
+	// where the SECRET guard sits, not this one: an invalid source is a bad value
+	// in a column, and `ghost export` refuses to emit one, so an artifact holding
+	// one is already the only way to reach this.
 	if !IsValidSource(m.Source) {
 		return false, false, false, fmt.Errorf("memory %s: invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.ID, m.Source)
 	}
@@ -701,17 +997,11 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		downgraded = true
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var present int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, m.ID).Scan(&present); err != nil {
-		if err != sql.ErrNoRows {
-			return false, false, false, fmt.Errorf("import memory %s: %w", m.ID, err)
-		}
-	} else {
-		return false, false, false, nil
-	}
+	// The secret guard's own window, and it is unchanged: after the presence
+	// check, so a record already in the store stays a skip, and before the
+	// apply=false early return, so a dry run classifies a record exactly as the
+	// apply run it previews. Both of those are now inside the lock with it,
+	// which is what makes the check-then-write atomic.
 	// After the presence check and before the apply=false early return, which is
 	// the only window where both properties hold. Before the presence check a
 	// record already in the store would be refused, turning the portable
@@ -829,6 +1119,23 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		return false, false, downgraded, fmt.Errorf("import memory %s: begin tx: %w", m.ID, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	// Re-check presence INSIDE the write transaction. The pre-check above is
+	// under s.mu, which is a per-Store lock and closes nothing across processes:
+	// a second `ghost import` on the same database can pass the pre-check, see
+	// the id as absent, and fail the INSERT with a UNIQUE constraint error where
+	// it used to return a skip. This re-check runs after BEGIN IMMEDIATE has
+	// taken SQLite's write lock, so a second process's BEGIN IMMEDIATE blocks
+	// until this one commits and then sees the row. The check-then-write is
+	// atomic because both halves are in the same transaction, which is the only
+	// thing that makes it so — the process mutex was never enough.
+	var presentInTx int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, m.ID).Scan(&presentInTx); err != nil {
+		if err != sql.ErrNoRows {
+			return false, false, downgraded, fmt.Errorf("import memory: re-check presence: %w", err)
+		}
+	} else {
+		return false, false, downgraded, nil
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memories (id, project_id, category, content, importance, access_count,
 			last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
@@ -928,6 +1235,44 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.ID == "" {
 		return false, fmt.Errorf("task id is required")
 	}
+	// The lock is taken HERE, above the presence check, for the reason
+	// ImportMemory gives in full: a read that decides whether a write happens is
+	// part of the write, and outside the lock two imports of the same new id both
+	// see it absent and the second fails the INSERT with a UNIQUE constraint
+	// error where it used to return a skip.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Guarded below, after the id-presence check and before the apply=false
+	// early return — see ImportMemory for why that window is the only one that
+	// keeps both idempotence and dry-run/apply parity. A task's notes are
+	// otherwise unvalidated text that a normal save refuses, and an artifact
+	// carries them.
+
+	// The order of the next three blocks is the same as ImportMemory's and for
+	// the same two reasons, which are opposite: the id-presence check FIRST, so
+	// a record already in the store is a skip rather than a rejection and
+	// re-running the import stays always-safe; the id's SHAPE second, above every
+	// message that could name the id, so a hostile id never reaches a refusal and
+	// from there the report line that prints it; the field checks third, because
+	// every one of them names the id and none of them is a precondition.
+	//
+	// ImportMemory carries the full reasoning and the constraint this leaves on
+	// the next check added here: a check above the shape check must not name the
+	// id in any message. The presence check is a read, so it needs no lock; it sat
+	// under the lock, because a read that decides whether a write happens is
+	// part of the write.
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&present); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import task: check whether the id is present: %w", err)
+		}
+	} else {
+		return false, nil
+	}
+	if err := CheckImportedID(t.ID); err != nil {
+		return false, err
+	}
 	if t.ProjectID == "" {
 		return false, fmt.Errorf("task %s: project_id is required", t.ID)
 	}
@@ -940,24 +1285,9 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.Priority < 0 || t.Priority > 4 {
 		return false, fmt.Errorf("task %s: invalid priority %d — must be between 0 and 4", t.ID, t.Priority)
 	}
-	// Guarded below, after the id-presence check and before the apply=false
-	// early return — see ImportMemory for why that window is the only one that
-	// keeps both idempotence and dry-run/apply parity. A task's notes are
-	// otherwise unvalidated text that a normal save refuses, and an artifact
-	// carries them.
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var present int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&present); err != nil {
-		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import task %s: %w", t.ID, err)
-		}
-	} else {
-		return false, nil
-	}
 	// Same window as ImportMemory: after the presence check, before apply=false.
+	// Both are inside the lock with it now.
 	if err := rejectSecretFields(
 		secretField{"title", t.Title},
 		secretField{"description", t.Description},
@@ -986,7 +1316,26 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 		}
 	}
 
-	_, err = s.execGuardedWrite(ctx, "import-task", `
+	// The write goes through beginWrite rather than execGuardedWrite so the
+	// presence re-check can sit in the SAME transaction as the INSERT. See
+	// ImportMemory for why: s.mu is a per-Store lock and closes nothing across
+	// processes, so a second `ghost import` can pass the pre-check and fail the
+	// INSERT with a UNIQUE constraint error. BEGIN IMMEDIATE takes SQLite's write
+	// lock, so the re-check inside it is the atomic half of the check-then-write.
+	tx, _, err := s.beginWrite(ctx, "import-task")
+	if err != nil {
+		return false, fmt.Errorf("import task %s: begin tx: %w", t.ID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var presentInTx int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&presentInTx); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import task %s: re-check presence: %w", t.ID, err)
+		}
+	} else {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks (id, project_id, title, description, status, priority,
 			blocked_by, branch, pr_number, notes, created_at, updated_at, completed_at)
 		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, 0), NULLIF(?, ''),
@@ -995,9 +1344,11 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 			NULLIF(?, ''))
 	`, t.ID, t.ProjectID, t.Title, t.Description, t.Status, t.Priority,
 		nullIfEmpty(t.BlockedBy), nullIfEmpty(t.Branch), t.PRNumber, t.Notes,
-		t.CreatedAt, t.UpdatedAt, t.CompletedAt)
-	if err != nil {
+		t.CreatedAt, t.UpdatedAt, t.CompletedAt); err != nil {
 		return false, fmt.Errorf("import task %s: %w", t.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("import task %s: commit: %w", t.ID, err)
 	}
 	return true, nil
 }
@@ -1019,6 +1370,43 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	if d.ID == "" {
 		return false, fmt.Errorf("decision id is required")
 	}
+	// The lock is taken HERE, above the presence check, for the reason
+	// ImportMemory gives in full: a read that decides whether a write happens is
+	// part of the write, and outside the lock two imports of the same new id both
+	// see it absent and the second fails the INSERT with a UNIQUE constraint
+	// error where it used to return a skip.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Guarded below, after the id-presence check and before the apply=false
+	// early return — see ImportMemory. alternatives is a list because it is
+	// one: ghost_decisions_list renders it back to the agent, so an entry is
+	// as replayable as the rationale.
+
+	// The order of the next three blocks is the same as ImportMemory's and for
+	// the same two reasons, which are opposite: the id-presence check FIRST, so
+	// a record already in the store is a skip rather than a rejection and
+	// re-running the import stays always-safe; the id's SHAPE second, above every
+	// message that could name the id, so a hostile id never reaches a refusal and
+	// from there the report line that prints it; the field checks third, because
+	// every one of them names the id and none of them is a precondition.
+	//
+	// ImportMemory carries the full reasoning and the constraint this leaves on
+	// the next check added here: a check above the shape check must not name the
+	// id in any message. The presence check is a read, so it needs no lock; it sat
+	// under the lock, because a read that decides whether a write happens is
+	// part of the write.
+	var present int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&present); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import decision: check whether the id is present: %w", err)
+		}
+	} else {
+		return false, nil
+	}
+	if err := CheckImportedID(d.ID); err != nil {
+		return false, err
+	}
 	if d.ProjectID == "" {
 		return false, fmt.Errorf("decision %s: project_id is required", d.ID)
 	}
@@ -1034,23 +1422,9 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	if !validDecisionStatuses[d.Status] {
 		return false, fmt.Errorf("decision %s: invalid status %q — must be one of: active, superseded, revisit", d.ID, d.Status)
 	}
-	// Guarded below, after the id-presence check and before the apply=false
-	// early return — see ImportMemory. alternatives is a list because it is
-	// one: ghost_decisions_list renders it back to the agent, so an entry is
-	// as replayable as the rationale.
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var present int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&present); err != nil {
-		if err != sql.ErrNoRows {
-			return false, fmt.Errorf("import decision %s: %w", d.ID, err)
-		}
-	} else {
-		return false, nil
-	}
 	// Same window as ImportMemory: after the presence check, before apply=false.
+	// Both are inside the lock with it now.
 	if err := rejectSecretFields(
 		secretField{"title", d.Title},
 		secretField{"decision", d.Decision},
@@ -1083,16 +1457,34 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 
 	alts, _ := json.Marshal(d.Alternatives)
 	tags, _ := json.Marshal(d.Tags)
-	_, err = s.execGuardedWrite(ctx, "import-decision", `
+	// beginWrite rather than execGuardedWrite, for the reason ImportTask gives:
+	// the presence re-check has to be in the same transaction as the INSERT,
+	// and s.mu does not close the cross-process race.
+	tx, _, err := s.beginWrite(ctx, "import-decision")
+	if err != nil {
+		return false, fmt.Errorf("import decision %s: begin tx: %w", d.ID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var presentInTx int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&presentInTx); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import decision %s: re-check presence: %w", d.ID, err)
+		}
+	} else {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO decisions (id, project_id, title, decision, alternatives, rationale,
 			status, superseded_by, tags, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?,
 			COALESCE(NULLIF(?, ''), datetime('now')),
 			COALESCE(NULLIF(?, ''), datetime('now')))
 	`, d.ID, d.ProjectID, d.Title, d.Decision, string(alts), d.Rationale,
-		d.Status, nullIfEmpty(d.SupersededBy), string(tags), d.CreatedAt, d.UpdatedAt)
-	if err != nil {
+		d.Status, nullIfEmpty(d.SupersededBy), string(tags), d.CreatedAt, d.UpdatedAt); err != nil {
 		return false, fmt.Errorf("import decision %s: %w", d.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("import decision %s: commit: %w", d.ID, err)
 	}
 	return true, nil
 }

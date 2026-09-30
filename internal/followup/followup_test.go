@@ -52,11 +52,17 @@ func TestResolveCommandQuotesAnythingButABareWord(t *testing.T) {
 	}
 }
 
-// An id is quoted like a project name, for the same reason and because an
-// imported artifact can hold anything: `ghost import` writes ids verbatim and
-// ImportMemory refuses only an empty one. Unquoted, an id holding a space
-// word-splits into two selectors the repair refuses, and one holding a `;` is a
-// second command for whoever pastes the line.
+// An id is quoted like a project name, for the same reason and because an id is
+// caller-supplied text on a row a store may already hold. Unquoted, an id
+// holding a space word-splits into two selectors the repair refuses, and one
+// holding a `;` is a second command for whoever pastes the line.
+//
+// Since #791 `ImportMemory` refuses an id holding whitespace at all, so a NEW
+// artifact cannot plant either of these; a store that holds one got it before
+// the refusal landed, from a restored snapshot, or by hand. The quoting is not
+// therefore redundant — it is the reason such an id is still nameable at all,
+// and `ResolveCommand` is handed ids from the store rather than from an artifact
+// this run is about to read.
 func TestResolveCommandQuotesAnIDThatIsNotHex(t *testing.T) {
 	got, viaFile, unnameable := ResolveCommand("myproj", []string{"imported note; rm -rf /"})
 	if len(viaFile) != 0 || len(unnameable) != 0 {
