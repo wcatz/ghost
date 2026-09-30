@@ -53,21 +53,38 @@ func TestDetectDoesNotRescanTheLinePerAssignment(t *testing.T) {
 	// quadratic, so the time grows ~64x; the line index makes it linear, so it
 	// grows ~8x. The bar is 20x, which separates the two without depending on
 	// how fast the machine is — the ratio is the whole assertion.
-	const base = 2_000
-	warm := build(64)
-	Detect(warm) // one warm call: the regex machines and the word set are one-time
+	//
+	// The figures are CPU time and the cheapest of five rounds, not wall clock
+	// and a single shot, because that combination is what flaked (#815): on a
+	// loaded runner the 8x sample read 36x the 1x sample for code that costs
+	// 8.2x, and the test failed for a tree that had not changed. fastestOf and
+	// cpuClock carry the measurement; the minimum is over rounds because
+	// everything left can only make a call look slower.
+	//
+	// The small fixture is measured over eight calls per round and the large over
+	// one, which puts both windows at tens of milliseconds of CPU. That is the
+	// clock's resolution made irrelevant — macOS counts getrusage in 1 ms — and
+	// it is why the two are not measured the same way despite the ratio being
+	// per-call either way.
+	//
+	// 400 candidates rather than the 2,000 this used, for a reason about FAILURE
+	// rather than speed. The bar is a ratio, so the base size does not move it —
+	// measured here, 400 candidates cost 5.0 ms of CPU and 3,200 cost 40.8 ms,
+	// which is 8.1x for 8x the input. What the base decides is how long a
+	// REGRESSION takes to be caught, and that is quadratic too: with the per-match
+	// rescan restored, 400 candidates cost 78 ms and 3,200 cost 4.76 s, a 61x
+	// reading that fails the 20x bar in under a minute including the warm calls.
+	// At 2,000 the same mutation puts the large fixture past minutes, so the
+	// assertion would eventually fail and nobody would ever see it — the suite
+	// would go over its own timeout first.
+	const base = 400
+	const rounds = 5
 
-	measure := func(n int) (int64, float64) {
-		text := build(n)
-		start := now()
-		Detect(text)
-		return int64(len(text)), secondsSince(start)
-	}
-	_, smallT := measure(base)
-	bigLen, bigT := measure(base * 8)
+	smallT := fastestOf(rounds, 8, func() { Detect(build(base)) })
+	bigT := fastestOf(rounds, 1, func() { Detect(build(base * 8)) })
 
-	t.Logf("%d candidates in %v, %d candidates in %v (%.1fx for 8x the input)",
-		base, smallT, base*8, bigT, ratio(bigT, smallT))
+	t.Logf("%d candidates in %.3f ms of CPU, %d candidates in %.3f ms (%.1fx for 8x the input)",
+		base, msOf(smallT), base*8, msOf(bigT), ratio(bigT, smallT))
 	if smallT == 0 {
 		t.Fatal("the base measurement was zero, so the ratio is meaningless")
 	}
@@ -75,7 +92,6 @@ func TestDetectDoesNotRescanTheLinePerAssignment(t *testing.T) {
 		t.Errorf("8x the candidates cost %.1fx the time — the line is being rescanned "+
 			"per match, so the scan is quadratic in line length", ratio(bigT, smallT))
 	}
-	_ = bigLen
 }
 
 // TestDetectAllocatesBoundedBytes is the mutation check for the mnemonic
@@ -105,12 +121,19 @@ func TestDetectDoesNotRescanTheLinePerAssignment(t *testing.T) {
 // 1.5x is roughly even between the two sides, and all four are written down so a
 // future change to the number is visible rather than remembered.
 //
-// The plain-run figure is now exact rather than sampled: 129 B/op at 4 KB and 129
-// B/op at 32 KB, 1.0x, identical across eight consecutive runs. It was
-// measurement noise before — the 4 KB figure read 569, 8975, 3582, 569, 8975
-// across six runs and the 32 KB figure was bimodal at 421 or 4,203 — so this
-// assertion used to fail intermittently and I would have shipped a flaky gate
-// describing it as verified. See allocatedBytesPerCall for the two causes.
+// The plain-run figure is now exact rather than sampled, and the reason is in
+// the instrument rather than in the bar. On the pinned instrument the small and
+// large fixtures read 130 B/op and 130 B/op — identical to the byte — and did so
+// on 30 consecutive windows. Unpinned, the same fixture read anywhere from 130 to
+// 9,962 B/op between adjacent windows of one run, because TotalAlloc is a
+// process-wide counter and Go's regexp match machines live in a per-P sync.Pool:
+// a goroutine that moves between Ps allocates a fresh machine inside whatever
+// window it happens to be in. Re-arming GC per window had the same effect by
+// emptying the pool again. It was measurement noise before — the 4 KB figure read
+// 569, 8975, 3582, 569, 8975 across six runs and the 32 KB figure was bimodal at
+// 421 or 4,203 — so this assertion used to fail intermittently and I would have
+// shipped a flaky gate describing it as verified (#815). See
+// allocatedBytesPerCall and pinnedToOneThread for the two causes.
 func TestDetectAllocatesBoundedBytes(t *testing.T) {
 	// Words with spaces throughout, which is the shape that made FieldsFunc
 	// build a slice per word. ~480 words at 4 KB, ~3,840 at 32 KB.
@@ -122,20 +145,26 @@ func TestDetectAllocatesBoundedBytes(t *testing.T) {
 		t.Fatalf("fixtures are %d and %d bytes, want at least 4000 and 32000", len(small), len(big))
 	}
 
-	// Different call counts, deliberately: the small fixture allocates ~500 bytes
-	// per call and the large one ~420, so a fixed count large enough for the
-	// first would make the second unnecessarily slow. The ratio is per call, so
-	// the two counts do not have to match — what they have to do is each put its
-	// own signal above the process's allocation floor.
-	smallB := allocatedBytesPerCall(100, func() { Detect(small) })
-	bigB := allocatedBytesPerCall(8, func() { Detect(big) })
+	// The SAME call count for both fixtures, which is a correctness property of
+	// the ratio and not tidiness. allocatedBytesPerCall reads TotalAlloc across a
+	// window, so anything the runtime allocates inside that window lands in both
+	// figures divided by the same count — and the error it introduces is
+	// one-sided. With equal counts, a contaminant of F bytes pulls the measured
+	// ratio (pb·n+F)/(ps·n+F) toward 1 and never past it, so the test can lose
+	// sensitivity but can never fail on noise. With the 100-against-8 counts this
+	// used, F landed on the small-signal side with all of its weight and the
+	// assertion failed on an unchanged implementation roughly half the time
+	// (#815). Twelve calls of the 32 KB fixture is ~150 ms of window, which is
+	// plenty of signal for the 8x ratio and short enough to keep the test quick.
+	const calls = 12
+	smallB := allocatedBytesPerCall(calls, func() { Detect(small) })
+	bigB := allocatedBytesPerCall(calls, func() { Detect(big) })
 	t.Logf("%.0f B/op at %d bytes, %.0f B/op at %d bytes (%.1fx for 8x the input)",
 		smallB.bytesPerOp, len(small), bigB.bytesPerOp, len(big),
 		ratio(bigB.bytesPerOp, smallB.bytesPerOp))
 
 	// A walk that stops at the first non-word must not cost more as the content
-	// grows. Both figures are per call, so the two fixtures' different call counts
-	// cancel.
+	// grows. Both figures are per call over the same number of calls.
 	if bigB.bytesPerOp > 1.5*smallB.bytesPerOp {
 		t.Errorf("8x the content cost %.1fx the allocated bytes — something is "+
 			"materialising the content, and the mnemonic pass collecting every "+
@@ -149,3 +178,8 @@ func ratio(big, small float64) float64 {
 	}
 	return big / small
 }
+
+// msOf renders a seconds figure the way the cost tests report it. The raw value
+// is a float count of nanoseconds, which prints as 4.98775e+06 and reads like an
+// exponent rather than a duration.
+func msOf(seconds float64) float64 { return seconds * 1000 }
