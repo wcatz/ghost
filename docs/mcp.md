@@ -185,8 +185,13 @@ tag cannot forge a line or break out of its own string — but it does not escap
 tag therefore prints as `<<` or `>>`, the same substitution the delimiters
 themselves use, so a reader who has met one knows the other, and a backtick prints
 as the JSON escape `\u0060` — there is no reader-facing convention for a backtick,
-so it gets the form the surrounding array already uses. A space and any length are
-fine: a tag is a label, not a key, and "ci timeouts" is a real one. A row's
+so it gets the form the surrounding array already uses. The consolidation prompt is a fourth printing surface for the same field, and the
+worse one: its list is neither JSON nor delimited, it sits on a line the model emits
+`keep`/`merge`/`rewrite`/`drop` operations against, and a newline in a tag would end
+the record. Its separators are escaped for the same reason, and its list is `|`
+separated because a comma cannot be a separator on a surface that has to survive one.
+A space and any length are fine: a tag is a label, not a key, and "ci timeouts" is a
+real one. A row's
 **`source=`** label comes from a closed vocabulary (`reflection`, `chat`, `manual`,
 `tool`, `mcp`, `onboarding`, `decision_log`, `builtin`), so it is printed bare.
 

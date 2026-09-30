@@ -275,8 +275,34 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 			// unrelated memories elsewhere in the corpus. A merge now unions the
 			// tags of the ids it names, so they are shown for the model to reason
 			// about rather than to re-emit.
+			//
+			// The `|` separator is not decorative, and neither is the trailing `,`
+			// inside a tag. This list is NOT JSON and NOT delimited: it is metadata
+			// on a line the model is told to emit `keep`/`merge`/`rewrite`/`drop`
+			// operations against, so a tag holding a comma or a `|` changes what the
+			// model reads as the boundary between two tags. A newline is the worse
+			// case: it ends the record, and the next line is a full line in a prompt
+			// that reads as Ghost's own instructions. `ghost import` carries a tag
+			// byte for byte — a delimiter in a label must not cost a memory its place
+			// in a backup — so the only thing standing between a hostile artifact and
+			// this prompt is the substitution below, and it runs on every stored tag
+			// rather than on the ones a writer vouched for.
+			//
+			// The three characters are exactly the ones `mcpserver.validateTags`
+			// refuses on the four MCP writers, plus the two separators this
+			// particular surface adds. A tag cannot contain them through any of
+			// Ghost's own writers; it can arrive through an import, a restored
+			// snapshot, or a hand edit, which is the same three routes the id guard's
+			// own comment names. `,` is escaped rather than dropped so a reader can
+			// tell a tag that held one from a tag that did not, and the replacements
+			// are the ones `assemble.TagsLabel` uses for a delimiter so that a tag
+			// reads the same in this prompt as on a memory row.
 			if len(m.Tags) > 0 {
-				line += fmt.Sprintf(", tags:[%s]", strings.Join(m.Tags, ","))
+				escaped := make([]string, len(m.Tags))
+				for i, t := range m.Tags {
+					escaped[i] = strings.NewReplacer("|", "ǁ", ",", "‚").Replace(neutralizeDelimiters(t))
+				}
+				line += fmt.Sprintf(", tags:[%s]", strings.Join(escaped, "|"))
 			}
 			line += fmt.Sprintf(") %s\n", quoteData(m.Content))
 			sb.WriteString(line)
@@ -316,5 +342,19 @@ Return ONLY the JSON object, no other text.`)
 // rewriting any literal « or » inside it so embedded delimiters can't
 // terminate the data block early and smuggle text back out as instructions.
 func quoteData(s string) string {
-	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
+	return "«" + neutralizeDelimiters(s) + "»"
+}
+
+// neutralizeDelimiters rewrites the « and » that open and close a data block into
+// the fixed `<<` and `>>` a reader cannot mistake for one.
+//
+// It is the local copy of `assemble.neutralizeDelimiters`, and the duplication is
+// forced rather than chosen: `internal/assemble` imports `internal/memory`, and
+// this package imports `internal/memory` too, so assemble cannot import reflection
+// and reflection importing assemble would close a cycle through the store. The
+// same substitution, written twice, with the test below asserting the two agree on
+// a corpus of shapes — which is the only way a copy that cannot be shared is kept
+// honest.
+func neutralizeDelimiters(s string) string {
+	return strings.NewReplacer("«", "<<", "»", ">>").Replace(s)
 }
