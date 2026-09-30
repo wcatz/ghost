@@ -328,6 +328,30 @@ ghost supersede myproject --withdraw a1b2c3d4 e5f6a7b8 --apply
 
 Each candidate is classified as `supersedes`, `causes`, `reversed`, or `neither`, with each note's creation timestamp in the prompt. A `supersedes` link only ever points from the newer note to the older one, so a `reversed` verdict — the classifier says the older note holds the current value and the newer one restates an obsolete claim — is reported and refused instead of written; `--apply` also invalidates any `supersedes`/`causes` link the pair already carries. A refused verdict is never recorded in the NEITHER cache, so the pair is not skipped on later passes. The default source is the calling harness. Applying the pass enables targeted demotion during search for genuine replacement pairs.
 
+**A `supersedes` has to retire *every* claim the older note makes, not one of them.** The link demotes the older note as a whole and marks it resolved, so a claim nobody retired drops out of an agent's context in the same instant as the one that was. A newer note that answers some of the older note's claims and leaves the rest standing is therefore `neither` — and specifically **not** `causes`, even when it reads as an elaboration that acts on the older one, because `causes` requires the older note's content to remain independently true and a partly-retired note by definition does not. A newer note that acts on an older one and retires *nothing* is `causes`; one that retires part of it and leaves the rest is not. The `replaced:` field may name several claims, separated by semicolons, when a whole note really is retired. Four shapes were the recurring wrong edges in [#779](https://github.com/wcatz/ghost/issues/779)'s re-measurement — three dry-run passes each on copies of three real stores — and none of them is a `supersedes`:
+
+| Shape | Example | Why it is not a replacement |
+|---|---|---|
+| **Partial claim** | The older note lists four things about a nightly run; a newer note fixes one of them. | The other three claims are still true, and the edge would take them out of context with the fixed one. |
+| **A log entry** | "Released 4.2: the worker moved to the new queue" / "Released 4.3: the worker gained a dead-letter topic". | Each entry records something that happened and stays true, so the later one does not make the earlier one untrue. Sharing a component, a host or a date is not a shared fact. **The exception, which overrides this rule only and not the coverage rule above: an entry that reports the open issue closed.** A status entry saying the fix shipped retires the earlier entry saying the build never got past it — so a blocker note and its fix are a supersession, while two releases are not. **Narrowing is not closing:** a report that leaves the blocker partly standing, or that is a second sighting of a problem still reproducing, does not retire the earlier report and is `neither` — which is why `#641`'s `status-report-divergence` pair is labeled `neither` and only its `status-report-fix` sibling is a supersession. |
+| **A recurring defect** | The same failure seen on two different days. | One still-open problem, not a bug and its fix. Only a note that says it is fixed, and fixes it, supersedes the note that reported it. |
+| **Parallel investigation** | Two notes on one stall, each about a different layer. | Neither retired the other; the timestamps say only which was written last. |
+
+That pass measured 55% precision over its 108 distinct proposals, rising to 79% for the edges proposed in all three passes and falling to 33% for those proposed in one — so the wrong edges are an **unstable** classifier as much as a wrong one, which is what [#779](https://github.com/wcatz/ghost/issues/779)'s second proposal (a gate on agreement between repeated passes) answers. The issue carries those numbers; the table above is the rule the prompt carries, not a measurement of it.
+
+**Upgrading: the tightened rubric applies to NEW pairs, and only `--reassess` reaches the edges already in the graph.** The NEITHER cache's key prefix moves with the rubric, so every cached verdict is re-asked — a fresh pair is judged under the new rules on the next ordinary pass. But a `supersedes` **edge** that is already live is held quiet by `skip-if-unchanged` until one of its endpoints changes, and a passing pass does not re-judge it. So an edge written under the old rubric stays until an edit touches it, or until you run:
+
+```bash
+ghost supersede <project> --reassess              # dry run: what the current rules would withdraw
+ghost supersede <project> --reassess --apply      # withdraw those, and print the resolve repair
+```
+
+That is the whole upgrade step for the rubric, and it is deliberate rather than an oversight: a wrong edge under a tightened rubric is exactly the case no ordinary pass will look at again, which is the reason the repair path exists. The cache clearing is not the same thing and does not reach edges — a cached verdict is a decision about a pair the graph never linked.
+
+One limit of the new rule is worth knowing, because the parser cannot check it: a `supersedes` answer must name a retired claim, and nothing verifies that it named *every* one. `replaced: the first claim; tbd` is accepted — the check is whether a claim is named, not whether all of them are. The coverage requirement is the model's to follow.
+
+
+
 A pair that already carried a live `supersedes` link is a **reclassification**, and a verdict other than `supersedes` on it is a withdrawal of that link — a real graph change, made through the same write that leaves the `unsupersede` history row. So it is reported per edge, in the same shape `--reassess` reports its withdrawals:
 
 ```

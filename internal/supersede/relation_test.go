@@ -189,8 +189,13 @@ func TestClassifierPromptAsksTheBothTrueQuestion(t *testing.T) {
 		"replaced: <the OLDER note's claim that no longer holds>",
 		// The many-fact case is its own rule, not an example of one: the
 		// partial-fix fixture was the one false edge the first eval run wrote,
-		// and the reason is structural (the edge demotes the whole note).
-		"correction to one detail of a many-fact note does not supersede that note",
+		// and the reason is structural (the edge demotes the whole note). It was
+		// one sentence inside NEITHER's list until #779 promoted it to the
+		// coverage requirement the whole SUPERSEDES criterion is stated against,
+		// so the anchor moved with the rule and the point it makes is now
+		// sharper — a many-fact note is superseded only when every claim stops
+		// being true, which is the other half of what #779 measured.
+		"must retire EVERY claim the OLDER note makes, not one of them",
 	} {
 		if !strings.Contains(system, want) {
 			t.Errorf("the single-pair prompt does not carry %q:\n%s", want, system)
@@ -201,17 +206,27 @@ func TestClassifierPromptAsksTheBothTrueQuestion(t *testing.T) {
 	}
 }
 
-// TestSupersedeNEITHERCachePrefixMoved: every NEITHER verdict cached under the
-// old rubric was judged by a rule that could not tell two-true pairs apart, and
-// a cache hit is a permanent skip for the life of that text — so the key's
+// TestSupersedeNEITHERCachePrefixMoved: every NEITHER verdict cached under an
+// older rubric was judged by a rule that could not tell two-true pairs apart,
+// and a cache hit is a permanent skip for the life of that text — so the key's
 // version prefix must move with the rubric, in one step, the way resolve's did.
+//
+// EVERY prior version is listed, not just the oldest, and that is the part a
+// single-version assertion lets go: v2 was #641's rubric, v3 was #686's, and
+// v4 is #779's. A bump that only clears v2 would leave every #686-era row in
+// place, and those are exactly the rows judged by a rule that answers a
+// partial-claim supersession SUPERSEDES. So the test walks the whole list, and
+// the list is a named type so a future bump has to name the version it retires
+// in the same place.
 func TestSupersedeNEITHERCachePrefixMoved(t *testing.T) {
-	old := func(content string) string {
-		sum := sha256.Sum256([]byte("v2\x00" + content))
-		return hex.EncodeToString(sum[:])
-	}
-	if old("same text") == contentHash("same text") {
-		t.Error("a v2-prefixed NEITHER row still matches the cache key: every verdict cached under the #641 rubric would keep skipping its pair")
+	for _, prior := range []string{"v2", "v3"} {
+		old := func(content string) string {
+			sum := sha256.Sum256([]byte(prior + "\x00" + content))
+			return hex.EncodeToString(sum[:])
+		}
+		if old("same text") == contentHash("same text") {
+			t.Errorf("a %s-prefixed NEITHER row still matches the cache key: every verdict cached under that rubric would keep skipping its pair", prior)
+		}
 	}
 	// The key is still keyed by CONTENT, which is what lets a tag or importance
 	// edit keep a cached verdict: two different notes hash apart.

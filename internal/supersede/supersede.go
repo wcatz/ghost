@@ -102,8 +102,10 @@ type Relation string
 
 const (
 	// RelationSupersedes means newer states an updated/changed/replaced value
-	// of the SAME fact as older, making older obsolete. A model that cannot name
-	// the claim it replaced does not reach this verdict (see requireReplaced).
+	// of the SAME fact as older, making older obsolete. A model that cannot
+	// name the claim it replaced does not reach this verdict (see
+	// requireReplaced), and one that retires only SOME of older's claims does
+	// not either (see the every-claim rule in classifyRubric).
 	RelationSupersedes Relation = "supersedes"
 	// RelationCauses means newer (typically a decision or change) was informed
 	// by older as supporting evidence, but older remains independently true.
@@ -130,17 +132,23 @@ type Classifier interface {
 
 // contentHash is the NEITHER-cache key component, mirroring resolve's
 // ContentHash: the classification question is about the notes' text, so a tag
-// or importance edit must not invalidate a cached verdict. The "v3\x00" prefix
+// or importance edit must not invalidate a cached verdict. The "v4\x00" prefix
 // versions the key — a prompt/rubric change that could flip verdicts bumps it
 // to reset every cached verdict in one step, the same reset resolve performed
 // when its rubric changed. A cache hit is a permanent skip for the life of that
 // text, so a stored verdict that the current rules would answer differently is
 // not a stale row, it is a rule that can never be applied again to those two
-// notes. v2 was the #641 rubric (REVERSED plus the created_at signal) and v3 is
+// notes. v2 was the #641 rubric (REVERSED plus the created_at signal), v3 is
 // #686's: a SUPERSEDES now has to name the older note's retired claim, and
-// two-true pairs are NEITHER, so every v2 row has to be re-asked.
+// two-true pairs are NEITHER, so every v2 row has to be re-asked. v4 is #779's:
+// a SUPERSEDES now has to retire EVERY claim of the older note rather than one
+// of them, and a log entry, a recurring defect and a parallel investigation are
+// named as the shapes they are. The three rules above v4 all narrowed the set
+// of answers that are SUPERSEDES, so every v3 row is a verdict the current
+// rubric would not necessarily give — and a row kept is a pair skipped for the
+// life of its text, which is the one direction this cache cannot be wrong in.
 func contentHash(content string) string {
-	sum := sha256.Sum256([]byte("v3\x00" + content))
+	sum := sha256.Sum256([]byte("v4\x00" + content))
 	return hex.EncodeToString(sum[:])
 }
 
