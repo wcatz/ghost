@@ -2040,6 +2040,28 @@ func (s *Server) registerTools() {
 					Content: []mcp.Content{&mcp.TextContent{Text: note}},
 				}, nil, nil
 			}
+			// `_global` is not a project, and the switch below asks whether a PROJECT
+			// is registered — so for that id the census is false in the same way, and
+			// `projectExists` answers `true` about a bucket, so the "is registered but
+			// has no memories" sentence is the one that ships. The store DOES hold
+			// global rows; stage 2 withheld them.
+			//
+			// So the same branch `buildProjectContext` takes answers here: the
+			// assembler's verdict, which is a fact about the window rather than about
+			// a project. Both surfaces are asserted on the same fixture in
+			// `TestTheGlobalProjectContextIsNotCountedAsAnotherProjectsRows`, because
+			// fixing one of them and not the other is how this defect survived a round
+			// in the first place.
+			if args.ProjectID == memory.GlobalProjectID {
+				if note := projectContextEmptyNote(memories); note != "" {
+					return &mcp.CallToolResult{
+						Content: []mcp.Content{&mcp.TextContent{Text: note}},
+					}, nil, nil
+				}
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: "No memories found among the cross-project rows."}},
+				}, nil, nil
+			}
 			exists, existsErr := s.projectExists(ctx, args.ProjectID)
 			switch {
 			case existsErr != nil:
