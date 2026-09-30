@@ -347,8 +347,15 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 // 250ms budget was added to prevent, and it landed on the first search a user
 // ever ran. WarmQueryKey moves it to startup.
 //
-// The test deletes the key file AND its directory after warming, so a later digest
-// can only come from memory: a warm key that still reads the file fails here.
+// The test deletes the key file after warming — and only the file, which is the
+// stronger claim: the data directory still exists and is still writable, so a later
+// digest that failed could only have failed because the key came from memory rather
+// than from disk. A warm key that still reads the file fails here.
+//
+// This is a property of the KEY's cache, not of the placement; what asserts the
+// placement — that mcpserver.New actually calls the warmer — is
+// internal/mcpserver/retrieval_warm_test.go. Both are needed, because either alone
+// leaves the search path resolving a key on its first call.
 func TestWarmingTheQueryKeyTakesTheFilesystemOffTheSearchPath(t *testing.T) {
 	dataDir := fakeDataDir(t)
 	useQueryKeyDir(t, dataDir)
@@ -437,5 +444,106 @@ func TestAShortKeyFileIsTreatedAsStillBeingWrittenRatherThanCorrupt(t *testing.T
 	// because a short file a human has to act on is different from a race.
 	if !strings.Contains(err.Error(), "too short") {
 		t.Errorf("the short-file message does not say what is wrong: %v", err)
+	}
+}
+
+// TestTheLosersRetryWaitsForAKeyThatIsStillBeingWritten: the loop's reason to
+// exist, asserted by making the wait SUCCEED rather than by reading the code.
+//
+// The earlier test for this seeded a short key file and then asked for a digest,
+// which pins the CLASSIFIER — but the top-level read answers that shape and never
+// reaches the loop, so deleting the loop's `errQueryKeyShort` arm left every test
+// in the package green. That is the regression the classifier's own comment claims
+// to have fixed, unpinned.
+//
+// So this drives readPublishedQueryKey directly and changes the file UNDER it: a
+// short file is what a half-finished write looks like, and if the loop waits for
+// it to finish then it gets the key; if it refuses on the first attempt, it gets
+// the error it would have given all along.
+func TestTheLosersRetryWaitsForAKeyThatIsStillBeingWritten(t *testing.T) {
+	dataDir := fakeDataDir(t)
+	useQueryKeyDir(t, dataDir)
+	path := filepath.Join(dataDir, queryKeyFileName)
+
+	// A short file, and deliberately not valid hex — "zz" can only be reported as
+	// too short, whereas a short VALID-hex file would also decode to a short key.
+	if err := os.WriteFile(path, []byte("zz"), 0o600); err != nil {
+		t.Fatalf("seed a half-written key: %v", err)
+	}
+	// It finishes being written, inside the window the loop is willing to wait for.
+	want := strings.Repeat("ab", queryKeyBytes)
+	go func() {
+		time.Sleep(readPublishedRetry * 3)
+		_ = os.WriteFile(path, []byte(want), 0o600)
+	}()
+
+	key, err := readPublishedQueryKey(path)
+	if err != nil {
+		t.Fatalf("readPublishedQueryKey gave up on a key that was still being written: %v — the loop "+
+			"refused the short-file verdict instead of waiting for it", err)
+	}
+	if got := digestWith(key, "q"); got != digestWith(mustDecodeHex(t, want), "q") {
+		t.Errorf("the key read as %x, want the one the writer published", key)
+	}
+}
+
+// TestTheLosersRetryWaitsForAKeyThatIsNotThereYet: the other "not ready" state.
+// Pre-existing behaviour, previously untested, and it is the arm the short-file
+// fix sits next to — so the pair is pinned together.
+func TestTheLosersRetryWaitsForAKeyThatIsNotThereYet(t *testing.T) {
+	dataDir := fakeDataDir(t)
+	useQueryKeyDir(t, dataDir)
+	path := filepath.Join(dataDir, queryKeyFileName)
+
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove the key: %v", err)
+	}
+	want := strings.Repeat("cd", queryKeyBytes)
+	go func() {
+		time.Sleep(readPublishedRetry * 3)
+		_ = os.WriteFile(path, []byte(want), 0o600)
+	}()
+
+	key, err := readPublishedQueryKey(path)
+	if err != nil {
+		t.Fatalf("readPublishedQueryKey gave up on a key that had not appeared yet: %v", err)
+	}
+	if got := digestWith(key, "q"); got != digestWith(mustDecodeHex(t, want), "q") {
+		t.Errorf("the key read as %x, want the one that appeared", key)
+	}
+}
+
+// TestTheLosersRetryRefusesACorruptKeyInsteadOfWaitingForIt: the third state, and
+// the reason the other two are distinguished from it.
+//
+// A file of full length that is not hex will not become hex by waiting, so the
+// loop must refuse it on the first attempt. The test proves that WITHOUT a clock
+// by making a valid key appear mid-window: a loop that retried would pick it up
+// and return it, so returning the refusal is the observable claim that no retry
+// happened.
+func TestTheLosersRetryRefusesACorruptKeyInsteadOfWaitingForIt(t *testing.T) {
+	dataDir := fakeDataDir(t)
+	useQueryKeyDir(t, dataDir)
+	path := filepath.Join(dataDir, queryKeyFileName)
+
+	// Full length, not hex: corruption, or a human's edit.
+	if err := os.WriteFile(path, []byte(strings.Repeat("z", queryKeyBytes*2)), 0o600); err != nil {
+		t.Fatalf("seed a corrupt key: %v", err)
+	}
+	// A valid key appears well inside the window the loop would retry across.
+	go func() {
+		time.Sleep(readPublishedRetry * 3)
+		_ = os.WriteFile(path, []byte(strings.Repeat("ab", queryKeyBytes)), 0o600)
+	}()
+
+	_, err := readPublishedQueryKey(path)
+	if err == nil {
+		t.Fatal("readPublishedQueryKey accepted a corrupt key")
+	}
+	if errors.Is(err, errQueryKeyShort) {
+		t.Error("a full-length non-hex file was reported as too short, so the loop would spin on corruption")
+	}
+	if !strings.Contains(err.Error(), "not hex") {
+		t.Errorf("the refusal is %v, want the corruption verdict — this error is what an operator reads", err)
 	}
 }

@@ -200,8 +200,25 @@ func emit(ctx context.Context, sink RecordSink, req Request, res Result) {
 		log = slog.Default()
 	}
 
-	// The record is projected BEFORE the clock starts: it reads only the result
-	// in hand, and it must not be able to consume the budget the write gets.
+	// Projected before the clock starts, and the projection is nearly as cheap as
+	// the Result in hand — but not entirely, and an earlier version of this comment
+	// said "it reads only the result in hand", which stopped being true when the
+	// query digest moved behind the RecordSink seam.
+	//
+	// What it reads now: the Result, and one call to the sink for the digest. That
+	// call is an in-memory HMAC against the store's cached per-install key, because
+	// mcpserver.New resolves the key at startup (Store.WarmQueryKey) and the key is
+	// then held for the process. So the ordinary case costs no filesystem work and
+	// cannot consume the budget below.
+	//
+	// The residual, stated rather than left to be discovered: a provider that is
+	// neither *memory.Store nor able to warm pays ONE key resolution — a data
+	// directory, a read, and on a first install a mkdir and a create — on its first
+	// search, unbounded. DigestQuery takes no context precisely so this comment can
+	// claim no bound it does not have: file I/O does not honour one, and a deadline
+	// that cannot interrupt the work would be a promise the code cannot keep. The
+	// two things that do keep it small are the warm at startup and the failure
+	// backoff in the key's own cache, and both are tested.
 	rec := record(req, res, sink, log)
 
 	// The write gets its own deadline, and this is the property that makes it
