@@ -1858,15 +1858,14 @@ func TestSupersedeReassessReport(t *testing.T) {
 	// tenses are pinned, each on the run it belongs to — a block that always
 	// predicted would satisfy the dry-run half alone, and one that always
 	// observed would satisfy the apply half alone.
-	if !strings.Contains(settled, "so that edge stays and its reverse was withdrawn") {
-		t.Errorf("an applied cycle block does not report the withdrawal as done:\n%s", settled)
+	if !strings.Contains(settled, "so that edge stands and its reverse is denied") {
+		t.Errorf("an applied cycle block does not say which edge the verdict named:\n%s", settled)
 	}
 	dryCycle := cycle(supersede.CycleKeptSecond, false, []supersede.WithdrawnEdge{
 		{NewerID: cFirst, OlderID: cSecond, Reason: "the reverse of the direction the verdict confirmed"},
 	})
-	if !strings.Contains(dryCycle, "abcdef01 -> 98765432  [would withdraw: the reverse of the direction the verdict named]") ||
-		!strings.Contains(dryCycle, "so that edge stays and its reverse would be withdrawn") {
-		t.Errorf("a dry-run cycle block claims a withdrawal:\n%s", dryCycle)
+	if !strings.Contains(dryCycle, "abcdef01 -> 98765432  [would withdraw: the reverse of the direction the verdict named]") {
+		t.Errorf("a dry-run cycle block does not predict the withdrawal:\n%s", dryCycle)
 	}
 	for _, tense := range []string{"withdrew", "was withdrawn", "were withdrawn"} {
 		if strings.Contains(dryCycle, tense) {

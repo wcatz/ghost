@@ -92,6 +92,41 @@ func TestSupersedeRepairCommandsParse(t *testing.T) {
 	}
 }
 
+// The note under a cycle's two edges states the DECISION and never a write,
+// because `apply` does not determine one: a failed InvalidateLink leaves the
+// denied edge live, and a concurrent pass may have taken it first. The per-edge
+// markers carry the tense, so the note must be mode-independent — and a test that
+// only checked it under --apply would have let the past tense back in.
+func TestCycleNoteClaimsNoWrite(t *testing.T) {
+	c := supersede.CyclicPair{
+		First:   supersede.CyclicEdge{SourceID: "abcdef0123456789", TargetID: "9876543210fedcba"},
+		Second:  supersede.CyclicEdge{SourceID: "9876543210fedcba", TargetID: "abcdef0123456789"},
+		Outcome: supersede.CycleKeptSecond,
+	}
+	note := cycleNote(c)
+	if note == "" {
+		t.Fatal("a kept cycle must say which edge the verdict named")
+	}
+	for _, claim := range []string{"withdrew", "withdrawn", "was removed", "has been withdrawn"} {
+		if strings.Contains(note, claim) {
+			t.Errorf("the note claims a write (%q) that the per-row markers own: %q", claim, note)
+		}
+	}
+	// The two denied-both shapes say the same thing without naming a write, and
+	// the note is the same sentence in every mode — there is no `apply` to read.
+	for _, outcome := range []supersede.CycleOutcome{supersede.CycleKeptFirst, supersede.CycleBothWithdrawn, supersede.CycleNoVerdict, supersede.CycleUnoriented} {
+		c.Outcome = outcome
+		if note := cycleNote(c); strings.Contains(note, "withdrew") || strings.Contains(note, "withdrawn") {
+			t.Errorf("outcome %q: the note claims a write: %q", outcome, note)
+		}
+	}
+	// And the wording the operator acts on is the judgement, in the present tense.
+	c.Outcome = supersede.CycleKeptSecond
+	if note := cycleNote(c); !strings.Contains(note, "its reverse is denied") {
+		t.Errorf("the note does not say the reverse is denied: %q", note)
+	}
+}
+
 // The cycle block the repair pass prints is the operator's only route out of a
 // demotion it did not cause, so the commands in it are rendered by the one
 // renderer the rest of the CLI uses rather than spelled at the call site — and
@@ -143,11 +178,17 @@ func TestSupersedeCycleBlockNamesAnEdgeTheCLICannotWithdraw(t *testing.T) {
 		t.Errorf("the cycle block printed a --withdraw command for an id the parser refuses:\n%s", out)
 	}
 	// What the block says instead, and what the operator is pointed at.
+	// All THREE parameters, under the tool's own names: ghost_link_withdraw's
+	// handler refuses the call when any of project_id, source_id or target_id is
+	// empty, and project_id is the ownership check as well as a required field.
+	// A fallback naming two of the three is the same dead command on another
+	// surface.
 	for _, want := range []string{
 		"not nameable from the CLI",
 		"ghost_link_withdraw",
-		"source " + dashy,
-		"target 9876543210fedcba",
+		"project_id myproj",
+		"source_id " + dashy,
+		"target_id 9876543210fedcba",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the cycle block is missing %q:\n%s", want, out)

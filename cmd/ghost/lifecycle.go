@@ -1643,7 +1643,7 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 			cycleEdgeState(c, supersede.CycleKeptFirst, apply, withdrawn))
 		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.Second.SourceID), shortID(c.Second.TargetID),
 			cycleEdgeState(c, supersede.CycleKeptSecond, apply, withdrawn))
-		fmt.Fprintf(&b, "    %s\n", cycleNote(c, apply))
+		fmt.Fprintf(&b, "    %s\n", cycleNote(c))
 		// The operator's next step, and it is a DIFFERENT step per outcome: a rerun
 		// for a verdict that never arrived, a decision for a pair with no knowable
 		// direction, and nothing at all once the pass has answered it. A block
@@ -1663,11 +1663,16 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 				// fails with a message naming neither the dash nor the id, so the
 				// ids are named here and the surface that CAN take them is named
 				// with them — the same split ResolveCommand makes for an id no
-				// --only form can carry.
+				// --only form can carry. All THREE of the tool's parameters, under
+				// the tool's own names: its handler refuses the call outright when
+				// any of project_id, source_id or target_id is empty, and
+				// project_id is the ownership check as well as a required field, so
+				// a fallback line naming two of the three just moves the dead
+				// command to the tool surface.
 				fmt.Fprintf(&b, "      %s -> %s  [not nameable from the CLI: an id beginning with a dash is a flag to the\n"+
 					"       argument parser, so no --withdraw command can carry it. Withdraw it with the MCP tool\n"+
-					"       ghost_link_withdraw, which parses no flags: source %s, target %s]\n",
-					shortID(e.SourceID), shortID(e.TargetID), e.SourceID, e.TargetID)
+					"       ghost_link_withdraw, which parses no flags: project_id %s, source_id %s, target_id %s]\n",
+					shortID(e.SourceID), shortID(e.TargetID), projectName, e.SourceID, e.TargetID)
 			}
 		}
 	}
@@ -1677,25 +1682,22 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	return b.String()
 }
 
-// cycleNote is the line under a cycle's two edges: what the pass decided, in the
-// tense this run is in. It is the only place the outcome is turned into a
-// sentence, which is why the outcome itself is a bare value.
-func cycleNote(c supersede.CyclicPair, apply bool) string {
-	// The kept edge really does stay in both modes — a dry run withdraws nothing —
-	// so only the DENIED edge's tense moves, and both phrasings have to read
-	// correctly: "was withdrawn" is an observation, "would be withdrawn" is a
-	// prediction, and a prediction printed as an observation is the whole defect.
-	verb := "would be withdrawn"
-	if apply {
-		verb = "was withdrawn"
-	}
+// cycleNote is the line under a cycle's two edges: what the pass DECIDED, in
+// words that are true in every mode. It deliberately claims no write, because
+// `apply` is not enough to know one: a failed InvalidateLink leaves the denied
+// edge live, and a concurrent pass may have taken it first, so the two rows above
+// carry the tense and the per-edge markers ("withdrew", "already gone", "not
+// reached … STILL LIVE") and this line carries the judgement. A note that took
+// its tense from `apply` said "was withdrawn" directly over a row reading "this
+// edge is STILL LIVE".
+func cycleNote(c supersede.CyclicPair) string {
 	switch c.Outcome {
 	case supersede.CycleKeptFirst:
-		return fmt.Sprintf("the verdict named the first edge's direction, so that edge stays and its reverse %s", verb)
+		return "the verdict named the first edge's direction, so that edge stands and its reverse is denied"
 	case supersede.CycleKeptSecond:
-		return fmt.Sprintf("the verdict named the second edge's direction, so that edge stays and its reverse %s", verb)
+		return "the verdict named the second edge's direction, so that edge stands and its reverse is denied"
 	case supersede.CycleBothWithdrawn:
-		return fmt.Sprintf("the two notes are not a replacement of one another in either direction, so both edges %s", verb)
+		return "the two notes are not a replacement of one another in either direction, so neither edge is supported"
 	case supersede.CycleNoVerdict:
 		return "no verdict: the classify call failed or its reply could not be read, so no edge of this pair moved and the next pass re-asks it"
 	case supersede.CycleUnoriented:
