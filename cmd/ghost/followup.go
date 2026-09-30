@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/scratch"
 	"github.com/wcatz/ghost/internal/supersede"
@@ -150,14 +151,37 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 	// ids rather than writing two half-ids, so a file holding only those names no
 	// selector at all and readRefSelectors refuses it — pointing the operator at
 	// it would be pointing at a command that cannot run.
-	fileHoldsSomething := path != "" && len(unnameable) < len(ids)
+	//
+	// A path holding a LINE BREAK fails the same test, for the reason the two
+	// copies of it below differ: there is no spelling of such a path that is both
+	// one line of output and an argument the parser reads back as the same path,
+	// so the file is not named and the ids are named instead.
+	fileHoldsSomething := path != "" && !containsLineBreak(path) && len(unnameable) < len(ids)
 	if fileHoldsSomething {
-		// Quoted for the same reason as the project name, and because the path
-		// is not Ghost's to control: $GHOST_SCRATCH_DIR and a data directory
-		// under a spaced path both reach it.
+		// Two forms of one path, and they are NOT the same string. The display copy
+		// is assemble.Label's, because a path is stored-adjacent text a reader looks
+		// at; the ARGUMENT is the raw value in single quotes, because that has to be
+		// byte-equal or the command does not run — which is exactly what
+		// internal/followup does with the same project name, and for the same
+		// reason: the quoting is the part that decides whether the command RUNS.
+		//
+		// Composing them the other way round is the bug this comment exists to
+		// prevent. Label renders a backtick as \` and a control character as an
+		// escape, and a backslash inside single quotes is literal, so
+		// `ghost resolve --project 'my\`proj' --reassess --apply` names a project
+		// that does not exist and a repair that will not run. Neither the path nor
+		// the project name is Ghost's to control — $GHOST_SCRATCH_DIR and a data
+		// directory under a spaced path both reach them — so the argument takes the
+		// real value and only the display copy is escaped.
 		fmt.Fprintf(&b, "  (the same ids are in %s, for `ghost resolve --project %s --reassess --only-file %s --apply`)\n",
-			path, shellQuote(projectName), shellQuote(path))
+			assemble.Label(path), shellQuote(projectName), shellQuote(path))
 	}
+	// Both buckets, rendered once, by internal/followup — the same function the
+	// two MCP surfaces print them through. The ids are a stored value at the
+	// start of a line, so how they are spelled is the one rule all three surfaces
+	// must share, and it is decided next to the command that refused to carry
+	// them rather than at each of the loops that print them.
+	viaFileText, unnameableText := followup.RenderUncarriedIDs(viaFileOnly, unnameable)
 	// Every branch is driven by the buckets, not by `cmd == ""`, which has two
 	// causes: ids holding a comma (the file reaches them) and ids holding a
 	// newline (nothing does). Keying the wording off the empty command made a
@@ -176,12 +200,10 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 				"   so the file above is the only way to run this repair. Do NOT fall back on the same command\n"+
 				"   without --only: that re-judges every resolved memory in the project)\n")
 		} else {
-			fmt.Fprintf(&b, "  (no --only command can name them and the id file could not be written, so they are\n"+
+			fmt.Fprintf(&b, "  (no --only command can name them and no id file can be named here, so they are\n"+
 				"   named here: put each on its own line in a file and use --only-file. Do NOT fall back on the\n"+
 				"   same command without --only: that re-judges every resolved memory in the project)\n")
-			for _, id := range viaFileOnly {
-				fmt.Fprintf(&b, "    %s\n", id)
-			}
+			b.WriteString(viaFileText)
 		}
 	case len(viaFileOnly) > 0 && fileHoldsSomething:
 		// `--only` splits on commas, so an id holding one is not nameable by that
@@ -191,15 +213,15 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		fmt.Fprintf(&b, "  (%d id(s) hold a comma, which --only cannot carry, so the command above leaves them out;\n"+
 			"   they are in the file, and the file is the only way to name them)\n", len(viaFileOnly))
 	case len(viaFileOnly) > 0:
-		// No file: the file write failed, so pointing at it would point at nothing
-		// and the ids would be listed nowhere — the invisibility this whole block
+		// No file to point at: either the write failed or the path holds a line
+		// break and cannot be printed as one line of command. Either way pointing at
+		// it would point at nothing an operator can use, and the ids would be listed
+		// nowhere — the invisibility this whole block
 		// exists to remove. They are named here instead, which is what the MCP
 		// surface does for the same reason.
-		fmt.Fprintf(&b, "  (%d id(s) hold a comma and the id file could not be written, so they are named here;\n"+
+		fmt.Fprintf(&b, "  (%d id(s) hold a comma and no id file can be named here, so they are named here;\n"+
 			"   no --only command can carry them — put each on its own line in a file and use --only-file)\n", len(viaFileOnly))
-		for _, id := range viaFileOnly {
-			fmt.Fprintf(&b, "    %s\n", id)
-		}
+		b.WriteString(viaFileText)
 	}
 	if len(unnameable) > 0 {
 		// No surface can name these: the file is one id per line, so a newline in
@@ -209,9 +231,7 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		fmt.Fprintf(&b, "  (%d id(s) hold a newline, which no --only or --only-file form can carry. No surface can\n"+
 			"   name them, so these stay resolved until the row is rewritten — delete and re-save the memory,\n"+
 			"   or re-import it under an id without a newline)\n", len(unnameable))
-		for _, id := range unnameable {
-			fmt.Fprintf(&b, "    %q\n", id)
-		}
+		b.WriteString(unnameableText)
 	}
 	return b.String()
 }

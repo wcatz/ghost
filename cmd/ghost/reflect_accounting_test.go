@@ -810,7 +810,7 @@ func TestReflectFullPrintsUntruncatedText(t *testing.T) {
 	if strings.Contains(compact, long) {
 		t.Errorf("the default render is not compact, so --full has nothing to add:\n%s", compact)
 	}
-	if !strings.Contains(compact, "...") {
+	if !strings.Contains(compact, "…") {
 		t.Errorf("the compact render does not mark its truncation:\n%s", compact)
 	}
 

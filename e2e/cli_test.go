@@ -292,7 +292,12 @@ func runProjectDeleteCommand(t *testing.T, s *sandbox) {
 	// an apply would leave the user unsure whether the irreversible half ran.
 	applied := s.mustRunStdin("doomed-cli-proj\n", "project", "delete", "doomed-cli-proj", "--apply")
 	mustMatch(t, "project delete (confirmation prompt)", applied.stdout, `Type the project name \("doomed-cli-proj"\)`)
-	mustContain(t, "project delete (apply)", applied.stdout, `Deleted "doomed-cli-proj"`)
+	// The name is a LABEL, so an ordinary one is printed as written rather than
+	// Go-quoted: `assemble.Label` keeps every word a name is made of
+	// byte-identical and neutralises only what could end the line or open a
+	// construct around it. The prompt above still quotes, because it is asking
+	// the reader to type the name and %q is the right shape for that.
+	mustContain(t, "project delete (apply)", applied.stdout, `Deleted doomed-cli-proj`)
 	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ?`, victim); n != 0 {
 		t.Fatalf("memory %s survived `ghost project delete --apply`", victim)
 	}

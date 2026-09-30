@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/secret"
 )
 
@@ -13,9 +14,9 @@ import (
 // The report deliberately emits only format, category, scope and length for a
 // proposal it refuses to store. That guarantee is worthless if the same command
 // printed the value ninety lines earlier, and it did: the proposal listing and
-// the drop-guard warning both printed `truncateForDisplay(content, 120)`, and
-// 120 characters is far more than a GitHub PAT or a Docker Hub token needs. In
-// the autonomous path that stdout is the append-only lifecycle.log, so the value
+// the drop-guard warning both printed 120 characters of stored content, and
+// 120 is far more than a GitHub PAT or a Docker Hub token needs. In the
+// autonomous path that stdout is the append-only lifecycle.log, so the value
 // would outlive the run — which is the exposure the credential refusal exists
 // to prevent, arrived at from the other direction.
 //
@@ -27,8 +28,8 @@ func TestDisplayProposalNeverPrintsACredential(t *testing.T) {
 	credential := "ghp_" + rep("a1B2c3D4e5F6", 3) + "AbCd"
 
 	clean := "the relay listens on 2222"
-	if got := displayProposal(clean, "fact", 120); got != truncateForDisplay(clean, 120) {
-		t.Errorf("displayProposal(%q) = %q, want the truncated content — a clean proposal must still be readable", clean, got)
+	if got := displayProposal(clean, "fact", 120); got != assemble.PreviewLine(clean, 120) {
+		t.Errorf("displayProposal(%q) = %q, want the first line of the content — a clean proposal must still be readable", clean, got)
 	}
 
 	got := displayProposal("the deploy token is "+credential, "fact", 120)

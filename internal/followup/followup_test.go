@@ -3,6 +3,8 @@ package followup
 import (
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/assemble"
 )
 
 // The ids are what the command judges, so they are never abbreviated: a prefix
@@ -178,5 +180,86 @@ func TestSupersedeCommandsQuoteTheProjectAndCarryApply(t *testing.T) {
 		if !strings.Contains(cmd, "--apply") {
 			t.Errorf("%q names a repair that predicts rather than performs", cmd)
 		}
+	}
+}
+
+// The buckets are the other half of what ResolveCommand answers, and they are
+// printed by three surfaces — the CLI twice and each MCP tool once — so how an id
+// is spelled is the one rule none of them may decide for itself. This function is
+// that decision, and the test is that it makes the value DATA rather than text
+// sitting at the head of a line.
+//
+// The hostile ids here hold a «, a backtick and a control character, which is the
+// shape a comma bucket really contains: since #791 `ImportMemory` refuses a
+// control character, whitespace, a backtick or a «, and a COMMA is deliberately
+// not in that class — a comma breaks a selector rather than a line — so such an id
+// still reaches the store, from an artifact imported before the refusal, a
+// restored snapshot or a hand-edited row. The newline bucket holds one too, and
+// that is the half %q got wrong: %q keeps a printable non-ASCII rune as itself,
+// so a « stayed literally visible in the MCP surfaces while the CLI escaped it.
+func TestRenderUncarriedIDsQuotesEveryStoredIDItPrints(t *testing.T) {
+	commy := "AAAA,«bell\x07`x`"
+	broken := "BBBB\n«second line»"
+	viaFileText, unnameableText := RenderUncarriedIDs([]string{commy}, []string{broken})
+
+	for _, c := range []struct {
+		bucket, id, text string
+	}{
+		{"the comma bucket", commy, viaFileText},
+		{"the newline bucket", broken, unnameableText},
+	} {
+		t.Run(c.bucket, func(t *testing.T) {
+			if !strings.Contains(c.text, assemble.Token(c.id)) {
+				t.Errorf("%s does not print the id through assemble.Token (%q):\n%q", c.bucket, assemble.Token(c.id), c.text)
+			}
+			// Line-anchored, and the reason this is not a substring test: the value
+			// IS in a Token either way, and what a reader is fooled by is an id at
+			// the head of a line, where it reads as Ghost's own.
+			for _, line := range strings.Split(c.text, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), c.id) {
+					t.Errorf("%s printed the id raw at the start of a line:\n%q", c.bucket, c.text)
+				}
+			}
+			// Each line is the whole value and nothing else, so a second id on one
+			// line cannot hide inside the first one's rendering.
+			for _, line := range strings.Split(strings.TrimSuffix(c.text, "\n"), "\n") {
+				if got := strings.TrimSpace(line); got != assemble.Token(c.id) {
+					t.Errorf("%s line = %q, want exactly the tokenized id", c.bucket, got)
+				}
+			}
+		})
+	}
+
+	// An honest id is printed bare and indented: Token quotes only what needs it,
+	// so the 32 hex characters Ghost mints cost nothing on any real report.
+	if got, _ := RenderUncarriedIDs([]string{"aaaaaaaa1111111111111111111111"}, nil); got != "    aaaaaaaa1111111111111111111111\n" {
+		t.Errorf("an ordinary id rendered as %q, want it bare under four spaces of indent", got)
+	}
+	// An empty bucket renders to nothing, so a caller can write the result
+	// unconditionally rather than guarding each one.
+	if via, un := RenderUncarriedIDs(nil, nil); via != "" || un != "" {
+		t.Errorf("RenderUncarriedIDs(nil, nil) = %q, %q, want two empty strings", via, un)
+	}
+}
+
+// Both buckets come back from ONE call, so the two cannot be spelled differently
+// — which is the whole reason the signature takes both. The order is the buckets'
+// order and nothing reorders it, because the caller prints the comma list and the
+// unnameable list under prose that says which is which.
+func TestRenderUncarriedIDsKeepsBothBucketsApart(t *testing.T) {
+	ids := []string{"plain", "with,comma", "with\nnewline"}
+	_, viaFile, unnameable := ResolveCommand("proj", ids)
+	if got, want := viaFile, []string{"with,comma"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("ResolveCommand bucketed %v as viaFile %v, want %v — the renderer's input is not what this test means to check", ids, got, want)
+	}
+	viaFileText, unnameableText := RenderUncarriedIDs(viaFile, unnameable)
+	if n := strings.Count(viaFileText, "\n"); n != 1 {
+		t.Errorf("the comma bucket rendered %d lines, want one:\n%q", n, viaFileText)
+	}
+	if n := strings.Count(unnameableText, "\n"); n != 1 {
+		t.Errorf("the newline bucket rendered %d lines, want one:\n%q", n, unnameableText)
+	}
+	if strings.Contains(viaFileText, "newline") || strings.Contains(unnameableText, "comma") {
+		t.Errorf("a bucket printed another's id: %q / %q", viaFileText, unnameableText)
 	}
 }

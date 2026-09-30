@@ -9,15 +9,15 @@
 // re-judges every resolved memory in the project, and #698 measured that
 // proposing to un-hide 143 rows on a real store, about 35% of them stale.
 //
-// It lives in its own package because THREE surfaces print it and none may
+// It lives in its own package because FOUR surfaces print it and none may
 // render it differently. The CLI prints it under a supersede withdrawal's
 // per-edge list; the CLI's `resolve --mark` report prints it for the memories
 // that run stamped, which is the other direction of the same stamp and so the
-// same command read backwards; and the MCP `ghost_link_withdraw` tool answers an
-// agent that may have no shell at all, where the same string is a sentence rather
-// than something to paste. One renderer means the project-name quoting — the part
-// that decides whether the command RUNS — is decided once, and a change to it
-// cannot leave the surfaces disagreeing about it.
+// same command read backwards; and the MCP tools `ghost_link_withdraw` and
+// `ghost_resolve_mark` answer an agent that may have no shell at all, where the
+// same string is a sentence rather than something to paste. One renderer means
+// the project-name quoting — the part that decides whether the command RUNS — is
+// decided once, and a change to it cannot leave the surfaces disagreeing about it.
 //
 // The two SUPERSEDE-side commands live here for that same reason rather than
 // beside their callers, and they are the reason this is a package and not a
@@ -34,12 +34,22 @@
 // the edge caused", and a mark's says "run this to clear the resolution this
 // stamp caused". Two renderers for one command would drift on the quoting, and a
 // command that does not run is worse than one whose wording is inconsistent.
+//
+// The buckets come with the command, because they are the other half of the same
+// question: ResolveCommand names the ids it could carry, and the two it returns
+// are the ids it could not. Each of those four surfaces then PRINTS them, so the
+// command is one renderer and the printing was a second — and a second is exactly
+// how the surfaces came to disagree about a stored id, with one spelling it and
+// two quoting it. RenderUncarriedIDs is that second renderer, so the rule an id
+// is printed under is decided once beside the command that refused to carry it.
 package followup
 
 import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/wcatz/ghost/internal/assemble"
 )
 
 // bareShellWord matches a token that can be pasted into a shell unquoted and
@@ -193,4 +203,53 @@ func ResolveCommand(projectName string, ids []string) (cmd string, viaFile, unna
 		return "", viaFile, unnameable
 	}
 	return fmt.Sprintf("ghost resolve %s --reassess --only %s --apply", project, strings.Join(quoted, ",")), viaFile, unnameable
+}
+
+// RenderUncarriedIDs renders the two buckets ResolveCommand returns — the ids
+// only the --only-file reaches, and the ids no surface reaches — as one indented
+// line each, through assemble.Token.
+//
+// It takes BOTH buckets and returns both, rather than exporting a one-bucket
+// helper, because the caller always has both and the mistake being prevented is
+// spelling them differently: a two-return signature cannot render the comma
+// bucket through Token and the newline bucket through %q, and it cannot print
+// one and drop the other by accident. The renderings are returned separately
+// because the surfaces put them under DIFFERENT prose — the CLI points at an id
+// file it wrote, the MCP surfaces write none — and it is the prose that differs,
+// never the ids.
+//
+// The ids are a stored value at the start of a line, which is the one place a
+// reader takes what they see for Ghost's own, and a comma bucket is by definition
+// ids an import wrote verbatim: `ghost import` refuses a control character,
+// whitespace, a backtick or a « (#791), and a COMMA is deliberately not in that
+// class, because a comma breaks a selector rather than a line. So an id in this
+// bucket can still carry a «, a backtick or a control character — from an
+// artifact imported before the refusal, a restored snapshot, a hand-edited row —
+// and printed raw it lands outside every «...» data block at the head of a line.
+// assemble.Token is what makes it data: a « becomes «, so it cannot open a
+// block of its own, and nothing in the value can begin a line.
+//
+// It is the SAME renderer for all four surfaces — the CLI under its per-edge
+// list, the CLI under `resolve --mark`'s report, and the two MCP tools — for the
+// reason this package exists at all: none of them may render it differently, and
+// before this one, the MCP pair printed the comma bucket raw and the newline
+// bucket with %q while the CLI printed both through Token. An agent reading a
+// tool result is the most injection-exposed reader Ghost has, so the surface
+// that drifts is the one that matters most.
+func RenderUncarriedIDs(viaFile, unnameable []string) (viaFileText, unnameableText string) {
+	return uncarriedIDLines(viaFile), uncarriedIDLines(unnameable)
+}
+
+// uncarriedIDLines renders one bucket. Four spaces of indent, because that is
+// where the ids sit in the block: under a parenthetical whose own text is
+// indented two, so a reader tells the explanation from the values in it.
+func uncarriedIDLines(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, id := range ids {
+		fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
+	}
+	return b.String()
 }

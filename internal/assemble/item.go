@@ -87,7 +87,7 @@ func (i Item) Line() string {
 		strconv.FormatFloat(i.Importance, 'f', 1, 64) + pin + tags + resolved + ScopeLabel(i.Scope) +
 		validityLabel(i.ValidityState, i.ValidFrom, i.ValidUntil, i.VerifiedAt) +
 		ConfidenceLabel(i.Confidence) + AgentLabel(i.Agent) + SourceRefLabel(i.SourceRef) + origin +
-		") " + quoteData(i.Content)
+		") " + Data(i.Content)
 }
 
 // AgentLabel renders the writing harness, or "" when the row records none.
@@ -109,7 +109,7 @@ func AgentLabel(agent string) string {
 	if len(agent) > MaxRenderedAgentLen {
 		agent = clampBytes(agent, MaxRenderedAgentLen) + "…[agent truncated]"
 	}
-	return " agent=" + quoteData(agent)
+	return " agent=" + Data(agent)
 }
 
 // MaxRenderedAgentLen is what a listing prints of an agent. It is a DISPLAY
@@ -149,7 +149,7 @@ func SourceRefLabel(ref string) string {
 		// put an invalid byte inside the data block.
 		ref = clampBytes(ref, MaxRenderedSourceRefLen) + "…[reference truncated]"
 	}
-	return " source_ref=" + quoteData(ref)
+	return " source_ref=" + Data(ref)
 }
 
 // ConfidenceLabel renders a recorded belief, or "" when the row records none.
@@ -377,6 +377,27 @@ func isTokenRune(r rune) bool {
 	return strings.ContainsRune("._-:/@+", r)
 }
 
+// Data wraps untrusted stored text in «...» data delimiters, first rewriting
+// any literal « or » inside it so embedded delimiters cannot terminate the
+// data block early and smuggle text back out as instructions.
+//
+// It is exported for the same reason Token is: a second renderer printing the
+// same field must reach the SAME function, and the single-record CLI dumps
+// (#802) are that second renderer. `Item.Line`, the session-start block and the
+// MCP listings each had their own copy of this rule before, and a copy is how
+// a rule drifts — the copy that is not tested is the one that ships the bug.
+// The delimiters are the reader's contract, not the caller's: text between «
+// and » is DATA, so a newline inside the block is still data and a line that
+// begins "- [" inside it is not Ghost's own output.
+//
+// It is the ONE delimiter renderer in this package, and it reaches
+// `neutralizeDelimiters` rather than building its own substitution: that is the
+// same rule the tag label (#811) needs, and two spellings of a substitution a
+// reader parses visually is two things to keep in step.
+func Data(s string) string {
+	return "«" + neutralizeDelimiters(s) + "»"
+}
+
 // TagsLabel renders a row's tag list as the ` tags:[…]` label a memory line
 // carries, or "" when the row records no tag.
 //
@@ -388,7 +409,7 @@ func isTokenRune(r rune) bool {
 //
 // WHY the label is a JSON array and not a delimited one, which is the decision
 // that makes the escaping below necessary: the line already delimits the one
-// field that is free prose (the content, through quoteData), and tags are short
+// field that is free prose (the content, through Data), and tags are short
 // keyword labels a reader scans. A second «...» pair per row would be a second
 // thing to explain on every listing, so the label is the JSON array, and the array
 // is what makes it safe — with one gap that had to be closed rather than assumed.
@@ -405,7 +426,7 @@ func isTokenRune(r rune) bool {
 // one contract, and a field that can open a block breaks it.
 //
 // So a « becomes `<<` and a » becomes `>>`, through `neutralizeDelimiters` — the
-// ONE function that does it, and the one `quoteData` already used, because a
+// ONE function that does it, and the one `Data` already used, because a
 // second copy of a substitution a reader parses visually is a second thing to keep
 // in step. `<<` is the same spelling the content uses, so a reader who has met one
 // knows the other. A backtick is neutralised too, and differently; see
@@ -441,7 +462,7 @@ func TagsLabel(tags []string) string {
 //
 // A JSON ESCAPE rather than a substitution like the guillemet's `<<`, and the
 // reason is that `<<` already means something to a reader of a Ghost line: it is
-// what `quoteData` writes for a literal `«`, so a reader who sees `<<` in a tag
+// what `Data` writes for a literal `«`, so a reader who sees `<<` in a tag
 // list knows it came from a delimiter. There is no such convention for a backtick
 // in a tag, so the honest form is the one the surrounding JSON already uses for a
 // character it must not print literally — and it stays VALID JSON, so a reader
@@ -460,7 +481,7 @@ const tagBacktickEscape = "\\u0060"
 // neutralizeTagLabel is the label's own neutralisation, and it is separate from
 // `neutralizeDelimiters` rather than an extension of it.
 //
-// `neutralizeDelimiters` is shared with `quoteData`, where a backtick is NOT a
+// `neutralizeDelimiters` is shared with `Data`, where a backtick is NOT a
 // threat — the content sits inside «...», so a backtick in it cannot close anything
 // Ghost printed. Widening that function would change how every content block in
 // every answer renders, on no evidence that a content backtick is unsafe. So the
@@ -473,27 +494,20 @@ func neutralizeTagLabel(s string) string {
 // the fixed `<<` and `>>` a reader cannot mistake for one.
 //
 // It is the ONE function that does it, and the fact that the tag list needed it
-// (#811) is the argument: `quoteData` has done this for the content since the
+// (#811) is the argument: `Data` has done this for the content since the
 // delimiters existed, and a field that renders its own copy of the substitution is
 // a field whose copy will drift.
 func neutralizeDelimiters(s string) string {
 	return delimiterReplacer.Replace(s)
 }
 
-// delimiterReplacer is the substitution itself, hoisted out of quoteData for the
+// delimiterReplacer is the substitution itself, hoisted out of Data for the
 // same reason the three copies of the preview cut were hoisted into PreviewLine: a
 // strings.Replacer is safe for concurrent use, and a rule that must never drift is
 // the kind that must not be copyable. It is a package var rather than a per-call
 // NewReplacer so it is built once instead of once per tag on every line of every
 // listing.
 var delimiterReplacer = strings.NewReplacer("«", "<<", "»", ">>")
-
-// quoteData wraps untrusted stored text in «...» data delimiters, first
-// rewriting any literal « or » inside it so embedded delimiters cannot
-// terminate the data block early and smuggle text back out as instructions.
-func quoteData(s string) string {
-	return "«" + neutralizeDelimiters(s) + "»"
-}
 
 // itemOf materialises one item from a candidate. The fields are copied, not
 // re-read, so an item cannot disagree with the row that produced it.

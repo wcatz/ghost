@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -302,7 +303,7 @@ func printPruneRow(w io.Writer, c memory.PruneCandidate, indent string) error {
 	if activity == "" {
 		activity = "(no recorded activity)"
 	}
-	if _, err := fmt.Fprintf(w, "%s%s  %s  %s  expired %s  last touched %s", indent, c.ID, c.Category, c.Retention, c.ExpiresAt, activity); err != nil {
+	if _, err := fmt.Fprintf(w, "%s%s  %s  %s  expired %s  last touched %s", indent, assemble.Token(c.ID), c.Category, c.Retention, c.ExpiresAt, activity); err != nil {
 		return err
 	}
 	if c.GraceFrom != "" && c.GraceFrom != c.ExpiresAt {

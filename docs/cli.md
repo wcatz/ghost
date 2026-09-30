@@ -31,6 +31,8 @@ The same shape applies at every level: `ghost mcp nope` and `ghost project` (no 
 
 A word after a command that takes an *operand* is not a subcommand and is never reported as an unknown one: `ghost history <memory-id>`, `ghost reflect <project>` and `ghost import <file>` all take the word as the thing they were asked about, and their own parsers report an operand they cannot use — a missing memory id (`ghost history`), a second project (`ghost resolve`), a file that is not there (`ghost import`), an unknown flag. `ghost reflect` is the exception among those parsers and keeps its historical behaviour: given two positionals it consolidates the last one, without a diagnostic. An unknown **flag** is not a routing error either, and never exits `2` — the command was found, so what answers the flag is that command's own parser: `ghost bench --wat` and `ghost upgrade --wat` reject the flag — an unknown flag and an unknown argument respectively — and exit `1`, while `ghost reflect --wat` ignores an unknown flag, as it always has.
 
+Stored values are rendered, not echoed: an id goes through `assemble.Token`, a project name or path through `assemble.Label`, and stored free text inside `«…»` data delimiters — so a newline inside a stored id or memory cannot start a line the reader takes for Ghost's own output, and text between `«` and `»` is data.
+
 ## MCP server
 
 ### `ghost mcp`

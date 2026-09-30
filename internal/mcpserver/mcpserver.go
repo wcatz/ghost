@@ -1262,6 +1262,18 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 	// the command RUNS is decided once. And named as a command, because that is
 	// what it is.
 	cmd, viaFileOnly, unnameable := followup.ResolveCommand(projectID, stamped)
+	// The two buckets through internal/followup's own renderer, which the CLI
+	// prints them with too. It used to be spelled here: this surface printed a
+	// comma id raw at the start of a line and quoted a newline id with %q, while
+	// the CLI ran both through assemble.Token — so the same stored value read
+	// differently depending on which surface an agent happened to be holding, and
+	// an agent reading a tool result is the most injection-exposed reader Ghost
+	// has. A comma bucket is by definition ids an import wrote verbatim, and
+	// #791's refusal covers control characters, whitespace, a backtick and a «
+	// but deliberately NOT a comma (a comma breaks a selector, not a line), so a
+	// «, a backtick or a control character in one is an ordinary row rather than
+	// a contrived one.
+	viaFileText, unnameableText := followup.RenderUncarriedIDs(viaFileOnly, unnameable)
 	if cmd != "" {
 		fmt.Fprintf(&sb, "\nThese are now out of ranked session-start injection. To put them back, a SCOPED repair has to\n"+
 			"clear the stamp, and it is a CLI command rather than a tool call — there is no MCP tool for it, because\n"+
@@ -1280,17 +1292,13 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 		fmt.Fprintf(&sb, "\n%d id(s) below are reachable only through `ghost resolve --reassess --only-file` with one id per\n"+
 			"line — write that file yourself, or hand the ids to someone with a shell. Do NOT fall back on the same\n"+
 			"command without --only: that re-judges every resolved memory in the project.\n", len(viaFileOnly))
-		for _, id := range viaFileOnly {
-			fmt.Fprintf(&sb, "  %s\n", id)
-		}
+		sb.WriteString(viaFileText)
 	}
 	if len(unnameable) > 0 {
 		fmt.Fprintf(&sb, "\n%d id(s) can be named by NO surface — the id holds a newline, which both --only (it splits on\n"+
 			"commas) and --only-file (one id per line) cannot carry. These memories stay resolved until the row is\n"+
 			"rewritten: delete and re-save the memory, or re-import it under an id with no newline.\n", len(unnameable))
-		for _, id := range unnameable {
-			fmt.Fprintf(&sb, "  %q\n", id)
-		}
+		sb.WriteString(unnameableText)
 	}
 	// The context resource carries the ranked surface this call just changed, so
 	// a client subscribed to it would otherwise keep serving a ranking with
@@ -3906,6 +3914,15 @@ func sourceLabel(source string) string {
 func repairInstructions(project string, targets []string) string {
 	var sb strings.Builder
 	cmd, viaFileOnly, unnameable := followup.ResolveCommand(project, targets)
+	// The buckets through internal/followup's renderer, as markMemoriesResolved
+	// prints them and as the CLI does. This function used to print a comma id raw
+	// at the start of a line and a newline id with %q, so the same stored value
+	// read differently here than in the CLI, and the reason to fix it is that the
+	// value is one an import wrote verbatim: a comma breaks a SELECTOR rather than
+	// a line, so #791 does not refuse it, and it can still carry a «, a backtick
+	// or a control character. Rendered raw it lands at the head of a line outside
+	// every «...» data block, in an answer an agent reads as Ghost's own.
+	viaFileText, unnameableText := followup.RenderUncarriedIDs(viaFileOnly, unnameable)
 	// The heading says "a SCOPED repair" because the command below it is scoped —
 	// so when no id is carriable there is no command, and the sentence has to
 	// change rather than dangle over an empty line. The unscoped form is never
@@ -3924,8 +3941,10 @@ func repairInstructions(project string, targets []string) string {
 		// an id holding one becomes two selectors that name nothing however it is
 		// quoted. An agent told nothing would run the command above, judge fewer
 		// memories than this call orphaned, and report a repair that did not
-		// happen. The id is given verbatim so a person can put it in a file
-		// themselves — one id per line, and the --only-file reader never splits.
+		// happen. The id is named through internal/followup's renderer, so a
+		// person can put it in a file themselves — one id per line, and the
+		// --only-file reader never splits — without the value being printed raw
+		// where an agent takes it for Ghost's own.
 		if cmd == "" {
 			sb.WriteString("\nNo --only command can name the target: its id holds a comma, which --only splits on.")
 		}
@@ -3936,9 +3955,7 @@ func repairInstructions(project string, targets []string) string {
 			"one id per line — write that file yourself, or hand the ids to someone with a shell. Do NOT fall\n"+
 			"back on the same command without --only: that re-judges every resolved memory in the project.\n",
 			len(viaFileOnly))
-		for _, id := range viaFileOnly {
-			fmt.Fprintf(&sb, "  %s\n", id)
-		}
+		sb.WriteString(viaFileText)
 	}
 	if len(unnameable) > 0 {
 		// The file is one id per line, so an id holding a newline is two selectors
@@ -3949,9 +3966,7 @@ func repairInstructions(project string, targets []string) string {
 			"splits on commas) and --only-file (one id per line) cannot carry. These memories stay resolved\n"+
 			"until the row is rewritten: delete and re-save the memory, or re-import it under an id with no\n"+
 			"newline.\n", len(unnameable))
-		for _, id := range unnameable {
-			fmt.Fprintf(&sb, "  %q\n", id)
-		}
+		sb.WriteString(unnameableText)
 	}
 	if cmd == "" && len(viaFileOnly) == 0 && len(unnameable) == 0 {
 		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")

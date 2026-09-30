@@ -129,13 +129,13 @@ func runValidity(p *pipeline) {
 			// either. It is reported so a caller can see the row's claim is
 			// unreadable rather than absent — as a note, which is true of the row
 			// whether it survives or not.
-			// quoteData, because this is stored text on its way to a tool
+			// Data, because this is stored text on its way to a tool
 			// answer: a portable artifact is explicitly untrusted input, and
 			// the validity triple is writable through ImportMemory and
 			// RestoreSnapshot. %q escapes a delimiter without delimiting it, so
 			// a value carrying one could close the data block and continue as
 			// instruction. Delimited like every other stored text in an answer.
-			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%s), treated as unset", ShortID(c.ID), quoteData(raw)))
+			p.noteBuf = append(p.noteBuf, formatNote("validity_unparseable: row %s has a validity value Ghost cannot read (%s), treated as unset", ShortID(c.ID), Data(raw)))
 		}
 		if v.state == validityExpired || v.state == validityFuture {
 			dropped = append(dropped, c.ID)

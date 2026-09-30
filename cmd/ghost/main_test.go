@@ -252,7 +252,7 @@ func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
 		t.Fatalf("printDeleteSummary: %v", err)
 	}
 
-	want := `Would delete "test-project" (proj):
+	want := `Would delete test-project (proj):
   memories:     1
   memory_links: 2
   tasks:        3

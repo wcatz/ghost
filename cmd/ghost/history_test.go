@@ -132,7 +132,7 @@ func TestPrintMemoryHistory_PrintsEveryEventOldestFirst(t *testing.T) {
 	// The agent is named when the write path knew it, and the content is
 	// printed in full — a history whose text is elided cannot answer the
 	// question it exists for.
-	if !strings.Contains(out, "agent claude-code") {
+	if !strings.Contains(out, "agent «claude-code»") {
 		t.Errorf("output does not name the performing agent:\n%s", out)
 	}
 	if !strings.Contains(out, "agent unknown") {
@@ -500,7 +500,7 @@ func TestPrintHistoryEntryNamesTheOtherEnd(t *testing.T) {
 	if !strings.Contains(out, "related memory: SUCCESSOR01") {
 		t.Errorf("output does not name the successor:\n%s", out)
 	}
-	if !strings.Contains(out, "folded-in text: the near-duplicate a fold brought in") {
+	if !strings.Contains(out, "folded-in text: «the near-duplicate a fold brought in»") {
 		t.Errorf("output does not carry the folded-in text:\n%s", out)
 	}
 	// A row with neither says nothing about either, rather than printing empty

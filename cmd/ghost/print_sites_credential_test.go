@@ -334,6 +334,9 @@ func TestHistoryPrintersWithholdCredentialsInPreGuardRows(t *testing.T) {
 				// The schema is the entry's own and only the VALUE changes: a
 				// clean row decodes back to exactly what the store returned, so
 				// nothing downstream of this command has to learn a second shape.
+				// The human form delimits the same text and this form does not —
+				// a reader can be fooled by a line that is not delimited, and a
+				// script reading .content cannot be.
 				t.Errorf("entry %d's clean content changed: %q", i, e.Content)
 			}
 			if strings.HasPrefix(e.MergedContent, "<withheld:") {
