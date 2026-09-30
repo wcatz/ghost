@@ -111,6 +111,16 @@ func TestProjectContextQuotesItsFreeTextSurfaces(t *testing.T) {
 			t.Errorf("%s prints «...»-delimited free text and never says what the delimiters mean; the session-start "+
 				"block prints this sentence for the same reason:\n%s", name, block)
 		}
+		// ONCE. The fixture has both a decision and a learned summary, so a block
+		// that emitted the sentence per section would carry it twice — and
+		// `internal/mcpinit` deliberately prints it exactly once, with a test
+		// that fails above one. `strings.Contains` cannot see a duplicate, which
+		// is why this is a count: the first version of this fix wrote the note in
+		// both section branches and every assertion here still passed.
+		if n := strings.Count(block, dataDelimiterNote); n > 1 {
+			t.Errorf("%s prints the «...» explainer %d times, so a reader meets a stray duplicate of it; the "+
+				"session-start block prints it exactly once:\n%s", name, n, block)
+		}
 	}
 
 	for _, want := range []string{titlePayload, decisionPayload, rationalePayload} {

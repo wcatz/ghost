@@ -3279,13 +3279,36 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// `Ghost memory is active but no project matched this directory` style of
 	// emptiness is a claim this surface may make.
 	if projectID != "" {
+		// The «...» explainer goes in the first section that carries quoted free
+		// text, and in exactly one of them. A project with a decision AND a
+		// learned summary is the common case, and the session-start block this
+		// sentence cites prints it exactly once — internal/mcpinit/hook.go, where
+		// a test fails above one — so emitting it per section would put the same
+		// explanation twice in one answer and make the second read as a stray
+		// duplicate.
+		//
+		// It is not hoisted to the top of the block either. The memory rows above
+		// have always been «...»-quoted without it, and this block's recorded
+		// shape is a parity baseline (see the projectctx goldens). So it lands
+		// where it is needed, at the head of the first section whose text this
+		// change newly delimits — the same place the tool and the decisions
+		// resource put theirs.
+		noted := false
+		note := func() {
+			if noted {
+				return
+			}
+			noted = true
+			sb.WriteString(dataDelimiterNote + "\n\n")
+		}
+
 		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
 		if err != nil {
 			return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
 		}
 		if len(decisions) > 0 {
 			sb.WriteString("\n\n## Recent Decisions\n\n")
-			sb.WriteString(dataDelimiterNote + "\n\n")
+			note()
 			for _, d := range decisions {
 				// Every field quoted, not just the decision: a decision's title
 				// is as much stored text as its body, written by the same
@@ -3304,7 +3327,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		}
 		if learned != "" {
 			sb.WriteString("\n\n## Learned Context\n\n")
-			sb.WriteString(dataDelimiterNote + "\n\n")
+			note()
 			sb.WriteString(quoteData(learned))
 		}
 	}
