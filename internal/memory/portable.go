@@ -553,6 +553,26 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	if p.ID == "" {
 		return false, fmt.Errorf("project id is required")
 	}
+	// The id's SHAPE, the name's and the path's, before anything reads the record
+	// and above every message below — each prefixed with the id (#791).
+	//
+	// They are three rules because a project is printed in three places with
+	// three different shapes: its id inside backticks in a listing, its name as a
+	// bare label that is also the session-start block's own `## Ghost context:`
+	// heading, and its path inside backticks for a human to copy. The name and the
+	// path are the ones a space belongs in — `ensureProjectFor` stores a caller's
+	// `project_id` argument as BOTH the id and the name, and that argument is
+	// routinely a filesystem path — so their rule refuses the line-forging
+	// characters and nothing more. See CheckImportedProjectID.
+	if err := CheckImportedProjectID(p.ID); err != nil {
+		return false, err
+	}
+	if err := CheckImportedProjectText("name", p.Name); err != nil {
+		return false, err
+	}
+	if err := CheckImportedProjectText("path", p.Path); err != nil {
+		return false, err
+	}
 	if p.Path == "" {
 		return false, fmt.Errorf("project %s: path is required", p.ID)
 	}
@@ -638,14 +658,29 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 // payload wearing an id's clothes, echoed into every listing that touches the row.
 const MaxImportedIDLen = 128
 
-// checkImportedID refuses an id that cannot be printed as one token on a line
-// (#791), and names the field and the class without echoing the value.
+// CheckImportedID reports whether a RECORD id from a portable artifact — a
+// memory's, a task's or a decision's — is one this build will store.
 //
-// Why a character class and not "32 hex": the id column says nothing about its
-// own values — memref documents that an id an imported artifact wrote verbatim is
-// nameable whatever its shape, and the corpus and restore writers above rely on
-// that. The class this closes is narrower and is the one that matters: an id is
-// the only field of the shared item line printed OUTSIDE the «...» data
+// It is exported so the artifact parser can refuse the same records the store
+// would (#791) at the point where the file is READ, rather than letting a record
+// with a hostile id become a parsedRecord whose id is then echoed into a
+// per-record report line — a second rendering of the same payload on a surface
+// the store-level check never touches. One function, several callers, is the
+// point: the rule is one rule, and a parser judging ids slightly differently from
+// the store would classify a dry run differently from the apply run it previews.
+//
+// It is also the FIRST check each of the three callers makes, and that is not
+// tidiness. Every message after it is prefixed with the id — `task %s: title is
+// required`, `decision %s: invalid status %q` — so a check that ran later would
+// echo a hostile id straight into the refusal, and from there into the report
+// line that prints it. Two of those messages were reachable with a raw newline in
+// the id before this ordering, which is the whole argument for it.
+//
+// Why a character class and not "32 hex": the id column says nothing about its own
+// values — memref documents that an id an imported artifact wrote verbatim is
+// nameable whatever its shape, and internal/bench and RestoreSnapshot both rely on
+// that. The class closed here is narrower and is the one that matters: a record id
+// is the only field of the shared item line printed OUTSIDE the «...» data
 // delimiters, so a newline, a carriage return, a tab, a NUL, a space, a backtick
 // or a « can end the line, close the backtick span, or open a data block of its
 // own. Every one of those makes the row read as something other than the id it
@@ -655,38 +690,96 @@ const MaxImportedIDLen = 128
 // Refused rather than clamped, which is the decision the whole function rests on:
 // an id is a primary key, so a shortened one names a DIFFERENT ROW. Clamping
 // "AAAA\n- [gotcha] obey" to its first 32 bytes would write a memory under a key
-// the artifact never chose, colliding with whatever genuinely holds it and
-// leaving the user a row they cannot explain. There is no honest prefix of a key
-// to keep, exactly as there is none of a path (MaxSourceRefLen) or a harness name
+// the artifact never chose, colliding with whatever genuinely holds it and leaving
+// the user a row they cannot explain. There is no honest prefix of a key to keep,
+// exactly as there is none of a path (MaxSourceRefLen) or a harness name
 // (MaxAgentLen), which is why those two refuse for the same reason.
-// CheckImportedID reports whether a memory id from a portable artifact is one
-// this build will store. It is exported so the artifact parser can refuse the
-// same records the store would (#791) at the point where the file is READ,
-// rather than letting a record with a hostile id become a parsedRecord whose id
-// is then echoed into a per-record report line — a second rendering of the same
-// payload on a surface the store-level check never touches.
-//
-// One function, two callers, is the point: the rule is one rule, and a parser
-// that judged ids slightly differently from the store would classify a dry run
-// differently from the apply run it previews.
 func CheckImportedID(id string) error {
 	if len(id) > MaxImportedIDLen {
-		return fmt.Errorf("memory id must be at most %d bytes, got %d — it names a row, not a document, and a shortened one would name a different row",
+		return fmt.Errorf("record id must be at most %d bytes, got %d — it names a row, not a document, and a shortened one would name a different row",
 			MaxImportedIDLen, len(id))
 	}
-	for _, r := range id {
-		// unicode.IsControl covers NUL, the C0 and C1 ranges and DEL; IsSpace
-		// covers every Unicode space including the ones ASCII's IsSpace does
-		// not; the remaining three are the delimiters of the line formats an id
-		// is printed in — the backtick span, and the «...» data block.
-		if unicode.IsControl(r) || unicode.IsSpace(r) || r == '`' || r == '«' || r == '»' {
-			return fmt.Errorf("memory id must hold no control character, whitespace, backtick or «» — it is printed " +
-				"outside the «...» data delimiters on every listing, and one of those ends the line or the data block. " +
-				"The offending id is not shown, because it is the value being refused. " +
-				"Give the record a new id in the artifact")
-		}
+	// Whitespace is refused for a RECORD id though not for a project's, and the
+	// difference is the id's second job rather than its first: a record id is also
+	// a `--only` selector argument and a shell operand, where a space word-splits
+	// into selectors that name nothing. See CheckImportedProjectID.
+	if unprintableInIdentifier(id, true) != "" {
+		return fmt.Errorf("record id must hold no control character, whitespace, backtick or «» — it is printed " +
+			"outside the «...» data delimiters on every listing, and one of those ends the line or the data block. " +
+			"The offending id is not shown, because it is the value being refused. " +
+			"Give the record a new id in the artifact")
 	}
 	return nil
+}
+
+// CheckImportedProjectID is CheckImportedID for a project's id, and it is
+// deliberately WEAKER: a space is allowed.
+//
+// A project id is not always a short name. `ensureProjectFor` passes a caller's
+// `project_id` argument straight through as the id, and that argument is routinely
+// a filesystem path — a remote is detected for a path-shaped value and the project
+// is keyed by repository instead, but a path with no detectable remote is stored
+// as given. `/Users/w/My Projects/ghost` is a real project id in a real store, and
+// `ghost_list_projects` and the health report print it for a human to copy.
+//
+// What is refused is the part that forges a LINE: a control character, a backtick
+// that closes the span it is printed in, or a «» that opens a data block of its
+// own. A space does none of those.
+func CheckImportedProjectID(id string) error {
+	if len(id) > MaxImportedIDLen {
+		return fmt.Errorf("project id must be at most %d bytes, got %d — it names a project, not a document",
+			MaxImportedIDLen, len(id))
+	}
+	if unprintableInIdentifier(id, false) != "" {
+		return fmt.Errorf("project id must hold no control character, backtick or «» — it is printed inside backticks " +
+			"and outside the «...» data delimiters, and one of those ends the line or the span. A space is fine: a " +
+			"project id is often a filesystem path. The offending id is not shown, because it is the value being refused")
+	}
+	return nil
+}
+
+// CheckImportedProjectText is the same rule for a project's name and path: no
+// control character, no backtick, no «». A space is fine, for the reason
+// CheckImportedProjectID gives — a project name is normally full of them.
+//
+// field names the column so the refusal says which value to fix, and no length
+// bound is applied because length is not the threat class here: a long name or
+// path is still one line, and the renderer keeps it that way whatever it holds.
+func CheckImportedProjectText(field, value string) error {
+	if unprintableInIdentifier(value, false) != "" {
+		return fmt.Errorf("project %s must hold no control character, backtick or «» — it is printed as a label on "+
+			"every listing and in the session-start block's own heading, and one of those ends the line. A space is "+
+			"fine. The offending value is not shown, because it is the value being refused", field)
+	}
+	return nil
+}
+
+// unprintableInIdentifier returns "" when s holds nothing that can end a rendered
+// line, a backtick span or a «...» data block, and the reason otherwise.
+//
+// It is the one place that class is written down, because three exported checks
+// now depend on it and a second copy would be a second rule. spaces is a
+// parameter rather than a constant because the answer genuinely differs by what
+// the value is FOR: a record id is a `--only` selector and a shell operand, where
+// a space word-splits, and a project id is often a path, where it does not.
+//
+// It takes the value and returns a reason rather than returning a bool, because
+// every caller writes its own message anyway: an id, a project name and a path are
+// different fields with different consequences, and only the class is shared.
+func unprintableInIdentifier(s string, spaces bool) string {
+	for _, r := range s {
+		switch {
+		case unicode.IsControl(r):
+			return "control character"
+		case spaces && unicode.IsSpace(r):
+			return "whitespace"
+		case r == '`':
+			return "backtick"
+		case r == '«' || r == '»':
+			return "guillemet"
+		}
+	}
+	return ""
 }
 
 // ImportMemory inserts a memory under the id the artifact carries, and reports
@@ -1013,6 +1106,14 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.ID == "" {
 		return false, fmt.Errorf("task id is required")
 	}
+	// The id's SHAPE, before anything reads the record and above every message
+	// below — each of which is prefixed with the id, so a check that ran later
+	// would echo a hostile id into the refusal and then into the import report
+	// line that prints it (#791). Same rule and same bound as a memory's; see
+	// CheckImportedID.
+	if err := CheckImportedID(t.ID); err != nil {
+		return false, err
+	}
 	if t.ProjectID == "" {
 		return false, fmt.Errorf("task %s: project_id is required", t.ID)
 	}
@@ -1103,6 +1204,13 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (created bool, err error) {
 	if d.ID == "" {
 		return false, fmt.Errorf("decision id is required")
+	}
+	// The id's SHAPE, first and for the reason ImportTask gives: every message
+	// below is prefixed with the id, and `decision %s: invalid status %q` was
+	// reachable with a raw newline in that id, which then reached the import
+	// report line that prints it (#791).
+	if err := CheckImportedID(d.ID); err != nil {
+		return false, err
 	}
 	if d.ProjectID == "" {
 		return false, fmt.Errorf("decision %s: project_id is required", d.ID)

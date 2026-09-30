@@ -287,6 +287,53 @@ func Token(s string) string {
 	return s
 }
 
+// Label renders one stored value that must occupy a single line of output and is
+// read as a LABEL rather than as a key — a project's name, a project's path.
+//
+// It exists because Token is the wrong renderer for those two, and using it would
+// have been a visible regression rather than a safe default: Token writes a space
+// as a quoted string, so every project named "my project" or living at
+// "/Users/w/My Projects/ghost" would print as `"my project"` on every listing and
+// in the session-start block's own heading. A space is not what makes a line, and
+// a name is not what gets used as a `--only` selector.
+//
+// So Label keeps ordinary text exactly as written — spaces, slashes, dots, every
+// word a name is made of — and neutralises only what could end the line or open a
+// construct around it. Three things are printed around a project name and path, so
+// three characters are delimiters here that are not delimiters for an id: a
+// control character, which ends the line; «», which opens a data block; and the
+// backtick and the double quote, which close the backtick span a path is printed
+// in and the `"…"` the session-start block tells the reader to pass to every tool.
+//
+// The escaping is `strconv.QuoteToASCII` — the same call Token makes, so the two
+// renderers cannot disagree about what a newline looks like — with the surrounding
+// quotes dropped and the backtick fixed up, because a backtick is printable and is
+// not a delimiter in Go, so quoting alone would hand back the one character this
+// exists to neutralise.
+func Label(s string) string {
+	if !labelNeedsEscaping(s) {
+		return s
+	}
+	q := strconv.QuoteToASCII(s)
+	q = strings.ReplaceAll(q, "`", "\\`")
+	// The quotes are the only thing dropped: a value that needed escaping always
+	// comes back with both, so the slice cannot run off the ends.
+	return q[1 : len(q)-1]
+}
+
+// labelNeedsEscaping reports whether s holds anything Label would have to escape.
+func labelNeedsEscaping(s string) bool {
+	for _, r := range s {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			return true
+		case r == '`', r == '"', r == '«', r == '»':
+			return true
+		}
+	}
+	return false
+}
+
 // isTokenRune is the set Token writes bare. It is the scope-name set the label
 // has always used, widened by nothing: the id column's own values are 32 hex
 // characters, and the other ids a real store holds (a bench corpus id, a restored

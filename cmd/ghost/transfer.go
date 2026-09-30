@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/portable"
 )
@@ -617,6 +618,18 @@ func printExportSummary(out io.Writer, path string, stats portable.Stats) error 
 // reviewable: the reader sees each memory's content prefix, not just a count.
 func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	detail := r.Detail
+	// The id through assemble.Token, once, for every line it reaches. A record's
+	// id is a key this line prints with no quoting of its own, so an id carrying a
+	// newline forges a report line here — the same class as the rendered memory
+	// line, on a surface a store written before the import shape check existed
+	// can still reach (#791). A well-formed id is written bare, so the report is
+	// byte-identical for every ordinary artifact.
+	//
+	// It is the SAME id printed by portable's labelOrID, and both render it
+	// through the one function rather than each choosing a spelling, because a
+	// report whose headline and whose per-record lines disagree about how an id
+	// looks is worse than either choice.
+	id := assemble.Token(r.ID)
 	// A credential refusal prints the id and nothing else. portable's
 	// safeDetail already reduces the detail to the id for any record whose text
 	// holds one — see the note there — and this is the second line for a
@@ -625,7 +638,7 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	// report.Errors, which is the part needed to fix the artifact.
 	var refused *memory.SecretContentError
 	if errors.As(r.Error, &refused) {
-		detail = r.ID
+		detail = id
 	}
 	// Only a memory has provenance to speak of. A project or a task line that
 	// said "provenance kept as exported" would be a sentence about a field the
@@ -647,9 +660,9 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	}
 	switch {
 	case detail == "":
-		detail = r.ID
+		detail = id
 	case r.ID != "":
-		detail = fmt.Sprintf("%q (%s)", detail, r.ID)
+		detail = fmt.Sprintf("%q (%s)", detail, id)
 	}
 	_, err := fmt.Fprintf(out, "  %-7s %-9s line %d  %s\n", r.Action, r.Type+":", r.Line, detail)
 	return err

@@ -386,8 +386,16 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "## Ghost context: %s\n", project)
-	fmt.Fprintf(&sb, "Use project_id: \"%s\" for all ghost_* tool calls.\n", project)
+	// The name through assemble.Label, once, for both lines it appears on. A
+	// project name is agent-supplied — `ensureProjectFor` stores the caller's
+	// `project_id` argument as the project's name as well as its id — and this is
+	// the block every session receives, so a newline in it forges a second
+	// heading here, above the «...» explainer that says stored text is data
+	// (#791). Label rather than Token because a name is a label: it is normally
+	// full of spaces, and Token would print every one of them as a quoted string.
+	name := assemble.Label(project)
+	fmt.Fprintf(&sb, "## Ghost context: %s\n", name)
+	fmt.Fprintf(&sb, "Use project_id: \"%s\" for all ghost_* tool calls.\n", name)
 	if asOf != nil {
 		fmt.Fprint(&sb, memory.AsOfSourceNote(*asOf))
 		fmt.Fprint(&sb, "\n")

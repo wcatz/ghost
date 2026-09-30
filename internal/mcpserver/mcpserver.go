@@ -316,7 +316,26 @@ type asOfCapableStore interface {
 // eight-hex ids Ghost mints have byte length == rune count, so this changes
 // nothing for them and is the difference between working and nonsense for the
 // rest.
+//
+// An id assemble.Token had to quote is returned WHOLE, not truncated first. This
+// is a LEGIBILITY fix rather than a safety one, and the distinction is worth
+// keeping: truncating first is already safe, because an eight-rune cut of a
+// newline-bearing id holds no newline once quoted. It is useless, though —
+// `Token(shortID(id))` on such an id produces `"AAAA\n- ["`, half an escape and
+// one truncated line, and a reader cannot tell it from an ordinary id or act on
+// it. Truncating the rendered form instead would cut mid-escape and can emit a
+// lone backslash. So a well-formed id is abbreviated and anything else is shown in
+// full, which is what "compact preview" was ever for (#791).
 func shortID(id string) string {
+	// An empty id stays empty rather than becoming the quoted empty string
+	// assemble.Token renders it as, because a preview column showing `""` for a
+	// row with no id is noise, and an id that is empty cannot forge a line.
+	if id == "" {
+		return ""
+	}
+	if rendered := assemble.Token(id); rendered != id {
+		return rendered
+	}
 	if utf8.RuneCountInString(id) > 8 {
 		return string([]rune(id)[:8])
 	}
@@ -2446,9 +2465,13 @@ func (s *Server) registerTools() {
 		}
 		var sb strings.Builder
 		for _, t := range tasks {
-			fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, shortID(t.ID), t.Title)
+			// The id through assemble.Token, for the reason Item.Line's does
+			// (#791), and the title and description through quoteData for the
+			// reason the decisions listing's do: a task's text is written by the
+			// same callers, through the same tools, as a memory's.
+			fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, shortID(t.ID), quoteData(t.Title))
 			if t.Description != "" {
-				fmt.Fprintf(&sb, "  %s\n", t.Description)
+				fmt.Fprintf(&sb, "  %s\n", quoteData(t.Description))
 			}
 		}
 		return &mcp.CallToolResult{
@@ -2640,7 +2663,15 @@ func (s *Server) registerTools() {
 				continue
 			}
 			totalMemories += count
-			fmt.Fprintf(&sb, "- **%s** (%s): %d memories\n", p.Name, p.ID[:min(len(p.ID), 8)], count)
+			// The name is a LABEL, so assemble.Label rather than Token: a project
+			// is normally named with spaces, and Token would print every one of
+			// them as a quoted string. Both guarantee a single line, which is what
+			// this line needs — a project name is agent-supplied (`ensureProjectFor`
+			// stores the caller's project_id argument as both id and name), and a
+			// newline in one put a second entry on a health report a human reads
+			// (#791).
+			fmt.Fprintf(&sb, "- **%s** (%s): %d memories\n", assemble.Label(p.Name),
+				shortID(p.ID), count)
 		}
 		fmt.Fprintf(&sb, "\n**Total memories:** %d\n", totalMemories)
 
@@ -2751,7 +2782,13 @@ func (s *Server) registerTools() {
 		sb.WriteString("## Ghost Projects\n\n")
 		for _, p := range projects {
 			count, _ := s.store.CountMemories(ctx, p.ID)
-			fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — %d memories\n", p.Name, p.ID, p.Path, count)
+			// Name and path through assemble.Label, id through assemble.Token, for
+			// the reasons the health listing above gives. The path is the one that
+			// has to stay copyable: it is printed for a human to paste into a
+			// terminal, and `/Users/w/My Projects/ghost` quoted would be a worse
+			// answer than a newline in it would be dangerous (#791).
+			fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — %d memories\n",
+				assemble.Label(p.Name), assemble.Token(p.ID), assemble.Label(p.Path), count)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
@@ -2976,15 +3013,32 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
+		// Every stored field of a decision is quoted, and the id goes through
+		// assemble.Token — the same two rules the project context's Recent
+		// Decisions section and the decisions resource use. This listing was the
+		// one surface that printed all four bare: a decision's title, decision and
+		// rationale as markdown, and its id raw inside backticks, so an imported
+		// decision whose id carried a newline forged a line here outside any «...»
+		// (#791).
+		//
+		// alternatives is a field too, and it is caller text: `ghost_decision_record`
+		// takes a list of strings and writes them as given, and this listing is the
+		// only surface that reads them back. The join happens before the quoting so
+		// the whole joined value is one data block rather than one per entry.
+		//
+		// The explainer is printed once, at the head, because this is a BLOCK — a
+		// whole decision record — rather than a row listing like
+		// `ghost_memories_list`, which delimits each line and does not.
 		var sb strings.Builder
+		sb.WriteString(dataDelimiterNote + "\n\n")
 		for _, d := range decisions {
-			fmt.Fprintf(&sb, "### %s\n", d.Title)
-			fmt.Fprintf(&sb, "**Decision:** %s\n", d.Decision)
-			fmt.Fprintf(&sb, "**Rationale:** %s\n", d.Rationale)
+			fmt.Fprintf(&sb, "### %s\n", quoteData(d.Title))
+			fmt.Fprintf(&sb, "**Decision:** %s\n", quoteData(d.Decision))
+			fmt.Fprintf(&sb, "**Rationale:** %s\n", quoteData(d.Rationale))
 			if len(d.Alternatives) > 0 {
-				fmt.Fprintf(&sb, "**Alternatives rejected:** %s\n", strings.Join(d.Alternatives, ", "))
+				fmt.Fprintf(&sb, "**Alternatives rejected:** %s\n", quoteData(strings.Join(d.Alternatives, ", ")))
 			}
-			fmt.Fprintf(&sb, "**Status:** %s | **ID:** `%s`\n\n", d.Status, d.ID)
+			fmt.Fprintf(&sb, "**Status:** %s | **ID:** `%s`\n\n", d.Status, assemble.Token(d.ID))
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
@@ -3151,10 +3205,19 @@ func (s *Server) registerResources() {
 				continue
 			}
 			for _, t := range tasks {
+				// The explainer goes in with the first row and only there: this is
+				// a BLOCK, so a reader meets «...» and needs to know what it
+				// means, and an empty section must still answer with its own
+				// sentence rather than with an explanation of nothing (#791). The
+				// id and the text take the same two rules as everywhere else.
+				if !hasContent {
+					sb.WriteString(dataDelimiterNote + "\n\n")
+				}
 				hasContent = true
-				fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, shortID(t.ID), t.Title)
+				fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority,
+					shortID(t.ID), quoteData(t.Title))
 				if t.Description != "" {
-					fmt.Fprintf(&sb, "  %s\n", t.Description)
+					fmt.Fprintf(&sb, "  %s\n", quoteData(t.Description))
 				}
 			}
 		}

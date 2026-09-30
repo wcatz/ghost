@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/secret"
 )
@@ -706,19 +707,27 @@ func safeDetail(label, full, id string) string {
 // directly or a kind added later that safeDetail does not know about. The format
 // still reaches the reader through the wrapped error, which is the part they need
 // in order to fix the artifact.
+//
+// The id goes through assemble.Token on every path, including the credential one.
+// That is not a contradiction: a credential refusal reducing the line to the id is
+// about not reprinting the CONTENT, and the id is a key this report prints inside
+// no quoting at all — so a store holding one that carries a newline, a store
+// written before the shape check existed, would forge a report line here (#791).
+// A well-formed id is written bare and this is invisible; a hostile one is
+// rendered inert on the very line that is naming it.
 func labelOrID(r RecordResult, err error) string {
 	var refused *memory.SecretContentError
 	if errors.As(err, &refused) {
 		if r.ID != "" {
-			return r.ID
+			return assemble.Token(r.ID)
 		}
 		return "(no id)"
 	}
 	switch {
 	case r.Detail != "" && r.ID != "":
-		return fmt.Sprintf("%q (%s)", r.Detail, r.ID)
+		return fmt.Sprintf("%q (%s)", r.Detail, assemble.Token(r.ID))
 	case r.ID != "":
-		return r.ID
+		return assemble.Token(r.ID)
 	default:
 		return "(no id)"
 	}
