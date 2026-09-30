@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -181,6 +185,132 @@ func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 	assertLogKeysAreLabels(t, log)
 }
 
+// assertDrivenLoggers requires every function in this package that actually
+// LOGS to be covered by one of the cases, so the guard's scope cannot quietly
+// outgrow the code it guards.
+//
+// It walks the package with go/parser rather than transcribing the list, which is
+// the same technique TestEveryHarnessCommandCallSiteChecksItsError uses in
+// internal/ai and TestEveryVerifiedAtMentionIsClassified uses in
+// internal/memory: the point of a guard like this is that it fails when the code
+// moves, and a transcribed list only fails when someone remembers to edit it —
+// which is the discipline the guard exists to remove.
+//
+// The set is the functions that make a slog LEVEL CALL, not the functions that
+// merely take a *slog.Logger. That distinction is not a nicety: scanning
+// declarations reports RelationClassifier.SetLogger, a setter that hands a
+// logger over and logs nothing, and asking the table for a case to drive it is
+// asking for a test of a getter. (That was the first version of this scan, and
+// it produced a table entry the guard was supposed to make unnecessary.)
+//
+// Finding ZERO logging functions is itself a failure: a scan that recognised
+// nothing is indistinguishable from a package that is clean.
+func assertDrivenLoggers(t *testing.T, cases []struct {
+	name   string
+	covers []string
+	run    func(t *testing.T, log *capturedLog)
+	wants  []string
+}) {
+	t.Helper()
+	covered := map[string]string{} // logging function -> the case that drives it
+	for _, tc := range cases {
+		for _, fn := range tc.covers {
+			covered[fn] = tc.name
+		}
+	}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	found := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// The enclosing FuncDecl of every level call. A method or closure that
+		// logs is attributed to the function whose name a caller already knows,
+		// so the table is keyed on entry points rather than on every small
+		// function that happens to emit a line.
+		var stack []*ast.FuncDecl
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.FuncDecl:
+				stack = append(stack, node)
+			case *ast.CallExpr:
+				if !isSlogLevelCall(node) || len(stack) == 0 {
+					return true
+				}
+				found++
+				fn := stack[len(stack)-1].Name.Name
+				if _, ok := covered[fn]; !ok {
+					t.Errorf("%s:%d: %s logs, but no case covers it: its log lines are outside assertLogKeysAreLabels",
+						name, fset.Position(node.Pos()).Line, fn)
+				}
+			}
+			return true
+		})
+	}
+	if found == 0 {
+		t.Fatal("no slog level call found in the package: this test has stopped seeing the code it guards")
+	}
+}
+
+// slogLevelNames are the methods and functions that emit a record. Anything else
+// on a logger (With, Handler, Enabled) emits nothing.
+var slogLevelNames = map[string]bool{
+	"Debug": true, "Info": true, "Warn": true, "Error": true,
+	"DebugContext": true, "InfoContext": true, "WarnContext": true, "ErrorContext": true,
+	"Log": true, "LogAttrs": true,
+}
+
+// isSlogLevelCall reports whether call is a level call on a *slog.Logger, or on
+// the slog package itself. It reads the call rather than the surrounding
+// declaration, so a method named Info on some other type is not mistaken for
+// one — and it recognises a call reached through any expression, so an
+// unrecognised shape is a gap in the scan rather than a silent pass.
+func isSlogLevelCall(call *ast.CallExpr) bool {
+	switch fun := ast.Unparen(call.Fun).(type) {
+	case *ast.SelectorExpr:
+		if !slogLevelNames[fun.Sel.Name] {
+			return false
+		}
+		if pkg, isIdent := fun.X.(*ast.Ident); isIdent && pkg.Name == "slog" {
+			return true
+		}
+		// A method on a logger the function received or holds. Without a type
+		// checker the receiver's NAME is the only signal, so this is the one
+		// approximation in the scan: a method named Info on an unrelated
+		// receiver whose base identifier is a word would be reported. Reporting
+		// one costs a table entry; missing one costs a pass that logs unguarded,
+		// and this package's only `Info`-named methods are slog's.
+		return baseIdentName(fun.X) != ""
+	case *ast.Ident:
+		return slogLevelNames[fun.Name] // slog.Info(...) at package level
+	}
+	return false
+}
+
+// baseIdentName returns the receiver's own name, so `h.logger` and `logger` both
+// yield "logger". A computed receiver with no identifier behind it returns "".
+func baseIdentName(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.SelectorExpr:
+		return e.Sel.Name
+	case *ast.ParenExpr:
+		return baseIdentName(e.X)
+	}
+	return ""
+}
+
 // TestPackagePassesLogOnlyLabelKeys is the package-wide half of #804: the same
 // shape assertion, driven through every entry point in this package that logs —
 // the creation pass, the repair pass, the operator's named withdrawal, and the
@@ -204,59 +334,49 @@ func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 // behaviour, and why the audit this test came from was a type-checked read of
 // every call rather than a runtime signal.
 //
-// The table is the coverage claim made checkable: a pass that logs, and no case
-// drives it, is named below — which catches a case dropped from the table, and
-// does NOT catch a new logger added to the package, since the list is
-// transcribed. The comment on the check says so, and says what to grep instead.
+// The table is the coverage claim made checkable: a function in this package
+// that logs, and no case covers it, is named by the check below. That set is
+// read out of the package's own source, so it grows when a fifth logging entry
+// point is added rather than when someone remembers this file.
 func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 	cases := []struct {
-		name  string
-		run   func(t *testing.T, log *capturedLog)
-		wants []string
+		name   string
+		covers []string
+		run    func(t *testing.T, log *capturedLog)
+		wants  []string
 	}{
-		{name: "Run", run: runPassesLogKeys, wants: []string{
+		{name: "Run", covers: []string{"Run"}, run: runPassesLogKeys, wants: []string{
 			"reverse of a live supersedes link", // the #804 line
 			"refusing a pair the graph claims in both directions",
 			"vetoed pair whose older note states a rule",
 			"skipping pair with an unclassifiable verdict",
 			"supersede classified",
 		}},
-		{name: "Reassess", run: reassessPassesLogKeys, wants: []string{
+		{name: "Reassess", covers: []string{"Reassess"}, run: reassessPassesLogKeys, wants: []string{
 			"a cyclic pair whose two rows share both timestamps",
 			"the older note states a rule this edge does not retire",
 			"supersede reassess", // the summary line — the longest in the package
 		}},
-		{name: "Withdraw", run: withdrawPassesLogKeys, wants: []string{
+		{name: "Withdraw", covers: []string{"Withdraw"}, run: withdrawPassesLogKeys, wants: []string{
 			"supersede withdrew a named edge",
 		}},
-		{name: "RelationClassifier", run: classifierPassesLogKeys, wants: []string{
+		// The classifier's lines live in its retry wrapper and its per-chunk
+		// helper, not in the public Classify/ClassifyBatch a caller names — the
+		// scan reads that off the source, which is why these two are spelled the
+		// way they are rather than the way the case is named.
+		{name: "RelationClassifier", covers: []string{"ClassifyBatch", "call", "classifyChunk"}, run: classifierPassesLogKeys, wants: []string{
 			"classify call failed; retrying once",
 			"batch reply unparseable",
 		}},
 	}
 
 	// Every pass in the package that logs must have a case, or this test is
-	// quietly narrower than it says. The names are what a reader greps for, and
-	// an entry here is what keeps the list honest as the package grows.
-	//
-	// What this catches: a case DELETED from the table without the guard going
-	// with it, which is how a table rots. What it does NOT catch: a fifth
-	// logging entry point added to the package later, because this list is
-	// transcribed rather than derived. Deriving it would mean walking the
-	// package's source from a test, which this repository does not do (no test
-	// asserts on source text or ASTs, so none rots when the source is
-	// reformatted). The honest consequence: a new logger has to be added here by
-	// whoever adds it, and `grep -l 'slog.Logger' internal/supersede/*.go` is
-	// the check to run when that happens.
-	driven := map[string]bool{}
-	for _, tc := range cases {
-		driven[tc.name] = true
-	}
-	for _, name := range []string{"Run", "Reassess", "Withdraw", "RelationClassifier"} {
-		if !driven[name] {
-			t.Errorf("no case drives %s, so its log lines are uncovered by assertLogKeysAreLabels", name)
-		}
-	}
+	// quietly narrower than it says. The list is DERIVED from the package's own
+	// source rather than transcribed, so a fifth logging entry point added later
+	// fails here instead of logging into an unguarded void. (The first version of
+	// this check transcribed the four names and a reviewer was right that it
+	// could only ever catch a case being removed, not a logger being added.)
+	assertDrivenLoggers(t, cases)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
