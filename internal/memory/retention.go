@@ -49,12 +49,16 @@ const SessionTTL = 24 * time.Hour
 // its last activity moving, and one nobody has touched for a week is a fact that
 // turned out not to matter.
 //
-// The activity it is measured from is COALESCE(last_accessed, updated_at,
-// created_at). last_accessed is what the name says and is preferred when it
-// exists; no production surface records it today (Store.Touch has no caller), so
-// in practice this is the row's last WRITE, and the grace is "a week since
-// anything changed this row". That is the weaker of the two readings, so the
-// default is a week rather than a day.
+// The activity it is measured from is pruneActivitySQL (prune.go), which is
+// COALESCE(last_accessed, max(updated_at, created_at, expires_at)). last_accessed
+// is what the name says and is preferred when it exists; no production surface
+// records it today (Store.Touch has no caller), so in practice this is the NEWEST
+// of the row's own stamps — its last write, or the expiry a write refreshed, since
+// a fold extends a session row's life without touching updated_at (#772). So the
+// grace is "a week since anything last said this row was wanted", and an untouched
+// session memory saved at T is removed at T + SessionTTL + grace rather than at
+// T + grace: the row is wanted until its expiry, and only then does the week start.
+// That is the weaker of the two readings, so the default is a week rather than a day.
 const DefaultSessionGrace = 7 * 24 * time.Hour
 
 // The Go-side source of truth for the memories retention CHECK constraint, in

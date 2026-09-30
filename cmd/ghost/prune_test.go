@@ -304,3 +304,76 @@ func TestPruneUsageSaysItIsNeverAutomatic(t *testing.T) {
 		}
 	}
 }
+
+// TestPrintPruneNamesTheGraceBasisWithoutClaimingItWasATouch is the renderer half
+// of #772. Putting expires_at into prune's activity term made the grace basis and
+// the row's last real activity two different values, and a report that projects
+// the first under the name "last touched" claims an event that did not happen: the
+// expiry is derived FORWARD at save time, so on a row never edited since its save
+// the two are the same instant and the line carries one timestamp twice under two
+// labels.
+//
+// Both directions are checked, because the fix is not "print more". When the two
+// agree there is nothing for a second label to add, so the line must not repeat
+// the stamp; when they differ — a row EDITED after its save, which is what makes
+// it eligible now rather than a month ago — the basis has to be there. The case
+// that is NOT here is a folded row: a fold refreshes expires_at and leaves
+// updated_at alone, so its basis is the expiry and the label is omitted anyway.
+// TestPruneReportsTheGraceBasisSeparatelyFromActivity pins that, and it is why
+// printPruneRow's condition compares stamp VALUES rather than asking what
+// touched the row.
+func TestPrintPruneNamesTheGraceBasisWithoutClaimingItWasATouch(t *testing.T) {
+	t.Run("agrees with the expiry, so the stamp is not repeated", func(t *testing.T) {
+		// A row saved and never touched since: the ordinary shape, and the one the
+		// save's own derived expiry makes self-referential.
+		const expiry = "2026-09-01 10:00:00"
+		c := memory.PruneCandidate{
+			ID: "abc123", ProjectID: "p", Category: "fact", Content: "a session note nobody has touched",
+			Retention:  memory.RetentionSession,
+			ExpiresAt:  expiry,
+			ActivityAt: "2026-08-20 09:00:00",
+			GraceFrom:  expiry,
+		}
+		var out bytes.Buffer
+		if err := printPruneRow(&out, c, "  "); err != nil {
+			t.Fatalf("printPruneRow: %v", err)
+		}
+		line := strings.SplitN(out.String(), "\n", 2)[0]
+		if got := strings.Count(line, expiry); got != 1 {
+			t.Errorf("the expiry %s appears %d times in %q, want once: the grace basis IS the expiry here, and repeating it reads as two events",
+				expiry, got, line)
+		}
+		if !strings.Contains(line, "last touched 2026-08-20 09:00:00") {
+			t.Errorf("the line does not carry the row's real last-touched stamp: %q", line)
+		}
+		if strings.Contains(line, "grace from") {
+			t.Errorf("the line names a grace basis that adds nothing over the expiry it repeats: %q", line)
+		}
+	})
+
+	t.Run("differs from the expiry, so the basis is named", func(t *testing.T) {
+		// A row EDITED after its save, so updated_at is later than the expiry the
+		// save derived. The grace then runs from the edit rather than from the
+		// expiry, which is the whole reason the two are separate facts: this row is
+		// eligible now because of something that happened, not because a value ran
+		// out.
+		c := memory.PruneCandidate{
+			ID: "def456", ProjectID: "p", Category: "fact", Content: "a session note edited after its save",
+			Retention:  memory.RetentionSession,
+			ExpiresAt:  "2026-09-01 10:00:00",
+			ActivityAt: "2026-09-05 09:00:00",
+			GraceFrom:  "2026-09-05 09:00:00",
+		}
+		var out bytes.Buffer
+		if err := printPruneRow(&out, c, "  "); err != nil {
+			t.Fatalf("printPruneRow: %v", err)
+		}
+		line := strings.SplitN(out.String(), "\n", 2)[0]
+		if !strings.Contains(line, "grace from 2026-09-05 09:00:00") {
+			t.Errorf("the line does not name the instant the grace was measured from: %q", line)
+		}
+		if strings.Count(line, "2026-09-05 09:00:00") != 2 {
+			t.Errorf("the line does not carry both readings — the last write and the grace basis are the same instant HERE, and only one of them is the expiry: %q", line)
+		}
+	})
+}

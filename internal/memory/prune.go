@@ -85,9 +85,23 @@ type PruneOptions struct {
 }
 
 // PruneCandidate is one row a prune would remove, with everything the report
-// needs to be checkable by a reader: which tier it is, when it expires, and when
-// anything last touched it. The text is included because a report of rows the
-// operator cannot recognise is a report they cannot approve.
+// needs to be checkable by a reader: which tier it is, when it expires, when
+// anything last touched it, and what the grace is measured from. The text is
+// included because a report of rows the operator cannot recognise is a report
+// they cannot approve.
+//
+// GraceFrom and ActivityAt are SEPARATE fields because they stopped being the
+// same value when #772 put expires_at into the activity term, and one field
+// under one name cannot honestly carry both readings. ActivityAt is what
+// happened to the row: a recorded read, else its last write, else its creation —
+// a statement about an event. GraceFrom is the basis the grace was actually
+// measured from, which now includes the expiry, and an expiry is a value Ghost
+// derived FORWARD at save time: a prediction about the future, not a record of
+// one. Reporting it as "last touched" would claim the row was touched at the
+// instant it stopped being wanted, and for a row never edited since its save
+// that instant IS the expiry, so the report would print one timestamp twice
+// under two labels. An operator reading that line to decide whether to run
+// `ghost prune --apply` deserves the difference.
 type PruneCandidate struct {
 	ID         string
 	ProjectID  string
@@ -96,6 +110,7 @@ type PruneCandidate struct {
 	Retention  string
 	ExpiresAt  string
 	ActivityAt string
+	GraceFrom  string
 }
 
 // PruneReport is what one run did, or would do.
@@ -125,6 +140,46 @@ type PruneReport struct {
 	Removed    int
 }
 
+// pruneActivitySQL is the instant the grace is measured from, as ONE expression,
+// because three things have to agree on it: the predicate below, the candidate's
+// GraceFrom, and the removal order. A grace measured from one expression and
+// ordered by another is a report that describes a different run from the one it
+// previews.
+//
+// The report's OTHER stamp, ActivityAt, is a deliberately NARROWER term —
+// COALESCE(last_accessed, updated_at, created_at), no expiry — because it answers
+// a different question ("what happened to this row?") and an expiry is not an
+// event, it is a value derived forward. The divergence is the point; folding
+// expires_at back into it would put a prediction under a label that claims
+// otherwise. See PruneCandidate.
+//
+// A recorded access is the strongest signal and is preferred when it exists.
+// Nothing in production writes last_accessed (Store.Touch has no caller), so
+// what is left is the newest of the row's own stamps: the last write, or the
+// expiry a write REFRESHED. That preference is a KNOWN limit rather than a
+// settled reading, and it is stated HERE because this is the COALESCE it
+// describes. A row holding an OLD non-NULL last_accessed shadows a refreshed
+// expires_at entirely, which has TWO consequences and the second is the one a
+// reader of the report will notice. The grace consequence: a fold's renewal does
+// not reach the grace for that row. The REPORT consequence: the basis is then the
+// old read rather than the expiry, so printPruneRow's "is it the expiry?" test
+// fails and the row carries a third stamp beside a second one that says the same
+// instant. It is dormant for the same reason the preference is, and it is written
+// down rather than left for the first surface that records a read to discover.
+//
+// It is max() over the three rather than another COALESCE term because
+// created_at is NOT NULL, so a trailing term is unreachable — and the newest of
+// the three is the question, not the first one present. The expiry belongs in the
+// max because a fold is a write that extends a session row's life
+// (raiseRetentionTx) while deliberately leaving updated_at alone, and without it
+// a row reinforced a moment ago was prunable the instant its fresh expiry
+// arrived: the grace was measured from a stamp the fold never moved (#772).
+// Every term but last_accessed is in the one layout Ghost writes, so the max is a
+// text comparison between like shapes; a hand-set value in another shape sorts
+// by its own characters, which errs towards the newer stamp and so towards
+// keeping the row.
+const pruneActivitySQL = "COALESCE(last_accessed, max(updated_at, created_at, expires_at))"
+
 // prunePredicate is the candidate predicate, and the DELETE runs the identical
 // text. That is not tidiness: the tombstones are appended for the ids the SELECT
 // returned, so the two statements have to name exactly the same rows. One
@@ -132,12 +187,10 @@ type PruneReport struct {
 // BEGIN IMMEDIATE), so they cannot disagree by a row arriving in between — which
 // is the reason to compare them by construction instead of by argument.
 //
-// The activity term is COALESCE(last_accessed, updated_at, created_at): a
-// recorded access is the stronger signal, and nothing in production writes
-// last_accessed (Store.Touch has no caller), so in practice this is the row's
-// last WRITE. It is compared through SQLite's datetime() rather than as text,
-// because the three columns do not all hold the same shape: created_at and
-// updated_at are whatever datetime('now') wrote, and Store.Touch writes
+// The activity term is pruneActivitySQL above, compared through SQLite's
+// datetime() rather than as text, because the columns it coalesces do not all
+// hold the same shape: created_at, updated_at and expires_at are whatever
+// datetime('now') wrote and sessionExpiry formats, while Store.Touch writes
 // last_accessed as RFC 3339. A text comparison between the two errs only WITHIN
 // one calendar day ('T' sorts above ' '), and it errs towards keeping the row — a
 // prune that runs a day late, never one that removes a memory it should not — but
@@ -152,6 +205,9 @@ type PruneReport struct {
 // A value set by hand in another shape does not match, which leaves the row in the
 // store rather than taking it out.
 //
+// The last_accessed preference is a KNOWN limit, stated on pruneActivitySQL above
+// where the COALESCE it describes lives.
+//
 // pinned = 0 is the fifth term, and it sits in the predicate rather than in Go
 // for the same reason the tier does: a pin is decided by the same statement that
 // reads the row. A pin is an explicit user override, and the session promise was
@@ -165,7 +221,7 @@ const prunePredicate = `
 		AND pinned = 0
 		AND expires_at IS NOT NULL
 		AND expires_at <= ?
-		AND datetime(COALESCE(last_accessed, updated_at, created_at)) <= datetime(?)
+		AND datetime(` + pruneActivitySQL + `) <= datetime(?)
 `
 
 // pruneBatchSize bounds the write lock: an apply removes candidates in batches
@@ -219,11 +275,17 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 	// two rows with the same stamp have to come out in an order a second run
 	// would repeat. The order is part of the query so a batch is the same window
 	// the preview named.
-	order := "\n\t\tORDER BY COALESCE(last_accessed, updated_at, created_at), id"
+	order := "\n\t\tORDER BY " + pruneActivitySQL + ", id"
 
+	// TWO columns, not one: pruneActivitySQL is the grace's basis and the removal
+	// order, and it includes an expiry — a value derived forward, not an event. The
+	// second is the row's last real activity, which is what an operator reading
+	// "last touched" is asking about, and the two differ on every ordinary row.
+	// See PruneCandidate.
 	candQuery := `
 		SELECT id, project_id, category, content, retention, expires_at,
-		       COALESCE(last_accessed, updated_at, created_at)
+		       COALESCE(last_accessed, updated_at, created_at),
+		       ` + pruneActivitySQL + `
 		FROM memories
 		WHERE ` + prunePredicate + scope + order
 
@@ -237,7 +299,7 @@ func (s *Store) PruneSessionMemories(ctx context.Context, opts PruneOptions) (Pr
 	}
 	for rows.Next() {
 		var c PruneCandidate
-		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Category, &c.Content, &c.Retention, &c.ExpiresAt, &c.ActivityAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ProjectID, &c.Category, &c.Content, &c.Retention, &c.ExpiresAt, &c.ActivityAt, &c.GraceFrom); err != nil {
 			rows.Close() //nolint:errcheck
 			s.mu.RUnlock()
 			return report, fmt.Errorf("scan prunable memory: %w", err)
