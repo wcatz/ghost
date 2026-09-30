@@ -36,8 +36,8 @@ const installPS1Path = "../../install.ps1"
 // cannot run it.
 //
 // It is NOT a gap in CI. An earlier version of this comment claimed "the workflows
-// are ubuntu, and there is no Windows job", which was simply false: build-and-test
-// has a `windows-plugin` job on windows-latest and windows-11-arm, both of which
+// are ubuntu, and there is no Windows job", which was simply false: ci.yml has a
+// `windows-plugin` job on windows-2025-vs2026 and windows-11-arm, both of which
 // ship PowerShell 7, and it now runs these tests. The skip is for local runs
 // only, and it says so rather than implying the suite is never executed.
 // requirePwshEnv, when set, turns the skip below into a failure. `go test` exits 0
@@ -62,7 +62,7 @@ func requirePwsh(t *testing.T) string {
 	{
 		t.Skip("pwsh is not on PATH, so install.ps1's decision logic cannot be executed here. " +
 			"CI does run it: the `install.ps1 decision tests` step of the `windows-plugin` job in " +
-			".github/workflows/ci.yml runs this on windows-latest and windows-11-arm, which ship " +
+			".github/workflows/ci.yml runs this on windows-2025-vs2026 and windows-11-arm, which ship " +
 			"PowerShell 7. To run it locally: " +
 			"`pwsh -NoProfile -File internal/selfupdate/install_ps1_attestation_cases.ps1 -Script install.ps1`.")
 	}

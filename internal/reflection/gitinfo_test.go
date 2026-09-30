@@ -45,6 +45,7 @@ func TestCollectGitContextNonRepo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	excludeEnclosingRepo(t, dir)
 
 	commits, language := CollectGitContext(dir)
 	if language != "Go" {
@@ -55,6 +56,40 @@ func TestCollectGitContextNonRepo(t *testing.T) {
 	}
 	if commits, _ := CollectGitContext(""); commits != nil {
 		t.Errorf("empty dir should yield nil commits, got %v", commits)
+	}
+}
+
+// excludeEnclosingRepo stops git from walking out of dir towards a repository
+// above it, so "this directory is not in a repository" is established here
+// rather than assumed of the host.
+//
+// t.TempDir() lands under TMPDIR, so with TMPDIR pointed at a scratch
+// directory inside a checkout — the recommended way to keep test scratch out
+// of /tmp, which is exactly what makes these temp dirs sit under a repository
+// — every such dir has one as an ancestor and `git -C dir log` walks up into
+// it. The walk-up is the product's, and it is intended: a project's recorded
+// path is often a subdirectory of a checkout (repo.DetectRemote walks up for
+// the same reason), so the PREMISE is what has to be pinned here, not git.
+//
+// GIT_CEILING_DIRECTORIES is git's own opt-out from the upward walk, and the
+// entry has to be dir's PARENT rather than dir: git searches everything below a
+// ceiling entry and reports the entry itself as no repository, but it does not
+// stop the walk when the ceiling is the starting directory — so pinning dir
+// would leave the ancestors reachable and the failure would read as a product
+// bug. That is why the premise is then checked against git rather than trusted:
+// if a future git changes this, this fails as a broken premise. And when git is
+// absent the check is skipped rather than passed — `exec` reports a missing
+// binary as an error, so without this the helper would return having established
+// nothing and the assertion below would be asserting nothing too.
+func excludeEnclosingRepo(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed, so whether this directory is in a repository is not a question this host can answer")
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").CombinedOutput(); err == nil {
+		t.Fatalf("premise broken: %s is inside the git repository at %s, so a test asserting "+
+			"no commits here is asserting nothing", dir, strings.TrimSpace(string(out)))
 	}
 }
 

@@ -47,11 +47,22 @@ on:
 
 jobs:
   release:
-    # Pinned to the image every release attestation to date was produced on.
-    # This job mints the Sigstore bundles `ghost upgrade` verifies, so its
-    # runner is part of the publisher's identity and must not move under the
-    # tag; see the RUNNER IMAGE note in ci.yml, which also runs the
-    # ubuntu-26.04 canary that a deliberate bump is made against.
+    # Pinned to the image every release attestation to date was produced on, so
+    # the build environment is known and reproducible rather than a label that
+    # can move under the tag.
+    #
+    # It is NOT part of the publisher's identity, and the earlier version of
+    # this comment said it was. The identity `ghost upgrade` verifies is the
+    # Fulcio certificate's SAN —
+    # `https://github.com/wcatz/ghost/.github/workflows/release.yml@refs/tags/v<version>`,
+    # issued by `https://token.actions.githubusercontent.com` — so the workflow
+    # file and the ref decide what verifies, and changing the image would change
+    # nothing about it. Pinning is still worth having: it is what keeps the
+    # toolchain producing the artifacts from moving silently, and
+    # internal/selfupdate/attestation.go is where that identity is held.
+    #
+    # See the RUNNER IMAGE note in ci.yml, which also runs the ubuntu-26.04
+    # canary that a deliberate bump is made against.
     runs-on: ubuntu-24.04
     # GoReleaser builds archives and checksums and creates the draft release,
     # so it needs contents: write. It publishes no container image because
