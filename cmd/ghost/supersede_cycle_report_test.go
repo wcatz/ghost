@@ -29,7 +29,7 @@ func TestSupersedeRepairCommandsParse(t *testing.T) {
 			if len(words) < 2 || words[1] != "supersede" {
 				t.Fatalf("not a supersede command: %v", words)
 			}
-			project, _, apply, reassess, _, withdraw, err := parseSupersedeArgs(words[2:])
+			project, _, apply, reassess, _, _, withdraw, err := parseSupersedeArgs(words[2:])
 			if err != nil {
 				t.Fatalf("ReassessCommand does not parse: %v", err)
 			}
@@ -70,7 +70,7 @@ func TestSupersedeRepairCommandsParse(t *testing.T) {
 						return
 					}
 					words := shellSplit(t, cmd)
-					project, _, apply, reassess, _, withdraw, err := parseSupersedeArgs(words[2:])
+					project, _, apply, reassess, _, _, withdraw, err := parseSupersedeArgs(words[2:])
 					if err != nil {
 						t.Fatalf("WithdrawCommand does not parse: %v\n%s", err, cmd)
 					}

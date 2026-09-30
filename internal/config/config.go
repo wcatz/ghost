@@ -186,6 +186,46 @@ type ReflectionConfig struct {
 	AutoResolve   bool `koanf:"auto_resolve"`
 	AutoSupersede bool `koanf:"auto_supersede"`
 	AutoReflect   bool `koanf:"auto_reflect"`
+	// SupersedeConsensus is how many classification passes the AUTOMATIC
+	// supersede phase must agree on before it writes an edge (#779). It is read
+	// ONLY when auto_supersede is true, because the phase that would use it does
+	// not otherwise run — a key that silently affected a hand-run
+	// `ghost supersede` would make the automatic and manual paths differ for a
+	// reason no command line shows.
+	//
+	// 1 means no gate, which is the ungated historical pass. The default is 3,
+	// the number #779's measurement used: edges the classifier proposed in all
+	// three of three dry runs scored 0.79 precision against 0.55 over distinct
+	// proposals and 0.33 for one proposed in a single run, so unanimity across
+	// three is the only subset that cleared a bar worth automating. A lower
+	// default would be a gate chosen for costing less than the evidence supports,
+	// and 2 is accepted because an operator who wants two is entitled to it.
+	//
+	// A value below supersede.MinConsensus is CLAMPED to the ungated pass rather
+	// than refused, and that is a deliberate difference from the CLI flag. A typo
+	// in a config file should not fail a lifecycle phase at 2am with a message
+	// about quorum arithmetic; it should run the pass the operator already had.
+	//
+	// The clamp is NOT visible on the phase's own report — an ungated run prints
+	// no gate line at all, so a clamped phase's stdout is byte-identical to one
+	// with no key. It is visible on `ghost lifecycle`'s own stderr, beside the
+	// reflect-skip notice and in the same voice, which on the unattended path is
+	// the phase tail and the lifecycle.log beneath it. The boundary is
+	// MinConsensus rather than 1: below it there is no gate, not a smaller one.
+	//
+	// It does NOT scale LifecycleTimeoutMinutes, and that is a decision rather
+	// than an oversight. That bound catches a HUNG phase, so multiplying it by
+	// the work factor makes it N times longer to notice a model that never
+	// answers — which is how a hang detector stops being one — and there is no
+	// principled factor to multiply by anyway, since the per-pass cost depends
+	// on the corpus and the model. So N lands on the operator: a gated phase
+	// multiplies its wall time against an unchanged deadline, and an expired one
+	// can SIGTERM inside the apply block, whose per-pair writes are separate
+	// transactions, leaving a PARTIAL WRITE, no report at all, and a
+	// lifecycle-last-failure marker. The cost is documented in
+	// config.example.yaml, docs/configuration.md and docs/cli.md rather than
+	// absorbed silently.
+	SupersedeConsensus int `koanf:"supersede_consensus"`
 	// ConsolidationTimeoutMinutes bounds a single `ghost reflect`
 	// consolidation call. It was hardcoded at 3 minutes, which the LLM tier
 	// hits on a large project: a ~190-memory prompt takes about that long on
@@ -279,6 +319,7 @@ var defaults = map[string]interface{}{
 	"reflection.auto_resolve":                  false,
 	"reflection.auto_supersede":                false,
 	"reflection.auto_reflect":                  false,
+	"reflection.supersede_consensus":           3,
 	"reflection.lifecycle_timeout_minutes":     60,
 	"reflection.consolidation_timeout_minutes": 10,
 	"lifecycle.min_interval":                   defaultLifecycleMinInterval,
@@ -568,6 +609,7 @@ func defaultConfig() *Config {
 		Reflection: ReflectionConfig{
 			ConsolidationTimeoutMinutes: 10,
 			LifecycleTimeoutMinutes:     60,
+			SupersedeConsensus:          3,
 		},
 		Lifecycle: LifecycleConfig{MinInterval: defaultLifecycleMinInterval},
 		Linking: LinkingConfig{
@@ -979,6 +1021,7 @@ var envOverrides = []envOverride{
 	{"GHOST_REFLECTION_AUTO_REFLECT", "reflection.auto_reflect", boolValue},
 	{"GHOST_REFLECTION_AUTO_RESOLVE", "reflection.auto_resolve", boolValue},
 	{"GHOST_REFLECTION_AUTO_SUPERSEDE", "reflection.auto_supersede", boolValue},
+	{"GHOST_REFLECTION_SUPERSEDE_CONSENSUS", "reflection.supersede_consensus", intValue},
 	{"GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES", "reflection.lifecycle_timeout_minutes", intValue},
 	{"GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES", "reflection.consolidation_timeout_minutes", intValue},
 	// GHOST_LIFECYCLE_MIN_INTERVAL: the generic transformer replaces every

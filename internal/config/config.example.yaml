@@ -98,6 +98,34 @@
 #                                     # target in ranking and resolve then stamps it
 #                                     # resolved, so a wrong edge removes a live
 #                                     # memory from every later session (#686).
+#   supersede_consensus: 3             # how many classification passes the automatic
+#                                     # supersede phase must AGREE on before it writes
+#                                     # an edge. Read only when auto_supersede is
+#                                     # true. 1 = no gate (the ungated pass, 0.55
+#                                     # measured precision); 3 is the default because
+#                                     # edges proposed in all three of #779's passes
+#                                     # read 0.79. Costs N times the classify calls
+#                                     # of the pairs that were going to be asked
+#                                     # anyway — pairs skip-if-unchanged or the
+#                                     # NEITHER cache would skip are still skipped
+#                                     # once, not N times. Values below 1 run as 1.
+#                                     # THE PHASE'S WALL TIME SCALES WITH N AND ITS
+#                                     # DEADLINE DOES NOT: lifecycle_timeout_minutes
+#                                     # still bounds the whole phase, and it is a hang
+#                                     # detector rather than a work budget, so it is
+#                                     # not multiplied — raising it to fit N would make
+#                                     # it N times longer to notice a model that never
+#                                     # answers. Turning this on at 3 therefore
+#                                     # multiplies the work against an unchanged 60
+#                                     # minutes. On a large project raise
+#                                     # lifecycle_timeout_minutes or set this to 2. An
+#                                     # expired deadline under --apply lands SIGTERM
+#                                     # inside the apply block, whose per-pair writes
+#                                     # are separate transactions: the phase can end
+#                                     # with a partial write, no report at all, and a
+#                                     # lifecycle-last-failure marker. Nothing is
+#                                     # corrupted and a re-run converges, but there is
+#                                     # no partial report to read.
 #                                     # `ghost supersede <project> --reassess` is
 #                                     # how a wrong edge is withdrawn.
 #   lifecycle_timeout_minutes: 60     # bound each phase; 0 disables. Keep it above

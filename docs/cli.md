@@ -323,6 +323,7 @@ ghost supersede myproject --withdraw a1b2c3d4 e5f6a7b8 --apply
 | `--reassess` | Re-judge the `supersedes` links already in the graph under the current rules and withdraw the ones they no longer support. Not combinable with `--withdraw`. |
 | `--withdraw <source-id> <target-id>` | Withdraw one named `supersedes` link — the edge from `source-id` (the newer note) to `target-id` (the older, buried one). Repeatable. `--source` and `--threshold` are not used: nothing is classified. |
 | `--threshold <float>` | Minimum cosine similarity for a candidate pair; default `0.80`. |
+| `--consensus <N>` | Classify the candidate set **N times** and write only what *all N* passes proposed, in the same direction. `N` ≥ 2; default `1`, which is no gate. A pair the passes split on is reported as "not agreed" and nothing is written for it. Costs N times the classify calls. Refused with `--reassess` and `--withdraw`. |
 | `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
@@ -337,7 +338,7 @@ Each candidate is classified as `supersedes`, `causes`, `reversed`, or `neither`
 | **A recurring defect** | The same failure seen on two different days. | One still-open problem, not a bug and its fix. Only a note that says it is fixed, and fixes it, supersedes the note that reported it. |
 | **Parallel investigation** | Two notes on one stall, each about a different layer. | Neither retired the other; the timestamps say only which was written last. |
 
-That pass measured 55% precision over its 108 distinct proposals, rising to 79% for the edges proposed in all three passes and falling to 33% for those proposed in one — so the wrong edges are an **unstable** classifier as much as a wrong one, which is what [#779](https://github.com/wcatz/ghost/issues/779)'s second proposal (a gate on agreement between repeated passes) answers. The issue carries those numbers; the table above is the rule the prompt carries, not a measurement of it.
+That pass measured 55% precision over its 108 distinct proposals, rising to 79% for the edges proposed in all three passes and falling to 33% for those proposed in one — so the wrong edges are an **unstable** classifier as much as a wrong one, which is what the [gate below](#gate-the---apply-on-agreement-between-passes) answers. [#779](https://github.com/wcatz/ghost/issues/779) carries those numbers; the table above is the rule the prompt carries, not a measurement of it.
 
 **Upgrading: the tightened rubric applies to NEW pairs, and only `--reassess` reaches the edges already in the graph.** The NEITHER cache's key prefix moves with the rubric, so every cached verdict is re-asked — a fresh pair is judged under the new rules on the next ordinary pass. But a `supersedes` **edge** that is already live is held quiet by `skip-if-unchanged` until one of its endpoints changes, and a passing pass does not re-judge it. So an edge written under the old rubric stays until an edit touches it, or until you run:
 
@@ -349,6 +350,35 @@ ghost supersede <project> --reassess --apply      # withdraw those, and print th
 That is the whole upgrade step for the rubric, and it is deliberate rather than an oversight: a wrong edge under a tightened rubric is exactly the case no ordinary pass will look at again, which is the reason the repair path exists. The cache clearing is not the same thing and does not reach edges — a cached verdict is a decision about a pair the graph never linked.
 
 One limit of the new rule is worth knowing, because the parser cannot check it: a `supersedes` answer must name a retired claim, and nothing verifies that it named *every* one. `replaced: the first claim; tbd` is accepted — the check is whether a claim is named, not whether all of them are. The coverage requirement is the model's to follow.
+### Gate the `--apply` on agreement between passes
+
+`ghost supersede <project> --apply --consensus 3` classifies the candidate set **three times** and writes only the edges all three passes proposed, in the same direction. A pair the passes split on is reported as **not agreed**, with its count and its ids, and nothing at all is written for it.
+
+```
+projy: 6 candidate pairs in 3 classify call(s), 0 cached, 1 supersedes, 0 causes, 0 reclassified, would link
+  consensus 3: 18 pair(s) asked, and only what all 3 passes proposed was would link
+  2 pair(s) not agreed: the classification passes split, so no edge was written and none was cached — re-run to ask again (fresh passes may agree), or drop --consensus to write the first pass's answer; raising it makes unanimity harder, not easier
+  4b1c9e2a -> f0a3d5c7  [not agreed: 2 supersedes, 1 neither]
+  91ee6b04 -> 2a7c1f88  [not agreed: 1 reversed, 1 causes, 1 unreadable]
+```
+
+**Unanimity, not a majority.** A 2-of-3 majority would write exactly the 0.56 row of that measurement. A pair the model read in one pass and answered differently in another is a pair whose verdict it has not settled, and the gate writes only settled ones.
+
+**Raising `--consensus` is not a remedy.** A split at N=3 has to satisfy one *more* pass at N=4, so a larger N makes unanimity strictly harder and can only suppress more pairs. The two things that help are a re-run — fresh passes may land on the same answer — and dropping the flag (or changing `--source`) to write what the first pass said.
+
+Three things are worth knowing before you turn it on:
+
+- **The gate is off unless you type it.** The default is one pass, so a hand-run pass is never silently tripled, and an existing script's bill does not change.
+- **It does not multiply the pairs that were already going to be skipped.** A pair `skip-if-unchanged` or the NEITHER cache would have skipped is skipped **once**, and an unchanged live edge is not re-asked at all — so on a converged project the gate costs almost nothing, and the multiplier falls on the pairs that were going to be asked anyway. `consensus N: N × pairs asked` on the summary is the number to check the bill against.
+- **A split is not a withdrawal, and not a cache row.** Nothing is written, nothing is withdrawn, and the pair is not cached — so it is asked again next pass rather than frozen on a verdict nobody reached. A live edge on such a pair is untouched and can still be withdrawn later, on a quorum.
+
+`--consensus` is refused with `--reassess` and `--withdraw`: those judge edges the graph **already holds**, and a gate that refused to withdraw an edge the passes happened to split on would disable the repair that exists to do it.
+
+`auto_supersede: true` runs the automatic phase through this gate by default, with the pass count from `reflection.supersede_consensus` (default 3, read only when `auto_supersede` is true). `auto_supersede` itself remains **off by default**.
+
+**The automatic phase's wall time scales with N and its deadline does not.** `lifecycle_timeout_minutes` still bounds the whole supersede phase, unchanged, and it is a hang detector rather than a work budget — so enabling the gate at 3 multiplies the work against the same 60 minutes, and on a large project you raise the bound or set the count to 2. A deadline that expires under `--apply` can land `SIGTERM` inside the apply block, whose per-pair writes are separate transactions, so the phase ends with a **partial write**, **no report at all** and a `lifecycle-last-failure` marker the next session-start turns into an alert. Nothing is corrupted and a re-run converges; the point is that there is no partial report to read, which is the reason to raise the bound rather than to rely on the retry. `ghost supersede <project> --apply --consensus N` run by hand has no such bound and prints its report as it finishes.
+
+
 
 
 
