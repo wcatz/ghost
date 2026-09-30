@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/mcpserver"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/portable"
 )
@@ -698,15 +700,29 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	// replacing the value with a pointer to where it lives is both the documented
 	// policy and the fix that keeps the memory.
 	//
-	// The command is named per KIND, for the reason repairableKinds is: the two
-	// kinds that can have a field edited are the two that have an update surface,
-	// and naming an MCP tool for a project or a decision would send someone to
-	// call something that does not exist. A project and a decision are fixed by
-	// editing the database or by deleting the row, and the delete sentence below
-	// already says which commands can do that — so this sentence points there
-	// rather than inventing a third.
+	// The command is named per KIND, and the field lists inside it are DERIVED from
+	// the tools' own argument structs (mcpserver.EditableFieldList) rather than
+	// written here. The first version of this sentence transcribed them, and it was
+	// wrong in four places: it promised `ghost_memory_update` could edit a memory's
+	// agent and session_id (neither is an argument — the tool writes them from the
+	// EDITING SESSION's provenance, and deliberately does not let a caller name
+	// their own author) and that `ghost_task_update` could edit a task's title and
+	// notes (it takes status, priority and description; a task's title is written at
+	// insert and its notes only by ghost_task_complete). A user who followed it got
+	// a rejected call, which is worse than no advice at all — the harm the delete
+	// sentence below is careful to avoid by naming only commands that exist.
+	//
+	// A transcribe-and-hope list is the same mistake as a second refusal predicate,
+	// and it drifted for the same reason. Deriving it means a field added to a tool
+	// is a field this sentence names, and one removed stops being named.
 	if hasSecret {
-		if _, err := fmt.Fprintf(out, "  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. To fix it, edit that field so it records WHERE the value lives and how to read it, never the value itself, then re-export. `ghost_memory_update` edits a memory's content, tags, source_ref, agent and session_id; `ghost_task_update` edits a task's title, description and notes. A project's name and path and a decision's title, decision, rationale and alternatives have no update surface: delete the row as below, or correct the field in the database directly.\n"); err != nil {
+		// The paragraph, in three moves and no more: the refusal is by design, the
+		// value is not printed, the fix is to point at where the value lives, and
+		// the re-export is the LAST step rather than an afterthought — a corrected
+		// row is still refused by the next export until the artifact is written
+		// again, so an operator who edits the field and stops has changed nothing a
+		// restore will read.
+		if _, err := fmt.Fprintf(out, "  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. Replace the value with WHERE it lives and how to read it, never the value itself. %s Re-export afterwards: a corrected row is still refused until the artifact is written again.\n", secretRepairAdvice()); err != nil {
 			return err
 		}
 	}
@@ -764,6 +780,165 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		why = "because `ghost import` refuses them — the credential guard by design"
 	}
 	return fmt.Errorf("%s left out of this artifact, %s — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)), why)
+}
+
+// secretFieldFixers is the field-to-tool mapping the credential advice is built
+// from, and it is keyed by the FIELD rather than by the record kind — because a
+// field is what the `!` line above named, so it is what the operator is holding.
+//
+// The keys are the column names `memory.CheckImported*` reports, which is what
+// `portable.SkippedRecord.Reason` carries, so the advice and the refusal name the
+// same thing. Every VALUE is checked against the tool's real arguments by
+// TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames — the test that exists
+// because the first version of this map was a transcription and was wrong in four
+// places.
+//
+// It is deliberately short: only the fields that are BOTH credential-guarded and
+// tool-editable. A field in neither list is a bug, which
+// TestTheCredentialAdviceCoversEveryGuardedField is what catches.
+var secretFieldFixers = map[string]string{
+	"content":     "ghost_memory_update",
+	"tags":        "ghost_memory_update",
+	"source_ref":  "ghost_memory_update",
+	"description": "ghost_task_update",
+	// notes is writable, but only by ghost_task_complete — which also marks the
+	// task done, so secretRepairAdvice names it with that consequence rather than
+	// as a neutral edit.
+	"notes": "ghost_task_complete",
+}
+
+// secretUnfixableFields are the credential-guarded fields NO tool can write, named
+// explicitly rather than left out. Silence would be the wrong default: the operator
+// is holding a row the report just refused, is told to edit the field, and would
+// find the advice covers every field they can see and not theirs.
+//
+// Each is unwritable for a stated reason, and the reasons differ:
+//
+//   - a memory's `agent` and `session_id`. The update tool DOES write both columns,
+//     but from the EDITING SESSION's provenance (provenanceFor), because a caller
+//     must not be able to name their own author. So a credential in a pre-#656
+//     row's agent cannot be edited away through any tool — the tool would replace
+//     it with the editing session's own token, and the honest statement is that
+//     the column is not the caller's to set.
+//   - a task's `title`. Written at insert and by no update: ghost_task_update
+//     takes status, priority and description, and ghost_task_complete writes notes
+//     and completed_at.
+//   - a decision's `title`, `decision`, `rationale` and `alternatives`. There is no
+//     decision update tool of any kind.
+//   - a project's `name` and `path`. There is no project update tool either — a
+//     project is created, bound, merged or deleted, never edited in place.
+//
+// These are exactly the fields the transcription named a tool for, which is why
+// this list is spelled out rather than derived from the absence of an entry.
+var secretUnfixableFields = []string{
+	"a memory's agent and session_id",
+	"a task's title",
+	"a decision's title, decision, rationale and alternatives",
+	"a project's name and path",
+}
+
+// editableBy reports whether a tool really takes a field, read from the tool's own
+// argument struct rather than from the mapping beside it. It is the check that makes
+// secretFieldFixers safe to keep, and it is why the sentence is built from the
+// derived answer instead of from the map's own key.
+func editableBy(tool, field string) bool {
+	for _, f := range mcpserver.EditableFields(tool) {
+		if f == field {
+			return true
+		}
+	}
+	return false
+}
+
+// secretRepairAdvice is the whole credential paragraph's tail: which tool edits
+// which field, and — stated first, because it is the common case for a field with
+// no tool — what to do when nothing can.
+//
+// The order is deliberate. A reader looking for their own field should find it in
+// the first sentence, and the fields no tool can write are the minority and the
+// slower path. Every field list in the output comes from
+// mcpserver.EditableFieldList, which reflects over the tool's own argument struct,
+// so a sentence here cannot promise a field a tool does not take.
+func secretRepairAdvice() string {
+	// Grouped BY TOOL rather than listed field by field. The first version said
+	// "`content` through `ghost_memory_update` edits category, confidence,
+	// content, …" once per field, which is nine repetitions of the same clause and
+	// a reader cannot tell which repetition applies to the field they are holding.
+	// A tool takes several of the fields, so one clause per tool says it once.
+	byTool := map[string][]string{}
+	for field, tool := range secretFieldFixers {
+		if !editableBy(tool, field) {
+			// The mapping has drifted from the tool it names, which is the failure
+			// the review found. Better to move the field to the unwritable
+			// sentence than to name a tool that will reject the call, and
+			// TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames fails on
+			// this too — but the report must still be true if a test is ever not
+			// run.
+			byTool[""] = append(byTool[""], field)
+			continue
+		}
+		byTool[tool] = append(byTool[tool], field)
+	}
+
+	tools := make([]string, 0, len(byTool))
+	for tool := range byTool {
+		if tool != "" {
+			tools = append(tools, tool)
+		}
+	}
+	sort.Strings(tools)
+
+	var b strings.Builder
+	if len(tools) > 0 {
+		b.WriteString("Edit it in place: ")
+		for i, tool := range tools {
+			if i > 0 {
+				b.WriteString("; ")
+			}
+			// The tool's own field list, in its own order, narrowed to the fields
+			// this report is about — a tool takes more arguments than there are
+			// credential-guarded fields, and naming the unrelated ones is noise.
+			fmt.Fprintf(&b, "%s edits %s", mcpserver.EditableFieldList(tool), fieldListInToolOrder(tool, byTool[tool]))
+			// ghost_task_complete is not a neutral edit: it marks the task done.
+			// Saying "notes" without that would send someone to close a task to
+			// clear a token out of it.
+			if tool == "ghost_task_complete" {
+				b.WriteString(" — which also marks the task done")
+			}
+		}
+		b.WriteString(".")
+	}
+	if b.Len() > 0 {
+		b.WriteString(" ")
+	}
+	// The unwritable half, which is the half the review was about. Both sources are
+	// named: the fields a tool was expected to edit and cannot, and the ones that
+	// never had a tool. The route for both is the same and it is the only one.
+	unfixable := append([]string{}, secretUnfixableFields...)
+	if drifted := byTool[""]; len(drifted) > 0 {
+		sort.Strings(drifted)
+		unfixable = append(unfixable, drifted...)
+	}
+	fmt.Fprintf(&b, "No tool can edit %s — those columns are written only by a save, a create or a restore, so clearing one means editing the database directly, or deleting the row as below.",
+		strings.Join(unfixable, ", "))
+	return b.String()
+}
+
+// fieldListInToolOrder renders the subset of a tool's fields that this report is
+// about, in the tool's own order so the reader meets them as the tool's schema
+// states them.
+func fieldListInToolOrder(tool string, fields []string) string {
+	want := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		want[f] = true
+	}
+	var kept []string
+	for _, f := range mcpserver.EditableFields(tool) {
+		if want[f] {
+			kept = append(kept, f)
+		}
+	}
+	return mcpserver.HumanFieldList(kept)
 }
 
 // printExportSummary states where the artifact is and what it holds, and says in

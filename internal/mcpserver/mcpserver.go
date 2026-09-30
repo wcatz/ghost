@@ -744,6 +744,28 @@ type updateArgs struct {
 	validityArgs
 }
 
+// taskCompleteArgs are ghost_task_complete's arguments: the task to complete and
+// the note to file under it. The note is the one task field with no length cap,
+// which is where "here is the value that fixed it" gets written, and it is
+// rendered straight into the next session's context — see
+// Store.CompleteTask, which guards it as a credential.
+type taskCompleteArgs struct {
+	TaskID string `json:"task_id" jsonschema:"Task ID — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
+	Notes  string `json:"notes,omitempty" jsonschema:"Completion notes"`
+}
+
+// taskUpdateArgs are ghost_task_update's arguments. Every field is optional and an
+// omitted one preserves the stored value, so a partial edit never needs the whole
+// row restated.
+type taskUpdateArgs struct {
+	TaskID string `json:"task_id" jsonschema:"Task ID to update — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
+	Status string `json:"status,omitempty" jsonschema:"New status: pending, active, blocked, done (omit to preserve current)"`
+	// Priority: see coerce.go — untyped so stringified client values
+	// survive schema validation and are normalized in-handler.
+	Priority    any     `json:"priority,omitempty" jsonschema:"Priority 0-4, an integer (0=critical, 2=normal, 4=low). Omit to keep current value."`
+	Description *string `json:"description,omitempty" jsonschema:"Updated description. Omit to preserve current value."`
+}
+
 // updateCapableStore narrows provider.MemoryStore to the one method a partial
 // edit needs. UpdateMemoryWithOptions carries the validity triple and the
 // write-time provenance, and it is not on provider.MemoryStore — that interface
@@ -2577,11 +2599,8 @@ func (s *Server) registerTools() {
 		}, nil, nil
 	})
 
-	// ghost_task_complete — mark a task as done.
-	type taskCompleteArgs struct {
-		TaskID string `json:"task_id" jsonschema:"Task ID — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
-		Notes  string `json:"notes,omitempty" jsonschema:"Completion notes"`
-	}
+	// ghost_task_complete — mark a task as done. The arguments are taskCompleteArgs,
+	// declared at package level for the same reason taskUpdateArgs is — see editable_fields.go.
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_complete",
@@ -3007,15 +3026,8 @@ func (s *Server) registerTools() {
 
 	// ghost_task_update — update a task's status, priority, or description.
 	// Priority and description are optional — omitting them preserves current values.
-	type taskUpdateArgs struct {
-		TaskID string `json:"task_id" jsonschema:"Task ID to update — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
-		Status string `json:"status,omitempty" jsonschema:"New status: pending, active, blocked, done (omit to preserve current)"`
-		// Priority: see coerce.go — untyped so stringified client values
-		// survive schema validation and are normalized in-handler.
-		Priority    any     `json:"priority,omitempty" jsonschema:"Priority 0-4, an integer (0=critical, 2=normal, 4=low). Omit to keep current value."`
-		Description *string `json:"description,omitempty" jsonschema:"Updated description. Omit to keep current value."`
-	}
-
+	// taskUpdateArgs is declared at package level so EditableFields can reflect over the same struct
+	// this handler is registered with — see editable_fields.go.
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_update",
 		Title:       "Update Task",

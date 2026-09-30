@@ -777,14 +777,28 @@ A row refused by the credential guard is different from every other left-out row
 
 ```text
   ! left out: memory m-9f3c — its content is credential-shaped, and ghost import refuses to store one by design — Ghost never stores a credential value
-  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. To fix it, edit that field so it records WHERE the value lives and how to read it, never the value itself, then re-export. `ghost_memory_update` edits a memory's content, tags, source_ref, agent and session_id; `ghost_task_update` edits a task's title, description and notes. A project's name and path and a decision's title, decision, rationale and alternatives have no update surface: delete the row as below, or correct the field in the database directly.
+  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. Replace the value with WHERE it lives and how to read it, never the value itself. Edit it in place: `ghost_memory_update` edits content, source_ref or tags; `ghost_task_complete` edits notes — which also marks the task done; `ghost_task_update` edits description. No tool can edit a memory's agent and session_id, a task's title, a decision's title, decision, rationale and alternatives, a project's name and path — those columns are written only by a save, a create or a restore, so clearing one means editing the database directly, or deleting the row as below. Re-export afterwards: a corrected row is still refused until the artifact is written again.
   Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.
   To include it, delete the row and re-save it (for a credential-shaped field, editing the field is usually what you want instead — see above): `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.
 ```
 
 The `!` line names the **field** and nothing else. The value is not in the report, not in the exit error, and not in any part of the export's own output — a refused credential must not be relocated into a terminal, a log or a paste. The same is true of the importer's report, and for the same reason.
 
-To fix the row, **edit the field** rather than delete the memory: put a pointer to where the value lives and how to read it, never the value, then re-export. `ghost_memory_update` covers a memory's `content`, `tags`, `source_ref`, `agent` and `session_id`; `ghost_task_update` covers a task's `title`, `description` and `notes`. A **project's** `name` and `path` and a **decision's** `title`, `decision`, `rationale` and `alternatives` have no update surface, so for those the choice is the delete command above or a direct edit of the database.
+To fix the row, **edit the field** rather than delete the memory: put a pointer to where the value lives and how to read it, never the value, then **re-export** — a corrected row is still refused until the artifact is written again.
+
+Which tool edits which field is derived from the tools' own arguments, so the list cannot drift from them:
+
+| Field | Fix |
+|---|---|
+| a memory's `content`, `tags` or `source_ref` | `ghost_memory_update` |
+| a task's `description` | `ghost_task_update` |
+| a task's `notes` | `ghost_task_complete` — which also marks the task **done** |
+| a memory's `agent` or `session_id` | **no tool.** The update writes both columns, but from the *editing session's* identity: a caller cannot name its own author. Clearing one means editing the database directly. |
+| a task's `title` | **no tool.** Written at insert; `ghost_task_update` takes status, priority and description only. |
+| a decision's `title`, `decision`, `rationale` or `alternatives` | **no tool.** There is no decision update tool of any kind. |
+| a project's `name` or `path` | **no tool.** A project is created, bound, merged or deleted, never edited in place. |
+
+For a field with no tool, the choice is the delete command above or a direct edit of the database.
 
 ### `ghost import`
 
