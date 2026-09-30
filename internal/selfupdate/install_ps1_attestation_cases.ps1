@@ -56,7 +56,50 @@ $boundary = @(
     # later comparison quietly reads it as 0.0.0 — which skipped the check.
     @{ Version = 'dev'; Required = $true },
     @{ Version = 'nightly'; Required = $true },
-    @{ Version = ''; Required = $true }
+    @{ Version = ''; Required = $true },
+    # --- the shapes the client's parseVersion refuses, and this one used to
+    # --- accept. Each of these is UNPARSEABLE rather than unusual, and an
+    # --- unparseable version is REQUIRED. Two of them disagreed for a whole
+    # --- review cycle and the disagreement was in the dangerous direction: the
+    # --- script installed a release from a checksum alone while the client
+    # --- refused it.
+    @{ Version = '0.42.9.1'; Required = $true },   # four components
+    @{ Version = '1.2.3.4'; Required = $true },    # five
+    @{ Version = '1.2'; Required = $true },        # two: ambiguous, and it used to compare EQUAL to 1.2.0
+    @{ Version = '0.43'; Required = $true },       # and the same for the cutover's own neighbourhood
+    @{ Version = '0.042.9'; Required = $true },    # leading zero in a component
+    @{ Version = '01.2.3'; Required = $true },     # ditto
+    @{ Version = '0.42.9-!!'; Required = $true },  # invalid prerelease ON AN OLD LINE: dropping it would have
+                                                  # turned "not a version" into "an old version", which is the
+                                                  # whole hazard — this row is the one that must not go to false
+    @{ Version = '0.43.0-a..b'; Required = $true },  # an empty identifier inside the prerelease list
+    @{ Version = '0.43.0-'; Required = $true },    # empty prerelease
+    @{ Version = 'garbage'; Required = $true },
+    @{ Version = 'v'; Required = $true },
+    # --- the rows that DISCRIMINATE. Every adversarial row above is on or above
+    # --- the cutover, where "unparseable" and "at or after the cutover" happen to
+    # --- agree — so a mutation that made the parser stricter, or dropped the
+    # --- prerelease and build-metadata handling entirely, still answered `true`
+    # --- and still passed. These are the same shapes on an OLDER line, where
+    # --- getting the parse wrong changes the answer: a permissive parser that
+    # --- refuses 0.42.9-rc.1 would demand an attestation for a release that
+    # --- predates the whole mechanism, and the flag would stop being the
+    # --- exception it is meant to be.
+    @{ Version = '0.42.9-rc.1'; Required = $false },
+    @{ Version = '0.42.9+build'; Required = $false },
+    @{ Version = '0.42.9-a..b'; Required = $true },
+    @{ Version = '0.42.0'; Required = $false },
+    @{ Version = '0.9.9'; Required = $false },
+    # --- the shapes that DO parse, to keep the mirror honest in the other
+    # --- direction: a permissive parse that required an attestation for
+    # --- everything would pass the rows above and be wrong.
+    @{ Version = '0.0.0'; Required = $false },
+    @{ Version = '1.0.0+build'; Required = $true },
+    @{ Version = '1.0.0-rc.1+build'; Required = $true },
+    @{ Version = '10.20.30'; Required = $true },
+    @{ Version = '0.43.0-00'; Required = $true },
+    @{ Version = '0.43.0-0'; Required = $true },
+    @{ Version = '0.43.0+a-b'; Required = $true }
 )
 foreach ($row in $boundary) {
     Check-Equal "attestation required for '$($row.Version)'" $row.Required (Test-AttestationRequired $row.Version)
@@ -176,6 +219,7 @@ foreach ($outage in @(
     'HTTP 429: Too Many Requests',
     'Get "https://api.github.com/...": dial tcp: lookup api.github.com: no such host',
     'Get "https://api.github.com/...": net/http: TLS handshake timeout',
+    'Get "https://api.github.com/...": proxyconnect tcp: dial tcp: connection refused',
     'HTTP 401: Bad credentials',
     'context deadline exceeded'
 )) {
@@ -211,7 +255,14 @@ foreach ($attackerText in @(
     'unexpected EOF while reading the statement',
     'proxy: the workflow identity could not be established',
     'the repository wcatz/ghost refused',
-    'signer workflow wcatz/ghost/.github/workflows/release.yml mismatch'
+    'signer workflow wcatz/ghost/.github/workflows/release.yml mismatch',
+    # A repository, organisation or workflow name may contain any of these, and gh
+    # quotes identity text back in its errors. So an attacker who controls the
+    # identity in a bundle they publish can put a downgrade token in the very
+    # message that refuses them. The bare 'proxyconnect' was in the allowlist
+    # until a control proved 'proxy-connect' is a legal repository name.
+    'unknown proxyconnector in wcatz/ghost-proxyconnect',
+    'workflow proxyconnect.yml in org wcatz-proxyconnect did not match'
 )) {
     $v = Get-VerdictWith (New-Stub -VerifyExit 1 -VerifyOutput $attackerText)
     Check-Equal "attacker text is a refusal, not a machine fault: $($attackerText.Substring(0, [Math]::Min(34, $attackerText.Length)))" `
@@ -358,27 +409,68 @@ if ($iCheck -ge 0 -and $iUnpack -ge 0) {
 # be used. A matcher that read comments would fail on the script's own
 # documentation, and one that half-worked would only be caught by that.
 function Get-CodeOnly {
+    <#
+    .SYNOPSIS
+        The CODE of a PowerShell script: comments and string literals removed.
+    .DESCRIPTION
+        A scanner rather than a regex, and the order it makes decisions in is the
+        whole point. A `#` inside a string is not a comment and a `//` inside a
+        string is not a comment, so strings have to be recognised BEFORE comments —
+        a script that strips comments first silently deletes the rest of any line
+        whose string contains a hash, and install.ps1 has here-strings.
+
+        What it removes:
+          - block comments, which NEST in PowerShell, so the closing pair inside
+            one does not necessarily end it. install.ps1 documents itself entirely
+            in them, and their interior lines do not begin with a hash, so anything
+            that only understands `//` and a trailing `#` leaves the prose behind
+            — and the prose names the very constructs being forbidden.
+          - `//` and `#` line comments.
+          - single-quoted, double-quoted, and here-string literals, with PowerShell's
+            doubled-quote escape (`''` inside `'`, `""` inside `"`).
+
+        What it does NOT remove: nothing else. It is not a parser, and
+        Test-The5.1ConstructsAreNamed says plainly what that costs.
+    #>
     param([string]$Text)
 
     $out = [System.Text.StringBuilder]::new()
     $i = 0
     $blockDepth = 0
+    $hereTerminator = $null
     while ($i -lt $Text.Length) {
-        if ($blockDepth -eq 0 -and $Text.Substring($i).StartsWith('<#')) {
-            # Block comments NEST in PowerShell, so this is a counter and not a
-            # flag: a `#>` inside one does not necessarily end it.
-            $blockDepth = 1
-            $i += 2
-            continue
-        }
-        if ($blockDepth -gt 0) {
-            if ($Text.Substring($i).StartsWith('<#')) { $blockDepth++; $i += 2; continue }
-            if ($Text.Substring($i).StartsWith('#>')) { $blockDepth--; $i += 2; continue }
+        $two = if ($i + 1 -lt $Text.Length) { $Text.Substring($i, 2) } else { '' }
+
+        if ($null -ne $hereTerminator) {
+            if ($two -eq $hereTerminator) { $hereTerminator = $null; $i += 2; continue }
             $i++
             continue
         }
-        if ($Text.Substring($i).StartsWith('//') -or $Text[$i] -eq '#') {
+        if ($blockDepth -gt 0) {
+            if ($two -eq '<#') { $blockDepth++; $i += 2; continue }
+            if ($two -eq '#>') { $blockDepth--; $i += 2; continue }
+            $i++
+            continue
+        }
+        if ($two -eq '<#') { $blockDepth = 1; $i += 2; continue }
+        if ($two -eq "@'") { $hereTerminator = "'@"; $i += 2; continue }
+        if ($two -eq '@"') { $hereTerminator = '"@'; $i += 2; continue }
+        if ($two -eq '//' -or $Text[$i] -eq '#') {
             while ($i -lt $Text.Length -and $Text[$i] -ne "`n") { $i++ }
+            continue
+        }
+        if ($Text[$i] -eq "'" -or $Text[$i] -eq '"') {
+            $q = $Text[$i]
+            $i++
+            while ($i -lt $Text.Length) {
+                if ($Text[$i] -eq $q) {
+                    # A doubled quote is an escaped quote, not the end.
+                    if ($i + 1 -lt $Text.Length -and $Text[$i + 1] -eq $q) { $i += 2; continue }
+                    $i++
+                    break
+                }
+                $i++
+            }
             continue
         }
         [void]$out.Append($Text[$i])
@@ -389,10 +481,46 @@ function Get-CodeOnly {
 
 $raw = Get-Content -Raw -LiteralPath $Script
 $psCode = Get-CodeOnly $raw
-# `??` and `?.` are PowerShell 7.0. A `?` in a string or a wildcard is not either,
-# and the two controls below are the reason the matcher is not simply "no ??".
-Check-Equal 'install.ps1 uses no PowerShell 7 null-coalescing operator' $false ($psCode -match '\?\?')
-Check-Equal 'install.ps1 uses no PowerShell 7 null-conditional operator' $false ($psCode -match '\?\.')
+
+# Each entry is a construct that does not PARSE under Windows PowerShell 5.1, with
+# the pattern that finds it in code. This is a list, not a heuristic: the previous
+# version of this check looked for `??` and `?.` only, and the honest description of
+# that was "it catches the two operators this author happened to type". So the
+# coverage is enumerated, and every pattern has a control proving it fires on the
+# construct and does not fire on a 5.1 spelling of the same idea.
+#
+# WHAT THIS IS NOT: a parser. It strips comments, not string literals, so a pattern
+# must not be matchable from inside a quoted string — the controls below include
+# lines that put the token names in strings, and the patterns are shaped to survive
+# them. A construct expressed in a way no pattern here anticipates would pass this
+# check and still fail to parse on 5.1; that is the residual, and the honest way to
+# state it is in the comment rather than to imply the check is complete. A first
+# version of the -Parallel pattern was a bare token and a control caught a legal
+# `$parallel` variable immediately, which is the reason the patterns are shaped
+# rather than loose.
+$ps7Only = [ordered]@{
+    'null-coalescing operator'   = '\?\?'
+    'null-conditional operator'  = '\?\.'
+    'null-coalescing assignment' = '\?\?='
+    'ternary conditional'        = '\?[^\s|]*\s+[^\r\n|]*:'
+    'pipeline chain operator &&' = '(?m)(?<![|0-9])&&'
+    'pipeline chain operator ||' = '(?m)(?<![|0-9])\|\|'
+    'ForEach-Object -Parallel'   = 'ForEach-Object[\s,]+-Parallel\b'
+    'ConvertFrom-Json -AsHashtable' = '-AsHashtable\b'
+}
+foreach ($entry in $ps7Only.GetEnumerator()) {
+    Check-Equal "install.ps1 uses no PowerShell 7 $($entry.Key)" $false ($psCode -match $entry.Value)
+}
+# Join-Path gained a third positional parameter in 7.0; with two it is 5.1-legal,
+# so this is a shape check rather than a token one.
+$joinPath = [regex]::Matches($psCode, '(?i)\bJoin-Path\b')
+foreach ($m in $joinPath) {
+    $tail = $psCode.Substring($m.Index + $m.Length)
+    # Only the arguments before the end of the statement can be positional.
+    $stmt = ($tail -split '[\r\n]')[0]
+    $args = ([regex]::Matches(($stmt -split '\|')[0], ',')).Count
+    Check-Equal 'Join-Path is given at most two arguments (5.1 has no AdditionalChildPath)' $true ($args -le 1)
+}
 Check-Equal 'install.ps1 declares its 5.1 target' $true ($raw -match '#Requires -Version 5\.1')
 
 # ...and the fallback the `??` would have provided is still there, so removing the
@@ -411,9 +539,41 @@ Check-Equal 'the stripper drops a multi-line block comment' 'x = 1' `
     ((Get-CodeOnly "<#`n ?? on its own line`n and ?. too`n#> x = 1").Trim())
 Check-Equal 'the stripper handles a nested block comment' 'x = 1' `
     ((Get-CodeOnly "<# outer <# inner ?? #> still outer #> x = 1").Trim())
-# ...and the matcher catches the operators when they ARE in code.
-foreach ($sample in @('?? $x', '"a" ?? $b', '$y = $z?.Name', "??`n", 'if ($a ?? $b) {}')) {
-    Check-Equal "the matcher would catch code using '$($sample.Trim())'" $true ((Get-CodeOnly $sample) -match '\?\?|\?\.')
+# ...and the matcher catches the operators when they ARE in code. One sample per
+# pattern, so a pattern that stopped matching anything would fail here rather than
+# quietly making its check above vacuous.
+$mustCatch = @(
+    '?? $x', '"a" ?? $b', '$y = $z?.Name', "??`n", 'if ($a ?? $b) {}',
+    '$x ??= $y',
+    '$ok = $a ? $b : $c',
+    'Get-Content f | Where-Object { $_ } && Write-Host done',
+    'Get-Content f || Write-Host missing',
+    '1..8 | ForEach-Object -Parallel { $_ }',
+    '$h = ConvertFrom-Json $j -AsHashtable'
+)
+foreach ($sample in $mustCatch) {
+    $hit = $false
+    foreach ($e in $ps7Only.GetEnumerator()) {
+        if ((Get-CodeOnly $sample) -match $e.Value) { $hit = $true }
+    }
+    Check-Equal "the matcher would catch '$($sample.Trim())'" $true $hit
+}
+# ...and does not fire on the 5.1 spellings, which is the other half: a pattern
+# loose enough to match a legal line would make the checks above unusable.
+foreach ($legal in @(
+    '$a = 1 ?? 2'.Replace(' ?? ', ' + '),
+    'Get-Content f | Where-Object { $_ }',
+    'if ($a) { b } else { c }',
+    'Join-Path $a "b"',
+    'Join-Path -Path $a -ChildPath "b"',
+    '$parallel = 1; $r = $a -eq $parallel',
+    '$msg = "use -AsHashtable on PowerShell 7 only"'
+)) {
+    $hit = $false
+    foreach ($e in $ps7Only.GetEnumerator()) {
+        if ((Get-CodeOnly $legal) -match $e.Value) { $hit = $true }
+    }
+    Check-Equal "a 5.1-legal line is not flagged: '$($legal.Trim())'" $false $hit
 }
 # ...and leaves a lone `?` alone, so a wildcard or a string is not a false alarm.
 Check-Equal 'a lone question mark is not an operator' $false ((Get-CodeOnly 'Get-ChildItem -Filter *.ps1?') -match '\?\?|\?\.')

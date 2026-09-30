@@ -29,18 +29,24 @@ import (
 const installPS1Path = "../../install.ps1"
 
 // requirePwsh skips rather than fails when PowerShell is absent, which is every
-// machine this repository's CI runs on — the workflows are ubuntu, and there is no
-// Windows job. A skip is a gap someone will close; the cost of not skipping is a
-// red build on a developer laptop for a test about a script that cannot run there
-// anyway. The cost of skipping silently is a script whose logic nobody has ever
-// executed, which is why the skip message says so and the local run is recorded in
-// the PR that introduced this.
+// linux and macOS machine this repository's tests run on, and a developer laptop
+// that has not installed it. A skip is a gap someone will close; the cost of not
+// skipping is a red build for a test about a Windows script on a machine that
+// cannot run it.
+//
+// It is NOT a gap in CI. An earlier version of this comment claimed "the workflows
+// are ubuntu, and there is no Windows job", which was simply false: build-and-test
+// has a `windows-plugin` job on windows-latest and windows-11-arm, both of which
+// ship PowerShell 7, and it now runs these tests. The skip is for local runs
+// only, and it says so rather than implying the suite is never executed.
 func requirePwsh(t *testing.T) string {
 	t.Helper()
 	pwsh, err := exec.LookPath("pwsh")
 	if err != nil {
 		t.Skip("pwsh is not on PATH, so install.ps1's decision logic cannot be executed here. " +
-			"This is a real gap: nothing in CI runs it. Run it locally with " +
+			"CI does run it: the `install.ps1 decision tests` step of the `windows-plugin` job in " +
+			".github/workflows/ci.yml runs this on windows-latest and windows-11-arm, which ship " +
+			"PowerShell 7. To run it locally: " +
 			"`pwsh -NoProfile -File internal/selfupdate/install_ps1_attestation_cases.ps1 -Script install.ps1`.")
 	}
 	return pwsh

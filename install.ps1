@@ -137,15 +137,36 @@ function Test-Checksum {
 function Get-ComparableVersion {
     <#
     .SYNOPSIS
-        The numeric core of a version, or $null when it has none.
+        The numeric core of a version, or $null when it is not a version this
+        repository recognises.
     .DESCRIPTION
-        Strips a leading v and any prerelease suffix, because the boundary is a
-        property of the RELEASE LINE: 0.43.0-rc.1 is older than 0.43.0 and newer
-        than 0.42.9, so a prerelease of the first attested version is the first
-        attested version. $null is returned rather than a guess for anything that
-        is not dotted digits, and a caller that gets $null must treat the version
-        as requiring an attestation — "cannot tell" must never read as "old enough
-        to skip", which is the same rule selfupdate.AttestationRequiredFor states.
+        A mirror of selfupdate.parseVersion and selfupdate.coreVersion, and the
+        two must agree on EVERY input or the boundary fails in one direction only —
+        the dangerous one. Where they once disagreed, the script said a release
+        needed no attestation and the client said it did, and the release
+        installed from a checksum alone:
+
+            0.42.9.1   ->  script: not required    client: required
+            0.042.9    ->  script: not required    client: required
+
+        Both are UNPARSEABLE, not merely unusual, and an unparseable version is
+        REQUIRED — the "cannot tell must never read as old enough to skip" rule.
+        So the rules are the client's, exactly:
+
+          - a leading `v` is dropped;
+          - build metadata from the FIRST `+` onward is dropped, and it is dropped
+            BEFORE the prerelease is split, so `1.0.0-rc.1+build` is `1.0.0` and
+            `1.0.0+build-rc` is also `1.0.0`;
+          - a prerelease is what follows the FIRST `-`, and it must be a
+            dot-separated list of non-empty identifiers of ASCII letters, digits
+            and hyphens. An invalid one makes the WHOLE version unparseable —
+            including one on an otherwise older line, where dropping it would have
+            turned "not a version" into "an old version";
+          - EXACTLY three numeric components. Two is ambiguous and four is a
+            different thing, and a two-component version in particular is the
+            shape that made `1.2` accidentally agree for the wrong reason;
+          - each component is `0 | [1-9][0-9]*`. A leading zero is refused, which
+            is what separates `0.42.9` from `0.042.9`; a bare `0` is allowed.
 
         Deliberately NOT [Parameter(Mandatory)]: an empty string is a real input
         here, not a caller mistake, and it means exactly what `dev` means. A
@@ -156,9 +177,51 @@ function Get-ComparableVersion {
     param([AllowEmptyString()][string]$Version)
 
     if ([string]::IsNullOrWhiteSpace($Version)) { return $null }
-    $core = (($Version -replace '^v', '') -split '-')[0]
-    if ($core -notmatch '^\d+(\.\d+)*$') { return $null }
-    return $core
+
+    $rest = $Version -replace '^v', ''
+    $plus = $rest.IndexOf('+')
+    if ($plus -ge 0) { $rest = $rest.Substring(0, $plus) }
+
+    $dash = $rest.IndexOf('-')
+    if ($dash -ge 0) {
+        $prerelease = $rest.Substring($dash + 1)
+        $rest = $rest.Substring(0, $dash)
+        if (-not (Test-ValidPrerelease $prerelease)) { return $null }
+    }
+
+    $parts = $rest -split '\.'
+    if ($parts.Count -ne 3) { return $null }
+    foreach ($p in $parts) {
+        if ($p -notmatch '^(0|[1-9][0-9]*)$') { return $null }
+    }
+    return ($parts -join '.')
+}
+
+function Test-ValidPrerelease {
+    <#
+    .SYNOPSIS
+        Whether s is a dot-separated list of non-empty alphanumeric identifiers.
+    .DESCRIPTION
+        The only prerelease shape semver defines, and the only one
+        selfupdate.validPrerelease accepts: ASCII letters, digits and hyphens, in
+        non-empty dot-separated identifiers. An empty identifier, or anything
+        outside that set, makes the version unparseable rather than odd.
+
+        The single `+` quantifier is what enforces the non-empty part, and it
+        makes two separate emptiness checks redundant — an earlier version had
+        one for the whole string and one per identifier, and NEITHER could be
+        killed by a mutation, because the identifier regex already rejects both
+        cases. `''.Split('.')` is a one-element array holding an empty string, so
+        an empty prerelease arrives at the loop and fails there. Two guards that
+        cannot disagree with each other are two things to keep in step for
+        nothing, so the checks are gone and the comment says why.
+    #>
+    param([AllowEmptyString()][string]$Prerelease)
+
+    foreach ($id in ($Prerelease -split '\.')) {
+        if ($id -notmatch '^[0-9A-Za-z-]+$') { return $false }
+    }
+    return $true
 }
 
 function Compare-CoreVersion {
@@ -172,6 +235,16 @@ function Compare-CoreVersion {
         comparison quietly treats it as 0.0.0. That turned "dev" — which cannot be
         ordered, and must therefore be treated as REQUIRING an attestation — into
         a version older than the boundary, and skipped the check.
+
+        Both sides are EXACTLY three components by the time they arrive —
+        Get-ComparableVersion is the only caller path and it refuses anything else —
+        so the loop runs three times and indexes directly. The earlier version
+        defaulted a missing segment to zero, which is a second way of saying
+        "1.2 and 1.2.0 are the same version", and that is exactly the reading the
+        client refuses. It was also unreachable-as-a-difference: with three
+        components guaranteed, the defaulting branch could never fire, so no test
+        could have killed it. It is gone rather than left as a way to reintroduce
+        the disagreement.
 
         AllowEmptyString here for the same reason as below: an unorderable version
         is an input this function is asked to classify, not a caller error.
@@ -187,11 +260,9 @@ function Compare-CoreVersion {
 
     $l = $lc -split '\.'
     $r = $rc -split '\.'
-    for ($i = 0; $i -lt [Math]::Max($l.Count, $r.Count); $i++) {
-        # A missing segment is zero, so 0.43 and 0.43.0 are the same version
-        # rather than an error.
-        $lv = if ($i -lt $l.Count) { [int]$l[$i] } else { 0 }
-        $rv = if ($i -lt $r.Count) { [int]$r[$i] } else { 0 }
+    for ($i = 0; $i -lt 3; $i++) {
+        $lv = [int]$l[$i]
+        $rv = [int]$r[$i]
         if ($lv -ne $rv) { return [Math]::Sign($lv - $rv) }
     }
     return 0
@@ -205,6 +276,11 @@ function Test-AttestationRequired {
         Not [Parameter(Mandatory)], for the reason Get-ComparableVersion gives: a
         version that cannot be ordered is the fail-closed case, so it has to be
         answerable rather than a parameter-binding failure.
+
+        And the failure direction is the whole point: $null -eq $cmp means the
+        version could not be ordered, and that answers TRUE. Anything that made
+        this line answer $false for an unorderable version would install a release
+        on a checksum alone, which is what the whole check exists to prevent.
     #>
     param([AllowEmptyString()][string]$Version)
 
@@ -276,7 +352,7 @@ function Test-GhMachineFailure {
         output shape this function has never seen is treated as a REFUSAL rather
         than waved through: the cost of a wrong answer there is an install that
         cannot proceed until whatever is broken is fixed, and the cost in the
-        other direction is an archive nobody vouched for getting installed by
+        other direction is an archive nobody has vouched for getting installed by
         someone who passed a flag.
 
         That is the opposite of the fail-open shape a guard script usually has, and
@@ -289,17 +365,19 @@ function Test-GhMachineFailure {
     # Every entry here DOWNGRADES a refusal to the overridable state, so each one
     # has to be a string an attacker cannot put into gh's error text about a
     # certificate. gh quotes attacker-influenced values back in its messages — the
-    # certificate's own subject, the repository — so a short generic token is a
-    # downgrade waiting to be typed. "SSL" and "EOF" were both in an earlier draft
-    # of this list and both are gone: "not from a trusted CA" contains one, and any
-    # message can be made to contain the other. What is kept are the specific
-    # forms a real transport failure prints.
+    # certificate's own subject, the repository, the organisation — so a short
+    # generic token is a downgrade waiting to be typed. "SSL" and "EOF" were both
+    # in an earlier draft of this list and both are gone: "not from a trusted CA"
+    # contains one, and any message can be made to contain the other. A bare
+    # "proxyconnect" went the same way, because a repository, organisation or
+    # workflow name may contain it — so the two-word form a transport failure
+    # actually prints is required, and nothing else matches.
     $machineCauses = @(
         'HTTP 429', 'HTTP 500', 'HTTP 502', 'HTTP 503', 'HTTP 504',
         'Bad credentials', 'requires authentication', 'rate limit',
         'dial tcp', 'no such host', 'connection reset', 'connection refused',
         'TLS handshake', 'context deadline', 'i/o timeout', 'no such network',
-        'proxyconnect', 'server misbehaving'
+        'proxyconnect tcp', 'server misbehaving'
     )
     foreach ($cause in $machineCauses) {
         if ($Output.Contains($cause)) { return $true }

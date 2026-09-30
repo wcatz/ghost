@@ -213,3 +213,17 @@ jobs:
       # rather than relying only on a cross-compile.
       - name: ai package tests
         run: go test -count=1 ./internal/ai/
+
+      # install.ps1 is a WINDOWS script, and its decision logic is checked by
+      # running it — so this is the only job in the file that can. Both runners
+      # ship PowerShell 7 as `pwsh` (and 5.1 as `powershell`), and the tests
+      # need only 7 to execute; the 5.1 target is held separately, by the static
+      # check in the same suite.
+      #
+      # `-run` rather than the whole package: the rest of internal/selfupdate
+      # does not need a native Windows run, and the two jobs together already
+      # cover it on linux. The point of adding this is the ONE thing no other job
+      # could check — that the script's decisions agree with the Go client's on
+      # the version boundary, and that it parses and runs on a Windows host.
+      - name: install.ps1 decision tests
+        run: go test -count=1 -run 'TestInstallPS1|^TestTheTwoBoundariesAgree$|^TestFirstAttestedVersionIsTheSameConstantInBoth$|^TestTheReleaseWorkflowIdentityIsTheSameStringInBoth$' ./internal/selfupdate/
