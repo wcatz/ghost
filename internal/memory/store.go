@@ -6376,6 +6376,32 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 	return count, err
 }
 
+// CountActiveMemories counts the project's memories the way a RETRIEVAL window sees
+// them: `resolved_at IS NULL`, and nothing else. It is not CountMemories with a
+// filter applied for tidiness — the two answer different questions, and the
+// difference is the whole of what each is for.
+//
+// A withdrawn row is one `ghost resolve` has ruled on. It stays in the store, stays
+// listed by `ghost_memories_list`, and stays countable by CountMemories; it is out
+// of every window a ranking surface reads, because `passiveFetchSQL` and the query
+// path both bind `resolved_at IS NULL`. So "how many does this project hold" and
+// "how many of its rows can a block have been assembled from" are different counts,
+// and a caller that needs the second cannot derive it from the first.
+//
+// It is deliberately not `CountMemories` minus something: the exclusion is in the
+// SQL the window uses, and duplicating that predicate here is what keeps the two in
+// step. A caller that wants the WINDOW's population should be counting what the
+// window admits.
+func (s *Store) CountActiveMemories(ctx context.Context, projectID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL`, projectID).Scan(&count)
+	return count, err
+}
+
 // IncrementInteraction increments the interaction count and returns the new value.
 func (s *Store) IncrementInteraction(ctx context.Context, projectID string) (int, error) {
 	s.mu.Lock()

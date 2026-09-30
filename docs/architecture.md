@@ -1587,10 +1587,27 @@ What exists now:
   project holds, and the disagreement is a fact about the SQL rather than about this
   surface: the passive window binds `resolved_at IS NULL` and `CountMemories` does
   not. So a project whose every row `ghost resolve` has withdrawn has an empty window
-  and a count of one, no stage withheld anything, and the abstention is false. The
-  count is then the only sentence that can be true, and it names no cause — which is
-  what `CountMemories` is for, covering resolution and validity and the cap alike. A
-  count that ERRORS is not a sentence at all: an unreadable count is evidence the
+  and a count of one, no stage withheld anything, and the abstention is false.
+
+  Which is why there are TWO counts and not one, because the two sentences are claims
+  about different populations. The COUNT sentence — "Ghost holds N memories for this
+  project and none of them is in the block above" — is about what the project holds,
+  names no cause, and `CountMemories` answers it. The ABSTENTION names a cause, so it
+  is a claim about which rows that cause explains, and the population it can be about
+  is the WINDOW's: the project's own rows `passiveFetchSQL` could have admitted.
+  `projectWindowRowCount` asks exactly that — `CountActiveMemories`, a
+  `windowCountCapableStore` assertion, whose predicate is the window's own — and
+  where it is zero, or the store cannot answer, the cause belongs to somebody else and
+  the count sentence is the honest one.
+
+  Both directions of that error are real and only one was found at a time. With no
+  window count, a project holding nothing was told its rows had been RETIRED on the
+  strength of aged-out `_global` rows; with a count but no window count, a project
+  whose rows were all WITHDRAWN was told the same thing, and the abstention named a
+  cause for rows that were not in the window at all. The sentence is only true of the
+  population it can name, so the note is gated on a count of that population.
+
+  A count that ERRORS is not a sentence at all: an unreadable count is evidence the
   project holds rows neither way, and the cheap direction is a missing note rather than
   a claim about memories that do not exist.
   The count is `CountMemories`, which covers rows left out for ANY reason — validity,

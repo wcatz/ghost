@@ -1498,8 +1498,16 @@ func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideItsLearnedContext(t *te
 // else, which is the only way to reach the count's ERROR path: a `*memory.Store`
 // never fails it, and a real failure (a locked file, a truncated page) is not
 // something a test should arrange on a real store.
+//
+// It fails BOTH counts, because the surface now asks two: `CountMemories` for what
+// the project holds and `CountActiveMemories` for what a window could admit. A fake
+// that failed only the first would have the surface decline the abstention on the
+// second's answer and never reach the error path this test is about.
 type uncountableStore struct {
 	provider.MemoryStore
+	// live is the concrete store, for the capability that `provider.MemoryStore`
+	// does not carry: the delegate has to be typed to reach `CountActiveMemories`.
+	live    *memory.Store
 	project string
 	err     error
 }
@@ -1509,6 +1517,13 @@ func (u uncountableStore) CountMemories(_ context.Context, projectID string) (in
 		return 0, u.err
 	}
 	return u.MemoryStore.CountMemories(context.Background(), projectID)
+}
+
+func (u uncountableStore) CountActiveMemories(ctx context.Context, projectID string) (int, error) {
+	if projectID == u.project {
+		return 0, u.err
+	}
+	return u.live.CountActiveMemories(ctx, projectID)
 }
 
 // TestAWithheldProjectIsToldNothingWhenItsRowCountCannotBeRead is the third
@@ -1534,7 +1549,7 @@ func TestAWithheldProjectIsToldNothingWhenItsRowCountCannotBeRead(t *testing.T) 
 		t.Fatalf("seed the retired row: %v", err)
 	}
 	readErr := errors.New("the count could not be read")
-	srv := New(uncountableStore{MemoryStore: st, project: "vproj", err: readErr},
+	srv := New(uncountableStore{MemoryStore: st, live: st, project: "vproj", err: readErr},
 		slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), "test")
 	ctx := context.Background()
 
@@ -1704,12 +1719,19 @@ func TestTheEmptyBlockGatesTheProjectScopedCountToo(t *testing.T) {
 // WHERE project_id = ?` — no `resolved_at` predicate. So a project whose only row
 // `ghost resolve` has withdrawn has an EMPTY window and a count of one.
 //
-// `holdsOwnRows` therefore answers true, the gate opens, and the answer is then
-// thrown away: `projectContextEmptyNote` returns "" because the reason is
-// `no_memories`, so control falls through to the census — "nothing has been saved
-// for it" — for a project Ghost holds a row for, while `ghost_memories_list` returns
-// that row. The gate was read to make a sentence possible and then declined to use
-// the only sentence it makes possible.
+// The gate therefore opened on a count of one, and the answer was then thrown away:
+// `projectContextEmptyNote` returned "" because the reason is `no_memories`, so
+// control fell through to the census — "nothing has been saved for it" — for a
+// project Ghost holds a row for, while `ghost_memories_list` returns that row. The
+// gate was read to make a sentence possible and then declined to use the only
+// sentence it makes possible.
+//
+// This is the NO-GLOBALS half of the shape, and the half that is easy to believe is
+// the whole of it: here the window really is empty, so `no_memories` is the truthful
+// reason and nothing but the census was ever wrong.
+// `TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow` is the other half, where
+// aged-out `_global` rows make the window non-empty and the reason an exclusion, and
+// where the abstention fires on rows that are not this project's.
 //
 // The RESOLVED row is the fixture because it is the one way to reach a count above
 // zero with a window the fetch emptied, without any stage involved: a validity
@@ -1797,6 +1819,100 @@ func TestAResolvedRowIsNotAPermanentlyEmptyProject(t *testing.T) {
 		if !strings.Contains(block, "Ghost holds 1 memory for this project") {
 			t.Errorf("%s reported an empty project without saying the row exists; the count already read for the gate "+
 				"is what makes that sentence, and it was discarded:\n%s", name, block)
+		}
+	}
+}
+
+// TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow is the shape the test above
+// does NOT cover, and it is the review finding on that test.
+//
+// The two sub-cases differ in one fact — whether the WINDOW is empty — and that
+// difference decides which sentence the current code reaches, so a test of the empty
+// window cannot see the other one:
+//
+//   - no `_global` row at all: the window is empty, `Reason` is `no_memories`,
+//     `projectContextEmptyNote` returns "" and the count sentence answers. That is
+//     TestAResolvedRowIsNotAPermanentlyEmptyProject.
+//   - `_global` rows that are EXPIRED: they ARE in the window (the fetch only filters
+//     `resolved_at`), stage 2 drops them for validity, and `Reason` is `all_invalid`.
+//     `projectContextEmptyNote` then answers — and its sentence is "the candidates
+//     this block was assembled from were withheld as out of date", which blames the
+//     project for rows that are `_global`'s, and calls the project's own row expired
+//     when `ghost resolve` withdrew it.
+//
+// The project's own row is absent from the window in BOTH sub-cases, and that is the
+// fact the sentence turns on. `CountMemories` cannot see it: it has no `resolved_at`
+// predicate, so it says one for a row the fetch excluded. So the count is a
+// necessary condition for the exclusion and not a sufficient one, which is what the
+// first version of this PR's gate got wrong in the other direction.
+//
+// The fix is to ask the question the WINDOW asks — how many of the project's own
+// rows were candidates at all — and to attribute the reason per scope rather than
+// asserting it about the project. Both are asserted here: the sentence must not
+// name a cause the project does not own, and the project must still be reported as
+// holding a row, because `ghost_memories_list` returns it.
+func TestAResolvedOwnRowIsNotBlamedForAnExpiredGlobalsRow(t *testing.T) {
+	st := newValidityStore(t)
+	srv, session := validityServerFor(t, st)
+	ctx := context.Background()
+	// The project's only own row, withdrawn.
+	if _, err := st.CreateWithIDFromCorpus(ctx, "vproj", "withdrawn", memory.Memory{
+		Category: "fact", Content: "a row ghost resolve withdrew", Source: "manual", Importance: 0.9,
+	}); err != nil {
+		t.Fatalf("seed the row: %v", err)
+	}
+	if stamped, err := st.MarkResolved(ctx, "vproj", []string{"withdrawn"}, memory.Provenance{}); err != nil ||
+		len(stamped) != 1 {
+		t.Fatalf("MarkResolved: %v (stamped %v), so the fixture is not the state the fetch filters on", err, stamped)
+	}
+	// A `_global` row that is present and EXPIRED — not absent. This is what makes
+	// the window non-empty and the reason an exclusion rather than an empty window.
+	for i := 0; i < 2; i++ {
+		if _, err := st.CreateWithIDFromCorpus(ctx, memory.GlobalProjectID, "aged"+twoDigits(i), memory.Memory{
+			Category: "preference", Content: "an aged-out cross-project preference", Source: "manual",
+			Importance: 0.9, ValidFrom: strPtr("2020-01-01"), ValidUntil: strPtr("2021-01-01"),
+		}); err != nil {
+			t.Fatalf("seed the aged-out global: %v", err)
+		}
+	}
+
+	// The preconditions, and the first is the whole difference from the sibling test:
+	// the window is NOT empty, so the reason is an exclusion and the abstention is
+	// reachable.
+	res, err := srv.projectContextMemories(ctx, "vproj", projectContextMemoriesCap)
+	if err != nil {
+		t.Fatalf("projectContextMemories vproj: %v", err)
+	}
+	if len(res.Items) != 0 {
+		t.Fatalf("fixture: %d rows were admitted", len(res.Items))
+	}
+	if res.Outcome != assemble.OutcomeEmpty || res.Reason != "all_invalid" {
+		t.Fatalf("fixture: got outcome %q reason %q, want empty/all_invalid — the aged-out globals are in the "+
+			"window and stage 2 drops them, which is what makes the abstention reachable", res.Outcome, res.Reason)
+	}
+	if n, err := st.CountMemories(ctx, "vproj"); err != nil || n != 1 {
+		t.Fatalf("fixture: CountMemories says %d (err %v), want 1 — the count has no resolved_at predicate", n, err)
+	}
+
+	for name, block := range map[string]string{
+		"ghost_project_context":        resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "vproj"})),
+		"the project-context resource": mustProjectContext(t, srv, "vproj"),
+	} {
+		// The project's row was WITHDRAWN, and the rows that were out of date belong
+		// to `_global`. A sentence naming a cause is a claim about which rows the
+		// cause explains, and here it explains none of this project's.
+		for _, blame := range []string{"withheld as out of date", "nothing has been saved for it",
+			"No memories found for this project."} {
+			if strings.Contains(block, blame) {
+				t.Errorf("%s told a caller %q, and the project's own row was withdrawn by ghost resolve rather than "+
+					"retired — the expired rows in the window are _global's:\n%s", name, blame, block)
+			}
+		}
+		// And the project is still reported as holding a row, because it does and
+		// `ghost_memories_list` returns it. Silence is the failure the abstention
+		// replaced; the count sentence is the honest middle here.
+		if !strings.Contains(block, "Ghost holds 1 memory for this project") {
+			t.Errorf("%s said nothing at all about a project holding a row:\n%s", name, block)
 		}
 	}
 }

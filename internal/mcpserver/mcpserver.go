@@ -309,6 +309,26 @@ type asOfCapableStore interface {
 	MemoriesAsOf(ctx context.Context, projectID string, t time.Time) (*memory.AsOfSet, error)
 }
 
+// windowCountCapableStore narrows provider.MemoryStore to the count the
+// project-context surface needs to say a sentence about a project: how many of its
+// rows a retrieval window could have admitted.
+//
+// It is a capability assertion rather than a new interface method for the reason
+// the others are, and the choice is load-bearing rather than a matter of taste. The
+// count that is on `provider.MemoryStore` — `CountMemories` — answers a DIFFERENT
+// question: it has no `resolved_at` predicate, so it counts rows `ghost resolve`
+// has withdrawn, which no window reads. Using it to decide whether a project "has
+// rows" is what let a project whose only row was withdrawn be told those rows "were
+// withheld as out of date" — a cause it did not have, explaining rows belonging to
+// `_global`. *memory.Store satisfies it.
+//
+// A provider without it answers the surfaces anyway and simply says less: the
+// consequence of the missing count is silence, and silence is the cheap direction
+// here. A hard error would fail a read that a project listing can still answer.
+type windowCountCapableStore interface {
+	CountActiveMemories(ctx context.Context, projectID string) (int, error)
+}
+
 // retrievalCapableStore narrows provider.MemoryStore to the retrieval record
 // ghost_memory_search writes (#646). A capability assertion for the reason
 // assembleCapableStore is one — the audit trail is a storage detail, not part of

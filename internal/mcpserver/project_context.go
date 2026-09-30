@@ -365,18 +365,47 @@ func projectContextEmptyNote(res assemble.Result) string {
 // Silence on an error, like everywhere else on these surfaces: a failed count is not
 // evidence that the project holds nothing, and the census is the one claim this
 // surface may only make from a verdict.
-// The count is read here, in the function that owns the choice of sentence, and by
-// no other caller — and the two review rounds that shaped this are the reason. A
-// shared `holdsOwnRows` predicate was the first attempt: three call sites, each
-// consulting a fact of its own. It was right about the count and useless about the
-// sentence, because a gate that only PERMITS one can be read and then ignored — and
-// this one was, for a project whose every row `ghost resolve` had withdrawn: the
-// count said one, the gate opened, `projectContextEmptyNote` returned "" for an empty
-// window, and the never-saved census shipped. Reading it where the sentence is
-// chosen is what makes the two facts one decision rather than a permission and an
-// act, and reading it ONCE is what keeps the two branches from disagreeing with each
-// other, since each read is its own snapshot and a `ghost_memory_delete` between them
-// would render the `n == 0` sentence over a block with no memory rows above it.
+//
+// The count is read here, in the function that owns the choice of sentence, and by no
+// other caller. Three review rounds shaped that, and each was the same mistake one
+// step along: a SHARED PREDICATE was the first attempt — three call sites, each
+// consulting a fact of its own — and it was right about the count and useless about
+// the sentence, because a gate that only PERMITS one can be read and then ignored.
+// It was: for a project whose every row `ghost resolve` had withdrawn, the count said
+// one, the gate opened, `projectContextEmptyNote` returned "" for an empty window,
+// and the never-saved census shipped. Reading the count where the sentence is chosen
+// makes the two facts one decision rather than a permission and an act; reading it
+// ONCE keeps the two branches from disagreeing with each other, since each read is
+// its own snapshot and a `ghost_memory_delete` between them would render the `n == 0`
+// sentence over a block with no memory rows above it.
+//
+// TWO COUNTS, because the two sentences are claims about different populations, and
+// only one of them is about what the project HOLDS. The second is projectWindowRowCount.
+//
+// projectWindowRowCount is how many of the project's OWN rows a retrieval window
+// could have admitted, which is the population the abstention sentence is about.
+//
+// It is a capability assertion and not `CountMemories`, because the difference
+// between the two counts is the whole of the last review finding on this surface:
+// `CountMemories` has no `resolved_at` predicate, so it counts rows `ghost resolve`
+// has withdrawn and no window reads. A project whose only row was withdrawn
+// therefore reports one, and a gate built on that number went on to tell the project
+// its rows "were withheld as out of date" — a cause it did not have, explaining
+// rows that belonged to `_global`.
+//
+// A store that cannot answer is `(0, nil)` rather than an error the caller must
+// handle separately, because the caller's response to both is the same: fall through
+// to the count sentence, which names no cause. That direction is the cheap one —
+// the reader loses a sentence that would have been true, rather than being handed one
+// that is not.
+func (s *Server) projectWindowRowCount(ctx context.Context, projectID string) (int, error) {
+	counter, ok := s.store.(windowCountCapableStore)
+	if !ok {
+		return 0, nil
+	}
+	return counter.CountActiveMemories(ctx, projectID)
+}
+
 func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string, res assemble.Result) string {
 	// `_global` IS a project, not a bucket that borrowed one, and an unresolved name
 	// has no project to count rows for — it gets the not-registered sentence, which
@@ -447,21 +476,38 @@ func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string
 		return ""
 	}
 	if len(res.Items) == 0 {
-		// The window is empty. The project holding a row is what makes a sentence
-		// possible at all, and the verdict picks which one:
+		// The window is empty of admitted rows, and the two sentences that could
+		// explain it need two DIFFERENT counts, because they are claims about
+		// different populations.
 		//
-		//   - a reason the verdict NAMES means the abstention, which is the sharper
-		//     instrument because it knows WHY the rows are gone; and
-		//   - `no_memories` means nothing was withheld, because the FETCH emptied the
-		//     window on its own `resolved_at IS NULL` and no stage can name that. The
-		//     abstention would be false and "" would be silence, so the count below
-		//     is the sentence, and it names no cause — which is what a count is for.
+		// The COUNT sentence — "Ghost holds N memories for this project and none of
+		// them is in the block above" — is about what the project holds, and `n`
+		// answers that. It names no cause, so it is true of a row withdrawn by
+		// `ghost resolve` as much as of one that aged out.
+		//
+		// The ABSTENTION names a cause, so it is a claim about which rows that cause
+		// explains, and the population it can be about is the WINDOW's: the project's
+		// own rows that `passiveFetchSQL` could have admitted. `n` cannot establish
+		// that — it has no `resolved_at` predicate, so a project whose every row was
+		// withdrawn reports one and the abstention would then blame it for rows that
+		// are `_global`'s and say "out of date" about a row `ghost resolve` retired
+		// on purpose. So the abstention asks the window's own question, and where
+		// that count is unavailable or zero the cause belongs to somebody else and
+		// the count sentence below is the honest answer.
 		if n == 0 {
-			return "" // nothing of this project's was withheld, so there is nothing to say
+			return "" // the project holds nothing at all, so there is nothing to report
 		}
-		if note := projectContextEmptyNote(res); note != "" {
-			return note
+		if inWindow, err := s.projectWindowRowCount(ctx, projectID); err == nil && inWindow > 0 {
+			if note := projectContextEmptyNote(res); note != "" {
+				return note
+			}
 		}
+		// Otherwise the rows the verdict describes are not this project's, and the
+		// count sentence below is what can honestly be said: the project holds `n`
+		// rows and none is above. That covers both a window emptied by the FETCH's
+		// `resolved_at IS NULL` (no stage withheld anything, so there is no
+		// abstention to render even when the verdict names an exclusion) and an
+		// exclusion that belongs entirely to `_global`.
 	}
 	for _, it := range res.Items {
 		if it.ProjectID == projectID {
