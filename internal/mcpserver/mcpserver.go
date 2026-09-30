@@ -3013,24 +3013,17 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
-		// An unresolved name resolves to "", and there is nothing to assemble for a
-		// project that does not exist. Answered with the same sentence the tool
-		// gives, naming what the caller asked for — the old path went through
-		// GetTopMemories and listed the GLOBAL rows under a heading naming this
-		// project, or fell through to "no memories found" depending on unrelated
-		// store contents. See projectNotRegistered.
-		if projectID == "" {
-			return &mcp.ReadResourceResult{
-				Contents: []*mcp.ResourceContents{{
-					URI:      req.Params.URI,
-					MIMEType: "text/plain",
-					Text:     projectNotRegistered(rawID),
-				}},
-			}, nil
-		}
+		// An unresolved name resolves to "". The block is still built — its
+		// `_global` section does not depend on the project, and the base ref
+		// delivered those rows for an unknown name — and the not-registered
+		// sentence is appended rather than returned in place of it. See
+		// projectNotRegistered and buildProjectContext.
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
-			return nil, fmt.Errorf("reading project context %q: %w", projectID, err)
+			return nil, fmt.Errorf("reading project context %q: %w", rawID, err)
+		}
+		if projectID == "" {
+			text = projectContextWithNotRegistered(text, rawID)
 		}
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
@@ -3190,20 +3183,14 @@ func (s *Server) registerPrompts() {
 			return nil, fmt.Errorf("resolve project: %w", err)
 		}
 		// The same unresolved-name case the tool and the resource handle, and the
-		// same sentence: three surfaces, one answer. See projectNotRegistered.
-		if projectID == "" {
-			return &mcp.GetPromptResult{
-				Description: "Ghost's accumulated knowledge for " + rawID,
-				Messages: []*mcp.PromptMessage{
-					{Role: "user", Content: &mcp.TextContent{
-						Text: "Recall what Ghost knows about project \"" + rawID + "\" before continuing:\n\n" + projectNotRegistered(rawID),
-					}},
-				},
-			}, nil
-		}
+		// same block-plus-sentence: the `_global` section does not depend on the
+		// project. See projectNotRegistered.
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("recall project context for %q: %w", rawID, err)
+		}
+		if projectID == "" {
+			text = projectContextWithNotRegistered(text, rawID)
 		}
 		if text == "" {
 			text = "No memories or learned context saved yet for this project."
@@ -3258,33 +3245,46 @@ func (s *Server) registerPrompts() {
 func (s *Server) buildProjectContext(ctx context.Context, projectID string) (string, error) {
 	var sb strings.Builder
 
-	memories, err := s.projectContextMemories(ctx, projectID, projectContextMemoriesCap)
-	if err != nil {
-		return "", fmt.Errorf("get memories for %q: %w", projectID, err)
-	}
-	if len(memories.Items) > 0 {
-		sb.WriteString("## Memories\n\n")
-		sb.WriteString(projectContextItems(memories.Items))
-	}
-
-	decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
-	if err != nil {
-		return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
-	}
-	if len(decisions) > 0 {
-		sb.WriteString("\n\n## Recent Decisions\n\n")
-		for _, d := range decisions {
-			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", d.ID, d.Title, d.Decision)
+	var memories assemble.Result
+	if projectID != "" {
+		var err error
+		memories, err = s.projectContextMemories(ctx, projectID, projectContextMemoriesCap)
+		if err != nil {
+			return "", fmt.Errorf("get memories for %q: %w", projectID, err)
+		}
+		if len(memories.Items) > 0 {
+			sb.WriteString("## Memories\n\n")
+			sb.WriteString(projectContextItems(memories.Items))
 		}
 	}
 
-	learned, err := s.store.GetLearnedContext(ctx, projectID)
-	if err != nil {
-		return "", fmt.Errorf("get learned context for %q: %w", projectID, err)
-	}
-	if learned != "" {
-		sb.WriteString("\n\n## Learned Context\n\n")
-		sb.WriteString(learned)
+	// Everything keyed on the project is skipped for an unresolved one, and
+	// `projectID == ""` matches nothing, so these two reads are a no-op rather than
+	// a second way to read a project that is not there. That is stated here rather
+	// than left to the reader of `if projectID != ""` above: a decisions read and a
+	// learned read are separate writers with their own SQL, and only the
+	// `Ghost memory is active but no project matched this directory` style of
+	// emptiness is a claim this surface may make.
+	if projectID != "" {
+		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
+		if err != nil {
+			return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
+		}
+		if len(decisions) > 0 {
+			sb.WriteString("\n\n## Recent Decisions\n\n")
+			for _, d := range decisions {
+				fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", d.ID, d.Title, d.Decision)
+			}
+		}
+
+		learned, err := s.store.GetLearnedContext(ctx, projectID)
+		if err != nil {
+			return "", fmt.Errorf("get learned context for %q: %w", projectID, err)
+		}
+		if learned != "" {
+			sb.WriteString("\n\n## Learned Context\n\n")
+			sb.WriteString(learned)
+		}
 	}
 
 	// Include global memories (preferences, conventions) that apply to all
@@ -3292,14 +3292,18 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// so skip any global already shown there rather than repeating the
 	// highest-value preferences in the token budget.
 	//
-	// The `seen` filter stays HERE, after the cap, and that is the whole reason
-	// the Global section is a second REQUEST rather than a second slice: this is a
-	// section boundary, not a selection rule. Filtering it into the store's read
-	// would run before the cap and admit up to 15 NEW rows where the shipped code
-	// admitted 15 rows of which some were repeats — a membership change with
-	// nothing behind it. `SlicePolicy.ExcludeSeen` stays unread for that reason.
+	// It runs for an UNRESOLVED project too, and that is the point: the section
+	// does not depend on the project, and the base ref delivered these rows for an
+	// unknown name — under `## Memories`, which is the mislabelling this migration
+	// removes, but delivered. A first session in a project Ghost has never seen is
+	// exactly when the cross-project preferences and conventions matter, and the
+	// server's own instructions tell the agent to look for this section. Dropping
+	// it would leave the answer contradicting the instructions shipped with it.
+	//
+	// The `seen` filter, the second REQUEST and the `ExcludeSeen` field it is why
+	// we do not use are all explained on projectContextGlobalSection, which is
+	// where the render now lives so the tool and this function cannot drift.
 	if projectID != memory.GlobalProjectID {
-
 		// 15 for the resolved case (projectContextGlobalsCap, unchanged) and 20 for
 		// an unresolved name (projectContextMemoriesCap), because the row COUNT is
 		// what a caller observes and origin/main's `GetTopMemories(ctx, "", 20)`

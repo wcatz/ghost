@@ -28,15 +28,6 @@ func newValiditySession(t *testing.T) (*Server, *mcp.ClientSession) {
 	return validityServerFor(t, newValidityStore(t))
 }
 
-// validityServerFor wraps a store in a Server and connects a client to it, so a
-// test can seed rows and then reach the SAME store through the tool.
-func validityServerFor(t *testing.T, st *memory.Store) (*Server, *mcp.ClientSession) {
-	t.Helper()
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(st, logger, "test")
-	return srv, connectedClient(t, srv)
-}
-
 // newValidityStore is the store behind newValiditySession, for a test that needs
 // to seed rows directly and then read them back through the same handle.
 func newValidityStore(t *testing.T) *memory.Store {
