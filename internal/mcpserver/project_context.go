@@ -291,7 +291,24 @@ func (s *Server) projectContextGlobalSection(ctx context.Context, limit int, alr
 // halves agree on, rendered in words that fit a listing rather than a search —
 // and names the surface that still shows the retired rows.
 //
-// An empty return means the census applies and the caller keeps its own.
+// An empty return means the census applies and the caller keeps its own — and the
+// caller asks it on a SECOND condition, which is not about the block at all: a
+// non-empty block whose memory read admitted NOTHING. `projectContextOwnRowsNote`
+// defers to it there, and the reason it can is that the question this answers is
+// about the rows, not about the text.
+//
+// IT STILL ANSWERS ABOUT A WINDOW, SO IT IS NOT A PROJECT-SCOPED CLAIM ON ITS OWN.
+// `projectContextBudget` reads this project OR `_global`, so an exclusion reason on
+// an empty item set can be describing rows that belong to `_global` — and the
+// project itself may hold none at all.
+//
+// So it has exactly ONE caller, `projectContextOwnRowsNote`, which establishes that
+// the project holds rows before rendering what comes back — and that is not a style
+// preference. `assemble.Result` carries no count and the store is not reachable from a
+// function that only renders bytes, so a caller that skipped the check could not make
+// the sentence true; it could only ship it. It was also the way this went wrong twice:
+// a caller holding the count as a permission rather than as the sentence's own input
+// read it, was satisfied, and then rendered a different and false sentence.
 func projectContextEmptyNote(res assemble.Result) string {
 	if res.Outcome != assemble.OutcomeEmpty || res.Reason == assemble.ReasonNoMemories {
 		return ""
@@ -320,9 +337,18 @@ func projectContextEmptyNote(res assemble.Result) string {
 // `GetTopMemories` did not filter validity and listed them marked `expired`.
 //
 // The gate here is the PROJECT's own rows, which is the question a caller actually
-// asked: is anything above mine? An empty block is a different question and
-// `projectContextEmptyNote` still answers it, because for an empty block the
-// assembler's own verdict is the sharper instrument — it knows WHY the rows are gone.
+// asked: is anything above mine? `projectContextEmptyNote` answers the same question
+// from the assembler's VERDICT rather than from a count, and it is the sharper
+// instrument — it knows WHY the rows are gone — so it answers both the empty block and
+// the block whose memory read admitted nothing at all (see the `len(res.Items) == 0`
+// branch below). The two are asked in that order by two callers, and neither caller
+// has to know which half of the function produced the sentence.
+//
+// A note is NEVER read off the verdict alone, and the union is why: `res` describes
+// the window this project shares with `_global`, so an exclusion reason can be
+// describing rows that belong to somebody else. `CountMemories` is the one
+// project-scoped fact in reach, and every branch that renders a sentence about the
+// project consults it.
 //
 // The population split has to happen HERE rather than in the assembler, because with
 // one bucket holding two populations nothing above the caller can tell them apart:
@@ -339,6 +365,18 @@ func projectContextEmptyNote(res assemble.Result) string {
 // Silence on an error, like everywhere else on these surfaces: a failed count is not
 // evidence that the project holds nothing, and the census is the one claim this
 // surface may only make from a verdict.
+// The count is read here, in the function that owns the choice of sentence, and by
+// no other caller — and the two review rounds that shaped this are the reason. A
+// shared `holdsOwnRows` predicate was the first attempt: three call sites, each
+// consulting a fact of its own. It was right about the count and useless about the
+// sentence, because a gate that only PERMITS one can be read and then ignored — and
+// this one was, for a project whose every row `ghost resolve` had withdrawn: the
+// count said one, the gate opened, `projectContextEmptyNote` returned "" for an empty
+// window, and the never-saved census shipped. Reading it where the sentence is
+// chosen is what makes the two facts one decision rather than a permission and an
+// act, and reading it ONCE is what keeps the two branches from disagreeing with each
+// other, since each read is its own snapshot and a `ghost_memory_delete` between them
+// would render the `n == 0` sentence over a block with no memory rows above it.
 func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string, res assemble.Result) string {
 	// `_global` IS a project, not a bucket that borrowed one, and an unresolved name
 	// has no project to count rows for — it gets the not-registered sentence, which
@@ -348,17 +386,87 @@ func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string
 	}
 	// An empty block is projectContextEmptyNote's, and its verdict beats a count:
 	// it can say the rows were found and withheld, which is the useful half.
-	if len(res.Items) == 0 {
+	//
+	// So an empty ITEM SET defers to it too, and "empty" here is the assembler
+	// admitting nothing — not the block being empty (#788). LEARNED CONTEXT is the
+	// section that makes the block non-empty over an empty memory read, because
+	// `ghost reflect` writes it into `ghost_state` and writes no memory row at all. So
+	// on a project whose every memory has retired and which reflection has already
+	// summarised, the answer was the summary alone — the census never fired and the
+	// exclusion that replaces it did not either, and the caller was handed a conclusion
+	// derived from those very memories with nothing saying they had been retired. That
+	// is the unmarked retired claim stage 2 exists to prevent, reached on the shape a
+	// mature project actually has.
+	//
+	// `## Recent Decisions` reaches the same shape only by LOSING its companion row.
+	// `RecordDecision` writes a `decision_log` MEMORY in the same transaction
+	// (`internal/memory/decisions.go`) and the tool says so — "a companion memory was
+	// also saved" — so a project with an active decision normally has a live memory
+	// row of its own that the passive read admits, and the section is not what emptied
+	// anything. It becomes the shape when that companion is deleted or withdrawn, which
+	// is worth knowing for a reader deciding whether to build a fixture on it: the
+	// learned-context fixture needs no such step, and a decision-only fixture would
+	// put a row of the project's own in the block and answer `""` at the loop below
+	// rather than at any gate. `TestTheOwnRowsNoteNeverClaimsThatARowAboveIsCrossProject
+	// WhenThereIsNone` is the pre-existing statement of that, and it is why its
+	// fixture is learned context.
+	//
+	// The verdict alone is NOT enough, and the reason is the same union that made the
+	// mixed bucket a problem above: `res` describes the WINDOW, which
+	// `projectContextBudget` reads as this project OR `_global`, while this sentence
+	// is read as a claim about the requested project. A project holding no memory row
+	// at all, on a store whose cross-project rows have all aged out, gets
+	// `all_invalid` from stage 2 and no admitted item — so deferring on the verdict
+	// alone would tell that project Ghost found and retired rows of its own, and
+	// point at a `ghost_memories_list` that returns nothing for it. So the count is
+	// consulted FIRST here, and it is not a permission but a SENTENCE SOURCE: below,
+	// where it is read, both branches render from it.
+	//
+	// The count is read ONCE, here, and both branches below render from this `n`.
+	// Reading it once per branch was a review finding: each read is its own snapshot,
+	// so a `ghost_memory_delete` or a `resolve --mark` landing between them could
+	// flip the answer to the `n == 0` sentence — "the memory rows above are the
+	// cross-project ones" — on a block that has no memory rows above it at all, and
+	// it cost an extra COUNT on every read of a project whose memory read admitted
+	// nothing.
+	//
+	// What no test here can kill is a SECOND read, because with no concurrent writer
+	// it is the same value and the only difference is the query count — a mutation
+	// that re-issues the read survives every fixture, and it would take a writer
+	// racing this read to fail. So the single read is stated here as the DESIGN and
+	// not claimed as something the suite proves; what the suite proves is that the
+	// branches agree about what to DO with a count, which is the half that was
+	// wrong.
+	//
+	// An error is silence here, for the reason the whole function is silent on one:
+	// a count nobody could read supports no sentence about the project, and not the
+	// census either. `_global` is not asked — it is refused at the guard above, which
+	// is the one place that knows a bucket is not a project to count rows for.
+	n, err := s.store.CountMemories(ctx, projectID)
+	if err != nil {
 		return ""
+	}
+	if len(res.Items) == 0 {
+		// The window is empty. The project holding a row is what makes a sentence
+		// possible at all, and the verdict picks which one:
+		//
+		//   - a reason the verdict NAMES means the abstention, which is the sharper
+		//     instrument because it knows WHY the rows are gone; and
+		//   - `no_memories` means nothing was withheld, because the FETCH emptied the
+		//     window on its own `resolved_at IS NULL` and no stage can name that. The
+		//     abstention would be false and "" would be silence, so the count below
+		//     is the sentence, and it names no cause — which is what a count is for.
+		if n == 0 {
+			return "" // nothing of this project's was withheld, so there is nothing to say
+		}
+		if note := projectContextEmptyNote(res); note != "" {
+			return note
+		}
 	}
 	for _, it := range res.Items {
 		if it.ProjectID == projectID {
 			return "" // a row of the project's own is in the block, so there is no gap to report
 		}
-	}
-	n, err := s.store.CountMemories(ctx, projectID)
-	if err != nil {
-		return ""
 	}
 	if n == 0 {
 		// The empty half of the same gate, and it was the same misattribution with
@@ -374,10 +482,12 @@ func (s *Server) projectContextOwnRowsNote(ctx context.Context, projectID string
 		// memory read, and the sections it would be wrong about — `## Learned
 		// Context` on the tool, `## Recent Decisions` and `## Learned Context` in
 		// buildProjectContext — are rendered by direct reads the assembler never
-		// sees. A project can hold zero memory rows and still have both:
-		// `ghost reflect` writes learned context into `ghost_state`,
-		// `ghost_decision_record` writes an active decision, and
-		// `ghost_memory_delete` removes only the `memories` row, so both survive it.
+		// sees. A project can hold zero memory rows and still have learned context:
+		// `ghost reflect` writes it into `ghost_state` and `ghost_memory_delete`
+		// removes only the `memories` row, so it survives that. It can hold a
+		// decision too, but only once that decision's COMPANION memory is gone —
+		// `RecordDecision` writes a `decision_log` row in the same transaction, so
+		// the section is normally accompanied by a live row of the project's own.
 		//
 		// So the sentence claims nothing about the rows above. "every row above
 		// applies to all projects" is true of a block that is only the memory

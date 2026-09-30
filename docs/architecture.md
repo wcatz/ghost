@@ -1550,6 +1550,49 @@ What exists now:
   cross-project preferences under a `## Memories` heading. `projectContextOwnRowsNote`
   is the census moved off that gate: no admitted row is the requested project's, so
   it says how many the project holds, that none is above, and where to browse them.
+
+  A project-keyed section outside the assembler is the third shape, and it is the
+  one that keeps the block non-empty when the memory read admits nothing at all:
+  `ghost reflect` writes learned context into `ghost_state` and writes no memory row,
+  so a mature project can hold a full block and an empty read. (`## Recent Decisions`
+  is the same shape only after its COMPANION memory is gone: `RecordDecision` inserts a
+  `decision_log` row in the same transaction and the tool reports it, so a decision
+  normally arrives with a live row of the project's own and the section is not what
+  emptied the read.) A verdict-gated note is then the only sentence that says the
+  memories behind the summary have been withheld, and without it a caller is handed a
+  conclusion derived from retired rows and told nothing about their retirement. So the
+  note's own gate is the ADMITTED ROWS rather than the rendered text, and the two
+  empty-block callers ask the function that owns the choice rather than spelling the
+  gate themselves.
+
+  The deferral is NOT on the verdict alone, because the verdict describes the WINDOW
+  and the sentence is read as a claim about the project — the same union that created
+  the mixed-bucket problem. A project holding no memory row at all, on a store whose
+  cross-project rows have all aged out, gets `all_invalid` from stage 2 and no
+  admitted item, so a verdict-only deferral would tell that project Ghost found and
+  retired rows of its own and point at a `ghost_memories_list` that returns nothing
+  for it.
+
+  Which makes the project-scoped COUNT the input to every sentence about a project
+  rather than a precondition of one branch, and the three gates that render one — the
+  two empty-block branches and the appended note — all go through the single function
+  that owns the choice. The union bug was on the two empty-block branches first, and
+  this change fixed them in the wrong order twice: first only the third gate, then a
+  shared predicate used as a *permission* — read, satisfied, and then discarded, so a
+  project whose rows were all withdrawn by `ghost resolve` still got the never-saved
+  census. A gate a caller can pass without obeying is the failure mode the single
+  function exists to prevent, so the count is read where the sentence is chosen.
+
+  That last shape is worth stating because the two readers disagree about what a
+  project holds, and the disagreement is a fact about the SQL rather than about this
+  surface: the passive window binds `resolved_at IS NULL` and `CountMemories` does
+  not. So a project whose every row `ghost resolve` has withdrawn has an empty window
+  and a count of one, no stage withheld anything, and the abstention is false. The
+  count is then the only sentence that can be true, and it names no cause — which is
+  what `CountMemories` is for, covering resolution and validity and the cap alike. A
+  count that ERRORS is not a sentence at all: an unreadable count is evidence the
+  project holds rows neither way, and the cheap direction is a missing note rather than
+  a claim about memories that do not exist.
   The count is `CountMemories`, which covers rows left out for ANY reason — validity,
   the cap, deduplication, resolution — so the sentence names no cause and stays true
   in all of them. The population split has to live at the caller, because with one
