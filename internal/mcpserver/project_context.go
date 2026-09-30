@@ -285,9 +285,19 @@ func projectContextSection(sb *strings.Builder, heading, body string) {
 // this is a function rather than a format string at each call site: the resolved id
 // is `""` here, and `Project "" is not registered` names nothing the caller can
 // act on.
+//
+// It is a function for a second reason now, and it is why the value goes through
+// `memory.ProjectArg` rather than `%q`: this is the sentence an UNKNOWN project
+// produces, so an agent that pasted a clone URL with embedded auth into `project_id`
+// arrives here with a token in it, and the answer is returned as tool text into
+// its own context. Every other sentence that quotes the argument goes through the
+// same renderer, and there are now enough of them that leaving this one on `%q`
+// would make the rule "a refusal never quotes a credential-shaped project
+// argument" true of every site except the one that fires most often for a project
+// Ghost has simply never heard of.
 func projectNotRegistered(asked string) string {
-	return fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. "+
-		"Call ghost_memory_save to create it.", asked)
+	return fmt.Sprintf("Project %s is not registered with Ghost yet — nothing has ever been saved for it. "+
+		"Call ghost_memory_save to create it.", memory.ProjectArg("project_id", asked))
 }
 
 // projectNotRegisteredAsOf is the `as_of` sibling of projectNotRegistered, and it
@@ -307,9 +317,9 @@ func projectNotRegistered(asked string) string {
 // for a disclosure to lead — the reader needs to see that the requested instant was
 // never consulted, and that is the same sentence's job.
 func projectNotRegisteredAsOf(asked string, asOf time.Time) string {
-	return fmt.Sprintf("Project %q is not registered with Ghost yet, so there is nothing to read as of %s: "+
+	return fmt.Sprintf("Project %s is not registered with Ghost yet, so there is nothing to read as of %s: "+
 		"Ghost has never held a row for it, at any instant. Call ghost_memory_save to create it.",
-		asked, asOf.Format(time.RFC3339))
+		memory.ProjectArg("project_id", asked), asOf.Format(time.RFC3339))
 }
 
 // projectContextWithNotRegistered appends the not-registered sentence to whatever

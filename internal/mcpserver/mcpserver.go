@@ -965,7 +965,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
 	if resolvedProjectID == "" {
-		return "", fmt.Errorf("project %q not found", args.ProjectID)
+		return "", fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
 	}
 	mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
 	if err != nil {
@@ -975,7 +975,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		return "", fmt.Errorf("memory %s not found", args.MemoryID)
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
+		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.ProjectArg("project_id", args.ProjectID))
 	}
 
 	importance, err := optFloat32(args.Importance, "importance")
@@ -1111,7 +1111,7 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
 	if resolvedProjectID == "" {
-		return "", fmt.Errorf("project %q not found", projectID)
+		return "", fmt.Errorf("project %s not found", memory.ProjectArg("project_id", projectID))
 	}
 
 	mems, err := s.store.GetByIDs(ctx, []string{memoryID})
@@ -1125,7 +1125,7 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 		return "", fmt.Errorf("memory %s is already global", memoryID)
 	}
 	if mems[0].ProjectID != resolvedProjectID {
-		return "", fmt.Errorf("memory %s does not belong to project %s", memoryID, projectID)
+		return "", fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.ProjectArg("project_id", projectID))
 	}
 
 	if err := s.store.PromoteToGlobal(ctx, resolvedProjectID, memoryID); err != nil {
@@ -1165,7 +1165,7 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
 	if resolvedProjectID == "" {
-		return "", fmt.Errorf("project %q not found", projectID)
+		return "", fmt.Errorf("project %s not found", memory.ProjectArg("project_id", projectID))
 	}
 	ws, ok := s.store.(linkCapableStore)
 	if !ok {
@@ -1281,7 +1281,7 @@ func (s *Server) markMemoriesResolved(ctx context.Context, req *mcp.CallToolRequ
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
 	if resolvedProjectID == "" {
-		return "", fmt.Errorf("project %q not found", projectID)
+		return "", fmt.Errorf("project %s not found", memory.ProjectArg("project_id", projectID))
 	}
 	ms, ok := s.store.(markCapableStore)
 	if !ok {
@@ -1491,7 +1491,7 @@ func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, reques
 	// The same ownership check a live row gets, against the project the
 	// tombstone was filed under. One entry is enough to name it.
 	if entries[0].ProjectID != resolvedProjectID {
-		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, requestedProjectID)
+		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, memory.ProjectArg("project_id", requestedProjectID))
 	}
 	purged, err := hist.PurgeMemoryHistory(ctx, memoryID)
 	if err != nil {
@@ -2276,7 +2276,7 @@ func (s *Server) registerTools() {
 			case existsErr != nil:
 				text = "Project lookup failed — unable to determine whether it is registered."
 			case !exists:
-				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", asked)
+				text = fmt.Sprintf("Project %s is not registered with Ghost yet — nothing has ever been saved for it.", memory.ProjectArg("project_id", asked))
 			case args.Category != "" && args.Retention != "":
 				text = fmt.Sprintf("No memories found in category %q with retention %q for this project.", args.Category, args.Retention)
 			case args.Category != "":
@@ -2320,7 +2320,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if resolvedProjectID == "" {
-			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
 		}
 
 		// Verify the memory exists and belongs to the specified project.
@@ -2339,7 +2339,7 @@ func (s *Server) registerTools() {
 			return s.purgeDeletedMemoryHistory(ctx, args.MemoryID, args.ProjectID, resolvedProjectID, args.PurgeHistory)
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.ProjectArg("project_id", args.ProjectID))
 		}
 
 		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{
@@ -2599,7 +2599,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if resolved == "" {
-			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 		priority := 2 // default: normal
@@ -2651,7 +2651,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if projectID == "" {
-			return nil, nil, fmt.Errorf("project %q not found", args.Project)
+			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project", args.Project))
 		}
 		rs, ok := s.store.(resolveCapableStore)
 		if !ok {
@@ -2896,7 +2896,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if resolved == "" {
-			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
 		}
 		args.ProjectID = resolved
 		if alternatives == nil {
@@ -3222,7 +3222,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
 		if resolvedProjectID == "" {
-			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+			return nil, nil, fmt.Errorf("project %s not found", memory.ProjectArg("project_id", args.ProjectID))
 		}
 
 		// Verify the memory exists and belongs to the specified project.
@@ -3234,7 +3234,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("memory %s not found", args.MemoryID)
 		}
 		if mems[0].ProjectID != resolvedProjectID {
-			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, memory.ProjectArg("project_id", args.ProjectID))
 		}
 
 		if err := s.store.TogglePin(ctx, args.MemoryID, args.Pinned); err != nil {
@@ -3420,7 +3420,7 @@ func (s *Server) registerResources() {
 		// projectNotRegistered and buildProjectContext.
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
-			return nil, fmt.Errorf("reading project context %q: %w", rawID, err)
+			return nil, fmt.Errorf("reading project context %s: %w", memory.ProjectArg("project_id", rawID), err)
 		}
 		if projectID == "" {
 			text = projectContextWithNotRegistered(text, rawID)
@@ -3604,7 +3604,7 @@ func (s *Server) registerPrompts() {
 		// project. See projectNotRegistered.
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
-			return nil, fmt.Errorf("recall project context for %q: %w", rawID, err)
+			return nil, fmt.Errorf("recall project context for %s: %w", memory.ProjectArg("project_id", rawID), err)
 		}
 		if projectID == "" {
 			text = projectContextWithNotRegistered(text, rawID)
@@ -3612,11 +3612,34 @@ func (s *Server) registerPrompts() {
 		if text == "" {
 			text = "No memories or learned context saved yet for this project."
 		}
+		// The argument goes into the prompt through `memory.ProjectArg` in both
+		// places, and the prompt is the sharpest end of #839 anywhere in the tree:
+		// this text is the USER message of a prompt invocation, so it is model
+		// input, not just a client-visible string. `rawID` is the caller's own
+		// `project_id` and the ordinary way an agent produces one is to paste the
+		// session's clone URL into it — inline credentials included — so quoting it
+		// verbatim here is the same leak the refusal sentences had, with a third
+		// party reading the result.
+		//
+		// The refusal above and in projectNotRegistered are the sentences an agent
+		// reads when the project is wrong; these two are what it reads once the
+		// block is already built, and the not-registered sentence is appended to
+		// exactly this block below — so a project Ghost has never heard of is the
+		// shape that reaches both a withheld sentence and an echoed one, which is
+		// why the rule cannot stop at the refusal.
+		//
+		// For every value the guard does not recognise this is byte-identical to
+		// what it was: the renderer hands back `"ghost"`, and the sentence keeps
+		// its own quotation marks around it in the user message. The one visible
+		// difference is the DESCRIPTION, which grew the same quotes its sibling
+		// already had, because `ProjectArg` is a renderer for a quoted slot and
+		// inventing a second unquoted one here would be a second rule.
 		return &mcp.GetPromptResult{
-			Description: "Ghost's accumulated knowledge for " + rawID,
+			Description: "Ghost's accumulated knowledge for " + memory.ProjectArg("project_id", rawID),
 			Messages: []*mcp.PromptMessage{
 				{Role: "user", Content: &mcp.TextContent{
-					Text: "Recall what Ghost knows about project \"" + rawID + "\" before continuing:\n\n" + text,
+					Text: "Recall what Ghost knows about project " + memory.ProjectArg("project_id", rawID) +
+						" before continuing:\n\n" + text,
 				}},
 			},
 		}, nil
@@ -3636,13 +3659,24 @@ func (s *Server) registerPrompts() {
 		if projectID == "" || topic == "" {
 			return nil, fmt.Errorf("project_id and topic arguments are required")
 		}
+		// This prompt never RESOLVES its project — it hands the argument straight
+		// to `ghost_decision_record` and lets that call decide — so it is not one
+		// of the surfaces the resolve sweep walks, and it is here precisely
+		// because of that: the project identifier reaches the agent's prompt
+		// without ever passing a resolver that could withhold it. `project_id` is
+		// routinely the session's clone URL, so both interpolations are #839's leak
+		// with nothing upstream to stop it, and both go through the same renderer
+		// the refusals use (#839). Byte-identical for every value the guard does
+		// not recognise: `ProjectArg` supplies the quotation marks the sentence
+		// already wrote itself.
+		rendered := memory.ProjectArg("project_id", projectID)
 		return &mcp.GetPromptResult{
 			Description: "Structure and record a decision about " + topic,
 			Messages: []*mcp.PromptMessage{
 				{Role: "user", Content: &mcp.TextContent{
-					Text: "Help me record a design decision about \"" + topic + "\" for project \"" + projectID + "\". " +
+					Text: "Help me record a design decision about \"" + topic + "\" for project " + rendered + ". " +
 						"Ask me for (or infer from context): a short title, the decision itself, the rationale, and any " +
-						"alternatives considered. Then call ghost_decision_record with project_id=\"" + projectID + "\" to save it.",
+						"alternatives considered. Then call ghost_decision_record with project_id=" + rendered + " to save it.",
 				}},
 			},
 		}, nil
@@ -3877,18 +3911,27 @@ func (s *Server) projectContextGlobals(ctx context.Context, limit int) (assemble
 
 // parseProjectIDFromURI extracts and URL-decodes the project_id segment from
 // a ghost:// resource URI (e.g. "ghost://project/my%20proj/context" → "my proj").
+//
+// All three refusals name the URI through `memory.ProjectArg` (#839), which is a
+// wider fix than it looks: the URI is the caller's project argument in the form
+// this tree's resource templates carry it, an agent pastes the clone URL it has
+// rather than a project name, and a malformed one of those is refused HERE — so
+// with a bare `%q` the only sentences on this path that ran before any resolve
+// were the ones that quoted it. The field is named `resource URI` rather than
+// `project_id` because the value is the whole URI, not the segment; that is the
+// honest name for the thing the caller has to fix.
 func parseProjectIDFromURI(rawURI string) (string, error) {
 	u, err := url.Parse(rawURI)
 	if err != nil {
-		return "", fmt.Errorf("invalid resource URI %q: %w", rawURI, err)
+		return "", fmt.Errorf("invalid resource URI %s: %w", memory.ProjectArg("resource URI", rawURI), err)
 	}
 	parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
 	if len(parts) == 0 || parts[0] == "" {
-		return "", fmt.Errorf("resource URI missing project_id: %s", rawURI)
+		return "", fmt.Errorf("resource URI missing project_id: %s", memory.ProjectArg("resource URI", rawURI))
 	}
 	projectID, err := url.PathUnescape(parts[0])
 	if err != nil {
-		return "", fmt.Errorf("invalid project_id encoding in URI %q: %w", rawURI, err)
+		return "", fmt.Errorf("invalid project_id encoding in URI %s: %w", memory.ProjectArg("resource URI", rawURI), err)
 	}
 	return projectID, nil
 }

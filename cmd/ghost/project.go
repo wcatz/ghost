@@ -28,9 +28,9 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 	if projectID == "" {
 		names, listErr := store.ListProjectNames(ctx)
 		if listErr != nil || len(names) == 0 {
-			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+			fmt.Fprintf(os.Stderr, "error: project %s not found\n", memory.ProjectArg("project_id", projectName))
 		} else {
-			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, knownProjectsSentence(names))
+			fmt.Fprintf(os.Stderr, "error: project %s not found. Known projects: %s\n", memory.ProjectArg("project_id", projectName), knownProjectsSentence(names))
 		}
 		os.Exit(1)
 	}
@@ -206,10 +206,10 @@ func runProjectMergeCore(ctx context.Context, store *memory.Store, out io.Writer
 	oldID, oldName := resolveForMerge(ctx, store, oldArg)
 	newID, newName := resolveForMerge(ctx, store, newArg)
 	if oldID == "" {
-		return fmt.Errorf("project %q not found; known projects: %s", oldArg, strings.Join(knownProjectNames(ctx, store), ", "))
+		return fmt.Errorf("project %s not found; known projects: %s", memory.ProjectArg("project_id", oldArg), strings.Join(knownProjectNames(ctx, store), ", "))
 	}
 	if newID == "" {
-		return fmt.Errorf("project %q not found; known projects: %s", newArg, strings.Join(knownProjectNames(ctx, store), ", "))
+		return fmt.Errorf("project %s not found; known projects: %s", memory.ProjectArg("project_id", newArg), strings.Join(knownProjectNames(ctx, store), ", "))
 	}
 	if oldID == newID {
 		return fmt.Errorf("refusing to merge a project into itself (%q)", oldID)
@@ -253,10 +253,10 @@ func resolveProjectBindID(ctx context.Context, store *memory.Store, projectID st
 		return "", err
 	} else if !ok {
 		if names := knownProjectNames(ctx, store); len(names) > 0 {
-			return "", fmt.Errorf("project %q not found (bind takes a project id). Known projects: %s",
-				projectID, strings.Join(names, ", "))
+			return "", fmt.Errorf("project %s not found (bind takes a project id). Known projects: %s",
+				memory.ProjectArg("project_id", projectID), strings.Join(names, ", "))
 		}
-		return "", fmt.Errorf("project %q not found (bind takes a project id)", projectID)
+		return "", fmt.Errorf("project %s not found (bind takes a project id)", memory.ProjectArg("project_id", projectID))
 	}
 	return projectID, nil
 }
@@ -315,6 +315,30 @@ func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer,
 
 	binding, err := store.BindProjectPath(ctx, id, abs, remote)
 	if err != nil {
+		// The one refusal that does not name what it refused, named here — the
+		// same division of labour `mcpserver.ensureProjectFor` uses for the
+		// project shape, and for the same reason. The predicate's sentence is also
+		// `ghost export`'s, where the caller's text is noise and a hazard, so it
+		// carries no path; a person who typed the directory needs to know which
+		// one was refused, and `assemble.Label` — the renderer `printBinding`
+		// already prints every path through — neutralises exactly the characters
+		// the refusal is about, so the sentence holds none of them.
+		//
+		// The credential refusal is EXCLUDED, and the exclusion is the whole
+		// subtlety: `assemble.Label` renders a value for a line, it does not
+		// withhold a secret, so appending the path beside
+		// `refusing to store credential-shaped content in path: GitHub personal
+		// access token` would put the token straight back into the one answer
+		// that says Ghost never stores credential values. That refusal already
+		// names the field, so it is handed back untouched — exactly what
+		// `ensureProjectFor` does with the same guard, and for the same reason.
+		//
+		// Only these two refusals are named. The others already carry the path, or
+		// the other project that caused them, and appending a second copy to those
+		// would read as a mistake.
+		if errors.Is(err, memory.ErrBindPathUnprintable) && !errors.Is(err, memory.ErrSecretContent) {
+			return fmt.Errorf("%w — path %s", err, assemble.Label(abs))
+		}
 		return err
 	}
 	return printBinding(out, binding)

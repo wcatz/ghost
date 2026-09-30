@@ -39,6 +39,18 @@ var (
 	// which is the state the caller is trying to leave.
 	ErrBindPathUnusable = errors.New("path is not a usable location")
 
+	// ErrBindPathUnprintable means the path holds something a project's stored
+	// text may not hold: a control character, a backtick, « or », or a
+	// credential. #824 closed this at project CREATION, and bind was the way
+	// back in through an UPDATE — recording a checkout called `«ghost»` on an
+	// otherwise ordinary project, after which `ghost export` calls
+	// `CheckImportedProject`, refuses that project's path, and leaves the
+	// project AND every memory, task and decision under it out of the artifact
+	// with a named non-zero exit. So the failure was not silent, it was also not
+	// the user's fault by the time they saw it: nothing on the way in had said
+	// the directory was ineligible.
+	ErrBindPathUnprintable = errors.New("path holds something Ghost cannot store")
+
 	// ErrBindPathClaimed means another project already records this
 	// directory. Two projects on one checkout leave a session there resolving
 	// to whichever row the prefix ranking happened to favour.
@@ -153,9 +165,15 @@ func StoredPathIsUsable(stored string) bool { return storedPathIsUsable(stored) 
 //
 // path must be absolute and must satisfy StoredPathIsUsable; the caller checks
 // that it exists and is a directory, because a caller that cannot look at the
-// filesystem cannot know. detectedRemote is whatever the caller detected at
-// that path, in any spelling — "" when the directory is not a checkout of
-// anything.
+// filesystem cannot know. The PHYSICAL path must also satisfy the importer's own
+// rule for a project's path — no control character, backtick, « or », and no
+// credential — or the bind is refused with ErrBindPathUnprintable, because a path
+// `ghost export` has to refuse takes the project and everything under it out of
+// the artifact (#840). The rule is asked about the path about to be recorded and
+// never about the one already stored, so a project bound by an older Ghost is
+// still repairable by binding it to a directory that passes. detectedRemote is
+// whatever the caller detected at that path, in any spelling — "" when the
+// directory is not a checkout of anything.
 func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote string) (ProjectBinding, error) {
 	var result ProjectBinding
 
@@ -173,6 +191,54 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 	physical, err := canonicalPath(path)
 	if err != nil {
 		return result, fmt.Errorf("%w: %q cannot be resolved to a directory: %v", ErrBindPathUnusable, path, err)
+	}
+
+	// The path rule the IMPORTER applies, asked on the value about to be written,
+	// before the transaction and before anything else (#840).
+	//
+	// `projects.path` has exactly one writer in the tree — the UPDATE below — so
+	// this is the whole gap rather than one of several: #824 refused an
+	// unexportable project at both creation routes, and bind was the way an
+	// ordinary project reached the same state through an update. «, » and a
+	// backtick are all legal in a POSIX directory name, `storedPathIsUsable` asks
+	// only whether the path is absolute and is not a bare root, and the character
+	// class is not exotic in practice: a checkout inside a directory whose owner
+	// likes «» is a normal thing to have on a disk.
+	//
+	// It is the importer's OWN predicate rather than a second rule, for the
+	// reason every check in import_check.go is the importer's: the sentence has to
+	// be the one `ghost export` reports, or the operator reads two different
+	// explanations of one decision. It carries no value — the predicate's message
+	// is also the export report's, where the caller's text is noise — and the
+	// `ghost project bind` boundary names the path beside it through
+	// `assemble.Label`, which is the renderer `printBinding` already uses for it.
+	//
+	// Asked on `physical`, not on `path` as typed, because `physical` is what
+	// lands in the column and what `pathsAgree` will compare a session directory
+	// against later. A symlink whose own name is hostile but whose target is not
+	// records the target, and refusing it would lock the user out of a directory
+	// Ghost has no problem with.
+	//
+	// The credential guard comes first, and for the reason it comes first
+	// everywhere else: the shape rule judges characters, not secrets, so a path
+	// that is both would otherwise be refused with a sentence that never mentions
+	// the token and leaves the reader to guess whether the directory is safe to
+	// record. Neither sentence quotes anything, so nothing leaks by asking in this
+	// order — it is asked first because the two answers call for different fixes.
+	//
+	// It is asked only about the NEW path. A project that already records a path
+	// this refuses — planted before the guard existed, restored from an artifact,
+	// or written by an older Ghost — keeps every route it has today, including a
+	// rebind to a clean directory, which is the only way out of the state it is
+	// in. Judging the stored value here would make `ghost project bind` refuse to
+	// repair the very projects the guard is protecting (#836's rule, at the update
+	// rather than the creation: a path about to be RECORDED is judged, a row
+	// already carrying one is not).
+	if err := rejectSecret("path", physical); err != nil {
+		return result, fmt.Errorf("%w: %w", ErrBindPathUnprintable, err)
+	}
+	if err := CheckImportedProjectText("path", physical); err != nil {
+		return result, fmt.Errorf("%w: %w", ErrBindPathUnprintable, err)
 	}
 	remote := NormalizeRepoRemote(detectedRemote)
 

@@ -816,7 +816,15 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		return "", false, fmt.Errorf("count explicit projects for repository: %w", err)
 	}
 	if count > 1 {
-		return "", false, fmt.Errorf("project reference %q matches multiple projects", projectRef)
+		// `projectRef` is the caller's own argument on the route
+		// `ensureProjectFor` takes when a path-shaped project_id carried a
+		// detectable remote, and it reaches here UNGUARDED on the branch where the
+		// resolution above found a project — the #836 gate skips both guards
+		// there, because a path a project is already bound to must stay
+		// writable. So the same renderer that holds `ResolveProject`'s refusals
+		// holds this one, for the same reason and at the same cost: the sentence
+		// is returned to the saving agent as a tool answer.
+		return "", false, fmt.Errorf("project reference %s matches multiple projects", ProjectArg("project_id", projectRef))
 	}
 	var existingRemote, matchedPath string
 	norm := strings.ReplaceAll(projectRef, `\`, "/")
@@ -1864,7 +1872,7 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		return DeleteProjectSummary{}, fmt.Errorf("resolve project: %w", err)
 	}
 	if id == "" {
-		return DeleteProjectSummary{}, fmt.Errorf("project %q not found", input)
+		return DeleteProjectSummary{}, fmt.Errorf("project %s not found", ProjectArg("project_id", input))
 	}
 	if id == "_global" {
 		return DeleteProjectSummary{}, fmt.Errorf("refusing to delete the _global project")
@@ -2099,7 +2107,7 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		return nameMatches[0].id, nameMatches[0].name, nil
 	}
 	if len(nameMatches) > 1 {
-		return "", "", fmt.Errorf("%w: %q matches multiple projects", ErrAmbiguousProject, input)
+		return "", "", ambiguousProject(input, "matches multiple projects")
 	}
 
 	// inputRemote can spawn git, so the session's remote is derived at most
@@ -2138,7 +2146,7 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 			bestLength := pathRankLength(survivors[0].path)
 			for _, candidate := range survivors[1:] {
 				if pathRankLength(candidate.path) == bestLength {
-					return "", "", fmt.Errorf("%w: %q has tied path-prefix matches", ErrAmbiguousProject, input)
+					return "", "", ambiguousProject(input, "has tied path-prefix matches")
 				}
 			}
 			return survivors[0].id, survivors[0].name, nil
@@ -2225,9 +2233,44 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		return "", "", nil
 	}
 	if len(survivors) > 1 {
-		return "", "", fmt.Errorf("%w: %q matches multiple projects", ErrAmbiguousProject, input)
+		return "", "", ambiguousProject(input, "matches multiple projects")
 	}
 	return survivors[0].id, survivors[0].name, nil
+}
+
+// ambiguousProject is how ResolveProject reports a reference more than one
+// project answers to. It exists because three refusals in one function were each
+// interpolating the caller's own argument, and a value that cannot be quoted has
+// to be recognised at every one of them (#839).
+//
+// `input` is the caller's argument verbatim and the reason is named separately,
+// so the sentence is `project identifier is ambiguous: "foo" matches multiple
+// projects` for everything the credential guard does not recognise — byte for byte
+// what it was — and a placeholder carrying the guard's format and no part of the
+// value when it does.
+//
+// The placeholder names a PROJECT IDENTIFIER rather than a field, and that is the
+// limit of what this function knows. `ghost_resolve` calls it `project` and every
+// other tool calls it `project_id`, so a refusal that named the field here would
+// tell the agent to change an argument it never passed — the exact mistake
+// `RejectSecret`'s comment warns the boundary against, moved one layer in. The
+// boundary's OWN sentences do name the field, because they know it, and they are
+// the ones an agent reads when the answer is about a project that does not exist
+// rather than one that exists twice.
+//
+// Rendering rather than returning is the deliberate choice against the alternative
+// #839 weighed, which was to stop interpolating and move the value into a
+// structured field each handler rendered. That would put the credential question
+// in nineteen handler call sites instead of one, and the store's own Error() is
+// read by the CLI and by `ghost project bind` too, so there is no boundary at the
+// end of it that could be trusted to make the call. One renderer, asked once,
+// is what makes the guarantee total instead of per-handler.
+//
+// The repository refusal in the same function does not come through here: it names
+// a NormalizeRepoRemote'd remote, which has had its userinfo stripped, so there is
+// no credential left in it to withhold.
+func ambiguousProject(input, reason string) error {
+	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, ProjectArg("project identifier", input), reason)
 }
 
 // basenameCandidate is one projects row that answers to a name.
