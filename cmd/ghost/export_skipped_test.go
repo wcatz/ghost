@@ -151,14 +151,13 @@ func TestTheDocumentedCredentialSampleMatchesTheCode(t *testing.T) {
 	_ = runExportCore(context.Background(), store, &summary, &warn,
 		filepath.Join(t.TempDir(), "artifact.jsonl"), "")
 
-	var credentialLine string
+	var real []string
 	for _, line := range strings.Split(warn.String(), "\n") {
-		if strings.Contains(line, "A credential-shaped field is refused") {
-			credentialLine = strings.TrimSpace(line)
-			break
+		if credentialAdviceLine(strings.TrimSpace(line)) {
+			real = append(real, strings.TrimSpace(line))
 		}
 	}
-	if credentialLine == "" {
+	if len(real) == 0 {
 		t.Fatalf("the export printed no credential advice:\n%s", warn.String())
 	}
 
@@ -166,36 +165,60 @@ func TestTheDocumentedCredentialSampleMatchesTheCode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docs/cli.md: %v", err)
 	}
-	var documented string
+	// Scoped to the SAMPLE BLOCK, which is found by its first line and runs to the
+	// closing fence. Scanning the whole file for "edits " also picks up the prose
+	// sentence that introduces the table below it — a line that is a true claim
+	// about the derivation and is not part of the output, so requiring it to match
+	// the report would be asserting that the document has no other uses of the word.
+	var documented []string
+	inBlock := false
 	for _, line := range strings.Split(string(doc), "\n") {
-		if strings.Contains(line, "A credential-shaped field is refused") {
-			documented = strings.TrimSpace(line)
-			break
+		switch {
+		case !inBlock && strings.Contains(line, "A credential-shaped field is refused"):
+			inBlock = true
+			documented = append(documented, strings.TrimSpace(line))
+		case inBlock && strings.HasPrefix(strings.TrimSpace(line), "```"):
+			inBlock = false
+		case inBlock:
+			// The same predicate the code side is filtered by, so the block's
+			// other lines (the re-key and delete advice, which the sibling test
+			// covers) do not enter this comparison.
+			if credentialAdviceLine(strings.TrimSpace(line)) {
+				documented = append(documented, strings.TrimSpace(line))
+			}
 		}
 	}
-	if documented == "" {
+	if len(documented) == 0 {
 		t.Fatal("docs/cli.md no longer shows the credential advice")
 	}
-	if documented != credentialLine {
+	// The WHOLE block, joined — not just the lead-in. The advice is one line per
+	// group now, and the failure this test exists for was IN those lines: a sample
+	// that matched on its first line and drifted on the rest would have passed.
+	gotDoc, gotCode := strings.Join(documented, "\n"), strings.Join(real, "\n")
+	if gotDoc != gotCode {
 		t.Errorf("the documented credential advice does not match what the code writes:\n  doc:  %q\n  code: %q",
-			documented, credentialLine)
+			gotDoc, gotCode)
 	}
-	// And the field claims are checked against the tools directly, so the docs
-	// cannot drift even if someone edits them and the report happens to match.
+	// And the field claims are checked against the tools directly, so the docs cannot
+	// drift even if someone edits them and the report happens to match.
 	for _, mustNot := range []string{
 		"edits a memory's content, tags, source_ref, agent and session_id",
 		"edits a task's title, description and notes",
 	} {
-		if strings.Contains(documented, mustNot) {
+		if strings.Contains(gotDoc, mustNot) {
 			t.Errorf("the documented advice still claims %q, which the named tools cannot do", mustNot)
 		}
 	}
 	// The unwritable half has to be there too, since that is what the review found
-	// missing: a reader holding a task with a credential in its title has to be
-	// told no tool edits it.
-	for _, want := range []string{"a task's title", "agent and session_id", "database directly", "Re-export afterwards"} {
-		if !strings.Contains(documented, want) {
-			t.Errorf("the documented advice does not mention %q:\n%s", want, documented)
+	// missing or wrong: a reader holding a task with a credential in its title has to
+	// be told no tool edits it, and a reader holding one in a project's path has to
+	// be pointed at `ghost project bind` rather than at a delete that cascades.
+	for _, want := range []string{
+		"a task's title", "agent and session_id", "database directly",
+		"ghost project bind", "ghost history purge", "then re-export",
+	} {
+		if !strings.Contains(gotDoc, want) {
+			t.Errorf("the documented advice does not mention %q:\n%s", want, gotDoc)
 		}
 	}
 }
@@ -431,10 +454,10 @@ func TestAnExportThatLeftAnEmptyProjectNameOutNamesItsRecordsToo(t *testing.T) {
 }
 
 // TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames is the test the
-// reviewer's finding deserved, and it exists because a report that names a tool
-// which cannot make the edit is worse than one that names no tool: the operator
-// types it, it is rejected, and the advice that was meant to be more useful than
-// "delete the row" has taught them the report is approximate.
+// review's finding deserved, and it exists because a report that names a tool which
+// cannot make the edit is worse than one that names no tool: the operator types it,
+// it is rejected, and the advice that was meant to be more useful than "delete the
+// row" has taught them the report is approximate.
 //
 // The first version of the credential paragraph transcribed the field lists and was
 // wrong in four places — `ghost_memory_update` was said to edit a memory's `agent`
@@ -442,9 +465,9 @@ func TestAnExportThatLeftAnEmptyProjectNameOutNamesItsRecordsToo(t *testing.T) {
 // SESSION's provenance, because a caller must not be able to name their own author)
 // and `ghost_task_update` was said to edit a task's `title` and `notes` (it takes
 // status, priority and description; a task's title is written at insert and its
-// notes only by ghost_task_complete). So the assertion here is per FIELD and
-// against the tool the advice actually names, which is the check a transcription
-// fails and a derived list passes by construction.
+// notes only by ghost_task_complete). So the assertion is per FIELD against the tool
+// the advice actually names, which is the check a transcription fails and a derived
+// list passes by construction.
 func TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames(t *testing.T) {
 	for field, tool := range secretFieldFixers {
 		t.Run(field, func(t *testing.T) {
@@ -452,54 +475,56 @@ func TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames(t *testing.T) {
 			if len(fields) == 0 {
 				t.Fatalf("the advice names %s for %s, but that tool is not a field editor", tool, field)
 			}
-			var found bool
-			for _, f := range fields {
-				if f == field {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !contains(fields, field) {
 				t.Errorf("the advice says %s edits %s, but it takes %s — a user who follows it gets a rejected call",
 					tool, field, mcpserver.HumanFieldList(fields))
 			}
 		})
 	}
+}
 
-	// And the fields the predicates can refuse with NO tool named, which is the
-	// other half: the advice has to cover every credential-guarded field, and where
-	// it cannot name a tool it has to say the column is unwritable rather than
-	// quietly omit it. These four are exactly the ones a transcription gets wrong
-	// by naming a tool that does not take them.
-	cred := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
-	unwritable := map[string]error{
-		"memory/agent":      memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", Agent: "ops-" + cred}),
-		"memory/session_id": memory.CheckImportedMemory(memory.PortableMemory{ID: "m1", ProjectID: "p1", Category: "gotcha", Content: "c", Source: "mcp", SessionID: "ses-" + cred}),
-		"task/title":        memory.CheckImportedTask(memory.Task{ID: "t1", ProjectID: "p1", Title: "t " + cred, Status: "pending"}),
-		"decision/rationale": memory.CheckImportedDecision(memory.Decision{ID: "d1", ProjectID: "p1", Title: "t",
-			Decision: "d", Rationale: "r " + cred, Status: "active"}),
-	}
-	advice := secretRepairAdvice()
-	for name, err := range unwritable {
-		if err == nil {
-			t.Errorf("%s is not refused at all, so it needs no advice", name)
-			continue
-		}
-		field := name[strings.LastIndex(name, "/")+1:]
-		if _, named := secretFieldFixers[field]; named {
-			t.Errorf("the advice names a tool for %s, which the sibling test checks — if that check passes, the field IS editable and this case is mislabelled", name)
-		}
-		// Not being named is correct; what must not happen is the report implying
-		// a tool can fix it. The unwritable sentence covers them collectively, so
-		// this asserts the sentence is present at all when such a field exists.
-		if !strings.Contains(advice, "No tool can edit") {
-			t.Errorf("the advice names no tool for %s and never says the column is unwritable, so the reader is left with nothing:\n%s", name, advice)
+// TestNoUnwritableFieldIsAlsoClaimedToBeEditable is the converse, and it is the
+// half that catches a mapping drift in the OTHER direction: a field the advice
+// claims is editable while the unwritable list also names it. The operator would be
+// given two instructions and the second one loses data.
+func TestNoUnwritableFieldIsAlsoClaimedToBeEditable(t *testing.T) {
+	advice := secretFixText()
+	// Each unwritable group names its fields in prose rather than as a struct, so
+	// the check is on the map: a field in secretFieldFixers must not be mentioned as
+	// unwritable, and the fields the unwritable list names are exactly the ones the
+	// predicates can refuse with no tool.
+	for field := range secretFieldFixers {
+		if !editableBy(secretFieldFixers[field], field) {
+			t.Errorf("%s is in secretFieldFixers but the tool it names does not take it", field)
 		}
 	}
-	// And the sentence is honest about what those columns are written by, so the
-	// operator knows the alternative is not "a save".
-	if !strings.Contains(advice, "database directly") {
-		t.Errorf("the advice does not name the only remaining route for an unwritable column:\n%s", advice)
+	// And the unwritable prose has to name a route for every group, not just say no
+	// tool exists. The review's second finding was exactly a group whose stated route
+	// was wrong (a project's path is written by `ghost project bind`, and the clause
+	// offered `ghost project delete`, which cascades), so the route is asserted per
+	// group rather than for the paragraph as a whole.
+	for _, want := range []string{
+		"EDITING SESSION",         // a memory's agent and session_id
+		"ghost history purge",     // an evidence row
+		"written when the task",   // a task's title
+		"no decision update tool", // a decision's fields
+		"ghost project bind",      // a project's path
+		"never renamed",           // a project's name
+		"database directly",       // and the honest alternative where there is one
+	} {
+		if !strings.Contains(advice, want) {
+			t.Errorf("the advice does not say %q, so a group with no tool is left with no route:\n%s", want, advice)
+		}
+	}
+	// The evidence group is the one the review added: three credential-guarded fields
+	// the export can refuse on, which nothing wrote about at all.
+	if !strings.Contains(advice, "evidence agent, session_id and source_ref") {
+		t.Errorf("the advice does not mention the evidence provenance fields, which `ghost export` refuses just as it refuses content:\n%s", advice)
+	}
+	// And the sentence must not claim those columns are "written only by a save, a
+	// create or a restore", which is false for the two the review named.
+	if strings.Contains(advice, "written only by a save") {
+		t.Errorf("the advice still claims the unwritable columns are written only by a save, a create or a restore — the memory update writes agent and session_id, and `ghost project bind` writes a project's path:\n%s", advice)
 	}
 }
 
@@ -535,7 +560,7 @@ func TestTheCredentialAdviceCoversEveryGuardedField(t *testing.T) {
 		"decision/alternatives": withCredDec(okDec, func(d *memory.Decision) { d.Alternatives = []string{cred} }),
 	}
 
-	advice := secretRepairAdvice()
+	advice := secretFixText()
 	for name, err := range refusals {
 		if err == nil {
 			t.Errorf("%s is not refused, so it is not a credential-guarded field and this row is mislabelled", name)
@@ -577,6 +602,40 @@ func withCredTask(tk memory.Task, f func(*memory.Task)) error {
 func withCredDec(d memory.Decision, f func(*memory.Decision)) error {
 	f(&d)
 	return memory.CheckImportedDecision(d)
+}
+
+// credentialAdviceLine reports whether a line is part of the credential advice
+// paragraph: the lead-in, a per-tool "edits" line, or a per-group "No tool edits"
+// line. One predicate for the code scan and the doc scan, because the same
+// conditions written twice is a way for the comparison to pass against a document
+// and a report that are each half-matched.
+func credentialAdviceLine(line string) bool {
+	return strings.Contains(line, "A credential-shaped field is refused") ||
+		strings.Contains(line, "edits ") || strings.Contains(line, "No tool edits")
+}
+
+// contains is a membership test over a string slice, named rather than inlined
+// because three of the assertions below read as prose if it is spelled out each time.
+func contains(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// secretFixText is the credential advice as a test reads it: the lines joined, so an
+// assertion can look for a field name without knowing which line it landed on. The
+// report prints one line per group, and a substring search over the joined text is
+// what makes the assertion independent of that layout — a regrouping of the advice
+// is not a defect, and a test that failed on it would be asserting typography.
+func secretFixText() string {
+	var b strings.Builder
+	if err := printSecretFixes(&b); err != nil {
+		panic(err)
+	}
+	return b.String()
 }
 
 // fmtErr is the error text a caller would print, so a leak assertion can cover the

@@ -777,7 +777,16 @@ A row refused by the credential guard is different from every other left-out row
 
 ```text
   ! left out: memory m-9f3c — its content is credential-shaped, and ghost import refuses to store one by design — Ghost never stores a credential value
-  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. Replace the value with WHERE it lives and how to read it, never the value itself. Edit it in place: `ghost_memory_update` edits content, source_ref or tags; `ghost_task_complete` edits notes — which also marks the task done; `ghost_task_update` edits description. No tool can edit a memory's agent and session_id, a task's title, a decision's title, decision, rationale and alternatives, a project's name and path — those columns are written only by a save, a create or a restore, so clearing one means editing the database directly, or deleting the row as below. Re-export afterwards: a corrected row is still refused until the artifact is written again.
+  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. Replace the value with WHERE it lives and how to read it, never the value itself, then re-export: a corrected row is still refused until the artifact is written again.
+  · `ghost_memory_update` edits content, source_ref or tags
+  · `ghost_task_complete` edits notes — which also marks the task done
+  · `ghost_task_update` edits description
+  · No tool edits a memory's agent and session_id — the memory update overwrites both with the EDITING SESSION's identity, because a caller must not be able to name its own author, so it cannot clear a value a pre-#656 row already holds; edit the row's agent and session_id in the database directly
+  · No tool edits a memory's evidence agent, session_id and source_ref — no tool writes an evidence row; they are appended by a save, an import and a reflect, and the only surface that reaches one is `ghost history purge <memory-id>`, which erases the memory's whole recorded history rather than editing a field
+  · No tool edits a task's title — written when the task is created; `ghost_task_update` takes status, priority and description only, so the only route is the database directly
+  · No tool edits a decision's title, decision, rationale and alternatives — there is no decision update tool of any kind, so the only route is the database directly
+  · No tool edits a project's path — `ghost project bind <project-id> <checkout-directory>` rewrites it, and note that `ghost project delete` is NOT the fix here: it cascades away every memory in the project
+  · No tool edits a project's name — nothing rewrites it; a project is created, bound, merged or deleted, never renamed, so the only route is the database directly
   Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.
   To include it, delete the row and re-save it (for a credential-shaped field, editing the field is usually what you want instead — see above): `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.
 ```
@@ -793,12 +802,14 @@ Which tool edits which field is derived from the tools' own arguments, so the li
 | a memory's `content`, `tags` or `source_ref` | `ghost_memory_update` |
 | a task's `description` | `ghost_task_update` |
 | a task's `notes` | `ghost_task_complete` — which also marks the task **done** |
-| a memory's `agent` or `session_id` | **no tool.** The update writes both columns, but from the *editing session's* identity: a caller cannot name its own author. Clearing one means editing the database directly. |
+| a memory's `agent` or `session_id` | **no tool sets them from a caller argument.** The update *does* write both columns, but with the **editing session's** identity, because a caller must not be able to name its own author. It therefore cannot clear a value a pre-`#656` row already holds — so edit the row's `agent` and `session_id` in the database directly. |
+| a memory's **evidence** `agent`, `session_id` or `source_ref` | **no tool.** Nothing writes an evidence row: they are appended by a save, an import and a reflect. The one surface that reaches one is `ghost history purge <memory-id>`, which erases the memory's whole recorded history rather than editing a field. |
 | a task's `title` | **no tool.** Written at insert; `ghost_task_update` takes status, priority and description only. |
 | a decision's `title`, `decision`, `rationale` or `alternatives` | **no tool.** There is no decision update tool of any kind. |
-| a project's `name` or `path` | **no tool.** A project is created, bound, merged or deleted, never edited in place. |
+| a project's `path` | `ghost project bind <project-id> <checkout-directory>` — and note that `ghost project delete` is **not** the fix: it cascades away every memory in the project. |
+| a project's `name` | **no tool.** Nothing rewrites a project's name; a project is created, bound, merged or deleted, never renamed. |
 
-For a field with no tool, the choice is the delete command above or a direct edit of the database.
+Where the route is "the database directly", the alternative is the delete command above. The field lists in the first three rows are derived from the tools' own arguments, so they cannot drift from them; the rest are stated per group because each has a different reason and a different route.
 
 ### `ghost import`
 
