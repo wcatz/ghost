@@ -197,11 +197,13 @@ func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 // which is the discipline the guard exists to remove.
 //
 // The set is the functions that make a slog LEVEL CALL, not the functions that
-// merely take a *slog.Logger. That distinction is not a nicety: scanning
-// declarations reports RelationClassifier.SetLogger, a setter that hands a
-// logger over and logs nothing, and asking the table for a case to drive it is
-// asking for a test of a getter. (That was the first version of this scan, and
-// it produced a table entry the guard was supposed to make unnecessary.)
+// merely take a *slog.Logger, and the receiver is resolved to a logger the file
+// actually declares. Both halves of that were wrong in the first version, in the
+// direction that looks like a pass: scanning declarations reports
+// RelationClassifier.SetLogger, a setter that logs nothing, and matching the
+// selector name alone counts `err.Error()` as a log call, which credits the
+// Withdraw case with a line it never reaches. A guard that over-counts is worse
+// than none, because it reports coverage it does not have.
 //
 // Finding ZERO logging functions is itself a failure: a scan that recognised
 // nothing is indistinguishable from a package that is clean.
@@ -238,13 +240,14 @@ func assertDrivenLoggers(t *testing.T, cases []struct {
 		// logs is attributed to the function whose name a caller already knows,
 		// so the table is keyed on entry points rather than on every small
 		// function that happens to emit a line.
+		loggers := declaredLoggers(file)
 		var stack []*ast.FuncDecl
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch node := n.(type) {
 			case *ast.FuncDecl:
 				stack = append(stack, node)
 			case *ast.CallExpr:
-				if !isSlogLevelCall(node) || len(stack) == 0 {
+				if !isSlogLevelCall(node, loggers) || len(stack) == 0 {
 					return true
 				}
 				found++
@@ -270,12 +273,16 @@ var slogLevelNames = map[string]bool{
 	"Log": true, "LogAttrs": true,
 }
 
-// isSlogLevelCall reports whether call is a level call on a *slog.Logger, or on
-// the slog package itself. It reads the call rather than the surrounding
-// declaration, so a method named Info on some other type is not mistaken for
-// one — and it recognises a call reached through any expression, so an
-// unrecognised shape is a gap in the scan rather than a silent pass.
-func isSlogLevelCall(call *ast.CallExpr) bool {
+// isSlogLevelCall reports whether call is a level call on this package's logger,
+// or on the slog package itself.
+//
+// The receiver is checked against the set of names the FILE declares a
+// *slog.Logger under, because "the selector's name is a level method" is not
+// enough on its own: `err.Error()` satisfies it, `slog` shares its level names
+// with error and with a dozen other types, and a false positive here credits a
+// case with covering a function that logs nothing — which is the exact failure
+// the scan exists to prevent, in the direction that looks like a pass.
+func isSlogLevelCall(call *ast.CallExpr, loggers map[string]bool) bool {
 	switch fun := ast.Unparen(call.Fun).(type) {
 	case *ast.SelectorExpr:
 		if !slogLevelNames[fun.Sel.Name] {
@@ -284,15 +291,95 @@ func isSlogLevelCall(call *ast.CallExpr) bool {
 		if pkg, isIdent := fun.X.(*ast.Ident); isIdent && pkg.Name == "slog" {
 			return true
 		}
-		// A method on a logger the function received or holds. Without a type
-		// checker the receiver's NAME is the only signal, so this is the one
-		// approximation in the scan: a method named Info on an unrelated
-		// receiver whose base identifier is a word would be reported. Reporting
-		// one costs a table entry; missing one costs a pass that logs unguarded,
-		// and this package's only `Info`-named methods are slog's.
-		return baseIdentName(fun.X) != ""
+		// A method on a logger the file declares: a parameter, a struct field
+		// (`h.logger`), or a local. The name is resolved to a declaration in the
+		// same file, so `err.Error()` cannot pass and a logger reached through a
+		// local can.
+		return loggers[baseIdentName(fun.X)]
 	case *ast.Ident:
 		return slogLevelNames[fun.Name] // slog.Info(...) at package level
+	}
+	return false
+}
+
+// declaredLoggers returns the names a file binds a *slog.Logger to: parameters,
+// results, struct fields and var declarations. A name bound to a logger ANYWHERE
+// in the file counts, which over-approximates by one declaration at worst and
+// under-approximates never for this package — every logger here is a parameter
+// or a field.
+func declaredLoggers(file *ast.File) map[string]bool {
+	names := map[string]bool{}
+	bind := func(expr ast.Expr, ident *ast.Ident) {
+		if ident != nil && isSlogLoggerType(expr) {
+			names[ident.Name] = true
+		}
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncDecl:
+			for _, list := range []*ast.FieldList{node.Recv, node.Type.Params, node.Type.Results} {
+				if list == nil {
+					continue
+				}
+				for _, field := range list.List {
+					for _, ident := range field.Names {
+						bind(field.Type, ident)
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, ident := range node.Names {
+				if i < len(node.Values) {
+					bind(node.Values[i], ident)
+				} else {
+					bind(node.Type, ident)
+				}
+			}
+		case *ast.AssignStmt:
+			// A local logger: `logger := slog.New(...)`. The RHS is not checked
+			// for *slog.Logger — that needs a type checker — so this is admitted
+			// only for an assignment whose right side mentions slog at all.
+			if len(node.Lhs) != len(node.Rhs) {
+				return true
+			}
+			for i, lhs := range node.Lhs {
+				ident, isIdent := lhs.(*ast.Ident)
+				if !isIdent {
+					continue
+				}
+				if _, mentionsSlog := node.Rhs[i].(*ast.CallExpr); mentionsSlog && rhsNamesSlog(node.Rhs[i]) {
+					names[ident.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	return names
+}
+
+// rhsNamesSlog reports whether expr's outermost call is a slog package
+// function, which is the only way this package ever obtains a logger.
+func rhsNamesSlog(expr ast.Expr) bool {
+	call, isCall := ast.Unparen(expr).(*ast.CallExpr)
+	if !isCall {
+		return false
+	}
+	sel, isSel := ast.Unparen(call.Fun).(*ast.SelectorExpr)
+	if !isSel {
+		return false
+	}
+	pkg, isIdent := sel.X.(*ast.Ident)
+	return isIdent && pkg.Name == "slog" && sel.Sel.Name == "New"
+}
+
+// isSlogLoggerType reports whether expr names a *slog.Logger (or a slog.Logger).
+func isSlogLoggerType(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.StarExpr:
+		return isSlogLoggerType(e.X)
+	case *ast.SelectorExpr:
+		pkg, isIdent := e.X.(*ast.Ident)
+		return isIdent && pkg.Name == "slog" && e.Sel.Name == "Logger"
 	}
 	return false
 }
