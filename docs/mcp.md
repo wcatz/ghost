@@ -186,7 +186,25 @@ tag cannot forge a line or break out of its own string — but it does not escap
 tag therefore prints as `<<` or `>>`, the same substitution the delimiters
 themselves use, so a reader who has met one knows the other, and a backtick prints
 as the JSON escape `\u0060` — there is no reader-facing convention for a backtick,
-so it gets the form the surrounding array already uses. The consolidation prompt is a fourth printing surface for the same field, and the
+so it gets the form the surrounding array already uses.
+The label is also **BOUNDED**, the way the `agent=` and `source_ref=` labels beside
+it are: each tag is cut at 64 bytes on a rune boundary and marked
+`…[tag truncated]`, whatever writer produced the row. The write-side cap of 64
+bytes reaches only the four tools that take a tag list, and `RestoreSnapshot`,
+`CreateFromCorpus` and `ReplaceNonManual` deliberately do not reach it — a restore
+writes the column in SQL, a corpus row reaches `insertMemory` directly, and a
+rewrite inherits its source's union of tags — so an over-long tag is reachable
+without any tool writing one, which is exactly the class the two labels beside
+this one were added for. The bound is a DISPLAY bound: it is applied to the list
+the marshal renders, so the stored value is never touched and a restore still
+writes the tag it recorded. It is cut per TAG rather than over the list, because
+bounding the list as one value would have to drop or merge entries and dropping a
+tag is worse than showing part of one. The marker is not decoration: a line that
+ends mid-label as though the label ended there is a claim about the row that is
+not true. And the bound must never be TIGHTER than the writer's — a tag the writer
+accepted whole and stored whole would then print shortened, which is a display
+bound quietly becoming a data change.
+The consolidation prompt is a fourth printing surface for the same field, and the
 worse one: its list is neither JSON nor delimited, it sits on a line the model emits
 `keep`/`merge`/`rewrite`/`drop` operations against, and a newline in a tag would end
 the record. So its class is the larger one — every control character, not just the
@@ -275,6 +293,55 @@ unchanged, and the renderer above is what makes an old one safe to read. An
 over-long tag is trimmed on a rune boundary rather than refused, and a tag over 64
 bytes is stored as the first 64 — a shortened *label* is a different label, not a
 different row, which is the whole difference from an id.
+
+**A decision's tags are the same rule, and the same reason.** `ghost_decision_record`
+is the only tool that writes a decision's tag list, so a decision's tags are
+refused at write time exactly as a memory's are, and the import and export paths
+carry them byte for byte — a decision holding `["«urgent»"]` round-trips whole,
+and `ghost export` does not leave the decision (nor the companion memory
+`RecordDecision` wrote beside it) out of the artifact. The issue this settled asked
+for a tag shape check on `ImportDecision`, and adding one is the mistake to name:
+the exporter applies the importer's own predicates, so a tag shape refused at import
+is a tag shape that drops the user's decision log from every backup. Where that tag
+reaches a listing is through the companion memory, which is an ordinary memory and
+is covered by the renderer above.
+
+**A project is refused on the way IN, by the predicate the exporter already uses.**
+`ghost export` leaves a project whose id, name or path fails
+`memory.CheckImportedProject` out of the artifact entirely — and with it every
+memory, task and decision under it, because the importer resolves each record's
+project against the artifact. So the same predicate is applied where a project is
+**created**, which is `ensureProjectFor`: the resolution runs FIRST, so a store
+that already holds a project of this shape keeps accepting writes into it and its
+memories stay reachable, and only a project about to be opened is judged. That
+holds for every ordinary way of naming it, not just the id — a `project_id` that is
+the session's directory resolves by path prefix to the project's stored id, and the
+write still lands in the project you already have instead of being refused as an
+invalid id. The full resolution is what makes that true, because a project can hold
+a refused character in a field the write boundary does not own: `ghost project bind`
+records `projects.path` through a check that asks only whether the path is absolute,
+and «, » and a backtick are all legal in a directory name. The credential guard
+below is gated the same way, so a bound path carrying a token cannot make a project
+unwritable by the address a session actually uses — and it is asked a SECOND time on
+the resolution's own failure path, because the two ambiguity refusals name the
+caller's argument and a token that happened to be ambiguous would otherwise reach the
+answer through them. Nothing echoes it either way.
+
+The answer names the refused `project_id` through `assemble.Token` — the renderer the
+row itself uses — because a caller that passed the value can fix it, and it holds
+none of the three characters it refuses. It never names a value the **credential
+guard** refused: `ensureProjectFor` asks that guard first, so a `project_id` carrying
+a token (a clone URL with embedded auth is path-shaped, and so an entirely ordinary
+agent mistake) comes back as the guard's own message, which names the field and the
+format and never the value. Asking FIRST rather than branching on what comes back is
+the load-bearing part, because the predicate judges shape before credentials, and a
+value that is both hostile and credential-shaped returns a shape error with the
+credential hidden behind it.
+`Store.EnsureProject*` and
+`Store.ResolveOrCreateRepoProject` ask the same function, so a non-MCP caller
+cannot reach a project the exporter would have to drop either. No CLI command
+creates a project row outside `ghost import`, which applies the same predicate
+before its own INSERT.
 
 Those checks run **after** the importer's id-presence check and before every
 message that would interpolate the id, and both positions are load-bearing. After

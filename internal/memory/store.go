@@ -499,6 +499,24 @@ func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 // EnsureProject creates or refreshes a project with no repository identity.
 // Callers that know the filesystem path should prefer EnsureProjectWithRepo,
 // which lets two checkouts of one repository collapse into a single project.
+//
+// A project this store does not ALREADY hold must be a shape `ghost import` will
+// accept, and the rule is `CheckImportedProject` — the importer's own predicate,
+// not a copy of it (#824). `ghost export` calls that same function to decide what
+// it may write, so an id, name or path it refuses is a project that leaves the
+// artifact entirely, and with it every memory, task and decision under it. A save
+// that created one would therefore open a project no backup can carry, and the
+// operator would learn it only when they ran one.
+//
+// The refusal is placed AFTER the exact-id lookup in the caller rather than
+// higher up, so a store that already holds such a project keeps working: its
+// memories stay reachable, and nothing is refused about a row that is not being
+// created. It does cover this function's refresh arm too, because the statement
+// underneath is one upsert and cannot tell the two apart — and that costs
+// nothing, since a project of this shape cannot be created by this build, so the
+// only rows a refresh here would decline are ones an earlier build, a restored
+// snapshot or a hand edit wrote. A caller holding such a project's exact id never
+// reaches this call at all (#824).
 func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error {
 	return s.ensureProjectLocked(ctx, id, path, name, "")
 }
@@ -726,6 +744,35 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 		return "", nil, err
 	}
 	if canonical == "" {
+		// The SHAPE, and the importer's own predicate rather than a second one
+		// (#824). This is the second project-creation route, and it carries the
+		// check for the same reason `ensureProjectLocked` does: a path-shaped
+		// `project_id` with a detectable remote reaches this branch instead of
+		// that one, so a save that took it would otherwise create the project
+		// `ghost export` has to leave out — and with it every memory, task and
+		// decision saved under it.
+		//
+		// It is asked HERE, on the one arm that is about to INSERT, and not above
+		// `resolveRepoProjectTx`, and that is the rule rather than a saving: the
+		// answer above may be a row this store already holds, and `projectRef` is
+		// the caller's argument, which `ensureProjectFor` has already resolved by
+		// exact id, basename name and longest path prefix. A legacy project whose
+		// id is hostile and whose recorded path is ordinary is therefore reachable
+		// here by its PATH with nothing hostile left in the reference, and judging
+		// the record on the way in would refuse a save into a project that exists
+		// and holds the user's memories. The refusal belongs to the CREATE, and
+		// this is the create.
+		//
+		// It costs a `git config` to get here before the refusal, which the
+		// previous placement avoided, and that is the right trade: `savingRepository`
+		// exists to answer whether this checkout already records the remote, which
+		// is only worth asking when the answer can change which project the save
+		// lands in. Once the answer is a project that is not there, the subprocess
+		// has already paid for itself. `path` was normalized from "" to the id
+		// above, so `createdProject` judges the record as it would be stored.
+		if err := CheckImportedProject(createdProject(id, path, name)); err != nil {
+			return "", nil, fmt.Errorf("create project: %w", err)
+		}
 		canonical, err = s.createRepoProjectTx(ctx, tx, id, path, name, repoRemote)
 		if err != nil {
 			return "", nil, err
@@ -1475,6 +1522,57 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 			}
 			mergedOld, mergedNew = id, existingID
 			return commit()
+		}
+	}
+
+	// The SHAPE, and the importer's own predicate rather than a second one, so a
+	// refusal reads identically whether it was reached by saving, by exporting or by
+	// restoring (#824).
+	//
+	// It is asked HERE — on the arm that is about to INSERT, after the two merges
+	// above have had their chance to fold this project into a row that already
+	// exists — and not at the top of the function, and the placement is the rule
+	// rather than a convenience. This function is an UPSERT, and it is reached with
+	// the id of a project the store ALREADY holds: `mcpserver.ensureProjectFor`
+	// looks the caller's argument up by exact id, then by basename name, then by
+	// longest path prefix, and hands the RESOLVED id down. So for a legacy project
+	// whose id is hostile but whose recorded path is ordinary — a pre-guard save
+	// later bound with `ghost project bind`, a restored snapshot, a hand edit — a
+	// save addressed by that project's PATH passes every check this boundary makes
+	// about the caller's own argument and arrives here carrying the hostile id. A
+	// predicate asked above that lookup would refuse it: "invalid project_id" for a
+	// project that exists and holds the user's memories, whose session was working
+	// in it a moment ago. Jumping straight to that answer is the failure the
+	// creation-only half of #824 exists to prevent, so the rule is exactly what the
+	// docs say: a project about to be OPENED is judged, a row already there is not.
+	//
+	// The existence test and the INSERT share one transaction, which is what makes
+	// the pair atomic rather than a check-then-write another process can interleave
+	// between — and `beginWrite` holds SQLite's write lock from the first statement
+	// in it, so the answer below is the answer the INSERT gets. `id` is the upsert's
+	// conflict target, so this is exactly the row the `ON CONFLICT(id) DO UPDATE`
+	// below would otherwise have refreshed.
+	//
+	// Skipping the predicate on the refresh arm is safe rather than merely
+	// convenient, and the upsert is why: on that arm the only fields it can change
+	// are `path`, `repo_remote` and `updated_at`, and it deliberately leaves `path`
+	// alone whenever the caller passed the id in its place — which is what
+	// `ensureProjectFor` does, so the hostile id is never written back into the
+	// path — while `repo_remote` is normalized and is not part of the predicate. A
+	// refresh therefore cannot make a held project less importable, and there is
+	// nothing here to judge.
+	//
+	// `createdProject` judges the record as it would be STORED, and the
+	// `path == ""` normalization above has already happened, so the record judged is
+	// the one after that substitution rather than a path the store has already
+	// decided what to put in it.
+	var held int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE id = ?`, id).Scan(&held); err != nil {
+		return fmt.Errorf("check project before create: %w", err)
+	}
+	if held == 0 {
+		if err := CheckImportedProject(createdProject(id, path, name)); err != nil {
+			return fmt.Errorf("create project: %w", err)
 		}
 	}
 

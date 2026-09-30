@@ -50,6 +50,37 @@ func rejectSecret(field, text string) error {
 	return &SecretContentError{Field: field, Format: finding.Label}
 }
 
+// RejectSecret is `rejectSecret` under the name a boundary can call, and it is
+// exported for exactly one caller: `mcpserver.ensureProjectFor`, which NAMES the
+// `project_id` it refused so an agent can fix it.
+//
+// Naming is a promise the value has to be able to keep, and a credential cannot.
+// A *SecretContentError quotes nothing precisely because the sentence it produces
+// reaches the log file, the saving agent's context, and — for reflection — a
+// prompt sent to a third-party model; a boundary that appended the value would
+// relocate the secret rather than contain it. So that boundary asks this FIRST
+// and returns the guard's own refusal untouched, and the shape rule it would
+// otherwise have quoted a value into is then free to name what is left.
+//
+// Asking first is also what makes the guarantee hold for a value that is BOTH.
+// `CheckImportedProject` judges shape before credentials, so a hostile id that
+// also holds a token comes back as a shape error with the credential hiding
+// behind it; a caller that branched on the returned error could not see it, and
+// would print the secret. Here there is nothing to branch on and nothing to
+// order: one question, one answer.
+//
+// The field is the boundary's own name for its argument rather than the column's,
+// because the boundary knows what the caller called it — an agent that passed
+// `project_id` has to be told it was the `project_id` — while the store's own
+// refusals name the artifact's field, which is where its sentences are read.
+//
+// It is the same `rejectSecret` every writer calls, not a second detection pass:
+// one implementation of the detector, so a boundary cannot reach a different
+// verdict from one a writer would.
+func RejectSecret(field, text string) error {
+	return rejectSecret(field, text)
+}
+
 // secretField is one caller-supplied text to check, named the way the caller
 // named the argument so the refusal says which one to fix.
 type secretField struct{ name, text string }

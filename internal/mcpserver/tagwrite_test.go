@@ -186,6 +186,40 @@ func TestATagRefusalNamesTheTagThroughTheSafeRenderer(t *testing.T) {
 	}
 }
 
+// TestTheRendererNeverShortensATagThisWriterAccepts is #821's cross-boundary half,
+// and it is the only test that can see both numbers at once.
+//
+// `validateTags` caps a tag at tagMaxLen and `assemble.TagsLabel` bounds what it
+// PRINTS of a tag at MaxRenderedTagLen, and the direction between them is the whole
+// of the contract. The two constants cannot be compared at compile time in the
+// package that would benefit — `tagMaxLen` is unexported here and `assemble` cannot
+// import `mcpserver` — so the agreement is held here instead, where a tag of
+// exactly the writer's bound is written by the real tool and then rendered by the
+// real renderer.
+//
+// The other direction is deliberately not asserted. A print bound LOOSER than the
+// write bound is harmless (the writer has already cut anything longer), so pinning
+// the two numbers equal would forbid a legitimate future loosening of the column
+// cap. What has to hold is the property, and it is the stored value that goes in —
+// a tag cut on the way in would make the render half pass for the wrong reason.
+func TestTheRendererNeverShortensATagThisWriterAccepts(t *testing.T) {
+	tag := strings.Repeat("t", tagMaxLen)
+	srv, session := newValiditySession(t)
+	if res := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "vproj", "content": "a claim with a tag at the write bound", "category": "fact",
+		"tags": []string{tag},
+	}); res.IsError {
+		t.Fatalf("save: %s", resultText(res))
+	}
+	stored := firstStoredTag(t, srv, "vproj")
+	if stored != tag {
+		t.Fatalf("the stored tag is %d bytes, want the %d the writer accepted", len(stored), tagMaxLen)
+	}
+	if label := assemble.TagsLabel([]string{stored}); label != ` tags:["`+tag+`"]` {
+		t.Errorf("the renderer shortened a tag this writer accepts whole:\n%s", label)
+	}
+}
+
 // TestATagLongerThanTheBoundIsCutOnARuneBoundary is here rather than in the tag
 // label's package because the CUT is what this writer does, and it was a byte
 // slice: `tags[i] = t[:64]` on a CJK tag returned half a rune, and that invalid

@@ -633,10 +633,19 @@ func TestTheReflectHeaderRendersAHostileProjectAsALabel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	s := memory.NewStore(db, nil)
-	if err := s.EnsureProject(context.Background(), hostileIDFor(), "/tmp/pwned", hostileNameFor()); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
+	// Planted in SQL, not created, because this build no longer CREATES such a
+	// project: every project-creation route refuses a shape
+	// `memory.CheckImportedProject` refuses (#824). That refusal is the fix, and
+	// this row is the other half of it — a store that already HOLDS one, from a
+	// save made before the guard, a restored snapshot or a hand edit, whose
+	// memories the operator still reaches and whose name and id every report
+	// still prints. The renderer is what makes that safe, so it has to keep being
+	// tested against the row the writer will no longer produce.
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`,
+		hostileIDFor(), "/tmp/pwned", hostileNameFor()); err != nil {
+		t.Fatalf("plant a legacy project the write boundary will no longer create: %v", err)
 	}
+	s := memory.NewStore(db, nil)
 	if err := s.Close(); err != nil {
 		t.Fatalf("close seed store: %v", err)
 	}
@@ -709,9 +718,13 @@ func TestProjectReportsRenderANameAsALabel(t *testing.T) {
 		s := memory.NewStore(db, nil)
 		t.Cleanup(func() { _ = s.Close() })
 		// An empty path is what makes a project unbound, and the hostile id and
-		// name are what the notice then prints.
-		if err := s.EnsureProject(ctx, hostileIDFor(), "", hostileNameFor()); err != nil {
-			t.Fatalf("EnsureProject: %v", err)
+		// name are what the notice then prints. Planted in SQL for the reason in
+		// TestTheReflectHeaderRendersAHostileProjectAsALabel: a project of this
+		// shape is one a store may still HOLD and one this build will no longer
+		// create (#824), and the notice is a print site either way.
+		if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, '', ?)`,
+			hostileIDFor(), hostileNameFor()); err != nil {
+			t.Fatalf("plant a legacy unbound project: %v", err)
 		}
 		var out bytes.Buffer
 		if err := writeUnboundProjectNotice(ctx, &out, s); err != nil {
