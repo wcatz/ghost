@@ -1070,8 +1070,16 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 		if isFresh && !agree {
 			res.OppositeLive++
 			if logger != nil {
+				// Four values, four keys. The line reports TWO disagreeing
+				// orientations of one pair, and the labels say which source
+				// asserted which: the link's own source and target, and the
+				// scan's proposed newer and older. A shared "link"/"scan"
+				// key with an unnamed value after it left slog pairing the
+				// arguments itself, so l.TargetID became a KEY and the line
+				// printed as `link=02EA044F… 3092A7BE…=scan …` (#804).
 				logger.Info("supersede: scan proposed the reverse of a live supersedes link; keeping the link's direction",
-					"link", l.SourceID, l.TargetID, "scan", cand.NewerID, cand.OlderID)
+					"link_source", l.SourceID, "link_target", l.TargetID,
+					"scan_newer", cand.NewerID, "scan_older", cand.OlderID)
 			}
 		}
 		newerMem, ok1 := memByID[l.SourceID]
