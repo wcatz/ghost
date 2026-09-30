@@ -812,22 +812,29 @@ func partialVerdicts(answered []Relation, err error) error {
 }
 
 // answeredPrefix is how much of a classify call's question its returned verdicts
-// answer: all of it on success, and the answered chunks' worth on a
-// *PartialVerdictsError — whose count is clamped to the slice actually held, so a
-// Classifier that miscounts cannot walk a caller off the end of its own answers.
+// answer: nothing unless the error says how much, and on a
+// *PartialVerdictsError that count clamped TWICE — to the slice actually held, and to
+// the number of pairs the caller asked about. Both clamps are there because the
+// answer is about to be used as a SLICE BOUND: a Classifier that over-reports (a
+// test double, a future implementation, a bug) would otherwise have the caller
+// walk off the end of its own pair list and panic, where the honest report of a
+// classifier that does not add up is a number it can act on. The shipped
+// classifier can over-report neither, which is exactly why the guard is here
+// rather than argued away.
 //
 // It is the only place in the package that reads that error, so every caller's
-// answer to "how much of this was decided?" is this one clamp rather than a
+// answer to "how much of this was decided?" is this one function rather than a
 // re-derivation of the rule at each call site.
-func answeredPrefix(verdicts []Relation, err error) int {
+func answeredPrefix(verdicts []Relation, pairs int, err error) int {
 	var partial *PartialVerdictsError
 	if !errors.As(err, &partial) {
 		return 0
 	}
-	if partial.Answered > len(verdicts) {
-		return len(verdicts)
+	answered := min(partial.Answered, len(verdicts), pairs)
+	if answered < 0 {
+		return 0
 	}
-	return partial.Answered
+	return answered
 }
 
 // classifyChunk issues one batched call for a chunk of two or more pairs and

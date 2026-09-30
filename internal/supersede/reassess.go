@@ -621,7 +621,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		// to pair is exactly what is in doubt there, so nothing is settled.
 		answered := len(open)
 		if err != nil {
-			answered = answeredPrefix(verdicts, err)
+			answered = answeredPrefix(verdicts, len(open), err)
 		}
 		switch {
 		case err != nil:

@@ -2,6 +2,7 @@ package supersede
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -252,5 +253,56 @@ func TestReassessKeepsACyclesVerdictFromAChunkThatAnswered(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "cyclic=4") {
 		t.Errorf("the summary must name every cycle:\n%s", buf.String())
+	}
+}
+
+// overReportingClassifier claims more pairs were answered than were asked about,
+// which no shipped classifier can do and every caller of a returned count has to
+// survive anyway: the count is about to be used as a SLICE BOUND, and a
+// classifier that does not add up deserves a report rather than a panic.
+type overReportingClassifier struct {
+	extra int
+}
+
+func (c *overReportingClassifier) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
+	verdicts := make([]Relation, 0, len(pairs)+c.extra)
+	for range pairs {
+		verdicts = append(verdicts, RelationNeither)
+	}
+	for range c.extra {
+		verdicts = append(verdicts, RelationNeither)
+	}
+	return verdicts, &PartialVerdictsError{Answered: len(pairs) + c.extra, Err: errors.New("opencode run: exit status 1")}
+}
+
+// TestReassessClampsAnOverReportedPrefix is the guard on that count. The pair
+// list is three long; a classifier that claims five were answered must leave the
+// pass settling at most three, naming at most three unjudged, and returning the
+// error — never indexing past the pairs it was given.
+func TestReassessClampsAnOverReportedPrefix(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	for _, texts := range [][2]string{
+		{"The restore spanned two spindles and took 41 minutes in week a.", "The restore path on one spindle is safe and takes under a minute."},
+		{"The ingest service now runs Redis 7.2, revision a.", "The ingest service runs Redis 6.2, revision a."},
+		{"The queue drains slowly on every restart, week b.", "The queue drain stall is fixed: raise the batch size, week b."},
+	} {
+		seedEdge(t, store, db, texts[0], texts[1])
+	}
+
+	res, _, err := Reassess(ctx, store, &overReportingClassifier{extra: 2}, "p", true, discardLogger())
+	if err == nil {
+		t.Fatal("a classifier that failed must still fail the pass, however much it claims to have answered")
+	}
+	// Everything it DID answer is settled, and nothing beyond the three pairs it
+	// was given is named or counted.
+	if res.Neither != 3 {
+		t.Errorf("Neither = %d, want 3: every pair it answered is a pair it was asked about", res.Neither)
+	}
+	if len(res.Unjudged) != 0 {
+		t.Errorf("Unjudged = %+v, want none: the claimed count is clamped to the pairs asked about, so the tail is empty rather than a slice out of range", res.Unjudged)
+	}
+	if res.Withdrawn != 3 {
+		t.Errorf("Withdrawn = %d, want 3", res.Withdrawn)
 	}
 }
