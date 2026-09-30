@@ -593,8 +593,20 @@ func intoSuffix(links []memory.Link) string {
 	if len(links) == 0 {
 		return " (no memory in this project links it)"
 	}
+	// DEDUPLICATED, for the same reason `resolveSource`'s holder set is: `links` is
+	// one row per EDGE since #833, so a source holding both relations on this target
+	// is two rows with one id. Rendering both reads as two holders, which is the
+	// same "a sentence that is not true of the graph" defect the clause after this
+	// one is about — and the reader is told to go and look for a second edge that
+	// does not exist. `relationWords` above already aggregates the relations, so
+	// the phrase names both while the id list names the holder once.
 	parts := make([]string, 0, len(links))
+	seen := make(map[string]bool, len(links))
 	for _, l := range links {
+		if seen[l.SourceID] {
+			continue
+		}
+		seen[l.SourceID] = true
 		parts = append(parts, short(l.SourceID))
 	}
 	suffix := " — withdraw that pair as well, or note that the other edge still buries it"

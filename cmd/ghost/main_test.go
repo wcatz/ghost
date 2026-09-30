@@ -1688,6 +1688,22 @@ func TestSupersedeReport(t *testing.T) {
 		t.Errorf("supersedeReport() = %q, want it to say what the veto costs and does not cost", got)
 	}
 	supersedeReportCountsEdges(t)
+	// The write-time skip #834 made visible: a pair whose endpoint a concurrent
+	// pass replaced between the classify and the write is a verdict that reached
+	// no writer, so under --apply it is in no count on this page. It has to be on
+	// a line, because the report's rule is that every reason a pair was not acted
+	// on gets one — and a reader comparing the summary with the rows below it
+	// would otherwise see a difference nothing accounts for.
+	stale := supersedeReport("proj", supersede.Result{Candidates: 1, Confirmed: 1, Created: 0, StaleSkipped: 1}, "linked", true, 1, 0)
+	if !strings.Contains(stale, "  1 pair(s) not written: an endpoint was replaced") {
+		t.Errorf("supersedeReport() apply = %q, want the stale-skip line: a judged pair that wrote no edge is in no count", stale)
+	}
+	// And it is an APPLY-only line. In a dry run the summary counts verdicts, so
+	// the pair is already in the numbers and a line about it would double-report
+	// the same pair twice.
+	if dryStale := supersedeReport("proj", supersede.Result{Candidates: 1, Confirmed: 1, StaleSkipped: 1}, "would link", false, 1, 0); strings.Contains(dryStale, "not written") {
+		t.Errorf("supersedeReport() dry run = %q, want no write-time line: nothing is written in a dry run, so the summary already counts the verdict", dryStale)
+	}
 	// The report is mode-agnostic about the veto: a vetoed pair is never linked,
 	// so there is nothing for --apply to write either. The apply verb is the
 	// only thing that changes.

@@ -594,6 +594,12 @@ func TestIntoSuffixNamesTheRelationWithoutClaimingItBuries(t *testing.T) {
 		{"a supersedes holder buries the target", sup, "still superseded by A1B2C3D4"},
 		{"a causes holder does not", causes, "still caused by A1B2C3D4"},
 		{"both relations are named as such", both, "still linked (superseded or caused) by A1B2C3D4"},
+		// And the holder is named ONCE for the both-relations case. The `both` set
+		// above is two EDGES with one source id, which is what the empty-relation
+		// read returns since #833; a suffix that printed it twice reads as two
+		// holders and sends the reader looking for a second edge that is not there.
+		// A `Contains` assertion cannot see this, so the count is asserted.
+		{"one holder, one id, both relations", both, "by A1B2C3D4 —"},
 		{"no holder is scoped to the project", nil, "no memory in this project links it"},
 		{"an empty holder set is the same sentence", []memory.Link{}, "no memory in this project links it"},
 	} {
@@ -615,6 +621,20 @@ func TestIntoSuffixNamesTheRelationWithoutClaimingItBuries(t *testing.T) {
 	if got := intoSuffix(causes); strings.Contains(got, "still buries it") {
 		t.Errorf("intoSuffix(causes-only) = %q claims an edge still buries the target, and a 'causes' edge buries nothing", got)
 	}
+	// The id list has no duplicate, over any set that carries one.
+	for _, c := range []struct {
+		name  string
+		links []memory.Link
+	}{
+		{"both relations on one source", both},
+		{"the same id three times", []memory.Link{{SourceID: id, Relation: string(RelationCauses)}, {SourceID: id, Relation: string(RelationSupersedes)}, {SourceID: id, Relation: string(RelationCauses)}}},
+	} {
+		got := intoSuffix(c.links)
+		if n := strings.Count(got, "A1B2C3D4"); n != 1 {
+			t.Errorf("%s: intoSuffix names the holder %d time(s), want 1:\n%q", c.name, n, got)
+		}
+	}
+
 	// A 'causes'-only suffix must instead say the reassuring thing, so the reader is
 	// not left with a bare list of ids and no guidance.
 	if got := intoSuffix(causes); !strings.Contains(got, "does not bury its target") {

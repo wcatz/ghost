@@ -314,7 +314,10 @@ func TestLinkWithdrawRegisteredAsATool(t *testing.T) {
 // load-bearing since #823 (its direction decides which way the pair is judged), so
 // the undo has to exist.
 func TestLinkWithdrawRemovesACausesEdge(t *testing.T) {
-	srv, store := linkWithdrawServer(t)
+	// newStoreWithDB rather than linkWithdrawServer, because this test pins the
+	// pair's stamps through SQL -- see below. It builds the same fixture, so the
+	// project name resolves the same way.
+	db, store, srv := newStoreWithDB(t)
 	ctx := context.Background()
 	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
@@ -334,9 +337,20 @@ func TestLinkWithdrawRemovesACausesEdge(t *testing.T) {
 	if err := store.CreateLink(ctx, cause, effect, "causes", 0.9, "llm"); err != nil {
 		t.Fatalf("CreateLink(causes): %v", err)
 	}
-	// The premise, established rather than assumed: both rows on both stamps. This
-	// is the pair no ordinary pass will ever judge, which is the whole reason the
-	// tool has to be able to reach it.
+	// The premise, ESTABLISHED rather than assumed — and established by WRITING
+	// the stamps, not by reading them. `datetime('now')` is second-resolution, so
+	// two `Create` calls a few microseconds apart almost always share a stamp and
+	// occasionally straddle a second boundary; asserting the tie after the fact
+	// would therefore be a test that fails once a minute for a reason that has
+	// nothing to do with the code. Pinning the two rows to one stamp makes the
+	// #778 shape a property of the fixture instead of of the clock, which is what
+	// lets the rest of this test state it as a premise.
+	stamp := "2026-06-01 00:00:00"
+	if _, err := db.ExecContext(ctx,
+		`UPDATE memories SET created_at = ?, updated_at = ? WHERE id IN (?, ?)`,
+		stamp, stamp, cause, effect); err != nil {
+		t.Fatalf("pin the pair's stamps: %v", err)
+	}
 	rows, err := store.GetByIDs(ctx, []string{cause, effect})
 	if err != nil {
 		t.Fatalf("GetByIDs: %v", err)
@@ -345,7 +359,7 @@ func TestLinkWithdrawRemovesACausesEdge(t *testing.T) {
 		t.Fatalf("GetByIDs = %d row(s), want 2", len(rows))
 	}
 	if rows[0].CreatedAt != rows[1].CreatedAt || rows[0].UpdatedAt != rows[1].UpdatedAt {
-		t.Fatalf("the fixture's two rows do NOT share created_at/updated_at (%q/%q vs %q/%q): the pair is orientable, so this is no longer the #778 shape the test is about",
+		t.Fatalf("the pinned stamps did not take (%q/%q vs %q/%q): the pair is orientable, so this is no longer the #778 shape the test is about",
 			rows[0].CreatedAt, rows[0].UpdatedAt, rows[1].CreatedAt, rows[1].UpdatedAt)
 	}
 

@@ -2169,6 +2169,23 @@ func supersedeReport(projectName string, res supersede.Result, verb string, appl
 		out += fmt.Sprintf("  %d pair(s) not written: the pair's opposite direction was already live when the write was attempted, so a concurrent pass got there first — this run wrote no edge for them, and the pair keeps the edge that is there; the next pass judges it in the direction the live edge asserts, and for a 'supersedes' edge `%s` settles it if the two passes disagree about which note is current (it loads live 'supersedes' edges only, so on a 'causes' pair the next ordinary pass is the whole of the repair)\n",
 			res.ReverseLive, followup.ReassessCommand(projectName))
 	}
+	// The OTHER write-time skip, and it is here for #834's reason rather than its
+	// own: a pair whose endpoint a concurrent pass replaced between the classify
+	// and the write is counted as a verdict and reaches neither writer, so under
+	// --apply it is in no count on this page at all. Before #834 the summary
+	// printed verdicts, so it was counted — falsely, as an edge that was written.
+	// Trading a false count for no count is the right trade, but "no count" still
+	// breaks the report's own rule that every reason a pair was not acted on gets
+	// a line, and a reader comparing this summary with the rows below it sees a
+	// difference nothing accounts for.
+	//
+	// Printed only under --apply, because that is the only mode where the pair is
+	// missing from the summary: in a dry run nothing is written at all, so the
+	// summary already counts the verdict and this line would double-report it.
+	if apply && res.StaleSkipped > 0 {
+		out += fmt.Sprintf("  %d pair(s) not written: an endpoint was replaced by a concurrent pass between the classify and the write, so there was no edge left to point at — nothing was written for them, and the next pass proposes whatever pair the new text forms\n",
+			res.StaleSkipped)
+	}
 	out += supersedeNotAgreedLines(res)
 	return out
 }
