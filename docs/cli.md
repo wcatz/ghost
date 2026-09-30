@@ -359,10 +359,12 @@ projy: 6 candidate pairs in 3 classify call(s), 0 cached, 1 supersedes, 0 causes
   consensus 3: 18 pair(s) asked, and only what all 3 passes proposed was would link
   2 pair(s) not agreed: the classification passes split, so no edge was written and none was cached — re-run to ask again (fresh passes may agree), or drop --consensus to write the first pass's answer; raising it makes unanimity harder, not easier
   4b1c9e2a -> f0a3d5c7  [not agreed: 2 supersedes, 1 neither]
-  91ee6b04 -> 2a7c1f88  [not agreed: 1 reversed, 1 causes, 1 unreadable]
+  91ee6b04 -> 2a7c1f88  [not agreed: 1 causes, 1 reversed, 1 unreadable]
 ```
 
 **Unanimity, not a majority.** A 2-of-3 majority would write exactly the 0.56 row of that measurement. A pair the model read in one pass and answered differently in another is a pair whose verdict it has not settled, and the gate writes only settled ones.
+
+A not-agreed tally reads in **descending vote count**, so the line leads with the majority — a split of one `supersedes` against two `neither` prints as `2 neither, 1 supersedes`, not the other way round — and a tie falls back to the fixed verdict order (`supersedes`, `causes`, `neither`, `reversed`, `unreadable`) so the same line comes out the same way on every run.
 
 **Raising `--consensus` is not a remedy.** A split at N=3 has to satisfy one *more* pass at N=4, so a larger N makes unanimity strictly harder and can only suppress more pairs. The two things that help are a re-run — fresh passes may land on the same answer — and dropping the flag (or changing `--source`) to write what the first pass said.
 

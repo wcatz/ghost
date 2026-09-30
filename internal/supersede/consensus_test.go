@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 
@@ -590,6 +591,80 @@ type linkReadFailStore struct {
 
 func (f *linkReadFailStore) GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
 	return nil, fmt.Errorf("injected: the store is unavailable")
+}
+
+// TestTheDisputedTypesCommentNamesTheRemediesThatWork holds the godoc on
+// `Disputed` to the same rule the report and both doc pages are held to, and it
+// exists because the first version of that comment said the opposite.
+//
+// A split between two readable verdicts reads as a model that cannot decide the
+// pair, and the natural first suggestion is a bigger sample. It is the wrong
+// suggestion: unanimity is STRICTLY HARDER to satisfy as N grows, so a pair that
+// split 2-1 at 3 has to satisfy one more pass at 4. The remedies are a re-run
+// (fresh passes may land on the same answer) and, for an operator, dropping the
+// flag to write what the first pass said.
+//
+// What the four statements share, and what this comment is careful to claim only
+// that, is the REFUSAL of a higher N: the report, docs/cli.md and
+// docs/architecture.md all say it is not a remedy, and the report and both pages
+// all offer a re-run. They do NOT all offer a different harness — the report and
+// both pages offer dropping the flag instead, and only the shipped comment names
+// a different harness, which is a maintainer's move rather than an operator's
+// and is supported by the note at supersedeNotAgreedLines ("only a lower N or a
+// different harness changes what is being asked"). Nothing here measures how a
+// split behaves as N grows beyond getting harder to satisfy, so nothing here
+// claims a trend.
+//
+// The comment is what a maintainer reads BEFORE touching the split path, and it
+// is the only one of the four that is not shown to an operator, so a wrong
+// remedy there is acted on silently.
+//
+// A comment is worth a test here for the same reason it is worth a test in the
+// report: a doc is a contract, and this one had already broken.
+func TestTheDisputedTypesCommentNamesTheRemediesThatWork(t *testing.T) {
+	// The comment is the doc comment on the type, so it is read off the source
+	// rather than duplicated here: a test that asserted its own copy of the text
+	// would pass while the comment said something else.
+	src := readSource(t, "supersede.go")
+	start := strings.Index(src, "// Disputed is one pair the consensus gate refused")
+	if start < 0 {
+		t.Fatal("supersede.go has no doc comment on Disputed")
+	}
+	end := strings.Index(src[start:], "\ntype Disputed struct")
+	if end < 0 {
+		t.Fatal("could not find the end of the Disputed doc comment")
+	}
+	comment := src[start : start+end]
+
+	if !strings.Contains(comment, "raising N makes unanimity") {
+		t.Error("the Disputed doc comment does not say that raising N makes unanimity harder, so a reader can take the omission as neutral rather than as the wrong advice it is")
+	}
+	if !strings.Contains(comment, "STRICTLY HARDER") {
+		t.Error("the Disputed doc comment does not say unanimity is STRICTLY HARDER to satisfy as N grows, which is the fact that makes a higher N a non-remedy rather than merely a weak one")
+	}
+	for _, want := range []string{"a re-run (fresh passes may agree)", "a different harness"} {
+		if !strings.Contains(comment, want) {
+			t.Errorf("the Disputed doc comment does not name %q as a remedy; the two the report and docs/cli.md offer are a re-run and a different harness", want)
+		}
+	}
+	// And the wrong remedy, if it appears, has to appear as the thing NOT to do.
+	if i := strings.Index(comment, "higher N"); i >= 0 {
+		window := comment[max(0, i-90):min(len(comment), i+40)]
+		if !strings.Contains(window, "NOT a higher N") && !strings.Contains(window, "NOT a") {
+			t.Errorf("the Disputed doc comment offers %q without ruling it out: raising N is the opposite of a remedy, so naming it bare sends a maintainer the wrong way", "higher N")
+		}
+	}
+}
+
+// readSource reads one non-test source file in this package, for a check whose
+// subject is the file's own prose rather than its behaviour.
+func readSource(t *testing.T, name string) string {
+	t.Helper()
+	raw, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return string(raw)
 }
 
 // TestConsensusRefusesEveryTwoToOneSplit is (g): a split is a split whatever it

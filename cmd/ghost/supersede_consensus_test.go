@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -257,6 +258,165 @@ func TestSupersedeReportNamesTheGateAndTheSplit(t *testing.T) {
 	if strings.Contains(out, "withdrew") || strings.Contains(out, "did not agree on") {
 		t.Errorf("a not-agreed row implies a write happened:\n%s", out)
 	}
+}
+
+// TestTheNotAgreedTallyLeadsWithTheMajority pins the ORDER of a not-agreed
+// tally line, which was a claim in the code's own comment with nothing behind it.
+//
+// The comment above the loop said "descending vote order" while the loop walked a
+// FIXED verdict order, so the two contradicted each other — and the consequence
+// was not cosmetic. A fixed order prints `1 supersedes, 2 neither` for a split
+// whose majority is NEITHER, leading with the minority, and this gate's entire
+// finding is that the verdict a reader takes away is the one most passes gave.
+// The doc examples had drifted with it: both docs/cli.md and
+// docs/architecture.md showed `1 reversed, 1 causes, 1 unreadable`, an order the
+// renderer could not produce at all.
+//
+// So the renderer now sorts by count, and this test holds the whole contract:
+// the majority leads, the minority follows, and a tie keeps the FIXED verdict
+// order so the line is still deterministic. The tie case matters on its own — an
+// unstable classifier is exactly what a 1-1-1 split reports, and a sort that
+// ordered equal counts arbitrarily would make that line unreproducible between
+// runs, which is the opposite of what a report about instability should do.
+//
+// Every case is asserted as a whole line, not as a substring, so a renderer that
+// emitted the right words in the wrong order fails.
+func TestTheNotAgreedTallyLeadsWithTheMajority(t *testing.T) {
+	// A pair for the line, and a run of one dispute, so the only thing varying
+	// between cases is the tally.
+	const (
+		newer = "0123456789ABCDEF0123456789ABCDEF"
+		older = "FEDCBA9876543210FEDCBA9876543210"
+	)
+	for _, tc := range []struct {
+		name  string
+		tally map[supersede.Relation]int
+		want  string
+		why   string
+	}{
+		{
+			name:  "a majority of NEITHER must not be led by a minority of supersedes",
+			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 1, supersede.RelationNeither: 2},
+			want:  "[not agreed: 2 neither, 1 supersedes]",
+			why:   "the fixed verdict order printed this as `1 supersedes, 2 neither`, leading with the minority — and the leading verdict is the one a reader keeps",
+		},
+		{
+			name:  "a majority of causes leads over a minority of reversed",
+			tally: map[supersede.Relation]int{supersede.RelationCauses: 2, supersede.RelationReversed: 1},
+			want:  "[not agreed: 2 causes, 1 reversed]",
+			why:   "reversed comes last in the fixed order, so this is the case where the bug was most visible",
+		},
+		{
+			name:  "a wide split reads 3 then 1",
+			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 3, supersede.RelationReversed: 1},
+			want:  "[not agreed: 3 supersedes, 1 reversed]",
+		},
+		{
+			name:  "a three-way tie keeps the FIXED verdict order",
+			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 1, supersede.RelationCauses: 1, supersede.RelationNeither: 1},
+			want:  "[not agreed: 1 supersedes, 1 causes, 1 neither]",
+			why:   "equal counts, so the line must still be reproducible run to run; an unstable classifier is exactly what this line reports, and a nondeterministic order would make it unreproducible",
+		},
+		{
+			name:  "a tie INCLUDING unreadable is ordered by the fixed list, not by the map",
+			tally: map[supersede.Relation]int{supersede.RelationReversed: 1, supersede.RelationCauses: 1, "": 1},
+			want:  "[not agreed: 1 causes, 1 reversed, 1 unreadable]",
+			why:   "this is the exact example both docs showed as `1 reversed, 1 causes, 1 unreadable`, an order the renderer could never produce; unreadable is last in the fixed list",
+		},
+		{
+			name:  "a majority of unreadable leads, because unreadable is a verdict here",
+			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 1, "": 2},
+			want:  "[not agreed: 2 unreadable, 1 supersedes]",
+			why:   "unreadable is counted, not hidden, so it leads on a count like any other — a harness fault is the more actionable finding",
+		},
+		{
+			name:  "a single verdict is unaffected by the sort",
+			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 3},
+			want:  "[not agreed: 3 supersedes]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := supersedeReport("proj", supersede.Result{
+				Candidates: 1, Consensus: 3, ConsensusPairsAsked: 3, NotAgreed: 1,
+				Disputed: []supersede.Disputed{{NewerID: newer, OlderID: older, Tally: tc.tally}},
+			}, "would link", 3, 0)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("tally %v did not render %q%s\n\nrendered:\n%s", tc.tally, tc.want, reasonSuffixSupersede(tc.why), out)
+			}
+		})
+	}
+}
+
+// TestTheDocumentedNotAgreedExamplesAreOrderableByTheRenderer closes the gap a
+// mutation found: the RENDERER's order was pinned but the two DOC EXAMPLES were
+// not, and both had drifted to an order no tally can produce — docs/cli.md and
+// docs/architecture.md showed `1 reversed, 1 causes, 1 unreadable`, while the
+// loop walked supersedes, causes, neither, reversed, unreadable. A reader copying
+// either example into a bug report was quoting output Ghost does not produce.
+//
+// So the check is not "the docs mention the right words" but "the docs contain a
+// line the renderer emits for the tally they quote". The tally is declared once
+// here, rendered through the real supersedeReport, and both pages are then
+// required to contain the rendered line. A doc that reorders the example fails; a
+// renderer whose order changes fails the other test in this file; and the two
+// cannot drift apart without one of them going red.
+func TestTheDocumentedNotAgreedExamplesAreOrderableByTheRenderer(t *testing.T) {
+	// The tally both pages quote, and it is deliberately a three-way tie so the
+	// fixed order is the thing under test: a tie is the only case where the
+	// example could be wrong without any majority being misreported.
+	const (
+		// The TALLY FRAGMENT, not the bracketed line. docs/cli.md quotes the
+		// whole line inside a sample block and docs/architecture.md quotes the
+		// fragment inline in prose, so the fragment is the one string both can
+		// carry, and its ORDER is the whole finding.
+		fragment = "1 causes, 1 reversed, 1 unreadable"
+		// The order no tally can produce, which is what both pages had drifted
+		// to: the fixed list emits causes before reversed.
+		impossible = "1 reversed, 1 causes, 1 unreadable"
+	)
+	out := supersedeReport("proj", supersede.Result{
+		Candidates: 1, Consensus: 3, ConsensusPairsAsked: 3, NotAgreed: 1,
+		Disputed: []supersede.Disputed{{
+			NewerID: "0123456789ABCDEF0123456789ABCDEF", OlderID: "FEDCBA9876543210FEDCBA9876543210",
+			Tally: map[supersede.Relation]int{supersede.RelationCauses: 1, supersede.RelationReversed: 1, "": 1},
+		}},
+	}, "would link", 3, 0)
+	if !strings.Contains(out, fragment) {
+		t.Fatalf("the renderer does not emit the tally the docs quote (%s):\n%s", fragment, out)
+	}
+	if strings.Contains(out, impossible) {
+		t.Fatalf("the renderer emits an order no tally can produce, which is what the docs had drifted to:\n%s", out)
+	}
+	for _, page := range []string{"../../docs/cli.md", "../../docs/architecture.md"} {
+		text := readDocPage(t, page)
+		if !strings.Contains(text, fragment) {
+			t.Errorf("%s does not carry the not-agreed tally the renderer emits (%s); a doc example in an order Ghost cannot print sends a reader looking for a bug that is not there", page, fragment)
+		}
+		if strings.Contains(text, impossible) {
+			t.Errorf("%s still shows the not-agreed tally as %q, an order the renderer cannot produce, so the example describes output Ghost does not emit", page, impossible)
+		}
+	}
+}
+
+// readDocPage reads one documentation page, and names the page it could not read
+// rather than only that a read failed.
+func readDocPage(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(raw)
+}
+
+// reasonSuffixSupersede puts a case's reasoning on the failure line, because
+// these are the cases whose expected output looks arbitrary until you know which
+// reading of the split it is defending.
+func reasonSuffixSupersede(why string) string {
+	if why == "" {
+		return ""
+	}
+	return " (" + why + ")"
 }
 
 // TestSupersedeNotAgreedAdviceNamesRemediesThatWork: the report must not tell an

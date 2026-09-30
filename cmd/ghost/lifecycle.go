@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -2002,16 +2003,28 @@ func supersedeNotAgreedLines(res supersede.Result) string {
 	// not contradict the dry-run hint further down, which says the same thing.
 	fmt.Fprintf(&b, "  %d pair(s) not agreed: the classification passes split, so no edge was written and none was cached — re-run to ask again (fresh passes may agree), or drop --consensus to write the first pass's answer; raising it makes unanimity harder, not easier\n", res.NotAgreed)
 	for _, d := range res.Disputed {
-		// The tally in descending vote order so the line reads as the finding
-		// rather than as a map dump. An unreadable pass is named as its own
-		// verdict because it is a different failure from a split between two
-		// readable ones: one is the model, the other is the harness or the
-		// prompt.
+		// The tally in DESCENDING VOTE ORDER so the line reads as the finding
+		// rather than as a map dump, because the verdict a reader takes away is
+		// the one the MAJORITY gave. A fixed verdict order cannot do that: it
+		// prints `1 supersedes, 2 neither` for a split whose majority is NEITHER,
+		// leading with the minority, and this gate's whole finding is that the
+		// leading verdict is what a reader keeps. Ties keep the fixed order, so a
+		// 1-1-1 split is still deterministic and still reads supersedes, causes,
+		// neither, reversed, unreadable.
+		//
+		// An unreadable pass is named as its own verdict because it is a
+		// different failure from a split between two readable ones: one is the
+		// model, the other is the harness or the prompt.
 		parts := make([]string, 0, len(d.Tally))
+		rels := make([]supersede.Relation, 0, len(d.Tally))
 		for _, rel := range []supersede.Relation{supersede.RelationSupersedes, supersede.RelationCauses, supersede.RelationNeither, supersede.RelationReversed, ""} {
-			if n := d.Tally[rel]; n > 0 {
-				parts = append(parts, fmt.Sprintf("%d %s", n, relationWord(rel)))
+			if d.Tally[rel] > 0 {
+				rels = append(rels, rel)
 			}
+		}
+		sort.SliceStable(rels, func(i, j int) bool { return d.Tally[rels[i]] > d.Tally[rels[j]] })
+		for _, rel := range rels {
+			parts = append(parts, fmt.Sprintf("%d %s", d.Tally[rel], relationWord(rel)))
 		}
 		fmt.Fprintf(&b, "  %s -> %s  [not agreed: %s]\n",
 			shortID(d.NewerID), shortID(d.OlderID), strings.Join(parts, ", "))

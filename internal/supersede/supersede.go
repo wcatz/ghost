@@ -549,12 +549,16 @@ type Result struct {
 // for the refusal rather than only its existence.
 //
 // The two verdicts it must be able to distinguish are the ones that call for
-// different next steps. A split between two READABLE verdicts is a model that
-// cannot decide the pair, and the remedy is a re-run with a higher N or a
-// different harness. A tally short because some pass's reply could not be parsed
+// different next steps, and the remedies have to be named correctly here because
+// this is the comment a maintainer reads before changing the split path. A split
+// between two READABLE verdicts is a model that cannot decide the pair, and the
+// remedies are a re-run (fresh passes may agree) or a different harness — NOT a
+// higher N, which is the opposite of a remedy: raising N makes unanimity
+// STRICTLY HARDER, since a pair that split 2-1 at N=3 then has to satisfy one
+// more pass at N=4. A tally short because some pass's reply could not be parsed
 // is a harness or prompt problem, and the remedy is neither of those. Collapsing
 // them into one count would send an operator to raise N for what is really an
-// unreadable answer.
+// unreadable answer, and N is the wrong dial in the other case too.
 type Disputed struct {
 	NewerID string
 	OlderID string
