@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 19
+const schemaVersion = 20
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -82,6 +82,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV17,
 	migrateV18,
 	migrateV19,
+	migrateV20,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1271,6 +1272,133 @@ func migrateV19(tx *sql.Tx) error {
 	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_session_expiry
         ON memories(expires_at) WHERE retention = 'session'`); err != nil {
 		return fmt.Errorf("create the session-expiry index: %w", err)
+	}
+	return nil
+}
+
+// migrateV20 adds the retrieval record: one row per retrieval call, holding what
+// the call retrieved and what it kept (#646).
+//
+// The whole table is new, so this repeats initSQL's DDL rather than altering
+// anything. initSQL's CREATE TABLE IF NOT EXISTS does run on every open, so this
+// step is not what CREATES the table on an upgrade path — the honest reason for
+// the copy is the one this file's own header gives: a migration step is frozen in
+// time and must not depend on initSQL, which keeps moving. A step reaching into
+// initSQL for its DDL would mean editing this file every time that string gained a
+// line, and a v20 written in 2027 would still create v20's table. The stamp and
+// the DDL also land in one transaction, so a step that succeeded is a step that
+// both happened. The repetition is pinned by
+// TestMigrateV20MatchesTheFreshDatabaseSchema, which compares the two shapes
+// rather than trusting this comment.
+//
+// The guard below is the half of migrateV18's shape a copy of the DDL does not
+// bring with it, and the reason the copy is not the whole story: IF NOT EXISTS is
+// a SILENT no-op against a table that already exists under this name, so a
+// database holding someone else's `retrieval_record` would be stamped v20 and
+// then fail every write with "no such column: verdicts" — a store that will not
+// open, from an error that names neither the table nor the way out. Verifying the
+// columns after the create covers that, and more besides (a hand-added column set
+// of any other kind), for the cost of one PRAGMA per column on a step that runs
+// once per store ever.
+//
+// No data migration and nothing to backfill. The table's subject is calls that
+// HAVE HAPPENED, and every call before this version happened with no record of
+// it — an empty table is the honest state, where a synthesised row per project
+// would report retrievals nobody made and put them in the audit's denominator.
+func migrateV20(tx *sql.Tx) error {
+	// BEFORE the create, and that placement is the point: the create's own
+	// statements are what fail on a foreign table (the index names a column it
+	// does not have), and their error names neither the table nor a remedy. See
+	// refuseForeignRetrievalRecordTable.
+	if err := refuseForeignRetrievalRecordTable(tx); err != nil {
+		return err
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS retrieval_record (
+    project_id TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    source     TEXT NOT NULL,
+    query_hash TEXT NOT NULL DEFAULT ''
+               CHECK (query_hash = '' OR
+                      (length(query_hash) = 64 AND query_hash NOT GLOB '*[^0-9a-f]*')),
+    as_of      TEXT NOT NULL DEFAULT '',
+    outcome    TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    verdicts   TEXT NOT NULL DEFAULT '[]',
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_retrieval_record_project ON retrieval_record(project_id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("v20 retrieval record: %w", err)
+		}
+	}
+	return nil
+}
+
+// retrievalRecordIdentity is the columns that identify a `retrieval_record` as
+// Ghost's, and it is deliberately NOT the full column set — the same rule, for the
+// same reason, as evidenceTableIdentity.
+//
+// A guard that compared every column would turn a table one version AHEAD of
+// this build into a refusal, and the remedy it prints is `DROP TABLE
+// retrieval_record`. That is a data-loss instruction issued by a check whose
+// whole purpose is to protect a table, and the hazard is sharper here than for
+// the evidence table: this guard runs from OpenDB on EVERY open, so it is not
+// reached only by a store that is mid-migration. A store at this version that a
+// later build added a column to must open, and must open quietly.
+//
+// These three are enough to say "this is Ghost's retrieval record" and none of
+// them is a column a same-named foreign table would plausibly carry: it is
+// keyed by project, and it is the table that stores a JSON array of verdicts.
+var retrievalRecordIdentity = []string{"project_id", "source", "verdicts"}
+
+// refuseForeignRetrievalRecordTable returns an error naming the remedy when the
+// database already holds a `retrieval_record` that is NOT Ghost's retrieval
+// record: the same treatment refuseForeignProvenanceTable gives the evidence
+// table, and for the same reason.
+//
+// No released build has ever written a table of this name but Ghost's, so unlike
+// #664's pre-rename provenance collision there is no known dev build to point at.
+// The guard is here anyway because the failure it prevents is silent rather than
+// loud: `CREATE TABLE IF NOT EXISTS` is a no-op against the existing table, so
+// the step would stamp v20 over a shape nothing here can write, and the store
+// would open and then fail every search's record with "no such column:
+// verdicts". That is a store that appears to work and is not, reached through a
+// migration that reported success.
+//
+// It REFUSES rather than adapts. The rows are somebody else's, there is no shape
+// to convert them into, and the pre-migration backup OpenDB has already taken is
+// the net a conversion would be guessing past. The remedy is one command an
+// operator can run, and it is STATED in the error rather than logged: a store
+// that will not open is theirs to fix, and a warning they may not see leaves
+// every write failing with the same unnamed error.
+//
+// Identity, not version and not the whole column set, so a store this build
+// created is left alone AND a store one version ahead of it is left alone: see
+// retrievalRecordIdentity. The check fires only on a table that is not ours, and
+// the remedy it prints is destructive, so it must not fire on ours.
+func refuseForeignRetrievalRecordTable(tx tableInspector) error {
+	present, err := tableExists(tx, "retrieval_record")
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	for _, c := range retrievalRecordIdentity {
+		has, err := columnExists(tx, "retrieval_record", c)
+		if err != nil {
+			return err
+		}
+		if !has {
+			return fmt.Errorf(
+				"this database already holds a retrieval_record table without a %q column, so it is not Ghost's "+
+					"retrieval record — a same-named table makes CREATE TABLE IF NOT EXISTS a silent no-op, so the "+
+					"migration would stamp v20 over a shape every later write would fail on. Drop it and reopen: "+
+					"sqlite3 <db> 'DROP TABLE retrieval_record'", c)
+		}
 	}
 	return nil
 }

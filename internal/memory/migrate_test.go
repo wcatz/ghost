@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2092,4 +2093,224 @@ func TestMigrateFreshDBHasMemoryProvenance(t *testing.T) {
 	if !strings.Contains(fkSQL, "REFERENCES memories(id) ON DELETE CASCADE") {
 		t.Errorf("memory_provenance.memory_id does not cascade from memories: %s", fkSQL)
 	}
+}
+
+// TestMigrateFreshDBHasRetrievalRecord: a brand-new database (initSQL path, no
+// migration involved) must have the retrieval record from the start — guards
+// against the table silently going missing from initSQL while migrateV20 still
+// creates it on upgraded databases, which is the state where a fresh install
+// records nothing and a migrated one does.
+//
+// The columns are read by name rather than by SELECT *, so a column renamed on
+// one path and not the other fails here by name.
+func TestMigrateFreshDBHasRetrievalRecord(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`SELECT project_id, session_id, source, query_hash, as_of,
+		outcome, reason, verdicts, recorded_at FROM retrieval_record LIMIT 0`); err != nil {
+		t.Fatalf("retrieval_record columns missing on fresh db: %v", err)
+	}
+	// The CHECK is the privacy rule expressed in the schema, so its absence is
+	// not a detail: a column that accepts any string accepts a question.
+	if _, err := db.Exec(
+		`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
+		 VALUES ('p1', 'search', 'how does the ingress rotate its cert', 'answerable', 'floor_met', '[]')`,
+	); err == nil {
+		t.Error("a retrieval_record accepted the query text in query_hash — the column that cannot hold a question is gone")
+	}
+	// A digest is still accepted, so the check above is not a blanket refusal.
+	if _, err := db.Exec(
+		`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
+		 VALUES ('p1', 'search', ?, 'answerable', 'floor_met', '[]')`,
+		strings.Repeat("ab", 32),
+	); err != nil {
+		t.Errorf("retrieval_record refused a 64-character hex digest: %v", err)
+	}
+	// And an empty hash, which is what a call with no query carries.
+	if _, err := db.Exec(
+		`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
+		 VALUES ('p1', 'session_start', '', 'answerable', 'floor_met', '[]')`,
+	); err != nil {
+		t.Errorf("retrieval_record refused an empty query_hash: %v", err)
+	}
+	// No json_valid CHECK on verdicts, and its ABSENCE is the property: the
+	// readers have to tolerate a document they cannot read, and a constraint
+	// refusing to store one would only make that tolerance unreachable.
+	if _, err := db.Exec(
+		`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
+		 VALUES ('p1', 'search', ?, 'answerable', 'floor_met', 'not json')`,
+		strings.Repeat("cd", 32),
+	); err != nil {
+		t.Errorf("retrieval_record refused an unreadable verdicts column: %v — the readers' tolerance is unreachable", err)
+	}
+
+	var stray int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='retrieval_record'
+		 AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_retrieval_record_project'`,
+	).Scan(&stray); err != nil {
+		t.Fatalf("count retrieval_record indexes: %v", err)
+	}
+	if stray != 0 {
+		t.Errorf("retrieval_record carries %d index(es) nothing reads; each is a b-tree insert on every search", stray)
+	}
+}
+
+// TestMigrateV20MatchesTheFreshDatabaseSchema: the migration path and the initSQL
+// path must produce the same table, or a store that reached v20 by upgrading
+// holds a different shape from one created fresh at the same version.
+//
+// Both spellings of the DDL exist — initSQL cannot deliver a new table to a
+// database that already exists — so nothing but this comparison keeps them in
+// step. It reads the column set WITH its types and NOT NULL flags, because a
+// column that exists with the wrong constraint is a different schema, and a
+// column added to one path and not the other reaches production as "works on
+// new installs, empty on upgraded ones".
+//
+// The migration step is RUN DIRECTLY rather than reached through OpenDB, and the
+// reason is worth stating because getting it wrong makes the test vacuous:
+// OpenDB executes initSQL BEFORE the migrations, so a database that has had the
+// table dropped already has it back again by the time migrateV20 runs and the
+// step is a no-op. Both arms are built here from initSQL alone, and the migrated
+// arm has the table removed and migrateV20's own statements applied to it.
+func TestMigrateV20MatchesTheFreshDatabaseSchema(t *testing.T) {
+	newDB := func(t *testing.T) *sql.DB {
+		t.Helper()
+		db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ghost.db"))
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		if _, err := db.Exec(initSQL); err != nil {
+			t.Fatalf("initSQL: %v", err)
+		}
+		return db
+	}
+
+	fresh := newDB(t)
+	migrated := newDB(t)
+	if _, err := migrated.Exec(`DROP TABLE IF EXISTS retrieval_record`); err != nil {
+		t.Fatalf("drop the table so the step has work to do: %v", err)
+	}
+	tx, err := migrated.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := migrateV20(tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("migrateV20: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	freshCols, err := columnShapes(t, fresh, "retrieval_record")
+	if err != nil {
+		t.Fatalf("read the fresh table: %v", err)
+	}
+	if len(freshCols) == 0 {
+		t.Fatal("a fresh database has no retrieval_record — the initSQL path is missing the table")
+	}
+	migratedCols, err := columnShapes(t, migrated, "retrieval_record")
+	if err != nil {
+		t.Fatalf("read the migrated table: %v", err)
+	}
+	if diff := columnShapeDiff(freshCols, migratedCols); diff != "" {
+		t.Errorf("the migration path and initSQL disagree on the table: %s", diff)
+	}
+	// And the index, which the same repetition carries: a migrated store without
+	// it reads the whole table for the one query that filters by project.
+	var idx string
+	if err := migrated.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_retrieval_record_project'`,
+	).Scan(&idx); err != nil {
+		t.Errorf("migrateV20 did not create the project index: %v", err)
+	}
+}
+
+// TestMigrateV20LeavesAnEarlierStoreReadable: the step is additive, so a store
+// that has rows must keep them. A migration that rebuilt a table to reach the
+// new version would be the shape of mistake this pins.
+func TestMigrateV20LeavesAnEarlierStoreReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v20-p1', 'p1')`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'a note that predates the record')`,
+	); err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	reopened, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close() //nolint:errcheck
+	var content string
+	if err := reopened.QueryRow(`SELECT content FROM memories WHERE id = 'm1'`).Scan(&content); err != nil {
+		t.Fatalf("the memory is gone after the reopen: %v", err)
+	}
+	if content != "a note that predates the record" {
+		t.Errorf("content = %q, want the row the earlier store held", content)
+	}
+	// Nothing is backfilled: the table's subject is calls that HAVE HAPPENED,
+	// and every call before this version happened with no record of it. A
+	// synthesised row would report retrievals nobody made and land in the
+	// audit's denominator.
+	var n int
+	if err := reopened.QueryRow(`SELECT count(*) FROM retrieval_record`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("the migration backfilled %d retrieval record(s) — the table records calls, and none were made", n)
+	}
+}
+
+// columnShapes is one table's columns as "name type notnull default" lines, in
+// the order PRAGMA reports them. Types and constraints are included because a
+// column that exists with the wrong NOT NULL is a different schema.
+func columnShapes(t *testing.T, db *sql.DB, table string) ([]string, error) {
+	t.Helper()
+	rows, err := db.Query(`SELECT name, type, "notnull", dflt_value FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	var out []string
+	for rows.Next() {
+		var name, typ, notnull string
+		var dflt sql.NullString
+		if err := rows.Scan(&name, &typ, &notnull, &dflt); err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%s %s notnull=%s default=%s", name, typ, notnull, dflt.String))
+	}
+	return out, rows.Err()
+}
+
+// columnShapeDiff names the first difference between two column lists, or "".
+func columnShapeDiff(a, b []string) string {
+	if len(a) != len(b) {
+		return fmt.Sprintf("%d column(s) against %d: %v vs %v", len(a), len(b), a, b)
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return fmt.Sprintf("column %d is %q on the fresh path and %q on the migrated path", i, a[i], b[i])
+		}
+	}
+	return ""
 }
