@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/mcpserver"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/portable"
 )
@@ -101,6 +103,12 @@ Embeddings are not exported: they are derived from content by a local model and
 the embedding worker rebuilds them. Memory links are not exported either — they
 only mean something between two memories that are both present, and the linking
 worker recomputes related edges after an import.
+
+A record ` + "`ghost import`" + ` would refuse is LEFT OUT and named on stderr, and
+the command exits non-zero. The exporter applies the importer's own refusal
+predicates, so what is left out is exactly what a restore would reject. A
+credential-shaped field is refused by design and the report names the field, never
+the value; see the export section of "ghost help" for the whole rule.
 
 Two exports of an unchanged database are byte-identical, so an artifact can be
 diffed against the previous one. Use ` + "`ghost import`" + ` to load one back.
@@ -657,12 +665,17 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	if len(skipped) == 0 {
 		return nil
 	}
-	var hasRepairable, hasUnrepairable bool
+	var hasRepairable, hasUnrepairable, hasSecret bool
 	for _, sk := range skipped {
 		// The id through assemble.Token, the same renderer the import report uses
 		// for the id it names: an id carrying a newline would forge a line on the
 		// very report that exists to name it (#791). Such an id is exactly what
 		// gets here, so this is not a precaution.
+		//
+		// The reason beside it is the importer's own message, and for a credential
+		// refusal it names the FIELD and nothing else — so this line is safe to
+		// print for the same reason the import report's is. The value itself is in
+		// no SkippedRecord field and never reaches this writer.
 		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, assemble.Token(sk.ID), sk.Reason); err != nil {
 			return err
 		}
@@ -674,6 +687,46 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			hasRepairable = true
 		} else {
 			hasUnrepairable = true
+		}
+		if sk.Secret {
+			hasSecret = true
+		}
+	}
+	// The credential advice is printed FIRST and separately, because it is not an
+	// alternative to the re-key advice below but a different thing entirely, and
+	// an operator who read the re-key sentence first would conclude that a
+	// credential-shaped row has to be DELETED to get rid of the value. It has not:
+	// the row is fine apart from the one field, the field is the value, and
+	// replacing the value with a pointer to where it lives is both the documented
+	// policy and the fix that keeps the memory.
+	//
+	// The command is named per KIND, and the field lists inside it are DERIVED from
+	// the tools' own argument structs (mcpserver.EditableFieldList) rather than
+	// written here. The first version of this sentence transcribed them, and it was
+	// wrong in four places: it promised `ghost_memory_update` could edit a memory's
+	// agent and session_id (neither is an argument — the tool writes them from the
+	// EDITING SESSION's provenance, and deliberately does not let a caller name
+	// their own author) and that `ghost_task_update` could edit a task's title and
+	// notes (it takes status, priority and description; a task's title is written at
+	// insert and its notes only by ghost_task_complete). A user who followed it got
+	// a rejected call, which is worse than no advice at all — the harm the delete
+	// sentence below is careful to avoid by naming only commands that exist.
+	//
+	// A transcribe-and-hope list is the same mistake as a second refusal predicate,
+	// and it drifted for the same reason. Deriving it means a field added to a tool
+	// is a field this sentence names, and one removed stops being named.
+	if hasSecret {
+		// The paragraph, in three moves and no more: the refusal is by design, the
+		// value is not printed, the fix is to point at where the value lives, and
+		// the re-export is the LAST step rather than an afterthought — a corrected
+		// row is still refused by the next export until the artifact is written
+		// again, so an operator who edits the field and stops has changed nothing a
+		// restore will read.
+		if _, err := fmt.Fprintln(out, "  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. Replace the value with WHERE it lives and how to read it, never the value itself, then re-export: a corrected row is still refused until the artifact is written again."); err != nil {
+			return err
+		}
+		if err := printSecretFixes(out); err != nil {
+			return err
 		}
 	}
 	if _, err := fmt.Fprintf(out, "  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.\n"); err != nil {
@@ -691,7 +744,17 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	// decision cannot, and for those two the sentence says so while naming the
 	// blunt repair that does work.
 	if hasRepairable {
-		if _, err := fmt.Fprintf(out, "  To include it, delete the row and re-save it under an id this build accepts: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n"); err != nil {
+		// "an id this build accepts" was the whole sentence when a shape refusal was
+		// the only possible reason, and it is now too narrow: a project refused for
+		// an empty name, or a memory refused for credential-shaped content, is not
+		// fixed by re-saving it under a different id. So the sentence names the
+		// reason the report already gave and points at the other one, which is the
+		// edit the field needs.
+		phrase := "delete the row and re-save it under an id this build accepts"
+		if hasSecret {
+			phrase = "delete the row and re-save it (for a credential-shaped field, editing the field is usually what you want instead — see above)"
+		}
+		if _, err := fmt.Fprintf(out, "  To include it, %s: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n", phrase); err != nil {
 			return err
 		}
 	}
@@ -710,7 +773,187 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			return err
 		}
 	}
-	return fmt.Errorf("%s left out of this artifact because this build cannot import them — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)))
+	// "because this build cannot import them" was accurate while a shape refusal was
+	// the only possible reason and is too narrow now: the exporter applies the
+	// importer's own predicates (#813), so a record is left out for exactly the
+	// reasons `ghost import` would give — which is the whole point, and is what
+	// the sentence has to say rather than implying a Ghost quirk.
+	why := "because `ghost import` would refuse them"
+	if hasSecret {
+		why = "because `ghost import` refuses them — the credential guard by design"
+	}
+	return fmt.Errorf("%s left out of this artifact, %s — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)), why)
+}
+
+// secretFieldFixers is the field-to-tool mapping the credential advice is built
+// from, and it is keyed by the FIELD rather than by the record kind — because a
+// field is what the `!` line above named, so it is what the operator is holding.
+//
+// The keys are the column names `memory.CheckImported*` reports, which is what
+// `portable.SkippedRecord.Reason` carries, so the advice and the refusal name the
+// same thing. Every VALUE is checked against the tool's real arguments by
+// TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames — the test that exists
+// because the first version of this map was a transcription and was wrong in four
+// places.
+//
+// It is deliberately short: only the fields that are BOTH credential-guarded and
+// tool-editable. A field in neither list is a bug, which
+// TestTheCredentialAdviceCoversEveryGuardedField is what catches.
+var secretFieldFixers = map[string]string{
+	"content":     "ghost_memory_update",
+	"tags":        "ghost_memory_update",
+	"source_ref":  "ghost_memory_update",
+	"description": "ghost_task_update",
+	// notes is writable, but only by ghost_task_complete — which also marks the
+	// task done, so secretRepairAdvice names it with that consequence rather than
+	// as a neutral edit.
+	"notes": "ghost_task_complete",
+}
+
+// secretUnfixableRoutes is what to do about a credential-guarded field that no
+// TOOL can write, and it is a table of sentences rather than one clause naming the
+// columns.
+//
+// One clause was the first version and it was wrong in two ways, both found by
+// review. It said those columns are "written only by a save, a create or a restore",
+// which is false for a memory's agent and session_id — the update DOES write both,
+// from the editing session's identity — and for a project's path, which
+// `ghost project bind` writes. And it said the only route was a direct database
+// edit, which sends an operator to hand-edit SQLite while a shipped command would
+// have done it: for a project's path, `ghost project bind` is the route, and the
+// alternative it would have offered instead — `ghost project delete` — CASCADES
+// away every memory in that project. An operator following the wrong advice here
+// loses data, which is worse than the wrong field list the previous commit removed.
+//
+// So each group gets its own sentence with its own true route, and each says why
+// there is no tool, because "no tool" with no reason reads as a defect.
+var secretUnfixableRoutes = []string{
+	// A memory's agent and session_id. The UPDATE writes both, from the editing
+	// session's provenance (provenanceFor) — a caller cannot name their own
+	// author, which is the design. So the tool does write the column and still
+	// cannot clear a credential from a pre-#656 row: the edit would replace the
+	// value with the editing session's own token.
+	"a memory's agent and session_id — the memory update overwrites both with the EDITING SESSION's identity, because a caller must not be able to name its own author, so it cannot clear a value a pre-#656 row already holds; edit the row's agent and session_id in the database directly",
+
+	// A memory's EVIDENCE fields. No tool writes a memory_provenance row at all —
+	// they are appended by a save, an import and a reflect, and nothing edits one.
+	// The one surface that reaches them is `ghost history purge`, which DELETES
+	// them, and that is a redaction of the whole memory's history rather than an
+	// edit of a field, so it is named as what it is.
+	"a memory's evidence agent, session_id and source_ref — no tool writes an evidence row; they are appended by a save, an import and a reflect, and the only surface that reaches one is `ghost history purge <memory-id>`, which erases the memory's whole recorded history rather than editing a field",
+
+	// A task's title. Written at insert and by no update.
+	"a task's title — written when the task is created; `ghost_task_update` takes status, priority and description only, so the only route is the database directly",
+
+	// A decision's fields. No decision update tool exists.
+	"a decision's title, decision, rationale and alternatives — there is no decision update tool of any kind, so the only route is the database directly",
+
+	// A project's name and path — and the two are NOT the same case, which is
+	// why they are two clauses. `ghost project bind` writes path (and
+	// repo_remote), so a credential in a path has a shipped command. Its name is
+	// NOT written by anything: a project is created, bound, merged or deleted.
+	"a project's path — `ghost project bind <project-id> <checkout-directory>` rewrites it, and note that `ghost project delete` is NOT the fix here: it cascades away every memory in the project",
+	"a project's name — nothing rewrites it; a project is created, bound, merged or deleted, never renamed, so the only route is the database directly",
+}
+
+// editableBy reports whether a tool really takes a field, read from the tool's own
+// argument struct rather than from the mapping beside it. It is the check that makes
+// secretFieldFixers safe to keep, and it is why the sentence is built from the
+// derived answer instead of from the map's own key.
+func editableBy(tool, field string) bool {
+	for _, f := range mcpserver.EditableFields(tool) {
+		if f == field {
+			return true
+		}
+	}
+	return false
+}
+
+// printSecretFixes writes the credential paragraph's two halves as a LEAD-IN and
+// then one line per group, rather than as a single sentence.
+//
+// The one-sentence version was tried and is unreadable: six groups each with a
+// reason and a route came to roughly 1,500 characters on one line, and a reader
+// hunting for their own field cannot find it in that. One line per group is the
+// form a person can scan, and it is the form every other advice paragraph in this
+// function already takes.
+func printSecretFixes(out io.Writer) error {
+	byTool := map[string][]string{}
+	var drifted []string
+	for field, tool := range secretFieldFixers {
+		if !editableBy(tool, field) {
+			// The mapping has drifted from the tool it names, which is the failure
+			// the review found. Better to report the field as unwritable than to
+			// name a tool that will reject the call, and
+			// TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames fails on
+			// this too — but the report must still be true if a test is ever not
+			// run.
+			drifted = append(drifted, field)
+			continue
+		}
+		byTool[tool] = append(byTool[tool], field)
+	}
+
+	// Grouped BY TOOL, one line each. The first version said "`content` through
+	// `ghost_memory_update` edits category, confidence, content, …" once per field,
+	// which is nine repetitions of the same clause and a reader cannot tell which
+	// repetition applies to the field they are holding. A tool takes several of the
+	// fields, so one line per tool says it once.
+	tools := make([]string, 0, len(byTool))
+	for tool := range byTool {
+		tools = append(tools, tool)
+	}
+	sort.Strings(tools)
+	for _, tool := range tools {
+		line := fmt.Sprintf("  · %s edits %s", mcpserver.EditableFieldList(tool), fieldListInToolOrder(tool, byTool[tool]))
+		// ghost_task_complete is not a neutral edit: it marks the task done. Saying
+		// "notes" without that would send someone to close a task to clear a token
+		// out of it.
+		if tool == "ghost_task_complete" {
+			line += " — which also marks the task done"
+		}
+		if _, err := fmt.Fprintln(out, line); err != nil {
+			return err
+		}
+	}
+	if len(drifted) > 0 {
+		sort.Strings(drifted)
+		if _, err := fmt.Fprintf(out, "  · %s — the advice expected a tool for %s and it no longer takes %s, so treat %s as unwritable\n",
+			strings.Join(drifted, " and "), mapPlural(len(drifted)), mapPlural(len(drifted)), mapPlural(len(drifted))); err != nil {
+			return err
+		}
+	}
+	for _, route := range secretUnfixableRoutes {
+		if _, err := fmt.Fprintf(out, "  · No tool edits %s\n", route); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mapPlural is "1 field" or "N fields", for the drifted sentence above.
+func mapPlural(n int) string {
+	if n == 1 {
+		return "1 field"
+	}
+	return fmt.Sprintf("%d fields", n)
+}
+
+// fieldListInToolOrder renders the subset of a tool's fields that this report is
+// about, in the tool's own order so the reader meets them as the tool's schema
+// states them.
+func fieldListInToolOrder(tool string, fields []string) string {
+	want := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		want[f] = true
+	}
+	var kept []string
+	for _, f := range mcpserver.EditableFields(tool) {
+		if want[f] {
+			kept = append(kept, f)
+		}
+	}
+	return mcpserver.HumanFieldList(kept)
 }
 
 // printExportSummary states where the artifact is and what it holds, and says in
