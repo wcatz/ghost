@@ -2202,10 +2202,13 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 	var b strings.Builder
 	for _, c := range classified {
 		if c.Reclassified && c.Relation != supersede.RelationSupersedes {
+			// The three markers, spelled as supersedeReassessReport spells them and
+			// padded as it pads them, so a reader moving between the two reports
+			// reads one vocabulary rather than two.
 			marker := "would withdraw"
 			switch {
 			case c.Withdrawn:
-				marker = "withdrew"
+				marker = "withdrew   "
 			case apply:
 				marker = "already gone"
 			}
