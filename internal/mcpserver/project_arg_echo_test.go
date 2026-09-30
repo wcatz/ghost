@@ -62,7 +62,21 @@ const echoToken = "ghp_" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 // argument it never passed. The boundary sentences, which do know, are held to the
 // caller's own name by the unknown-project shape instead, and that split is the
 // rule: whoever knows the field names it, and nobody names one they cannot see.
-const storeAmbiguityLabel = "project identifier"
+const storeAmbiguityLabel = memory.ProjectIdentifierLabel
+
+// A surface whose refusal is the STORE's own — because the store built it rather
+// than the handler — is held to the neutral label even where the handler knows the
+// field. `ghost_project_delete` is that case, and it is here because it is the one
+// place the two rules meet: the tool's argument is `project`, and the sentence that
+// reaches the agent comes out of `Store.DeleteProject`, which cannot see a tool
+// argument and is equally reached by `ghost project delete <name-or-id>`. So it
+// renders through `memory.ProjectIdentifierLabel` and the tool name in the wrapping
+// error is what tells the agent which argument to change.
+//
+// This is asserted rather than assumed, because the failure it guards is a sentence
+// that looks correct and is not: `ghost_project_delete: project "<project_id
+// withheld: …>" not found` withholds the value perfectly and still tells the agent
+// to look for a `project_id` argument this tool does not have.
 
 // projectResolvingSurfaces is every surface that takes a project argument before it
 // can do anything, with the minimum other arguments each needs. It is the same table
@@ -129,6 +143,11 @@ var projectResolvingSurfaces = []struct {
 	// to name: the unknown-project shape asserts only that nothing is echoed on
 	// them, which is the whole of what is true.
 	silentWhenUnknown bool
+	// storeRefusal marks a surface whose unknown-project sentence is built by the
+	// STORE rather than by the handler, so the field name the handler knows is not
+	// available to it and the refusal must carry the neutral label instead. Only
+	// `ghost_project_delete` sets it — see the note above storeAmbiguityLabel.
+	storeRefusal bool
 }{
 	{
 		name: "ghost_memory_search", argKey: "project_id", argName: "project_id",
@@ -197,6 +216,17 @@ var projectResolvingSurfaces = []struct {
 		// rendering every project argument through one hard-coded label.
 		name: "ghost_resolve", argKey: "project", argName: "project",
 		read: toolReader("ghost_resolve", "project", nil),
+	},
+	{
+		// The surface review-sweeper found, and the reason `storeRefusal` exists.
+		// Its argument is `project` like `ghost_resolve`'s, but unlike that tool the
+		// not-found sentence is not written here: `ghost_project_delete` hands
+		// `args.Project` to `Store.DeleteProject`, and the store is also reached by
+		// the CLI's `ghost project delete <name-or-id>`. So the store cannot name a
+		// field, and the neutral label is the honest answer.
+		name: "ghost_project_delete", argKey: "project", argName: "project",
+		read:         toolReader("ghost_project_delete", "project", nil),
+		storeRefusal: true,
 	},
 	{name: "ghost://project/{id}/context", argKey: "project_id", argName: "project_id", read: resourceReader("context")},
 	{name: "ghost://project/{id}/tasks", argKey: "project_id", argName: "project_id", read: resourceReader("tasks"), silentWhenUnknown: true},
@@ -393,9 +423,15 @@ func TestACredentialShapedProjectIDIsNeverEchoedBackByAResolvingSurface(t *testi
 					// And the refusal names the thing it is refusing, which is a
 					// different name on each shape and is asserted separately for
 					// each: the store cannot see the caller's field, the boundary can.
+					// A boundary that DELEGATED its sentence to the store cannot see it
+					// either, so it is held to the neutral label — the one case where
+					// knowing the field is not enough to be allowed to use it.
 					want := shape.label
 					if want == "" {
 						want = surface.argName
+						if surface.storeRefusal {
+							want = storeAmbiguityLabel
+						}
 					}
 					placeholder := `"<` + want + ` withheld: it holds a `
 					if !strings.Contains(out, placeholder) {

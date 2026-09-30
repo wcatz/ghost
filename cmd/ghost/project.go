@@ -19,6 +19,14 @@ import (
 // resolveProjectOrExit resolves projectName to a project ID via store, printing
 // an error (with known-project names when available) and exiting the process
 // on failure or when no matching project is found.
+//
+// The two refusals below name the operand `project`, which is what every usage
+// string in this file calls it (`ghost reflect <project>`, `ghost project bind
+// <project-id>`, `ghost prune [--project <name-or-id>]`) — NOT `project_id`,
+// which is the MCP tools' name for the same value. The label is the only part of
+// a withheld placeholder that reaches the reader, so it has to be the name the
+// reader actually typed: a refusal that said `project_id` here would send someone
+// looking for an argument this CLI does not have (#839).
 func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName string) string {
 	projectID, _, err := store.ResolveProject(ctx, projectName)
 	if err != nil {
@@ -28,9 +36,9 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 	if projectID == "" {
 		names, listErr := store.ListProjectNames(ctx)
 		if listErr != nil || len(names) == 0 {
-			fmt.Fprintf(os.Stderr, "error: project %s not found\n", memory.ProjectArg("project_id", projectName))
+			fmt.Fprintf(os.Stderr, "error: project %s not found\n", memory.ProjectArg("project", projectName))
 		} else {
-			fmt.Fprintf(os.Stderr, "error: project %s not found. Known projects: %s\n", memory.ProjectArg("project_id", projectName), knownProjectsSentence(names))
+			fmt.Fprintf(os.Stderr, "error: project %s not found. Known projects: %s\n", memory.ProjectArg("project", projectName), knownProjectsSentence(names))
 		}
 		os.Exit(1)
 	}
@@ -206,10 +214,10 @@ func runProjectMergeCore(ctx context.Context, store *memory.Store, out io.Writer
 	oldID, oldName := resolveForMerge(ctx, store, oldArg)
 	newID, newName := resolveForMerge(ctx, store, newArg)
 	if oldID == "" {
-		return fmt.Errorf("project %s not found; known projects: %s", memory.ProjectArg("project_id", oldArg), strings.Join(knownProjectNames(ctx, store), ", "))
+		return fmt.Errorf("project %s not found; known projects: %s", memory.ProjectArg("project", oldArg), strings.Join(knownProjectNames(ctx, store), ", "))
 	}
 	if newID == "" {
-		return fmt.Errorf("project %s not found; known projects: %s", memory.ProjectArg("project_id", newArg), strings.Join(knownProjectNames(ctx, store), ", "))
+		return fmt.Errorf("project %s not found; known projects: %s", memory.ProjectArg("project", newArg), strings.Join(knownProjectNames(ctx, store), ", "))
 	}
 	if oldID == newID {
 		return fmt.Errorf("refusing to merge a project into itself (%q)", oldID)
@@ -254,9 +262,9 @@ func resolveProjectBindID(ctx context.Context, store *memory.Store, projectID st
 	} else if !ok {
 		if names := knownProjectNames(ctx, store); len(names) > 0 {
 			return "", fmt.Errorf("project %s not found (bind takes a project id). Known projects: %s",
-				memory.ProjectArg("project_id", projectID), strings.Join(names, ", "))
+				memory.ProjectArg("project", projectID), strings.Join(names, ", "))
 		}
-		return "", fmt.Errorf("project %s not found (bind takes a project id)", memory.ProjectArg("project_id", projectID))
+		return "", fmt.Errorf("project %s not found (bind takes a project id)", memory.ProjectArg("project", projectID))
 	}
 	return projectID, nil
 }

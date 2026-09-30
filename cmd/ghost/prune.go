@@ -412,11 +412,11 @@ func runPrune(args []string) {
 	if opts.Project != "" {
 		resolved, _, rErr := store.ResolveProject(ctx, opts.Project)
 		if rErr != nil {
-			fmt.Fprintf(os.Stderr, "error: resolve project %s: %v\n", memory.ProjectArg("project_id", opts.Project), rErr)
+			fmt.Fprintf(os.Stderr, "error: resolve project %s: %v\n", memory.ProjectArg("project", opts.Project), rErr)
 			os.Exit(1)
 		}
 		if resolved == "" {
-			fmt.Fprintf(os.Stderr, "error: project %s not found — nothing was pruned\n", memory.ProjectArg("project_id", opts.Project))
+			fmt.Fprintf(os.Stderr, "error: project %s not found — nothing was pruned\n", memory.ProjectArg("project", opts.Project))
 			os.Exit(1)
 		}
 		scope = resolved

@@ -81,6 +81,21 @@ func RejectSecret(field, text string) error {
 	return rejectSecret(field, text)
 }
 
+// ProjectIdentifierLabel is what a store-level refusal names the value as when
+// the store cannot see the argument's own name.
+//
+// It is the honest answer rather than a default, because a refusal's whole job on
+// the credential path is to tell the caller WHICH argument to fix, and a name the
+// store guessed is worse than no name: `ghost_resolve` passes `project`,
+// `ghost_project_delete` passes `project`, and every other tool passes
+// `project_id`, so a store sentence that named a field would be naming an
+// argument the caller never passed on two of the three shapes.
+//
+// The boundary is where the field name belongs, because the boundary is what
+// knows it: those sentences render through `ProjectArg` with the caller's own
+// name, and this is what a store sentence uses when it is the one refusing.
+const ProjectIdentifierLabel = "project identifier"
+
 // ProjectArg renders a caller's project argument — the value a `project_id` or
 // `project` tool parameter carries, a CLI's project operand, a session hook's
 // directory — for a sentence that REFUSES it.

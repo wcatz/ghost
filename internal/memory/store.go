@@ -1872,7 +1872,14 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		return DeleteProjectSummary{}, fmt.Errorf("resolve project: %w", err)
 	}
 	if id == "" {
-		return DeleteProjectSummary{}, fmt.Errorf("project %s not found", ProjectArg("project_id", input))
+		// `ProjectIdentifierLabel` and not a field name, for the reason
+		// `ambiguousProject` gives: this store method is reached by
+		// `ghost_project_delete` (whose argument is `project`) and by
+		// `ghost project delete <name-or-id>` (a bare operand), so the one name
+		// both callers agree on is the value, not the argument. The MCP boundary
+		// wraps this sentence in `ghost_project_delete: `, which is what tells an
+		// agent which tool refused it and therefore which argument to change.
+		return DeleteProjectSummary{}, fmt.Errorf("project %s not found", ProjectArg(ProjectIdentifierLabel, input))
 	}
 	if id == "_global" {
 		return DeleteProjectSummary{}, fmt.Errorf("refusing to delete the _global project")
@@ -2270,7 +2277,7 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 // a NormalizeRepoRemote'd remote, which has had its userinfo stripped, so there is
 // no credential left in it to withhold.
 func ambiguousProject(input, reason string) error {
-	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, ProjectArg("project identifier", input), reason)
+	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, ProjectArg(ProjectIdentifierLabel, input), reason)
 }
 
 // basenameCandidate is one projects row that answers to a name.
