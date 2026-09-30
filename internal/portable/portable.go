@@ -284,6 +284,15 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 // it. #796 closed that for the id-shape checks; #813 closed it for every refusal
 // the importers make about a record, so a new one cannot be missed here.
 //
+// It calls the store's predicates rather than restating a class, and that is the
+// whole argument for the shape: a filter written HERE drifts, and the drift is
+// invisible until a restore rejects a file the operator believes is good.
+//
+// A memory's TAGS are the one field where "export what the importer accepts" is
+// right for the wrong reason and wrong for the right one, and the reasoning is on
+// `CheckImportedMemory` in `internal/memory/import_check.go` — where the omission
+// is deliberate and is stated as an omission rather than left to be found.
+//
 // Leaving the record OUT is the only honest option for a refusal Ghost cannot
 // repair. A different id is a different row: `memory_links`, the recorded history
 // and every `ghost history` read are attached to the id this store holds, so

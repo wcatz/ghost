@@ -33,6 +33,19 @@ const (
 	projectContextGlobalsCap = 15
 )
 
+// The two section headings, as constants, because #809 turned out to need both of
+// them in three places and the two surfaces are not allowed to spell one
+// differently. `## Global (applies to all projects)` in particular is not
+// decoration: the server's own SessionStart instructions key their trust guidance
+// on that exact heading — "Global memories under \"Global (applies to all
+// projects)\" apply across every project, but they are not all the user's own" —
+// so a row that loses the heading loses the guidance, and a row that gains a
+// near-enough heading is guidance the agent cannot match.
+const (
+	memorySectionHeading = "## Memories"
+	globalSectionHeading = "## Global (applies to all projects)"
+)
+
 // projectContextBudget is the policy for ONE read, and the two callers use it
 // differently on purpose:
 //
@@ -170,6 +183,91 @@ func projectContextItems(items []assemble.Item) string {
 	return sb.String()
 }
 
+// projectContextSplit separates an admitted window into the requested project's
+// own rows and the `_global` ones, by the row's OWN project rather than by the
+// order it arrived in (#809).
+//
+// This is the fix for the one heading the trust guidance depends on. A resolved
+// project's window is a UNION — `projectContextBudget` sets `IncludeGlobal`, so the
+// read is `project_id = ? OR project_id = '_global'` — and the whole union was
+// rendered under a single `## Memories` heading. So a cross-project row was listed
+// as one of this project's memories with nothing on the line saying otherwise, on
+// the most common path, while the UNRESOLVED path and `docs/mcp.md` both put the
+// same rows under `## Global (applies to all projects)`. Only the per-row `source=`
+// label survived, and the SessionStart instructions say explicitly to trust the
+// heading rather than the fact that a row is global.
+//
+// The ordering is PRESERVED within each half, and that is the whole constraint on
+// the split: the window is ranked by one composite over both populations, so
+// re-sorting either half would change which rows a caller sees. Splitting is a
+// partition, not a selection, and the caller still admits exactly the rows the
+// window admitted.
+//
+// It is keyed on `it.ProjectID` rather than on a comparison against the requested
+// project, which is what makes the `_global` case fall out correctly: a caller that
+// asks for `project_id: "_global"` gets a window of globals and therefore an empty
+// `own` half and a `## Global` section for the whole block — which is what that
+// request is, and is the same listing `ghost://memories/global` serves. The session
+// start's `loadSessionPassive` partitions the same way for the same reason, and
+// this is the project-context half of that one rule.
+func projectContextSplit(items []assemble.Item) (own, globals []assemble.Item) {
+	for _, it := range items {
+		if it.ProjectID == memory.GlobalProjectID {
+			globals = append(globals, it)
+		} else {
+			own = append(own, it)
+		}
+	}
+	return own, globals
+}
+
+// splitMemoriesByProject is projectContextSplit for the `as_of` branch, which
+// reads `memory.Memory` through `formatMemories` rather than `assemble.Item`.
+//
+// It is a second function rather than a generic one because the two types are
+// different types: `assemble.Run` does not produce `memory.Memory` and
+// `MemoriesAsOf` does not produce `assemble.Item`, and a shared generic helper over
+// both would have to reach for a field neither of them exposes. The RULE is one —
+// the row's own `ProjectID`, `_global` means global — and this is the same
+// predicate written against the other type, which is the honest form of "one rule,
+// two renderers".
+func splitMemoriesByProject(rows []memory.AsOfRow) (own, globals []memory.Memory) {
+	for _, r := range rows {
+		if r.ProjectID == memory.GlobalProjectID {
+			globals = append(globals, r.Memory)
+		} else {
+			own = append(own, r.Memory)
+		}
+	}
+	return own, globals
+}
+
+// projectContextSection writes one `## `-headed section onto the block, with the
+// blank-line separation every section after the first carries, and writes NOTHING
+// for an empty body.
+//
+// The separator is here rather than at each call site because the two surfaces
+// write their sections in different orders — the tool's Global section is
+// immediately after the memories, the resource's comes after `## Recent
+// Decisions` and `## Learned Context` — and a separator spelled at four call sites
+// is a separator that will be spelled four ways. `sb.Len() > 0` is what makes the
+// first section unseparated on both.
+//
+// A body that already ends in a newline is not a special case: `projectContextItems`
+// ends every row with one, and that is what produces the two blank lines the block
+// has always had between sections.
+func projectContextSection(sb *strings.Builder, heading, body string) {
+	if body == "" {
+		return
+	}
+	if sb.Len() > 0 {
+		sb.WriteString("\n\n")
+	}
+	sb.WriteString(heading)
+	sb.WriteString("\n\n")
+	sb.WriteString(body)
+}
+
 // projectNotRegistered is the sentence for a project name no `projects` row
 // matches, and there is ONE of it for three callers.
 //
@@ -235,41 +333,64 @@ func projectContextWithNotRegistered(text, asked string) string {
 }
 
 // projectContextGlobalSection renders the `## Global (applies to all projects)`
-// block for this surface, or "" when there is nothing to show under it.
+// block onto the block being built, or writes nothing when there is nothing to
+// show under it.
 //
-// It is the ONE render of that section, shared by the tool and by
-// buildProjectContext, so the two cannot spell one heading differently. The
-// `alreadyShown` filter is applied AFTER the cap, and that is the whole reason the
-// section is a second REQUEST rather than a second slice: it is a section
+// It writes into the caller's builder rather than returning a string, because the
+// heading and the blank-line separation around it are part of the section and
+// `projectContextSection` is the one place either is spelled. Returning a string
+// would put that decision back at two call sites with different section orders.
+//
+// It is the ONE render of that section's read, shared by the tool and by
+// buildProjectContext, so the two cannot disagree about which rows the second read
+// contributes — and after #809 the heading is load-bearing rather than cosmetic,
+// because the server's own instructions key their trust guidance on it.
+//
+// `alreadyShown` is every row the block has rendered, and `carried` is the
+// `_global` half of the mixed window (#809): the rows the first read delivered under
+// `## Memories` and that now belong under this heading. They are rendered HERE,
+// inside the one Global section, rather than under a second copy of the heading
+// beside the memories — a block with two `## Global` headings reads as a duplicate,
+// and the second one's rows look like more than the cap allows.
+//
+// That is also why `carried` is a parameter rather than something this function
+// reads: the resource's Global section comes after `## Recent Decisions` and
+// `## Learned Context`, and the tool's comes straight after the memories, so the
+// rows have to be handed over rather than fetched again.
+//
+// The `alreadyShown` filter is applied AFTER the cap, and that is the whole reason
+// the section is a second REQUEST rather than a second slice: it is a section
 // boundary, not a selection rule. Filtering it into the store's read would run
 // before the cap and admit up to 15 NEW rows where the shipped code admitted 15
-// rows of which some were repeats. `SlicePolicy.ExcludeSeen` stays unread for
-// that reason.
+// rows of which some were repeats. `SlicePolicy.ExcludeSeen` stays unread for that
+// reason.
+//
+// A failed global read is silence about the EXTRA rows and nothing more: the rows
+// the window already carried are in hand, and dropping them because a second read
+// failed would trade a section that is true for one that is missing. The block is
+// the answer, and a block with fewer globals beats an error here.
 //
 // `limit` is the cap the CALLER asked for, and the two call sites pass different
 // ones on purpose — see projectContextGlobalBudget.
-func (s *Server) projectContextGlobalSection(ctx context.Context, limit int, alreadyShown []assemble.Item) string {
-	seen := make(map[string]bool, len(alreadyShown))
-	for _, it := range alreadyShown {
-		seen[it.ID] = true
-	}
-	globals, err := s.projectContextGlobals(ctx, limit)
-	if err != nil {
-		// A failed global read is silence, exactly as it was when this ran inline:
-		// the block is the answer, and a block without a global section beats an
-		// error here.
-		return ""
-	}
-	var extra []assemble.Item
-	for _, g := range globals.Items {
-		if !seen[g.ID] {
-			extra = append(extra, g)
+func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Builder, limit int, alreadyShown, carried []assemble.Item) {
+	rows := carried
+	if globals, err := s.projectContextGlobals(ctx, limit); err == nil {
+		seen := make(map[string]bool, len(alreadyShown))
+		for _, it := range alreadyShown {
+			seen[it.ID] = true
+		}
+		// A fresh slice rather than an append onto `carried`: the caller owns that
+		// one, and `append` would write into its spare capacity — the kind of alias
+		// that shows up as a duplicated row in a block nobody is mutating.
+		rows = make([]assemble.Item, 0, len(carried)+len(globals.Items))
+		rows = append(rows, carried...)
+		for _, g := range globals.Items {
+			if !seen[g.ID] {
+				rows = append(rows, g)
+			}
 		}
 	}
-	if len(extra) == 0 {
-		return ""
-	}
-	return "## Global (applies to all projects)\n\n" + projectContextItems(extra)
+	projectContextSection(sb, globalSectionHeading, projectContextItems(rows))
 }
 
 // projectContextEmptyNote is what the surface says about a project whose memory

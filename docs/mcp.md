@@ -117,16 +117,18 @@ An unknown value is refused in the caller's own words, naming all three, and not
 `ghost_project_context`, the `ghost://project/{id}/context` resource and the `recall_project` prompt share one *policy*, not one read: the tool issues its own assembly at the caller's `limit`, while the resource and prompt go through one body that reads at a fixed 20 for `## Memories` and a fixed 15 for `## Global`. Their memory rows are assembled rather than selected by a private query, so they carry the same selection, the same filters and the same rendered fields as `ghost_memory_search` — including a `valid_until` window that has closed.
 
 - **The rows.** The project's own and `_global`'s, ranked by the composite score of importance, pin and category-aware recency, superseded rows pushed down and a near-duplicate pushed behind anything unpaired. `limit` (default 20, maximum 100) caps the whole block; the resource uses a fixed 20 for `## Memories` and a fixed 15 for `## Global`, minus anything the first section already showed. A superseded or near-duplicate row can therefore fall out of the block — that is a membership decision the ranking makes, not a truncation.
+- **A cross-project row is under `## Global`, on every path.** The window is one ranked union of this project's rows and `_global`'s, and it is split by the row's own project before it is rendered: the project's own under `## Memories`, the rest under `## Global (applies to all projects)`. Nothing is added, dropped or re-sorted — `limit` still caps the whole block and the two sections hold the same rows the unsplit window admitted. The split matters because that heading is not decoration: the instructions every session loads tell an agent that the memories under it "are not all the user's own", and to trust each row's origin label rather than the fact that a row is global. Under a single `## Memories` heading a cross-project row lost the one thing the guidance points at, and only the per-row `source=` label survived. `ghost_project_context` used to do exactly that on all three of its paths — a project that resolves, the `as_of` reading (which is a union too), and the unknown-name path — while the session-start block has always split the same way.
 - **A memory whose validity window has closed, or has not opened, is not shown.** It was marked `expired` before; it is now withheld, the same as on `ghost_memory_search` and in the session-start block. `ghost_memories_list` and `ghost_search_all` still show it, still marked, because they browse rather than filter.
+- **`_global` is a bucket, not a project, and every sentence about it says so.** `project_id: "_global"` resolves, so all three surfaces read it — but the block carries no `## Memories` section, because the window it reads *is* the cross-project rows, and an empty one answers "No memories found among the cross-project rows" rather than the project census a real project in the same shape would get. When rows were found and withheld, the answer is the assembler's own verdict, whose surviving half is a fact about the **window** ("the block was not empty before that — the answer is withheld, not absent") rather than about a project, and which points at `ghost_memories_list` — the tool resolves `_global` and lists the global rows still marked with their window, so that advice is actionable. What a `_global` request never says is the clause a project gets: "Ghost holds N memories for this project and none of it is in the block above", and the "nothing has been saved for it" census. Both are claims about a project's own rows, and a bucket has none. All three surfaces are asserted on the same fixtures, because a bucket read that answers differently on the tool than on the resource is the defect this row describes.
 - **A block says which kind of empty it is, whether or not the block is empty.** A project with no memories at all, or whose over-fetched window came back empty, reports that nothing has been saved. A project whose memories were all found and withheld reports *that* instead, and points at `ghost_memories_list` — where they are still visible with the window they carry. The distinction matters because the first is a census of the window and the second is not.
 
-  That check is on the PROJECT's own rows, not on the block, and it has to be. The block also carries `_global` rows, so it is rarely empty on a store that has any — and a project whose every memory has retired would otherwise be answered with the cross-project preferences under a `## Memories` heading, saying nothing about its own rows. So a block that admits no row of the requested project says so: how many the project holds, that none is above, and where to browse them. The count covers rows left out for any reason — validity, the cap, deduplication, resolution — so the sentence names no cause, and `ghost_memories_list` is the surface that shows them all.
+  That check is on the PROJECT's own rows, not on the block, and it has to be. The block also carries `_global` rows, so it is rarely empty on a store that has any — and a project whose every memory has retired would otherwise be answered with the cross-project preferences, saying nothing about its own rows. So a block that admits no row of the requested project says so: how many the project holds, that none is above, and where to browse them. The count covers rows left out for any reason — validity, the cap, deduplication, resolution — so the sentence names no cause, and `ghost_memories_list` is the surface that shows them all.
 
   The block being non-empty is not a reason to stay quiet, and the section that makes it non-empty is often a summary of the very rows that were withheld. `## Learned Context` is a direct read of `ghost_state` and not a memory row, so a project can have an empty memory read and a full block: `ghost reflect` writes learned context for a project whose memories have since aged out. (`## Recent Decisions` reaches the same shape only once the decision's companion memory is deleted or withdrawn — `ghost_decision_record` saves one of those too, so a decision normally brings a live row of its own with it.) So when the memory read admits no row of the project, the sentence is chosen by the VERDICT rather than by the text around it — the abstention and its `ghost_memories_list` pointer when rows were found and withheld, and nothing when the project holds no memory row of its own. That second half matters because the window is read as this project *plus* the cross-project ones, so a project with nothing of its own can share an "everything was out of date" verdict with rows that are not its own. Either way the note appears when there is something of yours to report; which one it is, is a fact about your rows, not about what else the block carries.
 
   The same rule holds on an **empty** block, and that is where it was wrong longest: a project with no memories of its own was told its rows had been retired on a store whose cross-project rows had also aged out, with the same "call `ghost_memories_list`" pointer to a browse that returns nothing for it. It now gets the ordinary empty-project answer instead — and, in the other direction, a project whose rows are all *withdrawn* (`ghost resolve` and `ghost resolve --mark` stamp `resolved_at`, and the context block does not read resolved rows) is no longer reported as one that has never been saved anything, nor as one whose rows "were withheld as out of date". It says how many it holds and that none is in the block, which is the same sentence a capped or deduplicated project gets.
-- **A project name Ghost has never seen still gets the cross-project rows.** The tool and the resource resolve the name first, and an unknown one resolves to nothing — so there is no project section to show. The `## Global (applies to all projects)` section does not depend on a project, and it is still rendered, followed by the sentence saying the project is not registered. You used to get those rows mislabelled under `## Memories`; now they are under the heading that is true of them. The first session in a new project is exactly when those preferences and conventions are worth having.
-- **Not part of the assembled rows**, and unchanged by any of the above: the learned-context summary, the resource's `## Recent Decisions`, and the `as_of` reading. An `as_of` request is a historical read rather than a current assembly — ranked from the change log rather than from the current tables, still honouring `limit`, and returning the wording each memory held at that instant with the halves that have no history (learned context, decisions, tasks) omitted rather than shown as they are now. `as_of` for a project name Ghost has never registered is **refused**, and the answer names the instant: a past reading of a project that does not exist is not a reading of anything, and answering it from the present would hand back today's rows to a caller who asked for a past one with nothing in the payload saying so.
+- **A project name Ghost has never seen still gets the cross-project rows.** The tool and the resource resolve the name first, and an unknown one resolves to nothing — so there is no project section to show. The `## Global (applies to all projects)` section does not depend on a project, and it is still rendered, followed by the sentence saying the project is not registered. You used to get those rows under `## Memories`; they are under the heading that is true of them. The first session in a new project is exactly when those preferences and conventions are worth having.
+- **Not part of the assembled rows**, and unchanged by any of the above: the learned-context summary, the resource's `## Recent Decisions`, and the `as_of` reading. An `as_of` request is a historical read rather than a current assembly — ranked from the change log rather than from the current tables, still honouring `limit`, still split into `## Memories` and `## Global` the same way, and returning the wording each memory held at that instant with the halves that have no history (learned context, decisions, tasks) omitted rather than shown as they are now. `as_of` for a project name Ghost has never registered is **refused**, and the answer names the instant: a past reading of a project that does not exist is not a reading of anything, and answering it from the present would hand back today's rows to a caller who asked for a past one with nothing in the payload saying so.
 
 ## Resources
 
@@ -176,6 +178,30 @@ once, because a reader who was never told the convention cannot be expected to
 honour it, and a second copy of the explanation reads as a stray duplicate rather
 than as emphasis.
 
+Two more fields are printed outside the delimiters *undelimited*, and both earn it
+by being short labels rather than prose. A row's **`tags:[…]`** label is a JSON
+array, so `json.Marshal` already escapes a newline, a quote and a backslash and a
+tag cannot forge a line or break out of its own string — but it does not escape
+`«` or `»`, which would open a data block of its own mid-metadata. A guillemet in a
+tag therefore prints as `<<` or `>>`, the same substitution the delimiters
+themselves use, so a reader who has met one knows the other, and a backtick prints
+as the JSON escape `\u0060` — there is no reader-facing convention for a backtick,
+so it gets the form the surrounding array already uses. The consolidation prompt is a fourth printing surface for the same field, and the
+worse one: its list is neither JSON nor delimited, it sits on a line the model emits
+`keep`/`merge`/`rewrite`/`drop` operations against, and a newline in a tag would end
+the record. So its class is the larger one — every control character, not just the
+delimiters and the backtick — and its **separators** are escaped too, which is a
+different kind of problem: a tag holding the separator reads as a different tag
+*count*, and the count is what the model reasons about. Its list is `|`-separated
+because a comma cannot be a separator on a surface that has to survive one, and every
+altered tag is marked so a reader can tell a substituted label from a genuine one. A
+delimiter still prints as `<<`/`>>` there, so the same tag reads the same in both
+places.
+A space and any length are fine: a tag is a label, not a key, and "ci timeouts" is a
+real one. A row's
+**`source=`** label comes from a closed vocabulary (`reflection`, `chat`, `manual`,
+`tool`, `mcp`, `onboarding`, `decision_log`, `builtin`), so it is printed bare.
+
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory
 rows were quoted before this existed, and the block's exact recorded shape is a
@@ -197,7 +223,13 @@ is for:
   tab, a NUL, a backtick or a `«` cannot start a line, close the backtick span or
   the `scope{…}` label, or open a data block of its own. A well-formed id is
   abbreviated to eight characters in a listing; one that had to be quoted is shown
-  whole, because eight runes of an escape is nothing a reader can use.
+  whole, because eight runes of an escape is nothing a reader can use. The eight
+  are *characters*: an id is not necessarily hex — `ghost import` writes an
+  artifact's ids verbatim — so a byte cut on a non-ASCII one returns half a rune.
+  The two agent-facing places that abbreviate, the listings and the assembler's
+  trace notes, go through one function, so they measure the same eight the same
+  way. `cmd/ghost`'s report form is deliberately not that function: its lines go
+  to a terminal for a human to paste, so an id there has to stay copyable.
 - **A label** — a project's name and path, which are normally full of spaces, and
   which a save stores verbatim from the `project_id` argument — keeps ordinary
   text exactly as written and escapes only what could end the line or close the
@@ -229,6 +261,21 @@ import` refuse a file `ghost export` had just written. An id is a primary key, s
 a shortened one would name a *different row* — a memory under a key the artifact
 never chose, colliding with whatever genuinely holds it.
 
+**A tag is refused at WRITE time, and never costs a record.** All four tools that
+take a tag list — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update`
+and `ghost_decision_record` — refuse a tag holding a control character, a backtick
+or a `«»`, naming the position and the tag itself. That is the only place the
+refusal belongs, and the reason is worth stating because getting it wrong costs
+data: an import-side guard cannot protect a store it never sees, and a
+`ghost_memory_save` that accepted `["«urgent»"]` produced a row that then fell out
+of every `ghost export`, because the exporter applies the importer's own checks. A
+backup that loses a memory because of a label is not a backup. So the import and
+export paths carry a tag byte for byte, a store's existing tags round-trip
+unchanged, and the renderer above is what makes an old one safe to read. An
+over-long tag is trimmed on a rune boundary rather than refused, and a tag over 64
+bytes is stored as the first 64 — a shortened *label* is a different label, not a
+different row, which is the whole difference from an id.
+
 Those checks run **after** the importer's id-presence check and before every
 message that would interpolate the id, and both positions are load-bearing. After
 the presence check, because a record already in the store is a *skip* and never a
@@ -242,5 +289,11 @@ forged by the record it is refusing. The rejection is per-record and named by
 artifact line number, so one damaged line does not abandon a file that may hold ten
 thousand good ones, and a dry run classifies the file exactly as the apply run it
 previews.
+
+`ghost export` applies **these same checks** rather than a second spelling of them,
+so it never writes a record its own importer would reject. A record it leaves out is
+named on stderr with the reason and the run exits non-zero — the file it wrote is
+complete and importable, just not the whole store, and deleting a working backup
+over a warning about the rows it lacks would be the worse failure.
 
 For the underlying server implementation, see [`architecture.md`](architecture.md). For client setup, see [`installation.md`](installation.md).
