@@ -173,11 +173,19 @@ func TestTheGlobalProjectContextRendersItsOwnWindow(t *testing.T) {
 		if n := strings.Count(out, globalSectionHeading); n != 1 {
 			t.Errorf("%s carries %d %q headings, want exactly one:\n%s", surface, n, globalSectionHeading, out)
 		}
-		// Keyed on the CONTENT, not on an id prefix: `ghost_save_global` mints a
-		// random 32-hex id per save, so there is no `g`-shaped prefix to count and
-		// the first version of this assertion failed on a block full of rows.
-		if !strings.Contains(out, "numbered 00") {
-			t.Errorf("%s rendered no global rows at all:\n%s", surface, out)
+		// A COUNT over the population, never a containment of one member. The
+		// fixture seeds 22 rows against a 20-row cap, and WHICH two are cut is a
+		// function of `hex(randomblob(16))`: every row shares a category, an
+		// importance and a pinned value, and `created_at` is the schema default at
+		// second precision, so `passiveFetchSQL`'s final tie-break is the id and the
+		// two rows with the largest ids are cut. A test naming one row therefore
+		// fails on roughly 2 runs in 22, and the sibling test in this file already
+		// states the rule it would break. The first version of this assertion did
+		// exactly that, with a second version of its own on top: it counted an
+		// `g`-shaped id prefix, which `ghost_save_global` never mints.
+		if n := strings.Count(out, "a cross-project preference numbered"); n != projectContextMemoriesCap {
+			t.Errorf("%s rendered %d global rows, want the %d its window cap admits:\n%s",
+				surface, n, projectContextMemoriesCap, out)
 		}
 	}
 
@@ -220,38 +228,78 @@ func TestTheGlobalProjectContextRendersItsOwnWindow(t *testing.T) {
 }
 
 // TestTheGlobalProjectContextIsNotCountedAsAnotherProjectsRows keeps the half of
-// the old guard that was RIGHT, because the fix above must not have widened it.
+// the old guard that was RIGHT, and a review of #817 is right twice over about the
+// first version: it seeded a memory in a DIFFERENT project, which nothing on the
+// `_global` path counts, so deleting the guard left it green; and its fixture had a
+// LIVE global in the block, which stops the note path being reached at all.
 //
-// `projectContextOwnRowsNote` refused `_global` deliberately: it is a bucket, not a
-// project to count rows for, and a sentence about "this project's memories" is
-// false of it. The split renders rows for `_global`; it must not also start
-// reporting a gap on that path, which is the failure `TestTheGlobalProjectContext
-// RendersItsOwnWindow`'s fixture — which holds rows in the block — would not see.
+// The shape that reaches it, and the only one, is a `_global` window that admits
+// NOTHING while `CountMemories` still counts what is in the store. A `valid_until`
+// in the past is the cheapest such row: stage 2 drops a closed window, so the row
+// is stored, counted, and not admitted. Then:
+//
+//   - WITH the guard, `projectContextOwnRowsNote` returns "" and the caller falls
+//     through to its own answer;
+//   - WITHOUT it, `n > 0` and `len(res.Items) == 0`, so it renders "Ghost holds N
+//     memories for this project and none of it is in the block above" — a claim
+//     about a PROJECT, over a block that is a listing of `_global`.
+//
+// The assertion is on the sentences rather than on which branch produced them, and
+// the fixture is asserted first: a test that cannot tell whether its own shape is
+// right is the exact failure this rewrite is fixing.
 func TestTheGlobalProjectContextIsNotCountedAsAnotherProjectsRows(t *testing.T) {
-	srv, _ := newValiditySession(t)
+	srv, session := newValiditySession(t)
 	ctx := context.Background()
 
-	// A project of its own with exactly one memory, so a `_global` read that were
-	// counted against it would report a gap, and a `_global` read that is counted
-	// correctly reports nothing.
-	if _, err := srv.store.Create(ctx, "vproj", memory.Memory{
-		Category: "preference", Content: "a claim about this project only", Source: "manual",
+	// ONLY closed-window globals. A live one would be admitted into the block,
+	// and the loop in `projectContextOwnRowsNote` that returns "" for a row of the
+	// requested project would find it — so the note could not be reached and the
+	// guard would never be consulted. That was the first version's second mistake.
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_save_global",
+		Arguments: map[string]any{
+			"content": "a cross-project preference whose window has closed", "category": "preference",
+			"valid_until": "2020-01-01T00:00:00Z",
+		},
 	}); err != nil {
-		t.Fatalf("Create: %v", err)
+		t.Fatalf("save_global: %v", err)
 	}
+
 	text, err := srv.buildProjectContext(ctx, memory.GlobalProjectID)
 	if err != nil {
 		t.Fatalf("buildProjectContext(_global): %v", err)
 	}
+	// The fixture must be the shape the test claims, or it proves nothing. The row
+	// must be in the store and OUT of the block: a row the window admits reaches
+	// the loop in `projectContextOwnRowsNote` that returns "" for a row of the
+	// requested project, so the guard is never consulted.
+	if n := countProjectMemories(t, srv, memory.GlobalProjectID); n != 1 {
+		t.Fatalf("the store counts %d global rows, want 1 — this test is about a store that holds a row the "+
+			"window will not admit", n)
+	}
+	if strings.Contains(text, "whose window has closed") {
+		t.Fatalf("the closed row reached the block, so the window did not exclude it and the note path is "+
+			"unreachable:\n%s", text)
+	}
+	// No sentence about "this project" and its rows, and no abstention: on a bucket
+	// that is not a project to count rows for, every one of these is false.
 	for _, note := range []string{
 		"Ghost holds no memories for this project",
+		"Ghost holds 1 memory for this project",
 		"and none of it is in the block above",
-		"the memory rows above are the cross-project ones",
+		"none of them is current",
+		"are not all the user",
+		"Call ghost_memories_list",
 	} {
 		if strings.Contains(text, note) {
-			t.Errorf("the _global block carries the note %q, which is a claim about ANOTHER project and false here:\n%s",
+			t.Errorf("the _global block carries %q, which is a claim about ANOTHER project and false here:\n%s",
 				note, text)
 		}
+	}
+	// And the answer is not EMPTY either: a `_global` request that answers with
+	// nothing is a different defect, and one that hides behind this one.
+	if strings.TrimSpace(text) == "" {
+		t.Error("the _global block is empty, so the closed row is not reaching the caller's own answer either")
 	}
 }
 
