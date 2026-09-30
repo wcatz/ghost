@@ -2,6 +2,7 @@ package supersede
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -558,4 +559,166 @@ func mustGetLinks(t *testing.T, store *memory.Store, id string) []memory.Link {
 		t.Fatalf("GetLinks(%s): %v", id, err)
 	}
 	return links
+}
+
+// seedCausesCycle writes a pair live in BOTH directions of 'causes', which is the
+// state a pass before #823 could leave, and returns the two notes' ids with the
+// newer one first (their timestamps are a month apart, so the pair IS
+// judgeable — the shape whose repair #823 settled).
+func seedCausesCycle(t *testing.T, store *memory.Store, db *sql.DB) (newer, older string) {
+	t.Helper()
+	newer = add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	older = add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	for _, dir := range [][2]string{{older, newer}, {newer, older}} {
+		if err := store.CreateLinkJudged(context.Background(), dir[0], dir[1], string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return newer, older
+}
+
+// TestADenyingVerdictDropsBothOfACausesCyclesEdges is the review finding that the
+// first cut of this change missed: the both-directions sweep existed only on the
+// AFFIRMING branch.
+//
+// A 'causes' cycle is settled by an affirming verdict because the guarded write
+// in front of it closes the cycle. A DENYING verdict writes nothing, so the sweep
+// is the only thing that can, and stopping it at one direction left the pair's
+// other edge live: the graph went on asserting that each of the pair's notes
+// caused the other, while `Result.ReclassifiedNoWrite` and the row's `already
+// gone` marker both said the pair was unlinked.
+func TestADenyingVerdictDropsBothOfACausesCyclesEdges(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		verdict Relation
+		// live is what the graph must hold afterwards: a NEITHER or a REVERSED
+		// leaves nothing, and both are the reason the count matters.
+		live int
+	}{
+		{name: "neither", verdict: RelationNeither, live: 0},
+		{name: "reversed", verdict: RelationReversed, live: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, db := seed(t)
+			ctx := context.Background()
+			newer, older := seedCausesCycle(t, store, db)
+
+			cls := &scriptedRelation{relation: tc.verdict}
+			res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(classified) != 1 {
+				t.Fatalf("classified = %+v, want one row", classified)
+			}
+			if got := liveCausesEdges(t, store, newer, older); len(got) != tc.live {
+				t.Errorf("live 'causes' edges = %v, want %d: a denying verdict says the pair is no relation at all, and one edge left is a cycle the graph still asserts",
+					got, tc.live)
+			}
+			if got := classified[0].CausesDropped; got != 2 {
+				t.Errorf("CausesDropped = %d, want 2: the row has to name both rows the run moved, or the `[+N causes edge dropped]` clause describes half the change", got)
+			}
+			if !classified[0].Withdrawn {
+				t.Error("Withdrawn = false over a run that removed two live edges: the marker above this row is a claim about the graph, and `already gone` is the wrong one")
+			}
+			if res.Reclassified != 1 || res.ReclassifiedNoWrite != 1 {
+				t.Errorf("Reclassified=%d ReclassifiedNoWrite=%d, want 1/1", res.Reclassified, res.ReclassifiedNoWrite)
+			}
+		})
+	}
+}
+
+// TestACausesCycleOnAPairHoldingASupersedesEdgeIsJudgedInTheEdgesDirection is the
+// second review finding, and it is the #641 shape wearing a 'causes' costume.
+//
+// `pairDirection` reported "no single stored direction" as soon as a pair's
+// 'causes' edges disagreed — before the rule that a 'supersedes' edge's direction
+// wins. A store a pre-#823 pass wrote is exactly that: a live 'supersedes' edge
+// with a 'causes' cycle beside it, because that writer shipped unguarded. The pair
+// then fell into the causes-cycle path, was judged in the TIMESTAMPS' direction,
+// and a NEITHER verdict invalidated 'supersedes' in the timestamps' direction —
+// which is not where the live edge is, so nothing was withdrawn while the report
+// said it was.
+func TestACausesCycleOnAPairHoldingASupersedesEdgeIsJudgedInTheEdgesDirection(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer, older := seedCausesCycle(t, store, db)
+	// The 'supersedes' edge, running the OTHER way round from the timestamps —
+	// so the pair has a stored direction that disagrees with them, and a verdict
+	// read in the timestamps' direction is asked about an edge that is not there.
+	if err := store.CreateLinkJudged(ctx, older, newer, string(RelationSupersedes), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+
+	cls := &supersedesEverything{}
+	_, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(cls.judged) != 1 || cls.judged[0] != [2]string{older, newer} {
+		t.Fatalf("asked about %v, want exactly [%s %s]: the live 'supersedes' edge decides the pair's direction even when its 'causes' edges disagree, because that is the edge the pass, `--reassess` and resolve's piggyback can all reach",
+			cls.judged, older, newer)
+	}
+	if len(classified) != 1 || classified[0].ReclassifiedFrom != RelationSupersedes {
+		t.Fatalf("classified = %+v, want one row whose live edge was 'supersedes'", classified)
+	}
+	// The verdict re-AFFIRMED that edge and still took the pair's two 'causes'
+	// rows, which is the whole of this finding: a supersession denies a 'causes'
+	// claim whichever end it is written from, so neither half of the cycle
+	// survives a pass that had every reason to end it.
+	if got := liveCausesEdges(t, store, newer, older); len(got) != 0 {
+		t.Errorf("live 'causes' edges = %v, want none: the pair is now a supersession, and a 'causes' claim in either direction is what that verdict denies", got)
+	}
+	if got := liveSupersedesEdges(t, store, older, newer); len(got) != 1 || got[0] != [2]string{older, newer} {
+		t.Errorf("live supersedes edges = %v, want exactly [%s %s]: the edge the verdict re-affirmed is not the one it drops", got, older, newer)
+	}
+	if got := classified[0].CausesDropped; got != 2 {
+		t.Errorf("CausesDropped = %d, want 2: the row has to name both rows the run moved", got)
+	}
+}
+
+// TestACausesCycleSettledByACausesVerdictIsCountedAndPrinted is the third
+// finding: the row set `CausesDropped` and `Withdrawn`, and the report printed
+// it as an ordinary `causes` line.
+//
+// The relation did not change — the verdict came back CAUSES on a pair whose live
+// edge was a 'causes' one — so nothing counted it, and the one graph row the run
+// actually deleted was invisible on every surface while the summary read
+// "0 reclassified".
+func TestACausesCycleSettledByACausesVerdictIsCountedAndPrinted(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	_, _ = seedCausesCycle(t, store, db)
+
+	cls := &recordingCauses{}
+	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(classified) != 1 {
+		t.Fatalf("classified = %+v, want one row", classified)
+	}
+	if res.Reclassified != 1 {
+		t.Errorf("Reclassified = %d, want 1: the pair's live claim went from two edges to one, which is the mutation this count has always meant", res.Reclassified)
+	}
+	if res.ReclassifiedNoWrite != 0 {
+		t.Errorf("ReclassifiedNoWrite = %d, want 0: the verdict affirmed a relation and wrote an edge, so the run was not purely destructive", res.ReclassifiedNoWrite)
+	}
+	if classified[0].CausesDropped != 1 || !classified[0].Withdrawn {
+		t.Errorf("row = %+v, want CausesDropped 1 and Withdrawn true: the edge the run deleted has to be on the row the operator reads", classified[0])
+	}
+	// That the REPORT prints it is the other half, and it is in cmd/ghost:
+	// TestSupersedePairLinesNamesTheEdgeACausesCycleRemoved.
+}
+
+// scriptedRelation answers one relation to every pair, for the fixtures that need
+// a specific verdict rather than a recording classifier.
+type scriptedRelation struct{ relation Relation }
+
+func (c *scriptedRelation) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
+	out := make([]Relation, len(pairs))
+	for i := range pairs {
+		out[i] = c.relation
+	}
+	return out, nil
 }

@@ -729,3 +729,65 @@ func TestRunSupersedeReportsACausesEdgeItReplacedWithASupersession(t *testing.T)
 		})
 	}
 }
+
+// TestSupersedePairLinesNamesTheEdgeACausesCycleRemoved is the reporting half of
+// the 'causes'-cycle rule, and it is a formatter test on purpose: what the pass
+// writes is held by internal/supersede, and what the operator is TOLD is held
+// here.
+//
+// A 'causes' CYCLE answered CAUSES keeps the direction the pass was asked about
+// and drops the edge asserting the other, so the pair's live claim goes from two
+// edges to one while the relation is unchanged. The row is a reclassified pair
+// whose verdict equals the edge it carried, which is the one combination the
+// report's skip test used to treat as "nothing happened" — so the run deleted a
+// graph row, the summary counted zero reclassifications, and the row printed as an
+// ordinary `causes` line.
+func TestSupersedePairLinesNamesTheEdgeACausesCycleRemoved(t *testing.T) {
+	row := supersede.Classified{
+		Candidate: supersede.Candidate{
+			NewerID: reclassCausesNewer, OlderID: reclassCausesTarget,
+		},
+		Relation:         supersede.RelationCauses,
+		Reclassified:     true,
+		ReclassifiedFrom: supersede.RelationCauses,
+		Withdrawn:        true,
+		CausesDropped:    1,
+		TargetProjectID:  "proj",
+	}
+	// The two halves of the row: the marker, which is a claim about the graph and
+	// has to be the one this run earns, and the clause naming the second row.
+	out := supersedePairLines(true, []supersede.Classified{row})
+	if !strings.Contains(out, "withdrew") {
+		t.Errorf("a row whose live edge this run removed does not carry the `withdrew` marker:\n%s", out)
+	}
+	if strings.Contains(out, "already gone") {
+		t.Errorf("a row this run withdrew claims the edge was already gone:\n%s", out)
+	}
+	if !strings.Contains(out, "[+1 causes edge dropped]") {
+		t.Errorf("the row says nothing about the edge the run removed:\n%s", out)
+	}
+	// And the same pair in a dry run promises rather than claims. `Withdrawn` is
+	// false there because the apply block never ran, which is the distinction the
+	// marker reads — so the fixture has to differ, and the fact that it has to is
+	// the reason a dry run cannot print a claim it has not earned.
+	promised := row
+	promised.Withdrawn = false
+	dry := supersedePairLines(false, []supersede.Classified{promised})
+	if !strings.Contains(dry, "would withdraw") {
+		t.Errorf("a dry run's row is not in the would-withdraw tense:\n%s", dry)
+	}
+	if strings.Contains(dry, "causes edge dropped") {
+		t.Errorf("a dry run forecasts a deletion count it never looked for:\n%s", dry)
+	}
+
+	// The control: a re-affirmation that moved NOTHING stays off this block. A
+	// predicate that admits every re-classified row would make every quiet
+	// `causes` re-confirmation print as a withdrawal, which is the false claim in
+	// the other direction.
+	quiet := row
+	quiet.Withdrawn = false
+	quiet.CausesDropped = 0
+	if out := supersedePairLines(true, []supersede.Classified{quiet}); strings.Contains(out, "withdrew") {
+		t.Errorf("a re-affirmation that moved nothing is dressed as a withdrawal:\n%s", out)
+	}
+}

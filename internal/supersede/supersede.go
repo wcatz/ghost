@@ -459,10 +459,30 @@ func claimsFor(links []memory.Link) []liveEdge {
 	return out
 }
 
+// pairState is what a pair's live edges turn out to be, once read through the
+// direction each one asserts. It is a NAMED SET of four because the four are four
+// different answers, and two of them are the difference between a pass that acts
+// and a pass that declines — a bool would make the caller re-derive which one it
+// holds, and it got that derivation wrong once already (see pairDirection).
+type pairState int
+
+const (
+	// pairFresh is the ordinary case: the graph says nothing about this pair, so
+	// the scan's own orientation is the pair's.
+	pairFresh pairState = iota
+	// pairDirected is a pair one live edge describes. The returned claim is that
+	// edge and the pair is judged in its direction.
+	pairDirected
+	// pairSupersedesCycle is a pair claimed in both directions in 'supersedes',
+	// which this pass refuses to judge at all.
+	pairSupersedesCycle
+	// pairCausesCycle is a pair whose 'causes' edges disagree, so it has no
+	// single stored direction. The caller judges it by the timestamps.
+	pairCausesCycle
+)
+
 // pairDirection decides which way round a pair holding live edges is judged, and
-// which relation's edge says so. It is the whole of the reconciliation in one
-// function because the three cases are three different answers, not one answer
-// with a flag.
+// which relation's edge says so.
 //
 //  1. TWO 'supersedes' edges disagreeing is a CYCLE, and it is refused rather than
 //     judged. Both edges demote one of the pair's two memories, neither withdraws
@@ -471,26 +491,32 @@ func claimsFor(links []memory.Link) []liveEdge {
 //     OTHER relation, so a SUPERSEDES verdict in one direction re-affirms that
 //     half and leaves its partner exactly as demoting as before.
 //
-//  2. Otherwise a 'supersedes' edge's direction wins, even where a 'causes' edge
-//     contradicts it. That is not a cycle: only one of the two edges demotes, and
-//     a verdict settles both — an affirming one writes the relation it was asked
-//     about and drops the other's edge in EITHER direction, a denying one drops
-//     both relations. Refusing the pair instead would leave a contradiction that
-//     the ordinary pass used to clear for free, and hand it to an operator.
+//  2. Otherwise a 'supersedes' edge's direction wins — INCLUDING where a 'causes'
+//     cycle sits on the same pair, which is the shape a pre-#823 store holds
+//     (that writer shipped unguarded) and which is a #641-shaped miss if the
+//     timestamps get to orient it: the live edge this pass can reach, and the one
+//     `--reassess` and resolve's piggyback act on, is the supersedes one, and
+//     judging the pair the other way asks about an edge that is not there while
+//     leaving the edge that IS in place. A contradicting 'causes' claim is not a
+//     cycle: only one of the two edges demotes, and a verdict settles both — an
+//     affirming one writes the relation it was asked about and drops the other's
+//     edge in EITHER direction, a denying one drops both relations. Refusing the
+//     pair instead would leave a contradiction the ordinary pass used to clear for
+//     free, and hand it to an operator.
 //
-//  3. Otherwise the 'causes' edges' direction wins, and a pair whose 'causes'
-//     edges DISAGREE has no stored direction at all: it is a 'causes' cycle, the
-//     caller judges it in the timestamps' direction, and the verdict settles it.
-//
-// A pair with no live edge returns ok=false with no relation, which is the
-// ordinary fresh case and not a failure — the two refusals above are counted by
-// the caller, because only it knows which of them it hit.
-func pairDirection(edges []liveEdge) (claim liveEdge, ok bool) {
+//  3. Otherwise the 'causes' edges decide, and a pair whose 'causes' edges
+//     DISAGREE has no stored direction at all: it is a 'causes' cycle, the caller
+//     judges it in the timestamps' direction, and the verdict settles it. The
+//     answer cannot be "whichever edge the query returned first":
+//     LinksByRelationSource has no ORDER BY, so that is a coin flip on two hex
+//     ids, which is the #641 harm wearing a different hat.
+func pairDirection(edges []liveEdge) (claim liveEdge, state pairState) {
 	if len(edges) == 0 {
-		return liveEdge{}, false
+		return liveEdge{}, pairFresh
 	}
 	var sup, cau liveEdge
 	haveSup, haveCau := false, false
+	causesDisagree := false
 	for _, e := range edges {
 		switch e.relation {
 		case RelationSupersedes:
@@ -500,7 +526,7 @@ func pairDirection(edges []liveEdge) (claim liveEdge, ok bool) {
 			}
 			if sup.newer != e.newer || sup.older != e.older {
 				// Case 1: a 'supersedes' cycle.
-				return liveEdge{}, false
+				return liveEdge{}, pairSupersedesCycle
 			}
 			if e.stamp > sup.stamp {
 				sup = e
@@ -511,17 +537,13 @@ func pairDirection(edges []liveEdge) (claim liveEdge, ok bool) {
 				continue
 			}
 			if cau.newer != e.newer || cau.older != e.older {
-				// Case 3, second half: a 'causes' cycle, and there is no single
-				// stored direction to prefer. Reporting it as "no direction" is
-				// the WHOLE of the difference from the first half of this case,
-				// and returning the first edge's direction instead would hand
-				// the pair's chronology to whichever row the query returned
-				// first — LinksByRelationSource has no ORDER BY, so that is a
-				// coin flip on a pair of hex ids, which is the #641 harm wearing
-				// a different hat. The caller tells the two apart with
-				// pairIsSupersedesCycle and judges this one in the timestamps'
-				// direction instead.
-				return liveEdge{}, false
+				// Case 3, second half. Recorded rather than returned, because
+				// case 2 outranks it: a pair holding a 'supersedes' edge is
+				// judged in THAT edge's direction whatever its 'causes' edges
+				// say, and only a pair with nothing else to go on is a causes
+				// cycle.
+				causesDisagree = true
+				continue
 			}
 			if e.stamp > cau.stamp {
 				cau = e
@@ -530,38 +552,18 @@ func pairDirection(edges []liveEdge) (claim liveEdge, ok bool) {
 	}
 	switch {
 	case haveSup:
-		// Case 2. A contradicting 'causes' edge is deliberately not consulted.
-		return sup, true
+		// Case 2. A contradicting or cyclic 'causes' claim is deliberately not
+		// consulted.
+		return sup, pairDirected
+	case causesDisagree:
+		return liveEdge{}, pairCausesCycle
 	case haveCau:
 		// Case 3, first half. A pair the timestamps disagree with about is
 		// judged in the edge's own direction, so a REVERSED verdict reaches the
 		// edge that is actually there.
-		return cau, true
+		return cau, pairDirected
 	}
-	return liveEdge{}, false
-}
-
-// pairIsSupersedesCycle reports whether a pair holds two live 'supersedes' edges
-// in opposite directions, which is the one shape this pass refuses to judge
-// (pairDirection, case 1). It is asked separately because a causes cycle and a
-// supersedes cycle are both "no single stored direction" and only one of them is
-// the demoting cycle the refusal is for.
-func pairIsSupersedesCycle(edges []liveEdge) bool {
-	var first liveEdge
-	seen := false
-	for _, e := range edges {
-		if e.relation != RelationSupersedes {
-			continue
-		}
-		if !seen {
-			first, seen = e, true
-			continue
-		}
-		if first.newer != e.newer || first.older != e.older {
-			return true
-		}
-	}
-	return false
+	return liveEdge{}, pairFresh
 }
 
 // claimsHold reports whether the pass read a live edge of this relation in this
@@ -575,6 +577,75 @@ func claimsHold(claims map[pairKey][]liveEdge, newer, older string, relation Rel
 		}
 	}
 	return false
+}
+
+// verdictSweepsBeyond reports whether this verdict's apply block will move a
+// graph row OTHER than the one the pair was judged around — the second row every
+// verdict owes, and the reason a verdict that re-affirmed the live edge's own
+// relation can still be a mutation on the graph.
+//
+// It is a PREDICTION, made from what the pass read, and it exists because the
+// counter that carries it is set before the apply block runs (a DRY RUN reports
+// the number too, and a count only an applied run can reach is a count the
+// preview does not preview). The apply block's own sweeps are gated on the same
+// `claimsHold` predicates, so the count and the writes cannot disagree: what this
+// says is "there is a row there to move", and what the block says is how many
+// moved.
+//
+// A NEITHER and a REVERSED are absent because they deny the pair outright, so
+// `verdict != liveRelation` already counts them.
+func verdictSweepsBeyond(claims map[pairKey][]liveEdge, live, verdict Relation, newer, older string) bool {
+	switch verdict {
+	case RelationSupersedes:
+		// A SUPERSEDES verdict drops the pair's 'causes' edges in BOTH
+		// directions: one of them is the edge a supersession implies, the other
+		// is the edge that contradicts it, and a verdict that keeps either is a
+		// verdict that half-settled the pair.
+		return claimsHold(claims, newer, older, RelationCauses) ||
+			claimsHold(claims, older, newer, RelationCauses)
+	case RelationCauses:
+		// A CAUSES verdict drops the pair's 'supersedes' edge — so a pair that
+		// held one moves a second row whatever its 'causes' edges say — and the
+		// reverse 'causes' edge of a CYCLE.
+		if live == RelationSupersedes {
+			return true
+		}
+		return live == RelationCauses && claimsHold(claims, older, newer, RelationCauses)
+	}
+	return false
+}
+
+// sweepCausesBothWays removes the pair's live 'causes' edges in BOTH directions
+// and returns how many rows it moved, which is what a denying verdict owes: it
+// says the pair is no relation at all, and a 'causes' cycle's two edges deny each
+// other as squarely as an edge the verdict happens to name does.
+//
+// The first statement is unconditional because it is the sweep the pass has
+// always made — the 'causes' edge in the direction this verdict implies. The
+// second is gated on having READ an edge the other way, so the ordinary pair pays
+// no second write and a cycle's other half — which is the only thing the second
+// statement can move — is still removed.
+//
+// A DENYING verdict is the one place the both-directions rule cannot be optional.
+// An affirming verdict writes an edge in the direction it was asked about, and the
+// guard in front of that write closes the cycle; here nothing is written, so a
+// sweep that stopped at one direction would leave the pair's other edge live and
+// the report would claim the pair is unlinked while the graph still asserts that
+// each of its notes caused the other.
+func sweepCausesBothWays(ctx context.Context, store vectorStore, claims map[pairKey][]liveEdge, newer, older string) (int, error) {
+	dropped, err := store.InvalidateLink(ctx, older, newer, string(RelationCauses))
+	if err != nil {
+		return 0, fmt.Errorf("invalidate causes link %s→%s: %w", older, newer, err)
+	}
+	total := int(dropped)
+	if !claimsHold(claims, older, newer, RelationCauses) {
+		return total, nil
+	}
+	reverse, err := store.InvalidateLink(ctx, newer, older, string(RelationCauses))
+	if err != nil {
+		return total, fmt.Errorf("invalidate reverse causes link %s→%s: %w", newer, older, err)
+	}
+	return total + int(reverse), nil
 }
 
 // Classified pairs a Candidate with the verdict Run() reached for it — used
@@ -1325,24 +1396,24 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			all = append(all, cand) // a fresh pair, in the scan's own direction
 			continue
 		}
-		l, ok := pairDirection(edges)
-		if !ok {
-			if pairIsSupersedesCycle(edges) {
-				// A 'supersedes' CYCLE, the state #778's own bidirectional
-				// write leaves behind and the one shape this pass refuses to
-				// judge: both edges demote one of the pair's two memories,
-				// neither withdraws the other, and no orientation of it can be
-				// judged into a state worth keeping. Refused, counted, and
-				// reported with the repair to run — this pass creates links, and
-				// withdrawing one is `ghost supersede --reassess`, which is the
-				// one repair that can see a 'supersedes' edge.
-				res.Bidirectional++
-				if logger != nil {
-					logger.Info("supersede: refusing a pair the graph claims in both directions (ghost supersede --reassess --apply withdraws one)",
-						"newer", edges[0].source, "older", edges[0].target)
-				}
-				continue
+		l, state := pairDirection(edges)
+		switch state {
+		case pairSupersedesCycle:
+			// A 'supersedes' CYCLE, the state #778's own bidirectional
+			// write leaves behind and the one shape this pass refuses to
+			// judge: both edges demote one of the pair's two memories,
+			// neither withdraws the other, and no orientation of it can be
+			// judged into a state worth keeping. Refused, counted, and
+			// reported with the repair to run — this pass creates links, and
+			// withdrawing one is `ghost supersede --reassess`, which is the
+			// one repair that can see a 'supersedes' edge.
+			res.Bidirectional++
+			if logger != nil {
+				logger.Info("supersede: refusing a pair the graph claims in both directions (ghost supersede --reassess --apply withdraws one)",
+					"newer", edges[0].source, "older", edges[0].target)
 			}
+			continue
+		case pairCausesCycle:
 			// A 'causes' CYCLE, and NOT refused — see pairDirection case 1 for
 			// why the argument that refuses a 'supersedes' cycle does not reach
 			// this one, and case 3 for why refusing it would be worse still:
@@ -1403,6 +1474,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				Similarity: edges[0].strength,
 			})
 			continue
+		case pairFresh, pairDirected:
 		}
 		livePair[key] = l.relation
 		// The live edge decides the pair's DIRECTION. A scan proposal that
@@ -1731,7 +1803,19 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			// count has always meant. The two tests were the same test before
 			// #823, because a live edge could only be 'supersedes' — see
 			// Classified.ReclassifiedFrom for why they stopped being one.
-			if wasReclassify && verdict != liveRelation {
+			//
+			// A re-affirmation is not automatically a non-event: a verdict can
+			// keep the relation the pair was judged around and still remove a row
+			// of the OTHER one — a 'causes' CYCLE answered CAUSES keeps the
+			// direction it was asked about and drops the edge asserting the other,
+			// and a SUPERSEDES verdict re-affirming a 'supersedes' edge beside a
+			// 'causes' cycle drops both of the cycle's edges. Counting only the
+			// relation change is how a run that really did delete a graph row
+			// reported "0 reclassified"; verdictSweepsBeyond is the half that
+			// catches it, on the same predicate the apply block's sweeps are
+			// gated on.
+			if wasReclassify && (verdict != liveRelation ||
+				verdictSweepsBeyond(claims, liveRelation, verdict, c.NewerID, c.OlderID)) {
 				res.Reclassified++
 				// The other affirmative verdict re-links the pair; NEITHER and a
 				// reversal only drop what is there.
@@ -1937,12 +2021,17 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				if err != nil {
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
-				c.Withdrawn = c.Reclassified && dropped > 0
-				causesDropped, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses))
+				causesDropped, err := sweepCausesBothWays(ctx, store, claims, c.NewerID, c.OlderID)
 				if err != nil {
-					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+					return res, nil, err
 				}
-				c.CausesDropped = int(causesDropped)
+				c.CausesDropped = causesDropped
+				// Either relation counts as "this run took the pair's live edge
+				// away", and the marker above this row is a claim about the
+				// graph: a causes-only pair has no 'supersedes' edge to drop, so
+				// deriving it from that count alone printed `already gone` over a
+				// run that really did remove a live 'causes' edge.
+				c.Withdrawn = c.Reclassified && (dropped > 0 || causesDropped > 0)
 			case RelationReversed:
 				// Nothing is written, in either direction: the classifier
 				// says the OLDER note is the current one, so the only link
@@ -1957,21 +2046,21 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				if err != nil {
 					return res, nil, fmt.Errorf("invalidate reversed supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
-				causesDropped, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses))
+				causesDropped, err := sweepCausesBothWays(ctx, store, claims, c.NewerID, c.OlderID)
 				if err != nil {
-					return res, nil, fmt.Errorf("invalidate reversed causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+					return res, nil, err
 				}
-				c.Withdrawn = c.Reclassified && dropped > 0
-				c.CausesDropped = int(causesDropped)
+				c.Withdrawn = c.Reclassified && (dropped > 0 || causesDropped > 0)
+				c.CausesDropped = causesDropped
 				// Info, and only when a row really changed: a fresh reversed
 				// candidate usually carries no link, so claiming a drop there
 				// would put a graph mutation in lifecycle.log that never
 				// happened. InvalidateLink's count is what makes the difference
 				// between the two cases observable.
-				if logger != nil && dropped+causesDropped > 0 {
+				if logger != nil && dropped+int64(causesDropped) > 0 {
 					logger.Info("supersede: dropped the links of a reversed pair",
 						"newer", c.NewerID, "older", c.OlderID,
-						"links", dropped+causesDropped)
+						"links", dropped+int64(causesDropped))
 				}
 			}
 			if logger != nil {
