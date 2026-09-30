@@ -67,6 +67,13 @@ func TestDetectDoesNotRescanTheLinePerAssignment(t *testing.T) {
 	// it is why the two are not measured the same way despite the ratio being
 	// per-call either way.
 	//
+	// Both fixtures are BUILT here rather than inside the timed closure, so the
+	// clock reads Detect and not Detect plus a strings.Builder pass over 12 KB and
+	// 96 KB of fixture. That pass is linear, so leaving it in would add the same
+	// kind of term to both windows, pull the ratio toward 1, and cost sensitivity
+	// without changing any verdict — but it would also make every figure this
+	// comment quotes a figure about the wrong thing.
+	//
 	// 400 candidates rather than the 2,000 this used, for a reason about FAILURE
 	// rather than speed. The bar is a ratio, so the base size does not move it —
 	// measured here, 400 candidates cost 5.0 ms of CPU and 3,200 cost 40.8 ms,
@@ -80,8 +87,9 @@ func TestDetectDoesNotRescanTheLinePerAssignment(t *testing.T) {
 	const base = 400
 	const rounds = 5
 
-	smallT := fastestOf(rounds, 8, func() { Detect(build(base)) })
-	bigT := fastestOf(rounds, 1, func() { Detect(build(base * 8)) })
+	smallText, bigText := build(base), build(base*8)
+	smallT := fastestOf(rounds, 8, func() { Detect(smallText) })
+	bigT := fastestOf(rounds, 1, func() { Detect(bigText) })
 
 	t.Logf("%d candidates in %.3f ms of CPU, %d candidates in %.3f ms (%.1fx for 8x the input)",
 		base, msOf(smallT), base*8, msOf(bigT), ratio(bigT, smallT))

@@ -1,8 +1,10 @@
 package secret
 
-// These exist so the cost tests read as cost tests rather than as string
-// formatting. itoa and the clock are here rather than imported so the hot loop in
-// the fixture builder does not allocate a slice per repetition.
+// itoa is here rather than imported into the fixture builder so the hot loop
+// that writes each repetition does not allocate a slice per repetition. The
+// clock the cost tests measure with is NOT here: it is cpuClock, in
+// cpuclock_unix_test.go and cpuclock_other_test.go, and the reason it is a CPU
+// clock rather than a wall clock is written down beside it.
 
 import (
 	"runtime"
@@ -12,10 +14,6 @@ import (
 )
 
 func itoa(i int) string { return strconv.Itoa(i) }
-
-func now() time.Time { return time.Now() }
-
-func secondsSince(start time.Time) float64 { return time.Since(start).Seconds() }
 
 // pinnedToOneThread runs f with the process pinned to a single OS thread and a
 // single P, and restores both afterwards.
@@ -170,5 +168,3 @@ func fastestOf(rounds, callsPerRound int, f func()) float64 {
 	})
 	return best
 }
-
-func gcNow() { runtime.GC() }
