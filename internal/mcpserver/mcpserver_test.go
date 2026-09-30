@@ -888,21 +888,55 @@ func TestParseProjectIDFromURI(t *testing.T) {
 
 func TestValidateTags(t *testing.T) {
 	tests := []struct {
-		name     string
-		tags     []string
-		wantLen  int
-		wantLast string
+		name       string
+		tags       []string
+		wantLen    int
+		wantLast   string
+		wantErr    bool
+		wantErrHas string
 	}{
-		{"nil", nil, 0, ""},
-		{"empty", []string{}, 0, ""},
-		{"under limit", []string{"a", "b", "c"}, 3, "c"},
-		{"at limit", make([]string, 10), 10, ""},
-		{"over limit", make([]string, 15), 10, ""},
-		{"long tag", []string{strings.Repeat("x", 100)}, 1, strings.Repeat("x", 64)},
+		{"nil", nil, 0, "", false, ""},
+		{"empty", []string{}, 0, "", false, ""},
+		{"under limit", []string{"a", "b", "c"}, 3, "c", false, ""},
+		{"at limit", make([]string, 10), 10, "", false, ""},
+		{"over limit", make([]string, 15), 10, "", false, ""},
+		{"long tag", []string{strings.Repeat("x", 100)}, 1, strings.Repeat("x", 64), false, ""},
+		// A SPACE and any length are accepted, and that is the decision the
+		// character class is drawn around: a tag is a keyword a reader scans
+		// inside a JSON array, not a key or a selector. See validateTags.
+		{"a tag holding a space", []string{"ci timeouts"}, 1, "ci timeouts", false, ""},
+		{"a non-ascii tag", []string{"日本語"}, 1, "日本語", false, ""},
+		// The class. Each is a character that can end the rendered line the label
+		// sits on; the boundary cases that are NOT in the class are in the table
+		// above, and the two directions matter more than the four refusals.
+		{"an opening guillemet", []string{"a«b"}, 0, "", true, "tag 0"},
+		{"a closing guillemet", []string{"a»b"}, 0, "", true, "tag 0"},
+		{"a newline", []string{"a\nb"}, 0, "", true, "tag 0"},
+		{"a carriage return", []string{"a\rb"}, 0, "", true, "tag 0"},
+		{"a nul", []string{"a\x00b"}, 0, "", true, "tag 0"},
+		{"a tab", []string{"a\tb"}, 0, "", true, "tag 0"},
+		{"a backtick", []string{"a`b"}, 0, "", true, "tag 0"},
+		// The POSITION, not just the field: a ten-tag list has to name the one to
+		// change, or the caller has to diff two lists by eye.
+		{"one hostile tag beside ordinary ones", []string{"golden", "x«y"}, 0, "", true, "tag 1"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := validateTags(tt.tags)
+			got, err := validateTags(tt.tags)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				// A refusal returns no list, so a caller cannot mistake a partial
+				// result for a validated one — and nothing is written.
+				if got != nil {
+					t.Errorf("a refusal returned a tag list anyway: %v", got)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrHas) {
+					t.Errorf("the refusal does not name the field and position (%q): %v", tt.wantErrHas, err)
+				}
+				return
+			}
 			if len(got) != tt.wantLen {
 				t.Errorf("len = %d, want %d", len(got), tt.wantLen)
 			}

@@ -183,12 +183,12 @@ array, so `json.Marshal` already escapes a newline, a quote and a backslash and 
 tag cannot forge a line or break out of its own string — but it does not escape
 `«` or `»`, which would open a data block of its own mid-metadata. A guillemet in a
 tag therefore prints as `<<` or `>>`, the same substitution the delimiters
-themselves use, so a reader who has met one knows the other; and `ghost import`
-refuses a tag holding one, along with a control character or a backtick. A space
-and any length are fine — a tag is a label, not a key, and "ci timeouts" is a real
-one. A row's **`source=`** label comes from a closed vocabulary
-(`reflection`, `chat`, `manual`, `tool`, `mcp`, `onboarding`, `decision_log`,
-`builtin`), so it is printed bare.
+themselves use, so a reader who has met one knows the other, and a backtick prints
+as the JSON escape `\u0060` — there is no reader-facing convention for a backtick,
+so it gets the form the surrounding array already uses. A space and any length are
+fine: a tag is a label, not a key, and "ci timeouts" is a real one. A row's
+**`source=`** label comes from a closed vocabulary (`reflection`, `chat`, `manual`,
+`tool`, `mcp`, `onboarding`, `decision_log`, `builtin`), so it is printed bare.
 
 The project context block is the one surface where the explanation is conditional,
 and it is worth saying why rather than leaving it to be discovered: its memory
@@ -240,18 +240,29 @@ because a store can hold anything and the renderer never has to ask.
 
 **Validation is separate, and refuses rather than clamps.** `ghost import`
 refuses a record id — a memory's, a task's or a decision's — carrying a control
-character, whitespace, a backtick or a `«»`, and one longer than 128 bytes, and it
-refuses a memory's *tags* carrying a control character, a backtick or a `«»`. A
+character, whitespace, a backtick or a `«»`, and one longer than 128 bytes. A
 project's id, name and path are refused the same characters *except* whitespace
 and *except* any length, because a project id is routinely a filesystem path and
 `/Users/w/My Projects/ghost` is a real one; a deep checkout is a longer one, and
 `ghost export` writes it into the artifact, so bounding it would make `ghost
-import` refuse a file `ghost export` had just written. A tag is neither case: it is
-not a primary key, so a shortened one names a different *tag* rather than a
-different row, and it is not a selector, so a space in one is a word rather than a
-word-split. An id is a primary key, so a shortened one would name a *different
-row* — a memory under a key the artifact never chose, colliding with whatever
-genuinely holds it.
+import` refuse a file `ghost export` had just written. An id is a primary key, so
+a shortened one would name a *different row* — a memory under a key the artifact
+never chose, colliding with whatever genuinely holds it.
+
+**A tag is refused at WRITE time, and never costs a record.** All four tools that
+take a tag list — `ghost_memory_save`, `ghost_save_global`, `ghost_memory_update`
+and `ghost_decision_record` — refuse a tag holding a control character, a backtick
+or a `«»`, naming the position and the tag itself. That is the only place the
+refusal belongs, and the reason is worth stating because getting it wrong costs
+data: an import-side guard cannot protect a store it never sees, and a
+`ghost_memory_save` that accepted `["«urgent»"]` produced a row that then fell out
+of every `ghost export`, because the exporter applies the importer's own checks. A
+backup that loses a memory because of a label is not a backup. So the import and
+export paths carry a tag byte for byte, a store's existing tags round-trip
+unchanged, and the renderer above is what makes an old one safe to read. An
+over-long tag is trimmed on a rune boundary rather than refused, and a tag over 64
+bytes is stored as the first 64 — a shortened *label* is a different label, not a
+different row, which is the whole difference from an id.
 
 Those checks run **after** the importer's id-presence check and before every
 message that would interpolate the id, and both positions are load-bearing. After

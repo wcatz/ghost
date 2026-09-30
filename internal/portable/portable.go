@@ -168,8 +168,8 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 		switch {
 		case orphaned(m.ProjectID):
 			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: orphanReason})
-		case recordExportRefusal(m.ID, m.Tags) != "":
-			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: recordExportRefusal(m.ID, m.Tags)})
+		case recordExportRefusal(m.ID) != "":
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: recordExportRefusal(m.ID)})
 		default:
 			keptMemories = append(keptMemories, m)
 		}
@@ -179,8 +179,8 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 		switch {
 		case orphaned(t.ProjectID):
 			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: orphanReason})
-		case recordExportRefusal(t.ID, nil) != "":
-			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: recordExportRefusal(t.ID, nil)})
+		case recordExportRefusal(t.ID) != "":
+			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: recordExportRefusal(t.ID)})
 		default:
 			keptTasks = append(keptTasks, t)
 		}
@@ -190,8 +190,8 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 		switch {
 		case orphaned(d.ProjectID):
 			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: orphanReason})
-		case recordExportRefusal(d.ID, nil) != "":
-			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: recordExportRefusal(d.ID, nil)})
+		case recordExportRefusal(d.ID) != "":
+			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: recordExportRefusal(d.ID)})
 		default:
 			keptDecisions = append(keptDecisions, d)
 		}
@@ -252,19 +252,20 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 
 // SkippedRecord is one record an export left out of the artifact, and why.
 //
-// The exporter applies the IMPORTER's own shape checks (`memory.CheckImportedID`,
-// `memory.CheckImportedTags` and the two project checks), because a store can
-// already hold an id or a tag this build refuses to import: written by a pre-#791
-// `ghost import`, reinstated by `RestoreSnapshot`, seeded by another tool, or
-// edited by hand. Exporting one produced an artifact that `ghost import` then
-// rejected record by record, so the backup was not a backup — and the operator
-// never learned it until they needed it.
+// The exporter applies the IMPORTER's own shape checks (`memory.CheckImportedID`
+// and the two project checks), because a store can already hold an id this build
+// refuses to import: written by a pre-#791 `ghost import`, reinstated by
+// `RestoreSnapshot`, seeded by another tool, or edited by hand. Exporting one
+// produced an artifact that `ghost import` then rejected record by record, so the
+// backup was not a backup — and the operator never learned it until they needed it.
 //
-// Two write boundaries have been added to the importer since, and the exporter
-// picked up each of them with the same call rather than a second spelling of the
-// class. That is the whole argument for reaching the store's function: a filter
-// written here drifts, and the drift is invisible until a restore rejects a file
-// the operator believes is good.
+// It reaches the store's function rather than restating the class, and that is the
+// whole argument for the shape: a filter written HERE drifts, and the drift is
+// invisible until a restore rejects a file the operator believes is good.
+//
+// A memory's TAGS are explicitly not in the set, and the reasoning is on
+// `recordExportRefusal` — it is the one field where the rule "export what the
+// importer accepts" is right for the wrong reason and wrong for the right one.
 //
 // Leaving the record OUT is the only honest option. A different id is a different
 // row: `memory_links`, the recorded history and every `ghost history` read are
@@ -315,20 +316,23 @@ func projectExportRefusal(p memory.PortableProject) string {
 // importer holds them to one: a record id is a primary key, so a shortened one
 // names a different row.
 //
-// A memory's TAGS are a second rule, and a second one because the importer holds
-// them to a second one: `memory.CheckImportedTags` refuses a tag holding a «, a
-// control character or a backtick, and the tag list is printed outside the «...»
-// data delimiters on every listing (#811). A task and a decision have no tag that
-// reaches a rendered row this way, so they stay on the id rule alone — and a
-// filter written wider than the importer's own checks is how the exporter became
-// the thing that had to be fixed, so this calls the importer rather than restating
-// its class.
-func recordExportRefusal(id string, tags []string) string {
+// A memory's TAGS are deliberately NOT a second rule, and the reason is the
+// difference between an id and a tag. A shortened id names a different ROW, so
+// leaving it out is the only honest option and the row is genuinely lost from the
+// backup; a tag is a label on a row that is otherwise perfectly exportable, and
+// dropping the whole memory for one odd label is data loss dressed as hygiene. It
+// is worse than that in practice: the MCP write path accepted a hostile tag for
+// months, so every store written through it could have a row that the exporter
+// decided was not worth backing up — and the operator finds out on the day they
+// need the file (#811).
+//
+// The tag is carried byte for byte instead. `assemble.TagsLabel` is what makes it
+// safe on the line an agent reads, and that is the layer a STORED value belongs
+// to: a value already in a store is a fact about the row, and refusing it on the
+// way out of a backup says nothing about the row and everything about the backup.
+func recordExportRefusal(id string) string {
 	if memory.CheckImportedID(id) != nil {
 		return "its id is not one this build will import"
-	}
-	if memory.CheckImportedTags(tags) != nil {
-		return "one of its tags is not one this build will import"
 	}
 	return ""
 }

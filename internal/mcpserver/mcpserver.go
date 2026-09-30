@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/ai"
@@ -399,17 +400,106 @@ func shortID(id string) string {
 	return assemble.ShortID(id)
 }
 
-// validateTags enforces tag limits: max 10 tags, max 64 chars each.
-func validateTags(tags []string) []string {
-	if len(tags) > 10 {
-		tags = tags[:10]
+// tagMaxLen is what one tag may be, in bytes. It is a DISPLAY-scale bound rather
+// than a column claim — the column is unconstrained text — and it is a constant
+// because three different things must agree on it: this writer, the tool
+// description that tells an agent the limit, and the test that pins the cut.
+const tagMaxLen = 64
+
+// tagMaxCount is how many tags one row may carry. The excess is DROPPED rather
+// than refused, and that is the shipped behaviour this keeps: a caller passing
+// twelve labels has made a mistake about how many it needs, not a mistake about
+// what a label may be, and the eleventh is a worse answer than the first ten.
+const tagMaxCount = 10
+
+// validateTags bounds a tag list and refuses the characters that could end the
+// line it is printed on.
+//
+// It returns an error because the two halves are different in kind and only one of
+// them is a number: a count and a length are trimmed, silently and harmlessly,
+// while a control character, a backtick or a `«»` is a refusal. A tag list is
+// printed as ` tags:["…"]` OUTSIDE the «...» data delimiters, on the same line as
+// the content (assemble.TagsLabel), so a newline in one ends the line, a backtick
+// pairs into a markdown code span that swallows the rest of the row, and a «
+// opens a data block of its own mid-metadata (#811).
+//
+// WHY THE REFUSAL IS HERE AND NOT ON `ghost import`, which is where it was put
+// first and where it was wrong: an import guard cannot protect a store it never
+// sees. `ghost_memory_save` reaching this function with `["«urgent»"]` was
+// accepted, rendered harmlessly, and then dropped from every subsequent
+// `ghost export` — because the exporter applies the importer's own checks, so
+// export→import was a round trip that lost the row. A backup that loses a
+// user's memory because of a tag is data loss, and the only boundary an ordinary
+// save passes through is this one. So the import and export paths carry a tag
+// byte for byte, and the renderer neutralises one there (#811) rather than
+// pretending a stored value is a threat to be refused.
+//
+// A SPACE is not refused and no length is refused, and both are deliberate: a tag
+// is a keyword a reader scans inside a JSON array, so "ci timeouts" is a real one,
+// and a shortened tag is a different label rather than a different row — which is
+// why trimming the tail of a long tag is acceptable and trimming an id is not.
+//
+// The tag is named in the refusal through `assemble.Token`, which is the renderer
+// the row itself uses: bare for a tag a stored name plausibly uses, and otherwise
+// the ASCII-only quoted string. Interpolating it raw would be a second injection
+// on the very surface the first one closes, and a backtick is in the class precisely
+// because it is a character this error string must never contain.
+func validateTags(tags []string) ([]string, error) {
+	if len(tags) > tagMaxCount {
+		tags = tags[:tagMaxCount]
 	}
 	for i, t := range tags {
-		if len(t) > 64 {
-			tags[i] = t[:64]
+		if len(t) > tagMaxLen {
+			// Cut on a RUNE boundary. This was `t[:64]`, which on a CJK tag
+			// returned half a rune — and the invalid bytes were STORED, not merely
+			// printed, because the cut happens on the way in. The column is
+			// unconstrained text, so nothing downstream would have caught it: the
+			// same defect #810 was about, one function away, inside the function
+			// this change rewrites.
+			t = memory.TruncateUTF8(t, tagMaxLen)
+			tags[i] = t
+		}
+		if reason := unsafeTagRune(t); reason != "" {
+			// The message names the class and the tag, and it contains NONE of the
+			// three characters it is refusing — no guillemet, no backtick. The first
+			// version of this sentence spelled them out ("outside the «...»
+			// delimiters"), which put a data delimiter into the very answer the
+			// refusal exists to keep clean: a reader, and a test, can no longer tell
+			// a message MENTIONING a delimiter from one CARRYING the caller's. So the
+			// prose says "delimiter" and the tag comes through Token, and the
+			// invariant "no «, » or ` survives into the sentence" is testable
+			// because this sentence holds to it.
+			return nil, fmt.Errorf("tag %d (%s) must hold no %s — a tag is printed in the metadata of a memory row, "+
+				"outside the data delimiters, so a control character ends the line, a backtick pairs into a code "+
+				"span that swallows the rest of the row, and a data delimiter opens a block of its own. A space and "+
+				"any length are fine. Change the tag and call again", i, assemble.Token(t), reason)
 		}
 	}
-	return tags
+	return tags, nil
+}
+
+// unsafeTagRune returns "" when no character in t can end a rendered line, a
+// backtick span or a «...» data block, and the reason otherwise.
+//
+// It is a function over one tag rather than a loop over the list so the four
+// writers share it, and it is deliberately NOT `memory.CheckImportedTags`: that
+// function was the import guard this change removed, and an import guard that a
+// writer also called would put the writer back on the path that lost backups.
+//
+// A SPACE is not in the class and neither is a length, and the comment on
+// validateTags is where both are argued.
+func unsafeTagRune(t string) string {
+	for _, r := range t {
+		switch {
+		case unicode.IsControl(r):
+			return "control character"
+		case r == '`':
+			return "backtick"
+		case r == '«' || r == '»':
+			return "data delimiter"
+		}
+	}
+	return ""
 }
 
 // defaultImportance returns the importance value, defaulting to fallback when nil.
@@ -810,7 +900,10 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		changed = append(changed, "importance")
 	}
 	if tags != nil {
-		tags = validateTags(tags)
+		var err error
+		if tags, err = validateTags(tags); err != nil {
+			return "", err
+		}
 		changed = append(changed, "tags")
 	}
 	// Named individually rather than as "validity", because each stamp is a
@@ -1575,7 +1668,9 @@ func (s *Server) registerTools() {
 		if tags == nil {
 			tags = []string{}
 		}
-		tags = validateTags(tags)
+		if tags, err = validateTags(tags); err != nil {
+			return nil, nil, err
+		}
 
 		var truncated bool
 		args.Content, truncated = memory.ClampContent(args.Content)
@@ -2263,7 +2358,9 @@ func (s *Server) registerTools() {
 		if tags == nil {
 			tags = []string{}
 		}
-		tags = validateTags(tags)
+		if tags, err = validateTags(tags); err != nil {
+			return nil, nil, err
+		}
 
 		globalTruncated := false
 		args.Content, globalTruncated = memory.ClampContent(args.Content)
@@ -2674,7 +2771,9 @@ func (s *Server) registerTools() {
 		if tags == nil {
 			tags = []string{}
 		}
-		tags = validateTags(tags)
+		if tags, err = validateTags(tags); err != nil {
+			return nil, nil, err
+		}
 		// Pass "" for path: MCP callers name projects rather than describing
 		// them, though ensureProjectFor still derives repository identity when
 		// project_id is an absolute path and returns the id to write to.

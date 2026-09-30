@@ -75,6 +75,17 @@ func TestBothTagLabelRenderersPrintTheOrdinaryCaseIdentically(t *testing.T) {
 		{"a tag holding a quote and a backslash", []string{`a"b\c`}, ` tags:["a\"b\\c"]`},
 		{"a tag holding HTML metacharacters", []string{"a<b&c>d"}, ` tags:["a\u003cb\u0026c\u003ed"]`},
 		{"no tag at all", nil, ""},
+		// A legacy backtick. json.Marshal does not escape one and the MCP write path
+		// refuses a NEW one, but a store can already hold this and the renderer is
+		// the layer that covers it — printed as the JSON escape the surrounding
+		// array already uses, so a reader decoding the array gets it back rather
+		// than losing it.
+		{"a legacy tag holding a backtick", []string{"a`b"}, ` tags:["a` + "\\u0060" + `b"]`},
+		// And a legacy guillemet, which is the OTHER convention on purpose: `<<` is
+		// what a content block prints for a literal `«`, so a reader who has met one
+		// knows the other. A backtick has no such convention, which is why it gets a
+		// JSON escape instead. See tagBacktickEscape.
+		{"a legacy tag holding a guillemet", []string{"a«b"}, ` tags:["a<<b"]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			line := formatMemories([]memory.Memory{{ID: "pmem00", Category: "fact", Content: "x", Tags: tc.tags}})

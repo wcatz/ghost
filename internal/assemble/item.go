@@ -408,7 +408,8 @@ func isTokenRune(r rune) bool {
 // ONE function that does it, and the one `quoteData` already used, because a
 // second copy of a substitution a reader parses visually is a second thing to keep
 // in step. `<<` is the same spelling the content uses, so a reader who has met one
-// knows the other.
+// knows the other. A backtick is neutralised too, and differently; see
+// `tagBacktickEscape`, which is where the two rules diverge and why.
 //
 // THE ORDER IS THE INTERESTING PART, and it took one reversal to get right.
 // Substituting BEFORE the marshal was the first attempt and it is wrong: the
@@ -433,7 +434,39 @@ func TagsLabel(tags []string) string {
 		// concatenation is the one rendering that cannot be escaped at all.
 		return ""
 	}
-	return " tags:" + neutralizeDelimiters(string(b))
+	return " tags:" + neutralizeTagLabel(string(b))
+}
+
+// tagBacktickEscape is what a backtick in a tag prints as.
+//
+// A JSON ESCAPE rather than a substitution like the guillemet's `<<`, and the
+// reason is that `<<` already means something to a reader of a Ghost line: it is
+// what `quoteData` writes for a literal `«`, so a reader who sees `<<` in a tag
+// list knows it came from a delimiter. There is no such convention for a backtick
+// in a tag, so the honest form is the one the surrounding JSON already uses for a
+// character it must not print literally — and it stays VALID JSON, so a reader
+// decoding the array gets the backtick back rather than losing it.
+//
+// It matters because `json.Marshal` does not escape a backtick, and a lone one in
+// a listing row opens a markdown code span that swallows the rest of the line. The
+// MCP write path refuses a backtick in a tag (mcpserver.validateTags), but a store
+// can already hold one — a pre-guard save, a restored snapshot, a hand edit — and
+// the renderer is the layer that covers those. Same reason the guillemets are
+// handled here and not refused at import: refusing a stored value on the way OUT of
+// a backup costs the user the whole memory, which is a far worse outcome than
+// printing one backtick as an escape.
+const tagBacktickEscape = "\\u0060"
+
+// neutralizeTagLabel is the label's own neutralisation, and it is separate from
+// `neutralizeDelimiters` rather than an extension of it.
+//
+// `neutralizeDelimiters` is shared with `quoteData`, where a backtick is NOT a
+// threat — the content sits inside «...», so a backtick in it cannot close anything
+// Ghost printed. Widening that function would change how every content block in
+// every answer renders, on no evidence that a content backtick is unsafe. So the
+// label has its own, and this is the one place the two rules differ.
+func neutralizeTagLabel(s string) string {
+	return strings.ReplaceAll(neutralizeDelimiters(s), "`", tagBacktickEscape)
 }
 
 // neutralizeDelimiters rewrites the « and » that open and close a data block into

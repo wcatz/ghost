@@ -811,58 +811,6 @@ func CheckImportedProjectText(field, value string) error {
 	return nil
 }
 
-// CheckImportedTags is CheckImportedID for a memory's TAGS, and it is the id
-// guard's rule applied to the one field the id guard does not reach: a tag is
-// printed outside the «...» data delimiters too — `assemble.TagsLabel` writes
-// ` tags:[…]` on the same line as the content, on both surfaces that render one —
-// and `json.Marshal` does not escape « or ».
-//
-// So a tag holding a « opened a data block of its own, mid-metadata, on the line a
-// reader takes the memory's content from. It cannot CLOSE one, so nothing escapes
-// the block as instruction; that is the whole difference in severity from the id
-// (#791), and the reason this is a guard rather than a rewrite. What it does break
-// is the delimiter contract in docs/mcp.md, which is one contract: a reader who
-// meets « twice before the content cannot tell which span is the data.
-//
-// It is exported for the same reason CheckImportedID is: `internal/portable`'s
-// exporter has to reach the importer's own rule rather than a second spelling of
-// it, or `ghost export` writes tags that `ghost import` then rejects — the
-// round-trip break #796 found in the id case.
-//
-// The rule is `unprintableInIdentifier` with `spaces` FALSE, and that is a
-// decision rather than a copy of the id's. A record id is a `--only` selector and
-// a shell operand, where a space word-splits into selectors that name nothing. A
-// tag is neither: it is a keyword a reader scans inside a JSON array, and a space
-// is most of what a tag is made of — "ci timeouts", "session capacity". Refusing
-// those would refuse the tags a real store is full of.
-//
-// The BACKTICK is in the class for a reason specific to this field, and it is
-// worth stating because it is the one member that is not obviously a threat here:
-// the id is printed inside a backtick span, but the tag label is not, so a backtick
-// in a tag cannot close anything of Ghost's. What two of them in one tag do is
-// pair into a markdown code span, which swallows the rest of the row — so the
-// label stops being a label. That is the same class of harm as the rest of the set
-// (the rendered line stops meaning what the renderer said it meant), and no tag a
-// real store holds contains one.
-//
-// There is deliberately NO LENGTH BOUND, for the reason CheckImportedProjectID has
-// none and the record id does: a shortened TAG is not a shortened ROW. Refusing an
-// over-long id is refusing to name a different row, which is an honesty problem; a
-// tag is a label, and the renderer is where a display bound belongs. The characters
-// that end a line are the threat class here, and those are refused.
-func CheckImportedTags(tags []string) error {
-	for i, tag := range tags {
-		if reason := unprintableInIdentifier(tag, false); reason != "" {
-			return fmt.Errorf("tag %d must hold no %s — a tag is printed outside the «...» data delimiters on "+
-				"every listing, so a control character ends the line, a backtick pairs into a code span that "+
-				"swallows the rest of the row, and a « opens a data block of its own. A space is fine, and so is "+
-				"any length: a tag is a label. The offending tag is not shown, because it is the value being "+
-				"refused. Give the record different tags in the artifact", i, reason)
-		}
-	}
-	return nil
-}
-
 // unprintableInIdentifier returns "" when s holds nothing that can end a rendered
 // line, a backtick span or a «...» data block, and the reason otherwise.
 //
@@ -1097,28 +1045,25 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if err := rejectSecretList("tags", m.Tags); err != nil {
 		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
 	}
-	// And their SHAPE, which is a different question from the secret guard above and
-	// the id's (#811).
 	//
-	// A tag is printed OUTSIDE the «...» data delimiters — `assemble.TagsLabel`
-	// writes ` tags:[...]` on the same line as the content, in both renderers — and
-	// `json.Marshal` escapes a newline, a quote and a backslash but not « or ». So
-	// a tag holding a « opened a data block of its own mid-metadata. The renderer
-	// now neutralises it, which is the load-bearing layer; this is the one that
-	// stops the next artifact carrying one, and it is here for the same reason
-	// CheckImportedID is: a store can already hold what a guard refuses (a
-	// pre-guard import, a restored snapshot, a hand edit), and refusing on the way
-	// in says nothing about the rows already there.
+	// And NOTHING else about a tag, which is a decision this function made the hard
+	// way. It used to refuse a control character, a backtick or a data delimiter in
+	// a tag — the same class as an id's — and `internal/portable`'s exporter applied
+	// that check so export→import would stay a round trip. Which meant a memory
+	// whose tag could not be imported was LEFT OUT of every backup, and a
+	// `ghost_memory_save` with tags ["«urgent»"] was accepted here (nothing on the
+	// MCP write path looked), rendered harmlessly, and then vanished from the next
+	// `ghost export` with a non-zero exit and a warning. A backup that loses a
+	// user's memory because of a tag is data loss, and no import guard can prevent
+	// it: an import guard cannot protect a store it never sees.
 	//
-	// It sits in the same window as the other field checks — after the presence
-	// check, so a re-run of an artifact against a store that already holds a
-	// pre-guard tag is still a skip and not a failure, and before the apply=false
-	// early return, so a dry run classifies the record exactly as the apply run it
-	// previews. Both of those are properties of the POSITION, which is why the
-	// check is a separate statement and not folded into rejectSecretList above.
-	if err := CheckImportedTags(m.Tags); err != nil {
-		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
-	}
+	// So a tag is carried byte for byte, and the RENDERER is what makes one safe on
+	// the line an agent reads — `assemble.TagsLabel` rewrites a data delimiter to
+	// `<<`/`>>`, the same substitution the content's own delimiters use. A stored
+	// value is not a threat to be refused; it is a fact about the row, and the
+	// renderer is where a fact is made legible. The class is still refused where it
+	// is reachable: `validateTags`, on the four MCP writers, which is the only
+	// boundary an ordinary save passes through (#811).
 	// The evidence records' own text, in the same window and for the same reason.
 	// An artifact's evidence rows are the FILE's content, exactly as
 	// `source_ref` above is, and this is the one route where that is true: a
