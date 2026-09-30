@@ -161,6 +161,12 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		fmt.Fprintf(&b, "  (the same ids are in %s, for `ghost resolve --project %s --reassess --only-file %s --apply`)\n",
 			assemble.Label(path), shellQuote(assemble.Label(projectName)), shellQuote(assemble.Label(path)))
 	}
+	// Both buckets, rendered once, by internal/followup — the same function the
+	// two MCP surfaces print them through. The ids are a stored value at the
+	// start of a line, so how they are spelled is the one rule all three surfaces
+	// must share, and it is decided next to the command that refused to carry
+	// them rather than at each of the loops that print them.
+	viaFileText, unnameableText := followup.RenderUncarriedIDs(viaFileOnly, unnameable)
 	// Every branch is driven by the buckets, not by `cmd == ""`, which has two
 	// causes: ids holding a comma (the file reaches them) and ids holding a
 	// newline (nothing does). Keying the wording off the empty command made a
@@ -182,9 +188,7 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 			fmt.Fprintf(&b, "  (no --only command can name them and the id file could not be written, so they are\n"+
 				"   named here: put each on its own line in a file and use --only-file. Do NOT fall back on the\n"+
 				"   same command without --only: that re-judges every resolved memory in the project)\n")
-			for _, id := range viaFileOnly {
-				fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
-			}
+			b.WriteString(viaFileText)
 		}
 	case len(viaFileOnly) > 0 && fileHoldsSomething:
 		// `--only` splits on commas, so an id holding one is not nameable by that
@@ -200,11 +204,7 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		// surface does for the same reason.
 		fmt.Fprintf(&b, "  (%d id(s) hold a comma and the id file could not be written, so they are named here;\n"+
 			"   no --only command can carry them — put each on its own line in a file and use --only-file)\n", len(viaFileOnly))
-		for _, id := range viaFileOnly {
-			// The same renderer as the other two buckets, so the id half of the
-			// contract is one rule rather than three spellings of it.
-			fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
-		}
+		b.WriteString(viaFileText)
 	}
 	if len(unnameable) > 0 {
 		// No surface can name these: the file is one id per line, so a newline in
@@ -214,12 +214,7 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		fmt.Fprintf(&b, "  (%d id(s) hold a newline, which no --only or --only-file form can carry. No surface can\n"+
 			"   name them, so these stay resolved until the row is rewritten — delete and re-save the memory,\n"+
 			"   or re-import it under an id without a newline)\n", len(unnameable))
-		for _, id := range unnameable {
-			// The same renderer rather than %q, so the id half of the contract is
-			// one rule: %q escapes a newline and Token quotes the whole value, and
-			// the two cannot disagree about what a hostile id looks like.
-			fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
-		}
+		b.WriteString(unnameableText)
 	}
 	return b.String()
 }

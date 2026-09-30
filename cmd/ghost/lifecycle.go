@@ -3135,6 +3135,11 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 	if apply {
 		if stamped := markStampedIDs(res.Memories); len(stamped) > 0 {
 			cmd, viaFileOnly, unnameable := followup.ResolveCommand(projectName, stamped)
+			// Both buckets through internal/followup's own renderer, which is the
+			// one the two MCP surfaces print them with — so a stored id is spelled
+			// the same way by every surface that has to print one, and the rule is
+			// decided beside the command that refused to carry the id.
+			viaFileText, unnameableText := followup.RenderUncarriedIDs(viaFileOnly, unnameable)
 			if cmd != "" {
 				fmt.Fprintf(&b, "\nTo put any of these back into session injection, clear the stamp on exactly them:\n  %s\n", cmd)
 			}
@@ -3146,18 +3151,12 @@ func resolveMarkReport(projectName string, res resolve.MarkResult, apply bool) s
 				// report a repair that did not happen.
 				fmt.Fprintf(&b, "  (%d id(s) hold a comma, which --only cannot carry, so they are named here; put each on\n"+
 					"   its own line in a file and use --only-file)\n", len(viaFileOnly))
-				for _, id := range viaFileOnly {
-					fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
-				}
+				b.WriteString(viaFileText)
 			}
 			if len(unnameable) > 0 {
 				fmt.Fprintf(&b, "  (%d id(s) hold a newline, which no --only or --only-file form can carry, so they stay\n"+
 					"   resolved until the row is rewritten — delete and re-save the memory)\n", len(unnameable))
-				for _, id := range unnameable {
-					// The same renderer as the comma bucket above, so the id half of
-					// the contract is one rule rather than two spellings of it.
-					fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
-				}
+				b.WriteString(unnameableText)
 			}
 		}
 	}

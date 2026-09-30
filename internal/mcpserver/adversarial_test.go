@@ -3,11 +3,14 @@ package mcpserver
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -497,5 +500,182 @@ func TestFormatMemoriesRendersOriginLabel(t *testing.T) {
 	}
 	if strings.Contains(out, "source=manual") {
 		t.Errorf("manual rows must stay unlabelled, or absence stops marking what is the user's own:\n%s", out)
+	}
+}
+
+// hostileCommaIDFor returns the id shape only an IMPORT writes, and the shape
+// `ghost import` still lets through.
+//
+// Since #791 `ImportMemory` refuses an id holding a control character,
+// whitespace, a backtick or a «, and a COMMA is deliberately not in that class —
+// a comma breaks a SELECTOR rather than a line, so refusing one would refuse an
+// id the --only-file form names perfectly well. So a comma id reaches the store,
+// and this one carries the rest of the payload too: a «, a backtick and a BEL,
+// none of which can share an id with a line break, because ResolveCommand buckets
+// a line break into the unnameable half first and the comma bucket is what this
+// is about. Printed raw, the « opens a «...» data block of its own around an id
+// a reader takes for Ghost's own, on a line that BEGINS with a stored value.
+//
+// It is planted in SQL, like every other hostile id in this package, because the
+// writer that refuses it is exactly the writer whose refusal this test is not
+// about: the state is one an artifact imported before #791, a restored snapshot
+// or a hand-edited database still holds.
+func hostileCommaIDFor() string { return "AAAA,«bell\x07`x`" }
+
+// hostileNewlineIDFor is the same payload with a LINE BREAK in it, which is the
+// one character no surface can carry: `--only` splits on commas and `--only-file`
+// is one id per line, so an id holding one is named rather than carried. It is
+// here as a second fixture rather than as a variant because the two buckets are
+// reached by different branches, and the %q these two surfaces used to print it
+// with was a DIFFERENT defect from the raw print: %q escapes the newline but
+// leaves a printable non-ASCII rune as itself, so the « stayed visible.
+func hostileNewlineIDFor() string { return "BBBB\n«tail»" }
+
+// assertTheIDIsOnlyAToken is the id half of the contract, over the wire.
+//
+// Three assertions, and only the first is about presence. "It is in the output"
+// is true of a correct rendering AND of a raw one — the id has to be named or
+// whoever reads the answer cannot act on it — so presence proves nothing. What
+// matters is HOW: assemble.Token escapes the « to « and the BEL to \a, so a
+// correct rendering contains the raw id NOWHERE and no « at all, while a raw
+// print contains the id verbatim and %q leaves the « standing. The line-anchored
+// check says the same thing about the POSITION, which is what a reader is
+// actually fooled by — and it is vacuous for an id that itself holds a newline,
+// which is why the « assertion is not optional here.
+func assertTheIDIsOnlyAToken(t *testing.T, surface, out, id string) {
+	t.Helper()
+	if !strings.Contains(out, assemble.Token(id)) {
+		t.Fatalf("fixture: %s does not name the id at all, so its rendering is not being tested:\n%s", surface, out)
+	}
+	if strings.Contains(out, id) {
+		t.Errorf("%s printed the raw stored id; it must appear only through assemble.Token:\n%s", surface, out)
+	}
+	if strings.Contains(out, "«") {
+		t.Errorf("%s left a « standing, so the stored value opens a data block of its own around itself:\n%s", surface, out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), id) {
+			t.Errorf("%s printed the stored id raw at the start of a line:\n%s", surface, out)
+			return
+		}
+	}
+}
+
+// TestTheUncarriedIDBucketsAreOneRendererOnBothMCPSurfaces drives the two MCP
+// tools that print the ids a resolve repair could not carry, over the wire, and
+// holds BOTH buckets of BOTH tools to the one text
+// internal/followup.RenderUncarriedIDs produces for them.
+//
+// This is the MCP half of what #818 left. `ghost_resolve_mark` and
+// `ghost_link_withdraw` each printed a comma id RAW at the start of a line while
+// the CLI printed both buckets through assemble.Token, and each quoted a newline
+// id with %q — which keeps a printable non-ASCII rune as itself, so a « stayed
+// literally visible in a tool result and was escaped in the CLI. An agent reading
+// a tool result is the most injection-exposed reader Ghost has, and a stored
+// value standing at the head of a line there is one the agent takes for Ghost's
+// own output. internal/followup's package doc says the three surfaces must not
+// render this differently; this is the test for the two of them reachable from
+// here, and both buckets each — the raw print and the %q are separate defects in
+// separate branches, and a fixture holding only the comma id would leave the %q
+// uncaught.
+//
+// The comma id is spelled out in cmd/ghost too (hostileMCPCommaID), because
+// package main cannot be imported from here and the parity claim is about ONE
+// input: the CLI compares its own block against this same function over this
+// same id.
+func TestTheUncarriedIDBucketsAreOneRendererOnBothMCPSurfaces(t *testing.T) {
+	db, store, srv := newStoreWithDB(t)
+	session := connectedClient(t, srv)
+	ctx := context.Background()
+	commy := hostileCommaIDFor()
+	broken := hostileNewlineIDFor()
+
+	// Two planted rows, one per bucket: ResolveCommand puts a COMMA in the bucket
+	// --only-file reaches and a NEWLINE in the bucket nothing reaches, and both are
+	// reachable states (an artifact imported before #791's refusal, a restored
+	// snapshot, a hand-edited row). One id per bucket is also what makes a failure
+	// name the half that broke rather than matching whichever came first.
+	plantMemoryWithID(t, db, "abc123", commy, "fact",
+		"a planted memory whose comma id is hostile")
+	plantMemoryWithID(t, db, "abc123", broken, "fact",
+		"a planted memory whose newline id is hostile")
+
+	// Each planted row gets its own superseding note and its own edge, so each
+	// tool call names one target and the result under test holds ONE bucket — a
+	// result that held both would pass an assertion about either of them for the
+	// wrong reason.
+	targets := make(map[string]string, 2)
+	for i, target := range []string{commy, broken} {
+		newer, err := store.Create(ctx, "abc123", memory.Memory{
+			Category: "fact", Content: fmt.Sprintf("Newer note %d supersedes the planted one.", i),
+			Source: "mcp", Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create(newer %d): %v", i, err)
+		}
+		if err := store.CreateLink(ctx, newer, target, "supersedes", 0.95, "llm"); err != nil {
+			t.Fatalf("CreateLink(%q): %v", target, err)
+		}
+		targets[target] = newer
+	}
+
+	// The exact text the shared renderer produces for these two ids. Package main
+	// cannot be imported from here, so the CLI's half of the same parity lives in
+	// cmd/ghost (TestTheUncarriedIDBucketsAreOneRendererOnEveryCLISurface) and
+	// compares its own block against this same function over this same comma id —
+	// which is what makes the three-surface claim checkable rather than asserted.
+	wantViaFile, wantUnnameable := followup.RenderUncarriedIDs([]string{commy}, []string{broken})
+
+	// The mark runs BEFORE the withdrawals: each withdrawal is then repairing a
+	// stamp that really landed, which is the order a caller reaches the two in.
+	// It names both ids in one call, so its result is the only one carrying BOTH
+	// buckets — which is what the CLI's `resolve --mark` report does too.
+	marked := resultText(callTool(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": "test-project",
+		"memory_ids": []string{commy, broken},
+	}))
+
+	for name, tc := range map[string]struct {
+		out    string
+		id     string
+		bucket string
+		prose  string
+		// The second half of the prose each bucket owes its reader, and the reason
+		// it is per-bucket: an unnameable id means there is NO command at all, so
+		// the warning against the unscoped repair has nothing to sit under and the
+		// sentence that must be there is the one saying the memory stays resolved.
+		warning string
+	}{
+		"ghost_resolve_mark, the comma bucket":    {marked, commy, wantViaFile, "--only-file", "re-judges every resolved memory in the project"},
+		"ghost_resolve_mark, the newline bucket":  {marked, broken, wantUnnameable, "NO surface", "These memories stay resolved"},
+		"ghost_link_withdraw, the comma bucket":   {resultText(callTool(t, session, "ghost_link_withdraw", map[string]any{"project_id": "test-project", "source_id": targets[commy], "target_id": commy})), commy, wantViaFile, "--only-file", "re-judges every resolved memory in the project"},
+		"ghost_link_withdraw, the newline bucket": {resultText(callTool(t, session, "ghost_link_withdraw", map[string]any{"project_id": "test-project", "source_id": targets[broken], "target_id": broken})), broken, wantUnnameable, "NO surface", "These memories stay resolved"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The bucket is reached at all: an empty command and an id no command
+			// can carry is what puts these two surfaces into the branch, so a
+			// fixture that quietly stopped exercising it would otherwise pass every
+			// assertion below.
+			if !strings.Contains(tc.out, tc.prose) {
+				t.Fatalf("fixture: %s printed no %q prose, so the bucket is not being reached:\n%s", name, tc.prose, tc.out)
+			}
+			assertTheIDIsOnlyAToken(t, name, tc.out, tc.id)
+			if !strings.Contains(tc.out, tc.bucket) {
+				t.Errorf("%s did not print the bucket internal/followup renders for this id:\nwant %q\ngot:\n%s",
+					name, tc.bucket, tc.out)
+			}
+			// The prose around the block is not replaced by it: an agent told
+			// nothing about which surface can reach the id — or that no surface
+			// can — is an agent who misreports the state of the memory. Matched on
+			// fragments that survive the two surfaces' different line wrapping.
+			if !strings.Contains(tc.out, tc.warning) {
+				t.Errorf("%s lost the warning its bucket owes the reader (%q):\n%s", name, tc.warning, tc.out)
+			}
+			// And the block appears exactly once, so the assertions above are about
+			// the block and not about an id repeated somewhere else.
+			if n := strings.Count(tc.out, tc.bucket); n != 1 {
+				t.Errorf("the rendered bucket appears %d times in %s, want once:\n%s", n, name, tc.out)
+			}
+		})
 	}
 }

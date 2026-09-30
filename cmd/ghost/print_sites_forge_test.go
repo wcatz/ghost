@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/resolve"
@@ -440,6 +441,91 @@ func TestResolveAndSupersedeReportsNameNoEdgeAsItsOwnLine(t *testing.T) {
 		assertNotAtLineStart(t, "the follow-up block with no id file", out, hostileCommaIDFor())
 	})
 }
+
+// TestTheUncarriedIDBucketsAreOneRendererOnEveryCLISurface is the CLI's half of
+// the parity that internal/followup.RenderUncarriedIDs exists to give: the block
+// each CLI surface prints under its own prose is byte-for-byte what that one
+// function renders for the same id.
+//
+// The other half is over the wire in internal/mcpserver
+// (TestTheUncarriedIDBucketsAreOneRendererOnBothMCPSurfaces), because package
+// main cannot be imported from there — so this is where the CLI is compared, and
+// both halves compare against the SAME function over the SAME id, which is what
+// turns "the three surfaces print this the same way" from a claim in a package
+// doc into something a test fails on. The MCP test uses
+// "AAAA,«bell\x07`x`" and so does hostileMCPCommaID below; the two literals have
+// to agree, because the parity is about one input.
+func TestTheUncarriedIDBucketsAreOneRendererOnEveryCLISurface(t *testing.T) {
+	// The id the MCP half uses: a comma (so no --only command can carry it), plus
+	// the «, the backtick and the BEL that a raw print would leave standing, and
+	// no line break — a newline would be bucketed as unnameable first and this is
+	// about the comma bucket.
+	hostile := hostileMCPCommaID()
+	wantComma, _ := followup.RenderUncarriedIDs([]string{hostile}, nil)
+	wantNewline, _ := followup.RenderUncarriedIDs(nil, []string{hostile})
+
+	t.Run("the supersede follow-up block", func(t *testing.T) {
+		// Both cases where this block NAMES the ids rather than pointing at a
+		// file. A non-empty path deliberately is not one of them: the file is what
+		// reaches a comma id, so the block names the file instead of repeating the
+		// list, and a test that expected the bucket there would be asserting a
+		// regression.
+		for name, out := range map[string]string{
+			"no id file":    supersedeReassessFollowup("proj", []string{hostile}, ""),
+			"mixed buckets": supersedeReassessFollowup("proj", []string{"aaaa1111", hostile, "bb\nbb"}, ""),
+		} {
+			t.Run(name, func(t *testing.T) {
+				if !strings.Contains(out, wantComma) {
+					t.Errorf("the block does not print the bucket followup.RenderUncarriedIDs renders:\nwant %q\ngot:\n%s", wantComma, out)
+				}
+				assertNotAtLineStart(t, "the follow-up block", out, hostile)
+				assertNoForgedLineOutsideADataBlock(t, "the follow-up block", out)
+			})
+		}
+	})
+
+	t.Run("resolve --mark's report", func(t *testing.T) {
+		// The other CLI surface, and the one whose follow-up names only the rows
+		// THIS call stamped — so the row has to be Marked for the bucket to be
+		// printed at all.
+		out := resolveMarkReport("proj", resolve.MarkResult{
+			Resolved: 1, Marked: 1,
+			Memories: []resolve.MarkedMemory{{
+				ID: hostile, Category: "fact", Content: "a marked note", Marked: true,
+			}},
+		}, true)
+		if !strings.Contains(out, wantComma) {
+			t.Errorf("the report does not print the bucket followup.RenderUncarriedIDs renders:\nwant %q\ngot:\n%s", wantComma, out)
+		}
+		assertNotAtLineStart(t, "ghost resolve --mark", out, hostile)
+	})
+
+	t.Run("the newline bucket is the same text on both CLI surfaces", func(t *testing.T) {
+		// The newline bucket is the half the MCP tools used to print with %q and
+		// the CLI with Token, so it is the half where the two could disagree about
+		// what a « looks like: %q leaves a printable non-ASCII rune as itself and
+		// Token escapes it. One function decides it now.
+		marked := resolveMarkReport("proj", resolve.MarkResult{
+			Resolved: 1, Marked: 1,
+			Memories: []resolve.MarkedMemory{{
+				ID: "bb\nbb", Category: "fact", Content: "a marked note", Marked: true,
+			}},
+		}, true)
+		if !strings.Contains(marked, wantNewline) {
+			t.Errorf("ghost resolve --mark does not print the newline bucket followup renders:\nwant %q\ngot:\n%s", wantNewline, marked)
+		}
+		sup := supersedeReassessFollowup("proj", []string{"bb\nbb"}, "")
+		if !strings.Contains(sup, wantNewline) {
+			t.Errorf("the supersede follow-up does not print the newline bucket followup renders:\nwant %q\ngot:\n%s", wantNewline, sup)
+		}
+	})
+}
+
+// hostileMCPCommaID is the id internal/mcpserver's adversarial suite plants for
+// the same test. It is spelled out here rather than shared because the two are in
+// different packages and the parity is over ONE input — so a reader changing one
+// literal has to change the other, and the comment says so.
+func hostileMCPCommaID() string { return "AAAA,«bell\x07`x`" }
 
 // TestTheKnownProjectsSentenceRendersANameAsALabel is the refusal that offers the
 // names a reader should try instead. It is a sentence rather than a listing, and
