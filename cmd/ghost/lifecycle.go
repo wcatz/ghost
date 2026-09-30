@@ -1846,6 +1846,22 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 				// project_id is the ownership check as well as a required field, so
 				// a fallback line naming two of the three just moves the dead
 				// command to the tool surface.
+				//
+				// The project name goes through assemble.Label here, and unlike the
+				// --only-file line in supersedeReassessFollowup it must NOT also go
+				// through a shell quoting — this is a field a reader TYPES, not an
+				// argument a shell parses, and the two want opposite things. A shell
+				// argument has to be byte-equal to the value or the command does not
+				// run, which is why that site quotes the raw value and escapes only
+				// the display copy. Here the reader copies the name into a JSON field
+				// their own client encodes, so the value wants to be exactly as
+				// written and this line wants to stay one line: Label keeps ordinary
+				// text — spaces, slashes, dots — verbatim and neutralises only what
+				// could end the line or open a «...» block. What it cannot do is hand
+				// back a name holding a backtick, a double quote or a guillemet, since
+				// the escaped spelling is not the name; that is the cost of a report
+				// line, and the alternative is a project name that starts a line of
+				// its own.
 				fmt.Fprintf(&b, "      %s -> %s  [not nameable from the CLI: an id beginning with a dash is a flag to the\n"+
 					"       argument parser, so no --withdraw command can carry it. Withdraw it with the MCP tool\n"+
 					"       ghost_link_withdraw, which parses no flags: project_id %s, source_id %s, target_id %s]\n",
@@ -2678,10 +2694,22 @@ func toWithdrawPairs(pairs []supersedePair) []supersede.WithdrawPair {
 // By characters, not bytes, and that is what makes it pasteable at all. An id is
 // not necessarily hex — `ghost import` writes an artifact's ids verbatim — so
 // `id[:8]` on a CJK id is invalid UTF-8 on the report line and a selector the
-// prefix query can never match. internal/supersede.short, internal/mcpserver's
-// shortID and internal/followup's renderer all measure the same eight the same
-// way, because the premise of the feature is that the printed id is the one you
-// can hand back.
+// prefix query can never match. internal/supersede.short measures the same eight
+// the same way, because the premise of the feature is that the printed id is the
+// one you can hand back.
+//
+// It CUTS FIRST AND QUOTES SECOND, and both halves are load-bearing in that
+// order. Quoting first would answer a different question — assemble.ShortID does
+// exactly that, returning an id Token had to quote in FULL rather than truncated —
+// and its answer is wrong here for the reason its own comment gives: these lines
+// go to a terminal for a human to paste back, so a report column that stops
+// being a selector is a regression, not a safety win. Cutting first keeps the
+// column an eight-character prefix whatever the id holds, and Token then makes
+// what is left of it safe to print: a hostile id (`ghost import` writes an
+// artifact's ids verbatim) comes out as one quoted line rather than a line of its
+// own that a reader takes for a Ghost row (#802). That is the one shape this
+// renderer and assemble.ShortID deliberately disagree on, and it is why they are
+// two functions and not one.
 func shortID(id string) string {
 	// An empty id stays empty rather than becoming the quoted empty string
 	// assemble.Token renders it as: a preview column showing `""` for a row with
@@ -2689,13 +2717,10 @@ func shortID(id string) string {
 	if id == "" {
 		return ""
 	}
-	if rendered := assemble.Token(id); rendered != id {
-		return rendered
-	}
 	if utf8.RuneCountInString(id) > 8 {
-		return string([]rune(id)[:8])
+		id = string([]rune(id)[:8])
 	}
-	return id
+	return assemble.Token(id)
 }
 
 // parseResolveArgs parses `ghost resolve`'s arguments (everything after the

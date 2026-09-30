@@ -238,19 +238,49 @@ func TestSupersedeReassessFollowupNamesTheCommandAndTheFile(t *testing.T) {
 }
 
 // The file is the only surface that can name a comma-bearing id, so a block that
-// points at the file when the file write FAILED points at nothing and lists the
-// id nowhere — the invisibility this block exists to remove. writeReassessTargets
-// returns an empty path on failure, so "no file" is exactly an empty path.
+// points at the file when there is NO file to point at lists the id nowhere — the
+// invisibility this block exists to remove. There are two ways to have no file:
+// writeReassessTargets returns an empty path on failure, and a path holding a
+// line break cannot be printed as one line of command at all. Both must name the
+// ids instead.
 func TestSupersedeReassessFollowupNamesTheIDsWhenTheFileIsMissing(t *testing.T) {
-	got := supersedeReassessFollowup("myproj", []string{"imported,note"}, "")
-	if strings.Contains(got, "are in the file") || strings.Contains(got, "they are in the file") {
-		t.Errorf("the follow-up points at a file that was never written:\n%s", got)
+	for name, path := range map[string]string{
+		"the write failed":             "",
+		"the path holds a line break":  "/data/x\n.ids",
+		"the path holds a bare return": "/data/x\r.ids",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := supersedeReassessFollowup("myproj", []string{"imported,note"}, path)
+			if strings.Contains(got, "are in the file") || strings.Contains(got, "they are in the file") {
+				t.Errorf("the follow-up points at a file no operator can use:\n%s", got)
+			}
+			if !strings.Contains(got, "imported,note") {
+				t.Errorf("the follow-up neither wrote nor named the id, so nothing can reach it:\n%s", got)
+			}
+			if !strings.Contains(got, "no id file can be named here") {
+				t.Errorf("the follow-up does not say there is no file to point at:\n%s", got)
+			}
+		})
 	}
-	if !strings.Contains(got, "imported,note") {
-		t.Errorf("the follow-up neither wrote nor named the id, so nothing can reach it:\n%s", got)
+}
+
+// The path in the --only-file line is printed in TWO forms, and they must not be
+// composed: the display copy is assemble.Label's, and the ARGUMENT is the raw
+// value in single quotes. Pre-escaping the argument is a silent corruption —
+// Label renders a backtick as \`, and a backslash inside single quotes is
+// literal, so the command would name a project and a file that do not exist.
+func TestTheOnlyFileLineQuotesTheRawPathAndName(t *testing.T) {
+	const path = "/data/my`dir with space/x.ids"
+	got := supersedeReassessFollowup("my`proj", []string{"aaaaaaaa1111111111111111111111"}, path)
+	// The display copy is escaped — a backtick in it would close the backtick span
+	// the line prints the command in, and the value has to stay one line.
+	if !strings.Contains(got, "my\\`dir") {
+		t.Errorf("the display copy of the path is not escaped, so a backtick in it closes the command span:\n%s", got)
 	}
-	if !strings.Contains(got, "id file could not be written") {
-		t.Errorf("the follow-up does not say the file is missing:\n%s", got)
+	// And the ARGUMENT carries the real value, which is the one spelling a shell
+	// reads back as the same path and the same project.
+	if !strings.Contains(got, "--project 'my`proj'") || !strings.Contains(got, "--only-file '"+path+"'") {
+		t.Errorf("the command's arguments are not the raw values:\n%s", got)
 	}
 }
 

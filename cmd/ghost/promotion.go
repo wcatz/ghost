@@ -194,16 +194,21 @@ func withheld(finding secret.Finding, category, content string) string {
 	return fmt.Sprintf("<withheld: %s, category=%s, bytes=%d>", finding.Label, category, len(content))
 }
 
-// displayText is the width half both of those share, and it is where the
-// line-safety of every stored-text site in cmd/ghost is decided.
+// humanStoredText is the ONE renderer for stored text on a report line in
+// cmd/ghost, and it is where the line-safety of every such site is decided.
 //
 // A limit above zero takes the FIRST LINE of the text, capped at the limit, and
 // a limit of zero or less — what `ghost reflect --full` asks for — takes the
-// whole of it. It carries NO data delimiters, and that is a property of the
-// function rather than an omission: the human renderers below add them, because
-// a reader can be fooled by a line that is not delimited, and the `--json`
-// printer must not, because its consumer is a script and encoding/json already
-// escapes a newline.
+// whole of it. A whole field carries the «...» delimiters and a preview does
+// not, and that is a property of the function rather than an omission: a reader
+// can be fooled by a whole line that is not delimited, while the `--json` printer
+// must never delimit at all because its consumer is a script and encoding/json
+// already escapes a newline.
+//
+// It is one function rather than a width half and a delimiting half because two
+// halves with two callers each is how the two drifted — `displayText` was the
+// width half, nothing called it once its two callers moved here, and a function
+// nothing calls is a second rule waiting to be the one that ships the bug.
 //
 // The first-line cut is `assemble.PreviewLine`, the ONE cut every other listing
 // already uses, and it is a cut at the first of EITHER byte: a byte cut does not
@@ -212,17 +217,6 @@ func withheld(finding secret.Finding, category, content string) string {
 // the limit is 120 and not the `--full` zero. That is the shape #802 is about,
 // and it is why the cut lives here rather than at each call site: a display flag
 // spread across five sites is how three copies of one rule drifted.
-func displayText(content string, limit int) string {
-	if limit <= 0 {
-		return content
-	}
-	return assemble.PreviewLine(content, limit)
-}
-
-// humanStoredText is displayText plus the «...» delimiters a whole field gets on
-// the human form. It is a named step because the two forms of one command
-// disagree about them on purpose, and a caller that reached for displayText
-// directly would be taking a side in that disagreement without saying so.
 func humanStoredText(content string, limit int) string {
 	if limit <= 0 {
 		return assemble.Data(content)
