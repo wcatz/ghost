@@ -9,10 +9,15 @@ import (
 )
 
 // seedReclassifyPair writes a live 'supersedes'/'llm' edge over two near-identical
-// notes and returns their ids. The vectors are close enough that the candidate
-// scan proposes the pair AND the live edge decides its direction, which is the
-// state a reclassification is: the graph already asserts the pair, so a verdict
-// other than SUPERSEDES WITHDRAWS an edge rather than declining to write one.
+// notes and returns their ids. The link row is then BACKDATED, which is what puts
+// the pair on the schedule: skip-if-unchanged holds a live edge quiet unless an
+// endpoint has moved since the edge was written (#787), so a fixture that leaves
+// the stamp at now produces a pair the pass never judges — and a pass that judged
+// nothing is not a fixture for what a pass does when a verdict denies a live edge.
+//
+// That is the production shape of a reclassification: an endpoint was edited after
+// the edge was written, so the pass re-judges the pair, and a verdict other than
+// SUPERSEDES WITHDRAWS an edge rather than declining to write one.
 //
 // The two notes are deliberately about two different steps of one pipeline, so
 // neither states a rule the imperative veto would retire (#686) — the fixture has
@@ -23,6 +28,12 @@ func seedReclassifyPair(t *testing.T, store *memory.Store, db *sql.DB) (newer, o
 	newer = add(t, store, db, "decision: the deploy pipeline now runs the migration check before staging", []float32{1, 0, 0}, "2026-07-01 00:00:00")
 	older = add(t, store, db, "note: the deploy pipeline runs the unit suite before staging", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
 	if err := store.CreateLink(ctx, newer, older, string(RelationSupersedes), 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`,
+		newer, older,
+	); err != nil {
 		t.Fatal(err)
 	}
 	return newer, older
