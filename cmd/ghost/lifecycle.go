@@ -1625,28 +1625,171 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]\n",
 			shortID(u.NewerID), shortID(u.OlderID))
 	}
+	// The cycles, one block each, AFTER the withdrawn rows so a reader meets the
+	// edges that moved before the pair they belong to. A block states which of
+	// the two edges stands and why, because "0 withdrawn" over a pair whose both
+	// edges are still live is the most misleading line this report could print —
+	// and it is indistinguishable, without this block, from a pass that had
+	// nothing to do with them.
+	//
+	// Every verb here is the ROW verb, derived from `apply` and from what the
+	// writes actually did, exactly as the rows above derive theirs. A block that
+	// printed the outcome's own prose would say "was withdrawn" for an edge a dry
+	// run never touched, and "withdrawn" for one a concurrent pass took first —
+	// the same past-tense claim the rows go to such lengths not to make.
+	for _, c := range res.Cyclic {
+		fmt.Fprintf(&b, "  cycle: a supersedes link is live in BOTH directions between these two memories, so each edge demotes the endpoint the other promotes.\n")
+		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.First.SourceID), shortID(c.First.TargetID),
+			cycleEdgeState(c, supersede.CycleKeptFirst, apply, withdrawn))
+		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.Second.SourceID), shortID(c.Second.TargetID),
+			cycleEdgeState(c, supersede.CycleKeptSecond, apply, withdrawn))
+		fmt.Fprintf(&b, "    %s\n", cycleNote(c))
+		// The operator's next step, and it is a DIFFERENT step per outcome: a rerun
+		// for a verdict that never arrived, a decision for a pair with no knowable
+		// direction, and nothing at all once the pass has answered it. A block
+		// describing a demotion with no way out of it is the failure this report
+		// exists to prevent.
+		if c.Outcome == supersede.CycleUnoriented {
+			fmt.Fprintf(&b, "    Withdraw whichever edge is wrong — both are still live, and each one demotes a memory:\n")
+			for _, e := range []supersede.CyclicEdge{c.First, c.Second} {
+				cmd, nameable := followup.WithdrawCommand(projectName, e.SourceID, e.TargetID)
+				if nameable {
+					fmt.Fprintf(&b, "      %s\n", cmd)
+					continue
+				}
+				// The CLI cannot name this id: parseSupersedeArgs refuses a
+				// --withdraw operand that looks like a flag, and quoting does not
+				// change that. Printing the command anyway would print one that
+				// fails with a message naming neither the dash nor the id, so the
+				// ids are named here and the surface that CAN take them is named
+				// with them — the same split ResolveCommand makes for an id no
+				// --only form can carry. All THREE of the tool's parameters, under
+				// the tool's own names: its handler refuses the call outright when
+				// any of project_id, source_id or target_id is empty, and
+				// project_id is the ownership check as well as a required field, so
+				// a fallback line naming two of the three just moves the dead
+				// command to the tool surface.
+				fmt.Fprintf(&b, "      %s -> %s  [not nameable from the CLI: an id beginning with a dash is a flag to the\n"+
+					"       argument parser, so no --withdraw command can carry it. Withdraw it with the MCP tool\n"+
+					"       ghost_link_withdraw, which parses no flags: project_id %s, source_id %s, target_id %s]\n",
+					shortID(e.SourceID), shortID(e.TargetID), projectName, e.SourceID, e.TargetID)
+			}
+		}
+	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")
 	}
 	return b.String()
 }
 
+// cycleNote is the line under a cycle's two edges: what the pass DECIDED, in
+// words that are true in every mode. It deliberately claims no write, because
+// `apply` is not enough to know one: a failed InvalidateLink leaves the denied
+// edge live, and a concurrent pass may have taken it first, so the two rows above
+// carry the tense and the per-edge markers ("withdrew", "already gone", "not
+// reached … STILL LIVE") and this line carries the judgement. A note that took
+// its tense from `apply` said "was withdrawn" directly over a row reading "this
+// edge is STILL LIVE".
+func cycleNote(c supersede.CyclicPair) string {
+	switch c.Outcome {
+	case supersede.CycleKeptFirst:
+		return "the verdict named the first edge's direction, so that edge stands and its reverse is denied"
+	case supersede.CycleKeptSecond:
+		return "the verdict named the second edge's direction, so that edge stands and its reverse is denied"
+	case supersede.CycleBothWithdrawn:
+		return "the two notes are not a replacement of one another in either direction, so neither edge is supported"
+	case supersede.CycleNoVerdict:
+		return "no verdict: the classify call failed or its reply could not be read, so no edge of this pair moved and the next pass re-asks it"
+	case supersede.CycleUnoriented:
+		return "undecided: both notes carry the same updated_at AND the same created_at, so there is no direction to ask about and this pass did not ask — a re-run will not change that"
+	}
+	return ""
+}
+
+// cycleEdgeState is what the report says about ONE edge of a cyclic pair: it
+// stands when the pass kept that direction, and it carries the ROW marker for the
+// edge the outcome denied — "would withdraw" in a dry run, "withdrew" only when
+// the write landed, "already gone" when a concurrent pass took it first. It takes
+// the withdrawn list rather than the count, because under --apply a count cannot
+// say WHICH edge moved, and the two rows of a block must not disagree with the
+// list printed above them.
+func cycleEdgeState(c supersede.CyclicPair, edge supersede.CycleOutcome, apply bool, withdrawn []supersede.WithdrawnEdge) string {
+	denied := c.Outcome != edge && c.Outcome != supersede.CycleNoVerdict && c.Outcome != supersede.CycleUnoriented
+	if !denied {
+		switch c.Outcome {
+		case supersede.CycleNoVerdict:
+			return "stands: no verdict, so no edge of this pair moved"
+		case supersede.CycleUnoriented:
+			return "stands: no direction knowable, so no edge of this pair moved"
+		}
+		return "stands: this is the direction the verdict named"
+	}
+	reason := "the reverse of the direction the verdict named"
+	if c.Outcome == supersede.CycleBothWithdrawn {
+		reason = "the two notes are not a replacement of one another"
+	}
+	if !apply {
+		return fmt.Sprintf("would withdraw: %s", reason)
+	}
+	e := c.First
+	if edge == supersede.CycleKeptSecond {
+		e = c.Second
+	}
+	for _, w := range withdrawn {
+		if w.NewerID == e.SourceID && w.OlderID == e.TargetID {
+			if w.Written {
+				return fmt.Sprintf("withdrew: %s", reason)
+			}
+			return fmt.Sprintf("already gone: %s (a concurrent pass withdrew it first)", reason)
+		}
+	}
+	// The write failed before this row, so the edge is still live — the marker
+	// the withdrawn rows use for the same state, and the one that stops a reader
+	// from reading the absence of a row as a withdrawal.
+	return fmt.Sprintf("not reached: %s — this edge is STILL LIVE", reason)
+}
+
 // supersedeReport renders the pass's per-outcome report: the one-line summary
-// followed by the deterministic veto's count. A pass that declined work it did
-// not do and printed the same totals as a pass that found nothing to do reads
-// as "nothing was skipped", so the veto is on the report (#686) — and it is
-// printed by the one call below, so the report and the pass cannot drift.
+// followed by each reason the pass declined a pair. A pass that declined work it
+// did not do and printed the same totals as a pass that found nothing to do reads
+// as "nothing was skipped", so every refusal is on the report (#686, and #778 for
+// the three orientation refusals) — and they are printed by the one call below,
+// so the report and the pass cannot drift.
 //
 // A retried call is on the report too, and only when there was one: a pass that
 // had to re-ask a failed call is not the pass the summary describes, and a
 // harness that is flapping shows up here before it shows up as a failure.
+//
+// Each of the three orientation reasons states the DECISION and not a judgment
+// the pass may never have made, because each count is taken before the filters
+// that would have spent a call: OppositeLive counts refused ORIENTATIONS, so the
+// line says the scan's direction lost and that the pair keeps the link's
+// direction, not that the pair was re-validated; Unoriented pairs were never
+// proposed; Bidirectional pairs are the cycle `ghost supersede --reassess
+// --apply` withdraws, named as the next step because this pass creates links and
+// does not delete graph history. The repair is quoted in its APPLIED form, since
+// the flagless one is a dry run that withdraws nothing.
 func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
 	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
 		projectName, res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
-	if res.Vetoed == 0 {
-		return out
+	if res.Vetoed > 0 {
+		out += fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
 	}
-	return out + fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
+	if res.Unoriented > 0 {
+		out += fmt.Sprintf("  %d pair(s) not proposed: both notes carry the same updated_at AND the same created_at (a bulk import stamps a whole batch at once), so there is no chronology to order them by — no classify call, no link, and not cached (a live link on such a pair is still re-judged, since it already carries a direction)\n", res.Unoriented)
+	}
+	if res.OppositeLive > 0 {
+		out += fmt.Sprintf("  %d pair(s) proposed the reverse of a live supersedes link: the reverse orientation was refused and the pair keeps the link's direction, so one pass never carries a pair both ways round (a pair is re-judged only if an endpoint changed since the link was written)\n", res.OppositeLive)
+	}
+	if res.Bidirectional > 0 {
+		// The real project name, through the one renderer that decides how a
+		// project is spelled as a shell argument. A command printed with a
+		// literal `<project>` is a command the operator has to edit before it
+		// runs, and an edit is where a repair goes to the wrong project.
+		out += fmt.Sprintf("  %d pair(s) refused: a supersedes link is already live in BOTH directions, which demotes both endpoints — not judged, not written, and not withdrawn here; run `%s` to settle the cycle\n",
+			res.Bidirectional, followup.ReassessCommand(projectName))
+	}
+	return out
 }
 
 // retryNote is the ", N retried call(s)" clause the call counts share: empty

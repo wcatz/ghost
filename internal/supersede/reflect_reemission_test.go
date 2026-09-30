@@ -76,7 +76,10 @@ func TestSelectCandidatesOrientsByAgeAfterAVerbatimReflect(t *testing.T) {
 	}
 	// The ages the decision is made from, checked first so a failure says which
 	// half broke: the pass overwriting the timestamp, or the tie-break that then
-	// decides the pair. Under the pre-fix code these two are the same value.
+	// decides the pair. Under the pre-fix code these two are the same value. With
+	// them equal, orient() falls to created_at (#778) rather than to the id, and
+	// these two rows' created_at order agrees with their ages — so the pair is
+	// still oriented right even if a future pass re-introduces the stamp.
 	if olderAge, newerAge := memoryUpdatedAt(t, db, older), memoryUpdatedAt(t, db, newer); olderAge >= newerAge {
 		t.Fatalf("after a verbatim reflect the older memory's updated_at is %q and the newer one's is %q — "+
 			"the pass stamped rows it did not change, and orient() now has no age to read", olderAge, newerAge)
@@ -92,7 +95,7 @@ func TestSelectCandidatesOrientsByAgeAfterAVerbatimReflect(t *testing.T) {
 	c := sel.Candidates[0]
 	if c.NewerID != newer || c.OlderID != older {
 		t.Errorf("orientation after a verbatim reflect: newer=%s older=%s, want newer=%s older=%s — the "+
-			"pass left both rows with one timestamp, so the direction came from the ID tie-break rather than "+
+			"pass left both rows with one timestamp, so the direction came from a tie-break rather than "+
 			"from the memories' ages, and a REVERSED verdict on the wrong pair is refused rather than flipped",
 			c.NewerID, c.OlderID, newer, older)
 	}

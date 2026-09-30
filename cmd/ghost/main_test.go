@@ -1691,6 +1691,66 @@ func TestSupersedeReport(t *testing.T) {
 	// inside the call tally rather than a second sentence, because the calls and
 	// the retries are one fact: the retry IS a call, and the line that reports
 	// one without the other describes a pass nobody ran.
+	//
+	// The three orientation refusals are on the report for the same reason the
+	// veto is, and each one says what the pass did INSTEAD, because a bare count
+	// cannot distinguish a pair that was judged and dropped from a pair that was
+	// never seen — and the two call for opposite follow-ups from the operator.
+	orientation := supersedeReport("proj", supersede.Result{
+		Candidates: 3, Unoriented: 4, OppositeLive: 2, Bidirectional: 1,
+	}, "would link", 1, 0)
+	for _, want := range []string{
+		"  4 pair(s) not proposed:",
+		"  2 pair(s) proposed the reverse of a live supersedes link:",
+		"  1 pair(s) refused:",
+		// The REAL project name, not a `<project>` placeholder: the line is a
+		// command, and a command with a placeholder in it is one the operator
+		// has to edit before it runs — which is where a repair ends up against
+		// the wrong project.
+		"ghost supersede proj --reassess --apply",
+	} {
+		if !strings.Contains(orientation, want) {
+			t.Errorf("supersedeReport() = %q, want it to contain %q", orientation, want)
+		}
+	}
+	if strings.Contains(orientation, "<project>") {
+		t.Errorf("supersedeReport() = %q, want no <project> placeholder in a command the operator is meant to paste", orientation)
+	}
+	// A project name that is not one bare shell word is rendered through
+	// --project in single quotes, which is the quoting rule the followup package
+	// owns and the one that decides whether the pasted command runs at all.
+	awkward := supersedeReport("my proj", supersede.Result{Bidirectional: 1}, "would link", 0, 0)
+	if !strings.Contains(awkward, "ghost supersede --project 'my proj' --reassess --apply") {
+		t.Errorf("supersedeReport() for a name holding a space = %q, want the --project form a shell reads as one argument", awkward)
+	}
+	// Each reason states the DECISION, not a judgment the pass may never have
+	// made. All three counts are taken before the filters that spend a call, so
+	// a line claiming a pair "was judged" describes a pass that did not run —
+	// the review-gate finding on the OppositeLive line, which the wording here
+	// has to keep fixed: the scan's ORIENTATION was refused, and the pair is
+	// re-judged only under skip-if-unchanged.
+	for _, want := range []string{
+		"no classify call, no link",
+		"the reverse orientation was refused and the pair keeps the link's direction",
+		"only if an endpoint changed since the link was written",
+		"not judged, not written",
+	} {
+		if !strings.Contains(orientation, want) {
+			t.Errorf("supersedeReport() = %q, want it to say %q so the count is not read as a pair the classifier saw", orientation, want)
+		}
+	}
+	// The named repair is the APPLIED form: `Reassess` withdraws only under
+	// --apply, so the flagless command an operator copies would predict the
+	// withdrawal and leave the cycle demoting both endpoints.
+	if strings.Contains(orientation, "--reassess`") || strings.Contains(orientation, "--reassess\n") {
+		t.Errorf("supersedeReport() = %q, want the repair quoted with --apply, not as a dry run", orientation)
+	}
+	// A pass with no refusals prints the summary alone, and the reasons do not
+	// accumulate across calls: they are per-pass facts, each conditional on its
+	// own count.
+	if plain := supersedeReport("proj", supersede.Result{Candidates: 2}, "would link", 1, 0); strings.Count(plain, "\n") != 1 {
+		t.Errorf("supersedeReport() = %q, want the summary line and no refusal lines when nothing was refused", plain)
+	}
 	retried := supersedeReport("proj", supersede.Result{Candidates: 4, Confirmed: 1}, "would link", 3, 1)
 	if !strings.Contains(retried, "in 3 classify call(s), 1 retried after a failed call, 0 cached") {
 		t.Errorf("supersedeReport() = %q, want the retried call counted next to the calls it made", retried)
@@ -1728,6 +1788,112 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	if strings.Contains(dry, "  withdrew ") {
 		t.Errorf("a dry run reported a withdrawal as done:\n%s", dry)
+	}
+
+	// A CYCLE — a pair live in BOTH directions — is the one finding whose
+	// absence from this report is indistinguishable from a pass that had nothing
+	// to do: the headline count is a count of edges, and both edges of an
+	// undecided cycle are still live while every number above reads zero. So the
+	// block names both edges, says which one stands, and — when the pass could not
+	// decide — hands over the two `ghost supersede --withdraw` commands, because a
+	// report that describes a demotion with no way out of it is the failure this
+	// block exists to prevent.
+	//
+	// Every verb in the block is the ROW verb, taken from `apply` and from what
+	// the writes actually did. A block that printed its own prose said "was
+	// withdrawn" for an edge a dry run never touched, directly under a list of
+	// "would withdraw" rows, and "withdrew" for one a concurrent pass took first.
+	const cFirst, cSecond = "abcdef0123456789", "9876543210fedcba"
+	cycle := func(outcome supersede.CycleOutcome, apply bool, rows []supersede.WithdrawnEdge) string {
+		return supersedeReassessReport("proj", supersede.ReassessResult{
+			Loaded: 2, Unclassified: 1, Cyclic: []supersede.CyclicPair{{
+				First:   supersede.CyclicEdge{SourceID: cFirst, TargetID: cSecond},
+				Second:  supersede.CyclicEdge{SourceID: cSecond, TargetID: cFirst},
+				Outcome: outcome,
+			}},
+		}, apply, rows, 1, 0)
+	}
+	// An UNORIENTED cycle — both notes stamped alike, so the pass had no
+	// direction to ask about and did not ask. Both edges stand, and the operator
+	// decides, because a re-run cannot change the timestamps.
+	unoriented := cycle(supersede.CycleUnoriented, true, nil)
+	for _, want := range []string{
+		"live in BOTH directions",
+		"abcdef01 -> 98765432  [stands: no direction knowable, so no edge of this pair moved]",
+		"98765432 -> abcdef01  [stands: no direction knowable, so no edge of this pair moved]",
+		"a re-run will not change that",
+		"ghost supersede proj --withdraw 'abcdef0123456789' '9876543210fedcba' --apply",
+		"ghost supersede proj --withdraw '9876543210fedcba' 'abcdef0123456789' --apply",
+	} {
+		if !strings.Contains(unoriented, want) {
+			t.Errorf("cycle report missing %q:\n%s", want, unoriented)
+		}
+	}
+	// A cycle with NO VERDICT is answered by a RERUN, not by the operator: the
+	// pass asked and got nothing, so a transient classify failure — #699's mode —
+	// must not be reported as a missing chronology and answered with "delete an
+	// edge". No --withdraw command is offered for it.
+	noVerdict := cycle(supersede.CycleNoVerdict, true, nil)
+	if !strings.Contains(noVerdict, "the next pass re-asks it") {
+		t.Errorf("a no-verdict cycle does not say the next pass re-asks it:\n%s", noVerdict)
+	}
+	if strings.Contains(noVerdict, "--withdraw ") {
+		t.Errorf("a no-verdict cycle printed withdraw commands, answering a transient harness failure with a deletion:\n%s", noVerdict)
+	}
+	// A settled cycle says which edge stands, and it does NOT offer the operator
+	// the commands: the pass already withdrew one of the two, so naming an edge to
+	// withdraw would be naming the one it just removed.
+	settled := cycle(supersede.CycleKeptSecond, true, []supersede.WithdrawnEdge{
+		{NewerID: cFirst, OlderID: cSecond, Reason: "the reverse of the direction the verdict confirmed", Written: true},
+	})
+	if !strings.Contains(settled, "98765432 -> abcdef01  [stands: this is the direction the verdict named]") ||
+		!strings.Contains(settled, "abcdef01 -> 98765432  [withdrew: the reverse of the direction the verdict named]") {
+		t.Errorf("settled cycle does not say which edge stands and moved:\n%s", settled)
+	}
+	if strings.Contains(settled, "--withdraw ") {
+		t.Errorf("a settled cycle printed a withdraw command, for an edge the pass already withdrew:\n%s", settled)
+	}
+	// The SAME settled cycle in a DRY RUN says "would withdraw" everywhere, and
+	// claims no write: the block must be as mode-aware as the rows above it. Both
+	// tenses are pinned, each on the run it belongs to — a block that always
+	// predicted would satisfy the dry-run half alone, and one that always
+	// observed would satisfy the apply half alone.
+	if !strings.Contains(settled, "so that edge stands and its reverse is denied") {
+		t.Errorf("an applied cycle block does not say which edge the verdict named:\n%s", settled)
+	}
+	dryCycle := cycle(supersede.CycleKeptSecond, false, []supersede.WithdrawnEdge{
+		{NewerID: cFirst, OlderID: cSecond, Reason: "the reverse of the direction the verdict confirmed"},
+	})
+	if !strings.Contains(dryCycle, "abcdef01 -> 98765432  [would withdraw: the reverse of the direction the verdict named]") {
+		t.Errorf("a dry-run cycle block does not predict the withdrawal:\n%s", dryCycle)
+	}
+	for _, tense := range []string{"withdrew", "was withdrawn", "were withdrawn"} {
+		if strings.Contains(dryCycle, tense) {
+			t.Errorf("a dry-run cycle block contains the past tense %q:\n%s", tense, dryCycle)
+		}
+	}
+	// An edge a concurrent pass withdrew first, and one whose write was never
+	// reached, are neither of the two states above: calling either "withdrew"
+	// claims a deletion this run did not make, and calling either "would
+	// withdraw" under --apply tells the operator to re-run a pass that ran.
+	taken := cycle(supersede.CycleKeptSecond, true, []supersede.WithdrawnEdge{
+		{NewerID: cFirst, OlderID: cSecond, Reason: "the reverse of the direction the verdict confirmed", Written: false},
+	})
+	if !strings.Contains(taken, "[already gone:") {
+		t.Errorf("a cycle block does not mark an edge a concurrent pass took first:\n%s", taken)
+	}
+	notReached := cycle(supersede.CycleBothWithdrawn, true, nil)
+	if !strings.Contains(notReached, "STILL LIVE") {
+		t.Errorf("a cycle block claims nothing about an edge with no withdrawal row under --apply:\n%s", notReached)
+	}
+	// A cycle whose both edges the verdict denied says so on each row, and still
+	// prints no command — there is nothing left to withdraw.
+	if both := cycle(supersede.CycleBothWithdrawn, true, []supersede.WithdrawnEdge{
+		{NewerID: cFirst, OlderID: cSecond, Reason: "neither", Written: true},
+		{NewerID: cSecond, OlderID: cFirst, Reason: "neither", Written: true},
+	}); !strings.Contains(both, "[withdrew: the two notes are not a replacement of one another]") ||
+		strings.Count(both, "[withdrew: the two notes are not a replacement of one another]") != 2 {
+		t.Errorf("a both-denied cycle does not mark both rows:\n%s", both)
 	}
 
 	// Under --apply the list says so per edge, and the headline counts the rows

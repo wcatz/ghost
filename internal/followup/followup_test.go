@@ -132,3 +132,45 @@ func TestResolveCommandSeparatesUnnameableFromFileOnly(t *testing.T) {
 		t.Errorf("the command lost its scope: %q", cmd)
 	}
 }
+
+// The two supersede-side commands carry the same quoting rule as ResolveCommand
+// and are here for the same reason: three print sites across two reports, one
+// spelling. The cases that matter are the ones where a bare name is not one shell
+// word, and where --apply is the difference between a repair and a prediction.
+func TestSupersedeCommandsQuoteTheProjectAndCarryApply(t *testing.T) {
+	if got, want := ReassessCommand("myproj"), "ghost supersede myproj --reassess --apply"; got != want {
+		t.Errorf("ReassessCommand = %q, want %q", got, want)
+	}
+	if got := ReassessCommand("my proj"); got != `ghost supersede --project 'my proj' --reassess --apply` {
+		t.Errorf("ReassessCommand for a name holding a space = %q, want the --project form a shell reads as one argument", got)
+	}
+	if got := ReassessCommand("proj; rm -rf /"); got != `ghost supersede --project 'proj; rm -rf /' --reassess --apply` {
+		t.Errorf("ReassessCommand for a name holding a semicolon = %q, want it quoted: an unquoted name executes when pasted", got)
+	}
+	if got, nameable := WithdrawCommand("myproj", "abc123", "def456"); !nameable || got != "ghost supersede myproj --withdraw 'abc123' 'def456' --apply" {
+		t.Errorf("WithdrawCommand = %q (nameable %v), want the --apply command", got, nameable)
+	}
+	// An id is caller-supplied text, and this one comes out of an import, so it is
+	// quoted whatever it holds.
+	if got, nameable := WithdrawCommand("myproj", "imported note; rm -rf /", "def456"); !nameable || !strings.Contains(got, `'imported note; rm -rf /'`) {
+		t.Errorf("WithdrawCommand = %q (nameable %v), want the id quoted", got, nameable)
+	}
+	// A DASH-LEADING id is the one shape `ghost supersede` cannot be given:
+	// parseSupersedeArgs refuses a --withdraw operand that looks like a flag, and
+	// no amount of quoting changes the word a shell delivers. So the renderer
+	// refuses to build the command and says so, and the caller names the ids and
+	// the surface that CAN take them — the same split ResolveCommand makes.
+	for _, id := range []string{"-imported-id", "-"} {
+		if got, nameable := WithdrawCommand("myproj", id, "def456"); nameable || got != "" {
+			t.Errorf("WithdrawCommand(%q) = %q (nameable %v), want no command and nameable=false: the parser refuses a dash-leading operand", id, got, nameable)
+		}
+	}
+	// Both commands are repairs, and a repair without --apply is a dry run: the
+	// flag is part of the command, not something the operator adds.
+	withdrawCmd, _ := WithdrawCommand("p", "a", "b")
+	for _, cmd := range []string{ReassessCommand("p"), withdrawCmd} {
+		if !strings.Contains(cmd, "--apply") {
+			t.Errorf("%q names a repair that predicts rather than performs", cmd)
+		}
+	}
+}
