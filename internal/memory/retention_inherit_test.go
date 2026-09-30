@@ -16,11 +16,22 @@ import (
 // column the term reaches past rather than the one it reaches for.
 func ageSessionRow(t *testing.T, s *Store, id string, ago time.Duration) {
 	t.Helper()
-	at := stamp(-ago)
+	ageSessionRowAt(t, s, id, time.Now().UTC(), ago)
+}
+
+// ageSessionRowAt is ageSessionRow at a base the caller chose. A fixture that
+// ages more than one row, or ages a row and then records a read on it, has to
+// reach for this: the rows are meant to be the same age, and separate clock
+// reads leave them a second apart without any of them being wrong (#800).
+func ageSessionRowAt(t *testing.T, s *Store, id string, now time.Time, ago time.Duration) {
+	t.Helper()
+	// One instant for the three columns, which are one row's history: read apart
+	// they leave the write an hour from the expiry by a second as well.
+	at, expires := stampAt(now, -ago), stampAt(now, -ago+time.Hour)
 	if _, err := s.db.ExecContext(context.Background(), `
 		UPDATE memories
 		SET created_at = ?, updated_at = ?, expires_at = ?
-		WHERE id = ?`, at, at, stamp(-ago+time.Hour), id); err != nil {
+		WHERE id = ?`, at, at, expires, id); err != nil {
 		t.Fatalf("age %s by %s: %v", id, ago, err)
 	}
 }
@@ -130,8 +141,12 @@ func TestAFoldRefreshesASessionRowsExpiry(t *testing.T) {
 			if err != nil {
 				t.Fatalf("save the session fact: %v", err)
 			}
-			ageSessionRow(t, s, id, 8*24*time.Hour)
-			recordRead(t, s, id, stamp(-8*24*time.Hour))
+			// One instant for the ageing and the read below: the read is recorded at
+			// the moment the row was last written, and a second between the two
+			// would make a row its own age (#800).
+			now := time.Now().UTC()
+			ageSessionRowAt(t, s, id, now, 8*24*time.Hour)
+			recordRead(t, s, id, stampAt(now, -8*24*time.Hour))
 			was := getOne(t, s, id)
 
 			_, duplicateOf, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
@@ -338,7 +353,12 @@ func TestPruneMeasuresTheGraceFromAnExpiryAFoldRefreshed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save the session fact: %v", err)
 	}
-	ageSessionRow(t, s, folded, 30*24*time.Hour)
+	// One instant for both rows. The argument below is that the activity term is
+	// the only thing that can spare the folded row, which the control's own
+	// thirty-day age also does not (#800). Not named `now`: the prune below runs
+	// at an instant of its own, an hour past the refreshed expiry.
+	ageBase := time.Now().UTC()
+	ageSessionRowAt(t, s, folded, ageBase, 30*24*time.Hour)
 
 	control, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
 		"a session fact that was written once and never mentioned again", "mcp", 0.6, nil,
@@ -346,7 +366,7 @@ func TestPruneMeasuresTheGraceFromAnExpiryAFoldRefreshed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save the control: %v", err)
 	}
-	ageSessionRow(t, s, control, 30*24*time.Hour)
+	ageSessionRowAt(t, s, control, ageBase, 30*24*time.Hour)
 
 	if _, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
 		"a session fact that keeps coming back after months of silence, restated", "mcp", 0.6, nil,
@@ -664,7 +684,12 @@ func TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission(t *testing.T) {
 	ctx := context.Background()
 
 	reEmitted := pruneRow(t, s, testProject, "a session fact a reflect run re-emits every pass", RetentionSession)
-	agePruneRow(t, s, reEmitted, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	// One instant for both rows below: the comment on the control says both are
+	// expired, aged and past the grace, and separate clock reads leave the pair
+	// a second apart without any of them being wrong (#800).
+	now := time.Now().UTC()
+	aged, newer := stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour)
+	agePruneRow(t, s, reEmitted, aged, newer)
 	wasReEmitted := getOne(t, s, reEmitted)
 
 	// The control, and it is a `manual` source for a reason the fixture needs
@@ -678,7 +703,7 @@ func TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission(t *testing.T) {
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET source = 'manual' WHERE id = ?`, control); err != nil {
 		t.Fatalf("mark the control manual: %v", err)
 	}
-	agePruneRow(t, s, control, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	agePruneRow(t, s, control, aged, newer)
 
 	// The reflect run: re-emit the row byte-for-byte, naming only itself.
 	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
@@ -791,22 +816,29 @@ func TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone(t *testing.T) {
 func TestPruneReportsTheGraceBasisSeparatelyFromActivity(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	// One instant for every stamp below, written and expected (#800). This test
+	// compares a row's column against the value it was given, so a second
+	// boundary between the two calls would report a production defect that is not
+	// one.
+	now := time.Now().UTC()
+	backdated := stampAt(now, -30*24*time.Hour)
+	expiry := stampAt(now, -30*24*time.Hour+SessionTTL)
 
 	untouched := pruneRow(t, s, testProject, "a session note nobody has written to since its save", RetentionSession)
 	edited := pruneRow(t, s, testProject, "a session note edited after the expiry its save derived", RetentionSession)
 	pruneFixture(t, s, "a durable note that is just as old", RetentionProject,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+		stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour))
 	// Thirty days ago with no recorded read, which is the shape a real store
 	// holds and the shape the fallback is for: last_accessed stays NULL, the
 	// write stamps go back to the save, and the expiry is that save's own
 	// SessionTTL — a month past the write, not on it.
 	for _, id := range []string{untouched, edited} {
-		backdateWrite(t, s, id, stamp(-30*24*time.Hour))
-		agePruneRow(t, s, id, stamp(-30*24*time.Hour+SessionTTL), "")
+		backdateWrite(t, s, id, backdated)
+		agePruneRow(t, s, id, expiry, "")
 	}
 	// The edit: later than the expiry, so the grace has to run from it.
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET updated_at = ? WHERE id = ?`,
-		stamp(-20*24*time.Hour), edited); err != nil {
+		stampAt(now, -20*24*time.Hour), edited); err != nil {
 		t.Fatalf("edit %s: %v", edited, err)
 	}
 
@@ -866,7 +898,7 @@ func TestPruneReportsTheGraceBasisSeparatelyFromActivity(t *testing.T) {
 	// second is not a candidate at all — which is #772 working, and would make this
 	// the re-emission test's subject rather than this one's.
 	folded := pruneRow(t, s, testProject, "a session note a later save folds into", RetentionSession)
-	backdateWrite(t, s, folded, stamp(-30*24*time.Hour))
+	backdateWrite(t, s, folded, backdated)
 	if _, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
 		"a session note a later save folds into, at some length", "mcp", 0.6, nil,
 		UpsertOptions{Retention: RetentionSession}); err != nil {
@@ -874,13 +906,13 @@ func TestPruneReportsTheGraceBasisSeparatelyFromActivity(t *testing.T) {
 	} else if dup != folded {
 		t.Fatalf("the restatement folded into %q, want %q", dup, folded)
 	}
-	agePruneRow(t, s, folded, stamp(-30*24*time.Hour+SessionTTL), "")
+	agePruneRow(t, s, folded, expiry, "")
 	// The fold must leave updated_at alone, or this row is not the case the test
 	// claims to be. Asserted rather than assumed, because the whole point of the
 	// case is that the fold's write lands on a DIFFERENT column than an edit's.
-	if got := getOne(t, s, folded); got.UpdatedAt != stamp(-30*24*time.Hour) {
+	if got := getOne(t, s, folded); got.UpdatedAt != backdated {
 		t.Errorf("updated_at = %q after the fold, want the backdated %q: #772 refreshes expires_at and must not move this",
-			got.UpdatedAt, stamp(-30*24*time.Hour))
+			got.UpdatedAt, backdated)
 	}
 	report, err = s.PruneSessionMemories(ctx, PruneOptions{})
 	if err != nil {
