@@ -142,6 +142,99 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		return resolvedID, nil, nil
 	}
 
+	// Resolve ONCE, here, for two reasons that are really one. The answer says
+	// whether the store already holds whatever this argument addresses — which is
+	// what decides whether the two guards below apply at all — and it is the same
+	// answer the non-repository branch below would have asked for anyway, so
+	// hoisting it costs the repository branch one read and nothing else. It does
+	// not change ROUTING: the repository branch still goes through
+	// `ResolveOrCreateRepoProject`, which repeats exact and longest-prefix path
+	// resolution without the basename fallback for the reason in its own comment.
+	//
+	// The credential guard is asked on this error path too, and being after the
+	// resolve is not a licence to let the argument reach the answer through it. The
+	// two ambiguity refusals interpolate the caller's own `input` — `"%q matches
+	// multiple projects"` and `"%q has tied path-prefix matches"` — and those
+	// sentences travel on to the tool's answer, so a credential-shaped argument
+	// that happens to be ambiguous would put the token into the one answer that
+	// says Ghost never stores credentials. The repository refusal names a
+	// `NormalizeRepoRemote`d remote, which has no userinfo, so it needs no guard.
+	// This is the same hole the read and update paths still have and this diff
+	// does not close (#839).
+	resolvedID, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		if serr := memory.RejectSecret("project_id", projectID); serr != nil {
+			return "", nil, serr
+		}
+		return "", nil, fmt.Errorf("resolve project: %w", err)
+	}
+
+	// The SHAPE of the project this save would OPEN, refused here rather than only
+	// in the store (#824).
+	//
+	// The store applies the same rule — it is `memory.CheckImportedProject`, the
+	// importer's own predicate, at both project-creation routes — and this call is
+	// not a second rule but the SAME predicate asked one step earlier, for a message
+	// the store's cannot produce. A store refusal deliberately does not name the
+	// offending value (the same message is the export report's, where quoting the
+	// caller's text is noise and a hazard), but an agent that passed `project_id` can
+	// fix it, and "project id must hold no data delimiter" without the value leaves
+	// it guessing which of several arguments was wrong. So the value is named here,
+	// through `assemble.Token` — the renderer the row itself uses — and the sentence
+	// holds NONE of the three characters it refuses.
+	//
+	// It is gated on `resolvedID == ""`, and that gate is the whole rule: a project
+	// the store ALREADY holds is not judged, because it is not being created, and
+	// the failure mode of judging it is a project the user is working in becoming
+	// unwritable. The exact-id lookup above settles one way of addressing such a
+	// project; this settles every other way, which is where the rule actually bites.
+	// A checkout whose DIRECTORY carries a refused character is not exotic — «, »
+	// and a backtick are all legal in a POSIX path, and `ghost project bind` writes
+	// `projects.path` through `storedPathIsUsable`, which asks only whether the path
+	// is absolute and is not a bare root. That project then has a clean id and a
+	// hostile recorded path, an agent's `project_id` is routinely the session
+	// directory, and the path resolves to the id by longest prefix — so a check asked
+	// before this resolution refused every save into it, which is the bug the gate
+	// fixes. The credential guard below is gated identically, and for the same
+	// reason: a bound path that is credential-shaped must not make a project
+	// unwritable by the address a session actually uses, and nothing prints the value
+	// on the route that resolves.
+	//
+	// It matches the store's own routes, which ask the predicate on the arm that is
+	// about to INSERT and skip it for a row the transaction already finds there, so a
+	// legacy project addressed by its PATH — which resolves to its hostile id — is
+	// judged the same way here as it is there: not at all.
+	//
+	// The record is the caller's argument in all three fields, which is what both
+	// branches below store: the non-remote route passes path="" and the store
+	// normalizes it to the id, and the repository route passes the same value three
+	// times (see ensureProjectForWithRemote). `repo_remote` is not part of the
+	// predicate and never was — `NormalizeRepoRemote` strips the userinfo, so it
+	// cannot carry a password.
+	//
+	// The credential guard is asked FIRST, and that ordering is the difference
+	// between naming a value and relocating a secret. `CheckImportedProject` ends in
+	// `rejectSecretFields`, so a credential-shaped `project_id` — and a path-shaped
+	// one carrying a token is an entirely ordinary agent mistake — comes back as a
+	// `*SecretContentError`, whose whole contract is that it names the field and the
+	// format and NEVER the value, because this sentence reaches the log, this
+	// agent's context, and a reflection prompt built from it. Appending the refused
+	// value to it would put the token back into the one answer that says Ghost
+	// never stores credentials. And it is asked first rather than branched on
+	// afterwards because the predicate judges SHAPE first: a value that is both
+	// hostile and credential-shaped comes back as a shape error with the credential
+	// behind it, which `errors.Is` cannot see and the append below would print.
+	if resolvedID == "" {
+		if err := memory.RejectSecret("project_id", projectID); err != nil {
+			return "", nil, err
+		}
+		if err := memory.CheckImportedProject(memory.PortableProject{
+			ID: projectID, Name: projectID, Path: projectID,
+		}); err != nil {
+			return "", nil, fmt.Errorf("%w — project_id %s", err, assemble.Token(projectID))
+		}
+	}
+
 	pathShaped := strings.ContainsAny(projectID, `/\`)
 	remote := ""
 	if pathShaped {
@@ -149,19 +242,15 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	}
 	if pathShaped && memory.NormalizeRepoRemote(remote) != "" {
 		// The transactional store operation repeats exact/longest-prefix path
-		// resolution without the basename fallback. Going through ResolveProject
-		// first could turn an arbitrary duplicate basename into an explicit id
-		// and bypass the unique-name rule.
+		// resolution without the basename fallback. Going through its own
+		// resolution first could turn an arbitrary duplicate basename into an
+		// explicit id and bypass the unique-name rule.
 		return s.ensureProjectForWithRemote(ctx, projectID, remote)
 	}
 
 	// With no usable repository identity, retain ordinary id/name/path lookup.
-	id, _, err := s.store.ResolveProject(ctx, projectID)
-	if err != nil {
-		return "", nil, fmt.Errorf("resolve project: %w", err)
-	}
-	if id != "" {
-		projectID = id
+	if resolvedID != "" {
+		projectID = resolvedID
 	}
 	return s.ensureProjectForWithRemote(ctx, projectID, remote)
 }
