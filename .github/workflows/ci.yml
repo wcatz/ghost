@@ -122,6 +122,48 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Check gofmt
+        # Whole-repo, every PR, no revision filter. This exists because
+        # golangci-lint did NOT catch the unformatted test files that sat on
+        # main (#842), and the two reasons it stayed silent are independent —
+        # BOTH verified against the pinned v2.12.2, not inferred:
+        #
+        #   1. .golangci.yml has no `formatters:` section at all, so no
+        #      formatter runs. `golangci-lint formatters` lists gofmt under
+        #      "Disabled by your configuration formatters". In v2 gofmt is a
+        #      FORMATTER, not a linter — adding it under `linters.enable`
+        #      would not enable it.
+        #   2. Even WITH gofmt enabled, this job's `run --new-from-rev=
+        #      origin/main` reports "0 issues" for a file the PR does not
+        #      touch. A whole-repo scan with the same config reports both
+        #      files. So enabling the formatter alone would still let an
+        #      untouched unformatted file through.
+        #
+        # Test files are NOT the gap: golangci's `run.tests` defaults to
+        # true, and the whole-repo run flagged both _test.go files.
+        #
+        # `gofmt -l .` is not narrower than the tracked file set either — it
+        # is BROADER. gofmt's directory walk does not stop at dot- or
+        # underscore-prefixed directories (measured, not assumed: a probe
+        # tree under ./.sandbox/hid with files in .sandbox/hid/.dot and
+        # .sandbox/hid/_under was listed in full), so nothing hides in
+        # .github/ and untracked scratch files are checked too, which is
+        # what a gate should do. There is no vendor/ directory, so the walk
+        # never reaches third-party code the repo does not control.
+        #
+        # The golangci-lint step is deliberately left exactly as it is: this
+        # check is additive, so the only behaviour that changes is that
+        # unformatted Go source now fails CI. The gate is `test -z` over
+        # gofmt's own list, and the failure branch names the files, because
+        # a bare non-zero exit is a poor thing to debug from a CI log.
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          test -z "$UNFORMATTED" || {
+            echo "$UNFORMATTED"
+            echo "::error::gofmt reports unformatted file(s) listed above — run 'gofmt -w .' and commit the result"
+            exit 1
+          }
+
       - name: Check go.mod tidy
         run: |
           go mod tidy
