@@ -343,10 +343,20 @@ func shortID(id string) string {
 }
 
 // firstLine returns the first line of s, truncated to at most n runes with an
-// ellipsis, mirroring cmd/ghost/main.go's firstLine for compact tool-output
-// preview.
+// ellipsis, mirroring cmd/ghost's firstLine for compact tool-output preview.
+//
+// Cut at the first of EITHER byte, and that is the whole reason this function
+// exists rather than a one-liner at each call site: a preview is rendered raw
+// into a tool answer, so whatever line-breaking character a memory's content
+// holds would otherwise be rendered raw too. IndexByte('\n') alone left a lone
+// carriage return in the output, and a lone CR is enough — a terminal treats it
+// as "return to column 0 and overwrite", so a memory whose content was
+// `legitimate claim\roverwrite this` printed a preview that showed only
+// `overwrite this`, and several renderers split on CR as readily as on LF.
+// Cutting at whichever comes first also drops the CR of a CRLF pair, since
+// s[:i] ends immediately before it (#791).
 func firstLine(s string, n int) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
 		s = s[:i]
 	}
 	r := []rune(s)

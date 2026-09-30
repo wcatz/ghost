@@ -203,7 +203,11 @@ is for:
 `ghost_link_withdraw` name what they touched by the first line of a memory's
 content, capped at 70 characters. That is not delimited — it is a preview, and
 labelling it as data would misrepresent what it is — but it is cut at the first
-newline, so a memory's content cannot forge a line there either.
+line break of either kind, LF or CR, so a memory's content cannot forge a line
+there either. The CR half is not pedantry: a lone carriage return is enough on
+its own, since a terminal reads it as "return to column 0 and overwrite", so a
+memory whose content was `legitimate claim\roverwrite this` would otherwise
+render a preview showing only `overwrite this`.
 
 Routes 2 and 3 are also what protect a store which already holds such a value:
 written before a write-boundary refusal landed, restored from a snapshot an older
