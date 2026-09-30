@@ -206,7 +206,7 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 			"source_id":  newer,
 			"target_id":  older,
 		})
-		mustContain(t, "withdraw (no live edge)", fail, "no live supersedes link")
+		mustContain(t, "withdraw (no live edge)", fail, "no live supersedes or causes link")
 		fail = callExpectingError(t, cs, "ghost_link_withdraw", map[string]any{
 			"project_id": "no-such-project-here",
 			"source_id":  newer,

@@ -1203,8 +1203,12 @@ func TestCLIResolveSupersede(t *testing.T) {
 
 		// Withdrawing it again is an error rather than a quiet no-op that reads as
 		// a completed withdrawal, and a ref that names nothing changes nothing.
+		// The refusal names BOTH relations, because that is the same message an
+		// operator gets when the edge they DO hold is a 'causes' one and the
+		// default looked for a 'supersedes' (#833) — one sentence, not two, and
+		// the one that tells them which relation to pass.
 		again := s.mustFail("supersede", e2eProject, "--withdraw", newer, older, "--apply")
-		mustMatch(t, "re-withdraw", again.stderr, `(?i)no live supersedes link`)
+		mustMatch(t, "re-withdraw", again.stderr, `(?i)no live supersedes or causes link`)
 		s.mustFail("supersede", e2eProject, "--withdraw", newer, "ffffffff")
 		// A pair the operator can see is wrong but Ghost cannot resolve is the
 		// same refusal, not a guess.

@@ -820,10 +820,24 @@ type Classified struct {
 
 // Result summarizes a pass.
 type Result struct {
-	Candidates    int
-	Confirmed     int // SUPERSEDES verdicts
-	Created       int // supersedes links written (0 in dry-run)
-	CausesCreated int // CAUSES verdicts (causes links written when apply)
+	Candidates int
+	Confirmed  int // SUPERSEDES verdicts
+	Created    int // supersedes links written (0 in dry-run)
+	// CausesCreated counts CAUSES VERDICTS, which is not what Created counts:
+	// Created is a WRITE count and this is not, because the 'causes' write is
+	// guarded and can be refused in the same run that reached the verdict (#823
+	// made that reachable, since before it the write was unguarded and always
+	// landed). A field named for what a relation "created" and counting verdicts
+	// is read as a write count by every caller that is not holding the diff in
+	// its head — which is the whole report, and the reason the write count is its
+	// own field, CausesWritten.
+	CausesCreated int // CAUSES verdicts (not writes — see CausesWritten)
+	// CausesWritten counts 'causes' links actually written, and is Created's
+	// twin: 0 in a dry run (nothing is attempted), and CausesCreated minus the
+	// pairs the guarded writer refused. It is what a report has to count under
+	// --apply, because "1 causes" over a refusal is a claim about the graph that
+	// the refusal line two lines below it takes back (#834).
+	CausesWritten int
 	// Reclassified counts the pairs whose live edge's RELATION changed, or whose
 	// live edge was invalidated — a verdict that re-affirmed the relation the
 	// pair already held is not one of them, and the distinction is what
@@ -1149,6 +1163,15 @@ func judgedAt(snapshot map[string]memory.Memory, c Candidate) string {
 // and only invalidated by NEITHER or a reversal. Subtracting the no-write
 // reclassifications matters because a pass whose whole effect is deleting a
 // link should not tell the operator that --apply will write links for it.
+//
+// It keys off VERDICTS (Confirmed and CausesCreated) and never off the write
+// counts, which is not an oversight: this answers "would an --apply of THIS
+// result have something to write", and in a dry run there are no writes to read.
+// #834 gave the 'causes' relation a write count of its own (CausesWritten)
+// precisely so the report could count writes without changing what this
+// promises — swapping CausesCreated for CausesWritten here would silence the
+// hint on a dry run that found a verdict and could not act on it, which is the
+// one pass whose verdict the operator most needs to be told about.
 func (r Result) WouldWriteLinks() bool {
 	return r.Confirmed > 0 || r.CausesCreated > 0 || r.Reclassified > r.ReclassifiedNoWrite
 }
@@ -2100,17 +2123,27 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				}
 				if !wrote {
 					// The pair's other 'causes' direction was already live when
-					// this write reached the store, which after the sweeps above
-					// is a CONCURRENT writer: this pass's graph read predates its
-					// commit. The edge that exists is the other writer's, the
-					// next pass judges the pair in ITS direction, and this run says
-					// so rather than reporting a link it did not write.
+					// this write reached the store. The sweeps above dropped the one
+					// this pass could SEE, so on a store whose 'causes' edges are all
+					// written by this pass — the only way production writes one — the
+					// edge that opposed this write is a CONCURRENT writer's: this
+					// pass's graph read predates its commit. The edge that exists is
+					// the other writer's, the next pass judges the pair in ITS
+					// direction, and this run says so rather than reporting a link it
+					// did not write.
+					//
+					// CausesWritten is NOT incremented here, and that is the whole of
+					// #834: a verdict and a write are different facts, and a summary
+					// that adds one where only the other is true reports an edge this
+					// run did not write. The refusal is counted where it happened.
 					res.ReverseLive++
 					c.OpposedLive = true
 					if logger != nil {
 						logger.Info("supersede: causes link not written, the pair's reverse causes edge is already live (a concurrent pass wrote it first)",
 							"older", c.OlderID, "newer", c.NewerID)
 					}
+				} else {
+					res.CausesWritten++
 				}
 				c.CausesDropped = causesDropped
 				// The withdrawal this row reports is the pair's live edge

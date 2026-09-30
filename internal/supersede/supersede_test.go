@@ -1266,6 +1266,11 @@ func TestResultWouldWriteLinks(t *testing.T) {
 		{"one no-write reclassification and one real reclassification", Result{Reclassified: 2, Reversed: 1, ReclassifiedNoWrite: 1}, true},
 		// Only refusals, and the cache is not a graph change either way.
 		{"cache hits and unclassified pairs", Result{Skipped: 3, Unclassified: 2}, false},
+		// The WRITE counts never appear here (#834). They are 0 in every dry run,
+		// which is the run that prints this hint, so keying the promise off them
+		// would make it false on exactly the pass it is for; and a result carrying
+		// one is a result of an --apply, which prints the hint not at all.
+		{"writes alone, no verdicts", Result{Created: 1, CausesWritten: 1}, false},
 	}
 	for _, c := range cases {
 		if got := c.res.WouldWriteLinks(); got != c.want {
@@ -1305,9 +1310,9 @@ func TestRunCountsNoWriteReclassifications(t *testing.T) {
 				t.Fatalf("got reclassified=%d noWrite=%d, want 1/1 for a %s verdict",
 					res.Reclassified, res.ReclassifiedNoWrite, verdict)
 			}
-			if res.Created != 0 || res.CausesCreated != 0 {
-				t.Errorf("a %s reclassification must write nothing, got created=%d causes=%d",
-					verdict, res.Created, res.CausesCreated)
+			if res.Created != 0 || res.CausesCreated != 0 || res.CausesWritten != 0 {
+				t.Errorf("a %s reclassification must write nothing, got created=%d causes=%d causesWritten=%d",
+					verdict, res.Created, res.CausesCreated, res.CausesWritten)
 			}
 			if res.WouldWriteLinks() {
 				t.Errorf("a pass whose only finding is a %s reclassification must not promise a link to write", verdict)

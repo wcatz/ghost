@@ -76,6 +76,51 @@ func TestRepairableTargetsGroupsByTheProjectThatCanRepairThem(t *testing.T) {
 	}
 }
 
+// TestRepairableTargetsSkipsACausesWithdrawal is the rule #833 made load-bearing.
+// The follow-up is a `ghost resolve --reassess`, and resolve's supersedes
+// piggyback acts on 'supersedes'/'llm' edges alone — a 'causes' claim never
+// stamped the `resolved_at` the repair clears. So naming a 'causes' target sends
+// the operator to clear a memory nothing is holding down, and the repair reports
+// it as still asserted for a reason that was removed by the very command they ran.
+//
+// Before #833 this was not a filter at all: every link reaching this function was
+// a 'supersedes' edge by construction, because the relation was never read off
+// the row. #833 made a 'causes' edge withdrawable, which is the first time a
+// non-supersedes row can arrive here, and it arrives on both surfaces at once —
+// so the filter is written here rather than at either caller, where one of the two
+// would have been forgotten.
+//
+// An EMPTY relation still counts, and that is not leniency: it is the zero value
+// of a struct a caller may have built by hand, and the withdrawal's own default
+// is 'supersedes', so a row without one has not said it is a 'causes' claim.
+func TestRepairableTargetsSkipsACausesWithdrawal(t *testing.T) {
+	got := RepairableTargets([]WithdrawnLink{
+		{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Relation: "causes", Withdrawn: true},
+		{SourceID: "B", TargetID: "T2", TargetProjectID: "p", Relation: "supersedes", Withdrawn: true},
+		{SourceID: "C", TargetID: "T3", TargetProjectID: "p", Withdrawn: true},    // unset: the default
+		{SourceID: "D", TargetID: "T1", TargetProjectID: "p", Relation: "causes"}, // deduped anyway
+	})
+	if len(got) != 1 {
+		t.Fatalf("RepairableTargets = %+v, want one group", got)
+	}
+	want := []string{"T2", "T3"}
+	if len(got[0].Targets) != len(want) {
+		t.Fatalf("RepairableTargets = %+v, want %v: a 'causes' target is not repairable", got[0].Targets, want)
+	}
+	for i := range want {
+		if got[0].Targets[i] != want[i] {
+			t.Errorf("Targets[%d] = %q, want %q", i, got[0].Targets[i], want[i])
+		}
+	}
+	// A request that withdrew only 'causes' edges has no follow-up at all, rather
+	// than an empty group the caller would render as a command naming nothing.
+	if n := len(RepairableTargets([]WithdrawnLink{
+		{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Relation: "causes", Withdrawn: true},
+	})); n != 0 {
+		t.Errorf("RepairableTargets = %d group(s) over a 'causes'-only withdrawal, want none", n)
+	}
+}
+
 // RepairableTargets keeps the ORDER the rows were reported in, so the report and
 // the command built from it cannot disagree about which memory is which, and it
 // keeps a blank TargetID out of a selector list readRefSelectors would refuse.

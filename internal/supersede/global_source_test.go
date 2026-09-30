@@ -140,14 +140,14 @@ func TestWithdrawStillRefusesAnEdgeNoProjectClaims(t *testing.T) {
 	if err == nil {
 		t.Fatal("Withdraw from _global reached an edge with no endpoint in the shared scope")
 	}
-	if !strings.Contains(err.Error(), "no live supersedes link") {
+	if !strings.Contains(err.Error(), "no live supersedes or causes link") {
 		t.Errorf("the refusal is not about the edge's ownership: %v", err)
 	}
 	if strings.Contains(err.Error(), "nothing supersedes that memory") {
 		t.Errorf("the refusal makes a claim about the whole graph: %v", err)
 	}
-	if links, lerr := store.SupersedesLinksInto(ctx, memory.GlobalProjectID, target); lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	if links, lerr := store.LinksInto(ctx, memory.GlobalProjectID, target, "supersedes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
 	} else if len(links) != 0 {
 		t.Errorf("the other project's edge is visible from _global as %d live row(s): the shared scope is not every project", len(links))
 	}
@@ -348,10 +348,10 @@ func TestWithdrawReachesAnEdgeWhoseSourceIsInAnotherProject(t *testing.T) {
 	// The ranking was demoting that target the whole time, which is what made the
 	// missing repair worth closing. The read is the one a withdrawal makes: the
 	// target is in p, so p can see the edge burying it.
-	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	if links, lerr := store.LinksInto(ctx, "p", target, "supersedes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
 	} else if len(links) != 1 {
-		t.Fatalf("SupersedesLinksInto(p) = %+v, want the one edge burying p's own memory", links)
+		t.Fatalf("LinksInto(p) = %+v, want the one edge burying p's own memory", links)
 	}
 
 	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: source, Target: target}}, true, discardLogger())
@@ -361,8 +361,8 @@ func TestWithdrawReachesAnEdgeWhoseSourceIsInAnotherProject(t *testing.T) {
 	if res.Withdrawn != 1 {
 		t.Errorf("Withdrawn = %d, want 1", res.Withdrawn)
 	}
-	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	if links, lerr := store.LinksInto(ctx, "p", target, "supersedes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
 	} else if len(links) != 0 {
 		t.Errorf("live edge(s) = %d after the withdrawal, want 0", len(links))
 	}
@@ -413,8 +413,8 @@ func TestAProjectScopedRefStillRefusesWhatItCannotName(t *testing.T) {
 	if !strings.Contains(err.Error(), "too short to be a prefix") {
 		t.Errorf("a short ref was not refused on its length: %v", err)
 	}
-	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	if links, lerr := store.LinksInto(ctx, "p", target, "supersedes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
 	} else if len(links) != 1 {
 		t.Errorf("live edge(s) = %d, want 1: the two refusals above wrote nothing", len(links))
 	}

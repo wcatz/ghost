@@ -525,7 +525,7 @@ func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string
 // repair pass's floor.
 //
 // The scope is BOTH endpoints, and it is deliberately STRICTER than
-// SupersedesLinksInto's, because the two reads answer different questions. That
+// LinksInto's, because the two reads answer different questions. That
 // one is a targeted withdrawal, and the caller has already NAMED the target: the
 // question is which edges bury this memory, and the memory's own project may
 // answer it however the edge came to be sourced. This one feeds a PASS, and a pass
@@ -582,8 +582,10 @@ func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, 
 	return links, rows.Err()
 }
 
-// SupersedesLinksInto returns the live 'supersedes' edges whose TARGET is
-// memoryID and whose EITHER endpoint belongs to projectID or to `_global`.
+// LinksInto returns the live edges whose TARGET is memoryID and whose EITHER
+// endpoint belongs to projectID or to `_global`, for the given relation — or for
+// the two directed relations a targeted withdrawal can name ('supersedes' and
+// 'causes', 'supersedes' first) when relation is empty.
 //
 // It is the read a targeted withdrawal decides on, and it answers two questions
 // with one query: whether the exact edge the operator named is live, and — when
@@ -612,24 +614,69 @@ func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, 
 // target is the promoted memory — which is the case the half exists for. A caller
 // reaching this read with a project it does not own therefore still gets nothing
 // it could not have had.
-func (s *Store) SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]Link, error) {
+//
+// The relation is a parameter rather than a fixed column, and that is #833
+// rather than a generality: a 'causes' edge became load-bearing when its
+// DIRECTION started deciding which way a pair is judged, so a pair whose only
+// edge is a 'causes' one is now a pair a person has to be able to name. It was
+// unreachable through a read hardcoded to 'supersedes' — a pair the ordinary
+// pass refuses forever (the #778 tie: both rows share updated_at and created_at,
+// so there is no chronology to orient it by) had no repair at all, and neither
+// `ghost supersede --withdraw` nor ghost_link_withdraw could reach it.
+//
+// Only the two relations a withdrawal can act on are returned by the empty form.
+// A 'related' or 'contradicts' edge is not a supersession claim, nothing in the
+// ranking reads it, and listing it in a refusal would send an operator after an
+// edge neither surface was asked about; naming a relation the CLI and the MCP
+// tool do not accept is refused by them, not silently ignored here.
+func (s *Store) LinksInto(ctx context.Context, projectID, memoryID, relation string) ([]Link, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// An empty relation means "both relations", and it is a separate statement
+	// rather than an `OR relation IN (…)`: the caller that wants both wants the
+	// order the withdrawal's selection reads in — 'supersedes' first, because that
+	// is the relation its default picks — and an ORDER BY in a UNION would be a
+	// second statement to keep agreeing with this one.
+	if relation == "" {
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT l.source_id, l.target_id, l.relation, l.strength, l.source, l.created_at, l.invalidated_at
+			FROM memory_links l
+			JOIN memories source_mem ON source_mem.id = l.source_id
+			JOIN memories target_mem ON target_mem.id = l.target_id
+			WHERE l.relation IN ('supersedes', 'causes') AND l.invalidated_at IS NULL
+			  AND l.target_id = ?
+			  AND (source_mem.project_id IN (?, ?) OR target_mem.project_id IN (?, ?))
+			ORDER BY CASE l.relation WHEN 'supersedes' THEN 0 ELSE 1 END, l.created_at
+		`, memoryID, projectID, GlobalProjectID, projectID, GlobalProjectID)
+		if err != nil {
+			return nil, fmt.Errorf("links into: %w", err)
+		}
+		defer rows.Close() //nolint:errcheck
+		return scanLinks(rows)
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT l.source_id, l.target_id, l.relation, l.strength, l.source, l.created_at, l.invalidated_at
 		FROM memory_links l
 		JOIN memories source_mem ON source_mem.id = l.source_id
 		JOIN memories target_mem ON target_mem.id = l.target_id
-		WHERE l.relation = 'supersedes' AND l.invalidated_at IS NULL
+		WHERE l.relation = ? AND l.invalidated_at IS NULL
 		  AND l.target_id = ?
 		  AND (source_mem.project_id IN (?, ?) OR target_mem.project_id IN (?, ?))
-	`, memoryID, projectID, GlobalProjectID, projectID, GlobalProjectID)
+		ORDER BY l.created_at
+	`, relation, memoryID, projectID, GlobalProjectID, projectID, GlobalProjectID)
 	if err != nil {
-		return nil, fmt.Errorf("supersedes links into: %w", err)
+		return nil, fmt.Errorf("links into: %w", err)
 	}
 	defer rows.Close() //nolint:errcheck
+	return scanLinks(rows)
+}
 
+// scanLinks reads the seven link columns in the order both LinksInto statements
+// select them, so the two cannot drift about which column is which — a swap would
+// be silent, because every column is a string or a float and scans into a string
+// just fine.
+func scanLinks(rows *sql.Rows) ([]Link, error) {
 	var links []Link
 	for rows.Next() {
 		var l Link

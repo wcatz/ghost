@@ -1420,7 +1420,7 @@ func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provi
 // supersedePair is one `--withdraw <source-id> <target-id>` pair as it was typed,
 // before the refs are resolved. Source is the superseding memory (a
 // 'supersedes' edge is written newer→older) and Target the superseded one.
-type supersedePair struct{ source, target string }
+type supersedePair struct{ source, target, relation string }
 
 // parseSupersedeArgs parses `ghost supersede`'s arguments (everything after
 // the subcommand word). Hand-rolled, matching the historical loop exactly:
@@ -1484,7 +1484,7 @@ func checkSupersedeConsensus(n int) error {
 	return nil
 }
 
-func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, consensus int, withdraw []supersedePair, err error) {
+func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, consensus int, withdraw []supersedePair, relation string, err error) {
 	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
 	consensus = 1    // one pass: the flag is off until it is typed
 	for i := 0; i < len(args); i++ {
@@ -1496,37 +1496,42 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 		case args[i] == "--consensus" && i+1 < len(args):
 			v, cerr := strconv.Atoi(args[i+1])
 			if cerr != nil {
-				return "", "", false, false, 0, 0, nil, fmt.Errorf("--consensus needs a whole number of passes: %q", args[i+1])
+				return "", "", false, false, 0, 0, nil, "", fmt.Errorf("--consensus needs a whole number of passes: %q", args[i+1])
 			}
 			if verr := checkSupersedeConsensus(v); verr != nil {
-				return "", "", false, false, 0, 0, nil, verr
+				return "", "", false, false, 0, 0, nil, "", verr
 			}
 			consensus = v
 			i++
 		case strings.HasPrefix(args[i], "--consensus="):
 			v, cerr := strconv.Atoi(strings.TrimPrefix(args[i], "--consensus="))
 			if cerr != nil {
-				return "", "", false, false, 0, 0, nil, fmt.Errorf("--consensus needs a whole number of passes")
+				return "", "", false, false, 0, 0, nil, "", fmt.Errorf("--consensus needs a whole number of passes")
 			}
 			if verr := checkSupersedeConsensus(v); verr != nil {
-				return "", "", false, false, 0, 0, nil, verr
+				return "", "", false, false, 0, 0, nil, "", verr
 			}
 			consensus = v
 		case args[i] == "--withdraw" && i+2 < len(args) && !strings.HasPrefix(args[i+1], "-") && !strings.HasPrefix(args[i+2], "-"):
 			withdraw = append(withdraw, supersedePair{source: args[i+1], target: args[i+2]})
 			i += 2
 		case args[i] == "--withdraw":
-			return "", "", false, false, 0, 0, nil, fmt.Errorf("--withdraw needs a source id and a target id: --withdraw <source-id> <target-id>")
+			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("--withdraw needs a source id and a target id: --withdraw <source-id> <target-id>")
+		case args[i] == "--relation" && i+1 < len(args):
+			relation = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--relation="):
+			relation = strings.TrimPrefix(args[i], "--relation=")
 		case args[i] == "--project":
 			if i+1 >= len(args) {
-				return "", "", false, false, 0, 0, nil, errors.New("--project requires a value")
+				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
 			}
 			project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
 			project = strings.TrimPrefix(args[i], "--project=")
 			if project == "" {
-				return "", "", false, false, 0, 0, nil, errors.New("--project requires a value")
+				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
 			}
 		case args[i] == "--threshold" && i+1 < len(args):
 			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
@@ -1545,11 +1550,23 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 		case !strings.HasPrefix(args[i], "-"):
 			project = args[i]
 		default:
-			return "", "", false, false, 0, 0, nil, fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
 	if len(withdraw) > 0 && reassess {
-		return "", "", false, false, 0, 0, nil, errors.New("--withdraw removes the edges you name and --reassess re-judges every edge in the graph; run them as two commands")
+		return "", "", false, false, 0, 0, nil, "", errors.New("--withdraw removes the edges you name and --reassess re-judges every edge in the graph; run them as two commands")
+	}
+	// --relation only decides which edge --withdraw acts on, so it is refused
+	// without one rather than silently ignored: a command that accepted it and
+	// withdrew the other relation's edge would report the pair withdrawn and
+	// leave the edge the operator meant still live.
+	if relation != "" {
+		if len(withdraw) == 0 {
+			return "", "", false, false, 0, 0, nil, "", errors.New("--relation names which edge --withdraw acts on; use it with --withdraw")
+		}
+		if rerr := checkSupersedeRelation(relation); rerr != nil {
+			return "", "", false, false, 0, 0, nil, "", rerr
+		}
 	}
 	if consensus > 1 && (reassess || len(withdraw) > 0) {
 		// Both repair modes judge edges the graph ALREADY holds, one verdict per
@@ -1558,9 +1575,27 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 		// withdraw an edge the passes happen to split on, which is the one job
 		// the repair exists to do. The creation pass is where the measurement
 		// applied; a repair is a decision about an edge that is already live.
-		return "", "", false, false, 0, 0, nil, errors.New("--consensus applies to the creation pass; --reassess and --withdraw judge edges that are already in the graph, one verdict per edge")
+		return "", "", false, false, 0, 0, nil, "", errors.New("--consensus applies to the creation pass; --reassess and --withdraw judge edges that are already in the graph, one verdict per edge")
 	}
-	return project, source, apply, reassess, threshold, consensus, withdraw, nil
+	return project, source, apply, reassess, threshold, consensus, withdraw, relation, nil
+}
+
+// checkSupersedeRelation refuses a --relation that is not one of the two
+// relations a withdrawal can act on. It is one function for the same reason
+// checkSupersedeConsensus is: both spellings of the flag have to refuse the same
+// words with the same sentence, and the pair a caller was refused over is the pair
+// it would then have withdrawn nothing about.
+//
+// It accepts exactly 'supersedes' and 'causes' because those are the two the
+// withdrawal writes and the two the refusal names. A typo that silently fell back
+// to the default would withdraw the OTHER edge of a pair that holds both, which
+// is the one case where the operator's own word is the only thing that decides
+// which edge moves.
+func checkSupersedeRelation(relation string) error {
+	if relation != string(supersede.RelationSupersedes) && relation != string(supersede.RelationCauses) {
+		return fmt.Errorf("--relation takes supersedes or causes, not %q", relation)
+	}
+	return nil
 }
 
 // supersedeUsage is the help for `ghost supersede`: stderr when the project
@@ -1581,6 +1616,15 @@ Flags:
                       unsupersede history row; without it nothing is written.
                       --source and --threshold are not used: nothing is classified.
                       Cannot be combined with --reassess (run them as two commands).
+  --relation supersedes|causes
+                      Which edge --withdraw acts on, for a pair that holds more
+                      than one. Default: the 'supersedes' edge if the pair has
+                      one, else the 'causes' edge. --relation is required to
+                      reach a 'causes' edge on a pair that ALSO has a live
+                      'supersedes' one. Only valid with --withdraw. Withdrawing
+                      a 'causes' edge invalidates that edge and writes no
+                      unsupersede history row, because a 'causes' claim never
+                      held its target down.
   --consensus N       Classify the candidate set N times and write ONLY what all
                       N passes proposed, in the same direction (N >= 2; default 1,
                       which is no gate). A pair the passes split on is reported as
@@ -1631,6 +1675,13 @@ name, on your say-so, without asking a model. It settles the WHOLE request befor
 writing anything, so a pair that names no live edge withdraws none of them, and
 an ambiguous prefix is a refusal listing the matches rather than a guess.
 
+--withdraw names EITHER relation. A pair whose only edge is a 'causes' one is
+reachable without any flag — it has no 'supersedes' edge to pick instead — and a
+pair holding both needs --relation, because 'supersedes' is the default and the
+pair is the case where guessing wrong withdraws the edge you did not mean. A
+refusal names the live edges of BOTH relations, since the missing one is the
+common case for an operator who has the pair but not the relation.
+
 Withdrawing an edge (--withdraw --apply, or --reassess --apply) writes the
 unsupersede history row and leaves the resolution it may have caused in place:
 resolve treats a live edge as a floor, so that resolution becomes clearable only
@@ -1670,7 +1721,12 @@ func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, a
 		verb, count = "withdrew", res.Withdrawn
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d supersedes edge(s) named, %s %d\n", assemble.Label(projectName), res.Resolved, verb, count)
+	// The header names the RELATIONS it counted, because the request may name
+	// 'causes' edges and the row below says which one each was: a report reading
+	// "2 supersedes edge(s) named" over two 'causes' rows is a claim about edges
+	// the operator never named, and it is the number they quote when they ask
+	// why a 'causes' pair could not be withdrawn.
+	fmt.Fprintf(&b, "%s: %d %s edge(s) named, %s %d\n", assemble.Label(projectName), res.Resolved, relationsNamed(res.Links), verb, count)
 	for _, l := range res.Links {
 		marker := "would withdraw"
 		if apply {
@@ -1690,8 +1746,15 @@ func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, a
 		// account of. The target's text goes through the stored-content
 		// substitution with no category, because an edge records none: the marker
 		// says the format and the length, which is all a reader of this line has.
+		// The edge's RELATION is on the line, not only in the header: a request may
+		// name a mix of the two, and the relation is what decides whether the
+		// row's withdrawal also cleared a resolution (a 'supersedes' edge demotes
+		// its target and stamps it resolved; a 'causes' edge does neither). A
+		// reader checking they withdrew the right edge cannot see the relation
+		// from a header that aggregates two.
 		fmt.Fprintf(&b, "  %s  %s -> %s  [%s, strength %.2f]  %s\n",
-			marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, l.Strength,
+			marker, shortID(l.SourceID), shortID(l.TargetID),
+			edgeKind(l.Relation, l.LinkSource), l.Strength,
 			displayStored(l.TargetText, "", 70))
 	}
 	if !apply {
@@ -1703,6 +1766,60 @@ func supersedeWithdrawReport(projectName string, res supersede.WithdrawResult, a
 	// for it. A second, hand-written hint here would be a second command string to
 	// keep current, and #702 made the unscoped one wrong to suggest.
 	return b.String()
+}
+
+// edgeKind renders the bracketed edge descriptor on a --withdraw row: the
+// RELATION first, then the edge's own `source` column, which says what created it
+// ('llm' for a pass's own verdict). The relation is new and the source column is
+// not: the source decides the follow-up, because only a 'supersedes'/'llm' edge
+// is one resolve's piggyback ever stamps resolved_at on account of, so a row
+// printed without it cannot be matched against that rule.
+//
+// A row whose relation is empty renders 'supersedes' rather than a blank: an
+// empty Relation is the zero value of a struct a caller may have built by hand,
+// and a report printing an empty bracket over one of its own rows is a report
+// that cannot be matched against the rule above.
+func edgeKind(relation, linkSource string) string {
+	if relation == "" {
+		relation = string(supersede.RelationSupersedes)
+	}
+	if linkSource == "" {
+		return relation
+	}
+	return relation + ", source " + linkSource
+}
+
+// relationsNamed describes the relations a withdrawal actually resolved, for the
+// header. A request holding both reports "supersedes and causes", because
+// aggregating either into one word would be the claim #833 was filed about: the
+// header's number is what an operator reads back, and a "1 supersedes edge"
+// over a 'causes' withdrawal is a report that disagrees with the rows under it.
+func relationsNamed(links []supersede.WithdrawnLink) string {
+	seen := map[string]bool{}
+	for _, l := range links {
+		if l.Relation != "" {
+			seen[l.Relation] = true
+		}
+	}
+	// The FIXED relation order, not the rows' order, and the reason is that a
+	// report which read "2 causes and supersedes" on one request and
+	// "2 supersedes and causes" on the next is a second, invisible ordering rule
+	// with nothing behind it. It is the same order the pair resolution walks and
+	// the same order `LinksInto` returns, so a reader comparing this header with
+	// the selection that produced it is not comparing two different orders.
+	var order []string
+	for _, r := range []string{string(supersede.RelationSupersedes), string(supersede.RelationCauses)} {
+		if seen[r] {
+			order = append(order, r)
+		}
+	}
+	if len(order) == 0 {
+		return string(supersede.RelationSupersedes)
+	}
+	if len(order) == 1 {
+		return order[0]
+	}
+	return strings.Join(order, " and ")
 }
 
 // supersedeReassessReport renders the --reassess result: the per-outcome counts,
@@ -1963,9 +2080,24 @@ func cycleEdgeState(c supersede.CyclicPair, edge supersede.CycleOutcome, apply b
 // --apply` withdraws, named as the next step because this pass creates links and
 // does not delete graph history. The repair is quoted in its APPLIED form, since
 // the flagless one is a dry run that withdraws nothing.
-func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
+func supersedeReport(projectName string, res supersede.Result, verb string, apply bool, calls, retries int) string {
+	// The two edge counts, and they are chosen by MODE rather than printed as
+	// both (#834). Under --apply they are what the graph now holds: Created and
+	// CausesWritten are WRITE counts, and a verdict whose write the store refused
+	// is not one of them — the refusal has its own line below, and counting it in
+	// the summary as well would be the report claiming an edge the run says it
+	// did not write, one line apart. In a dry run nothing was attempted, so both
+	// write counts are 0 and the summary's honest number is what the pass WOULD
+	// write: the verdicts. Same tense the verb already carries, and the dry run's
+	// "Re-run with --apply to write these links." hint below is keyed off those
+	// same verdicts (Result.WouldWriteLinks), so the summary and the hint cannot
+	// disagree about the same pass.
+	supersedesCount, causesCount := res.Confirmed, res.CausesCreated
+	if apply {
+		supersedesCount, causesCount = res.Created, res.CausesWritten
+	}
 	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
-		assemble.Label(projectName), res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+		assemble.Label(projectName), res.Candidates, calls, retryNote(retries), res.Skipped, supersedesCount, causesCount, res.Reclassified, verb)
 	// The gate's own line, and it is printed BEFORE the not-agreed rows because
 	// it is what makes those rows readable: without the multiplier on the page, a
 	// reader cannot tell an empty consensus result from a pass that found nothing
@@ -2281,7 +2413,7 @@ func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory
 // would otherwise report an empty result for a corpus the operator can see (#716).
 // The other two modes read no vectors, which is why the pre-scan sits after them.
 func runSupersede() {
-	projectName, source, apply, reassess, threshold, consensus, withdrawPairs, parseErr := parseSupersedeArgs(os.Args[2:])
+	projectName, source, apply, reassess, threshold, consensus, withdrawPairs, relation, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
 		os.Exit(1)
@@ -2298,7 +2430,7 @@ func runSupersede() {
 	projectID := resolveProjectOrExit(ctx, store, projectName)
 
 	if len(withdrawPairs) > 0 {
-		runSupersedeWithdraw(ctx, store, logger, projectName, projectID, withdrawPairs, apply)
+		runSupersedeWithdraw(ctx, store, logger, projectName, projectID, withdrawPairs, relation, apply)
 		return
 	}
 
@@ -2366,7 +2498,7 @@ func runSupersede() {
 	if apply {
 		verb = "linked"
 	}
-	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls(), cls.Retries()))
+	fmt.Print(supersedeReport(projectName, res, verb, apply, cls.Calls(), cls.Retries()))
 	fmt.Print(supersedeIndexNotes(supersedeIndexFacts{
 		embedded: embedded, unscored: res.Unscored,
 		embeddingOn: cfg.Embedding.Enabled, budgetExpired: budgetExpired,
@@ -2734,8 +2866,8 @@ func (a resolveArgs) hasMark() bool { return len(a.mark) > 0 || a.markFile != ""
 // a later pass will not see them again) rather than reporting nothing about a
 // repair that partly happened. A refusal — an ambiguous ref, a pair with no live
 // edge — writes nothing at all, so there is no partial withdrawal to report.
-func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog.Logger, projectName, projectID string, pairs []supersedePair, apply bool) {
-	res, err := supersede.Withdraw(ctx, store, projectID, toWithdrawPairs(pairs), apply, logger)
+func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog.Logger, projectName, projectID string, pairs []supersedePair, relation string, apply bool) {
+	res, err := supersede.Withdraw(ctx, store, projectID, toWithdrawPairs(pairs, relation), apply, logger)
 	fmt.Print(supersedeWithdrawReport(projectName, res, apply))
 	// The follow-up through the SAME helpers --reassess uses, and for the same
 	// reason: the resolution this edge justified is cleared by a SCOPED resolve
@@ -2763,11 +2895,16 @@ func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog
 }
 
 // toWithdrawPairs maps the parsed command line onto the core's request, so the
-// argv shape and the domain shape stay separate types.
-func toWithdrawPairs(pairs []supersedePair) []supersede.WithdrawPair {
+// argv shape and the domain shape stay separate types. The relation comes from
+// the FLAG rather than from each pair, because --relation applies to every
+// --withdraw on the command line: a command that withdrew a 'supersedes' pair
+// and a 'causes' pair under one flag has to say which is which twice, and a
+// per-pair form this parser cannot express is a worse surface than one flag with
+// one honest meaning.
+func toWithdrawPairs(pairs []supersedePair, relation string) []supersede.WithdrawPair {
 	out := make([]supersede.WithdrawPair, 0, len(pairs))
 	for _, p := range pairs {
-		out = append(out, supersede.WithdrawPair{Source: p.source, Target: p.target})
+		out = append(out, supersede.WithdrawPair{Source: p.source, Target: p.target, Relation: relation})
 	}
 	return out
 }

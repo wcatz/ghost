@@ -55,7 +55,7 @@ var helpValueFlagsByCommand = map[string]map[string]bool{
 	"opencode cleanup-sessions": {"--grace": true, "--limit": true},
 	"reflect":                   {"--project": true, "--source": true, "--tier": true},
 	"resolve":                   {"--project": true, "--source": true, "--only": true, "--only-file": true, "--mark": true, "--mark-file": true},
-	"supersede":                 {"--project": true, "--source": true, "--threshold": true, "--consensus": true, "--withdraw": true},
+	"supersede":                 {"--project": true, "--source": true, "--threshold": true, "--consensus": true, "--withdraw": true, "--relation": true},
 }
 
 // isHelpToken reports whether arg is one of the two spellings of a help request.

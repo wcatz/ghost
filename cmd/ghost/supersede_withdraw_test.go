@@ -12,7 +12,7 @@ import (
 // get wrong — the operands must not be read as the project, because parseSupersedeArgs
 // takes the project from any bare word.
 func TestParseSupersedeArgsWithdraw(t *testing.T) {
-	project, source, apply, reassess, threshold, _, withdraw, err := parseSupersedeArgs([]string{
+	project, source, apply, reassess, threshold, _, withdraw, _, err := parseSupersedeArgs([]string{
 		"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--withdraw", "11223344", "55667788", "--apply",
 	})
 	if err != nil {
@@ -53,7 +53,7 @@ func TestParseSupersedeArgsWithdrawOperandErrors(t *testing.T) {
 		{"ghost", "--withdraw", "a1b2c3d4"},
 		{"ghost", "--withdraw", "a1b2c3d4", "--apply"},
 	} {
-		_, _, _, _, _, _, withdraw, err := parseSupersedeArgs(args)
+		_, _, _, _, _, _, withdraw, _, err := parseSupersedeArgs(args)
 		if err == nil {
 			t.Errorf("parseSupersedeArgs(%v) = no error, want one; it read %d pair(s)", args, len(withdraw))
 			continue
@@ -68,7 +68,7 @@ func TestParseSupersedeArgsWithdrawOperandErrors(t *testing.T) {
 // two different repairs, and one command doing both has two dry-run answers.
 // The reader is told which one they asked for twice.
 func TestParseSupersedeArgsWithdrawRefusesReassess(t *testing.T) {
-	_, _, _, _, _, _, _, err := parseSupersedeArgs([]string{"ghost", "--reassess", "--withdraw", "a1b2c3d4", "e5f6a7b8"})
+	_, _, _, _, _, _, _, _, err := parseSupersedeArgs([]string{"ghost", "--reassess", "--withdraw", "a1b2c3d4", "e5f6a7b8"})
 	if err == nil {
 		t.Fatal("parseSupersedeArgs accepted --reassess with --withdraw")
 	}
@@ -99,9 +99,9 @@ func TestSupersedeWithdrawReportDistinguishesTheRowsItNeverReached(t *testing.T)
 		Resolved:  3,
 		Withdrawn: 1,
 		Links: []supersede.WithdrawnLink{
-			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", LinkSource: "llm", Withdrawn: true},
-			{SourceID: "11112222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF1", LinkSource: "llm", WithdrawalFailed: true},
-			{SourceID: "22222222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF2", LinkSource: "llm", NotAttempted: true},
+			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", Relation: "supersedes", LinkSource: "llm", Withdrawn: true},
+			{SourceID: "11112222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF1", Relation: "supersedes", LinkSource: "llm", WithdrawalFailed: true},
+			{SourceID: "22222222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF2", Relation: "supersedes", LinkSource: "llm", NotAttempted: true},
 		},
 	}
 	out := supersedeWithdrawReport("ghost", res, true)
@@ -123,8 +123,8 @@ func TestSupersedeWithdrawReportDryRun(t *testing.T) {
 	res := supersede.WithdrawResult{
 		Resolved: 2,
 		Links: []supersede.WithdrawnLink{
-			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", TargetText: "The restore path on one spindle is safe.", LinkSource: "llm", Strength: 0.95},
-			{SourceID: "FFEEDDCCBBAA99887766554433221100", TargetID: "00112233445566778899AABBCCDDEEFF1", TargetText: "The ingest service runs Redis 6.2.", LinkSource: "manual", Strength: 0.8},
+			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", TargetText: "The restore path on one spindle is safe.", Relation: "supersedes", LinkSource: "llm", Strength: 0.95},
+			{SourceID: "FFEEDDCCBBAA99887766554433221100", TargetID: "00112233445566778899AABBCCDDEEFF1", TargetText: "The ingest service runs Redis 6.2.", Relation: "supersedes", LinkSource: "manual", Strength: 0.8},
 		},
 	}
 	out := supersedeWithdrawReport("ghost", res, false)
@@ -167,7 +167,7 @@ func TestSupersedeWithdrawReportApplied(t *testing.T) {
 		Resolved:  2,
 		Withdrawn: 1,
 		Links: []supersede.WithdrawnLink{
-			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", TargetText: "The restore path on one spindle is safe.", LinkSource: "llm", Withdrawn: true},
+			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", TargetText: "The restore path on one spindle is safe.", Relation: "supersedes", LinkSource: "llm", Withdrawn: true},
 			{SourceID: "FFEEDDCCBBAA99887766554433221100", TargetID: "00112233445566778899AABBCCDDEEFF1", TargetText: "The ingest service runs Redis 6.2.", LinkSource: "llm"},
 		},
 	}
@@ -187,6 +187,59 @@ func TestSupersedeWithdrawReportApplied(t *testing.T) {
 	}
 	if strings.Contains(out, "resolve") {
 		t.Errorf("the report names the resolve pass; the shared follow-up owns that:\n%s", out)
+	}
+}
+
+// TestSupersedeWithdrawReportNamesTheRelationItResolved: --withdraw reaches a
+// 'causes' edge as well as a 'supersedes' one (#833), so the report's two places
+// that name the edge have to follow. The HEADER aggregates and the ROW is
+// per-edge, and both are load-bearing: the header's number is the one an operator
+// quotes back when they ask why a 'causes' pair could not be withdrawn, and the
+// relation is what decides whether the row's withdrawal also cleared a resolution
+// — only a 'supersedes' edge ever stamped the `resolved_at` the follow-up clears.
+//
+// The mixed case is the one a single-relation header gets wrong in a way nobody
+// reads as a bug: one request, two relations, and a header that named only the
+// first would still look right on the first row.
+func TestSupersedeWithdrawReportNamesTheRelationItResolved(t *testing.T) {
+	causes := supersede.WithdrawnLink{
+		SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0",
+		TargetText: "The restore path on one spindle is safe.", Relation: "causes", LinkSource: "llm",
+		Strength: 0.81, Withdrawn: true,
+	}
+	sup := supersede.WithdrawnLink{
+		SourceID: "FFEEDDCCBBAA99887766554433221100", TargetID: "00112233445566778899AABBCCDDEEFF1",
+		TargetText: "The ingest service runs Redis 6.2.", Relation: "supersedes", LinkSource: "llm",
+		Strength: 0.8, Withdrawn: true,
+	}
+
+	out := supersedeWithdrawReport("ghost", supersede.WithdrawResult{Resolved: 1, Withdrawn: 1, Links: []supersede.WithdrawnLink{causes}}, true)
+	if !strings.Contains(out, "1 causes edge(s) named") {
+		t.Errorf("a 'causes' withdrawal is reported as a 'supersedes' one:\n%s", out)
+	}
+	if !strings.Contains(out, "[causes, source llm, strength 0.81]") {
+		t.Errorf("the row does not name the relation and the edge's own source:\n%s", out)
+	}
+
+	mixed := supersedeWithdrawReport("ghost", supersede.WithdrawResult{Resolved: 2, Withdrawn: 2, Links: []supersede.WithdrawnLink{causes, sup}}, true)
+	if !strings.Contains(mixed, "2 supersedes and causes edge(s) named") {
+		t.Errorf("a request holding both relations names one of them:\n%s", mixed)
+	}
+
+	// A row whose relation is empty is the ZERO VALUE of a struct a caller may
+	// have built by hand, and it renders 'supersedes' rather than a blank bracket:
+	// a report printing an empty bracket over one of its own rows is a report that
+	// cannot be matched against the follow-up rule.
+	unset := supersede.WithdrawnLink{
+		SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0",
+		LinkSource: "llm", Strength: 0.81,
+	}
+	blank := supersedeWithdrawReport("ghost", supersede.WithdrawResult{Resolved: 1, Links: []supersede.WithdrawnLink{unset}}, false)
+	if !strings.Contains(blank, "1 supersedes edge(s) named") {
+		t.Errorf("a request resolving nothing did not fall back to the default relation:\n%s", blank)
+	}
+	if !strings.Contains(blank, "[supersedes, source llm, strength 0.81]") {
+		t.Errorf("an unset relation renders as an empty bracket rather than 'supersedes':\n%s", blank)
 	}
 }
 

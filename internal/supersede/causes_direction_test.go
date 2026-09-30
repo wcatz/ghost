@@ -219,6 +219,13 @@ func TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps(t *
 	if res.Reclassified != 1 {
 		t.Errorf("Reclassified = %d, want 1: the relation is unchanged, but a live 'causes' edge was DROPPED, so this row moved the graph and must not be reported as a quiet re-affirmation", res.Reclassified)
 	}
+	// Both causes counts, and here they must agree: the pass swept the edge that
+	// disagreed and then wrote its own, so this is a verdict that became a write
+	// with no refusal in between (#834's counters, on the path where they match).
+	if res.CausesCreated != 1 || res.CausesWritten != 1 {
+		t.Errorf("CausesCreated/CausesWritten = %d/%d, want 1/1: the verdict's own edge replaced the one it contradicted, so the write landed",
+			res.CausesCreated, res.CausesWritten)
+	}
 }
 
 // TestACausesVerdictReAffirmsALiveCausesEdgeThatAgreesWithTheTimestamps is the
@@ -318,6 +325,13 @@ func TestTheCausesWriteIsNowGuarded(t *testing.T) {
 	}
 	if res.CausesCreated != 1 {
 		t.Errorf("CausesCreated = %d, want 1: nothing opposed this write, and a guard that refuses an unopposed pair is not a guard", res.CausesCreated)
+	}
+	// And the WRITE count moves with it (#834). The two agree here because the
+	// write landed, which is the whole point of keeping them apart: a run whose
+	// write was refused has to be able to say so, and this is the counter that
+	// says it.
+	if res.CausesWritten != 1 {
+		t.Errorf("CausesWritten = %d, want 1: the verdict was written, and a write count that did not follow the write is the #834 asymmetry again", res.CausesWritten)
 	}
 	// The pair is unclaimed, so the guarded writer is the one that has to be
 	// reached for — and it wrote.

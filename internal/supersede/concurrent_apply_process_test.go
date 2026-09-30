@@ -113,8 +113,11 @@ type applyRaceReport struct {
 	Opposite  int         `json:"opposite_live"`
 	// CausesCreated mirrors the child's `causes_created`: the two relations are
 	// written through different writers, so one total cannot say which of them a
-	// pass reached for.
+	// pass reached for. It counts VERDICTS, and CausesWritten mirrors the child's
+	// `causes_written` so a parent can tell the two apart — the race this harness
+	// stages is the one state where they differ (#834).
 	CausesCreated int    `json:"causes_created"`
+	CausesWritten int    `json:"causes_written"`
 	Error         string `json:"error"`
 }
 
@@ -338,23 +341,38 @@ func TestTwoApplyPassesCannotWriteACausesCycle(t *testing.T) {
 			edges, wantEdge, earlyReport.Asked[0])
 	}
 
-	// Both passes reached a verdict — that is what CausesCreated counts, and it is
-	// a VERDICT count while Result.Created is a WRITE count, an asymmetry that
-	// predates this test and that the ReverseLive line on the report is what
-	// makes honest. So the two facts to check are "both were asked" and "exactly
-	// one was refused", not a total of edges written.
-	verdicts, refused := 0, 0
+	// Both passes reached a verdict, and exactly one write landed — so this is
+	// the one fixture where the two counters disagree, and the disagreement is
+	// the whole of #834. CausesCreated counts VERDICTS (2) and CausesWritten
+	// counts WRITES (1), so a report can count the writes and the dry-run hint
+	// can keep counting the verdicts. Before CausesWritten existed the only way
+	// to say "one edge was written" here was to subtract the refusals, which is
+	// a report re-deriving a fact the pass already had.
+	verdicts, written, refused := 0, 0, 0
 	for _, rep := range []applyRaceReport{earlyReport, lateReport} {
 		verdicts += rep.CausesCreated
+		written += rep.CausesWritten
 		refused += rep.Refused
 	}
 	if verdicts != 2 {
 		t.Errorf("the two passes report %d 'causes' verdict(s), want 2: the point of the fixture is that both reach one, in opposite directions (%+v / %+v)",
 			verdicts, earlyReport, lateReport)
 	}
+	if written != 1 {
+		t.Errorf("the two passes report %d 'causes' write(s), want 1: two verdicts in opposite directions and one edge in the graph means exactly one of them was written, and a counter that cannot say so is the one the summary line used to print (%+v / %+v)",
+			written, earlyReport, lateReport)
+	}
 	if refused != 1 {
 		t.Errorf("the two passes report %d refused write(s), want 1: the pass that lost the race has to say it wrote nothing, or its report claims a link that is not there (%+v / %+v)",
 			refused, earlyReport, lateReport)
+	}
+	// And the two disagree by exactly the refusal, which is the relation #834
+	// turned on: CausesCreated is the verdict count the dry-run hint keys off,
+	// CausesWritten is what the graph gained, and the difference is the one pair
+	// the store refused.
+	if verdicts-written != refused {
+		t.Errorf("verdicts %d - writes %d = %d, want the %d refused write(s): the write count and the verdict count differ by the refusals and by nothing else (%+v / %+v)",
+			verdicts, written, verdicts-written, refused, earlyReport, lateReport)
 	}
 }
 

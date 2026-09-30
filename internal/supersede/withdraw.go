@@ -73,10 +73,10 @@ type WithdrawStore interface {
 	// reached only when the named project IS `_global` — the shared scope,
 	// where an edge's endpoint may live in any project (#786).
 	MemoryIDsByIDPrefixAnyProject(ctx context.Context, prefix string) ([]string, error)
-	// SupersedesLinksInto returns the live 'supersedes' edges pointing at a
-	// memory, restricted to the ones the project owns through EITHER endpoint
+	// LinksInto returns the live edges pointing at a memory for the given
+	// relation, restricted to the ones the project owns through EITHER endpoint
 	// (or through the shared scope).
-	SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]memory.Link, error)
+	LinksInto(ctx context.Context, projectID, memoryID, relation string) ([]memory.Link, error)
 	// GetByIDs loads the targets' text, so the report can answer "did I
 	// withdraw the right edge?" from its own output.
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
@@ -90,8 +90,9 @@ type WithdrawStore interface {
 // one. Either may be a full id or an unambiguous 8-or-more-character prefix of
 // one.
 type WithdrawPair struct {
-	Source string
-	Target string
+	Source   string
+	Target   string
+	Relation string // empty means auto-select (supersedes then causes)
 }
 
 // WithdrawnLink is one edge the request named, resolved to full ids. The link's
@@ -103,8 +104,14 @@ type WithdrawPair struct {
 // the report prints it: an operator withdrawing an edge they believe is wrong
 // has to be able to check that from the output, not from a second command.
 type WithdrawnLink struct {
-	SourceID   string
-	TargetID   string
+	SourceID string
+	TargetID string
+	// Relation is the edge's relation ('supersedes' or 'causes'), carried from
+	// the row the pair resolved to. It is what the write uses — InvalidateLink is
+	// relation-scoped, and only a 'supersedes' invalidation writes the
+	// `unsupersede` history row — so a 'causes' withdrawal is withdrawn AS a
+	// 'causes' edge rather than as a supersession that does not exist.
+	Relation   string  // 'supersedes' or 'causes'
 	TargetText string  // the target's own content, as stored
 	LinkSource string  // the edge's own `source` column
 	Strength   float32 // the edge's stored similarity, as written
@@ -172,10 +179,24 @@ type ProjectTargets struct {
 // to which memories a repair can still clear, and a wrong answer does not print a
 // wrong report, it clears the wrong memories. `TestRepairableTargets*` pins it
 // once, in the package that owns the type.
+//
+// It counts 'supersedes' withdrawals ALONE, and the relation is a FILTER rather
+// than an assumption. The repair is a `ghost resolve --reassess`, resolve's
+// supersedes piggyback acts on 'supersedes'/'llm' edges only, and a 'causes'
+// claim never stamped the `resolved_at` the repair clears — so naming a 'causes'
+// target sends the operator to clear a memory nothing is holding down. #833 made
+// the filter load-bearing rather than vacuous: before it every link reaching this
+// function was a 'supersedes' edge by construction (the relation on the row was
+// never even read), so a 'causes' withdrawal did not exist to be filtered. An
+// EMPTY relation counts, because that is the zero value of a struct a caller may
+// have built by hand and the withdrawal's own default is 'supersedes'.
 func RepairableTargets(links []WithdrawnLink) []ProjectTargets {
 	rows := make([]RepairTarget, 0, len(links))
 	seen := make(map[string]bool, len(links))
 	for _, l := range links {
+		if l.Relation != "" && l.Relation != string(RelationSupersedes) {
+			continue
+		}
 		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
 			continue
 		}
@@ -289,7 +310,7 @@ func Withdraw(ctx context.Context, store WithdrawStore, projectID string, pairs 
 		return res, nil
 	}
 	for i := range res.Links {
-		n, err := store.InvalidateLink(ctx, res.Links[i].SourceID, res.Links[i].TargetID, string(RelationSupersedes))
+		n, err := store.InvalidateLink(ctx, res.Links[i].SourceID, res.Links[i].TargetID, res.Links[i].Relation)
 		if err != nil {
 			// The edges before this one are gone and cannot be un-gone, so the
 			// count and the list go back WITH the error — and the list says WHICH
@@ -300,7 +321,7 @@ func Withdraw(ctx context.Context, store WithdrawStore, projectID string, pairs 
 			for j := i + 1; j < len(res.Links); j++ {
 				res.Links[j].NotAttempted = true
 			}
-			return res, fmt.Errorf("withdraw supersedes link %s→%s: %w", res.Links[i].SourceID, res.Links[i].TargetID, err)
+			return res, fmt.Errorf("withdraw %s link %s→%s: %w", res.Links[i].Relation, res.Links[i].SourceID, res.Links[i].TargetID, err)
 		}
 		if n == 0 {
 			// A concurrent pass withdrew it first. The edge is gone either way,
@@ -313,6 +334,7 @@ func Withdraw(ctx context.Context, store WithdrawStore, projectID string, pairs 
 		if logger != nil {
 			logger.Info("supersede withdrew a named edge",
 				"source", res.Links[i].SourceID, "target", res.Links[i].TargetID,
+				"relation", res.Links[i].Relation,
 				"link_source", res.Links[i].LinkSource, "withdrawn", res.Withdrawn)
 		}
 	}
@@ -384,7 +406,7 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 	if err != nil {
 		return link, err
 	}
-	into, err := store.SupersedesLinksInto(ctx, projectID, targetID)
+	into, err := store.LinksInto(ctx, projectID, targetID, "") // fetch all relations for auto/inspection
 	if err != nil {
 		return link, err
 	}
@@ -393,24 +415,49 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		return link, err
 	}
 	if sourceID == targetID {
-		// Not a missing edge: CreateLink refuses self-links, so this pair can
-		// never be one, and saying that is more use than "no live supersedes
-		// link" for an operator who mistyped a ref.
 		return link, fmt.Errorf("%s supersedes itself: both refs are memory %s", short(targetID), targetID)
 	}
-	for _, l := range into {
-		if l.SourceID != sourceID {
+	// The RELATION this pair resolves to, and the reason the loop is ordered
+	// rather than a single scan: an unset Relation means "whichever of the two the
+	// pair has", and the two are not equal — 'supersedes' is the one that buries
+	// its target and the one every pre-#833 call site meant, so it wins. A pair
+	// holding both is exactly the case where the order decides which edge moves,
+	// and the order has to be a stated rule rather than whatever the read
+	// happened to return.
+	//
+	// A PINNED Relation is a filter rather than a preference, so it skips every
+	// other relation instead of merely sorting behind this one: falling back is
+	// the wrong-edge withdrawal the pin exists to prevent.
+	for _, want := range []string{string(RelationSupersedes), string(RelationCauses)} {
+		if pair.Relation != "" && want != pair.Relation {
 			continue
 		}
-		return WithdrawnLink{
-			SourceID:   l.SourceID,
-			TargetID:   l.TargetID,
-			LinkSource: l.Source,
-			Strength:   l.Strength,
-		}, nil
+		for _, l := range into {
+			if l.SourceID == sourceID && l.Relation == want {
+				return WithdrawnLink{
+					SourceID:   l.SourceID,
+					TargetID:   l.TargetID,
+					Relation:   want,
+					LinkSource: l.Source,
+					Strength:   l.Strength,
+				}, nil
+			}
+		}
 	}
-	return link, fmt.Errorf("no live supersedes link %s → %s in project %s%s",
-		short(sourceID), short(targetID), projectID, intoSuffix(into))
+	return link, fmt.Errorf("no live %s link %s → %s in project %s%s",
+		relationLabel(pair.Relation), short(sourceID), short(targetID), projectID, intoSuffix(into))
+}
+
+// relationLabel names the edges the refusal is about: the pinned relation, or
+// both when the pair named neither. It is what keeps a refusal honest about what
+// was searched — "no live supersedes link" over a pair holding only a 'causes'
+// edge sent an operator to the graph instead of telling them the edge they want
+// needs --relation, which is the whole of the #833 fix.
+func relationLabel(relation string) string {
+	if relation == "" {
+		return "supersedes or causes"
+	}
+	return relation
 }
 
 // resolveSource turns the SOURCE ref into a memory id, in the project's own scope
@@ -429,6 +476,12 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 // are a fallback, never a replacement, and the rules are memref's either way — so
 // an ambiguous holder is still a refusal with the matches listed, and a ref that
 // names nothing is still told it names nothing.
+//
+// The holder set is NOT narrowed by the caller's pinned relation, and that is
+// deliberate: a source resolved through a 'causes' holder and then refused for
+// having no 'supersedes' edge is a PRECISE refusal ("no live supersedes link
+// A→B, still caused by A"), while narrowing the set first refuses the SOURCE ref
+// as unresolvable and sends the operator looking for the wrong problem.
 func resolveSource(ctx context.Context, store WithdrawStore, projectID string, into []memory.Link, ref string) (string, error) {
 	id, scopedErr := resolveRef(ctx, store, projectID, "source", ref)
 	if scopedErr == nil {
@@ -468,7 +521,7 @@ func resolveSource(ctx context.Context, store WithdrawStore, projectID string, i
 //
 // This is the WIDENING of a ref's scope and nothing else. It decides which
 // memories may be NAMED, never which edge may be changed: the request still ends
-// at SupersedesLinksInto, whose ownership rule requires an endpoint in `_global`
+// at LinksInto, whose ownership rule requires an endpoint in `_global`
 // itself, so a ref that resolves into some other project buys the operator
 // nothing but an honest refusal about the edge. And it is not reachable for a
 // named project — `ghost supersede p --withdraw` still cannot name a memory in q.
@@ -503,14 +556,35 @@ func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref 
 // edge exists under a scope this read cannot see.
 func intoSuffix(links []memory.Link) string {
 	if len(links) == 0 {
-		return " (no memory in this project supersedes it)"
+		return " (no memory in this project links it)"
 	}
 	parts := make([]string, 0, len(links))
 	for _, l := range links {
 		parts = append(parts, short(l.SourceID))
 	}
-	return " (still superseded by " + strings.Join(parts, ", ") +
+	return " (still " + relationWords(links) + " by " + strings.Join(parts, ", ") +
 		" — withdraw that pair as well, or note that the other edge still buries it)"
+}
+
+// relationWords picks the verb phrase that matches the relations actually present.
+func relationWords(links []memory.Link) string {
+	hasSup, hasCauses := false, false
+	for _, l := range links {
+		switch l.Relation {
+		case string(RelationSupersedes):
+			hasSup = true
+		case string(RelationCauses):
+			hasCauses = true
+		}
+	}
+	switch {
+	case hasSup && hasCauses:
+		return "linked (superseded or caused)"
+	case hasCauses:
+		return "caused"
+	default:
+		return "superseded"
+	}
 }
 
 // short is the report's id form, measured in CHARACTERS. The rules and the

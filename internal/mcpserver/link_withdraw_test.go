@@ -49,9 +49,9 @@ func seedLinkWithdrawal(t *testing.T, store *memory.Store, projectID string) (ne
 
 func liveInto(t *testing.T, store *memory.Store, projectID, target string) int {
 	t.Helper()
-	links, err := store.SupersedesLinksInto(context.Background(), projectID, target)
+	links, err := store.LinksInto(context.Background(), projectID, target, "supersedes")
 	if err != nil {
-		t.Fatalf("SupersedesLinksInto: %v", err)
+		t.Fatalf("LinksInto: %v", err)
 	}
 	return len(links)
 }
@@ -65,7 +65,7 @@ func TestLinkWithdrawRemovesTheNamedEdge(t *testing.T) {
 	srv, store := linkWithdrawServer(t)
 	newer, older := seedLinkWithdrawal(t, store, "abc123")
 
-	msg, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, older)
+	msg, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, older, "")
 	if err != nil {
 		t.Fatalf("withdrawSupersedesLink: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestLinkWithdrawTakesPrefixes(t *testing.T) {
 	srv, store := linkWithdrawServer(t)
 	newer, older := seedLinkWithdrawal(t, store, "abc123")
 
-	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer[:8], older[:8]); err != nil {
+	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer[:8], older[:8], ""); err != nil {
 		t.Fatalf("withdrawSupersedesLink: %v", err)
 	}
 	if got := liveInto(t, store, "abc123", older); got != 0 {
@@ -140,17 +140,23 @@ func TestLinkWithdrawRefusesWhatItCannotDo(t *testing.T) {
 	srv, store := linkWithdrawServer(t)
 	newer, older := seedLinkWithdrawal(t, store, "abc123")
 
-	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", "", older); err == nil {
+	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", "", older, ""); err == nil {
 		t.Error("an empty source_id was accepted")
 	}
-	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, ""); err == nil {
+	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, "", ""); err == nil {
 		t.Error("an empty target_id was accepted")
 	}
-	if _, err := srv.withdrawSupersedesLink(context.Background(), "no-such-project", newer, older); err == nil {
+	if _, err := srv.withdrawSupersedesLink(context.Background(), "no-such-project", newer, older, ""); err == nil {
 		t.Error("an unknown project was accepted")
 	}
-	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", older, newer); err == nil {
+	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", older, newer, ""); err == nil {
 		t.Error("a reversed pair with no such edge was accepted")
+	}
+	// A relation the graph cannot hold is refused by name, not defaulted: a typo
+	// that silently became 'supersedes' would withdraw the OTHER edge of a pair
+	// holding both and leave the one asked about live.
+	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, older, "caused"); err == nil {
+		t.Error("an unknown relation was accepted")
 	}
 	// None of the refusals moved anything.
 	if got := liveInto(t, store, "abc123", older); got != 1 {
@@ -158,7 +164,7 @@ func TestLinkWithdrawRefusesWhatItCannotDo(t *testing.T) {
 	}
 	// The edge itself is still withdrawable afterwards, so a refusal is not a
 	// one-way door for the correct request.
-	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, older); err != nil {
+	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, older, ""); err != nil {
 		t.Errorf("the correct request failed after refusals: %v", err)
 	}
 }
@@ -191,8 +197,8 @@ func (r raceStore) MemoryIDsByIDPrefixAnyProject(ctx context.Context, prefix str
 	return r.inner.MemoryIDsByIDPrefixAnyProject(ctx, prefix)
 }
 
-func (r raceStore) SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]memory.Link, error) {
-	return r.inner.SupersedesLinksInto(ctx, projectID, memoryID)
+func (r raceStore) LinksInto(ctx context.Context, projectID, memoryID, relation string) ([]memory.Link, error) {
+	return r.inner.LinksInto(ctx, projectID, memoryID, relation)
 }
 
 // InvalidateLink reports that a concurrent pass took the edge first: the write
@@ -216,7 +222,7 @@ func TestLinkWithdrawSaysSoWhenAConcurrentPassTookTheEdge(t *testing.T) {
 	newer, older := seedLinkWithdrawal(t, store, "abc123")
 	raced := srv.linkRaceStore(store)
 
-	msg, err := raced.withdrawSupersedesLink(context.Background(), "test-project", newer, older)
+	msg, err := raced.withdrawSupersedesLink(context.Background(), "test-project", newer, older, "")
 	if err != nil {
 		t.Fatalf("a concurrent withdrawal is not a failure: %v", err)
 	}
@@ -256,7 +262,7 @@ func TestLinkWithdrawIsProjectScoped(t *testing.T) {
 	}
 	newer, older := seedLinkWithdrawal(t, store, "other")
 
-	_, err := srv.withdrawSupersedesLink(ctx, "test-project", newer, older)
+	_, err := srv.withdrawSupersedesLink(ctx, "test-project", newer, older, "")
 	if err == nil {
 		t.Fatal("the tool reached another project's edge")
 	}
@@ -299,6 +305,126 @@ func TestLinkWithdrawRegisteredAsATool(t *testing.T) {
 	}
 }
 
+// TestLinkWithdrawRemovesACausesEdge is #833 on the MCP surface. Both endpoints
+// share created_at AND updated_at, which is the #778 tie the ordinary pass counts
+// as Unoriented and refuses to judge — so a 'causes' cycle over such a pair has no
+// pass-level repair at all, and a tool that can only withdraw 'supersedes' edges
+// leaves the contradiction in the graph with nothing to run. The claim is
+// load-bearing since #823 (its direction decides which way the pair is judged), so
+// the undo has to exist.
+func TestLinkWithdrawRemovesACausesEdge(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	cause, err := store.Create(ctx, "test-project", memory.Memory{
+		Category: "fact", Content: "The migration left the lock table populated.", Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create(cause): %v", err)
+	}
+	effect, err := store.Create(ctx, "test-project", memory.Memory{
+		Category: "fact", Content: "The replica fell behind by four hours afterwards.", Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create(effect): %v", err)
+	}
+	if err := store.CreateLink(ctx, cause, effect, "causes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink(causes): %v", err)
+	}
+
+	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", cause, effect, "causes")
+	if err != nil {
+		t.Fatalf("withdrawSupersedesLink(causes): %v", err)
+	}
+	// The header names the RELATION it withdrew. An agent reporting "withdrew 1
+	// supersedes link" over a 'causes' edge would be reporting an edge nobody named,
+	// and the wrong one is the edge it would then try to repair.
+	if !strings.Contains(msg, "named causes link(s)") {
+		t.Errorf("the result does not name the relation it withdrew: %q", msg)
+	}
+	if links, lerr := store.LinksInto(ctx, "test-project", effect, "causes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
+	} else if len(links) != 0 {
+		t.Errorf("live 'causes' edges into the effect = %d, want 0", len(links))
+	}
+	// And no unsupersede row: a 'causes' claim never demoted its target and never
+	// stamped resolved_at, so there is no standing to reverse.
+	entries, err := store.MemoryHistory(ctx, effect, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	for _, e := range entries {
+		if e.Phase == "unsupersede" {
+			t.Errorf("a 'causes' withdrawal wrote the unsupersede row: %+v", e)
+		}
+	}
+}
+
+// TestLinkWithdrawDefaultsToSupersedesAndTakesCausesOnlyWhenNamed: the one case
+// where the default decides the edge. A pair holding both relations is the case a
+// wrong default withdraws something the caller did not name, so the pin is the
+// only way through it — and the pin has to actually pin.
+func TestLinkWithdrawDefaultsToSupersedesAndTakesCausesOnlyWhenNamed(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	cause, err := store.Create(ctx, "test-project", memory.Memory{
+		Category: "fact", Content: "The migration left the lock table populated.", Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create(cause): %v", err)
+	}
+	effect, err := store.Create(ctx, "test-project", memory.Memory{
+		Category: "fact", Content: "The replica fell behind by four hours afterwards.", Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create(effect): %v", err)
+	}
+	if err := store.CreateLink(ctx, cause, effect, "causes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink(causes): %v", err)
+	}
+	if err := store.CreateLink(ctx, cause, effect, "supersedes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink(supersedes): %v", err)
+	}
+
+	// Unpinned: 'supersedes', the relation the edge's removal un-hides a memory for.
+	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", cause, effect, "")
+	if err != nil {
+		t.Fatalf("withdrawSupersedesLink (default): %v", err)
+	}
+	if !strings.Contains(msg, "named supersedes link(s)") {
+		t.Errorf("the default did not pick the supersedes edge: %q", msg)
+	}
+	links, err := store.LinksInto(ctx, "test-project", effect, "causes")
+	if err != nil {
+		t.Fatalf("LinksInto: %v", err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("live 'causes' edges = %d, want 1: the default withdrew the other relation", len(links))
+	}
+
+	// Pinned: the 'causes' edge, and the 'supersedes' one this same call just
+	// took is not what it withdraws now.
+	msg, err = srv.withdrawSupersedesLink(ctx, "test-project", cause, effect, "causes")
+	if err != nil {
+		t.Fatalf("withdrawSupersedesLink(causes): %v", err)
+	}
+	if !strings.Contains(msg, "named causes link(s)") {
+		t.Errorf("the pinned relation was not the one withdrawn: %q", msg)
+	}
+	links, err = store.LinksInto(ctx, "test-project", effect, "causes")
+	if err != nil {
+		t.Fatalf("LinksInto: %v", err)
+	}
+	if len(links) != 0 {
+		t.Errorf("live 'causes' edges = %d, want 0", len(links))
+	}
+}
+
 // An id holding a comma cannot be named by `--only` at all: the parser splits its
 // value on commas, so however the id is quoted it becomes two selectors that name
 // nothing. Rendering it would hand the agent a command that runs and judges the
@@ -338,7 +464,7 @@ func TestLinkWithdrawNamesAnIDThatOnlyTheFileFormCanCarry(t *testing.T) {
 		t.Fatalf("CreateLink: %v", err)
 	}
 
-	msg, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, commy)
+	msg, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, commy, "")
 	if err != nil {
 		t.Fatalf("withdrawSupersedesLink: %v", err)
 	}
@@ -396,7 +522,7 @@ func TestLinkWithdrawSaysNoSurfaceCanNameANewlineID(t *testing.T) {
 		t.Fatalf("CreateLink: %v", err)
 	}
 
-	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", newer, wrapped)
+	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", newer, wrapped, "")
 	if err != nil {
 		t.Fatalf("withdrawSupersedesLink: %v", err)
 	}
