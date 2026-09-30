@@ -110,7 +110,11 @@ jobs:
         #
         # So the loud case stays loud: a published release stops this job and
         # says what to do instead, which is to re-run the plugin job alone.
-        # Nothing to check on a first run — there is no release for the tag yet.
+        # Nothing to check on a first run, and nothing to check against the
+        # draft GoReleaser creates either — the by-tag endpoint does not serve
+        # drafts, so a draft arrives here as a 404 and takes the same allow
+        # branch. The only answer that stops the job is a 200, and a 200 means
+        # published.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -127,17 +131,24 @@ jobs:
           # gh that words its 404 differently stops the release rather than
           # letting it rebuild a published one.
           if STATE=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq '"\(.id) \(.draft)"' 2>&1); then
+            # A 200 here means a PUBLISHED release, and only that. The endpoint
+            # is documented as "get a PUBLISHED release with the specified
+            # tag" and answers 200 or 404 and nothing else, so a DRAFT release
+            # for this tag 404s like no release at all — which is why the draft
+            # is handled in the 404 branch below and there is no draft branch
+            # here. Anything answered is therefore published.
             RELEASE_ID=${STATE%% *}
-            IS_DRAFT=${STATE##* }
-            if [ "$IS_DRAFT" = "true" ]; then
-              echo "release ${GITHUB_REF_NAME} is a draft (${RELEASE_ID}) — a re-run may replace its assets"
-              exit 0
-            fi
             echo "::error::release ${GITHUB_REF_NAME} (${RELEASE_ID}) is PUBLISHED, so this job will not rebuild it. GoReleaser would replace published, already-attested assets, and main's catalog still pins the digests they had before. Re-run the plugin job alone (it is idempotent) — or delete the release and re-tag if this tag was wrong."
             exit 1
           fi
           if printf '%s' "$STATE" | grep -q '404'; then
-            echo "no release exists for ${GITHUB_REF_NAME} yet — GoReleaser will create the draft"
+            # Either there is no release for this tag yet, or it is a DRAFT —
+            # the endpoint does not serve drafts, so a re-run in the recovery
+            # window lands here too, and that is the case this branch has to
+            # allow. Both are the same thing to this step: nothing is
+            # published, so replace_existing_artifacts cannot replace anything
+            # anyone can already see.
+            echo "no PUBLISHED release for ${GITHUB_REF_NAME} — GoReleaser will create the draft, or replace the assets of a draft one"
             exit 0
           fi
           echo "::error::could not read the release for ${GITHUB_REF_NAME} (got: ${STATE}) — refusing to rebuild rather than guess whether it is published"
