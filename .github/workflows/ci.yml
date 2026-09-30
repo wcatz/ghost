@@ -15,7 +15,9 @@ concurrency:
 permissions:
   contents: read
 
-# RUNNER IMAGE. Every job in .github/workflows/ names ubuntu-24.04 EXPLICITLY.
+# RUNNER IMAGE. Every job in .github/workflows/ names an EXPLICIT image rather
+# than a floating `-latest` label, and the only exceptions are the non-required
+# jobs that exist to try a candidate — the Linux pin is ubuntu-24.04.
 # GitHub moves the `ubuntu-latest` label to Ubuntu 26 on 2026-10-19
 # (actions/runner-images#14748), and that is not a cosmetic change here: a
 # different toolchain, a different sqlite/libc, a different pwsh, and a
@@ -28,10 +30,14 @@ permissions:
 # `windows-latest` resolves to today (run 36772364289, "Image:
 # windows-2025-vs2026"). Pinned to that name rather than to the OS version so
 # that neither the Windows release nor the Visual Studio toolset can move under
-# the matrix; `windows-11-arm` was already explicit.
+# the matrix; `windows-11-arm` was already explicit. NO CANARY COVERS THIS ONE:
+# ubuntu-26-canary runs no Windows step, so it can never be the evidence for
+# moving this pin. A deliberate Windows bump is decided by pinning the candidate
+# and reading the `Image:` line that run reports, which is how this pin was
+# chosen.
 #
-# Bump the pin deliberately, with the evidence below: `ubuntu-26-canary` runs
-# build-and-test's own steps on ubuntu-26.04 and is NOT a required status
+# Bump the ubuntu pin deliberately, with the evidence below: `ubuntu-26-canary`
+# runs build-and-test's own steps on ubuntu-26.04 and is NOT a required status
 # check (main-branch-protection requires exactly build-and-test, lint and
 # review-gate), so it can report a failure without blocking a merge or a
 # release. Move the pin when that job is green, not when the label moves.

@@ -36,10 +36,10 @@ const installPS1Path = "../../install.ps1"
 // cannot run it.
 //
 // It is NOT a gap in CI. An earlier version of this comment claimed "the workflows
-// are ubuntu, and there is no Windows job", which was simply false: build-and-test
-// has a `windows-plugin` job on windows-2025-vs2026 and windows-11-arm, both of
-// which ship PowerShell 7, and it now runs these tests. The skip is for local
-// runs only, and it says so rather than implying the suite is never executed.
+// are ubuntu, and there is no Windows job", which was simply false: ci.yml has a
+// `windows-plugin` job on windows-2025-vs2026 and windows-11-arm, both of which
+// ship PowerShell 7, and it now runs these tests. The skip is for local runs
+// only, and it says so rather than implying the suite is never executed.
 // requirePwshEnv, when set, turns the skip below into a failure. `go test` exits 0
 // when every selected test SKIPS, so a step whose only job is to run this suite
 // would stay green while running nothing — which is the exact gap the CI step was

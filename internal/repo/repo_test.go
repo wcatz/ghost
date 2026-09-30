@@ -45,9 +45,13 @@ func gitIn(t *testing.T, dir, remote string) {
 // entry and reports the entry itself as no repository, but it does not stop the
 // walk when the ceiling is the starting directory, so pinning dir would leave
 // the ancestors reachable and the failure would read as a product bug. Hence the
-// premise is then checked against git rather than trusted.
+// premise is then checked against git rather than trusted — and skipped rather
+// than passed when git is absent, which is the state gitIn above already guards.
 func excludeEnclosingRepo(t *testing.T, dir string) {
 	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed, so whether this directory is in a repository is not a question this host can answer")
+	}
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
 	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").CombinedOutput(); err == nil {
 		t.Fatalf("premise broken: %s is inside the git repository at %s, so a test asserting "+
