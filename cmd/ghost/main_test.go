@@ -1730,6 +1730,23 @@ func TestSupersedeReport(t *testing.T) {
 	if !strings.Contains(awkward, "ghost supersede --project 'my proj' --reassess --apply") {
 		t.Errorf("supersedeReport() for a name holding a space = %q, want the --project form a shell reads as one argument", awkward)
 	}
+	// The write-time refusal (#806) is the only line on this report about a pair
+	// that was JUDGED and then not written, and it has to say so in those words:
+	// a pass that lost that race wrote nothing for the pair, and a report that
+	// reads as a link it did not write is the one false claim this report may
+	// not make. Its repair is the next ordinary pass plus the settled form of
+	// --reassess, and both are named.
+	raced := supersedeReport("proj", supersede.Result{Candidates: 2, Confirmed: 1, ReverseLive: 1}, "linked", 1, 0)
+	for _, want := range []string{
+		"  1 pair(s) not written:",
+		"a concurrent pass got there first",
+		"this run wrote no edge for them",
+		"ghost supersede proj --reassess --apply",
+	} {
+		if !strings.Contains(raced, want) {
+			t.Errorf("supersedeReport() = %q, want it to contain %q", raced, want)
+		}
+	}
 	// Each reason states the DECISION, not a judgment the pass may never have
 	// made. All three counts are taken before the filters that spend a call, so
 	// a line claiming a pair "was judged" describes a pass that did not run —

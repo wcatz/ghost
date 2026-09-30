@@ -154,6 +154,49 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			notWant: []string{"causes edge dropped"},
 		},
 		{
+			// A pair the pass JUDGED and did not write, because the other
+			// direction was already live when the write was attempted (#806). The
+			// row is still here — a verdict was reached — and it has to say
+			// so on the row, because a line reading as a link the pass created
+			// is the false claim the other three markers above exist to
+			// prevent. The "withdrew" vocabulary is held away from it for the
+			// same reason: nothing was withdrawn either.
+			name:  "a pair the pass judged and did not write is not claimed",
+			apply: true,
+			classified: []supersede.Classified{
+				opposedRow(supersede.RelationSupersedes),
+			},
+			want:    []string{"not written", "the pair's reverse direction is already live", shortID(reclassNewer) + "  supersedes  " + shortID(reclassOlder)},
+			notWant: []string{"withdrew", "would withdraw", "already gone"},
+		},
+		{
+			// The same refusal on a CAUSES verdict, whose edge runs the other
+			// way, so the marker rides the causes line rather than the
+			// supersedes one.
+			name:  "a refused causes write is marked too",
+			apply: true,
+			classified: []supersede.Classified{
+				opposedRow(supersede.RelationCauses),
+			},
+			want:    []string{"causes", "not written"},
+			notWant: []string{"withdrew", "would withdraw"},
+		},
+		{
+			// And a reclassified pair refused the same way. It cannot happen for
+			// a SUPERSEDES verdict (the live edge IS the direction the pair
+			// was asked about, so nothing opposes it), which is exactly why
+			// the marker is tested before the withdrawal vocabulary: a
+			// future verdict that can be refused must not be printed as a
+			// withdrawal this run did not make.
+			name:  "a refused reclassified write is not dressed as a withdrawal",
+			apply: true,
+			classified: []supersede.Classified{
+				opposedRow(supersede.RelationCauses),
+			},
+			want:    []string{"not written"},
+			notWant: []string{"withdrew", "would withdraw", "already gone"},
+		},
+		{
 			name:  "a reversed reclassification is a withdrawal like any other",
 			apply: true,
 			classified: []supersede.Classified{
@@ -178,6 +221,18 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			}
 		})
 	}
+}
+
+// opposedRow is reclassRow for the one outcome where the pass reached a
+// verdict and wrote nothing: the pair's opposite direction was already
+// live when the write was attempted (#806). Reclassified is true for the
+// CAUSES shape because that is the row the refusal can reach — a
+// SUPERSEDES reclassification is asked in the live edge's own direction,
+// so nothing opposes it.
+func opposedRow(relation supersede.Relation) supersede.Classified {
+	row := reclassRow(relation, relation == supersede.RelationCauses, false)
+	row.OpposedLive = true
+	return row
 }
 
 // withCauses is reclassRow plus the second graph row a denying verdict moves.
