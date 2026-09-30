@@ -44,6 +44,7 @@ package supersede
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -367,11 +368,27 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		}
 		return link, fmt.Errorf("the %s ref is empty in the pair (%q, %q)", empty, pair.Source, pair.Target)
 	}
-	sourceID, err := resolveRef(ctx, store, projectID, "source", pair.Source)
+	// The TARGET is resolved first, and the order is the point rather than a
+	// convenience. It is the memory the caller is un-burying, so it is the one
+	// whose project the command has to be able to name; and once it is named, the
+	// live edges pointing at it are in scope, which is what makes a SOURCE in
+	// another project nameable. `ghost project merge` moves a memory between
+	// projects and leaves its links, so an edge can end up with its target here
+	// and its source in `q` — a claim that buries one of this project's memories
+	// and that neither project's own ref scope could name, which is the same
+	// "demoted by a claim no command can reach" state #786 removed for a promoted
+	// source. Resolving the source against the target's own holders closes it,
+	// and it is a narrow widening: the id set is derived from an edge the caller
+	// can already SEE, so it cannot be used to ask what else exists in `q`.
+	targetID, err := resolveRef(ctx, store, projectID, "target", pair.Target)
 	if err != nil {
 		return link, err
 	}
-	targetID, err := resolveRef(ctx, store, projectID, "target", pair.Target)
+	into, err := store.SupersedesLinksInto(ctx, projectID, targetID)
+	if err != nil {
+		return link, err
+	}
+	sourceID, err := resolveSource(ctx, store, projectID, into, pair.Source)
 	if err != nil {
 		return link, err
 	}
@@ -380,11 +397,6 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		// never be one, and saying that is more use than "no live supersedes
 		// link" for an operator who mistyped a ref.
 		return link, fmt.Errorf("%s supersedes itself: both refs are memory %s", short(targetID), targetID)
-	}
-
-	into, err := store.SupersedesLinksInto(ctx, projectID, targetID)
-	if err != nil {
-		return link, err
 	}
 	for _, l := range into {
 		if l.SourceID != sourceID {
@@ -399,6 +411,45 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 	}
 	return link, fmt.Errorf("no live supersedes link %s → %s in project %s%s",
 		short(sourceID), short(targetID), projectID, intoSuffix(into))
+}
+
+// resolveSource turns the SOURCE ref into a memory id, in the project's own scope
+// first and then against the memories that hold the target.
+//
+// The second attempt is what lets `ghost supersede p --withdraw` reach an edge a
+// note in `q` makes about a note in `p` — a shape `ghost project merge` leaves
+// behind, and one the project-scoped read cannot name from either end: `p` cannot
+// resolve a `q` memory, and `q` cannot resolve a `p` one. The target's own read
+// already returned the holder, so the id is in hand and only the REF standing for
+// it was missing; the operator has that id on screen, because the refusal that
+// would have named it is built from the same read.
+//
+// The project's scope is tried FIRST so the refusal a mistyped ref gets is the
+// project-scoped one, naming the project the operator was working in. The holders
+// are a fallback, never a replacement, and the rules are memref's either way — so
+// an ambiguous holder is still a refusal with the matches listed, and a ref that
+// names nothing is still told it names nothing.
+func resolveSource(ctx context.Context, store WithdrawStore, projectID string, into []memory.Link, ref string) (string, error) {
+	id, scopedErr := resolveRef(ctx, store, projectID, "source", ref)
+	if scopedErr == nil {
+		return id, nil
+	}
+	// Only a MISS falls through to the holders. An AMBIGUOUS ref is a refusal
+	// about a real ambiguity in the project's own ids, and answering it from a
+	// different id set would resolve the very spelling the refusal said cannot
+	// address either of its matches — so a ref too short to be a prefix stays
+	// refused too, and neither reaches the fallback.
+	if !errors.Is(scopedErr, memref.ErrNoMatch) {
+		return "", scopedErr
+	}
+	ids := make([]string, 0, len(into))
+	for _, l := range into {
+		ids = append(ids, l.SourceID)
+	}
+	if id, err := memref.ResolveIn(ids, "source", ref); err == nil {
+		return id, nil
+	}
+	return "", scopedErr
 }
 
 // resolveRef turns one ref into a memory id in the project, through the shared

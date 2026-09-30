@@ -314,22 +314,21 @@ func TestWithdrawReachesAnEdgeWhoseTargetWasPromoted(t *testing.T) {
 	}
 }
 
-// TestWithdrawCannotNameAnotherProjectsSource bounds the ownership rule from the
-// other side, and it is about REFS rather than about the edge read. `ghost project
-// merge` moves a memory between projects and leaves its links, so a project can own
-// a target whose source sits in a project that is not its own — and the ownership
-// rule above says that target's project may withdraw that edge. It still cannot,
-// because the SOURCE ref does not resolve there.
+// TestWithdrawReachesAnEdgeWhoseSourceIsInAnotherProject is the last shape #786
+// left, and the one its own first fix created. `ghost project merge` moves a
+// memory between projects and leaves its links, so a project can own a TARGET
+// whose source sits in a project that is not its own. Neither project can name the
+// pair: `p` cannot resolve a `q` memory and `q` cannot resolve a `p` one, so the
+// ownership rule that lets `p` withdraw the edge was unreachable through it — and
+// the edge went on demoting a `p` memory with no command able to stop it.
 //
-// That is deliberate, and the alternative is worse than the limitation. Widening a
-// project's ref scope to reach a neighbour would make `ghost supersede p --withdraw
-// <q-prefix> …` answer "no live supersedes link" for an id that does not exist in p
-// — which is a question about another project's corpus asked through this one, and
-// the reason MemoryIDsByIDPrefix is project-scoped at all. So the edge read is
-// wider than the refs on purpose: it can see the edge, and the command still cannot
-// name it from here. A shared-scope endpoint is the case that IS reachable, and
-// neither test above is about this one.
-func TestWithdrawCannotNameAnotherProjectsSource(t *testing.T) {
+// The resolution order is what closes it. The TARGET is named first, and once it
+// is, the live edges pointing at it are in scope — so the SOURCE ref resolves
+// against the holders of a memory the caller has already named, not only against
+// the project's own ids. The widening is as narrow as it can be: the id set comes
+// from a read the caller can already see, so it cannot be used to ask what else
+// exists in the other project.
+func TestWithdrawReachesAnEdgeWhoseSourceIsInAnotherProject(t *testing.T) {
 	store, _ := seed(t)
 	ctx := context.Background()
 	if err := store.EnsureProject(ctx, "q", "/tmp/q", "q"); err != nil {
@@ -346,22 +345,78 @@ func TestWithdrawCannotNameAnotherProjectsSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = Withdraw(ctx, store, "p", []WithdrawPair{{Source: source, Target: target}}, true, discardLogger())
+	// The ranking was demoting that target the whole time, which is what made the
+	// missing repair worth closing. The read is the one a withdrawal makes: the
+	// target is in p, so p can see the edge burying it.
+	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
+		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	} else if len(links) != 1 {
+		t.Fatalf("SupersedesLinksInto(p) = %+v, want the one edge burying p's own memory", links)
+	}
+
+	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: source, Target: target}}, true, discardLogger())
+	if err != nil {
+		t.Fatalf("Withdraw(p) could not reach the edge burying one of its own memories: %v", err)
+	}
+	if res.Withdrawn != 1 {
+		t.Errorf("Withdrawn = %d, want 1", res.Withdrawn)
+	}
+	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
+		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	} else if len(links) != 0 {
+		t.Errorf("live edge(s) = %d after the withdrawal, want 0", len(links))
+	}
+}
+
+// TestAProjectScopedRefStillRefusesWhatItCannotName is the boundary the widened
+// source resolution must not cross. The holders of the named target are in scope
+// for the SOURCE ref and for nothing else: a ref naming an unrelated memory in
+// another project is still a miss, and a ref too short to be a prefix is still
+// refused on its length — the fallback is for a MISS, never for a refusal, or an
+// ambiguous spelling would be answered out of a different id set than the one that
+// called it ambiguous.
+func TestAProjectScopedRefStillRefusesWhatItCannotName(t *testing.T) {
+	store, _ := seed(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "q", "/tmp/q", "q"); err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.Create(ctx, "q", memory.Memory{
+		Category: "fact", Content: "A note in q that supersedes one in p.", Source: "mcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated, err := store.Create(ctx, "q", memory.Memory{
+		Category: "fact", Content: "Another q note, an endpoint of nothing.", Source: "mcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := mustCreatePlain(t, store, "The p note a q note superseded.")
+	if err := store.CreateLink(ctx, source, target, string(RelationSupersedes), 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A q memory that is not a holder of the named target: a miss, named as one.
+	_, err = Withdraw(ctx, store, "p", []WithdrawPair{{Source: unrelated, Target: target}}, true, discardLogger())
 	if err == nil {
-		t.Fatal("a project named another project's memory")
+		t.Fatal("Withdraw resolved a memory in another project that holds nothing over the target")
 	}
 	if !strings.Contains(err.Error(), "no memory in project p") {
 		t.Errorf("the refusal is not the project-scoped ref resolution: %v", err)
 	}
-	// The edge read DOES see it — the target's project owns the memory being
-	// buried — so the refusal is about naming the pair, not about the ownership
-	// rule having lost the edge.
-	links, lerr := store.SupersedesLinksInto(ctx, "p", target)
-	if lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	_, err = Withdraw(ctx, store, "p", []WithdrawPair{{Source: source[:4], Target: target}}, true, discardLogger())
+	if err == nil {
+		t.Fatal("Withdraw accepted a four-character source ref")
 	}
-	if len(links) != 1 {
-		t.Errorf("SupersedesLinksInto(p) = %+v, want the one edge burying p's own memory", links)
+	if !strings.Contains(err.Error(), "too short to be a prefix") {
+		t.Errorf("a short ref was not refused on its length: %v", err)
+	}
+	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
+		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	} else if len(links) != 1 {
+		t.Errorf("live edge(s) = %d, want 1: the two refusals above wrote nothing", len(links))
 	}
 }
 

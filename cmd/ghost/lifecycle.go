@@ -2213,18 +2213,27 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 			case apply:
 				marker = "already gone"
 			}
-			// The CAUSES row names the re-link as well, because that verdict
-			// writes a second graph row: an operator deciding what this run did
-			// to the graph is deciding about both, and a line that reported only
-			// the withdrawal would leave one of them unmentioned.
+			// Both verdicts that deny the pair move a SECOND graph row, and a line
+			// that named only the supersedes edge would say the run moved one row
+			// when it moved two — the same `[+N causes edge]` marker
+			// supersedeReassessReport puts on its own rows, for the same reason.
+			// A CAUSES verdict CREATES the row; NEITHER and REVERSED drop one.
 			extra := ""
-			if c.Relation == supersede.RelationCauses {
+			switch {
+			case c.Relation == supersede.RelationCauses:
 				verb := "re-linked"
 				if !apply {
 					verb = "re-linked by --apply"
 				}
 				extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
 					shortID(c.OlderID), "causes", shortID(c.NewerID))
+			case apply && c.CausesDropped > 0:
+				// Only what the write actually moved, so a dry run says nothing
+				// here rather than forecasting a deletion nobody performed: Run
+				// makes no prediction read for this, and adding one would put a
+				// second read's failure in a pass whose only fatal error is a
+				// write error.
+				extra = fmt.Sprintf("  [+%d causes edge dropped]", c.CausesDropped)
 			}
 			fmt.Fprintf(&b, "  %s  %s -> %s  [%s%s]\n",
 				marker, shortID(c.NewerID), shortID(c.OlderID), supersedeReclassifyReason(c.Relation), extra)

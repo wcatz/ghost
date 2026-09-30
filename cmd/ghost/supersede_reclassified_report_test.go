@@ -128,6 +128,32 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			notWant: []string{"withdrew", "would withdraw"},
 		},
 		{
+			// A denying verdict moves a SECOND row: NEITHER and REVERSED both drop
+			// the pair's live 'causes' edge, and a row that named only the
+			// supersedes edge would say the run moved one row when it moved two.
+			// `--reassess` marks the same thing, and these rows are printed in its
+			// shape.
+			name:  "a withdrawal that also dropped a causes edge says so",
+			apply: true,
+			classified: []supersede.Classified{
+				withCauses(reclassRow(supersede.RelationNeither, true, true), 1),
+			},
+			want:    []string{"withdrew", "[+1 causes edge dropped]"},
+			notWant: []string{"+0 causes", "would withdraw"},
+		},
+		{
+			// The count is what the write returned, so a dry run has none — and a
+			// marker over a pass that deleted nothing is the one line this report
+			// must not print.
+			name:  "a dry run forecasts no causes deletion",
+			apply: false,
+			classified: []supersede.Classified{
+				withCauses(reclassRow(supersede.RelationNeither, true, false), 0),
+			},
+			want:    []string{"would withdraw"},
+			notWant: []string{"causes edge dropped"},
+		},
+		{
 			name:  "a reversed reclassification is a withdrawal like any other",
 			apply: true,
 			classified: []supersede.Classified{
@@ -152,6 +178,12 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withCauses is reclassRow plus the second graph row a denying verdict moves.
+func withCauses(row supersede.Classified, dropped int) supersede.Classified {
+	row.CausesDropped = dropped
+	return row
 }
 
 // TestSupersedePairLinesPrintsNothingForAnEmptyPass: the header line above says

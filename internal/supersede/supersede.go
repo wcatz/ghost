@@ -422,6 +422,24 @@ type Classified struct {
 	// against: a resolve repair's pool is filtered by project, so a repair scoped
 	// to the wrong one silently clears nothing. See RepairableTargets.
 	TargetProjectID string
+	// CausesDropped is how many live 'causes' edges this pair's withdrawal ALSO
+	// removed, and it is the second graph mutation a denying verdict performs —
+	// Reassess reports it on the row for the same reason, and a report that
+	// names the supersedes edge and not the causes edge says the run moved one
+	// row when it moved two.
+	//
+	// It counts only what --apply actually invalidated, so it is 0 in a dry run
+	// and there is NO prediction for it: reading the pair's live 'causes' edges to
+	// forecast a deletion is a second read whose failure would then have to fail
+	// the pass, and this pass's contract is that a write error is the only thing
+	// that aborts one. A dry-run row says nothing about it rather than claiming a
+	// deletion nobody performed; the run's own log line carries the count.
+	//
+	// A FRESH pair's causes sweep is not reported on any row, because a fresh
+	// pair produces no withdrawal row to carry it: the pass has no per-pair line
+	// for a proposal it declined to link, which is the one place this count is
+	// still invisible.
+	CausesDropped int
 }
 
 // Result summarizes a pass.
@@ -1059,9 +1077,11 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
 				c.Withdrawn = c.Reclassified && dropped > 0
-				if _, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
+				causesDropped, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses))
+				if err != nil {
 					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
+				c.CausesDropped = int(causesDropped)
 			case RelationReversed:
 				// Nothing is written, in either direction: the classifier
 				// says the OLDER note is the current one, so the only link
@@ -1081,6 +1101,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 					return res, nil, fmt.Errorf("invalidate reversed causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
 				c.Withdrawn = c.Reclassified && dropped > 0
+				c.CausesDropped = int(causesDropped)
 				// Info, and only when a row really changed: a fresh reversed
 				// candidate usually carries no link, so claiming a drop there
 				// would put a graph mutation in lifecycle.log that never

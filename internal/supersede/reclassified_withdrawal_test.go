@@ -156,3 +156,100 @@ func TestAFreshNeitherIsNotAWithdrawal(t *testing.T) {
 		t.Errorf("live supersedes edge(s) = %d, want 0", got)
 	}
 }
+
+// TestRunReportsTheCausesEdgeTheSameWithdrawalRemoved: a denying verdict moves a
+// SECOND graph row. NEITHER and REVERSED both drop the pair's live 'causes'
+// edge, and `Run` was discarding the count that says whether they did — so an
+// applied pass could report `withdrew X -> Y [neither]` while a live causes edge
+// Y→X went with it, and the report read as though one row moved when two did.
+// `--reassess` reports exactly this as `[+N causes edge]` on its own rows, and
+// these rows are printed in its shape.
+//
+// Only a count the WRITE returned: a dry run says nothing here, because Run makes
+// no prediction read for it and forecasting a deletion nobody performed is the
+// claim the marker exists to prevent.
+func TestRunReportsTheCausesEdgeTheSameWithdrawalRemoved(t *testing.T) {
+	for _, tc := range []struct {
+		verdict Relation
+		// Both denying verdicts sweep the other relation's edge; a CAUSES verdict
+		// CREATES one instead, which the report covers on its own branch.
+		wantDropped int
+	}{
+		{verdict: RelationNeither, wantDropped: 1},
+		{verdict: RelationReversed, wantDropped: 1},
+	} {
+		t.Run(string(tc.verdict), func(t *testing.T) {
+			store, db := seed(t)
+			ctx := context.Background()
+			newer, older := seedReclassifyPair(t, store, db)
+			// A live 'causes' edge on the pair, which the denial sweeps with the
+			// supersedes edge — the second mutation the row has to account for.
+			if err := store.CreateLink(ctx, older, newer, string(RelationCauses), 0.9, "llm"); err != nil {
+				t.Fatal(err)
+			}
+			cls := &mockClassifier{verdict: func(_, _ string) Relation { return tc.verdict }}
+
+			_, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(classified) != 1 {
+				t.Fatalf("classified = %+v, want exactly the one pair", classified)
+			}
+			if got := classified[0].CausesDropped; got != tc.wantDropped {
+				t.Errorf("CausesDropped = %d, want %d: the row has to account for the causes edge the same verdict removed", got, tc.wantDropped)
+			}
+			// And the graph agrees with the count, so the two are not independent.
+			links, err := store.GetLinks(ctx, older)
+			if err != nil {
+				t.Fatalf("GetLinks: %v", err)
+			}
+			live := 0
+			for _, l := range links {
+				if l.Relation == string(RelationCauses) && l.InvalidatedAt == nil {
+					live++
+				}
+			}
+			if live != 1-tc.wantDropped {
+				t.Errorf("live causes edge(s) = %d, want %d", live, 1-tc.wantDropped)
+			}
+		})
+	}
+}
+
+// TestADryRunForecastsNoCausesDeletion: the count is what the write returned, and
+// a dry run writes nothing. A marker that read `+1 causes edge` over a pass that
+// deleted nothing is the one line this report must not print.
+func TestADryRunForecastsNoCausesDeletion(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer, older := seedReclassifyPair(t, store, db)
+	if err := store.CreateLink(ctx, older, newer, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationReversed }}
+
+	_, classified, err := Run(ctx, store, cls, "p", 0.9, false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(classified) != 1 {
+		t.Fatalf("classified = %+v, want exactly the one pair", classified)
+	}
+	if classified[0].CausesDropped != 0 {
+		t.Errorf("a dry run reported %d causes edge(s) dropped, and it dropped none", classified[0].CausesDropped)
+	}
+	links, err := store.GetLinks(ctx, older)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	live := 0
+	for _, l := range links {
+		if l.Relation == string(RelationCauses) && l.InvalidatedAt == nil {
+			live++
+		}
+	}
+	if live != 1 {
+		t.Errorf("live causes edge(s) = %d after a dry run, want 1: it wrote nothing", live)
+	}
+}
