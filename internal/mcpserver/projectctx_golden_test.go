@@ -286,6 +286,28 @@ func TestProjectContextGoldenFixtureExercisesItsBranches(t *testing.T) {
 	if !strings.Contains(res, "## Global (applies to all projects)") {
 		t.Errorf("fixture produced no Global section, so the _global read is untested:\n%s", res)
 	}
+	// #809: a cross-project row must not sit under `## Memories`, on either
+	// surface. The goldens pin the bytes, which is the load-bearing half; this
+	// assertion is here so that a future re-record that put them back reads as the
+	// defect it is rather than as an accepted baseline — the goldens are re-recorded
+	// by hand whenever a change is intended, and a baseline that quietly accepts
+	// the mislabelling is how it came to be there in the first place.
+	for _, tc := range []struct{ surface, out string }{
+		{"ghost_project_context", tool},
+		{"ghost://project/{id}/context", res},
+	} {
+		memories, _, ok := strings.Cut(tc.out, "## Global (applies to all projects)")
+		if !ok {
+			continue // the tool's block has no global rows at all on some fixture
+		}
+		if !strings.Contains(memories, "## Memories") {
+			continue
+		}
+		if strings.Contains(memories, "`gmem") {
+			t.Errorf("%s lists a _global row under ## Memories; the SessionStart trust guidance keys on the "+
+				"Global heading, so a row without it is a row the guidance cannot reach:\n%s", tc.surface, tc.out)
+		}
+	}
 	// Every category, so the composite order is exercised across all three decay
 	// groups rather than only the non-decaying one.
 	for _, cat := range []string{"preference", "convention", "fact", "architecture", "pattern", "gotcha", "decision"} {

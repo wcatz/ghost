@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/ai"
@@ -382,38 +381,22 @@ func sessionIDFor(req *mcp.CallToolRequest) string {
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
-// memory and task IDs), mirroring cmd/ghost's package-level shortID.
+// memory and task IDs).
 //
-// By characters, not bytes: an id is not necessarily hex (`ghost import` writes
-// an artifact's ids verbatim), and `id[:8]` on a CJK id returns invalid UTF-8 — a
-// preview line that cannot be read, and a selector that can never resolve. The
-// eight-hex ids Ghost mints have byte length == rune count, so this changes
-// nothing for them and is the difference between working and nonsense for the
-// rest.
+// It is `assemble.ShortID` and nothing of its own, which is the fix for #810: the
+// rule was written four times — here, in `internal/assemble`'s trace notes, in
+// `cmd/ghost` and in `internal/memref` — and the copy in `internal/assemble` had
+// drifted into `id[:8]`, so a CJK id put invalid UTF-8 inside a note. Two
+// implementations of one rule are two rules, and the untested one is the one that
+// ships the bug. The reasoning — eight CHARACTERS through `memref.Short`, then
+// `assemble.Token`, and why a quoted id is shown whole rather than truncated — is
+// on the one implementation, which is where a reader changing it will look.
 //
-// An id assemble.Token had to quote is returned WHOLE, not truncated first. This
-// is a LEGIBILITY fix rather than a safety one, and the distinction is worth
-// keeping: truncating first is already safe, because an eight-rune cut of a
-// newline-bearing id holds no newline once quoted. It is useless, though —
-// `Token(shortID(id))` on such an id produces `"AAAA\n- ["`, half an escape and
-// one truncated line, and a reader cannot tell it from an ordinary id or act on
-// it. Truncating the rendered form instead would cut mid-escape and can emit a
-// lone backslash. So a well-formed id is abbreviated and anything else is shown in
-// full, which is what "compact preview" was ever for (#791).
+// `cmd/ghost`'s own copy stays, and is deliberately different: its report lines
+// go to a terminal for a human to paste back, so an id has to stay copyable
+// there. The comment on it says the same thing.
 func shortID(id string) string {
-	// An empty id stays empty rather than becoming the quoted empty string
-	// assemble.Token renders it as, because a preview column showing `""` for a
-	// row with no id is noise, and an id that is empty cannot forge a line.
-	if id == "" {
-		return ""
-	}
-	if rendered := assemble.Token(id); rendered != id {
-		return rendered
-	}
-	if utf8.RuneCountInString(id) > 8 {
-		return string([]rune(id)[:8])
-	}
-	return id
+	return assemble.ShortID(id)
 }
 
 // validateTags enforces tag limits: max 10 tags, max 64 chars each.
@@ -1808,6 +1791,12 @@ func (s *Server) registerTools() {
 					Content: []mcp.Content{&mcp.TextContent{Text: projectNotRegisteredAsOf(asked, *asOf)}},
 				}, nil, nil
 			}
+			// The Global section and nothing else, built in its own builder because
+			// the not-registered sentence is APPENDED to it and a block with the
+			// sentence above the rows would read as though the rows were the
+			// sentence's continuation.
+			var gsb strings.Builder
+			s.projectContextGlobalSection(ctx, &gsb, args.Limit, nil, nil)
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{
 					// `args.Limit` and NOT a fixed cap: origin/main's
@@ -1816,7 +1805,7 @@ func (s *Server) registerTools() {
 					// the Global section's 15 here would have overridden
 					// `limit` — which the tool publishes as "Max memories to
 					// return" — and returned 15 rows for a `limit: 3` request.
-					Text: projectContextWithNotRegistered(s.projectContextGlobalSection(ctx, args.Limit, nil), asked),
+					Text: projectContextWithNotRegistered(gsb.String(), asked),
 				}},
 			}, nil, nil
 		}
@@ -1841,14 +1830,22 @@ func (s *Server) registerTools() {
 				live = live[:args.Limit]
 			}
 			sb.WriteString(memory.AsOfSourceNote(*asOf))
-			sb.WriteString("\n\n")
 			if len(live) > 0 {
-				rows := make([]memory.Memory, len(live))
-				for i, r := range live {
-					rows[i] = r.Memory
-				}
-				sb.WriteString("## Memories\n\n")
-				sb.WriteString(formatMemories(rows))
+				// Split the same way the present-tense branch does, and for the same
+				// reason (#809): `MemoriesAsOf` reads `ProjectScoped`, which is
+				// `project_id = ? OR project_id = '_global'`, so this set is a union
+				// too and a cross-project row was listed under `## Memories` here
+				// as well. `memory.Memory` rather than `assemble.Item`, so the split
+				// is on the row's own ProjectID rather than through
+				// `projectContextSplit` — the same rule, the other type.
+				//
+				// `## Learned Context` and the learned/learned sections stay omitted
+				// for the reason above, and the Global section is the ONLY thing this
+				// adds: it reads the same rows, renders the same fields through the
+				// same `formatMemories`, and says which instant it read.
+				own, globals := splitMemoriesByProject(live)
+				projectContextSection(&sb, memorySectionHeading, formatMemories(own))
+				projectContextSection(&sb, globalSectionHeading, formatMemories(globals))
 			}
 			if note := set.UnknownNote(); note != "" {
 				sb.WriteString("\n" + note + "\n")
@@ -1871,15 +1868,26 @@ func (s *Server) registerTools() {
 		// with no project, and this is the seam that would refuse it if the check
 		// above were ever moved back down here.
 		var memories assemble.Result
+		// The window is a UNION of this project's rows and `_global`'s, and it is
+		// split before it is rendered (#809): a cross-project row listed under
+		// `## Memories` is a row the SessionStart trust guidance — which keys on
+		// `## Global (applies to all projects)` — cannot see. The split partitions
+		// the admitted set and reorders nothing, so `limit` still caps the whole
+		// block and every row the window admitted is still shown.
+		var own, globals []assemble.Item
 		if args.ProjectID != "" {
 			memories, err = s.projectContextMemories(ctx, args.ProjectID, args.Limit)
 			if err != nil {
 				return nil, nil, err
 			}
-			if len(memories.Items) > 0 {
-				sb.WriteString("## Memories\n\n")
-				sb.WriteString(projectContextItems(memories.Items))
-			}
+			own, globals = projectContextSplit(memories.Items)
+			projectContextSection(&sb, memorySectionHeading, projectContextItems(own))
+			// The tool's Global section is the `_global` half of its own window and
+			// NO second read: `limit` already capped the whole block, and a second
+			// read at the Global section's own cap would return more rows than the
+			// caller asked for. The resource, whose caps are per-section, does run
+			// one — see buildProjectContext.
+			projectContextSection(&sb, globalSectionHeading, projectContextItems(globals))
 		}
 
 		learned, err := s.store.GetLearnedContext(ctx, args.ProjectID)
@@ -3425,16 +3433,20 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	var sb strings.Builder
 
 	var memories assemble.Result
+	// The same split the tool makes, and for the same reason (#809): the window is
+	// a union of the project's own rows and `_global`'s, and a cross-project row
+	// printed under `## Memories` is a row the SessionStart trust guidance cannot
+	// see. The `_global` half is handed to the Global section below rather than
+	// rendered here, so the block carries ONE copy of that heading.
+	var own, globals []assemble.Item
 	if projectID != "" {
 		var err error
 		memories, err = s.projectContextMemories(ctx, projectID, projectContextMemoriesCap)
 		if err != nil {
 			return "", fmt.Errorf("get memories for %q: %w", projectID, err)
 		}
-		if len(memories.Items) > 0 {
-			sb.WriteString("## Memories\n\n")
-			sb.WriteString(projectContextItems(memories.Items))
-		}
+		own, globals = projectContextSplit(memories.Items)
+		projectContextSection(&sb, memorySectionHeading, projectContextItems(own))
 	}
 
 	// Everything keyed on the project is skipped for an unresolved one, and
@@ -3499,17 +3511,21 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	}
 
 	// Include global memories (preferences, conventions) that apply to all
-	// projects. The read above already mixes '_global' rows into the project list,
+	// projects. The read above already mixed '_global' rows into the project list,
 	// so skip any global already shown there rather than repeating the
 	// highest-value preferences in the token budget.
 	//
 	// It runs for an UNRESOLVED project too, and that is the point: the section
 	// does not depend on the project, and the base ref delivered these rows for an
-	// unknown name — under `## Memories`, which is the mislabelling this migration
+	// unknown name — under `## Memories`, which the mislabelling this migration
 	// removes, but delivered. A first session in a project Ghost has never seen is
 	// exactly when the cross-project preferences and conventions matter, and the
 	// server's own instructions tell the agent to look for this section. Dropping
 	// it would leave the answer contradicting the instructions shipped with it.
+	//
+	// `globals` is the `_global` half of the window above (#809), so the section is
+	// the union of the rows that window carried and the rows this read adds, under
+	// ONE heading.
 	//
 	// The `seen` filter, the second REQUEST and the `ExcludeSeen` field it is why
 	// we do not use are all explained on projectContextGlobalSection, which is
@@ -3523,10 +3539,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		if projectID == "" {
 			limit = projectContextMemoriesCap
 		}
-		if section := s.projectContextGlobalSection(ctx, limit, memories.Items); section != "" {
-			sb.WriteString("\n\n")
-			sb.WriteString(section)
-		}
+		s.projectContextGlobalSection(ctx, &sb, limit, memories.Items, globals)
 	}
 
 	if sb.Len() == 0 {
@@ -3620,13 +3633,12 @@ func formatMemories(memories []memory.Memory) string {
 		if m.Pinned {
 			pin = " [pinned]"
 		}
-		tags := ""
-		if len(m.Tags) > 0 {
-			tagsJSON, err := json.Marshal(m.Tags)
-			if err == nil {
-				tags = " tags:" + string(tagsJSON)
-			}
-		}
+		// The tag list through assemble.TagsLabel, for the reason every other
+		// renderer on this line is assemble's: the label is printed OUTSIDE the
+		// «...» data delimiters and json.Marshal does not escape « or », so a tag
+		// holding one opened a data block of its own mid-metadata (#811). This was
+		// the second copy of that label, and the untested one.
+		tags := assemble.TagsLabel(m.Tags)
 		// Content is wrapped in «...» data delimiters: it is free text the
 		// agent itself (or an indirect-injection source it summarized) wrote —
 		// stored data, not a new instruction, however imperative it reads.

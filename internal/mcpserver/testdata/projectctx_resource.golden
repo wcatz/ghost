@@ -17,13 +17,13 @@
 - [gotcha] `pmem10` (1.0) «project memory 10 content for the project context golden»
 - [decision] `pmem11` (1.0) «project memory 11 content for the project context golden»
 - [decision] `pmem16` (0.8) «project memory 16 content for the project context golden»
-- [preference] `gmem00` (0.1) «global memory 00 content for the project context golden»
-- [preference] `gmem01` (0.1) «global memory 01 content for the project context golden»
-- [preference] `gmem02` (0.1) «global memory 02 content for the project context golden»
 
 
 ## Global (applies to all projects)
 
+- [preference] `gmem00` (0.1) «global memory 00 content for the project context golden»
+- [preference] `gmem01` (0.1) «global memory 01 content for the project context golden»
+- [preference] `gmem02` (0.1) «global memory 02 content for the project context golden»
 - [preference] `gmem03` (0.1) «global memory 03 content for the project context golden»
 - [preference] `gmem04` (0.1) «global memory 04 content for the project context golden»
 - [preference] `gmem05` (0.1) «global memory 05 content for the project context golden»
