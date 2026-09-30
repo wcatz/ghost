@@ -78,7 +78,15 @@ func TestBothTagLabelRenderersPrintTheOrdinaryCaseIdentically(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			line := formatMemories([]memory.Memory{{ID: "pmem00", Category: "fact", Content: "x", Tags: tc.tags}})
-			if !strings.Contains(line, tc.want) && !(tc.want == "" && !strings.Contains(line, " tags:")) {
+			// The empty case asserts an ABSENCE, which `strings.Contains` cannot
+			// state, so the two directions are spelled rather than folded into one
+			// condition. A negated conjunction here is also the shape a future edit
+			// would get wrong.
+			carries := tc.want != "" && strings.Contains(line, tc.want)
+			if tc.want == "" {
+				carries = !strings.Contains(line, " tags:")
+			}
+			if !carries {
 				t.Errorf("formatMemories with tags %q = %q, want it to carry %q", tc.tags, line, tc.want)
 			}
 		})

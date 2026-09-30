@@ -233,7 +233,7 @@ func projectContextSplit(items []assemble.Item) (own, globals []assemble.Item) {
 // two renderers".
 func splitMemoriesByProject(rows []memory.AsOfRow) (own, globals []memory.Memory) {
 	for _, r := range rows {
-		if r.Memory.ProjectID == memory.GlobalProjectID {
+		if r.ProjectID == memory.GlobalProjectID {
 			globals = append(globals, r.Memory)
 		} else {
 			own = append(own, r.Memory)
