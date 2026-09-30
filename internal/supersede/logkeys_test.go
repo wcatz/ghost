@@ -204,10 +204,10 @@ func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 // behaviour, and why the audit this test came from was a type-checked read of
 // every call rather than a runtime signal.
 //
-// The table is the coverage claim made checkable: a pass that logs, and no entry
-// drives it, fails the assertion below rather than quietly going uncovered — the
-// failure mode a hand-written scope comment in a test cannot have, because
-// nothing re-reads it.
+// The table is the coverage claim made checkable: a pass that logs, and no case
+// drives it, is named below — which catches a case dropped from the table, and
+// does NOT catch a new logger added to the package, since the list is
+// transcribed. The comment on the check says so, and says what to grep instead.
 func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -224,7 +224,7 @@ func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 		{name: "Reassess", run: reassessPassesLogKeys, wants: []string{
 			"a cyclic pair whose two rows share both timestamps",
 			"the older note states a rule this edge does not retire",
-			"supersede reassess", // the summary line: 19 keys, the longest in the package
+			"supersede reassess", // the summary line — the longest in the package
 		}},
 		{name: "Withdraw", run: withdrawPassesLogKeys, wants: []string{
 			"supersede withdrew a named edge",
@@ -235,15 +235,23 @@ func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 		}},
 	}
 
-	// Every pass in the package that logs must be in the table above, or this
-	// test is quietly narrower than it says. The names are what a reader greps
-	// for, and an entry here is what keeps the list honest as the package grows.
+	// Every pass in the package that logs must have a case, or this test is
+	// quietly narrower than it says. The names are what a reader greps for, and
+	// an entry here is what keeps the list honest as the package grows.
+	//
+	// What this catches: a case DELETED from the table without the guard going
+	// with it, which is how a table rots. What it does NOT catch: a fifth
+	// logging entry point added to the package later, because this list is
+	// transcribed rather than derived. Deriving it would mean walking the
+	// package's source from a test, which this repository does not do (no test
+	// asserts on source text or ASTs, so none rots when the source is
+	// reformatted). The honest consequence: a new logger has to be added here by
+	// whoever adds it, and `grep -l 'slog.Logger' internal/supersede/*.go` is
+	// the check to run when that happens.
 	driven := map[string]bool{}
 	for _, tc := range cases {
 		driven[tc.name] = true
 	}
-	// Logging is a method call on one of these four types, so the list is the
-	// complete set of loggers in the package and not a sample of it.
 	for _, name := range []string{"Run", "Reassess", "Withdraw", "RelationClassifier"} {
 		if !driven[name] {
 			t.Errorf("no case drives %s, so its log lines are uncovered by assertLogKeysAreLabels", name)
