@@ -15,11 +15,25 @@ concurrency:
 permissions:
   contents: read
 
+# RUNNER IMAGE. Every job in .github/workflows/ names ubuntu-24.04 EXPLICITLY.
+# GitHub moves the `ubuntu-latest` label to Ubuntu 26 on 2026-10-19
+# (actions/runner-images#14748), and that is not a cosmetic change here: a
+# different toolchain, a different sqlite/libc, a different pwsh, and a
+# different set of preinstalled tools that the release job's gh, the
+# attestation tooling and this file's actionlint step all rely on. Every CI
+# run and every release attestation to date was produced on 24.04, so the
+# attested artifact of a known image is what is being protected.
+#
+# Bump the pin deliberately, with the evidence below: `ubuntu-26-canary` runs
+# build-and-test's own steps on ubuntu-26.04 and is NOT a required status
+# check (main-branch-protection requires exactly build-and-test, lint and
+# review-gate), so it can report a failure without blocking a merge or a
+# release. Move the pin when that job is green, not when the label moves.
 jobs:
   # Fast-feedback leg: everything that fails in seconds, in parallel with
   # build-and-test instead of ahead of it.
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -37,7 +51,7 @@ jobs:
         # convention for third-party binaries.
         #
         # actionlint runs shellcheck over every run: block WHEN THE
-        # SHELLCHECK BINARY IS PRESENT, and ubuntu-latest ships it. A local
+        # SHELLCHECK BINARY IS PRESENT, and ubuntu-24.04 ships it. A local
         # run on a machine without shellcheck silently skips those checks
         # and is NOT equivalent to this job — the first real run of this
         # step failed on six findings a local pass had not surfaced.
@@ -67,7 +81,7 @@ jobs:
           /tmp/actionlint -color "${FILES[@]}"
 
       - name: Review-script unit tests
-        # stdlib-only unittest; ubuntu-latest ships python3, so no setup
+        # stdlib-only unittest; ubuntu-24.04 ships python3, so no setup
         # step and no dependency install.
         #
         # unittest discover's own exit code is not a sufficient guard on its
@@ -122,7 +136,7 @@ jobs:
   # version fields to each other; release.yml additionally pins them to the
   # tag being released.
   manifest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -147,7 +161,7 @@ jobs:
   # concurrently with lint. The job name is a required branch-protection
   # context — do not rename casually.
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -174,6 +188,59 @@ jobs:
       # subcommand and hook against a sandboxed HOME with fake harnesses.
       # Without this step nothing ran it, so a change to a verdict format
       # could break it unseen.
+      - name: E2E (built binary)
+        run: go test -tags e2e -count=1 ./e2e/
+
+      - name: Build
+        run: go build -o /dev/null ./cmd/ghost
+
+  # The canary for the runner bump everything else is pinned against: the same
+  # three steps as build-and-test, on ubuntu-26.04, the image ubuntu-latest
+  # migrates to on 2026-10-19. It exists so that bump is a decision made from
+  # evidence instead of a date (see the RUNNER IMAGE note above).
+  #
+  # NOT A MATRIX LEG ON build-and-test, and that is not a style choice. GitHub
+  # matches a required status check by the job's reported NAME, and a matrix
+  # reports `build-and-test (ubuntu-24.04)`; `build-and-test` would then never be
+  # reported, main-branch-protection would wait for a context that cannot arrive,
+  # and every PR would sit at "Expected — waiting for status" with nothing to
+  # clear it. A separate job keeps the required context's name intact and adds
+  # one non-required check beside it.
+  #
+  # It cannot gate a merge or a release: main-branch-protection requires exactly
+  # `build-and-test`, `lint` and `review-gate`, and this is none of them.
+  #
+  # And it deliberately does NOT use continue-on-error, so a real breakage on
+  # 26.04 is a red X on a check nobody waits for, rather than a green tick over a
+  # failed test — the same reasoning as plugin-validate.yml's "No
+  # continue-on-error anywhere: if the design's gate cannot run, the run must be
+  # red, not quietly green". A canary that cannot report red is not evidence.
+  #
+  # Its steps are copied from build-and-test rather than shared with it. A
+  # reusable workflow or composite action would be one place to change both, but
+  # it would also put a required job's steps behind an indirection whose
+  # failure mode (a broken reference) takes the required check with it. A
+  # duplicated step list is a cheaper risk than that.
+  #
+  # Deleting this job is how the pin is retired: when 26.04 is green and is the
+  # image being attested, move the pin to it and drop the canary in the same
+  # commit, so no run can be reported as evidence for the wrong image.
+  ubuntu-26-canary:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The same -timeout 20m build-and-test declares, and for the same reason
+      # (see its comment): internal/memory's race binary sits at or past Go's
+      # implicit 10m default on a hosted runner. A canary must not fail for a
+      # reason the leg it canaries also fails on, or its own verdict is noise.
+      - name: Test
+        run: go test -race -count=1 -timeout 20m ./...
+
       - name: E2E (built binary)
         run: go test -tags e2e -count=1 ./e2e/
 

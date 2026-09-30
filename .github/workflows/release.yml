@@ -47,7 +47,12 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Pinned to the image every release attestation to date was produced on.
+    # This job mints the Sigstore bundles `ghost upgrade` verifies, so its
+    # runner is part of the publisher's identity and must not move under the
+    # tag; see the RUNNER IMAGE note in ci.yml, which also runs the
+    # ubuntu-26.04 canary that a deliberate bump is made against.
+    runs-on: ubuntu-24.04
     # GoReleaser builds archives and checksums and creates the draft release,
     # so it needs contents: write. It publishes no container image because
     # .goreleaser.yml has no dockers or image_templates; the docker job pushes
@@ -254,7 +259,7 @@ jobs:
             install.ps1
 
   docker:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # contents: read covers actions/checkout; packages: write is what lets
     # GITHUB_TOKEN authenticate to ghcr.io in the login step and publish the
     # multi-arch image in the build step.
@@ -336,7 +341,7 @@ jobs:
   #                        back to an older catalog.
   plugin:
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # contents: write uploads the three plugin archives as release assets and
     # writes the pinned catalog. pull-requests: write opens the catalog PR. No
     # packages: write — this job attaches archives to an existing release, it

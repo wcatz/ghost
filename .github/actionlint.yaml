@@ -18,6 +18,28 @@
 # longmemeval.yml); with it, exit 0. Note actionlint only runs shellcheck when
 # the binary is present, so a local run without shellcheck installed is NOT
 # equivalent to CI.
+
+# actionlint's built-in table of GitHub-hosted runner labels is behind the
+# images: v1.7.12 (the version this job pins) knows ubuntu-24.04 and
+# ubuntu-22.04 but not ubuntu-26.04, so it reports `label "ubuntu-26.04" is
+# unknown` as an ERROR and fails the required `lint` check on the canary job's
+# runs-on line. The label itself is real and documented as GitHub-hosted
+# (actions/runner-images README: "Ubuntu 26.04 ... x64 ... ubuntu-26.04", with
+# an ubuntu26 image release published 2026-09-27), so this is actionlint's table
+# being stale, not a typo in the workflow.
+#
+# Declared here rather than silenced with a `paths:` ignore, because the
+# comment above promises that no error-severity finding is suppressed anywhere
+# — and a label actionlint has not heard of is a fact about actionlint's
+# release cadence, not a defect in a run: block. `self-hosted-runner.labels`
+# ADDS to the built-in set (actionlint docs/config.md), so nothing already
+# known is lost. Drop this entry once the pinned actionlint ships the label;
+# keeping it is harmless, because a label listed here that the built-in table
+# later learns agrees with the table rather than disagreeing with it.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+
 paths:
   .github/workflows/best-practices-loop.yml:
     ignore: ['SC2129']
