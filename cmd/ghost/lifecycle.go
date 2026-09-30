@@ -1470,6 +1470,18 @@ type supersedePair struct{ source, target string }
 // is 3, and this comment deliberately does not restate it — a second copy of a
 // tunable is a second place for it to be wrong, and the config field is the one
 // the lifecycle phase reads.
+// checkSupersedeConsensus refuses a gate below supersede.MinConsensus. It is one
+// function rather than a check in each of the two flag arms because the message
+// is the contract: both spellings have to refuse identically, and a duplicated
+// fmt.Errorf is a sentence a later edit fixes in one arm and forgets in the
+// other, which is a silent divergence in an error path nothing else tests.
+func checkSupersedeConsensus(n int) error {
+	if n < supersede.MinConsensus {
+		return fmt.Errorf("--consensus needs at least %d passes (1 would run the ordinary pass again and gate on nothing)", supersede.MinConsensus)
+	}
+	return nil
+}
+
 func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, consensus int, withdraw []supersedePair, err error) {
 	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
 	consensus = 1    // one pass: the flag is off until it is typed
@@ -1484,8 +1496,8 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			if cerr != nil {
 				return "", "", false, false, 0, 0, nil, fmt.Errorf("--consensus needs a whole number of passes: %q", args[i+1])
 			}
-			if v < supersede.MinConsensus {
-				return "", "", false, false, 0, 0, nil, fmt.Errorf("--consensus needs at least %d passes (1 would run the ordinary pass again and gate on nothing)", supersede.MinConsensus)
+			if verr := checkSupersedeConsensus(v); verr != nil {
+				return "", "", false, false, 0, 0, nil, verr
 			}
 			consensus = v
 			i++
@@ -1494,8 +1506,8 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			if cerr != nil {
 				return "", "", false, false, 0, 0, nil, fmt.Errorf("--consensus needs a whole number of passes")
 			}
-			if v < supersede.MinConsensus {
-				return "", "", false, false, 0, 0, nil, fmt.Errorf("--consensus needs at least %d passes (1 would run the ordinary pass again and gate on nothing)", supersede.MinConsensus)
+			if verr := checkSupersedeConsensus(v); verr != nil {
+				return "", "", false, false, 0, 0, nil, verr
 			}
 			consensus = v
 		case args[i] == "--withdraw" && i+2 < len(args) && !strings.HasPrefix(args[i+1], "-") && !strings.HasPrefix(args[i+2], "-"):
