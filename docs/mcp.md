@@ -322,7 +322,10 @@ a refused character in a field the write boundary does not own: `ghost project b
 records `projects.path` through a check that asks only whether the path is absolute,
 and «, » and a backtick are all legal in a directory name. The credential guard
 below is gated the same way, so a bound path carrying a token cannot make a project
-unwritable by the address a session actually uses.
+unwritable by the address a session actually uses — and it is asked a SECOND time on
+the resolution's own failure path, because the two ambiguity refusals name the
+caller's argument and a token that happened to be ambiguous would otherwise reach the
+answer through them. Nothing echoes it either way.
 
 The answer names the refused `project_id` through `assemble.Token` — the renderer the
 row itself uses — because a caller that passed the value can fix it, and it holds

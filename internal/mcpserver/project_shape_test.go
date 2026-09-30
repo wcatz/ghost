@@ -400,6 +400,48 @@ func TestABoundPathThePredicateRefusesStillAcceptsASaveAddressedByThatPath(t *te
 	}
 }
 
+// TestACredentialShapedProjectIDIsNeverEchoedBackByTheResolveItself is the leak the
+// gate on the guards would otherwise open, and the reason the credential guard is
+// asked on the resolve's error path as well as on the creation path.
+//
+// Hoisting the resolution above the guards means a credential-shaped `project_id`
+// now reaches `Store.ResolveProject` before anything has judged it, and two of that
+// function's refusals interpolate the caller's own argument — `"%q matches multiple
+// projects"` and `"%q has tied path-prefix matches"`. Those sentences travel on into
+// the tool's answer, so a token that happened to be ambiguous would land in the one
+// answer that says Ghost never stores credentials. The precondition is narrow — two
+// projects have to share the value as a name — and it is exactly the invariant the
+// guard was written for.
+//
+// So the guard is asked twice, at the two points where the argument can become an
+// answer, and both refusals are credential refusals that name the field and never
+// the value. The repository refusal needs no such treatment: it names a
+// `NormalizeRepoRemote`d remote, which has no userinfo to strip back out.
+func TestACredentialShapedProjectIDIsNeverEchoedBackByTheResolveItself(t *testing.T) {
+	// Two projects sharing the token as their NAME, which is what
+	// `basenameCandidates` matches on and what makes the reference ambiguous.
+	const token = "ghp_" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	db, _, session := projectShapeSession(t)
+	plantProject(t, db, "twin-a", token, filepath.Join(t.TempDir(), "a"))
+	plantProject(t, db, "twin-b", token, filepath.Join(t.TempDir(), "b"))
+
+	out := resultText(callTool(t, session, "ghost_memory_save", map[string]any{
+		"content": "a claim", "category": "fact", "project_id": token,
+	}))
+	if strings.Contains(out, token) {
+		t.Errorf("the ambiguity refusal echoed the credential back into the answer:\n%s", out)
+	}
+	if strings.Contains(out, assemble.Token(token)) {
+		t.Errorf("the ambiguity refusal echoed the refused value through the renderer:\n%s", out)
+	}
+	// And it is still refused — as a credential, which is what names the reason a
+	// caller can act on. A resolve error that merely happened to avoid printing the
+	// value would not satisfy this.
+	if !strings.Contains(out, "credential") {
+		t.Errorf("an ambiguous credential-shaped project_id was not refused as a credential (answer: %s)", out)
+	}
+}
+
 // projectShapeSession is the fixture the three tests above share: a store holding
 // the projects every other test in this package creates, over a live MCP
 // connection. The database handle comes back too, because the legacy test has to

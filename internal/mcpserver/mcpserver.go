@@ -150,8 +150,22 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// not change ROUTING: the repository branch still goes through
 	// `ResolveOrCreateRepoProject`, which repeats exact and longest-prefix path
 	// resolution without the basename fallback for the reason in its own comment.
+	//
+	// The credential guard is asked on this error path too, and being after the
+	// resolve is not a licence to let the argument reach the answer through it. The
+	// two ambiguity refusals interpolate the caller's own `input` — `"%q matches
+	// multiple projects"` and `"%q has tied path-prefix matches"` — and those
+	// sentences travel on to the tool's answer, so a credential-shaped argument
+	// that happens to be ambiguous would put the token into the one answer that
+	// says Ghost never stores credentials. The repository refusal names a
+	// `NormalizeRepoRemote`d remote, which has no userinfo, so it needs no guard.
+	// This is the same hole the read and update paths still have and this diff
+	// does not close (#839).
 	resolvedID, _, err := s.store.ResolveProject(ctx, projectID)
 	if err != nil {
+		if serr := memory.RejectSecret("project_id", projectID); serr != nil {
+			return "", nil, serr
+		}
 		return "", nil, fmt.Errorf("resolve project: %w", err)
 	}
 
