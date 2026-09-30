@@ -559,7 +559,7 @@ func runExport() {
 	if dest == "-" {
 		summary = os.Stderr
 	}
-	if err := runExportCore(context.Background(), store, summary, dest, opts.Project); err != nil {
+	if err := runExportCore(context.Background(), store, summary, os.Stderr, dest, opts.Project); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -569,13 +569,21 @@ func runExport() {
 // destination the file is created with the same 0600 width the database has,
 // before any record is written, so a failure part-way leaves a file only the
 // user can read.
-func runExportCore(ctx context.Context, store *memory.Store, summary io.Writer, dest, projectFilter string) error {
+//
+// summary is where the run states what it did, and warn is where it names the
+// records it could not write. They are separate writers because the artifact may
+// BE stdout (`ghost export -`), and a warning that lands inside a JSONL stream
+// corrupts it for the reader that is piping it straight into an import.
+func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Writer, dest, projectFilter string) error {
 	if dest == "-" {
 		stats, err := portable.Export(ctx, store, os.Stdout, projectFilter)
 		if err != nil {
 			return err
 		}
-		return printExportSummary(summary, "-", stats)
+		if err := printExportSummary(summary, "-", stats); err != nil {
+			return err
+		}
+		return reportSkippedRecords(warn, stats.Skipped)
 	}
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -603,13 +611,61 @@ func runExportCore(ctx context.Context, store *memory.Store, summary io.Writer, 
 		}
 		return exportErr
 	}
-	return printExportSummary(summary, dest, stats)
+	// From here the artifact is COMPLETE and importable, so the file is KEPT even
+	// when records were left out of it. That is the whole difference from the
+	// branch above: this artifact imports cleanly, it is just not the whole
+	// store, and deleting it would destroy a working backup over a warning about
+	// the rows it does not contain.
+	if err := printExportSummary(summary, dest, stats); err != nil {
+		return err
+	}
+	return reportSkippedRecords(warn, stats.Skipped)
 }
 
-// printExportSummary states where the artifact is and what it holds.
+// reportSkippedRecords names every record an export left out and returns an error
+// when there was one, so the command exits non-zero and a backup script notices.
+//
+// The error mirrors the importer's: import counts its rejections and returns an
+// error AFTER printing the per-record report, and this does the same for the rows
+// it could not write. A count of what was written is not a count of what exists,
+// and a partial export reported as a success is the failure mode worth spending
+// an exit code on.
+func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error {
+	if len(skipped) == 0 {
+		return nil
+	}
+	for _, sk := range skipped {
+		// The id through assemble.Token, the same renderer the import report uses
+		// for the id it names: an id carrying a newline would forge a line on the
+		// very report that exists to name it (#791). Such an id is exactly what
+		// gets here, so this is not a precaution.
+		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, assemble.Token(sk.ID), sk.Reason); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(out, "  Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.\n"); err != nil {
+		return err
+	}
+	// Only a project has a delete surface on the CLI, and naming a command that
+	// does not exist is worse than naming none — so the sentence below is the
+	// whole of the repair, and it says which half of the row is the problem.
+	if _, err := fmt.Fprintf(out, "  To include it, delete the row and re-save it under an id this build accepts: `ghost project delete <id>` drops a project and everything under it, and a memory goes through the ghost_memory_delete tool.\n"); err != nil {
+		return err
+	}
+	return fmt.Errorf("%s left out of this artifact because this build cannot import them — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)))
+}
+
+// printExportSummary states where the artifact is and what it holds, and says in
+// the SAME line when it does not hold everything — because a headline that counts
+// only what was written reads as a count of the store, which is the claim a
+// backup script is about to act on.
 func printExportSummary(out io.Writer, path string, stats portable.Stats) error {
-	_, err := fmt.Fprintf(out, "exported %s to %s\n",
+	headline := fmt.Sprintf("exported %s to %s",
 		pluralRecords(stats.Projects, stats.Memories, stats.Tasks, stats.Decisions), path)
+	if len(stats.Skipped) > 0 {
+		headline += fmt.Sprintf(" — %s left out, see below", countLabel(len(stats.Skipped)))
+	}
+	_, err := fmt.Fprintln(out, headline)
 	return err
 }
 

@@ -27,7 +27,7 @@ func TestExportArtifactIsNotGroupOrWorldReadable(t *testing.T) {
 	}
 
 	dest := filepath.Join(t.TempDir(), "export.jsonl")
-	if err := runExportCore(ctx, store, &strings.Builder{}, dest, ""); err != nil {
+	if err := runExportCore(ctx, store, &strings.Builder{}, &strings.Builder{}, dest, ""); err != nil {
 		t.Fatalf("runExportCore: %v", err)
 	}
 	info, err := os.Lstat(dest)

@@ -247,7 +247,7 @@ func TestRunExportCoreThenRunImportCoreRoundTrip(t *testing.T) {
 
 	artifact := filepath.Join(t.TempDir(), "export.jsonl")
 	var summary strings.Builder
-	if err := runExportCore(ctx, src, &summary, artifact, ""); err != nil {
+	if err := runExportCore(ctx, src, &summary, &summary, artifact, ""); err != nil {
 		t.Fatalf("runExportCore: %v", err)
 	}
 	if !strings.Contains(summary.String(), artifact) {
@@ -364,7 +364,7 @@ func TestRunExportCoreRejectsAnUnknownProject(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "x.jsonl")
-	err := runExportCore(context.Background(), store, &strings.Builder{}, dest, "nope")
+	err := runExportCore(context.Background(), store, &strings.Builder{}, &strings.Builder{}, dest, "nope")
 	if err == nil {
 		t.Fatal("an unmatched --project must fail")
 	}

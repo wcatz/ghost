@@ -139,7 +139,73 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 		return Stats{}, err
 	}
 
-	stats := Stats{Projects: len(selected), Memories: len(memories), Tasks: len(tasks), Decisions: len(decisions)}
+	// Split every record into what the importer will accept and what it will
+	// refuse, BEFORE anything is written, so the counts below describe the
+	// artifact rather than the store.
+	//
+	// The project split comes first and its CHILDREN follow it, because a
+	// project left out of the artifact takes every record naming it with it: the
+	// importer resolves each record's project against the artifact, so a memory
+	// under an absent project is rejected as project-not-found. Dropping the
+	// project alone would therefore trade one unimportable record for a whole
+	// project's worth, while naming the child costs one extra report line.
+	skipped := make([]SkippedRecord, 0)
+	droppedProjects := make(map[string]bool)
+	keptProjects := make([]memory.PortableProject, 0, len(selected))
+	for _, p := range selected {
+		if reason := projectExportRefusal(p); reason != "" {
+			skipped = append(skipped, SkippedRecord{Type: TypeProject, ID: p.ID, Reason: reason})
+			droppedProjects[p.ID] = true
+			continue
+		}
+		keptProjects = append(keptProjects, p)
+	}
+	orphaned := func(projectID string) bool { return droppedProjects[projectID] }
+	const orphanReason = "the project it names was left out of this artifact"
+
+	keptMemories := make([]memory.PortableMemory, 0, len(memories))
+	for _, m := range memories {
+		switch {
+		case orphaned(m.ProjectID):
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: orphanReason})
+		case recordExportRefusal(m.ID) != "":
+			skipped = append(skipped, SkippedRecord{Type: TypeMemory, ID: m.ID, Reason: recordExportRefusal(m.ID)})
+		default:
+			keptMemories = append(keptMemories, m)
+		}
+	}
+	keptTasks := make([]memory.Task, 0, len(tasks))
+	for _, t := range tasks {
+		switch {
+		case orphaned(t.ProjectID):
+			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: orphanReason})
+		case recordExportRefusal(t.ID) != "":
+			skipped = append(skipped, SkippedRecord{Type: TypeTask, ID: t.ID, Reason: recordExportRefusal(t.ID)})
+		default:
+			keptTasks = append(keptTasks, t)
+		}
+	}
+	keptDecisions := make([]memory.Decision, 0, len(decisions))
+	for _, d := range decisions {
+		switch {
+		case orphaned(d.ProjectID):
+			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: orphanReason})
+		case recordExportRefusal(d.ID) != "":
+			skipped = append(skipped, SkippedRecord{Type: TypeDecision, ID: d.ID, Reason: recordExportRefusal(d.ID)})
+		default:
+			keptDecisions = append(keptDecisions, d)
+		}
+	}
+
+	stats := Stats{
+		Projects:  len(keptProjects),
+		Memories:  len(keptMemories),
+		Tasks:     len(keptTasks),
+		Decisions: len(keptDecisions),
+	}
+	if len(skipped) > 0 {
+		stats.Skipped = skipped
+	}
 	bw := bufio.NewWriter(w)
 	write := func(r record) error {
 		b, err := json.Marshal(r)
@@ -154,26 +220,26 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 	if _, err := bw.Write(append(headerLine(), '\n')); err != nil {
 		return Stats{}, fmt.Errorf("write header: %w", err)
 	}
-	for i := range selected {
-		p := selected[i]
+	for i := range keptProjects {
+		p := keptProjects[i]
 		if err := write(record{Type: TypeProject, Project: &p}); err != nil {
 			return Stats{}, err
 		}
 	}
-	for i := range memories {
-		m := memories[i]
+	for i := range keptMemories {
+		m := keptMemories[i]
 		if err := write(record{Type: TypeMemory, Memory: &m}); err != nil {
 			return Stats{}, err
 		}
 	}
-	for i := range tasks {
-		t := tasks[i]
+	for i := range keptTasks {
+		t := keptTasks[i]
 		if err := write(record{Type: TypeTask, Task: &t}); err != nil {
 			return Stats{}, err
 		}
 	}
-	for i := range decisions {
-		d := decisions[i]
+	for i := range keptDecisions {
+		d := keptDecisions[i]
 		if err := write(record{Type: TypeDecision, Decision: &d}); err != nil {
 			return Stats{}, err
 		}
@@ -184,12 +250,69 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 	return stats, nil
 }
 
-// Stats is what an export wrote.
+// SkippedRecord is one record an export left out of the artifact, and why.
+//
+// The exporter applies the IMPORTER's own shape checks (`memory.CheckImportedID`
+// and the two project checks), because a store can already hold an id this build
+// refuses to import: written by a pre-#791 `ghost import`, reinstated by
+// `RestoreSnapshot`, seeded by another tool, or edited by hand. Exporting one
+// produced an artifact that `ghost import` then rejected record by record, so the
+// backup was not a backup — and the operator never learned it until they needed
+// it.
+//
+// Leaving the record OUT is the only honest option. A different id is a different
+// row: `memory_links`, the recorded history and every `ghost history` read are
+// attached to the id this store holds, so re-keying one would orphan all of them.
+// So the id is named and the operator decides what to do with the row.
+//
+// ID is the RAW id, and a caller MUST render it through `assemble.Token` before
+// printing it — the same obligation `RecordResult.ID` carries. An id carrying a
+// newline would otherwise forge a report line on the very report that names it.
+type SkippedRecord struct {
+	Type   string
+	ID     string
+	Reason string
+}
+
+// Stats is what an export wrote, and what it deliberately left out.
 type Stats struct {
 	Projects  int
 	Memories  int
 	Tasks     int
 	Decisions int
+	// Skipped holds every record left out, in the order the artifact would have
+	// written them: projects, then memories, tasks and decisions. It is empty for
+	// an ordinary store, and a caller that reports an export must say so when it
+	// is not — a count of what was written is not a count of what exists.
+	Skipped []SkippedRecord
+}
+
+// projectExportRefusal reports why the importer would refuse this project, or
+// "" when it would accept it. The three checks are the importer's own, not a
+// second rule: a second spelling of "which ids are importable" is a second thing
+// to keep in step, and this one already drifted once — the exporter wrote exactly
+// what the importer refused.
+func projectExportRefusal(p memory.PortableProject) string {
+	switch {
+	case memory.CheckImportedProjectID(p.ID) != nil:
+		return "its id is not one this build will import"
+	case memory.CheckImportedProjectText("name", p.Name) != nil:
+		return "its name is not one this build will import"
+	case memory.CheckImportedProjectText("path", p.Path) != nil:
+		return "its path is not one this build will import"
+	}
+	return ""
+}
+
+// recordExportRefusal reports why the importer would refuse this record's id, or
+// "". A memory, a task and a decision are one rule between them, because the
+// importer holds them to one: a record id is a primary key, so a shortened one
+// names a different row.
+func recordExportRefusal(id string) string {
+	if memory.CheckImportedID(id) != nil {
+		return "its id is not one this build will import"
+	}
+	return ""
 }
 
 // selectProjects filters an already-read project list by id or exact name.
