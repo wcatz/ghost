@@ -1985,7 +1985,7 @@ func supersedeReport(projectName string, res supersede.Result, verb string, call
 	// reporting a link it did not write, and the repair is the next ordinary
 	// pass, which reads the live edge and asks about the pair in ITS direction.
 	if res.ReverseLive > 0 {
-		out += fmt.Sprintf("  %d pair(s) not written: the pair's opposite direction was already live when the write was attempted, so a concurrent pass got there first — this run wrote no edge for them, and the next pass judges the pair in the direction the live edge asserts (run `%s --apply` if the two passes disagree about which note is current)\n",
+		out += fmt.Sprintf("  %d pair(s) not written: the pair's opposite direction was already live when the write was attempted, so a concurrent pass got there first — this run wrote no edge for them, and the pair keeps the edge that is there; the next pass judges it in the direction the live edge asserts, and `%s` settles it if the two passes disagree about which note is current\n",
 			res.ReverseLive, followup.ReassessCommand(projectName))
 	}
 	out += supersedeNotAgreedLines(res)
@@ -2547,6 +2547,14 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 			// A CAUSES verdict CREATES the row; NEITHER and REVERSED drop one.
 			extra := ""
 			switch {
+			case c.OpposedLive:
+				// Nothing to add, and saying so is the point: the re-linked
+				// clause below would claim a second graph row this run
+				// declined to write, which is the same false claim the
+				// marker above it exists to prevent. Only a SUPERSEDES row
+				// carries the flag today (see the pass), and a row that
+				// somehow does is held to the same rule rather than to
+				// whatever it happens to hold.
 			case c.Relation == supersede.RelationCauses:
 				verb := "re-linked"
 				if !apply {

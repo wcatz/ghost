@@ -165,11 +165,18 @@ type vectorStore interface {
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	GetEmbedding(ctx context.Context, memoryID string) ([]float32, error)
 	SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]memory.ScoredMemory, error)
-	// CreateLinkUnopposed, not CreateLinkJudged: the pass writes a DIRECTED edge
-	// about a pair, and the one write it must never make is the second direction
-	// of a pair another writer has already claimed (#806). The store reads the
-	// reverse edge inside the transaction that inserts this one, so the guard
-	// holds between two PROCESSES and not only between two pairs in one run.
+	// CreateLinkJudged writes the edge as judged, with no opinion about the
+	// pair's other direction. It is here for the 'causes' edge, and only that
+	// one: a 'causes' cycle demotes nothing, so refusing the second direction
+	// there would cost a call per pass forever and buy nothing (see the CAUSES
+	// branch of the apply block).
+	CreateLinkJudged(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) error
+	// CreateLinkUnopposed, for the 'supersedes' edge: the one write the pass must
+	// never make is the second direction of a pair another writer has already
+	// claimed (#806), because both edges demote one of the pair's two memories
+	// and neither withdraws the other. The store reads the reverse edge inside
+	// the transaction that inserts this one, so the guard holds between two
+	// PROCESSES and not only between two pairs in one run.
 	CreateLinkUnopposed(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) (bool, error)
 	InvalidateLink(ctx context.Context, sourceID, targetID, relation string) (int64, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
@@ -444,7 +451,10 @@ type Classified struct {
 	//
 	// It is false in a dry run, where nothing is attempted and so nothing can
 	// be opposed: a dry run's promise is about the verdict, and the race is a
-	// property of the write.
+	// property of the write. Only a SUPERSEDES row can carry it, because only
+	// that write is guarded — and a reclassified row cannot, since the live
+	// edge decides the direction a reclassified pair is asked about, so its
+	// write is in the edge's own direction and nothing opposes it.
 	OpposedLive bool
 	// TargetProjectID is the project the target lives in, and the follow-up the
 	// CLI prints is scoped to IT rather than to the project the pass was run
@@ -538,12 +548,12 @@ type Result struct {
 	// demotes both endpoints and no orientation of it can be judged into a
 	// state worth keeping.
 	Bidirectional int
-	// ReverseLive counts the pairs whose edge this run had a verdict for and did
-	// NOT write, because the pair's opposite direction was already live by the
-	// time the write reached the store — a concurrent `ghost supersede --apply`
-	// that read the same unclaimed pair, scanned it the other way round, and
-	// wrote first (#806). It is the write-time twin of OppositeLive: that one is
-	// the graph's direction beating this pass's SCAN, this one is the graph
+	// ReverseLive counts the 'supersedes' edges this run had a verdict for and
+	// did NOT write, because the pair's opposite direction was already live by
+	// the time the write reached the store — a concurrent `ghost supersede
+	// --apply` that read the same unclaimed pair, scanned it the other way round,
+	// and wrote first (#806). It is the write-time twin of OppositeLive: that one
+	// is the graph's direction beating this pass's SCAN, this one is the graph
 	// beating this pass's WRITE, and a pass can lose the second race having won
 	// the first.
 	//
@@ -554,6 +564,14 @@ type Result struct {
 	// next ordinary pass, which reads the live edge and judges the pair in ITS
 	// direction — and `ghost supersede --reassess` if the two disagree about
 	// which of them is current.
+	//
+	// 'supersedes' and only 'supersedes'. The guarded writer refuses the second
+	// direction of a pair, and a 'causes' pair cannot be settled by refusing: the
+	// direction override is built from live supersedes edges, so such a pair is
+	// re-proposed the other way round on every pass and would be refused on every
+	// one, forever. Nothing demotes on a 'causes' edge, so the second direction
+	// is left writable there and the trap is not entered — see the CAUSES branch
+	// of the apply block for the whole of it.
 	ReverseLive int
 	// Consensus is the number of classification passes this run made over the
 	// candidate set: 1 for the ordinary pass, N for a consensus-gated one. It is
@@ -1465,30 +1483,28 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
 			case RelationCauses:
-				wrote, err := store.CreateLinkUnopposed(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm", c.JudgedAt)
-				if err != nil {
+				// CreateLinkJudged and NOT the guarded writer, and the asymmetry is the
+				// point rather than an oversight. The guard exists because a pair live in
+				// BOTH directions demotes BOTH endpoints, and only 'supersedes' is read
+				// by the ranking guards — a 'causes' cycle demotes nothing, so refusing
+				// the second 'causes' edge would buy a graph that does not contradict
+				// itself at the price of a PERMANENT paid refusal. The direction
+				// override above is built from live SUPERSEDES edges, so a pair whose
+				// 'causes' edge runs against the timestamps is re-proposed in the
+				// flipped direction on EVERY pass, answered CAUSES again and refused
+				// again, forever: a refusal that never converges costs a call per pass
+				// for as long as the edge lives, which is worse than the contradiction
+				// it prevents. A supersedes pair has no such trap — there the live edge
+				// decides the direction, so its write is in the edge's own direction and
+				// the refusal is a one-off race rather than a state.
+				//
+				// What this leaves is a pre-existing gap rather than a new one, and it
+				// has its own issue: nothing reconciles a live 'causes' edge's
+				// direction with the timestamps, and only a supersedes pair is ever
+				// cache-skipped, so such a pair is re-asked on every pass whatever
+				// this writer does.
+				if err := store.CreateLinkJudged(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm", c.JudgedAt); err != nil {
 					return res, nil, fmt.Errorf("create causes link %s→%s: %w", c.OlderID, c.NewerID, err)
-				}
-				if !wrote {
-					// The same refusal on the other relation, counted in the same
-					// number: two passes that oriented one pair oppositely can each
-					// reach a CAUSES verdict, and 'causes' is written older to
-					// newer, so the two of them would be a cycle of the second kind.
-					// Nothing demotes on a 'causes' edge — ranking reads only
-					// 'supersedes' — so the harm there is a graph that contradicts
-					// itself rather than a memory leaving ranked injection. A caller
-					// cannot tell which relation it was holding, so it is one count.
-					//
-					// The supersedes withdrawal below still runs, for the same reason
-					// the sweep above does: this verdict denied the pair a supersession,
-					// and a live edge claiming one is stale whatever the other
-					// relation's write did.
-					res.ReverseLive++
-					c.OpposedLive = true
-					if logger != nil {
-						logger.Info("supersede: not written, the pair's reverse causes edge is already live (a concurrent pass wrote it first)",
-							"older", c.OlderID, "newer", c.NewerID)
-					}
 				}
 				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
 				if err != nil {

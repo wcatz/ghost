@@ -170,31 +170,22 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			notWant: []string{"withdrew", "would withdraw", "already gone"},
 		},
 		{
-			// The same refusal on a CAUSES verdict, whose edge runs the other
-			// way, so the marker rides the causes line rather than the
-			// supersedes one.
-			name:  "a refused causes write is marked too",
+			// The same refusal carried by a CAUSES row. Only a SUPERSEDES row
+			// gets the flag in production — the 'causes' write is not guarded,
+			// because nothing demotes on it and refusing it there would cost a
+			// call per pass forever — and a reclassified row cannot get it
+			// either, because the live edge decides the direction it is asked
+			// about. The row is here because the RENDERER's rule is "a row
+			// that claims a write this run declined says so", whatever the row
+			// holds: without the two guards this fails, printing a re-link
+			// and a withdrawal for a run that did neither.
+			name:  "a refused write is never dressed as a re-link or a withdrawal",
 			apply: true,
 			classified: []supersede.Classified{
 				opposedRow(supersede.RelationCauses),
 			},
-			want:    []string{"causes", "not written"},
-			notWant: []string{"withdrew", "would withdraw"},
-		},
-		{
-			// And a reclassified pair refused the same way. It cannot happen for
-			// a SUPERSEDES verdict (the live edge IS the direction the pair
-			// was asked about, so nothing opposes it), which is exactly why
-			// the marker is tested before the withdrawal vocabulary: a
-			// future verdict that can be refused must not be printed as a
-			// withdrawal this run did not make.
-			name:  "a refused reclassified write is not dressed as a withdrawal",
-			apply: true,
-			classified: []supersede.Classified{
-				opposedRow(supersede.RelationCauses),
-			},
-			want:    []string{"not written"},
-			notWant: []string{"withdrew", "would withdraw", "already gone"},
+			want:    []string{"not written", "causes"},
+			notWant: []string{"re-linked", "withdrew", "would withdraw", "already gone"},
 		},
 		{
 			name:  "a reversed reclassification is a withdrawal like any other",

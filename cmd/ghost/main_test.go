@@ -1741,11 +1741,19 @@ func TestSupersedeReport(t *testing.T) {
 		"  1 pair(s) not written:",
 		"a concurrent pass got there first",
 		"this run wrote no edge for them",
+		"the pair keeps the edge that is there",
 		"ghost supersede proj --reassess --apply",
 	} {
 		if !strings.Contains(raced, want) {
 			t.Errorf("supersedeReport() = %q, want it to contain %q", raced, want)
 		}
+	}
+	// followup.ReassessCommand ALREADY renders the applied form, so a line that
+	// appended --apply to it would print a command no other report in the tree
+	// emits. The parser tolerates the repeat (it sets apply = true per
+	// occurrence), which is exactly why only the rendered text catches it.
+	if strings.Contains(raced, "--apply --apply") {
+		t.Errorf("supersedeReport() = %q, want the repair quoted once: ReassessCommand is already the APPLIED form", raced)
 	}
 	// Each reason states the DECISION, not a judgment the pass may never have
 	// made. All three counts are taken before the filters that spend a call, so
