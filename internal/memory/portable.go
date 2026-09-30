@@ -844,6 +844,23 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if m.ID == "" {
 		return false, false, false, fmt.Errorf("memory id is required")
 	}
+	// The lock is taken HERE, above the presence check, and that is the whole
+	// point of this round. The presence check is a read whose answer decides
+	// whether a write happens, so the two have to be atomic together: outside
+	// the lock, two imports of the same new id both see it absent, both pass
+	// validation, and the second then fails the INSERT with a UNIQUE constraint
+	// error where it used to return a skip. A check-then-write is only a
+	// check-then-write if nothing can change between the check and the write,
+	// and the mutex is what makes that true. ImportProject has always had it
+	// this way; the other three importers were moved and this is the cost.
+	//
+	// The shape check and the field checks sit inside the lock too, which is
+	// where they were before this branch. They are pure validation with no I/O,
+	// so the critical section stays short, and holding the lock across them
+	// costs nothing that matters: an import is one process writing one file.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	// The order of the next three blocks is load-bearing in BOTH directions, and
 	// this branch got it wrong twice before getting it right: presence, then
 	// shape, then the field checks. Neither rule alone picks this order; both
@@ -859,12 +876,9 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// not being written and could not be. The shape check was in front of this for
 	// a round, and the fix is this position, not a weakened rule.
 	//
-	// It is a read, so it needs no lock. It was previously below `s.mu.Lock()`
-	// with everything else, and moving it up does not weaken anything: the
-	// mutex serialises WRITES, and the check is a SELECT whose answer is a
-	// statement about the moment it ran. Two imports racing the same new id both
-	// see it absent and both attempt the INSERT, and the second is stopped by the
-	// primary key exactly as it was before.
+	// It is a read, and it is under the lock anyway, because a read that decides
+	// whether a write happens is part of the write. See the comment on the lock
+	// above for the race this closes.
 	//
 	// It names the id in neither arm, deliberately. This is the only message
 	// between the two checks, and a message carrying the id here would be a way
@@ -949,15 +963,11 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		downgraded = true
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	// The secret guard's own window, and it is unchanged: after the presence
 	// check, so a record already in the store stays a skip, and before the
 	// apply=false early return, so a dry run classifies a record exactly as the
-	// apply run it previews. The presence check has moved above the mutex, so
-	// "after the presence check" is still literally true here and for one
-	// stronger reason: a skip has already returned.
+	// apply run it previews. Both of those are now inside the lock with it,
+	// which is what makes the check-then-write atomic.
 	// After the presence check and before the apply=false early return, which is
 	// the only window where both properties hold. Before the presence check a
 	// record already in the store would be refused, turning the portable
@@ -1174,6 +1184,14 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.ID == "" {
 		return false, fmt.Errorf("task id is required")
 	}
+	// The lock is taken HERE, above the presence check, for the reason
+	// ImportMemory gives in full: a read that decides whether a write happens is
+	// part of the write, and outside the lock two imports of the same new id both
+	// see it absent and the second fails the INSERT with a UNIQUE constraint
+	// error where it used to return a skip.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	// Guarded below, after the id-presence check and before the apply=false
 	// early return — see ImportMemory for why that window is the only one that
 	// keeps both idempotence and dry-run/apply parity. A task's notes are
@@ -1191,9 +1209,8 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	// ImportMemory carries the full reasoning and the constraint this leaves on
 	// the next check added here: a check above the shape check must not name the
 	// id in any message. The presence check is a read, so it needs no lock; it sat
-	// below `s.mu.Lock()` before, and moving it up weakens nothing, because the
-	// mutex serialises writes and the answer is a statement about the moment the
-	// SELECT ran.
+	// under the lock, because a read that decides whether a write happens is
+	// part of the write.
 	var present int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&present); err != nil {
 		if err != sql.ErrNoRows {
@@ -1217,10 +1234,9 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.Priority < 0 || t.Priority > 4 {
 		return false, fmt.Errorf("task %s: invalid priority %d — must be between 0 and 4", t.ID, t.Priority)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Same window as ImportMemory: after the presence check, before apply=false.
+	// Both are inside the lock with it now.
 	if err := rejectSecretFields(
 		secretField{"title", t.Title},
 		secretField{"description", t.Description},
@@ -1282,6 +1298,14 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	if d.ID == "" {
 		return false, fmt.Errorf("decision id is required")
 	}
+	// The lock is taken HERE, above the presence check, for the reason
+	// ImportMemory gives in full: a read that decides whether a write happens is
+	// part of the write, and outside the lock two imports of the same new id both
+	// see it absent and the second fails the INSERT with a UNIQUE constraint
+	// error where it used to return a skip.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	// Guarded below, after the id-presence check and before the apply=false
 	// early return — see ImportMemory. alternatives is a list because it is
 	// one: ghost_decisions_list renders it back to the agent, so an entry is
@@ -1298,9 +1322,8 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	// ImportMemory carries the full reasoning and the constraint this leaves on
 	// the next check added here: a check above the shape check must not name the
 	// id in any message. The presence check is a read, so it needs no lock; it sat
-	// below `s.mu.Lock()` before, and moving it up weakens nothing, because the
-	// mutex serialises writes and the answer is a statement about the moment the
-	// SELECT ran.
+	// under the lock, because a read that decides whether a write happens is
+	// part of the write.
 	var present int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&present); err != nil {
 		if err != sql.ErrNoRows {
@@ -1327,10 +1350,9 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	if !validDecisionStatuses[d.Status] {
 		return false, fmt.Errorf("decision %s: invalid status %q — must be one of: active, superseded, revisit", d.ID, d.Status)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	// Same window as ImportMemory: after the presence check, before apply=false.
+	// Both are inside the lock with it now.
 	if err := rejectSecretFields(
 		secretField{"title", d.Title},
 		secretField{"decision", d.Decision},
