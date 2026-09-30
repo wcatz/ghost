@@ -97,8 +97,12 @@ func RejectSecret(field, text string) error {
 const ProjectIdentifierLabel = "project identifier"
 
 // ProjectArg renders a caller's project argument — the value a `project_id` or
-// `project` tool parameter carries, a CLI's project operand, a session hook's
-// directory — for a sentence that REFUSES it.
+// `project` tool parameter carries, or a CLI's project operand — for a sentence
+// that REFUSES it.
+//
+// It is a RENDERER, and saying so is not the same as saying it is everywhere: a
+// refusal that quotes a project argument has to come through here, and one that
+// does not is a hole in the rule rather than a variation of it.
 //
 // Naming the value is the diagnostic and it is the reason every one of these
 // sentences wrote `%q`: `matches multiple projects: foo` is how an operator finds
