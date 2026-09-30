@@ -3684,6 +3684,31 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 			return note, nil
 		}
+		// `_global` is not a project to count rows for, so `projectContextOwnRowsNote`
+		// above says nothing about it and the census below would be the answer — and
+		// the census is a claim about a PROJECT. "No memories found for this project"
+		// on a request for `_global` is the same false statement as the one the note
+		// guard exists to prevent, one function earlier, and a review of #817 caught
+		// it on a store whose only global row has a closed window.
+		//
+		// So the census is refused for that id, and what answers instead is the
+		// assembler's own VERDICT about the window: rows were found and withheld,
+		// which is a true and useful thing to say about a bucket of cross-project
+		// memories, and it names no project. A store holding NO globals at all has
+		// `ReasonNoMemories`, which is a census of the WINDOW and is the one case
+		// where "nothing to show" is a fact about the request rather than a claim
+		// about a project — so that half is kept, restated as a fact about the
+		// cross-project rows rather than about a project.
+		//
+		// A real project in the same shape takes the other branch, which is why the
+		// divergence is stated: it gets `projectContextEmptyNote`'s abstention from
+		// the same function, because the count gate above does not apply to it.
+		if projectID == memory.GlobalProjectID {
+			if note := projectContextEmptyNote(memories); note != "" {
+				return note, nil
+			}
+			return "No memories found among the cross-project rows.", nil
+		}
 		return "No memories found for this project.", nil
 	}
 	// The same note the tool appends, for the same reason, and at the same place:

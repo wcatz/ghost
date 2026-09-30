@@ -281,25 +281,75 @@ func TestTheGlobalProjectContextIsNotCountedAsAnotherProjectsRows(t *testing.T) 
 		t.Fatalf("the closed row reached the block, so the window did not exclude it and the note path is "+
 			"unreachable:\n%s", text)
 	}
-	// No sentence about "this project" and its rows, and no abstention: on a bucket
-	// that is not a project to count rows for, every one of these is false.
+	// No sentence about "this project" and its rows: on a bucket that is not a
+	// project to count rows for, every one of these is false.
 	for _, note := range []string{
 		"Ghost holds no memories for this project",
 		"Ghost holds 1 memory for this project",
 		"and none of it is in the block above",
-		"none of them is current",
+		"the memory rows above are the cross-project ones",
 		"are not all the user",
-		"Call ghost_memories_list",
 	} {
 		if strings.Contains(text, note) {
 			t.Errorf("the _global block carries %q, which is a claim about ANOTHER project and false here:\n%s",
 				note, text)
 		}
 	}
-	// And the answer is not EMPTY either: a `_global` request that answers with
-	// nothing is a different defect, and one that hides behind this one.
+	// The CENSUS is the sentence that matters most here, and the first version of
+	// this test passed because of it: "No memories found for this project." is a
+	// claim about a project, on a request that named a bucket, and a store whose
+	// only global row has a closed window is exactly the shape that reached it. A
+	// review of #817 caught that my "the answer is not empty" assertion was
+	// satisfied BY the census — the very sentence the sibling test forbids — so the
+	// census is now named explicitly rather than passed over.
+	if strings.Contains(text, "No memories found for this project.") {
+		t.Errorf("the _global block answers with the project census, which is a claim about a project:\n%s", text)
+	}
+	// What DOES answer is the assembler's own verdict, which is a fact about the
+	// WINDOW rather than about a project: rows were found and withheld. So the
+	// abstention has to be present, and a real project in the same shape gets the
+	// same sentence — the divergence is that one is about the project's rows and
+	// this one is about the cross-project rows.
+	for _, want := range []string{"withheld as out of date", "not absent"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the _global block does not carry the assembler's verdict (%q), so it says nothing true about "+
+				"the withheld cross-project rows:\n%s", want, text)
+		}
+	}
+}
+
+// TestTheGlobalProjectContextOnAStoreWithNoGlobalsAtAll is the other half of the
+// empty path, and it is separated because the two answers are different for a
+// reason that is easy to state wrongly.
+//
+// A store holding NO global rows has `ReasonNoMemories` — a census of the WINDOW,
+// and the one case where "nothing to show" is a fact about the REQUEST rather than
+// a claim about a project. That half is kept. What must not appear is the project
+// census, and what must not appear either is the abstention: no rows were found, so
+// saying they were withheld would be its own false statement, which is the mirror of
+// the one the sibling test catches.
+func TestTheGlobalProjectContextOnAStoreWithNoGlobalsAtAll(t *testing.T) {
+	srv, _ := newValiditySession(t)
+
+	text, err := srv.buildProjectContext(context.Background(), memory.GlobalProjectID)
+	if err != nil {
+		t.Fatalf("buildProjectContext(_global): %v", err)
+	}
 	if strings.TrimSpace(text) == "" {
-		t.Error("the _global block is empty, so the closed row is not reaching the caller's own answer either")
+		t.Fatal("the _global block is empty, so a caller is told nothing at all")
+	}
+	for _, forbidden := range []string{
+		"No memories found for this project.",
+		"withheld as out of date",
+		"Ghost holds",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("the _global block carries %q on a store with no globals at all:\n%s", forbidden, text)
+		}
+	}
+	// The census is a fact about the CROSS-PROJECT rows, which is the request.
+	if !strings.Contains(text, "cross-project") {
+		t.Errorf("the _global block does not say what the census is a census OF:\n%s", text)
 	}
 }
 
