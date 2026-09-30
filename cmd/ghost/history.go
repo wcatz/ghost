@@ -15,6 +15,7 @@ import (
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/memref"
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // historyOptions is `ghost history`'s parsed arguments.
@@ -384,11 +385,15 @@ func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
 		// Already delimited by displayedHistoryEntry's substitution, which takes
 		// the whole of a field the write-time filter never saw; delimiting it again
 		// would print a double block.
-		if _, err := fmt.Fprintf(w, "  folded-in text: %s\n", shown.MergedContent); err != nil {
+		// Both fields are delimited here rather than in the substitution the two
+		// printers share, because the --json form of the same entry is not: a
+		// reader can be fooled by a line that is not delimited, and a script
+		// reading .content cannot be.
+		if _, err := fmt.Fprintf(w, "  folded-in text: %s\n", assemble.Data(shown.MergedContent)); err != nil {
 			return err
 		}
 	}
-	_, err := fmt.Fprintf(w, "  %s\n", shown.Content)
+	_, err := fmt.Fprintf(w, "  %s\n", assemble.Data(shown.Content))
 	return err
 }
 
@@ -426,17 +431,36 @@ func printHistoryJSON(w io.Writer, entries []memory.HistoryEntry) error {
 // substitution, for both printers. A copy, because the caller's slice is the
 // store's read and nothing here may rewrite it.
 //
+// The substitution is the credential one and nothing else: it carries NO data
+// delimiters. The two forms of this command disagree about them on purpose — the
+// human printer delimits a whole field, because a reader can be fooled by a line
+// that is not, and the `--json` printer does not, because its consumer is a
+// script, the schema is the store's own, and encoding/json already escapes a
+// newline. A clean entry therefore decodes to exactly what the store returned,
+// which is the contract docs/architecture.md states for this pair of printers.
+//
 // The two fields are not the same column and are not treated as one: content is
 // the write-time filter's, and merged_content is not, so a store can hold a value
 // in the second and not the first. The limit is zero — no cut — because the history
 // answers "what did this hold" and a cut is not an answer; what is withheld is
 // withheld whole, with the byte count of the text that was not printed.
 func displayedHistoryEntry(e memory.HistoryEntry) memory.HistoryEntry {
-	e.Content = displayProposal(e.Content, e.Category, 0)
+	e.Content = substituteHistoryText(e.Content, e.Category)
 	if e.MergedContent != "" {
-		e.MergedContent = displayClaim(singleLine(e.MergedContent), 0)
+		e.MergedContent = substituteHistoryText(singleLine(e.MergedContent), "")
 	}
 	return e
+}
+
+// substituteHistoryText is the credential substitution over the whole of a field,
+// with no data delimiters. It is the half of displayedHistoryEntry that is not a
+// rendering decision, so the --json printer can share it with the human one
+// without inheriting the human one's framing.
+func substituteHistoryText(content, category string) string {
+	if finding, ok := secret.Detect(content); ok {
+		return withheld(finding, category, content)
+	}
+	return content
 }
 
 // runHistory implements `ghost history <memory-id>`, and `ghost history purge

@@ -166,7 +166,7 @@ func displayProposal(content, category string, limit int) string {
 	if finding, ok := secret.Detect(content); ok {
 		return withheld(finding, category, content)
 	}
-	return displayText(content, limit)
+	return humanStoredText(content, limit)
 }
 
 // displayClaim renders text a result records without a category: a rewrite's
@@ -178,7 +178,7 @@ func displayClaim(content string, limit int) string {
 	if finding, ok := secret.Detect(content); ok {
 		return withheld(finding, "", content)
 	}
-	return displayText(content, limit)
+	return humanStoredText(content, limit)
 }
 
 // withheld is the one rendering of a credential that a cmd/ghost print site
@@ -194,12 +194,36 @@ func withheld(finding secret.Finding, category, content string) string {
 	return fmt.Sprintf("<withheld: %s, category=%s, bytes=%d>", finding.Label, category, len(content))
 }
 
-// displayText is the truncation half both of those share: `limit` bytes of
-// caller-supplied memory text, or the whole of it when the limit is zero or less,
-// which is what `ghost reflect --full` asks for. The cut is a display decision
-// and the marker is display-only; a stored memory keeps its full content unless
-// the writer's content cap applies.
+// displayText is the width half both of those share, and it is where the
+// line-safety of every stored-text site in cmd/ghost is decided.
+//
+// A limit above zero takes the FIRST LINE of the text, capped at the limit, and
+// a limit of zero or less — what `ghost reflect --full` asks for — takes the
+// whole of it. It carries NO data delimiters, and that is a property of the
+// function rather than an omission: the human renderers below add them, because
+// a reader can be fooled by a line that is not delimited, and the `--json`
+// printer must not, because its consumer is a script and encoding/json already
+// escapes a newline.
+//
+// The first-line cut is `assemble.PreviewLine`, the ONE cut every other listing
+// already uses, and it is a cut at the first of EITHER byte: a byte cut does not
+// stop at a line break, so the first 120 bytes of a memory holding a newline
+// printed the line after it too — on the default `ghost reflect` report, where
+// the limit is 120 and not the `--full` zero. That is the shape #802 is about,
+// and it is why the cut lives here rather than at each call site: a display flag
+// spread across five sites is how three copies of one rule drifted.
 func displayText(content string, limit int) string {
+	if limit <= 0 {
+		return content
+	}
+	return assemble.PreviewLine(content, limit)
+}
+
+// humanStoredText is displayText plus the «...» delimiters a whole field gets on
+// the human form. It is a named step because the two forms of one command
+// disagree about them on purpose, and a caller that reached for displayText
+// directly would be taking a side in that disagreement without saying so.
+func humanStoredText(content string, limit int) string {
 	if limit <= 0 {
 		return assemble.Data(content)
 	}

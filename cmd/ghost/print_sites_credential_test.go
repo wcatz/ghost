@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/resolve"
 	"github.com/wcatz/ghost/internal/supersede"
@@ -331,12 +330,13 @@ func TestHistoryPrintersWithholdCredentialsInPreGuardRows(t *testing.T) {
 			}
 			if strings.HasPrefix(e.Content, "<withheld:") {
 				withheldContent++
-			} else if e.Content != assemble.Data(entries[i].Content) {
+			} else if e.Content != entries[i].Content {
 				// The schema is the entry's own and only the VALUE changes: a
-				// clean row decodes back to the stored text inside the same «...»
-				// delimiters the human form prints, so the two forms of this
-				// command cannot disagree about what a row holds — and nothing
-				// downstream has to learn a second shape.
+				// clean row decodes back to exactly what the store returned, so
+				// nothing downstream of this command has to learn a second shape.
+				// The human form delimits the same text and this form does not —
+				// a reader can be fooled by a line that is not delimited, and a
+				// script reading .content cannot be.
 				t.Errorf("entry %d's clean content changed: %q", i, e.Content)
 			}
 			if strings.HasPrefix(e.MergedContent, "<withheld:") {

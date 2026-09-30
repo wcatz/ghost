@@ -383,6 +383,34 @@ func TestResolveAndSupersedeReportsNameNoEdgeAsItsOwnLine(t *testing.T) {
 		assertNotAtLineStart(t, "the reassess held lines", out, hostileIDFor())
 	})
 
+	t.Run("a hostile holder in the hold reason", func(t *testing.T) {
+		// The reason is built from the same stored ids as the row's own, and it is
+		// printed on the same line — so it is the one part of this report that a
+		// hostile holder reaches without being an operand. A holder is a stored
+		// memory id (a supersedes source, a correction's paired row), and one that
+		// is a pre-#791 import id or a restored snapshot row can hold a newline;
+		// because it is printed mid-line, the text after that newline begins a
+		// line of its own, outside every «» block.
+		holder := hostileIDFor()
+		out := reassessHeldLines([]resolve.HeldMemory{{
+			Memory: memory.Memory{ID: "a1a1a1a1b2b2c2c2d3d3e3e3f3f3a1a1", Category: "gotcha", Content: "the relay port is 2222"},
+			Holds: []resolve.Hold{
+				{Kind: resolve.HoldSupersedes, Holder: holder},
+				{Kind: resolve.HoldCorrection, Holder: holder},
+			},
+		}})
+		if !strings.Contains(out, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB") {
+			t.Fatalf("fixture: the hold reason is missing the planted holder:\n%s", out)
+		}
+		assertNoForgedLineOutsideADataBlock(t, "the hold reason", out)
+		assertNotAtLineStart(t, "the hold reason", out, holder)
+		// Both kinds name the holder, so both are rendered — a reason that quoted
+		// one and not the other would pass the assertions above on the first.
+		if got := strings.Count(out, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"); got < 2 {
+			t.Errorf("the hold reason names the holder %d time(s), want both the supersedes and the correction:\n%s", got, out)
+		}
+	})
+
 	t.Run("the follow-up block", func(t *testing.T) {
 		// The comma id is the one no command can carry, so the block names it on
 		// its own line — the one place a report prints an id at the start of a
@@ -396,6 +424,20 @@ func TestResolveAndSupersedeReportsNameNoEdgeAsItsOwnLine(t *testing.T) {
 		assertNoForgedLineOutsideADataBlock(t, "the follow-up block", out)
 		assertNotAtLineStart(t, "the follow-up block", out, hostileCommaIDFor())
 		assertNotAtLineStart(t, "the follow-up block", out, hostilePathFor())
+	})
+
+	t.Run("the follow-up block with no id file", func(t *testing.T) {
+		// The third bucket, and the one a non-empty path never reaches: with no
+		// file to point at, the ids are named here instead. It is the same stored
+		// value printed at the start of a line, so it is the same rule — and the
+		// reason there are three buckets is that no single one of them is always
+		// the one that runs.
+		out := supersedeReassessFollowup("proj", []string{hostileCommaIDFor()}, "")
+		if !strings.Contains(out, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB") {
+			t.Fatalf("fixture: the follow-up block is missing the planted id:\n%s", out)
+		}
+		assertNoForgedLineOutsideADataBlock(t, "the follow-up block with no id file", out)
+		assertNotAtLineStart(t, "the follow-up block with no id file", out, hostileCommaIDFor())
 	})
 }
 

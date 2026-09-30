@@ -201,7 +201,9 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		fmt.Fprintf(&b, "  (%d id(s) hold a comma and the id file could not be written, so they are named here;\n"+
 			"   no --only command can carry them — put each on its own line in a file and use --only-file)\n", len(viaFileOnly))
 		for _, id := range viaFileOnly {
-			fmt.Fprintf(&b, "    %s\n", id)
+			// The same renderer as the other two buckets, so the id half of the
+			// contract is one rule rather than three spellings of it.
+			fmt.Fprintf(&b, "    %s\n", assemble.Token(id))
 		}
 	}
 	if len(unnameable) > 0 {

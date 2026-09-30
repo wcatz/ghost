@@ -37,6 +37,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -119,6 +120,14 @@ type HeldMemory struct {
 // however the caller assembled it, and so a report a reader compares between two
 // runs is comparable. Empty when nothing holds the row, which the pass never
 // renders: a row with no holder is not a held row.
+// Reason is the sentence a report prints about what holds the row, and it is a
+// DISPLAY method rather than a fact about the graph: the holders are stored ids
+// (a supersedes source, a correction's paired row), so each one is rendered
+// through assemble.Token exactly as the id on the same line is. A holder that is
+// a pre-#791 import id, a restored snapshot row or a hand-edited row can hold a
+// newline, and because it is printed mid-line the text after that newline begins
+// a line of its own, outside every «» block. What the store holds is unchanged —
+// this is the one place the reason is built, and it has one caller.
 func (h HeldMemory) Reason() string {
 	if len(h.Holds) == 0 {
 		return ""
@@ -129,9 +138,9 @@ func (h HeldMemory) Reason() string {
 	for _, k := range h.Holds {
 		switch k.Kind {
 		case HoldSupersedes:
-			supersedes = append(supersedes, string(k.Kind)+" "+k.Holder)
+			supersedes = append(supersedes, string(k.Kind)+" "+assemble.Token(k.Holder))
 		default:
-			corrections = append(corrections, string(k.Kind)+" "+k.Holder)
+			corrections = append(corrections, string(k.Kind)+" "+assemble.Token(k.Holder))
 		}
 	}
 	sort.Strings(supersedes)
