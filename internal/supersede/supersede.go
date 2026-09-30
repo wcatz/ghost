@@ -843,7 +843,19 @@ type Result struct {
 	// pair already held is not one of them, and the distinction is what
 	// Classified.ReclassifiedFrom is for.
 	Reclassified int // existing links whose relation changed or was invalidated
+	// StaleSkipped is the PRE-CLASSIFY existence drop: a candidate whose endpoint
+	// a concurrent pass had already replaced when the pass re-read the graph, so
+	// the pair was discarded BEFORE any harness call was spent on it. It happens in
+	// a dry run exactly as it does under --apply, and it is not in
+	// Result.Candidates, which is recomputed from the surviving set afterwards.
 	StaleSkipped int
+	// StaleAtWrite is the OTHER population and the one that needed the counter:
+	// a pair that was classified, and then found its endpoint replaced again
+	// between the classify and the write, so a verdict was reached and paid for and
+	// no edge was written. It is 0 in a dry run, which attempts no write, and it is
+	// counted apart from StaleSkipped because a report line about it may not claim
+	// a classify call was spent — StaleSkipped's guarantee is that none was.
+	StaleAtWrite int
 	Skipped      int // fresh pairs skipped via the NEITHER cache
 	Unclassified int // pairs skipped because the classifier answer was unparseable
 	Reversed     int // REVERSED verdicts: refused, never written
@@ -1978,7 +1990,11 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				return res, nil, fmt.Errorf("stale check %s→%s: %w", c.NewerID, c.OlderID, err)
 			}
 			if !pairAlive {
-				res.StaleSkipped++
+				// StaleAtWrite and NOT StaleSkipped: this pair WAS classified, so
+				// the report line about it can honestly say a classify call was
+				// spent and no edge was written. The pre-classify site above cannot
+				// say that, which is why the two are counted apart.
+				res.StaleAtWrite++
 				if logger != nil {
 					logger.Info("supersede: skipping write, endpoint replaced by a concurrent pass",
 						"newer", c.NewerID, "older", c.OlderID)

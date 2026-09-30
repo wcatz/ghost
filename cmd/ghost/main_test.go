@@ -1688,21 +1688,42 @@ func TestSupersedeReport(t *testing.T) {
 		t.Errorf("supersedeReport() = %q, want it to say what the veto costs and does not cost", got)
 	}
 	supersedeReportCountsEdges(t)
-	// The write-time skip #834 made visible: a pair whose endpoint a concurrent
-	// pass replaced between the classify and the write is a verdict that reached
-	// no writer, so under --apply it is in no count on this page. It has to be on
-	// a line, because the report's rule is that every reason a pair was not acted
-	// on gets one — and a reader comparing the summary with the rows below it
-	// would otherwise see a difference nothing accounts for.
-	stale := supersedeReport("proj", supersede.Result{Candidates: 1, Confirmed: 1, Created: 0, StaleSkipped: 1}, "linked", true, 1, 0)
-	if !strings.Contains(stale, "  1 pair(s) not written: an endpoint was replaced") {
-		t.Errorf("supersedeReport() apply = %q, want the stale-skip line: a judged pair that wrote no edge is in no count", stale)
+	// The two STALE populations, and they are two lines because one counter for
+	// both would need a wording true of each, which does not exist. A pre-classify
+	// drop spent NO classify call; a pre-write drop spent one and wrote nothing.
+	// Both leave the pair in no count on the page, so both get a line in BOTH modes.
+	//
+	// The pre-write one exists for #834's reason: it is counted as a verdict, so
+	// under --apply the summary (which counts writes) does not carry it, and
+	// trading a false count for no count still needs the difference to be on the
+	// page somewhere.
+	preWrite := supersedeReport("proj", supersede.Result{Candidates: 1, Confirmed: 1, Created: 0, StaleAtWrite: 1}, "linked", true, 1, 0)
+	if !strings.Contains(preWrite, "  1 pair(s) not written: an endpoint was replaced by a concurrent pass between the classify and the write") {
+		t.Errorf("supersedeReport() apply = %q, want the pre-write stale line: a judged pair that wrote no edge is in no count", preWrite)
 	}
-	// And it is an APPLY-only line. In a dry run the summary counts verdicts, so
-	// the pair is already in the numbers and a line about it would double-report
-	// the same pair twice.
-	if dryStale := supersedeReport("proj", supersede.Result{Candidates: 1, Confirmed: 1, StaleSkipped: 1}, "would link", false, 1, 0); strings.Contains(dryStale, "not written") {
-		t.Errorf("supersedeReport() dry run = %q, want no write-time line: nothing is written in a dry run, so the summary already counts the verdict", dryStale)
+	if strings.Contains(preWrite, "no call was spent") {
+		t.Errorf("supersedeReport() = %q claims no classify call was spent for the PRE-WRITE drop; that pair was classified", preWrite)
+	}
+	// The pre-classify one must NOT claim a call was spent, and must print in a dry
+	// run too — it fires there, and `Result.Candidates` is recomputed from the
+	// surviving set, so the pair is in no count on the page in EITHER mode.
+	for _, apply := range []bool{true, false} {
+		verb := "would link"
+		if apply {
+			verb = "linked"
+		}
+		pre := supersedeReport("proj", supersede.Result{Candidates: 1, StaleSkipped: 1}, verb, apply, 0, 0)
+		if !strings.Contains(pre, "  1 pair(s) not proposed: an endpoint was replaced by a concurrent pass before the classify") {
+			t.Errorf("supersedeReport() apply=%v = %q, want the pre-classify stale line in BOTH modes: the pair is in no count on this page", apply, pre)
+		}
+		if strings.Contains(pre, "no edge was written") {
+			t.Errorf("supersedeReport() apply=%v = %q describes the pre-classify drop as a failed WRITE; no call was spent and there was nothing to write", apply, pre)
+		}
+	}
+	// And the two never share a line: a reader must be able to tell which of the
+	// two populations a run reported without reading the code.
+	if both := supersedeReport("proj", supersede.Result{Candidates: 2, StaleSkipped: 1, StaleAtWrite: 1}, "linked", true, 1, 0); strings.Count(both, "pair(s) ") != 2 {
+		t.Errorf("supersedeReport() = %q, want one line per stale population, not a single merged count", both)
 	}
 	// The report is mode-agnostic about the veto: a vetoed pair is never linked,
 	// so there is nothing for --apply to write either. The apply verb is the

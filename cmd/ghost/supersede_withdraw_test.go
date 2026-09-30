@@ -323,6 +323,37 @@ func TestParseSupersedeArgsRelation(t *testing.T) {
 		}
 	}
 
+	// An EMPTY value is refused by BOTH spellings, and this is the case the flag
+	// cannot express any other way. The empty string is the auto-select value, so
+	// `--relation ""` and "no --relation" are indistinguishable by the value alone —
+	// and a script writes it by accident, as `--relation "$REL"` with REL unset. The
+	// first cut of this check sat only in the `--relation=` arm, so the space form
+	// still fell through to auto-select: a pair holding both relations silently lost
+	// its 'causes' edge and had its 'supersedes' edge withdrawn instead, which is
+	// the exact wrong-edge withdrawal the flag exists to prevent.
+	//
+	// So the guard is on WHETHER THE FLAG WAS TYPED, and this asserts the space form
+	// specifically because it is the one that was missed.
+	for _, args := range [][]string{
+		{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation", ""},
+		{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation="},
+	} {
+		_, _, _, _, _, _, _, _, rerr := parseSupersedeArgs(args)
+		if rerr == nil {
+			t.Errorf("parseSupersedeArgs(%v) accepted an EMPTY --relation, which silently means auto-select", args)
+			continue
+		}
+		if !strings.Contains(rerr.Error(), "--relation requires a value") {
+			t.Errorf("parseSupersedeArgs(%v) refusal = %q, want the requires-a-value sentence", args, rerr)
+		}
+	}
+	// And the refusal is not the "no --withdraw" one: this command DID withdraw
+	// something, so telling the operator to add --withdraw would send them off to
+	// run a command that has the same bug.
+	if _, _, _, _, _, _, _, _, rerr := parseSupersedeArgs([]string{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation", ""}); rerr != nil && strings.Contains(rerr.Error(), "use it with --withdraw") {
+		t.Errorf("the empty-value refusal is the wrong sentence: %v", rerr)
+	}
+
 	// Without --withdraw there is no edge for the flag to choose between, and it is
 	// REFUSED rather than ignored: a command that took it, said nothing, and ran
 	// the ordinary pass is a command whose argv does not describe it.

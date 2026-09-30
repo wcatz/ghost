@@ -1494,6 +1494,14 @@ func checkSupersedeConsensus(n int) error {
 func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, consensus int, withdraw []supersedePair, relation string, err error) {
 	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
 	consensus = 1    // one pass: the flag is off until it is typed
+	// relationSeen is what tells "the operator typed --relation with an empty
+	// value" from "the operator did not type it", and the empty `relation` string
+	// cannot: it is the auto-select value. One bool for BOTH spellings, so the
+	// refusal cannot be satisfied by choosing the other one — which is what a check
+	// living in only the `--relation=` arm did, leaving `--relation "$VAR"` with an
+	// unset VAR silently meaning auto-select on exactly the pair the flag exists to
+	// disambiguate.
+	relationSeen := false
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--apply":
@@ -1526,18 +1534,11 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 			return "", "", false, false, 0, 0, nil, "", fmt.Errorf("--withdraw needs a source id and a target id: --withdraw <source-id> <target-id>")
 		case args[i] == "--relation" && i+1 < len(args):
 			relation = args[i+1]
+			relationSeen = true
 			i++
 		case strings.HasPrefix(args[i], "--relation="):
 			relation = strings.TrimPrefix(args[i], "--relation=")
-			// An EMPTY value is refused here rather than left to fall through as
-			// "auto-select", because `--project=` next to it refuses an empty value
-			// and a flag that means two different things depending on whether it was
-			// spelled with an `=` is a flag nobody can predict. `--relation` as the
-			// final argument falls to the unknown-flag branch below, exactly as
-			// `--consensus` does, and that is the smaller surprise.
-			if relation == "" {
-				return "", "", false, false, 0, 0, nil, "", errors.New("--relation requires a value: supersedes or causes")
-			}
+			relationSeen = true
 		case args[i] == "--project":
 			if i+1 >= len(args) {
 				return "", "", false, false, 0, 0, nil, "", errors.New("--project requires a value")
@@ -1572,11 +1573,14 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 	if len(withdraw) > 0 && reassess {
 		return "", "", false, false, 0, 0, nil, "", errors.New("--withdraw removes the edges you name and --reassess re-judges every edge in the graph; run them as two commands")
 	}
-	// --relation only decides which edge --withdraw acts on, so it is refused
-	// without one rather than silently ignored: a command that accepted it and
-	// withdrew the other relation's edge would report the pair withdrawn and
-	// leave the edge the operator meant still live.
-	if relation != "" {
+	// --relation is validated by WHETHER IT WAS TYPED, never by whether its value
+	// is non-empty, because the empty value IS the auto-select value and a script's
+	// unset variable produces it silently.
+	//
+	// It is also refused without --withdraw rather than ignored: a command that
+	// accepted it and ran the ordinary pass is a command whose argv does not
+	// describe what it did.
+	if relationSeen {
 		if len(withdraw) == 0 {
 			return "", "", false, false, 0, 0, nil, "", errors.New("--relation names which edge --withdraw acts on; use it with --withdraw")
 		}
@@ -1608,6 +1612,15 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 // is the one case where the operator's own word is the only thing that decides
 // which edge moves.
 func checkSupersedeRelation(relation string) error {
+	if relation == "" {
+		// Reached only when the flag was TYPED, because the caller gates on that
+		// rather than on this value. The empty string is also what an unset shell
+		// variable expands to, so this is a spelling a script produces by accident:
+		// `--relation "$REL"` with REL unset must not read as "the operator chose
+		// the default", because on a pair holding both relations that withdraws the
+		// edge they did not name.
+		return errors.New("--relation requires a value: supersedes or causes")
+	}
 	if relation != string(supersede.RelationSupersedes) && relation != string(supersede.RelationCauses) {
 		return fmt.Errorf("--relation takes supersedes or causes, not %q", relation)
 	}
@@ -2169,22 +2182,28 @@ func supersedeReport(projectName string, res supersede.Result, verb string, appl
 		out += fmt.Sprintf("  %d pair(s) not written: the pair's opposite direction was already live when the write was attempted, so a concurrent pass got there first — this run wrote no edge for them, and the pair keeps the edge that is there; the next pass judges it in the direction the live edge asserts, and for a 'supersedes' edge `%s` settles it if the two passes disagree about which note is current (it loads live 'supersedes' edges only, so on a 'causes' pair the next ordinary pass is the whole of the repair)\n",
 			res.ReverseLive, followup.ReassessCommand(projectName))
 	}
-	// The OTHER write-time skip, and it is here for #834's reason rather than its
-	// own: a pair whose endpoint a concurrent pass replaced between the classify
-	// and the write is counted as a verdict and reaches neither writer, so under
-	// --apply it is in no count on this page at all. Before #834 the summary
-	// printed verdicts, so it was counted — falsely, as an edge that was written.
-	// Trading a false count for no count is the right trade, but "no count" still
-	// breaks the report's own rule that every reason a pair was not acted on gets
-	// a line, and a reader comparing this summary with the rows below it sees a
-	// difference nothing accounts for.
+	// The two STALE populations, and they are two lines because they are two
+	// different facts about where a pair was dropped. One counter for both would
+	// have to word one line for both, and there is no wording that is true of each:
+	// the pre-classify drop guarantees NO classify call was spent, so a line saying
+	// one was would misreport the run's harness bill against the classify-call total
+	// printed in the summary above; the pre-write drop spent one and wrote nothing.
 	//
-	// Printed only under --apply, because that is the only mode where the pair is
-	// missing from the summary: in a dry run nothing is written at all, so the
-	// summary already counts the verdict and this line would double-report it.
-	if apply && res.StaleSkipped > 0 {
-		out += fmt.Sprintf("  %d pair(s) not written: an endpoint was replaced by a concurrent pass between the classify and the write, so there was no edge left to point at — nothing was written for them, and the next pass proposes whatever pair the new text forms\n",
+	// Both are printed in BOTH modes, because both leave the pair in no count on
+	// this page: `Result.Candidates` is recomputed from the surviving set, so a
+	// pre-classify drop is not in it, and under --apply a pre-write drop is
+	// counted as a verdict that reached neither writer (#834's trade of a false
+	// count for no count). A pass that declined work it did not do and printed the
+	// same totals as a pass that found nothing to do reads as "nothing was
+	// skipped" — which is what the Vetoed, Unoriented and OppositeLive lines
+	// exist to prevent (#686), and it is why these are here.
+	if res.StaleSkipped > 0 {
+		out += fmt.Sprintf("  %d pair(s) not proposed: an endpoint was replaced by a concurrent pass before the classify, so no call was spent on them and they are not in the candidate count above — the next pass proposes whatever pair the new text forms\n",
 			res.StaleSkipped)
+	}
+	if res.StaleAtWrite > 0 {
+		out += fmt.Sprintf("  %d pair(s) not written: an endpoint was replaced by a concurrent pass between the classify and the write, so a verdict was reached and no edge was written for it — the next pass proposes whatever pair the new text forms\n",
+			res.StaleAtWrite)
 	}
 	out += supersedeNotAgreedLines(res)
 	return out
