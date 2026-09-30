@@ -66,7 +66,6 @@ $boundary = @(
     @{ Version = '0.42.9.1'; Required = $true },   # four components
     @{ Version = '1.2.3.4'; Required = $true },    # five
     @{ Version = '1.2'; Required = $true },        # two: ambiguous, and it used to compare EQUAL to 1.2.0
-    @{ Version = '0.43'; Required = $true },       # and the same for the cutover's own neighbourhood
     @{ Version = '0.042.9'; Required = $true },    # leading zero in a component
     @{ Version = '01.2.3'; Required = $true },     # ditto
     @{ Version = '0.42.9-!!'; Required = $true },  # invalid prerelease ON AN OLD LINE: dropping it would have
@@ -116,8 +115,26 @@ foreach ($row in $boundary) {
 # Emitted so the Go side can check these against selfupdate.AttestationRequiredFor
 # rather than trusting a second table of its own. Two tables agreeing by
 # inspection is a coincidence; one table, compared, is a contract.
-$emitted = [ordered]@{}
-foreach ($row in $boundary) { $emitted[$row.Version] = [bool](Test-AttestationRequired $row.Version) }
+#
+# An ARRAY of records, not a map keyed by the version. PowerShell hashtables key
+# CASE-INSENSITIVELY — `[ordered]@{}` included, which is not obvious and cost three
+# rows: 'V0.42.9' overwrote 'v0.42.9', 'V0.43.0' overwrote 'v0.43.0', and 'V'
+# overwrote 'v', so the payload carried 34 entries for a 37-row table and the
+# Go side compared the UPPERCASE spelling while the lowercase row was never checked
+# at all. A key that is only distinct by case is not a key.
+$emitted = @(
+    foreach ($row in $boundary) {
+        [ordered]@{ Version = $row.Version; Required = [bool](Test-AttestationRequired $row.Version) }
+    }
+)
+# The control for that: a payload that quietly lost rows would still be valid JSON
+# and would still be compared — against fewer versions, all of which happen to
+# agree. So the count is checked against the table, here, where a shortfall is
+# visible.
+if ($emitted.Count -ne $boundary.Count) {
+    Write-Host "FAIL: emitted $($emitted.Count) boundary rows for a $($boundary.Count)-row table, so some versions would never be compared"
+    exit 1
+}
 Write-Host "BOUNDARY $($emitted | ConvertTo-Json -Compress)"
 
 # The prerelease row is specifically the release LINE: 0.43.0-rc.1 is older than

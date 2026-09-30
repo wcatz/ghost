@@ -108,7 +108,13 @@ func TestInstallPS1AttestationDecidesTheSameWayGhostUpgradeDoes(t *testing.T) {
 // boundaryRE matches the line install_ps1_attestation_cases.ps1 emits so this side
 // can hold its own boundary function to the same answers, instead of trusting a
 // second table that agrees by inspection.
-var boundaryRE = regexp.MustCompile(`(?m)^BOUNDARY (\{.*\})\r?$`)
+var boundaryRE = regexp.MustCompile(`(?m)^BOUNDARY (\[.*\])\r?$`)
+
+// boundaryRow is one version's answer as the script reported it.
+type boundaryRow struct {
+	Version  string
+	Required bool
+}
 
 // parseEmittedBoundary reads the script's own answers out of its output.
 //
@@ -126,19 +132,33 @@ var boundaryRE = regexp.MustCompile(`(?m)^BOUNDARY (\{.*\})\r?$`)
 // using a bare CR with no LF caught that — `\r?$` cannot match when `$` has no
 // newline to anchor to, so the pattern alone would still miss an output that some
 // other host produced. Neither mechanism is load-bearing alone.
-func parseEmittedBoundary(out string) (map[string]bool, error) {
+func parseEmittedBoundary(out string) ([]boundaryRow, error) {
 	out = strings.ReplaceAll(out, "\r\n", "\n")
 	out = strings.ReplaceAll(out, "\r", "\n")
 	m := boundaryRE.FindStringSubmatch(out)
 	if m == nil {
 		return nil, fmt.Errorf("no BOUNDARY line in the case file's output")
 	}
-	var got map[string]bool
+	var got []boundaryRow
 	if err := json.Unmarshal([]byte(m[1]), &got); err != nil {
 		return nil, fmt.Errorf("the emitted boundary is not JSON: %w", err)
 	}
 	if len(got) == 0 {
 		return nil, fmt.Errorf("the emitted boundary is empty, so comparing it would pass on nothing")
+	}
+	// An EXACT duplicate is a mistake: the same version listed twice compares
+	// twice and reports nothing the first one did not. Case-VARIANT pairs are not
+	// a mistake and are in fact the point — 'V0.42.9' beside 'v0.42.9' is what
+	// catches PowerShell's case-insensitive -replace, and an array is the only
+	// payload shape that can hold both. A first version of this check rejected
+	// them too, which would have made the three rows that find the bug unable to
+	// exist.
+	seen := make(map[string]bool, len(got))
+	for _, row := range got {
+		if seen[row.Version] {
+			return nil, fmt.Errorf("the emitted boundary lists %q twice; a version that appears once cannot be compared against twice", row.Version)
+		}
+		seen[row.Version] = true
 	}
 	return got, nil
 }
@@ -148,7 +168,7 @@ func parseEmittedBoundary(out string) (map[string]bool, error) {
 // it is worth checking on every platform that the parser is indifferent to the
 // platform's line endings — which is the whole fix.
 func TestParseEmittedBoundaryIsNotFooledByLineEndings(t *testing.T) {
-	const line = `BOUNDARY {"0.42.9":false,"0.43.0":true}`
+	const line = `BOUNDARY [{"Version":"0.42.9","Required":false},{"Version":"0.43.0","Required":true}]`
 	for _, tc := range []struct {
 		name  string
 		out   string
@@ -167,20 +187,43 @@ func TestParseEmittedBoundaryIsNotFooledByLineEndings(t *testing.T) {
 			if len(got) != tc.wantN {
 				t.Fatalf("parsed %d versions, want %d: %v", len(got), tc.wantN, got)
 			}
-			if !got["0.43.0"] {
+			byVersion := make(map[string]bool, len(got))
+			for _, r := range got {
+				byVersion[r.Version] = r.Required
+			}
+			if !byVersion["0.43.0"] {
 				t.Error("0.43.0 parsed as not required; the value the JSON carries was dropped")
 			}
-			if got["0.42.9"] {
+			if byVersion["0.42.9"] {
 				t.Error("0.42.9 parsed as required; the value the JSON carries was inverted")
 			}
 		})
 	}
+	t.Run("a case-variant pair is kept, and both are compared", func(t *testing.T) {
+		// The shape the fix is FOR. A map keyed by the version could not hold
+		// this, which is why the payload is an array.
+		got, err := parseEmittedBoundary(`BOUNDARY [{"Version":"v0.42.9","Required":false},{"Version":"V0.42.9","Required":true}]`)
+		if err != nil {
+			t.Fatalf("a case-variant pair was refused: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("parsed %d rows, want 2", len(got))
+		}
+		if got[0].Version != "v0.42.9" || got[0].Required {
+			t.Errorf("row 0 = %+v, want the lowercase version not required", got[0])
+		}
+		if got[1].Version != "V0.42.9" || !got[1].Required {
+			t.Errorf("row 1 = %+v, want the uppercase version required", got[1])
+		}
+	})
 	for _, tc := range []struct {
 		name string
 		out  string
 	}{
 		{"no boundary at all", "all 176 checks passed\n"},
-		{"empty boundary", "BOUNDARY {}\n"},
+		{"empty boundary", "BOUNDARY []\n"},
+		{"a map payload from an older script", "BOUNDARY {\"0.43.0\":true}\n"},
+		{"the same version twice", `BOUNDARY [{"Version":"0.43.0","Required":true},{"Version":"0.43.0","Required":true}]` + "\n"},
 		{"malformed json", "BOUNDARY {not json}\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,7 +249,8 @@ func TestTheTwoBoundariesAgree(t *testing.T) {
 		t.Fatalf("%v:\n%s", err, out)
 	}
 
-	for version, want := range got {
+	for _, row := range got {
+		version, want := row.Version, row.Required
 		if have := AttestationRequiredFor(version); have != want {
 			t.Errorf("install.ps1 and selfupdate disagree about whether %q needs an attestation: script says %v, Go says %v. "+
 				"The two are the same rule, and a release at the boundary that one of them skips is a release nothing has vouched for", strconv.Quote(version), want, have)
