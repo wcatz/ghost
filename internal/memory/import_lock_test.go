@@ -58,6 +58,7 @@ func TestThePresenceCheckIsUnderTheLockAndBeforeTheShapeCheck(t *testing.T) {
 			lock := strings.Index(body, "s.mu.Lock()")
 			presence := strings.Index(body, "SELECT 1 FROM")
 			shape := strings.Index(body, "CheckImported")
+			begin := strings.Index(body, "beginWrite")
 			insert := strings.Index(body, "INSERT INTO")
 			if lock < 0 || presence < 0 || shape < 0 || insert < 0 {
 				t.Fatalf("one of the four statements is missing: lock=%d presence=%d shape=%d insert=%d",
@@ -75,6 +76,22 @@ func TestThePresenceCheckIsUnderTheLockAndBeforeTheShapeCheck(t *testing.T) {
 			}
 			if shape >= insert {
 				t.Errorf("the shape check is NOT before the INSERT: CheckImported at %d, INSERT at %d", shape, insert)
+			}
+			// And the re-check that closes the cross-process race: after
+			// beginWrite, before the INSERT. s.mu is a per-Store lock and closes
+			// nothing across processes, so the pre-check alone is not atomic —
+			// the re-check has to be inside the BEGIN IMMEDIATE transaction.
+			recheck := strings.LastIndex(body, "SELECT 1 FROM")
+			if begin < 0 {
+				t.Fatalf("no beginWrite in %s — the write has to go through a transaction the re-check can share", fn)
+			}
+			if recheck <= begin {
+				t.Errorf("the presence re-check is NOT inside the write transaction: beginWrite at %d, "+
+					"re-check at %d — a second process can pass the pre-check and fail the INSERT with a "+
+					"UNIQUE constraint error", begin, recheck)
+			}
+			if recheck >= insert {
+				t.Errorf("the presence re-check is NOT before the INSERT: re-check at %d, INSERT at %d", recheck, insert)
 			}
 		})
 	}

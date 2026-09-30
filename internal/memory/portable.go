@@ -646,13 +646,35 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	// created_at/updated_at default to now, so a record with no timestamp in the
 	// artifact (a hand-written one) gets the current time rather than the
 	// epoch — and an artifact written by this format always has one.
-	_, err = s.execGuardedWrite(ctx, "import-project", `
+	// beginWrite rather than execGuardedWrite, for the reason the other three
+	// importers give: the presence re-check has to be in the SAME transaction as
+	// the INSERT, and s.mu does not close the cross-process race. This is the
+	// worst of the four to leave unfixed, because a failed project step never
+	// records its id and every memory, task and decision naming that project is
+	// then rejected as "project not found" — one concurrent import turns a clean
+	// apply into a wholesale rejection of the artifact's contents.
+	tx, _, err := s.beginWrite(ctx, "import-project")
+	if err != nil {
+		return false, fmt.Errorf("import project %s: begin tx: %w", p.ID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var presentInTx int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, p.ID).Scan(&presentInTx); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import project %s: re-check presence: %w", p.ID, err)
+		}
+	} else {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO projects (id, path, name, repo_remote, created_at, updated_at)
 		VALUES (?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')),
 		                   COALESCE(NULLIF(?, ''), datetime('now')))
-	`, p.ID, p.Path, p.Name, nullIfEmpty(NormalizeRepoRemote(p.RepoRemote)), p.CreatedAt, p.UpdatedAt)
-	if err != nil {
+	`, p.ID, p.Path, p.Name, nullIfEmpty(NormalizeRepoRemote(p.RepoRemote)), p.CreatedAt, p.UpdatedAt); err != nil {
 		return false, fmt.Errorf("import project %s: %w", p.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("import project %s: commit: %w", p.ID, err)
 	}
 	return true, nil
 }
