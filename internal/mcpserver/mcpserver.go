@@ -3641,7 +3641,30 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	// The `seen` filter, the second REQUEST and the `ExcludeSeen` field it is why
 	// we do not use are all explained on projectContextGlobalSection, which is
 	// where the render now lives so the tool and this function cannot drift.
-	if projectID != memory.GlobalProjectID {
+	//
+	// `_global` IS a project, and the guard below is the one place that knows a
+	// bucket is not a project to count rows for — so it must not also be the place
+	// that decides the window's own rows are dropped. `ResolveProject(ctx,
+	// "_global")` succeeds, so `ghost://project/_global/context` and
+	// `recall_project` with `project_id: "_global"` both reach here with that id;
+	// `projectContextBudget` then sets `IncludeGlobal: false` because the bucket IS
+	// `_global` already, and `projectContextSplit` puts every row in `globals` with
+	// an empty `own` half. Skipping the section on that path therefore discarded
+	// the whole block, and a store full of global memories was answered with the
+	// false census "No memories found for this project." — while the TOOL, whose
+	// guard is only `args.ProjectID != ""`, rendered the same rows correctly. Two
+	// surfaces disagreeing about the same request is the defect; the disagreement
+	// was introduced by the split, so the split's own case is fixed here.
+	//
+	// So the SECOND read is what the guard skips, and it is the right half to skip:
+	// for `_global` the window already IS the globals, capped at the caller's own
+	// limit, so a second read at the Global section's cap could only add rows the
+	// caller did not ask for. The `carried` half is rendered either way, under the
+	// one heading that is true of it, which for this project is also the whole
+	// block.
+	if projectID == memory.GlobalProjectID {
+		projectContextSection(&sb, globalSectionHeading, projectContextItems(globals))
+	} else {
 		// 15 for the resolved case (projectContextGlobalsCap, unchanged) and 20 for
 		// an unresolved name (projectContextMemoriesCap), because the row COUNT is
 		// what a caller observes and origin/main's `GetTopMemories(ctx, "", 20)`

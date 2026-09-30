@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // TestAResolvedProjectsGlobalRowsSitUnderTheGlobalHeading is #809.
@@ -119,6 +120,141 @@ func TestAResolvedProjectsGlobalRowsSitUnderTheGlobalHeading(t *testing.T) {
 // So it counts. Enough rows to overrun BOTH caps, because the interesting case is
 // the one where the mixed window and the section's own second read disagree about
 // what the block holds — that is where a row can be counted twice or not at all.
+// TestTheGlobalProjectContextRendersItsOwnWindow is the split's own degenerate
+// case, and a review of #817 found it after the split shipped: `_global` IS a
+// project, so `ResolveProject(ctx, "_global")` succeeds and two documented surfaces
+// — `ghost://project/_global/context` and `recall_project` with
+// `project_id: "_global"` — reach `buildProjectContext` with that id.
+//
+// `projectContextBudget` then sets `IncludeGlobal: false` because the bucket is
+// already `_global`, and `projectContextSplit` puts every row in `globals` with an
+// empty `own` half. The old guard then skipped the Global section on the reasoning
+// that a bucket is not a project to count rows for, which is true and is the wrong
+// question: it also discarded the `carried` half, so a store full of global memories
+// was answered with the false census "No memories found for this project." The TOOL
+// renders the same rows correctly, so two surfaces disagreed about one request.
+//
+// It is asserted through BOTH surfaces and it asserts the whole shape, because the
+// census is a sentence a caller cannot act on and a heading-less block is the same
+// failure wearing a different hat.
+func TestTheGlobalProjectContextRendersItsOwnWindow(t *testing.T) {
+	srv, session := newValiditySession(t)
+	ctx := context.Background()
+
+	// Enough globals to overrun the resource's 15-cap, so "the cap is not binding"
+	// cannot be the reason a row is missing.
+	const globals = 22
+	for i := 0; i < globals; i++ {
+		if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name: "ghost_save_global",
+			Arguments: map[string]any{
+				"content":  fmt.Sprintf("a cross-project preference numbered %02d", i),
+				"category": "preference",
+			},
+		}); err != nil {
+			t.Fatalf("save_global %d: %v", i, err)
+		}
+	}
+
+	assertWholeBlock := func(surface, out string) {
+		t.Helper()
+		// The false census, which is what the block answered instead.
+		for _, census := range []string{"No memories found for this project.", "is not registered with Ghost yet"} {
+			if strings.Contains(out, census) {
+				t.Errorf("%s answered %q on a store holding %d global memories:\n%s", surface, census, globals, out)
+			}
+		}
+		// And the rows are there, under the ONE heading that is true of them, with
+		// no empty `## Memories` above a block that has none of that project's own.
+		if strings.Contains(out, memorySectionHeading) {
+			t.Errorf("%s rendered a %q section for a project whose window IS the globals, so it can only be "+
+				"empty:\n%s", surface, memorySectionHeading, out)
+		}
+		if n := strings.Count(out, globalSectionHeading); n != 1 {
+			t.Errorf("%s carries %d %q headings, want exactly one:\n%s", surface, n, globalSectionHeading, out)
+		}
+		// Keyed on the CONTENT, not on an id prefix: `ghost_save_global` mints a
+		// random 32-hex id per save, so there is no `g`-shaped prefix to count and
+		// the first version of this assertion failed on a block full of rows.
+		if !strings.Contains(out, "numbered 00") {
+			t.Errorf("%s rendered no global rows at all:\n%s", surface, out)
+		}
+	}
+
+	// The resource and the prompt body.
+	text, err := srv.buildProjectContext(ctx, memory.GlobalProjectID)
+	if err != nil {
+		t.Fatalf("buildProjectContext(_global): %v", err)
+	}
+	assertWholeBlock("ghost://project/_global/context", text)
+
+	// The tool, over the transport, so the two surfaces are compared as an agent
+	// meets them rather than one of them through a function.
+	tool := resultText(callTool(t, session, "ghost_project_context", map[string]any{
+		"project_id": memory.GlobalProjectID,
+	}))
+	assertWholeBlock("ghost_project_context", tool)
+
+	// And they say the SAME THING, which is the shape the defect had: two surfaces
+	// on one request. The counts are equal because both cap the same window, and
+	// the row sets are equal because both read the same bucket.
+	if got, want := strings.Count(tool, "\n- ["), strings.Count(text, "\n- ["); got != want {
+		t.Errorf("the tool carries %d rows and the resource %d for the same request, so the two surfaces "+
+			"disagree about it:\n--- tool ---\n%s\n--- resource ---\n%s", got, want, tool, text)
+	}
+	// And the COUNT is the cap, which is the other half of the fix: the resource
+	// caps the window at 20, so it admits exactly 20 of the 22 rows seeded. The
+	// fixture seeds more than the cap ON PURPOSE, so "the rows are there" cannot
+	// pass by showing everything.
+	//
+	// A note on what this assertion does NOT kill, because the honest answer is
+	// interesting: letting the second read run for `_global` as well changes
+	// nothing observable. Its rows are all in `alreadyShown`, so the `seen` filter
+	// drops every one, and the block comes out byte-identical — the guard is there
+	// for the wasted query, not for the output. Both surfaces pass with the guard
+	// removed, and this test is not claiming otherwise.
+	if n := strings.Count(text, "\n- ["); n != projectContextMemoriesCap {
+		t.Errorf("the _global block carries %d rows, want the %d its window cap admits:\n%s",
+			n, projectContextMemoriesCap, text)
+	}
+}
+
+// TestTheGlobalProjectContextIsNotCountedAsAnotherProjectsRows keeps the half of
+// the old guard that was RIGHT, because the fix above must not have widened it.
+//
+// `projectContextOwnRowsNote` refused `_global` deliberately: it is a bucket, not a
+// project to count rows for, and a sentence about "this project's memories" is
+// false of it. The split renders rows for `_global`; it must not also start
+// reporting a gap on that path, which is the failure `TestTheGlobalProjectContext
+// RendersItsOwnWindow`'s fixture — which holds rows in the block — would not see.
+func TestTheGlobalProjectContextIsNotCountedAsAnotherProjectsRows(t *testing.T) {
+	srv, _ := newValiditySession(t)
+	ctx := context.Background()
+
+	// A project of its own with exactly one memory, so a `_global` read that were
+	// counted against it would report a gap, and a `_global` read that is counted
+	// correctly reports nothing.
+	if _, err := srv.store.Create(ctx, "vproj", memory.Memory{
+		Category: "preference", Content: "a claim about this project only", Source: "manual",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	text, err := srv.buildProjectContext(ctx, memory.GlobalProjectID)
+	if err != nil {
+		t.Fatalf("buildProjectContext(_global): %v", err)
+	}
+	for _, note := range []string{
+		"Ghost holds no memories for this project",
+		"and none of it is in the block above",
+		"the memory rows above are the cross-project ones",
+	} {
+		if strings.Contains(text, note) {
+			t.Errorf("the _global block carries the note %q, which is a claim about ANOTHER project and false here:\n%s",
+				note, text)
+		}
+	}
+}
+
 func TestTheProjectContextSplitMovesRowsWithoutChangingTheBlock(t *testing.T) {
 	srv, session := newValiditySession(t)
 	ctx := context.Background()
