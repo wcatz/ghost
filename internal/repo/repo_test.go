@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,25 @@ func gitIn(t *testing.T, dir, remote string) {
 	run("init", "-q")
 	if remote != "" {
 		run("remote", "add", "origin", remote)
+	}
+}
+
+// excludeEnclosingRepo stops git from walking out of dir towards a repository
+// above it, so "this directory is not a repository" is established here rather
+// than assumed of the host. t.TempDir() sits under TMPDIR, so a TMPDIR pointed
+// inside a checkout gives every temp dir a repository ancestor.
+//
+// The ceiling is dir's PARENT, not dir: git searches everything below a ceiling
+// entry and reports the entry itself as no repository, but it does not stop the
+// walk when the ceiling is the starting directory, so pinning dir would leave
+// the ancestors reachable and the failure would read as a product bug. Hence the
+// premise is then checked against git rather than trusted.
+func excludeEnclosingRepo(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	if out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").CombinedOutput(); err == nil {
+		t.Fatalf("premise broken: %s is inside the git repository at %s, so a test asserting "+
+			"no remote here is asserting nothing", dir, strings.TrimSpace(string(out)))
 	}
 }
 
@@ -64,7 +84,15 @@ func TestDetectRemoteReturnsEmpty(t *testing.T) {
 	if got := DetectRemote(filepath.Join(t.TempDir(), "does-not-exist")); got != "" {
 		t.Errorf("DetectRemote(missing dir) = %q, want empty", got)
 	}
-	if got := DetectRemote(t.TempDir()); got != "" {
+	// The non-repository case is the one that needs its premise stated rather
+	// than assumed: DetectRemote's `git -C` walks up to the enclosing
+	// repository on purpose (TestDetectRemoteReturnsOrigin pins that), so with
+	// TMPDIR pointed inside a checkout — the recommended way to keep test
+	// scratch off a small /tmp — this temp dir has a repository above it and
+	// the assertion below would be asserting nothing.
+	nonRepo := t.TempDir()
+	excludeEnclosingRepo(t, nonRepo)
+	if got := DetectRemote(nonRepo); got != "" {
 		t.Errorf("DetectRemote(non-repository) = %q, want empty", got)
 	}
 
