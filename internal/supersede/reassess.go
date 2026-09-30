@@ -9,7 +9,9 @@
 // injection everywhere — and resolve's own repair pass deliberately HONOURS a
 // live 'supersedes' edge as a floor, so it cannot undo the resolution while the
 // edge stands. Nothing in the ordinary pass can reach an edge whose endpoints
-// have not changed: skip-if-unchanged holds it quiet forever.
+// have not changed: skip-if-unchanged holds it quiet forever, whichever way its
+// own candidate scan proposes the pair (#787) and however long ago the edge was
+// last confirmed (#784).
 //
 // This pass is the operator-facing undo. It re-applies the deterministic
 // imperative veto and the current classifier to every live 'supersedes'/'llm'

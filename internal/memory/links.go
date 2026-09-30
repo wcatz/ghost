@@ -38,6 +38,21 @@ var symmetricRelations = map[string]bool{"related": true}
 // either memory's currency is asserted by an edge the linker adds on cosine
 // similarity alone.
 func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error {
+	return s.CreateLinkJudged(ctx, sourceID, targetID, relation, strength, source, "")
+}
+
+// CreateLinkJudged is CreateLink for a caller that made a JUDGEMENT about the
+// pair, and the only difference between the two a caller can see is the stamp it
+// writes: judgedAt rather than the write clock. `ghost supersede` is that
+// caller, and linkInsertSQL sets out why the stamp has to be the freshness of
+// what was judged rather than when the row landed — in short, the two are
+// minutes apart, and an edit landing between them is one no verdict was given
+// for.
+//
+// An empty judgedAt is CreateLink, and every other caller wants exactly that:
+// the linker's `related` edges, the bench seeders and the restore paths make no
+// judgement, so the write clock is the honest stamp.
+func (s *Store) CreateLinkJudged(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) error {
 	if sourceID == targetID {
 		return fmt.Errorf("create link: self-links not allowed (id %s)", sourceID)
 	}
@@ -68,7 +83,7 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 		if err != nil {
 			return err
 		}
-		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source); err != nil {
+		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source, judgedAt); err != nil {
 			return err
 		}
 		// Only when the edge BECOMES active. `ghost supersede` re-writes a pair
@@ -97,7 +112,7 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 	}
 
 	_, err := s.execGuardedWrite(ctx, "create-link-autocommit", linkInsertSQL,
-		sourceID, targetID, relation, strength, source)
+		sourceID, targetID, relation, strength, source, judgedAt)
 	if err != nil {
 		return fmt.Errorf("create link: %w", err)
 	}
@@ -105,21 +120,44 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 }
 
 // linkInsertSQL is the upsert CreateLink performs: re-inserting an existing
-// (source, target, relation) keeps the higher strength and clears any
-// invalidation. Shared by the autocommit path and the transaction the
-// supersede history row shares, so the two cannot record different edges.
+// (source, target, relation) keeps the higher strength, clears any
+// invalidation, and stamps created_at from judgedAt. Shared by the autocommit
+// path and the transaction the supersede history row shares, so the two cannot
+// record different edges.
+//
+// created_at on a link row is not a claim about when the edge entered the graph.
+// Its one reader is `ghost supersede`'s skip-if-unchanged test, which compares
+// each endpoint's updated_at against it to decide whether the pair has moved
+// since it was last JUDGED — so it is a judgement stamp, and a re-judgement that
+// leaves it where it was is why an edge whose endpoint was ever edited was
+// re-billed on every pass after it (#784). The history row is keyed on the edge
+// BECOMING active rather than on this column, so the stamp writes no history.
+//
+// judgedAt is passed in rather than taken from a clock, and that is the whole of
+// the subtlety. `ghost supersede` reads both endpoints at the TOP of a pass and
+// then spends a classify call that takes seconds to minutes, and an edit landing
+// in that window — reflect's consolidation rewrite, a save through a live
+// `ghost mcp` — carries an updated_at newer than the text the classifier actually
+// saw but older than the moment the write lands. Stamping the WRITE would cover
+// that edit instead of stopping short of it, and the pair would then sit quiet
+// against text no verdict was ever given for, so the caller stamps the freshness
+// of what it judged. An empty judgedAt means no judgement was made here and falls
+// back to the write clock, which is what every caller but supersede wants (the
+// linker's `related` edges, which nothing reads this column for, and the bench
+// seeders).
 const linkInsertSQL = `
-		INSERT INTO memory_links (source_id, target_id, relation, strength, source)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
-			strength = MAX(strength, excluded.strength),
-			invalidated_at = NULL
+	INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at)
+	VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')))
+	ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
+		strength = MAX(strength, excluded.strength),
+		invalidated_at = NULL,
+		created_at = excluded.created_at
 `
 
 // insertLinkTx is linkInsertSQL inside an open transaction.
-func insertLinkTx(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation string, strength float32, source string) error {
+func insertLinkTx(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation string, strength float32, source, judgedAt string) error {
 	if _, err := tx.ExecContext(ctx, linkInsertSQL,
-		sourceID, targetID, relation, strength, source); err != nil {
+		sourceID, targetID, relation, strength, source, judgedAt); err != nil {
 		return fmt.Errorf("create link: %w", err)
 	}
 	return nil

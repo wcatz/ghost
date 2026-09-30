@@ -15,7 +15,9 @@
 // resolved_at by resolve's supersedes piggyback, which the repair pass
 // deliberately honours as a floor. Nothing in the ordinary pass can undo that,
 // because skip-if-unchanged holds an edge whose endpoints have not changed quiet
-// forever. Only a person who can see both notes can name the pair.
+// forever — whichever way the scan proposes the pair (#787) and however long ago
+// the edge was last confirmed (#784). Only a person who can see both notes can
+// name the pair.
 //
 // So this is the operator-facing undo for one edge, and the difference from
 // Reassess is the whole point: nothing is judged here. The caller has decided,

@@ -226,20 +226,34 @@ func TestRunRejectsParallelFacts(t *testing.T) {
 func TestRunIdempotent(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
-	add(t, store, db, "go version is 1.26", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	add(t, store, db, "go version is 1.24", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+	newer := add(t, store, db, "go version is 1.26", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, "go version is 1.24", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
 	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
 
 	r1, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	// The second pass over a graph the first one just wrote is not only
+	// idempotent, it is QUIET. Writing an edge retires no vector, so the scan
+	// proposes this pair again on every later pass — and an unchanged edge is
+	// held quiet rather than re-asked (#787), which is the difference between a
+	// converged project costing nothing per pass and costing a harness call per
+	// batch of eight over the whole graph.
+	cls2 := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	r2, _, err := Run(ctx, store, cls2, "p", 0.9, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r1.Created != 1 || r2.Created != 1 {
-		t.Errorf("both runs should (idempotently) create 1 link, got %d then %d", r1.Created, r2.Created)
+	if r1.Created != 1 {
+		t.Errorf("first pass created %d link(s), want 1", r1.Created)
+	}
+	if r2.Created != 0 || cls2.batchCalls != 0 {
+		t.Errorf("second pass created %d link(s) over %d classify call(s), want 0/0: nothing changed since the edge was written, so there is nothing to decide",
+			r2.Created, cls2.batchCalls)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 1 {
+		t.Errorf("live supersedes edges = %v, want the one the first pass wrote: a quiet pass is quiet, not a withdrawal", pairs)
 	}
 }
 
@@ -322,6 +336,12 @@ func TestRunReclassifiesExistingSupersedesToCauses(t *testing.T) {
 	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
 		t.Fatal(err)
 	}
+	// Arm the reclassify half, because an UNCHANGED live edge is held quiet
+	// rather than re-asked (#787) — which is the correct behaviour and would
+	// make this test assert nothing at all. Writing an edge retires no vector,
+	// so the scan proposes this pair too, in the edge's own direction, and the
+	// pair faces skip-if-unchanged like any other live one.
+	backdateLink(t, db, newer, older)
 
 	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationCauses }}
 	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
@@ -398,6 +418,240 @@ func TestRunSkipsUnchangedExistingLink(t *testing.T) {
 		if call.Newer == "reversed the NATS decision back to Postgres LISTEN/NOTIFY" {
 			t.Errorf("Classify should not have been called for the unchanged existing-link pair, but was called with newer=%q older=%q", call.Newer, call.Older)
 		}
+	}
+}
+
+// unchangedLiveEdge seeds a LIVE supersedes edge over a pair the scan also
+// proposes, in the edge's own direction, and asserts both halves of that
+// premise rather than leaving them to the fixture's dates.
+//
+// The premise matters because it is the ordinary case and not an edge case: every
+// supersedes edge in the graph got there because SelectCandidates put these two
+// rows in front of the classifier as cosine neighbours above the threshold, and
+// nothing about writing an edge retires those vectors. A pass that only holds an
+// edge quiet when the scan cannot find it is holding it quiet in a configuration
+// no supersedes edge is ever in (#787).
+func unchangedLiveEdge(t *testing.T, store *memory.Store, newer, older string) {
+	t.Helper()
+	ctx := context.Background()
+
+	sel, err := SelectCandidates(ctx, store, "p", 0.9)
+	if err != nil {
+		t.Fatalf("SelectCandidates: %v", err)
+	}
+	if len(sel.Candidates) != 1 || sel.Candidates[0].NewerID != newer || sel.Candidates[0].OlderID != older {
+		t.Fatalf("the scan must re-propose %s→%s for this fixture to be testing what it claims: got %d candidate(s) %+v",
+			newer, older, len(sel.Candidates), sel.Candidates)
+	}
+
+	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	links, err := store.LinksByRelationSource(ctx, "p", "supersedes", "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource: %v", err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("live supersedes edges = %d, want 1", len(links))
+	}
+	mems, err := store.GetByIDs(ctx, []string{newer, older})
+	if err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	}
+	for _, m := range mems {
+		if m.UpdatedAt > links[0].CreatedAt {
+			t.Fatalf("fixture is not UNCHANGED: memory %s has updated_at=%s past the edge's created_at=%s",
+				m.ID, m.UpdatedAt, links[0].CreatedAt)
+		}
+	}
+}
+
+// TestRunSkipsUnchangedLiveEdgeTheScanAlsoProposes is #787's half that costs
+// money: an edge nobody has touched is asked about on every pass, so with
+// reflection.auto_supersede on, every stop-hook run spends one harness call per
+// batch of eight over a graph that has not moved since the last one.
+func TestRunSkipsUnchangedLiveEdgeTheScanAlsoProposes(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer := add(t, store, db, "kubernetes now on 1.31", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, "kubernetes cluster runs 1.27", []float32{0.99, 0.01, 0}, "2026-01-01 00:00:00")
+	unchangedLiveEdge(t, store, newer, older)
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cls.batchCalls != 0 {
+		t.Errorf("the pass spent %d classify call(s) %v on an edge whose endpoints have not changed: an unchanged edge costs nothing", cls.batchCalls, cls.calls)
+	}
+	if res.Candidates != 0 {
+		t.Errorf("Result.Candidates = %d, want 0: the pair is held quiet before it is a candidate, so a re-run reports no work rather than work it declined to do", res.Candidates)
+	}
+	if res.OppositeLive != 0 {
+		t.Errorf("Result.OppositeLive = %d, want 0: the scan AGREED with the edge, and an agreed-with orientation is not a refused one", res.OppositeLive)
+	}
+}
+
+// TestRunCannotWithdrawAnUnchangedLiveEdgeByReAskingIt is #787's other half,
+// and the one with a body count. A classifier's verdict on one pair is not
+// stable run to run (#779), so a pass that re-asks an edge nobody changed
+// withdraws a correct edge on whichever pass the answer comes back NEITHER, and
+// re-creates it on the next. Each flip spends two history rows on the target —
+// the version slots CreateLink's own comment warns about — and leaves the
+// target stamped resolved_at with no edge holding it.
+func TestRunCannotWithdrawAnUnchangedLiveEdgeByReAskingIt(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer := add(t, store, db, "api rate limit raised to 500 rps", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, "api rate limit is 100 rps", []float32{0.99, 0.01, 0}, "2026-01-01 00:00:00")
+	unchangedLiveEdge(t, store, newer, older)
+
+	// NEITHER to everything, under --apply: this is the roll the ordinary pass
+	// must not be able to make. If it asks at all, the edge is gone.
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cls.batchCalls != 0 {
+		t.Errorf("the pass asked the classifier about an unchanged edge %d time(s) %v", cls.batchCalls, cls.calls)
+	}
+	if res.Reclassified != 0 || res.ReclassifiedNoWrite != 0 {
+		t.Errorf("reclassified=%d noWrite=%d, want 0/0: nothing was reclassified, because nothing was asked", res.Reclassified, res.ReclassifiedNoWrite)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 1 {
+		t.Errorf("live supersedes edges = %v, want the one that was already there: the ordinary pass must not re-roll an edge nobody edited", pairs)
+	}
+}
+
+// TestRunReConfirmingAnEdgeRefreshesItsFreshnessReference is #784. Re-confirming
+// an edge has to move the stamp skip-if-unchanged reads, or the promise in
+// docs/invariants.md — one call per endpoint edit rather than one per pass — is
+// only true for an edge nobody has ever edited, and any edge whose endpoint was
+// ever touched (a tag or importance edit bumps updated_at, and so does
+// PromoteToGlobal) is re-billed on every pass forever.
+//
+// The vectors are DISSIMILAR on purpose: only the reclassify path can judge this
+// pair, so its going quiet is attributable to the stamp and to nothing else. With
+// similar vectors the pair would be held quiet by #787's branch instead and this
+// test would pass whether or not the stamp moved.
+func TestRunReConfirmingAnEdgeRefreshesItsFreshnessReference(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer := add(t, store, db, "reversed the NATS decision back to Postgres LISTEN/NOTIFY", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, "unrelated gotcha about DNS caching", []float32{0, 1, 0}, "2026-01-01 00:00:00")
+
+	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	// Backdated so the edit below is unambiguously an edit since the edge was
+	// written, and dissimilar vectors so the scan cannot re-propose the pair.
+	backdateLink(t, db, newer, older)
+	if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = '2026-07-15 00:00:00' WHERE id = ?`, older); err != nil {
+		t.Fatal(err)
+	}
+
+	first := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	res, _, err := Run(ctx, store, first, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if first.batchCalls != 1 || res.Confirmed != 1 {
+		t.Fatalf("the pass answering an endpoint edit: calls=%d confirmed=%d, want 1/1", first.batchCalls, res.Confirmed)
+	}
+
+	// The re-confirm is the last judgement of this pair's current text, so the
+	// next two passes are quiet about it. Without the stamp moving they are not.
+	// The fake CONFIRMS throughout: an answer that withdrew the edge would take
+	// the pair out of the fixture, and this test is about the call count, not
+	// about the rollback #787 already covers.
+	for pass := 2; pass <= 3; pass++ {
+		cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+		res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+		if err != nil {
+			t.Fatalf("Run (pass %d): %v", pass, err)
+		}
+		if cls.batchCalls != 0 {
+			t.Errorf("pass %d spent %d classify call(s) %v on an edge re-confirmed by pass 1: one endpoint edit buys one call, not one per pass", pass, cls.batchCalls, cls.calls)
+		}
+		if res.Candidates != 0 {
+			t.Errorf("pass %d Result.Candidates = %d, want 0: nothing changed since the re-confirm", pass, res.Candidates)
+		}
+	}
+
+	// And the stamp moved FORWARD rather than parking the pair somewhere no
+	// edit can reach it: a second edit re-arms the same call.
+	if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = datetime('now', '+1 minute') WHERE id = ?`, older); err != nil {
+		t.Fatal(err)
+	}
+	fourth := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	if _, _, err := Run(ctx, store, fourth, "p", 0.9, true, nil); err != nil {
+		t.Fatalf("Run (pass 4): %v", err)
+	}
+	if fourth.batchCalls != 1 {
+		t.Errorf("pass 4 spent %d classify call(s), want 1: a further endpoint edit is what buys the next one", fourth.batchCalls)
+	}
+}
+
+// TestRunAnEditLandingDuringClassificationStillBuysTheNextCall is the stamp's
+// other half, and the one a wall-clock stamp gets wrong.
+//
+// The quiet test compares each endpoint's updated_at against the edge's stamp,
+// and those timestamps are read at the TOP of the pass — before a classify call
+// that takes seconds to minutes against a real harness. So an edit landing in
+// that window carries an updated_at newer than the text the classifier actually
+// saw, and the stamp must be the JUDGED pair's freshness rather than the moment
+// the write happened: stamped with the write clock, the re-confirm covers the
+// edit instead of stopping short of it, and the pair is held quiet against text
+// no verdict was ever given for. The stop hook makes this window ordinary —
+// reflect's consolidation rewrite and a save through a live `ghost mcp` both
+// stamp updated_at on rows the pass is judging — and the edit this masks is
+// invisible afterwards, since the edge still looks current.
+//
+// The edit's stamp is '2026-07-02', not a wall clock: it is unambiguously after
+// what this pass read and unambiguously before any real write, so the test does
+// not depend on two `datetime('now')` calls landing in the same second.
+func TestRunAnEditLandingDuringClassificationStillBuysTheNextCall(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer := add(t, store, db, "reversed the NATS decision back to Postgres LISTEN/NOTIFY", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, "unrelated gotcha about DNS caching", []float32{0, 1, 0}, "2026-07-01 00:00:00")
+
+	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	backdateLink(t, db, newer, older)
+
+	// The edit lands INSIDE the classify call, which is exactly where a
+	// concurrent reflect pass or a save through a live server puts it.
+	midFlight := &mockClassifier{verdict: func(_, _ string) Relation {
+		if _, err := db.ExecContext(ctx,
+			`UPDATE memories SET content = ?, updated_at = '2026-07-02 00:00:00' WHERE id = ?`,
+			"unrelated gotcha about DNS caching, and it is gone in 1.19", older,
+		); err != nil {
+			t.Errorf("edit during classification: %v", err)
+		}
+		return RelationSupersedes
+	}}
+	if _, _, err := Run(ctx, store, midFlight, "p", 0.9, true, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if midFlight.batchCalls != 1 {
+		t.Fatalf("the pass made %d classify call(s), want 1: the reclassify half is armed", midFlight.batchCalls)
+	}
+
+	// The re-confirm judged text as of 2026-07-01. The 07-02 edit is a
+	// different claim about the same pair, so the next pass owes it a call.
+	next := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	if _, _, err := Run(ctx, store, next, "p", 0.9, true, nil); err != nil {
+		t.Fatalf("Run (after the mid-flight edit): %v", err)
+	}
+	if next.batchCalls != 1 {
+		t.Errorf("the pass made %d classify call(s), want 1: an edit landing while the classifier was running must not be covered by the stamp written afterwards",
+			next.batchCalls)
 	}
 }
 

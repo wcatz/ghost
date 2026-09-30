@@ -151,7 +151,7 @@ type vectorStore interface {
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	GetEmbedding(ctx context.Context, memoryID string) ([]float32, error)
 	SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]memory.ScoredMemory, error)
-	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
+	CreateLinkJudged(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) error
 	InvalidateLink(ctx context.Context, sourceID, targetID, relation string) (int64, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	SupersedeChecked(ctx context.Context, projectID string) (map[[2]string]memory.SupersedeCheck, error)
@@ -389,6 +389,14 @@ func orient(a, b memory.Memory) (newer, older memory.Memory, ok bool) {
 type Classified struct {
 	Candidate
 	Relation Relation
+	// JudgedAt is the freshness of the CONTENT this verdict was made against:
+	// the later of the two endpoints' updated_at as this pass read them, before
+	// it spent the call. It is the stamp the apply block writes onto the edge it
+	// creates, and it is why it is read from the pass's own snapshot rather than
+	// from the clock — see memory.CreateLinkJudged, which is where the reason is
+	// set out. Empty only when an endpoint is missing from that snapshot, which
+	// the existence check has already refused by then.
+	JudgedAt string
 }
 
 // Result summarizes a pass.
@@ -440,13 +448,15 @@ type Result struct {
 	// refused (#778). It counts REFUSED PROPOSALS, not classifications: a
 	// refused pair still has to survive the endpoint-existence check,
 	// skip-if-unchanged (a live edge whose endpoints have not moved since it was
-	// written is not re-judged), the scope and persistent filters and the
-	// imperative veto before any of them reaches the classifier, so a counted
-	// pair may be one the pass spent no call on. What the count is exactly is
-	// what the pass decided HERE — the graph's direction beat the scan's — which
-	// is why the report line says the orientation was refused rather than
-	// claiming a judgment, and why the pairs the classifier did see in the link's
-	// direction are the ordinary Candidate/Reclassified totals above.
+	// last judged is not re-judged, whichever way the scan proposed it), the
+	// scope and persistent filters and the imperative veto before any of them
+	// reaches the classifier, so a counted pair may be one the pass spent no
+	// call on. What the count is exactly is what the pass decided HERE — the
+	// graph's direction beat the scan's — which is why the report line says the
+	// orientation was refused rather than claiming a judgment, and why the pairs
+	// the classifier did see in the link's direction are the ordinary
+	// Candidate/Reclassified totals above. A proposal that AGREED with the edge
+	// is not counted at all: nothing was refused.
 	OppositeLive int
 	// Bidirectional counts the pairs the graph already claims in BOTH
 	// directions — the cycle a pass before #778 could write, left in place for
@@ -456,6 +466,30 @@ type Result struct {
 	// demotes both endpoints and no orientation of it can be judged into a
 	// state worth keeping.
 	Bidirectional int
+}
+
+// judgedAt is the freshness of the content a verdict was made against: the
+// later of the two endpoints' updated_at, read from the pass's OWN snapshot.
+//
+// It is read from the snapshot rather than from the clock because the two are
+// minutes apart — the classify call sits between them — and an edit landing in
+// that gap (reflect's consolidation rewrite, a save through a live `ghost mcp`)
+// has an updated_at newer than the text the classifier saw. Stamping the write
+// instead would cover that edit, and the pair would sit quiet against text no
+// verdict was ever given for, which is the one thing the stamp must never do.
+//
+// An endpoint the snapshot does not hold contributes nothing rather than a zero
+// stamp: it was already refused by the existence check before this is reached,
+// and a "" here falls back to the write clock, which is the safe direction for a
+// write that is about to happen anyway.
+func judgedAt(snapshot map[string]memory.Memory, c Candidate) string {
+	latest := ""
+	for _, id := range [2]string{c.NewerID, c.OlderID} {
+		if m, ok := snapshot[id]; ok && m.UpdatedAt > latest {
+			latest = m.UpdatedAt
+		}
+	}
+	return latest
 }
 
 // WouldWriteLinks reports whether an --apply pass would put a NEW link in the
@@ -506,18 +540,28 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 //
 // A pair whose existing 'supersedes' link predates neither endpoint's last
 // update is skipped (skip-if-unchanged) — reclassifying it would repeat the
-// same verdict for no reason. Fresh candidates are classified unless both
-// endpoints' content still matches a cached NEITHER verdict (the content-keyed
-// NEITHER cache, schema v8): a cache skip is treated as a NEITHER verdict, so
-// if a 'causes' link existed and the endpoints' text later reverted to a
-// previously cached version, that link is not invalidated on the skipping pass
-// — graph-only staleness, since ranking consumes only 'supersedes'. Reclassify
-// candidates are never cache-skipped, so live-link pairs are still validated
-// every pass and self-healing is untouched — and a pair a live edge names is
-// never cache-skipped for the same reason, whichever source proposed its
-// direction, since the edge still has to keep self-healing. Cache rows are
-// recorded on apply only — dry-run stays side-effect-free — and cascade away
-// with their memories via the FK.
+// same verdict for no reason, and re-asking a pair whose verdicts are not
+// stable run to run (#779) is how a correct edge gets withdrawn and re-created
+// on alternating passes. The test is against the LINK's own created_at, so it
+// holds whichever way the pair was proposed: a live edge the scan agrees with
+// and a live edge the scan contradicts are the same test (#787), and being
+// proposed twice is not a reason to be judged twice. The stamp moves when a
+// verdict re-confirms the edge, and it is stamped with the freshness of the
+// content that verdict was made against rather than with the moment the row
+// landed (memory.CreateLinkJudged) — the two are a classify call apart, and an
+// edit landing between them must not be covered by a stamp written after it.
+// So an edge costs one call per endpoint EDIT rather than one per pass forever. Fresh candidates
+// are classified unless both endpoints' content still matches a cached NEITHER
+// verdict (the content-keyed NEITHER cache, schema v8): a cache skip is treated
+// as a NEITHER verdict, so if a 'causes' link existed and the endpoints' text
+// later reverted to a previously cached version, that link is not invalidated
+// on the skipping pass — graph-only staleness, since ranking consumes only
+// 'supersedes'. Reclassify candidates are never cache-skipped, so a live edge
+// whose endpoints HAVE moved is still judged on every pass and self-healing is
+// untouched — and a pair a live edge names is never cache-skipped for the same
+// reason, whichever source proposed its direction, since the edge still has to
+// keep self-healing. Cache rows are recorded on apply only — dry-run stays
+// side-effect-free — and cascade away with their memories via the FK.
 //
 // Pairs whose endpoints are replaced by a concurrent reflect pass (the stop
 // hook spawns both for the same session) are dropped and counted in
@@ -531,7 +575,9 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // SupersedePenalties is what keeps an edge written before this rule existed from
 // demoting anything. The reclassify half is what makes the rule reach an edge
 // that already exists, and what it saves is one call per endpoint edit, not one
-// per pass: skip-if-unchanged already holds an untouched pair quiet.
+// per pass: skip-if-unchanged already holds an untouched pair quiet, and a
+// re-confirm moves the stamp that test reads (#784), so the two halves together
+// are what make a converged graph cost nothing per pass.
 //
 // CreateLink and InvalidateLink are both idempotent no-ops when there's
 // nothing to change, so re-running Run converges and self-heals after
@@ -573,6 +619,9 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 //     (Result.OppositeLive), which is a count of refused orientations and not of
 //     classifications: the pair continues in the link's direction and is
 //     re-judged only under skip-if-unchanged, like any other untouched live edge.
+//     A scan proposal that AGREED with it is not counted and buys nothing either,
+//     because the edge already describes the pair and the edge's stamp — not the
+//     scan's vectors — is what says whether it still holds (#787).
 //   - A pair the graph already claims in BOTH directions is refused outright
 //     (Result.Bidirectional): no third direction exists, so no orientation of it
 //     can be judged into a state worth keeping, and the repair is the withdrawal
@@ -688,23 +737,18 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		}
 		l := links[0]
 		livePair[key] = true
-		// The live edge's direction, unless the scan already proposed this pair
-		// that way round — then the scan's candidate carries it (and its
-		// similarity), and the pair is revalidated under skip-if-unchanged below
-		// either way. The comparison is on the ORDERED pair, because agreeing
-		// about which memory is newer is what makes the scan's candidate and the
-		// edge the same candidate.
-		if isFresh && cand.NewerID == l.SourceID && cand.OlderID == l.TargetID {
-			all = append(all, cand)
-			continue
-		}
-		// The scan proposed the REVERSE of an edge the graph already asserts. The
-		// pair continues below in the edge's own direction — subject to the same
-		// skip-if-unchanged, existence, scope, persistent and veto filters as any
-		// other live-link pair, so it is not thereby guaranteed a classify call —
-		// and the refused orientation is counted, because what this pass decided
-		// here is that the graph's direction beat the scan's.
-		if isFresh {
+		// The live edge decides the pair's DIRECTION. A scan proposal that
+		// contradicts it is refused as a direction and counted; a proposal that
+		// AGREES with it is not refused — and it is no reason to spend anything
+		// either, because the edge already describes this pair and the edge's own
+		// created_at, not the scan's vectors, is what says whether it still
+		// holds. Both orientations therefore face the same skip-if-unchanged test
+		// below. The agreeing one used to skip it by appending the scan's
+		// candidate outright, which billed and re-rolled every edge the scan
+		// could still see (#787) — and a scan that CAN see it is the ordinary
+		// case, not an edge case, because writing an edge retires no vector.
+		agree := isFresh && cand.NewerID == l.SourceID && cand.OlderID == l.TargetID
+		if isFresh && !agree {
 			res.OppositeLive++
 			if logger != nil {
 				logger.Info("supersede: scan proposed the reverse of a live supersedes link; keeping the link's direction",
@@ -717,7 +761,16 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			continue // an endpoint no longer exists
 		}
 		if newerMem.UpdatedAt <= l.CreatedAt && olderMem.UpdatedAt <= l.CreatedAt {
-			continue // skip-if-unchanged: neither endpoint changed since this link was written
+			continue // skip-if-unchanged: neither endpoint changed since this edge was last judged
+		}
+		if agree {
+			// The scan's own candidate, and only because it carries the cosine
+			// similarity measured just now, which the link row's stored strength
+			// cannot: both describe the SAME orientation, which is the whole of
+			// what the classifier is shown, so the edge contributes the freshness
+			// reference above and nothing here.
+			all = append(all, cand)
+			continue
 		}
 		all = append(all, Candidate{
 			NewerID: l.SourceID, NewerContent: newerMem.Content, NewerCreatedAt: newerMem.CreatedAt,
@@ -880,7 +933,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 				}
 				continue
 			}
-			classified = append(classified, Classified{Candidate: c, Relation: verdict})
+			classified = append(classified, Classified{Candidate: c, Relation: verdict, JudgedAt: judgedAt(aliveByID, c)})
 
 			key := newPairKey(c.NewerID, c.OlderID)
 			wasReclassify := livePair[key]
@@ -941,7 +994,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			writable[[2]string{c.NewerID, c.OlderID}] = true
 			switch c.Relation {
 			case RelationSupersedes:
-				if err := store.CreateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes), c.Similarity, "llm"); err != nil {
+				if err := store.CreateLinkJudged(ctx, c.NewerID, c.OlderID, string(RelationSupersedes), c.Similarity, "llm", c.JudgedAt); err != nil {
 					return res, nil, fmt.Errorf("create supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
 				res.Created++
@@ -949,7 +1002,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
 			case RelationCauses:
-				if err := store.CreateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm"); err != nil {
+				if err := store.CreateLinkJudged(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm", c.JudgedAt); err != nil {
 					return res, nil, fmt.Errorf("create causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
 				if _, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
