@@ -43,7 +43,7 @@ permissions:
 jobs:
   cycle:
     name: graded staleness cycle (LLM stages)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Harness-internal stage deadlines bound LLM time (8m supersede + 8m
     # resolve + up to 2x15m reflect on the SQLITE_BUSY retry path) plus the
     # 3m embedding-drain gate, binary builds, and tool installs.
