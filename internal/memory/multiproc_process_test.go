@@ -867,6 +867,13 @@ var writeLockBudgets = map[string]float64{
 	// that entry has a distribution behind it rather than an allowance: a table
 	// row with no traffic in the run is an untested budget, and the numbers above
 	// would have been the numbers a reader took on faith.
+	// The fraction is of the STORE-WIDE busy_timeout, and for this one op that is
+	// not the bound that governs it: the retrieval record write scopes its own
+	// busy_timeout to ~150ms (docs/architecture.md, concurrency contract), so the
+	// budget printed beside its line is the store's and NOT its own. Measured with
+	// the scoping in place: wait p50 0.06ms, p99 107ms, max 129ms -- under the
+	// 150ms and nowhere near the 1250ms this fraction prints. Read the
+	// distribution, not the printed budget, for this row.
 	"record-retrieval": 0.25,
 }
 

@@ -845,11 +845,21 @@ func runCLI(ctx context.Context, o options, rep *report, b barriers) error {
 		for _, r := range rows {
 			verdicts = append(verdicts, memory.RowVerdict{ID: r.ID, Kept: true, Stage: "validity"})
 		}
+		// A REFUSED record is counted, not fatal. The record write is bounded on
+		// purpose: it pins a connection with a short busy_timeout and gives up
+		// rather than inherit the store's five seconds, so under this fleet's own
+		// contention a record is lost now and then — and the product path treats
+		// that as the designed outcome, logging it and returning the answer it
+		// already computed. A child that died on it would be measuring the wrong
+		// thing: the load is a measurement of lock behaviour, and the op it is
+		// measuring is defined to fail sometimes. The refusal is still recorded,
+		// because how often it happens is exactly what writeLockBudgets' wait
+		// distribution for this op is read against.
 		if err := store.RecordRetrieval(ctx, memory.RetrievalRecord{
 			ProjectID: o.project, Source: "search", QueryHash: retrievalQueryHash(o.query),
 			Outcome: "answerable", Reason: "floor_met", Verdicts: verdicts,
 		}); err != nil {
-			return fmt.Errorf("RecordRetrieval: %w", err)
+			rep.put("record_retrieval_refused", fmt.Sprint(rep.count("record_retrieval_refused")+1))
 		}
 		rep.put("reads", fmt.Sprint(rep.count("reads")+1))
 		return nil
@@ -1210,11 +1220,21 @@ func loadLoop(ctx context.Context, rep *report, b barriers, pace bool, body func
 	return fmt.Errorf("load loop ran for its %s cap without a stop signal", loadCap)
 }
 
-// retrievalQueryHash is the query reduced to the digest the retrieval record
-// stores. It is the assembler's own rule, reproduced here because this child
-// records directly against the store rather than through assemble.Run, and the
-// column's CHECK refuses anything that is not 64 hex characters — so the helper
-// exists to keep the fleet writing records the real writer would write.
+// retrievalQueryHash is the query reduced to a 64-hex digest for the retrieval
+// record's query_hash column, whose CHECK refuses anything else.
+//
+// It is NOT the production rule and must not be read as one. The real digest is an
+// HMAC-SHA256 under a per-install key, and it is produced by (*memory.Store).
+// DigestQuery, which owns that key — see internal/memory/retrieval_key.go. This
+// helper is a bare sha256 because the fleet's job here is to put the record write
+// under contention, and asking the store for its own digest would mean this child
+// resolved the key from the filesystem to produce a column it never reads back.
+//
+// That substitution is deliberate and it has a boundary: the fleet therefore
+// measures the WRITE, at a hash nobody will ever group by, and any future
+// assertion about grouping or about a digest's provenance is out of scope for it.
+// What it can measure is the lock behaviour, the row count and the cap, which is
+// what writeLockBudgets' record-retrieval entry is about.
 func retrievalQueryHash(query string) string {
 	sum := sha256.Sum256([]byte(query))
 	return hex.EncodeToString(sum[:])

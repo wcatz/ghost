@@ -220,11 +220,30 @@ func TestRecordRetrievalCapsTheTableOldestFirst(t *testing.T) {
 	retrievalRecordRowsCap = 10
 	t.Cleanup(func() { retrievalRecordRowsCap = restore })
 
+	// Counted after EVERY insert, not once at the end, and that is the whole point
+	// of this loop. The cap's claim is that the table "cannot exceed its bound even
+	// transiently", because the eviction rides in the same transaction as the
+	// append -- and a final-state assertion cannot see a transient overshoot.
+	//
+	// It survived one: moving the trigger to `rowid > cap+1` lets the table reach
+	// cap+1 rows on the insert that crosses the bound and evict on the NEXT one,
+	// so it settles back at the cap and every final-state assertion passes while
+	// the table was over its documented bound for the span of a transaction. The
+	// policy is not "ends up at the cap", it is "never above the cap", and only a
+	// per-insert reading distinguishes the two.
 	for i := range 25 {
 		rec := sampleRetrievalRecord()
 		rec.QueryHash = digest(i)
 		if err := s.RecordRetrieval(ctx, rec); err != nil {
 			t.Fatalf("RecordRetrieval %d: %v", i, err)
+		}
+		var n int
+		if err := s.db.QueryRow(`SELECT count(*) FROM retrieval_record`).Scan(&n); err != nil {
+			t.Fatalf("count retrieval rows after insert %d: %v", i, err)
+		}
+		if n > retrievalRecordRowsCap {
+			t.Fatalf("after insert %d the table holds %d rows, above the cap of %d — the eviction must "+
+				"happen in the SAME transaction as the append, not on a later one", i, n, retrievalRecordRowsCap)
 		}
 	}
 
@@ -234,6 +253,12 @@ func TestRecordRetrievalCapsTheTableOldestFirst(t *testing.T) {
 	}
 	if n > retrievalRecordRowsCap {
 		t.Errorf("retrieval_record holds %d rows, want at most the cap of %d", n, retrievalRecordRowsCap)
+	}
+	// Settled AT the cap rather than under it: a window that shrinks would still
+	// satisfy "never above", and would be a silent loss of evidence.
+	if n != retrievalRecordRowsCap {
+		t.Errorf("retrieval_record holds %d rows once past the cap, want exactly %d — the policy is a "+
+			"window of the cap, not one that drifts under it", n, retrievalRecordRowsCap)
 	}
 	got, err := s.RetrievalRecords(ctx, retrievalRecordRowsCap)
 	if err != nil {
@@ -1209,5 +1234,169 @@ func TestARecordWriteGivesUpOnAHeldStoreLockRatherThanWaiting(t *testing.T) {
 	}
 	if left != 0 {
 		t.Errorf("a refused record left %d row(s) behind", left)
+	}
+}
+
+// TestARecordWriteIsBoundedWhenAnotherProcessHoldsTheWriteLock: the budget has to
+// bound the CROSS-PROCESS wait, which is a different wait from the two the first
+// version of this bounded.
+//
+// The record write is on the search path, so it gets a 250ms budget and a
+// context-aware acquire of the store's own mutex. Neither of those touches the
+// wait that matters when the contention is EXTERNAL: a second process — ghost
+// reflect, ghost prune, another server — holding the write lock. That wait is
+// SQLite's busy handler, which is a sleep loop inside the driver's C call. A
+// context cannot interrupt it, and the pool is opened with busy_timeout(5000), so
+// a BEGIN IMMEDIATE spent five seconds inside SQLite and came back SQLITE_BUSY —
+// twenty times the budget, after the caller had already been given its answer.
+//
+// The fix is a scoped busy_timeout for this one write. What this test asserts is
+// the property the comments claim and did not have: the call returns in about the
+// budget no matter who holds the lock. It is measured against a real second
+// *sql.DB on the same file holding BEGIN IMMEDIATE, because a mock would prove
+// only that the test's own mock is bounded.
+func TestARecordWriteIsBoundedWhenAnotherProcessHoldsTheWriteLock(t *testing.T) {
+	// A FILE-backed store, opened exactly as production opens it — the pool's
+	// busy_timeout(5000) is half of what is under test, so a store opened with a
+	// short timeout would not reproduce the bug at all.
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := s.EnsureProject(context.Background(), testProject, "/tmp/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	// A second, INDEPENDENT handle on the same file — a second process as far as
+	// SQLite is concerned, and the only thing that reproduces this. A second
+	// connection on the store's own pool would not do it: the pool holds one
+	// connection and the store's mutex would serialise the two anyway, which is
+	// the in-process wait this test is NOT about.
+	blocker, err := sql.Open("sqlite", "file:"+dbPath+
+		"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatalf("open the blocking handle: %v", err)
+	}
+	t.Cleanup(func() { _ = blocker.Close() })
+	blocker.SetMaxOpenConns(1)
+
+	held, err := blocker.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("the blocker could not take the write lock: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Rollback() })
+	if _, err := held.Exec(`CREATE TABLE hold (id INTEGER)`); err != nil {
+		t.Fatalf("the blocking transaction is not a write: %v", err)
+	}
+	// Confirm the lock is really held, and confirm it in MILLISECONDS: a probe on
+	// the store's own pool would wait out that pool's five-second busy_timeout to
+	// fail, which would make this test take five seconds to prove a 250ms bound.
+	// A third handle with busy_timeout(0) asks the same question without waiting.
+	probe, err := sql.Open("sqlite", "file:"+dbPath+
+		"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatalf("open the probe handle: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Close() })
+	probe.SetMaxOpenConns(1)
+	if probeTx, pErr := probe.BeginTx(context.Background(), nil); pErr == nil {
+		_ = probeTx.Rollback()
+		t.Fatal("a third handle took the write lock while the blocker held BEGIN IMMEDIATE, so this " +
+			"test is not reproducing cross-process contention")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = s.RecordRetrieval(ctx, sampleRetrievalRecord())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("RecordRetrieval succeeded while another process held the write lock for the whole call")
+	}
+	// Generous slack over the 250ms budget for a loaded machine, and far under the
+	// store's 5s busy_timeout that this call used to spend.
+	if elapsed > 2*time.Second {
+		t.Errorf("RecordRetrieval took %v with the write lock held by another process, want about the "+
+			"250ms budget — the ctx deadline does not bound SQLite's busy handler, so the call waited "+
+			"out the pool's busy_timeout instead", elapsed)
+	}
+}
+
+// TestAScopedRecordWritePutsTheStoreBusyTimeoutBack: the fix's own hazard, tested
+// because the fix introduced it.
+//
+// A scoped write lowers busy_timeout on a connection the store shares with every
+// other write, because the pool holds exactly one. If the value were not put
+// back, every LATER write in the process would inherit a 150ms budget where the
+// store's contract says five seconds — a failure that is invisible at the call
+// that caused it, shows up as unrelated saves losing their lock under contention,
+// and never names the record write that did it. So the restore is asserted, in
+// both directions: after a write that SUCCEEDED, and after one that was REFUSED by
+// a lock the caller's own deadline ran out on, which is the case where the context
+// is already dead and a naive restore would be skipped.
+func TestAScopedRecordWritePutsTheStoreBusyTimeoutBack(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := s.EnsureProject(context.Background(), testProject, "/tmp/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	read := func() int {
+		t.Helper()
+		var got int
+		if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&got); err != nil {
+			t.Fatalf("read busy_timeout: %v", err)
+		}
+		return got
+	}
+	original := read()
+	if original <= 0 {
+		t.Fatalf("the store opened with busy_timeout %d, which is no timeout at all", original)
+	}
+
+	// A successful write.
+	if err := s.RecordRetrieval(context.Background(), sampleRetrievalRecord()); err != nil {
+		t.Fatalf("RecordRetrieval: %v", err)
+	}
+	if got := read(); got != original {
+		t.Errorf("after a successful record write the store's busy_timeout is %d, want %d — the scoped "+
+			"write left its own budget on the connection every other write uses", got, original)
+	}
+
+	// A refused one, with a context that is ALREADY done when the restore runs.
+	blocker, err := sql.Open("sqlite", "file:"+dbPath+
+		"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatalf("open the blocking handle: %v", err)
+	}
+	t.Cleanup(func() { _ = blocker.Close() })
+	blocker.SetMaxOpenConns(1)
+	held, err := blocker.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("the blocker could not take the write lock: %v", err)
+	}
+	t.Cleanup(func() { _ = held.Rollback() })
+	if _, err := held.Exec(`CREATE TABLE hold (id INTEGER)`); err != nil {
+		t.Fatalf("the blocking transaction is not a write: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := s.RecordRetrieval(ctx, sampleRetrievalRecord()); err == nil {
+		t.Fatal("RecordRetrieval succeeded while another process held the write lock")
+	}
+	if got := read(); got != original {
+		t.Errorf("after a REFUSED record write the store's busy_timeout is %d, want %d — the restore is "+
+			"the one step that must survive the caller's context expiring", got, original)
 	}
 }

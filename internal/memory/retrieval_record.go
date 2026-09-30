@@ -29,9 +29,11 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -212,6 +214,25 @@ const recordLockPoll = time.Millisecond
 // common case costs two statements and the over-cap case three: nothing is
 // probed when the row just written cannot have crossed the bound.
 //
+// It is bounded THREE times, and the third bound is the one that used to be
+// missing. The caller's context bounds the wait for the store's own mutex
+// (lockRecordWrite, because a sync.RWMutex ignores a context) and bounds the wait
+// for a free connection. Neither touches the wait when ANOTHER PROCESS holds the
+// write lock: that wait is SQLite's busy handler, a sleep loop inside the
+// driver's C call, which no context can interrupt. The pool is opened with
+// busy_timeout(5000), so a BEGIN IMMEDIATE spent five seconds inside SQLite and
+// came back SQLITE_BUSY — and because this path also inherits beginWrite's one
+// bounded retry, ten. A search that had already been answered then took ten
+// seconds to return.
+//
+// So this write does not use beginWrite. It pins one connection, asks that
+// connection for a busy_timeout derived from the caller's own deadline, and
+// restores the value it found afterwards. busy_timeout is per-connection, which
+// is why the pool's single connection is pinned for the whole transaction rather
+// than set with a bare Exec: an unpinned PRAGMA could land on a connection the
+// transaction does not use, and the bound would silently not apply. The
+// store-wide five seconds is NOT changed — every other write keeps it.
+//
 // The write is refused, not merely discouraged, on a store a newer Ghost owns
 // (#746). A retrieval record is the audit trail of what an agent was told, and
 // a stale server's records are exactly the ones that lie — the store may since
@@ -243,10 +264,16 @@ func (s *Store) RecordRetrieval(ctx context.Context, rec RetrievalRecord) error 
 	}
 	defer s.mu.Unlock()
 
-	tx, lock, err := s.beginWrite(ctx, "record-retrieval")
+	// One pinned connection for the whole transaction, with this write's own
+	// busy_timeout. See the comment above: the store-wide five seconds is what
+	// this path must not inherit, and it is restored before returning.
+	conn, lock, err := s.beginScopedWrite(ctx, "record-retrieval")
 	if err != nil {
 		return fmt.Errorf("record retrieval: %w", err)
 	}
+	defer conn.close(s, "record-retrieval") // a failed restore is logged, not swallowed
+
+	tx := conn.tx
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
 	var rowid int64
@@ -276,6 +303,155 @@ func (s *Store) RecordRetrieval(ctx context.Context, rec RetrievalRecord) error 
 		return fmt.Errorf("record retrieval: %w", err)
 	}
 	lock.reportHold("record-retrieval", time.Now())
+	return nil
+}
+
+// close restores the store's write budget and releases the pinned connection.
+func (sw *scopedWrite) close(s *Store, op string) { s.restoreScopedBusyTimeout(sw.restore, op) }
+
+// retrievalBusyTimeoutFloor is the busy_timeout a scoped retrieval write uses
+// when the caller gave no deadline to derive one from.
+//
+// It is a floor rather than the only number: it is also the CEILING, so a caller
+// that handed this write a minute of budget does not get a minute of waiting for
+// a row that is a measurement of a call that has already been answered. The
+// assembler's budget is 250ms and this is below it, so the two cannot drift into
+// a state where the pragma outlasts the context that asked for it.
+const retrievalBusyTimeoutFloor = 150 * time.Millisecond
+
+// retrievalBusyTimeoutMargin is what the scoped timeout leaves of the caller's
+// deadline for the statements themselves and for restoring the pragma. Without it
+// the wait could consume the entire budget and the caller would see its context
+// expire before the transaction was finished — bounded, but by the wrong thing.
+const retrievalBusyTimeoutMargin = 40 * time.Millisecond
+
+// scopedWrite is one write transaction on a connection whose busy_timeout is this
+// write's own, and the value to put back when it is done.
+type scopedWrite struct {
+	tx      *sql.Tx
+	conn    *sql.Conn
+	restore func() error
+}
+
+// beginScopedWrite opens a write transaction on a PINNED connection whose
+// busy_timeout is bounded by the caller's own deadline.
+//
+// Why the pin: busy_timeout is a property of a connection, and the pool holds
+// exactly one (MaxOpenConns(1)). Setting the pragma through s.db would put it on
+// whichever connection the pool handed out, and a pool is free to close an idle
+// connection between that statement and the BEGIN — after which the transaction
+// would run on a fresh connection at the store-wide five seconds and the bound
+// would be quietly absent. Pinning makes the pragma and the transaction the same
+// connection by construction.
+//
+// Why no retry: beginWrite makes one extra BEGIN attempt, which is right for a
+// save — the caller's whole point is that the memory is not lost. Two attempts at
+// a 150ms budget is 300ms, past the 250ms the assembler allows, and a record is
+// the one write here whose loss is recoverable: the caller already has its
+// answer, and a report with a hole in it beats a search that waits. A refusal is
+// reported through the same seam as every other write, so the fleet's
+// record-retrieval distribution still has the losing attempts in it.
+func (s *Store) beginScopedWrite(ctx context.Context, op string) (*scopedWrite, writeLock, error) {
+	start := time.Now()
+	// Conn is context-aware, unlike the BEGIN that follows it, so a caller whose
+	// budget is already spent fails here rather than inside SQLite.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, writeLock{}, err
+	}
+	// Read the value to put back rather than assuming the DSN's 5000: a test or a
+	// future caller may have set its own, and restoring a number this function
+	// hard-coded would silently change the store's write contract.
+	var previous int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&previous); err != nil {
+		_ = conn.Close()
+		return nil, writeLock{}, fmt.Errorf("read busy_timeout: %w", err)
+	}
+	budget := retrievalBusyTimeoutFloor
+	if deadline, ok := ctx.Deadline(); ok {
+		if left := time.Until(deadline) - retrievalBusyTimeoutMargin; left > 0 && left < budget {
+			budget = left
+		}
+	}
+	if err := setScopedBusyTimeout(ctx, conn, budget); err != nil {
+		_ = conn.Close()
+		return nil, writeLock{}, err
+	}
+
+	// The DSN asks for BEGIN IMMEDIATE, so the write lock is taken here, before
+	// the first statement, and this is the whole of the wait the budget governs.
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		s.restoreScopedBusyTimeout(restorePragma(conn, previous), op)
+		if isLockContention(err) {
+			writeLock{wait: time.Since(start)}.reportLost(op)
+		}
+		return nil, writeLock{}, err
+	}
+
+	sw := &scopedWrite{tx: tx, conn: conn, restore: restorePragma(conn, previous)}
+	// The newer-store refusal runs in the SAME transaction as the write it guards,
+	// exactly as beginGuardedWrite does, and rolls back rather than commits.
+	if err := s.checkStoreNotNewer(ctx, tx); err != nil {
+		_ = tx.Rollback()
+		s.restoreScopedBusyTimeout(sw.restore, op)
+		return nil, writeLock{}, err
+	}
+	return sw, writeLock{wait: time.Since(start), took: time.Now()}, nil
+}
+
+// restoreScopedBusyTimeout puts the store's write budget back and says so when it
+// cannot.
+//
+// This is the one error in the record write that outlives the call: every other
+// failure is a lost row, which the caller already handles, but a connection left
+// carrying this write's 150ms timeout shortens EVERY later write's budget for the
+// life of the process. That shows up later as unrelated saves losing their lock,
+// and it never names the record write that did it — so it is logged here, at the
+// point where the cause is still known, rather than left to be inferred.
+func (s *Store) restoreScopedBusyTimeout(restore func() error, op string) {
+	if err := restore(); err != nil {
+		s.logger.Warn("the retrieval record's scoped busy_timeout could not be restored; "+
+			"this connection may carry a shorter write budget for the rest of the process",
+			"op", op, "error", err)
+	}
+}
+
+// restorePragma returns the connection's busy_timeout to what it was, and closes
+// the pinned connection.
+//
+// It does not use the CALLER's context, because that context is the thing which
+// may have just expired: the refused case below is one where the write ended
+// because the caller's budget ran out, and a restore that inherited a dead context
+// would depend on the driver tolerating one. This driver does (measured — a
+// restore through an already-cancelled context still applied the pragma), so
+// WithoutCancel is not what makes the property hold and the test does not pretend
+// it is: it is here so the code does not have to be re-examined to find out.
+//
+// A connection left at a 150ms timeout would silently shorten every LATER write's
+// budget for the life of the process, which is a far worse failure than the record
+// this write lost. A failure to restore is returned so the caller can say so,
+// because it is the one error here that outlives the call.
+func restorePragma(conn *sql.Conn, previous int) func() error {
+	return func() error {
+		err := setScopedBusyTimeout(context.Background(), conn,
+			time.Duration(previous)*time.Millisecond)
+		_ = conn.Close()
+		return err
+	}
+}
+
+// setScopedBusyTimeout is the one statement in this file that is not a store write,
+// and it is in its own function so the structural guard's exemption map can name
+// it: a PRAGMA that sets the connection's busy timeout changes CONNECTION state —
+// what this connection will wait for the write lock — and writes nothing to the
+// file. It therefore has no store version to be behind, and asking would answer a
+// question about a pragma rather than about the data.
+func setScopedBusyTimeout(ctx context.Context, conn *sql.Conn, d time.Duration) error {
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout = `+
+		strconv.Itoa(int(d.Milliseconds()))); err != nil {
+		return fmt.Errorf("set the scoped busy_timeout: %w", err)
+	}
 	return nil
 }
 

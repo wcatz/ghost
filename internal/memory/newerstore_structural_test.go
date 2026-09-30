@@ -66,12 +66,25 @@ type writeSeamCall struct {
 	why string
 }
 
-// The two seams. They are named rather than pattern-matched on their bodies so
+// The seams. They are named rather than pattern-matched on their bodies so
 // the scan pins the CALL SITE, which is what a future write path has to get
 // right — and they are named separately so routing a statement to the wrong one
 // is a failure rather than a pass.
+//
+// There are three, and the third exists because a seam is a CLAIM that a function
+// checks the store's version: naming one lets every write in it pass without the
+// scan knowing whether the claim is true. That is why
+// TestEveryNamedSeamActuallyChecksTheStoreVersion walks each seam's call tree and
+// requires the check — a seam that stops checking fails on its own account rather
+// than quietly admitting every write routed through it.
+//
+// beginScopedWrite is the retrieval record's: it opens the write transaction on a
+// PINNED connection with its own busy_timeout (see the concurrency contract in
+// docs/architecture.md), so it cannot be beginGuardedWrite, and it runs the same
+// checkStoreNotNewer in the same transaction.
 const (
 	guardedTxSeam        = "beginGuardedWrite"
+	guardedScopedTxSeam  = "beginScopedWrite"
 	guardedStatementSeam = "execGuardedWrite"
 )
 
@@ -84,6 +97,13 @@ const (
 // function rather than only by file wherever the file still holds store writes,
 // so exempting one path cannot quietly exempt the next one added beside it.
 var writeSeamExemptions = map[string]string{
+	// The scoped write's busy_timeout pragma. It sets what THIS CONNECTION waits
+	// for the write lock and writes nothing to the file, so there is no store
+	// version for it to be behind. It is keyed to the helper rather than to
+	// beginScopedWrite itself on purpose: the seam's transaction and its guarded
+	// check stay in scope of this test, and only the pragma is exempt.
+	"retrieval_record.go:setScopedBusyTimeout": "a PRAGMA that sets the connection's busy_timeout configures the connection, not the file",
+
 	// The migration path. It is the thing that makes a store newer, so asking
 	// it whether the store is newer is a deadlock in meaning: at the moment it
 	// runs, the answer is by construction "no, not yet". It also runs on a
@@ -813,8 +833,8 @@ func seamFor(kind, enclosing string) string {
 	bare := bareFuncName(enclosing)
 	switch kind {
 	case writeTxKind, queryWriteKind:
-		if bare == guardedTxSeam {
-			return guardedTxSeam
+		if bare == guardedTxSeam || bare == guardedScopedTxSeam {
+			return bare
 		}
 	case autocommitKind:
 		if bare == guardedStatementSeam {
@@ -1154,4 +1174,89 @@ func typeText(expr ast.Expr) string {
 		return id.Name
 	}
 	return ""
+}
+
+// TestEveryNamedSeamActuallyChecksTheStoreVersion: the other half of what naming a
+// seam claims.
+//
+// seamFor recognises a function as a seam BY NAME, so naming one makes every write
+// inside it pass this guard without the guard knowing whether the function really
+// performs the check. A seam that is renamed, emptied of its check, or added by
+// someone who believed their own comment would then admit every write routed
+// through it, silently — the failure this file exists to prevent, reached from the
+// other direction.
+//
+// So each named seam's CALL TREE is read and required to run the check. The tree
+// rather than the body, because a seam may delegate: beginGuardedWrite and
+// execGuardedWrite both hand off to finishGuardedWrite, and asserting a direct call
+// would have failed on both seams that existed before this test — which is how a
+// correct delegation looks like a broken seam.
+func TestEveryNamedSeamActuallyChecksTheStoreVersion(t *testing.T) {
+	// The same walk this scan already does: the package directory's non-test .go
+	// files, parsed one by one. parser.ParseDir would be shorter and is deprecated
+	// because it ignores build tags when associating files with packages, which
+	// would make the seam list depend on which platform the test runs on.
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	direct := map[string]bool{}
+	calls := map[string][]string{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		{
+			for _, d := range file.Decls {
+				fn, ok := d.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				var names []string
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					switch fun := call.Fun.(type) {
+					case *ast.SelectorExpr:
+						if fun.Sel.Name == "checkStoreNotNewer" {
+							direct[fn.Name.Name] = true
+						}
+						names = append(names, fun.Sel.Name)
+					case *ast.Ident:
+						names = append(names, fun.Name)
+					}
+					return true
+				})
+				calls[fn.Name.Name] = names
+			}
+		}
+	}
+	var reaches func(string, int) bool
+	reaches = func(name string, depth int) bool {
+		if direct[name] {
+			return true
+		}
+		if depth == 0 {
+			return false
+		}
+		for _, called := range calls[name] {
+			if reaches(called, depth-1) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, seam := range []string{guardedTxSeam, guardedScopedTxSeam, guardedStatementSeam} {
+		if !reaches(seam, 2) {
+			t.Errorf("%s is named as a guarded seam but nothing in its call tree runs "+
+				"checkStoreNotNewer — every write routed through it passes this guard unchecked", seam)
+		}
+	}
 }
