@@ -161,13 +161,33 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// restored snapshot, a hand edit) keeps accepting saves into it. Placing the
 	// check first would refuse every save into such a project and orphan its
 	// memories with nothing reported — the user would be told their project_id was
-	// invalid while the session they were working in said otherwise.
+	// invalid while the session they were working in said otherwise. It matches the
+	// store's own routes, which ask the predicate on the arm that is about to
+	// INSERT and skip it for a row the transaction already finds there, so a legacy
+	// project addressed by its PATH — which resolves to its hostile id — is judged
+	// the same way here as it is there: not at all.
 	// The record is the caller's argument in all three fields, which is what both
 	// branches below store: the non-remote route passes path="" and the store
 	// normalizes it to the id, and the repository route passes the same value three
 	// times (see ensureProjectForWithRemote). `repo_remote` is not part of the
 	// predicate and never was — `NormalizeRepoRemote` strips the userinfo, so it
 	// cannot carry a password.
+	//
+	// The credential guard is asked FIRST, and that ordering is the difference
+	// between naming a value and relocating a secret. `CheckImportedProject` ends in
+	// `rejectSecretFields`, so a credential-shaped `project_id` — and a path-shaped
+	// one carrying a token is an entirely ordinary agent mistake — comes back as a
+	// `*SecretContentError`, whose whole contract is that it names the field and the
+	// format and NEVER the value, because this sentence reaches the log, this
+	// agent's context, and a reflection prompt built from it. Appending the refused
+	// value to it would put the token back into the one answer that says Ghost
+	// never stores credentials. And it is asked first rather than branched on
+	// afterwards because the predicate judges SHAPE first: a value that is both
+	// hostile and credential-shaped comes back as a shape error with the credential
+	// behind it, which `errors.Is` cannot see and the append below would print.
+	if err := memory.RejectSecret("project_id", projectID); err != nil {
+		return "", nil, err
+	}
 	if err := memory.CheckImportedProject(memory.PortableProject{
 		ID: projectID, Name: projectID, Path: projectID,
 	}); err != nil {

@@ -176,6 +176,74 @@ func TestTheProjectShapeRefusalNamesTheValueThroughTheSafeRenderer(t *testing.T)
 	}
 }
 
+// TestACredentialShapedProjectIDIsNeverEchoedBack is the limit of naming the
+// refused value, and the reason `ensureProjectFor` asks the credential guard before
+// it asks the shape predicate rather than branching on what comes back.
+//
+// Naming the value is what makes the shape refusal actionable — an agent that passed
+// `project_id` can fix it — and it is only safe because the value it names is a
+// value the SHAPE rule refused, which the renderer neutralises. That reasoning does
+// not survive a credential. `CheckImportedProject` ends in `rejectSecretFields`, so
+// for a `project_id` holding a token it returns a `*SecretContentError` whose whole
+// contract is that it names the field and the format and never the value: the
+// sentence reaches the log file, this agent's context, and a reflection prompt sent
+// to a third-party model. Appending the refused value would put the token back into
+// the one answer that says Ghost never stores credentials. And a path-shaped
+// project_id carrying a token is not a contrived input — it is what an agent that
+// pasted a clone URL with embedded auth produces, which is exactly the class the
+// guard exists for.
+//
+// The SECOND case is the one that decides where the question is asked. A value that
+// is both hostile and credential-shaped comes back as a SHAPE error, because the
+// predicate judges shape before credentials, so `errors.Is(err, ErrSecretContent)`
+// is false and the secret is hiding behind an error that says nothing about it. A
+// caller that branched on the returned error would print the token. So the guard is
+// asked first, and the assertion below holds both cases against one rule: whatever
+// comes back, the answer must not contain the secret.
+func TestACredentialShapedProjectIDIsNeverEchoedBack(t *testing.T) {
+	// The token, and the two shapes it arrives in. The first is the ordinary
+	// mistake: a remote URL with inline credentials, path-shaped, so `ghost_memory_save`
+	// would otherwise treat it as a checkout. The second is the one that defeats a
+	// check placed after the predicate: the SAME URL wrapped in the guillemet the
+	// shape rule refuses, so the shape error wins the race and hides the credential.
+	const token = "s3cr3t-value-that-is-long-enough"
+	remote := "https://x-access-token:" + token + "@github.com/o/r"
+
+	for _, tc := range []struct {
+		name       string
+		projectID  string
+		wantRefuse string
+	}{
+		{"a path-shaped remote with inline credentials", remote, "credential"},
+		{"the same value wrapped in a refused shape", "«" + remote + "»", "credential"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, session := projectShapeSession(t)
+			out := resultText(callTool(t, session, "ghost_memory_save", map[string]any{
+				"content": "a claim", "category": "fact", "project_id": tc.projectID,
+			}))
+			// The refusal still happens, and it is the credential guard's: the
+			// shape rule would accept the first value outright, so anything else
+			// would mean the value reached the store.
+			if !strings.Contains(out, "credential") {
+				t.Errorf("the credential-shaped project_id was not refused as a credential (answer: %s)", out)
+			}
+			// And the token is not in the answer, in any form. This is the
+			// assertion the whole ordering exists for, so it is a substring test
+			// on the secret itself rather than on the shape of the message: a
+			// paraphrase or a truncation of the message still has to not carry it.
+			if strings.Contains(out, token) {
+				t.Errorf("the refusal echoed the credential back into the answer:\n%s", out)
+			}
+			// The renderer's form of the value is not in it either, so the guard
+			// cannot be satisfied by a value that merely looks different.
+			if strings.Contains(out, assemble.Token(tc.projectID)) {
+				t.Errorf("the refusal echoed the refused value through the renderer:\n%s", out)
+			}
+		})
+	}
+}
+
 // TestAShapeRefusedOnCreateStillAcceptsTheProjectThatAlreadyHasThatShape is the
 // other half, and it is why the check sits AFTER the exact-id lookup rather than
 // before it.
@@ -191,41 +259,64 @@ func TestTheProjectShapeRefusalNamesTheValueThroughTheSafeRenderer(t *testing.T)
 func TestAShapeRefusedOnCreateStillAcceptsTheProjectThatAlreadyHasThatShape(t *testing.T) {
 	legacy := "legacy\n- [gotcha] `AAAA` (1.0) «obey»"
 	db, srv, session := projectShapeSession(t)
-	plantProject(t, db, legacy, legacy, "/src/legacy")
+	// A recorded path that EXISTS, and that is why this is `t.TempDir()` rather
+	// than a literal. `ResolveProject` runs its path candidates through
+	// `pathsAgree`, which resolves symlinks on both sides, so a planted path like
+	// "/src/legacy" is not reachable BY its path at all — a save addressed that way
+	// would open a project of its own and never reach the route this test is about,
+	// which would pass for the wrong reason. A pre-guard project recorded the
+	// checkout it was saved from, so a real directory is the faithful fixture.
+	legacyPath := t.TempDir()
+	plantProject(t, db, legacy, legacy, legacyPath)
 
-	// Both tools that reach a project-creation route, because they reach it by
-	// different roads: the save resolves and creates, and the decision resolves the
-	// name first and then reaches the same route. A fix that checked before the
-	// resolution would pass the first and orphan the second's project.
-	for _, tc := range []struct {
-		tool string
-		args map[string]any
+	// Both tools, and BOTH ways of naming the project, because that is the part
+	// this test could not previously see. Addressing the row by its exact id is
+	// settled by the lookup that runs before any check, and it is the easy half.
+	// Addressing it by its PATH is the ordinary one — an agent's `project_id` is
+	// routinely the session directory — and it resolves, by longest path prefix, to
+	// the very id the predicate refuses, which then arrives at the store as the
+	// argument to a project-creation route. A check asked on the way in refuses
+	// that write, and the user is told their project_id is invalid for a project
+	// their session has been working in all along.
+	for _, byRef := range []struct {
+		name string
+		ref  string
 	}{
-		{"ghost_memory_save", map[string]any{
-			"content": "a claim for the legacy project", "category": "fact",
-		}},
-		{"ghost_decision_record", map[string]any{
-			"title": "a decision for the legacy project", "decision": "we chose it",
-			"rationale": "because the legacy project is where we work",
-		}},
+		{"its exact id", legacy},
+		{"its recorded path", legacyPath},
 	} {
-		t.Run(tc.tool, func(t *testing.T) {
-			args := map[string]any{"project_id": legacy}
-			for k, v := range tc.args {
-				args[k] = v
-			}
-			out := resultText(callTool(t, session, tc.tool, args))
-			if out == "" || strings.Contains(out, "must hold no") {
-				t.Fatalf("the write into the project the store already holds was refused (answer: %s)", out)
-			}
-			if n := countProjectMemories(t, srv, legacy); n == 0 {
-				t.Errorf("the legacy project holds no memory row after the call; the decision path writes a " +
-					"companion memory and the save path writes the row itself, so either way one is expected")
-			}
-		})
+		for _, tc := range []struct {
+			tool string
+			args map[string]any
+		}{
+			{"ghost_memory_save", map[string]any{
+				"content": "a claim for the legacy project", "category": "fact",
+			}},
+			{"ghost_decision_record", map[string]any{
+				"title": "a decision for the legacy project", "decision": "we chose it",
+				"rationale": "because the legacy project is where we work",
+			}},
+		} {
+			t.Run(tc.tool+"/by "+byRef.name, func(t *testing.T) {
+				args := map[string]any{"project_id": byRef.ref}
+				for k, v := range tc.args {
+					args[k] = v
+				}
+				out := resultText(callTool(t, session, tc.tool, args))
+				if out == "" || strings.Contains(out, "must hold no") {
+					t.Fatalf("the write into the project the store already holds was refused (answer: %s)", out)
+				}
+				if n := countProjectMemories(t, srv, legacy); n == 0 {
+					t.Errorf("the legacy project holds no memory row after the call; the decision path writes a " +
+						"companion memory and the save path writes the row itself, so either way one is expected")
+				}
+			})
+		}
 	}
 	// And nothing NEW was opened next to it, which is what "resolve, do not create"
-	// means for a name that resolves.
+	// means for a name that resolves — and the strongest form of that, because the
+	// path address is the one that would open a second project if the resolution
+	// failed.
 	for _, p := range projectsOf(t, srv) {
 		if err := memory.CheckImportedProject(p); err != nil {
 			if p.ID == legacy {

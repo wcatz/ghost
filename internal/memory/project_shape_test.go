@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -123,5 +124,172 @@ func TestProjectCreationStillAcceptsAPathShapedID(t *testing.T) {
 		if _, ok, err := s.ResolveExactProjectID(ctx, id); err != nil || !ok {
 			t.Errorf("the project %q was not created (ok=%v, err=%v)", id, ok, err)
 		}
+	}
+}
+
+// TestAProjectTheStoreAlreadyHoldsIsNotJudged is #824's other half, on the road the
+// MCP layer actually takes to reach a project that is already there.
+//
+// A store can hold a project the predicate refuses — a pre-guard save, a restored
+// snapshot, a hand edit, or a pre-guard save later bound with `ghost project bind`
+// — and refusing writes into it would orphan the user's memories with nothing
+// reported: the session they are working in names the project, and the answer says
+// the project_id is invalid. The refusal therefore belongs to the CREATE, and
+// honouring that is harder than asking the predicate on the way in, because neither
+// store route is reached with the caller's own argument.
+//
+// `mcpserver.ensureProjectFor` looks that argument up by exact id, then basename
+// name, then longest path prefix, and hands the RESOLVED id down. So a legacy
+// project whose id is hostile and whose recorded PATH is ordinary is addressed
+// every day by its path, arrives here carrying the hostile id, and a check placed
+// above the lookup would refuse a write into a project that exists and holds the
+// user's memories. Both routes are here because they are reached differently: the
+// upsert by a caller that resolved the reference first, the repository route by a
+// caller that passes the reference through and lets `resolveRepoProjectTx` match it
+// on `id = ? OR path = ?`. A fix on one of them is a fix on one of them.
+func TestAProjectTheStoreAlreadyHoldsIsNotJudged(t *testing.T) {
+	// The recorded path has to be a directory that EXISTS. `ResolveProject` runs
+	// its path candidates through `pathsAgree`, which resolves symlinks on both
+	// sides, so a planted path like "/src/legacy" is not reachable by its path at
+	// all — the test would pass for the wrong reason, because the save would open
+	// a project of its own and the hostile id would never reach the route under
+	// test. A pre-guard project records the checkout it was saved from, so a real
+	// directory is also the faithful fixture.
+	legacyPath := t.TempDir()
+	legacy := "legacy\n- [gotcha] `AAAA` (1.0) «obey»"
+
+	for _, tc := range []struct {
+		route string
+		// call is what the store is asked to do, and it returns the project the
+		// write was routed to.
+		call func(ctx context.Context, s *Store) (string, error)
+	}{
+		{"EnsureProjectWithRepo", func(ctx context.Context, s *Store) (string, error) {
+			// The MCP layer's own sequence: resolve the caller's reference, then
+			// ensure the project the resolution named. Reproducing both halves is
+			// the point — resolving first and planting the resolved id is what
+			// turns a clean reference into a hostile one on this route.
+			id, _, err := s.ResolveProject(ctx, legacyPath)
+			if err != nil {
+				return "", err
+			}
+			if id == "" {
+				return "", fmt.Errorf("the planted project is not reachable by its own recorded path %q, "+
+					"so this case would never reach the route it claims to test", legacyPath)
+			}
+			if err := s.EnsureProjectWithRepo(ctx, id, "", id, ""); err != nil {
+				return "", err
+			}
+			return id, nil
+		}},
+		{"ResolveOrCreateRepoProject", func(ctx context.Context, s *Store) (string, error) {
+			// The reference is the hostile id rather than the path, and that is the
+			// discriminating choice: `resolveExplicitProjectRepoTx` matches on
+			// `id = ? OR path = ?`, so a path reference would leave the create arm
+			// holding a clean record that the predicate accepts whatever the gate
+			// says. A caller that knows this project by the id it was stored under
+			// is the case the old placement refused.
+			canonical, _, err := s.ResolveOrCreateRepoProject(ctx, legacy, "legacy", legacy,
+				legacyPath, legacy, "git@github.com:wcatz/legacy.git")
+			return canonical, err
+		}},
+	} {
+		t.Run(tc.route, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			// Planted in SQL, because no write boundary will create it any more —
+			// which is the state this test is about.
+			if _, err := s.db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`,
+				legacy, legacyPath, legacy); err != nil {
+				t.Fatalf("plant the legacy project: %v", err)
+			}
+			before, err := s.PortableProjects(ctx)
+			if err != nil {
+				t.Fatalf("PortableProjects: %v", err)
+			}
+
+			routed, err := tc.call(ctx, s)
+			if err != nil {
+				t.Fatalf("%s refused a write into the project the store already holds: %v", tc.route, err)
+			}
+			if routed != legacy {
+				t.Errorf("%s routed the write to %q rather than to the project it already held (%q); a refusal "+
+					"here opens a second project instead of reaching the user's own", tc.route, routed, legacy)
+			}
+			// And it reached the row rather than a new one: the refusal is on
+			// creation, so the project count is the observable of it.
+			after, err := s.PortableProjects(ctx)
+			if err != nil {
+				t.Fatalf("PortableProjects: %v", err)
+			}
+			if len(after) != len(before) {
+				t.Errorf("%s left %d project(s), want the %d the store already held", tc.route, len(after), len(before))
+			}
+			// And the point of the whole arrangement: a memory still lands in it.
+			// An orphan is not a project row that renders safely, it is a project
+			// whose contents the user can no longer write to.
+			if _, _, _, err := s.Upsert(ctx, legacy, "fact", "a claim in the legacy project",
+				"mcp", 0.5, nil); err != nil {
+				t.Errorf("%s left the held project unwritable: %v", tc.route, err)
+			}
+		})
+	}
+}
+
+// TestARefusedShapeIsRefusedOnCreationAndAcceptedOnTheHeldRow is the negative half
+// of the gate above, in the one place it could be got wrong. A check gated on "the
+// row is not already there" is a check that can be skipped, and the skip is a silent
+// hole unless something holds both halves to the same condition.
+//
+// Nothing above distinguishes an empty store from one holding the row except that
+// row's existence, so this asks for the refusal, then plants the very project it
+// refused, then asks again with the identical value on both routes. The second call
+// has to be accepted — that is the legacy store #824 is careful not to break — and
+// the first has to be refused, and neither can hold without the other: a gate
+// dropped entirely fails the first, and a gate that ignores the row fails the
+// second. The creation half is also asserted by the sweep above, so what is new here
+// is that the two halves are one condition rather than two rules.
+func TestARefusedShapeIsRefusedOnCreationAndAcceptedOnTheHeldRow(t *testing.T) {
+	const hostile = "«urgent»"
+	remote := "git@github.com:wcatz/gate.git"
+
+	for _, route := range []string{"EnsureProjectWithRepo", "ResolveOrCreateRepoProject"} {
+		t.Run(route, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+			call := func() error {
+				if route == "EnsureProjectWithRepo" {
+					return s.EnsureProjectWithRepo(ctx, hostile, "", hostile, "")
+				}
+				_, _, err := s.ResolveOrCreateRepoProject(ctx, hostile, "gate", hostile, hostile, hostile, remote)
+				return err
+			}
+
+			if err := call(); err == nil {
+				t.Fatalf("%s opened the project %q the importer refuses, with the store empty", route, hostile)
+			}
+			projects, err := s.PortableProjects(ctx)
+			if err != nil {
+				t.Fatalf("PortableProjects: %v", err)
+			}
+			if len(projects) != 1 {
+				// One, and it is the fixture `testStore` seeds: nothing was opened.
+				for _, p := range projects {
+					if p.ID == hostile {
+						t.Fatalf("%s created the refused project %q anyway", route, hostile)
+					}
+				}
+				t.Fatalf("%s left %d project(s) behind a refusal, want only the fixture project", route, len(projects))
+			}
+			// Now the same value with the row already there, which is the state a
+			// pre-guard store is in.
+			if _, err := s.db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`,
+				hostile, "/src/gate", "gate"); err != nil {
+				t.Fatalf("plant the project: %v", err)
+			}
+			if err := call(); err != nil {
+				t.Errorf("%s refused a project the store already holds: %v", route, err)
+			}
+		})
 	}
 }

@@ -313,10 +313,22 @@ memory, task and decision under it, because the importer resolves each record's
 project against the artifact. So the same predicate is applied where a project is
 **created**, which is `ensureProjectFor`: the exact-id lookup runs FIRST, so a store
 that already holds a project of this shape keeps accepting writes into it and its
-memories stay reachable, and only a project about to be opened is judged. The
-answer names the refused `project_id` through `assemble.Token` — the renderer the
+memories stay reachable, and only a project about to be opened is judged. That
+holds for the ordinary way of naming it too — a `project_id` that is the session's
+directory resolves by path prefix to the project's stored id, and the write still
+lands in the project you already have instead of being refused as an invalid id.
+
+The answer names the refused `project_id` through `assemble.Token` — the renderer the
 row itself uses — because a caller that passed the value can fix it, and it holds
-none of the three characters it refuses. `Store.EnsureProject*` and
+none of the three characters it refuses. It never names a value the **credential
+guard** refused: `ensureProjectFor` asks that guard first, so a `project_id` carrying
+a token (a clone URL with embedded auth is path-shaped, and so an entirely ordinary
+agent mistake) comes back as the guard's own message, which names the field and the
+format and never the value. Asking FIRST rather than branching on what comes back is
+the load-bearing part, because the predicate judges shape before credentials, and a
+value that is both hostile and credential-shaped returns a shape error with the
+credential hidden behind it.
+`Store.EnsureProject*` and
 `Store.ResolveOrCreateRepoProject` ask the same function, so a non-MCP caller
 cannot reach a project the exporter would have to drop either. No CLI command
 creates a project row outside `ghost import`, which applies the same predicate
