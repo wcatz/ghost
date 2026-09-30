@@ -282,7 +282,7 @@ func TestReassessWithdrawsNeitherEdgeOfAnUndecidedCycle(t *testing.T) {
 		if res.Unclassified != 1 {
 			t.Errorf("Result.Unclassified = %d, want 1: a missing verdict is counted, not dropped", res.Unclassified)
 		}
-		assertUndecidedCycle(t, store, res, withdrawn, stale, fix)
+		assertUndecidedCycle(t, store, res, withdrawn, stale, fix, CycleNoVerdict)
 	})
 
 	t.Run("tied timestamps", func(t *testing.T) {
@@ -307,19 +307,25 @@ func TestReassessWithdrawsNeitherEdgeOfAnUndecidedCycle(t *testing.T) {
 		if len(cls.judged) != 0 {
 			t.Errorf("the pass asked about a pair whose direction is unknowable: %v", cls.judged)
 		}
-		assertUndecidedCycle(t, store, res, withdrawn, a, b)
+		if res.Unoriented != 1 {
+			t.Errorf("Result.Unoriented = %d, want 1: a tied pair is counted, and it is the one undecided cycle whose next step is the operator's", res.Unoriented)
+		}
+		assertUndecidedCycle(t, store, res, withdrawn, a, b, CycleUnoriented)
 	})
 }
 
-// assertUndecidedCycle is the shared shape of the undecided branch: nothing
-// withdrawn, nothing judged, the cycle reported, and both edges still live.
-func assertUndecidedCycle(t *testing.T, store *memory.Store, res ReassessResult, withdrawn []WithdrawnEdge, a, b string) {
+// assertUndecidedCycle is the shared shape of the two outcomes that decide
+// NOTHING: nothing withdrawn, the cycle reported, both edges still live. The
+// outcome differs, and it is the one thing that tells the operator whether a re-run
+// answers it or only they do — so the caller names which of the two it is looking
+// at, rather than the test reading one sentence that claimed to be both.
+func assertUndecidedCycle(t *testing.T, store *memory.Store, res ReassessResult, withdrawn []WithdrawnEdge, a, b string, outcome CycleOutcome) {
 	t.Helper()
 	if res.Withdrawn != 0 || len(withdrawn) != 0 {
 		t.Errorf("withdrawn=%d listed=%d, want 0/0: with no verdict there is no basis for withdrawing half a cycle", res.Withdrawn, len(withdrawn))
 	}
-	if len(res.Cyclic) != 1 || res.Cyclic[0].Outcome != CycleUndecided {
-		t.Fatalf("Cyclic = %+v, want exactly one pair reported as undecided", res.Cyclic)
+	if len(res.Cyclic) != 1 || res.Cyclic[0].Outcome != outcome {
+		t.Fatalf("Cyclic = %+v, want exactly one pair reported as %q", res.Cyclic, outcome)
 	}
 	c := res.Cyclic[0]
 	if (c.First.SourceID != a && c.First.SourceID != b) || (c.Second.SourceID != a && c.Second.SourceID != b) {

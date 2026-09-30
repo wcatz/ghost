@@ -45,14 +45,30 @@ func TestSupersedeRepairCommandsParse(t *testing.T) {
 
 			// The withdraw command, with the id shapes an imported artifact brings
 			// in — a full id is never hex, and the resolver accepts any shape as
-			// long as the whole id is given.
-			for _, tc2 := range []struct{ name, id string }{
-				{name: "a hex id", id: "abcdef0123456789abcdef0123456789"},
-				{name: "an id holding a space and a semicolon", id: "imported note; rm -rf /"},
-				{name: "an eight-character prefix", id: "abcdef01"},
+			// long as the whole id is given. A DASH-LEADING id is the one shape the
+			// CLI cannot be given, and it is the case the renderer's `nameable`
+			// return exists for: parseSupersedeArgs refuses a --withdraw operand
+			// that looks like a flag, and quoting does not change that.
+			for _, tc2 := range []struct {
+				name, id string
+				nameable bool
+			}{
+				{name: "a hex id", id: "abcdef0123456789abcdef0123456789", nameable: true},
+				{name: "an id holding a space and a semicolon", id: "imported note; rm -rf /", nameable: true},
+				{name: "an eight-character prefix", id: "abcdef01", nameable: true},
+				{name: "an id beginning with a dash", id: "-imported-id", nameable: false},
 			} {
 				t.Run(tc2.name, func(t *testing.T) {
-					cmd := followup.WithdrawCommand(tc.project, tc2.id, "9876543210fedcba9876543210fedcba")
+					cmd, nameable := followup.WithdrawCommand(tc.project, tc2.id, "9876543210fedcba9876543210fedcba")
+					if nameable != tc2.nameable {
+						t.Fatalf("nameable = %v, want %v for %q", nameable, tc2.nameable, tc2.id)
+					}
+					if !nameable {
+						if cmd != "" {
+							t.Errorf("a command was rendered for an id the parser refuses: %q", cmd)
+						}
+						return
+					}
 					words := shellSplit(t, cmd)
 					project, _, apply, reassess, _, withdraw, err := parseSupersedeArgs(words[2:])
 					if err != nil {
@@ -85,15 +101,56 @@ func TestSupersedeCycleBlockUsesTheFollowupCommands(t *testing.T) {
 	c := supersede.CyclicPair{
 		First:   supersede.CyclicEdge{SourceID: "abcdef0123456789", TargetID: "9876543210fedcba"},
 		Second:  supersede.CyclicEdge{SourceID: "9876543210fedcba", TargetID: "abcdef0123456789"},
-		Outcome: supersede.CycleUndecided,
+		Outcome: supersede.CycleUnoriented,
 	}
 	out := supersedeReassessReport("myproj", supersede.ReassessResult{
 		Loaded: 2, Unclassified: 1, Cyclic: []supersede.CyclicPair{c},
 	}, true, nil, 1, 0)
 	for _, e := range []supersede.CyclicEdge{c.First, c.Second} {
-		want := followup.WithdrawCommand("myproj", e.SourceID, e.TargetID)
+		want, nameable := followup.WithdrawCommand("myproj", e.SourceID, e.TargetID)
+		if !nameable {
+			t.Fatalf("an ordinary id is nameable, so WithdrawCommand refused %s", e.SourceID)
+		}
 		if !strings.Contains(out, want) {
 			t.Errorf("the cycle block does not print %q:\n%s", want, out)
+		}
+	}
+}
+
+// An id the CLI cannot name must not be printed inside a --withdraw command the
+// parser refuses, and the answer is to name the ids and the surface that CAN take
+// them — the same split ResolveCommand makes for an id no --only form can carry.
+// This is `ghost import`'s verbatim ids reaching memory_links, so it is a shape
+// the store really holds rather than a hypothetical.
+func TestSupersedeCycleBlockNamesAnEdgeTheCLICannotWithdraw(t *testing.T) {
+	dashy := "-imported-id-01"
+	c := supersede.CyclicPair{
+		First:   supersede.CyclicEdge{SourceID: dashy, TargetID: "9876543210fedcba"},
+		Second:  supersede.CyclicEdge{SourceID: "9876543210fedcba", TargetID: dashy},
+		Outcome: supersede.CycleUnoriented,
+	}
+	if _, nameable := followup.WithdrawCommand("myproj", dashy, "9876543210fedcba"); nameable {
+		t.Fatal("an id beginning with a dash is not a --withdraw operand, so it must not be reported as nameable")
+	}
+	out := supersedeReassessReport("myproj", supersede.ReassessResult{
+		Loaded: 2, Cyclic: []supersede.CyclicPair{c},
+	}, true, nil, 1, 0)
+	// The dead command, printed for an operator to run and fail on. The check is on
+	// the command PREFIX, not on the flag: the block's own explanation says "no
+	// --withdraw command can carry it", and a flag-only match would flag that
+	// sentence as the thing it forbids.
+	if strings.Contains(out, "ghost supersede myproj --withdraw") {
+		t.Errorf("the cycle block printed a --withdraw command for an id the parser refuses:\n%s", out)
+	}
+	// What the block says instead, and what the operator is pointed at.
+	for _, want := range []string{
+		"not nameable from the CLI",
+		"ghost_link_withdraw",
+		"source " + dashy,
+		"target 9876543210fedcba",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the cycle block is missing %q:\n%s", want, out)
 		}
 	}
 }

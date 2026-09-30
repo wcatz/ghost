@@ -147,17 +147,28 @@ func TestSupersedeCommandsQuoteTheProjectAndCarryApply(t *testing.T) {
 	if got := ReassessCommand("proj; rm -rf /"); got != `ghost supersede --project 'proj; rm -rf /' --reassess --apply` {
 		t.Errorf("ReassessCommand for a name holding a semicolon = %q, want it quoted: an unquoted name executes when pasted", got)
 	}
-	if got, want := WithdrawCommand("myproj", "abc123", "def456"), "ghost supersede myproj --withdraw 'abc123' 'def456' --apply"; got != want {
-		t.Errorf("WithdrawCommand = %q, want %q", got, want)
+	if got, nameable := WithdrawCommand("myproj", "abc123", "def456"); !nameable || got != "ghost supersede myproj --withdraw 'abc123' 'def456' --apply" {
+		t.Errorf("WithdrawCommand = %q (nameable %v), want the --apply command", got, nameable)
 	}
 	// An id is caller-supplied text, and this one comes out of an import, so it is
 	// quoted whatever it holds.
-	if got := WithdrawCommand("myproj", "imported note; rm -rf /", "def456"); !strings.Contains(got, `'imported note; rm -rf /'`) {
-		t.Errorf("WithdrawCommand = %q, want the id quoted", got)
+	if got, nameable := WithdrawCommand("myproj", "imported note; rm -rf /", "def456"); !nameable || !strings.Contains(got, `'imported note; rm -rf /'`) {
+		t.Errorf("WithdrawCommand = %q (nameable %v), want the id quoted", got, nameable)
+	}
+	// A DASH-LEADING id is the one shape `ghost supersede` cannot be given:
+	// parseSupersedeArgs refuses a --withdraw operand that looks like a flag, and
+	// no amount of quoting changes the word a shell delivers. So the renderer
+	// refuses to build the command and says so, and the caller names the ids and
+	// the surface that CAN take them — the same split ResolveCommand makes.
+	for _, id := range []string{"-imported-id", "-"} {
+		if got, nameable := WithdrawCommand("myproj", id, "def456"); nameable || got != "" {
+			t.Errorf("WithdrawCommand(%q) = %q (nameable %v), want no command and nameable=false: the parser refuses a dash-leading operand", id, got, nameable)
+		}
 	}
 	// Both commands are repairs, and a repair without --apply is a dry run: the
 	// flag is part of the command, not something the operator adds.
-	for _, cmd := range []string{ReassessCommand("p"), WithdrawCommand("p", "a", "b")} {
+	withdrawCmd, _ := WithdrawCommand("p", "a", "b")
+	for _, cmd := range []string{ReassessCommand("p"), withdrawCmd} {
 		if !strings.Contains(cmd, "--apply") {
 			t.Errorf("%q names a repair that predicts rather than performs", cmd)
 		}

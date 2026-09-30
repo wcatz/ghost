@@ -84,9 +84,34 @@ func ReassessCommand(projectName string) string {
 // prefix that is unambiguous now may not be after the next save. --apply is on it
 // for the same reason as everywhere else here: without it the command prints
 // "would withdraw" and writes nothing.
-func WithdrawCommand(projectName, sourceID, targetID string) string {
+//
+// nameable is false when `ghost supersede` CANNOT be given this pair, and it is
+// a separate return rather than a comment because the caller has to do something
+// about it. parseSupersedeArgs refuses a --withdraw operand beginning with a
+// dash — deliberately, since an id is caller-supplied text and a dash-leading one
+// is a flag there — and quoting does not change that: the shell delivers the same
+// word either way. `ghost import` writes ids verbatim, so such an id reaches
+// memory_links and reaches here. A caller that printed the command regardless
+// would print one that fails with a message naming neither the dash nor the id,
+// which is ResolveCommand's `unnameable` bucket for the same class of problem: the
+// answer is to name the ids and the surface that CAN take them
+// (`ghost_link_withdraw`, which parses no flags), not to print a dead command.
+func WithdrawCommand(projectName, sourceID, targetID string) (cmd string, nameable bool) {
+	if !withdrawOperandNameable(sourceID) || !withdrawOperandNameable(targetID) {
+		return "", false
+	}
 	return fmt.Sprintf("ghost supersede %s --withdraw %s %s --apply",
-		projectArg(projectName), shellQuote(sourceID), shellQuote(targetID))
+		projectArg(projectName), shellQuote(sourceID), shellQuote(targetID)), true
+}
+
+// withdrawOperandNameable mirrors the one rule in parseSupersedeArgs that decides
+// whether an id can be an operand of --withdraw. It is restated here rather than
+// imported because that parser is in package main and this package must not depend
+// on it — the two are pinned together by TestSupersedeRepairCommandsParse, which
+// runs every rendered command through the real parser, so a rule that drifts is a
+// failing test rather than a command that does not run.
+func withdrawOperandNameable(id string) bool {
+	return id != "" && !strings.HasPrefix(id, "-")
 }
 
 // projectArg is the project as ONE shell argument: the bare name when that

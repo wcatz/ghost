@@ -1631,22 +1631,45 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	// edges are still live is the most misleading line this report could print —
 	// and it is indistinguishable, without this block, from a pass that had
 	// nothing to do with them.
+	//
+	// Every verb here is the ROW verb, derived from `apply` and from what the
+	// writes actually did, exactly as the rows above derive theirs. A block that
+	// printed the outcome's own prose would say "was withdrawn" for an edge a dry
+	// run never touched, and "withdrawn" for one a concurrent pass took first —
+	// the same past-tense claim the rows go to such lengths not to make.
 	for _, c := range res.Cyclic {
 		fmt.Fprintf(&b, "  cycle: a supersedes link is live in BOTH directions between these two memories, so each edge demotes the endpoint the other promotes.\n")
-		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.First.SourceID), shortID(c.First.TargetID), cycleEdgeState(c, supersede.CycleKeptFirst))
-		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.Second.SourceID), shortID(c.Second.TargetID), cycleEdgeState(c, supersede.CycleKeptSecond))
-		// An UNDECIDED cycle is the operator's to settle, and the only thing that
-		// settles it is naming an edge: this pass withdrew nothing because it could
-		// not decide, and saying so without saying what to run leaves the report
-		// describing a demotion with no way out of it.
-		if c.Outcome == supersede.CycleUndecided {
-			fmt.Fprintf(&b, "    %s\n", c.Outcome)
+		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.First.SourceID), shortID(c.First.TargetID),
+			cycleEdgeState(c, supersede.CycleKeptFirst, apply, withdrawn))
+		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.Second.SourceID), shortID(c.Second.TargetID),
+			cycleEdgeState(c, supersede.CycleKeptSecond, apply, withdrawn))
+		fmt.Fprintf(&b, "    %s\n", cycleNote(c, apply))
+		// The operator's next step, and it is a DIFFERENT step per outcome: a rerun
+		// for a verdict that never arrived, a decision for a pair with no knowable
+		// direction, and nothing at all once the pass has answered it. A block
+		// describing a demotion with no way out of it is the failure this report
+		// exists to prevent.
+		if c.Outcome == supersede.CycleUnoriented {
 			fmt.Fprintf(&b, "    Withdraw whichever edge is wrong — both are still live, and each one demotes a memory:\n")
-			fmt.Fprintf(&b, "      %s\n", followup.WithdrawCommand(projectName, c.First.SourceID, c.First.TargetID))
-			fmt.Fprintf(&b, "      %s\n", followup.WithdrawCommand(projectName, c.Second.SourceID, c.Second.TargetID))
-			continue
+			for _, e := range []supersede.CyclicEdge{c.First, c.Second} {
+				cmd, nameable := followup.WithdrawCommand(projectName, e.SourceID, e.TargetID)
+				if nameable {
+					fmt.Fprintf(&b, "      %s\n", cmd)
+					continue
+				}
+				// The CLI cannot name this id: parseSupersedeArgs refuses a
+				// --withdraw operand that looks like a flag, and quoting does not
+				// change that. Printing the command anyway would print one that
+				// fails with a message naming neither the dash nor the id, so the
+				// ids are named here and the surface that CAN take them is named
+				// with them — the same split ResolveCommand makes for an id no
+				// --only form can carry.
+				fmt.Fprintf(&b, "      %s -> %s  [not nameable from the CLI: an id beginning with a dash is a flag to the\n"+
+					"       argument parser, so no --withdraw command can carry it. Withdraw it with the MCP tool\n"+
+					"       ghost_link_withdraw, which parses no flags: source %s, target %s]\n",
+					shortID(e.SourceID), shortID(e.TargetID), e.SourceID, e.TargetID)
+			}
 		}
-		fmt.Fprintf(&b, "    %s\n", c.Outcome)
 	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")
@@ -1654,22 +1677,74 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 	return b.String()
 }
 
-// cycleEdgeState is what the report says about ONE edge of a cyclic pair: it
-// stands when the pass kept that direction, and it names the rule that withdrew
-// the other when it did not. It takes the outcome the pair came back with and the
-// edge's own position in it, so the two rows of a block cannot disagree with the
-// line under them — which is the one thing a two-row block has to be trusted for.
-func cycleEdgeState(c supersede.CyclicPair, edge supersede.CycleOutcome) string {
-	switch c.Outcome {
-	case edge:
-		return "stands: this is the direction the verdict named"
-	case supersede.CycleUndecided:
-		return "stands: no verdict, so no edge of this pair was withdrawn"
-	case supersede.CycleBothWithdrawn:
-		return "withdrawn: the two notes are not a replacement of one another"
-	default:
-		return "withdrawn: the reverse of the direction the verdict named"
+// cycleNote is the line under a cycle's two edges: what the pass decided, in the
+// tense this run is in. It is the only place the outcome is turned into a
+// sentence, which is why the outcome itself is a bare value.
+func cycleNote(c supersede.CyclicPair, apply bool) string {
+	// The kept edge really does stay in both modes — a dry run withdraws nothing —
+	// so only the DENIED edge's tense moves, and both phrasings have to read
+	// correctly: "was withdrawn" is an observation, "would be withdrawn" is a
+	// prediction, and a prediction printed as an observation is the whole defect.
+	verb := "would be withdrawn"
+	if apply {
+		verb = "was withdrawn"
 	}
+	switch c.Outcome {
+	case supersede.CycleKeptFirst:
+		return fmt.Sprintf("the verdict named the first edge's direction, so that edge stays and its reverse %s", verb)
+	case supersede.CycleKeptSecond:
+		return fmt.Sprintf("the verdict named the second edge's direction, so that edge stays and its reverse %s", verb)
+	case supersede.CycleBothWithdrawn:
+		return fmt.Sprintf("the two notes are not a replacement of one another in either direction, so both edges %s", verb)
+	case supersede.CycleNoVerdict:
+		return "no verdict: the classify call failed or its reply could not be read, so no edge of this pair moved and the next pass re-asks it"
+	case supersede.CycleUnoriented:
+		return "undecided: both notes carry the same updated_at AND the same created_at, so there is no direction to ask about and this pass did not ask — a re-run will not change that"
+	}
+	return ""
+}
+
+// cycleEdgeState is what the report says about ONE edge of a cyclic pair: it
+// stands when the pass kept that direction, and it carries the ROW marker for the
+// edge the outcome denied — "would withdraw" in a dry run, "withdrew" only when
+// the write landed, "already gone" when a concurrent pass took it first. It takes
+// the withdrawn list rather than the count, because under --apply a count cannot
+// say WHICH edge moved, and the two rows of a block must not disagree with the
+// list printed above them.
+func cycleEdgeState(c supersede.CyclicPair, edge supersede.CycleOutcome, apply bool, withdrawn []supersede.WithdrawnEdge) string {
+	denied := c.Outcome != edge && c.Outcome != supersede.CycleNoVerdict && c.Outcome != supersede.CycleUnoriented
+	if !denied {
+		switch c.Outcome {
+		case supersede.CycleNoVerdict:
+			return "stands: no verdict, so no edge of this pair moved"
+		case supersede.CycleUnoriented:
+			return "stands: no direction knowable, so no edge of this pair moved"
+		}
+		return "stands: this is the direction the verdict named"
+	}
+	reason := "the reverse of the direction the verdict named"
+	if c.Outcome == supersede.CycleBothWithdrawn {
+		reason = "the two notes are not a replacement of one another"
+	}
+	if !apply {
+		return fmt.Sprintf("would withdraw: %s", reason)
+	}
+	e := c.First
+	if edge == supersede.CycleKeptSecond {
+		e = c.Second
+	}
+	for _, w := range withdrawn {
+		if w.NewerID == e.SourceID && w.OlderID == e.TargetID {
+			if w.Written {
+				return fmt.Sprintf("withdrew: %s", reason)
+			}
+			return fmt.Sprintf("already gone: %s (a concurrent pass withdrew it first)", reason)
+		}
+	}
+	// The write failed before this row, so the edge is still live — the marker
+	// the withdrawn rows use for the same state, and the one that stops a reader
+	// from reading the absence of a row as a withdrawal.
+	return fmt.Sprintf("not reached: %s — this edge is STILL LIVE", reason)
 }
 
 // supersedeReport renders the pass's per-outcome report: the one-line summary

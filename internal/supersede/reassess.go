@@ -59,15 +59,16 @@
 // first, a cycle is ONE question, and the verdict is read as a DIRECTION:
 // `supersedes` names one of the two live edges as current, so that edge stands and
 // its reverse is withdrawn; `reversed` names the other, so the other stands;
-// `neither` and `causes` deny the replacement in either direction, so both go. A
-// verdict that decides NOTHING — a failed call, an unparseable reply, or a pair
-// whose notes share every timestamp and so have no direction to ask about —
-// withdraws neither, and the report hands the operator the two
-// `ghost supersede --withdraw` commands, because withdrawing half a cycle on a
-// hunch would leave a live edge this pass never judged: the state the cycle itself
-// is a report about. `ReassessResult.Cyclic` is a list for that reason, and the
-// veto is not applied to a cycle — it asks one orientation's question, and a cycle
-// has two over the same two bodies.
+// `neither` and `causes` deny the replacement in either direction, so both go. The
+// two outcomes that decide NOTHING are separate values — a missing verdict is
+// answered by a RERUN, a pair with no knowable direction only by the operator —
+// and neither withdraws, because withdrawing half a cycle on a hunch would leave a
+// live edge this pass never judged: the state the cycle itself is a report about.
+// `ReassessResult.Cyclic` is a list for that reason, and the veto is not applied
+// to a cycle: it asks one orientation's question, and a cycle has two over the
+// same two bodies. A CycleOutcome holds no prose, because the report is the only
+// thing that knows whether this run was a dry run and must be the only thing
+// spelling a withdrawal as one.
 package supersede
 
 import (
@@ -145,9 +146,10 @@ type ReassessResult struct {
 	// for a cycle is one `ghost supersede --withdraw` command per edge, and an
 	// operator deciding which half to drop needs the ids. Every pair here was
 	// judged ONCE, as an unordered pair, so a verdict could keep exactly one
-	// direction and withdraw the edge asserting the opposite; an Outcome of
-	// CycleUndecided is the case where nothing was withdrawn and the cycle is
-	// still demoting both endpoints.
+	// direction and withdraw the edge asserting the opposite. The two outcomes
+	// that deny nothing are separate because the operator's next step differs: a
+	// missing verdict is answered by a RERUN, and only a pair with no knowable
+	// direction is the operator's to decide.
 	Cyclic []CyclicPair
 	// Unjudged names the pairs the classifier produced no verdict for, because
 	// the call failed on both attempts or the reply's verdict count did not
@@ -192,9 +194,12 @@ type CyclicPair struct {
 	Outcome CycleOutcome
 }
 
-// CycleOutcome is what a pass did about a pair live in BOTH directions. The four
-// values are the whole decision table, and each is a claim the pass can make from
-// the verdict it received:
+// CycleOutcome is what a pass decided about a pair live in BOTH directions. The
+// values are a DECISION and not a sentence, deliberately: the report is where the
+// wording lives, because only the report knows whether this was a dry run, and a
+// constant that spelled out "was withdrawn" would put a past-tense claim under a
+// list of "would withdraw" rows (#780's review). Each value is a claim the pass
+// can make from the verdict it received:
 //
 //   - A SUPERSEDES verdict names the direction the pair runs, so that edge stays
 //     and the edge asserting the opposite goes. KeptFirst is the ordinary case
@@ -204,26 +209,33 @@ type CyclicPair struct {
 //     other edge is the one that stands.
 //   - NEITHER and CAUSES deny the same-fact replacement in either direction, so
 //     both go: an edge left live asserts what the verdict just denied.
-//   - A missing verdict — an unparseable reply, a failed call, or a pair whose
-//     two rows share both timestamps so no direction is knowable — decides
-//     nothing, and nothing is withdrawn. Withdrawing half a cycle on a hunch
-//     would leave a live edge this pass never judged, which is the state the
-//     cycle itself is a report about.
+//   - The two outcomes that decide NOTHING are SEPARATE, because they are
+//     different facts and the operator's next step is different for each. A
+//     missing verdict — an unparseable reply, or a classify call that failed —
+//     means the pass asked and got nothing, so a RERUN is the answer and the
+//     cycle is not yet the operator's call. An unoriented pair — two rows sharing
+//     every timestamp, so there is no direction to ask about — means the pass
+//     deliberately did not ask, and a rerun will not change that, so the
+//     operator decides. Collapsing the two into one sentence had the transient
+//     #699 failure reported as a missing chronology and answered with "delete an
+//     edge".
 type CycleOutcome string
 
 const (
-	// CycleKeptFirst: the edge in First's direction stands, Second was withdrawn.
-	CycleKeptFirst CycleOutcome = "the first edge stands — it is the direction the verdict named — and its reverse was withdrawn"
-	// CycleKeptSecond: the edge in Second's direction stands, First was
-	// withdrawn.
-	CycleKeptSecond CycleOutcome = "the second edge stands — it is the direction the verdict named — and its reverse was withdrawn"
-	// CycleBothWithdrawn: neither direction is supported, so both edges went.
-	CycleBothWithdrawn CycleOutcome = "the two notes are not a replacement of one another in either direction; both edges were withdrawn"
-	// CycleUndecided: no verdict, so no edge was withdrawn and the cycle is
-	// still demoting both endpoints. The report prints the two
-	// `ghost supersede --withdraw` commands, because an undecided cycle is the
-	// operator's call, not this pass's.
-	CycleUndecided CycleOutcome = "no verdict and no direction knowable from the timestamps; no edge was withdrawn, so the cycle is still demoting both endpoints"
+	// CycleKeptFirst: the edge in First's direction stands; the other is denied.
+	CycleKeptFirst CycleOutcome = "kept-first"
+	// CycleKeptSecond: the edge in Second's direction stands; the other is denied.
+	CycleKeptSecond CycleOutcome = "kept-second"
+	// CycleBothWithdrawn: neither direction is supported, so both edges are
+	// denied.
+	CycleBothWithdrawn CycleOutcome = "both-denied"
+	// CycleNoVerdict: the pass asked and got nothing — an unparseable reply, or a
+	// classify call that failed. Both edges stand and the next pass re-asks.
+	CycleNoVerdict CycleOutcome = "no-verdict"
+	// CycleUnoriented: both rows share updated_at AND created_at, so there is no
+	// direction to ask about (#778) and the pass did not ask. Both edges stand,
+	// and a rerun will not change that.
+	CycleUnoriented CycleOutcome = "unoriented"
 )
 
 // cycleDecision is the working state of one cyclic pair while its single verdict
@@ -506,7 +518,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 				first:  CyclicEdge{SourceID: g[0].SourceID, TargetID: g[0].TargetID},
 				second: CyclicEdge{SourceID: g[1].SourceID, TargetID: g[1].TargetID},
 			}
-			cyc := CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleUndecided}
+			cyc := CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleUnoriented}
 			// The direction to ask about, and whether one is knowable at all. A
 			// pair tying on both timestamps is the #778 rule, and it refuses
 			// rather than falls back: the two rows carry no chronology, so there
@@ -585,7 +597,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			// purpose.
 			for _, dec := range openCycles {
 				if dec != nil {
-					res.Cyclic = append(res.Cyclic, CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleUndecided})
+					res.Cyclic = append(res.Cyclic, CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleNoVerdict})
 				}
 			}
 			if logger != nil {
@@ -777,7 +789,7 @@ func unjudgedPairs(open []Candidate) []UnjudgedPair {
 // this pass never judged, which is indistinguishable from the cycle it was asked
 // to repair.
 func settleCycle(dec *cycleDecision, verdict Relation, res *ReassessResult) []judged {
-	cyc := CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleUndecided}
+	cyc := CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleNoVerdict}
 	judgedEdge, other := dec.edgeOf()
 	reverse := func(e CyclicEdge) Candidate {
 		return Candidate{NewerID: e.SourceID, OlderID: e.TargetID}
