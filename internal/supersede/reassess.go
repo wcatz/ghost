@@ -47,6 +47,27 @@
 // instead of leaving them indistinguishable from a model-adjudicated verdict.
 // Run's veto is deliberately NOT withdrawn on the ordinary pass for the same
 // reason: a creation pass is not where graph history gets deleted.
+//
+// A CYCLE — one pair live in BOTH directions — is the one shape this pass used to
+// get wrong, and getting it wrong looked like success (#778). It loaded every live
+// edge as an independent candidate, so a pair claimed in both directions was asked
+// the same question twice; a classifier that cannot decline a direction answered
+// `supersedes` to both, and the pass reported Confirmed 2, Withdrawn 0 and left
+// the cycle in the graph — the shape where each edge demotes the endpoint the
+// other promotes, so the repair that exists to remove wrong edges preserved the
+// worst one and said nothing. So the edges are grouped by the UNORDERED pair
+// first, a cycle is ONE question, and the verdict is read as a DIRECTION:
+// `supersedes` names one of the two live edges as current, so that edge stands and
+// its reverse is withdrawn; `reversed` names the other, so the other stands;
+// `neither` and `causes` deny the replacement in either direction, so both go. A
+// verdict that decides NOTHING — a failed call, an unparseable reply, or a pair
+// whose notes share every timestamp and so have no direction to ask about —
+// withdraws neither, and the report hands the operator the two
+// `ghost supersede --withdraw` commands, because withdrawing half a cycle on a
+// hunch would leave a live edge this pass never judged: the state the cycle itself
+// is a report about. `ReassessResult.Cyclic` is a list for that reason, and the
+// veto is not applied to a cycle — it asks one orientation's question, and a cycle
+// has two over the same two bodies.
 package supersede
 
 import (
@@ -93,6 +114,20 @@ type ReassessResult struct {
 	// sentences, and an operator who read "would sweep 1" in the dry run needs
 	// the second one.
 	CausesSweepFailed int
+	// Unoriented counts the pairs the pass could not even frame a question about
+	// because both rows share their updated_at AND their created_at, so no
+	// direction is knowable (#778). It is zero on every store this pass normally
+	// sees, and non-zero on a bulk-imported one: a cycle whose notes were
+	// stamped in the same batch is reported and left alone, because guessing a
+	// direction for it is the harm the #778 rule exists to prevent. The pair
+	// still appears in Cyclic, so the report names it and hands over the
+	// --withdraw commands.
+	//
+	// Only a CYCLE can land here, and that is not a narrowing of the rule: an
+	// ordinary edge is judged in the direction the GRAPH asserts, which it
+	// carries, so the pass never needs a chronology to ask about it. A cycle is
+	// the one shape with no stored direction to fall back on — it holds both.
+	Unoriented int
 	// CausesPredictionFailed counts the dry-run rows whose 'causes' prediction
 	// the pass could not read at all, so their second-deletion count is unknown
 	// rather than zero. It is 0 in every --apply run, which never reads the
@@ -102,6 +137,18 @@ type ReassessResult struct {
 	// never happened sends the operator away believing there is nothing else to
 	// delete.
 	CausesPredictionFailed int
+	// Cyclic names every pair the graph claims in BOTH directions — the cycle a
+	// pass before #778 could write, whose two edges each demote one of the pair's
+	// two memories, so neither note stays ranked until one of them goes.
+	//
+	// It is a LIST and not a count because a count cannot be acted on: the repair
+	// for a cycle is one `ghost supersede --withdraw` command per edge, and an
+	// operator deciding which half to drop needs the ids. Every pair here was
+	// judged ONCE, as an unordered pair, so a verdict could keep exactly one
+	// direction and withdraw the edge asserting the opposite; an Outcome of
+	// CycleUndecided is the case where nothing was withdrawn and the cycle is
+	// still demoting both endpoints.
+	Cyclic []CyclicPair
 	// Unjudged names the pairs the classifier produced no verdict for, because
 	// the call failed on both attempts or the reply's verdict count did not
 	// match the pairs asked about (#699). Their edges are LEFT ALIVE: nothing
@@ -120,6 +167,98 @@ type ReassessResult struct {
 type UnjudgedPair struct {
 	NewerID string
 	OlderID string
+}
+
+// CyclicEdge is one of a pair's two live 'supersedes' edges, in the direction it
+// is written: Source supersedes Target. It is a pair of ids and nothing else,
+// because a cycle is a graph shape and the report draws it, not the text of the
+// notes the two edges were written from.
+type CyclicEdge struct {
+	SourceID string
+	TargetID string
+}
+
+// CyclicPair is one pair the graph claims in BOTH directions, and what this pass
+// did about it. First and Second are the two live edges, in the order the store
+// returned them — an order that carries no meaning, which is exactly why the pass
+// does not use it to choose a direction (see the cycle handling in Reassess).
+type CyclicPair struct {
+	First  CyclicEdge
+	Second CyclicEdge
+	// Outcome names what happened, because "0 withdrawn" over a pair whose both
+	// edges are still live is the single most misleading line this report could
+	// print, and the reader cannot tell it from a pass that had nothing to do.
+	// It is one of the four CycleOutcome values.
+	Outcome CycleOutcome
+}
+
+// CycleOutcome is what a pass did about a pair live in BOTH directions. The four
+// values are the whole decision table, and each is a claim the pass can make from
+// the verdict it received:
+//
+//   - A SUPERSEDES verdict names the direction the pair runs, so that edge stays
+//     and the edge asserting the opposite goes. KeptFirst is the ordinary case
+//     and KeptSecond the mirror of it, because which of the two live edges the
+//     pass asked about depends on the timestamps and not on the store's order.
+//   - A REVERSED verdict names the OTHER direction as the current one, so the
+//     other edge is the one that stands.
+//   - NEITHER and CAUSES deny the same-fact replacement in either direction, so
+//     both go: an edge left live asserts what the verdict just denied.
+//   - A missing verdict — an unparseable reply, a failed call, or a pair whose
+//     two rows share both timestamps so no direction is knowable — decides
+//     nothing, and nothing is withdrawn. Withdrawing half a cycle on a hunch
+//     would leave a live edge this pass never judged, which is the state the
+//     cycle itself is a report about.
+type CycleOutcome string
+
+const (
+	// CycleKeptFirst: the edge in First's direction stands, Second was withdrawn.
+	CycleKeptFirst CycleOutcome = "the first edge stands — it is the direction the verdict named — and its reverse was withdrawn"
+	// CycleKeptSecond: the edge in Second's direction stands, First was
+	// withdrawn.
+	CycleKeptSecond CycleOutcome = "the second edge stands — it is the direction the verdict named — and its reverse was withdrawn"
+	// CycleBothWithdrawn: neither direction is supported, so both edges went.
+	CycleBothWithdrawn CycleOutcome = "the two notes are not a replacement of one another in either direction; both edges were withdrawn"
+	// CycleUndecided: no verdict, so no edge was withdrawn and the cycle is
+	// still demoting both endpoints. The report prints the two
+	// `ghost supersede --withdraw` commands, because an undecided cycle is the
+	// operator's call, not this pass's.
+	CycleUndecided CycleOutcome = "no verdict and no direction knowable from the timestamps; no edge was withdrawn, so the cycle is still demoting both endpoints"
+)
+
+// cycleDecision is the working state of one cyclic pair while its single verdict
+// is outstanding: the two live edges, which of them the pass asked about, and
+// what the verdict settled. It is filled in one step and read once, so a verdict
+// cannot land on a cycle whose state was never set.
+type cycleDecision struct {
+	first  CyclicEdge
+	second CyclicEdge
+	// askedFirst is true when the Candidate this pair contributed ran in First's
+	// direction, so a verdict that keeps "the direction it was asked about" is
+	// about First.
+	askedFirst bool
+	outcome    CycleOutcome
+	settled    bool
+}
+
+// keptOutcome is the outcome for a verdict that named ONE of the two live edges
+// as the current direction: that edge stands and the other is withdrawn.
+// namedIsFirst says which one the verdict named — the edge the pass asked about
+// for a SUPERSEDES answer, and the OTHER one for a REVERSED answer, which is
+// what "the older note is the current one" says about the pair.
+func (c *cycleDecision) keptOutcome(namedIsFirst bool) CycleOutcome {
+	if namedIsFirst {
+		return CycleKeptFirst
+	}
+	return CycleKeptSecond
+}
+
+// edgeOf returns the live edge the pass asked about, and the other one.
+func (c *cycleDecision) edgeOf() (judged, other CyclicEdge) {
+	if c.askedFirst {
+		return c.first, c.second
+	}
+	return c.second, c.first
 }
 
 // WithdrawnEdge is one edge the pass withdrew, or would withdraw under --apply.
@@ -206,6 +345,21 @@ func liveCausesPairs(ctx context.Context, store reassessStore, settled []judgedE
 type judgedEdge struct {
 	OlderID string
 	NewerID string
+}
+
+// judged is one pair this pass has settled WITHOUT the classifier's answer, or
+// with an answer that is a denial: a withdrawal, with the reason that withdrew
+// it and whether the other relation is swept with it. Package-level rather than
+// local to Reassess because settleCycle builds the cycle's rows, and a type a
+// free function cannot name is a type that function cannot be.
+type judged struct {
+	cand   Candidate
+	reason string // non-empty means already withdrawn, with this reason
+	vetoed bool   // settled without a harness call
+	// sweep arms the other-relation sweep: every withdrawal that DENIES a relation
+	// drops the 'causes' edge too, exactly as Run does. A CAUSES verdict affirms
+	// that relation instead, so its row sweeps nothing.
+	sweep bool
 }
 
 // retryReporter is the optional retry tally a Classifier may carry.
@@ -300,33 +454,90 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	// Settle the free decisions first — the veto, the missing endpoints and the
 	// scope exemption — so the harness is only asked about pairs a rule did not
 	// already answer.
-	type judged struct {
-		cand   Candidate
-		reason string // non-empty means already withdrawn, with this reason
-		vetoed bool   // settled without a harness call
-		// sweep arms the other-relation sweep: every withdrawal that DENIES a
-		// relation drops the 'causes' edge too, exactly as Run does. A CAUSES
-		// verdict affirms that relation instead, so its row sweeps nothing.
-		sweep bool
-	}
 	var open []Candidate
 	var settled []judged
+	// openCycles[i] is the cyclic pair that open[i] asks about, or nil for an
+	// ordinary edge. It is parallel to `open` rather than indexed into it so a
+	// candidate cannot be attached to a decision that belongs to another pair.
+	openCycles := make([]*cycleDecision, 0, len(links))
+	// The live edges, grouped by the UNORDERED pair, because a pair is the unit
+	// this pass judges (#778) and a pair with two live edges is a CYCLE. The
+	// groups keep the store's order and are never read as a direction: which edge
+	// of a cycle the pass asks about comes from the timestamps, not from which row
+	// the query returned first, because that order is not a promise.
+	groups := make([][]memory.Link, 0, len(links))
+	groupIndex := make(map[pairKey]int, len(links))
 	for _, l := range links {
+		key := newPairKey(l.SourceID, l.TargetID)
+		if i, ok := groupIndex[key]; ok {
+			groups[i] = append(groups[i], l)
+			continue
+		}
+		groupIndex[key] = len(groups)
+		groups = append(groups, []memory.Link{l})
+	}
+
+	for _, g := range groups {
+		l := g[0]
 		newer, okNewer := byID[l.SourceID]
 		older, okOlder := byID[l.TargetID]
 		if !okNewer || !okOlder {
 			// memory_links cascades with its memories, so this should be
 			// unreachable; if it is reached, the pair cannot be judged on its own
 			// merits, and the failure modes are not equal.
-			res.Skipped++
+			res.Skipped += len(g)
 			continue
 		}
 		if memory.ScopesConflict(newer.Scope, older.Scope) {
-			res.Skipped++
+			res.Skipped += len(g)
 			if logger != nil {
 				logger.Debug("supersede reassess: leaving a scope-conflicting edge alone",
 					"newer", l.SourceID, "older", l.TargetID)
 			}
+			continue
+		}
+		// A CYCLE: the same pair live in both directions, each edge asserting
+		// what the other denies, and each demoting the endpoint the other
+		// promotes. It is ONE question, asked in the direction the timestamps
+		// give — never the store's row order — and a verdict that names a
+		// direction keeps that edge and withdraws its reverse.
+		if len(g) > 1 {
+			dec := &cycleDecision{
+				first:  CyclicEdge{SourceID: g[0].SourceID, TargetID: g[0].TargetID},
+				second: CyclicEdge{SourceID: g[1].SourceID, TargetID: g[1].TargetID},
+			}
+			cyc := CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleUndecided}
+			// The direction to ask about, and whether one is knowable at all. A
+			// pair tying on both timestamps is the #778 rule, and it refuses
+			// rather than falls back: the two rows carry no chronology, so there
+			// is nothing to ask "which is newer" about. Nothing is withdrawn and
+			// the cycle is reported, because the operator's --withdraw is the
+			// repair for a pair this pass cannot even frame a question about.
+			cNewer, cOlder, oriented := orient(newer, older)
+			if !oriented {
+				res.Cyclic = append(res.Cyclic, cyc)
+				res.Unoriented++
+				if logger != nil {
+					logger.Info("supersede reassess: a cyclic pair whose two rows share both timestamps; no edge withdrawn",
+						"a", dec.first.SourceID, "b", dec.first.TargetID)
+				}
+				continue
+			}
+			dec.askedFirst = dec.first.SourceID == cNewer.ID
+			cand := Candidate{
+				NewerID: cNewer.ID, NewerContent: cNewer.Content, NewerCreatedAt: cNewer.CreatedAt,
+				OlderID: cOlder.ID, OlderContent: cOlder.Content, OlderCreatedAt: cOlder.CreatedAt,
+				Similarity: g[0].Strength,
+			}
+			// The veto is deliberately NOT applied to a cycle, and that is a
+			// decision rather than an oversight. VetoSupersede asks one
+			// orientation's question — does the OLDER note's rule get retired by
+			// the newer one — and a cycle has two orientations over the same two
+			// bodies, so settling either one here would withdraw an edge on a
+			// direction the pass chose rather than one the graph asserts. The
+			// classifier is asked instead, and its answer is read as a direction.
+			open = append(open, cand)
+			openCycles = append(openCycles, dec)
 			continue
 		}
 		cand := Candidate{
@@ -344,6 +555,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			continue
 		}
 		open = append(open, cand)
+		openCycles = append(openCycles, nil)
 	}
 
 	// A failure here is recorded, not raised: the settled rows below do not
@@ -364,12 +576,28 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		case err != nil:
 			fail = fmt.Errorf("classify %d live supersedes edge(s): %w", len(open), err)
 			res.Unjudged = unjudgedPairs(open)
+			// A cycle whose question was on the failed call is reported UNDECIDED
+			// alongside the ordinary unjudged pairs, and the same way: no verdict
+			// for any pair the call carried, so no edge of the cycle moves and the
+			// report names the --withdraw commands for it. Silently omitting the
+			// cycle from a report that is otherwise listing every unjudged pair
+			// would leave the operator believing its two edges were left alone on
+			// purpose.
+			for _, dec := range openCycles {
+				if dec != nil {
+					res.Cyclic = append(res.Cyclic, CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleUndecided})
+				}
+			}
 			if logger != nil {
 				logger.Warn("supersede reassess: the classifier failed; the edges it would have judged stand",
 					"unjudged", len(res.Unjudged), "settled", len(settled), "error", err)
 			}
 		default:
 			for i, c := range open {
+				if dec := openCycles[i]; dec != nil {
+					settled = append(settled, settleCycle(dec, verdicts[i], &res)...)
+					continue
+				}
 				switch verdicts[i] {
 				case RelationSupersedes:
 					res.Confirmed++
@@ -512,6 +740,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
 			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
 			"reversed", res.Reversed, "unknown", res.Unclassified, "unjudged", len(res.Unjudged),
+			"cyclic", len(res.Cyclic), "unoriented", res.Unoriented,
 			"withdrawn", res.Withdrawn, "causes_withdrawn", res.CausesWithdrawn,
 			"causes_sweep_failed", res.CausesSweepFailed,
 			"causes_prediction_failed", res.CausesPredictionFailed,
@@ -533,5 +762,74 @@ func unjudgedPairs(open []Candidate) []UnjudgedPair {
 	for _, c := range open {
 		out = append(out, UnjudgedPair{NewerID: c.NewerID, OlderID: c.OlderID})
 	}
+	return out
+}
+
+// settleCycle reads ONE verdict about a pair live in both directions into the
+// withdrawals it implies, and records the pair on the result so the report can
+// name the cycle whether or not anything moved.
+//
+// The four branches are CycleOutcome's table, read as a direction: a verdict
+// that NAMES one of the two live edges as current keeps it and withdraws the
+// other, and a verdict that denies the same-fact replacement withdraws both. The
+// default is the important one — a missing verdict withdraws NEITHER, because a
+// cycle is the one state where withdrawing half of it would leave a live edge
+// this pass never judged, which is indistinguishable from the cycle it was asked
+// to repair.
+func settleCycle(dec *cycleDecision, verdict Relation, res *ReassessResult) []judged {
+	cyc := CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleUndecided}
+	judgedEdge, other := dec.edgeOf()
+	reverse := func(e CyclicEdge) Candidate {
+		return Candidate{NewerID: e.SourceID, OlderID: e.TargetID}
+	}
+	// The 'causes' sweep rides on the same verdicts it rides on everywhere else
+	// in this pass: a denial sweeps, a CAUSES verdict affirms that relation. A
+	// cycle's rows are ordinary edges in that respect — the two edges of a pair
+	// are two rows, and each row's withdrawal sweeps the one 'causes' edge that
+	// contradicts it.
+	var out []judged
+	switch verdict {
+	case RelationSupersedes:
+		res.Confirmed++
+		cyc.Outcome = dec.keptOutcome(dec.askedFirst)
+		dec.outcome, dec.settled = cyc.Outcome, true
+		out = append(out, judged{
+			cand:   reverse(other),
+			reason: "the reverse of the direction the verdict confirmed: this edge asserts the opposite, and both directions at once demote both endpoints",
+			sweep:  true,
+		})
+	case RelationReversed:
+		res.Reversed++
+		cyc.Outcome = dec.keptOutcome(!dec.askedFirst)
+		dec.outcome, dec.settled = cyc.Outcome, true
+		out = append(out, judged{
+			cand:   reverse(judgedEdge),
+			reason: "reversed: the note this edge supersedes is the current one, so this edge runs against the pair and the reverse is the direction that stands",
+			sweep:  true,
+		})
+	case RelationCauses:
+		res.Causes++
+		cyc.Outcome = CycleBothWithdrawn
+		dec.outcome, dec.settled = cyc.Outcome, true
+		out = append(out,
+			judged{cand: reverse(judgedEdge), reason: "causes: the older note is still independently true"},
+			judged{cand: reverse(other), reason: "causes: the older note is still independently true, and its reverse asserts the opposite"},
+		)
+	case RelationNeither:
+		res.Neither++
+		cyc.Outcome = CycleBothWithdrawn
+		dec.outcome, dec.settled = cyc.Outcome, true
+		out = append(out,
+			judged{cand: reverse(judgedEdge), reason: "neither: both notes are still true", sweep: true},
+			judged{cand: reverse(other), reason: "neither: both notes are still true, and its reverse asserts the opposite", sweep: true},
+		)
+	default:
+		// A missing verdict, not a denial. Counted the way every other missing
+		// verdict in this pass is counted, and the pair is still reported: the
+		// cycle is live and demoting both endpoints, which is a finding about the
+		// graph whatever this pass could or could not decide.
+		res.Unclassified++
+	}
+	res.Cyclic = append(res.Cyclic, cyc)
 	return out
 }

@@ -132,3 +132,34 @@ func TestResolveCommandSeparatesUnnameableFromFileOnly(t *testing.T) {
 		t.Errorf("the command lost its scope: %q", cmd)
 	}
 }
+
+// The two supersede-side commands carry the same quoting rule as ResolveCommand
+// and are here for the same reason: three print sites across two reports, one
+// spelling. The cases that matter are the ones where a bare name is not one shell
+// word, and where --apply is the difference between a repair and a prediction.
+func TestSupersedeCommandsQuoteTheProjectAndCarryApply(t *testing.T) {
+	if got, want := ReassessCommand("myproj"), "ghost supersede myproj --reassess --apply"; got != want {
+		t.Errorf("ReassessCommand = %q, want %q", got, want)
+	}
+	if got := ReassessCommand("my proj"); got != `ghost supersede --project 'my proj' --reassess --apply` {
+		t.Errorf("ReassessCommand for a name holding a space = %q, want the --project form a shell reads as one argument", got)
+	}
+	if got := ReassessCommand("proj; rm -rf /"); got != `ghost supersede --project 'proj; rm -rf /' --reassess --apply` {
+		t.Errorf("ReassessCommand for a name holding a semicolon = %q, want it quoted: an unquoted name executes when pasted", got)
+	}
+	if got, want := WithdrawCommand("myproj", "abc123", "def456"), "ghost supersede myproj --withdraw 'abc123' 'def456' --apply"; got != want {
+		t.Errorf("WithdrawCommand = %q, want %q", got, want)
+	}
+	// An id is caller-supplied text, and this one comes out of an import, so it is
+	// quoted whatever it holds.
+	if got := WithdrawCommand("myproj", "imported note; rm -rf /", "def456"); !strings.Contains(got, `'imported note; rm -rf /'`) {
+		t.Errorf("WithdrawCommand = %q, want the id quoted", got)
+	}
+	// Both commands are repairs, and a repair without --apply is a dry run: the
+	// flag is part of the command, not something the operator adds.
+	for _, cmd := range []string{ReassessCommand("p"), WithdrawCommand("p", "a", "b")} {
+		if !strings.Contains(cmd, "--apply") {
+			t.Errorf("%q names a repair that predicts rather than performs", cmd)
+		}
+	}
+}

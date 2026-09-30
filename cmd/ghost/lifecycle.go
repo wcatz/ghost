@@ -1625,10 +1625,51 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		fmt.Fprintf(&b, "  unjudged    %s -> %s  [no verdict: the classify call failed or answered with the wrong number of verdicts, so the edge stands and the next pass re-asks it]\n",
 			shortID(u.NewerID), shortID(u.OlderID))
 	}
+	// The cycles, one block each, AFTER the withdrawn rows so a reader meets the
+	// edges that moved before the pair they belong to. A block states which of
+	// the two edges stands and why, because "0 withdrawn" over a pair whose both
+	// edges are still live is the most misleading line this report could print —
+	// and it is indistinguishable, without this block, from a pass that had
+	// nothing to do with them.
+	for _, c := range res.Cyclic {
+		fmt.Fprintf(&b, "  cycle: a supersedes link is live in BOTH directions between these two memories, so each edge demotes the endpoint the other promotes.\n")
+		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.First.SourceID), shortID(c.First.TargetID), cycleEdgeState(c, supersede.CycleKeptFirst))
+		fmt.Fprintf(&b, "    %s -> %s  [%s]\n", shortID(c.Second.SourceID), shortID(c.Second.TargetID), cycleEdgeState(c, supersede.CycleKeptSecond))
+		// An UNDECIDED cycle is the operator's to settle, and the only thing that
+		// settles it is naming an edge: this pass withdrew nothing because it could
+		// not decide, and saying so without saying what to run leaves the report
+		// describing a demotion with no way out of it.
+		if c.Outcome == supersede.CycleUndecided {
+			fmt.Fprintf(&b, "    %s\n", c.Outcome)
+			fmt.Fprintf(&b, "    Withdraw whichever edge is wrong — both are still live, and each one demotes a memory:\n")
+			fmt.Fprintf(&b, "      %s\n", followup.WithdrawCommand(projectName, c.First.SourceID, c.First.TargetID))
+			fmt.Fprintf(&b, "      %s\n", followup.WithdrawCommand(projectName, c.Second.SourceID, c.Second.TargetID))
+			continue
+		}
+		fmt.Fprintf(&b, "    %s\n", c.Outcome)
+	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")
 	}
 	return b.String()
+}
+
+// cycleEdgeState is what the report says about ONE edge of a cyclic pair: it
+// stands when the pass kept that direction, and it names the rule that withdrew
+// the other when it did not. It takes the outcome the pair came back with and the
+// edge's own position in it, so the two rows of a block cannot disagree with the
+// line under them — which is the one thing a two-row block has to be trusted for.
+func cycleEdgeState(c supersede.CyclicPair, edge supersede.CycleOutcome) string {
+	switch c.Outcome {
+	case edge:
+		return "stands: this is the direction the verdict named"
+	case supersede.CycleUndecided:
+		return "stands: no verdict, so no edge of this pair was withdrawn"
+	case supersede.CycleBothWithdrawn:
+		return "withdrawn: the two notes are not a replacement of one another"
+	default:
+		return "withdrawn: the reverse of the direction the verdict named"
+	}
 }
 
 // supersedeReport renders the pass's per-outcome report: the one-line summary
@@ -1664,7 +1705,12 @@ func supersedeReport(projectName string, res supersede.Result, verb string, call
 		out += fmt.Sprintf("  %d pair(s) proposed the reverse of a live supersedes link: the reverse orientation was refused and the pair keeps the link's direction, so one pass never carries a pair both ways round (a pair is re-judged only if an endpoint changed since the link was written)\n", res.OppositeLive)
 	}
 	if res.Bidirectional > 0 {
-		out += fmt.Sprintf("  %d pair(s) refused: a supersedes link is already live in BOTH directions, which demotes both endpoints — not judged, not written, and not withdrawn here; run `ghost supersede <project> --reassess --apply` to withdraw one of the two\n", res.Bidirectional)
+		// The real project name, through the one renderer that decides how a
+		// project is spelled as a shell argument. A command printed with a
+		// literal `<project>` is a command the operator has to edit before it
+		// runs, and an edit is where a repair goes to the wrong project.
+		out += fmt.Sprintf("  %d pair(s) refused: a supersedes link is already live in BOTH directions, which demotes both endpoints — not judged, not written, and not withdrawn here; run `%s` to settle the cycle\n",
+			res.Bidirectional, followup.ReassessCommand(projectName))
 	}
 	return out
 }

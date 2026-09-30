@@ -1703,11 +1703,25 @@ func TestSupersedeReport(t *testing.T) {
 		"  4 pair(s) not proposed:",
 		"  2 pair(s) proposed the reverse of a live supersedes link:",
 		"  1 pair(s) refused:",
-		"ghost supersede <project> --reassess --apply",
+		// The REAL project name, not a `<project>` placeholder: the line is a
+		// command, and a command with a placeholder in it is one the operator
+		// has to edit before it runs — which is where a repair ends up against
+		// the wrong project.
+		"ghost supersede proj --reassess --apply",
 	} {
 		if !strings.Contains(orientation, want) {
 			t.Errorf("supersedeReport() = %q, want it to contain %q", orientation, want)
 		}
+	}
+	if strings.Contains(orientation, "<project>") {
+		t.Errorf("supersedeReport() = %q, want no <project> placeholder in a command the operator is meant to paste", orientation)
+	}
+	// A project name that is not one bare shell word is rendered through
+	// --project in single quotes, which is the quoting rule the followup package
+	// owns and the one that decides whether the pasted command runs at all.
+	awkward := supersedeReport("my proj", supersede.Result{Bidirectional: 1}, "would link", 0, 0)
+	if !strings.Contains(awkward, "ghost supersede --project 'my proj' --reassess --apply") {
+		t.Errorf("supersedeReport() for a name holding a space = %q, want the --project form a shell reads as one argument", awkward)
 	}
 	// Each reason states the DECISION, not a judgment the pass may never have
 	// made. All three counts are taken before the filters that spend a call, so
@@ -1774,6 +1788,53 @@ func TestSupersedeReassessReport(t *testing.T) {
 	}
 	if strings.Contains(dry, "  withdrew ") {
 		t.Errorf("a dry run reported a withdrawal as done:\n%s", dry)
+	}
+
+	// A CYCLE — a pair live in BOTH directions — is the one finding whose
+	// absence from this report is indistinguishable from a pass that had nothing
+	// to do: the headline count is a count of edges, and both edges of an
+	// undecided cycle are still live while every number above reads zero. So the
+	// block names both edges, says which one stands, and — when the pass could not
+	// decide — hands over the two `ghost supersede --withdraw` commands, because a
+	// report that describes a demotion with no way out of it is the failure this
+	// block exists to prevent.
+	cycle := func(outcome supersede.CycleOutcome) string {
+		return supersedeReassessReport("proj", supersede.ReassessResult{
+			Loaded: 2, Unclassified: 1, Cyclic: []supersede.CyclicPair{{
+				First:   supersede.CyclicEdge{SourceID: "abcdef0123456789", TargetID: "9876543210fedcba"},
+				Second:  supersede.CyclicEdge{SourceID: "9876543210fedcba", TargetID: "abcdef0123456789"},
+				Outcome: outcome,
+			}},
+		}, true, nil, 1, 0)
+	}
+	undecided := cycle(supersede.CycleUndecided)
+	for _, want := range []string{
+		"live in BOTH directions",
+		"abcdef01 -> 98765432  [stands: no verdict, so no edge of this pair was withdrawn]",
+		"98765432 -> abcdef01  [stands: no verdict, so no edge of this pair was withdrawn]",
+		"ghost supersede proj --withdraw 'abcdef0123456789' '9876543210fedcba' --apply",
+		"ghost supersede proj --withdraw '9876543210fedcba' 'abcdef0123456789' --apply",
+	} {
+		if !strings.Contains(undecided, want) {
+			t.Errorf("cycle report missing %q:\n%s", want, undecided)
+		}
+	}
+	// A settled cycle says which edge stands, and it does NOT offer the operator
+	// the commands: the pass already withdrew one of the two, so naming an edge to
+	// withdraw would be naming the one it just removed.
+	settled := cycle(supersede.CycleKeptSecond)
+	if !strings.Contains(settled, "98765432 -> abcdef01  [stands: this is the direction the verdict named]") ||
+		!strings.Contains(settled, "abcdef01 -> 98765432  [withdrawn: the reverse of the direction the verdict named]") {
+		t.Errorf("settled cycle does not say which edge stands:\n%s", settled)
+	}
+	if strings.Contains(settled, "--withdraw") {
+		t.Errorf("a settled cycle printed a withdraw command, for an edge the pass already withdrew:\n%s", settled)
+	}
+	// A cycle whose both edges the verdict denied says so on each row, and still
+	// prints no command — there is nothing left to withdraw.
+	if both := cycle(supersede.CycleBothWithdrawn); !strings.Contains(both, "[withdrawn: the two notes are not a replacement of one another]") ||
+		strings.Count(both, "[withdrawn: the two notes are not a replacement of one another]") != 2 {
+		t.Errorf("a both-withdrawn cycle does not mark both rows:\n%s", both)
 	}
 
 	// Under --apply the list says so per edge, and the headline counts the rows
