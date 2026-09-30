@@ -51,8 +51,12 @@ type relationCase struct {
 //     signal that separates it from a genuine later update. That inversion is
 //     the regression.
 //   - status-report-fix / status-report-divergence: two reports of ONE open
-//     issue, the later one resolving or narrowing the earlier. `causes` is
-//     wrong for both; supersede is at most right.
+//     issue. `causes` is wrong for both. #641 labeled both SUPERSEDES and
+//     said so itself — "supersede is at most right" — because the bug it was
+//     fixing was the `causes` link. #779 relabeled the divergence half to
+//     NEITHER, on the reasoning at that case: the fix half's later report
+//     really does retire the earlier blocker, and the divergence half's does
+//     not, so only the first is a supersession.
 //   - parallel-events: two separate things that happened to the same host, in
 //     opposite order to importance. Neither supersedes the other.
 //
@@ -90,8 +94,23 @@ var regressionRelationCases = []relationCase{
 		newerCreated: "2023-05-20 11:05:00",
 		older:        "OPEN: a second, distinct script-evaluation mismatch exists beyond the encoding bug already fixed — reproduced on live production as a rejected zero-amount script that the network accepts and our evaluation path does not. Confirmed still present with the witness-shape fix applied, so it is a separate cause, not yet run to completion. A full offending input was captured for later debugging.",
 		olderCreated: "2023-05-17 16:00:00",
-		want:         RelationSupersedes,
-		wrong:        RelationCauses,
+		// RELABELED to NEITHER by #779, deliberately and against #641's
+		// SUPERSEDES. #641's own comment called this "at most right" — the
+		// finding it fixed was the misused `causes` link, and SUPERSEDES was
+		// chosen as a verdict the prompt could be made to reach, not because
+		// anything in the pair is retired. Nothing is: BOTH notes are OPEN
+		// reports of the SAME still-reproducing problem, and the newer adds a
+		// second sighting plus a payload archive while the older's claim — a
+		// distinct mismatch that is still present — stays true throughout. So
+		// it is the coverage rule's own case, and it is also the shape of the
+		// "a recurring defect is not a fix chain" bullet two paragraphs
+		// below. #779's re-measurement is the reason this is not a hedge
+		// either: every wrong edge it found joined two notes that were BOTH
+		// still true, and an edge on this pair demotes a live OPEN report to
+		// "resolved" — the one direction the KEEP-bias error argument does
+		// not cover, since no ordinary pass will look at it again.
+		want:  RelationNeither,
+		wrong: RelationCauses,
 	},
 	{
 		key:          "parallel-events",
@@ -322,8 +341,9 @@ func TestRunReversedVerdictInvalidatesBackwardsLink(t *testing.T) {
 
 // TestRunAppliesLabeledRealDataVerdicts drives all four real pairs through one
 // batched call with the verdicts the fixed prompt is supposed to produce, and
-// pins the resulting graph: the two status-report pairs supersede, the reversed
-// pair gets nothing, and the two parallel events on one host get nothing.
+// pins the resulting graph: the ONE status-report pair whose later report really
+// does retire the earlier one supersedes, and the reversed pair, the
+// still-open-report pair and the two parallel events on one host get nothing.
 //
 // One of them no longer reaches the classifier at all. "status-report-fix"'s
 // older note says the build "never gets past" the missing fix, which reads as a
@@ -358,8 +378,19 @@ func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 	if res.Reversed != 1 {
 		t.Errorf("Reversed = %d, want 1 (%s)", res.Reversed, regressionCase(t, "reversed").name)
 	}
-	if res.Confirmed != 1 {
-		t.Errorf("Confirmed = %d, want 1 (the status-report pair the veto does not settle)", res.Confirmed)
+	// Zero, and stated as zero rather than as the count that happened to be
+	// true. NEITHER status-report pair reaches a confirmed edge:
+	// status-report-fix is settled by the imperative veto before any call (see
+	// the test's comment), and status-report-divergence is NEITHER by label
+	// since #779, because its later report is a second sighting of a still-open
+	// problem rather than a retirement of the first. Before #779 the divergence
+	// half confirmed, and that edge pointed at a live OPEN report — the one
+	// direction the KEEP-bias error argument does not cover. The per-pair
+	// assertions below still pin the graph case by case, so this count is a
+	// statement about the SHAPE of #641's two status-report pairs rather than
+	// the only thing holding the graph down.
+	if res.Confirmed != 0 {
+		t.Errorf("Confirmed = %d, want 0: one of the two status-report pairs is vetoed and the other is NEITHER by label, so a confirmed edge here points at a live OPEN report", res.Confirmed)
 	}
 	// Which pair got which verdict, by identity: the per-pair verdicts are the
 	// fixture, so this fails if a reply ever lands on the wrong pair — which a
