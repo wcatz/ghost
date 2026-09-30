@@ -1980,10 +1980,16 @@ func supersedeReport(projectName string, res supersede.Result, verb string, call
 		out += fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
 	}
 	if res.Unoriented > 0 {
-		out += fmt.Sprintf("  %d pair(s) not proposed: both notes carry the same updated_at AND the same created_at (a bulk import stamps a whole batch at once), so there is no chronology to order them by — no classify call, no link, and not cached (a live 'supersedes' link on such a pair is still re-judged, since it already carries a direction; a pair whose 'causes' edges disagree with each other is the one live shape that is not, because it carries none)\n", res.Unoriented)
+		out += fmt.Sprintf("  %d pair(s) not proposed: both notes carry the same updated_at AND the same created_at (a bulk import stamps a whole batch at once), so there is no chronology to order them by — no classify call, no link, and not cached (a live 'supersedes' link on such a pair is still re-judged, since it already carries a direction; a pair whose only live link is a 'causes' one is the shape that is not, because a causes edge carries no direction — the question is asked by the timestamps, and two rows that share both of them cannot answer it)\n", res.Unoriented)
 	}
 	if res.OppositeLive > 0 {
-		out += fmt.Sprintf("  %d pair(s) proposed the reverse of a live supersedes or causes link: the reverse orientation was refused and the pair keeps the link's direction, so one pass never carries a pair both ways round (a pair is re-judged only if an endpoint changed since the link was written)\n", res.OppositeLive)
+		// Supersedes alone, and the wording says so rather than leaving the
+		// reader to work it out: a 'causes' link's direction no longer decides
+		// which way round its pair is asked, so it can never be what a proposal
+		// opposed. That edge still HOLDS its pair (skip-if-unchanged reads its
+		// stamp) and is still never cache-skipped, which is what stops the
+		// re-bill; it is reconciled by the verdict rather than by the prompt.
+		out += fmt.Sprintf("  %d pair(s) proposed the reverse of a live supersedes link: the reverse orientation was refused and the pair keeps the link's direction, so one pass never carries a pair both ways round (a pair is re-judged only if an endpoint changed since the link was written)\n", res.OppositeLive)
 	}
 	if res.Bidirectional > 0 {
 		// The real project name, through the one renderer that decides how a
@@ -2572,7 +2578,14 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 		// re-affirmed beside a 'causes' cycle has its own edge still in the
 		// graph, so `already gone` described an edge that never left. Hence the
 		// `kept` case, which is a statement and not a euphemism.
-		if c.Reclassified && (c.Relation != c.ReclassifiedFrom || c.CausesDropped > 0) {
+		//
+		// The drop is read as the run OBSERVED it under --apply and as what it
+		// READ where nothing was applied, so a dry run's row is reached at all
+		// for a verdict that would only sweep — a 'causes' cycle answered CAUSES
+		// is the case that fell through every row shape here and was reported as
+		// a plain verdict, which said nothing about the half of the cycle it
+		// would have deleted.
+		if c.Reclassified && (c.Relation != c.ReclassifiedFrom || c.CausesDropped > 0 || c.CausesDroppable > 0) {
 			// The markers, spelled as supersedeReassessReport spells them and padded
 			// as it pads them, so a reader moving between the two reports reads one
 			// vocabulary rather than two. A refused write is its own marker rather
@@ -2623,19 +2636,25 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 				// it happens to hold. The DROPPED clause below is unaffected: it
 				// is about the other relation, not about the refused write.
 			case c.Relation == supersede.RelationCauses, c.Relation == supersede.RelationSupersedes:
-				// What the pass WROTE, and the verb distinguishes the two things
-				// writing it can be. A relation CHANGE is a re-link, and the
-				// SUPERSEDES arm here was missing entirely, so a live 'causes'
+				// What the pass WROTE, and the verb distinguishes the THREE
+				// things writing it can be. A relation CHANGE is a re-link, and
+				// the SUPERSEDES arm here was missing entirely, so a live 'causes'
 				// edge replaced by a supersession went unmentioned while the
-				// summary said "1 reclassified". A relation UNCHANGED is a
-				// re-affirmation: the upsert re-stamped the edge and kept it, and
-				// calling that a re-link announced a change of relation that had
-				// not happened.
-				verb := "re-linked"
-				if c.Relation == c.ReclassifiedFrom {
-					verb = "re-affirmed"
-				} else if !apply {
-					verb = verb + " by --apply"
+				// summary said "1 reclassified". A relation UNCHANGED with
+				// nothing dropped is a re-affirmation: the upsert re-stamped the
+				// edge the row is about and kept it, and calling that a re-link
+				// announced a change that had not happened. A relation UNCHANGED
+				// WITH a row dropped is neither of those, and the relation test
+				// alone would have called it a re-affirmation: a 'causes' edge
+				// running against the timestamps is dropped and replaced by one
+				// running with them, so the edge the verdict wrote is a DIFFERENT
+				// edge from the one the row is about.
+				verb := "re-affirmed"
+				if c.Relation != c.ReclassifiedFrom || c.CausesDroppable > 0 {
+					verb = "re-linked"
+					if !apply {
+						verb = verb + " by --apply"
+					}
 				}
 				if c.Relation == supersede.RelationCauses {
 					extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
@@ -2645,12 +2664,16 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 						shortID(c.NewerID), "supersedes", shortID(c.OlderID))
 				}
 			}
-			// Only what the write actually moved, so a dry run says nothing here
-			// rather than forecasting a deletion nobody performed: Run makes no
-			// prediction read for this, and adding one would put a second read's
-			// failure in a pass whose only fatal error is a write error.
+			// The rows the run REMOVED: counted from what it moved under
+			// --apply, and counted from what it READ where nothing was applied.
+			// The dry-run half is exact about the pair rather than vague, because
+			// Run forecasts it off the same snapshot its own sweeps are gated on
+			// and never queries for it — so the preview names the deletion instead
+			// of showing a re-link that will also remove an edge.
 			if apply && c.CausesDropped > 0 {
 				extra += fmt.Sprintf("  [+%d causes edge dropped]", c.CausesDropped)
+			} else if !apply && c.CausesDroppable > 0 {
+				extra += fmt.Sprintf("  [+%d causes edge would be dropped]", c.CausesDroppable)
 			}
 			fmt.Fprintf(&b, "  %s  %s -> %s  [%s%s]\n",
 				marker, shortID(c.NewerID), shortID(c.OlderID), supersedeReclassifyReason(c.Relation), extra)

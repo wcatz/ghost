@@ -147,7 +147,7 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			name:  "a withdrawal that also dropped a causes edge says so",
 			apply: true,
 			classified: []supersede.Classified{
-				withCauses(reclassRow(supersede.RelationNeither, true, true), 1),
+				withCauses(reclassRow(supersede.RelationNeither, true, true), 1, 1),
 			},
 			want:    []string{"withdrew", "[+1 causes edge dropped]"},
 			notWant: []string{"+0 causes", "would withdraw"},
@@ -155,14 +155,29 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 		{
 			// The count is what the write returned, so a dry run has none — and a
 			// marker over a pass that deleted nothing is the one line this report
-			// must not print.
-			name:  "a dry run forecasts no causes deletion",
+			// must not print. What it MAY print is the forecast, in its own words,
+			// and the two differ by the tense rather than by the number: the
+			// forecast is counted off the edges the pass read, the marker is
+			// counted off the writes it made.
+			name:  "a dry run names the deletion it would make, in the future tense",
 			apply: false,
 			classified: []supersede.Classified{
-				withCauses(reclassRow(supersede.RelationNeither, true, false), 0),
+				withCauses(reclassRow(supersede.RelationNeither, true, false), 0, 1),
+			},
+			want:    []string{"would withdraw", "[+1 causes edge would be dropped]"},
+			notWant: []string{"[+1 causes edge dropped]"},
+		},
+		{
+			// The control for the row above: a dry run over a pair whose live
+			// 'causes' edges the pass did not read — a fresh pair, which reports
+			// no sweep at all — forecasts nothing rather than forecasting zero.
+			name:  "a dry run with no live causes edge to read forecasts nothing",
+			apply: false,
+			classified: []supersede.Classified{
+				withCauses(reclassRow(supersede.RelationNeither, true, false), 0, 0),
 			},
 			want:    []string{"would withdraw"},
-			notWant: []string{"causes edge dropped"},
+			notWant: []string{"causes edge"},
 		},
 		{
 			// A pair the pass JUDGED and did not write, because the other
@@ -238,8 +253,12 @@ func opposedRow(relation supersede.Relation) supersede.Classified {
 }
 
 // withCauses is reclassRow plus the second graph row a denying verdict moves.
-func withCauses(row supersede.Classified, dropped int) supersede.Classified {
+// withCauses sets both counts, because a row carries both and a fixture that set
+// only the observed one would be asserting against a dry run that has no way to
+// produce the other. droppable is the dry run's forecast of dropped.
+func withCauses(row supersede.Classified, dropped, droppable int) supersede.Classified {
 	row.CausesDropped = dropped
+	row.CausesDroppable = droppable
 	return row
 }
 
@@ -573,6 +592,16 @@ func seedPromotedSupersedesEdge(t *testing.T, dbPath string) (source, target str
 // pair has to be re-judged for a verdict to exist, and the way to reach the
 // classifier with no vector involved is a pair whose edge predates both
 // endpoints.
+//
+// The first memory is backdated where the supersedes fixture does not have to be,
+// and the asymmetry is the rule rather than an inconvenience. A 'supersedes' edge
+// carries its own direction, so a pair whose rows share a timestamp is still
+// re-judged in the direction the edge names. A 'causes' edge settles nothing about
+// the question, so the pair is asked in the direction `orient` gives — and
+// `orient` refuses two rows that share both timestamps, exactly as it refuses them
+// in a scan. Two memories created in the same instant therefore tie, and the pair
+// would be reported as unproposed; giving the two notes real ages is what makes
+// the fixture reachable at all.
 func seedLiveCausesEdge(t *testing.T, dbPath string) (older, newer string) {
 	t.Helper()
 	ctx := context.Background()
@@ -610,6 +639,16 @@ func seedLiveCausesEdge(t *testing.T, dbPath string) (older, newer string) {
 		older, newer,
 	); err != nil {
 		t.Fatalf("backdate the link row: %v", err)
+	}
+	// The first note gets a real age. BOTH columns, because `orient` reads
+	// updated_at first and falls back to created_at only on a tie, so a backdate
+	// that left updated_at alone would be decided by the column the backdate did
+	// not touch.
+	if _, err := raw.ExecContext(ctx,
+		`UPDATE memories SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE id = ?`,
+		older,
+	); err != nil {
+		t.Fatalf("backdate the older memory row: %v", err)
 	}
 	return older, newer
 }
@@ -766,18 +805,33 @@ func TestSupersedePairLinesNamesTheEdgeACausesCycleRemoved(t *testing.T) {
 	if !strings.Contains(out, "[+1 causes edge dropped]") {
 		t.Errorf("the row says nothing about the edge the run removed:\n%s", out)
 	}
-	// And the same pair in a dry run promises rather than claims. `Withdrawn` is
-	// false there because the apply block never ran, which is the distinction the
-	// marker reads — so the fixture has to differ, and the fact that it has to is
-	// the reason a dry run cannot print a claim it has not earned.
+	// And the same pair in a dry run promises rather than claims. Two fields have
+	// to change together, and both changes are what a real dry run produces:
+	// `Withdrawn` is false because the apply block never ran, and
+	// `CausesDropped` is 0 because nothing was invalidated. Setting only the
+	// first would leave a row no dry run can emit — one claiming a deletion —
+	// and this block's own predicate would then admit it on the observed count,
+	// so the forecast below would never be the reason the row was reached and
+	// the assertion would prove nothing about the dry run's own path.
 	promised := row
 	promised.Withdrawn = false
+	promised.CausesDropped = 0
+	promised.CausesDroppable = row.CausesDropped
 	dry := supersedePairLines(false, []supersede.Classified{promised})
 	if !strings.Contains(dry, "would withdraw") {
 		t.Errorf("a dry run's row is not in the would-withdraw tense:\n%s", dry)
 	}
-	if strings.Contains(dry, "causes edge dropped") {
-		t.Errorf("a dry run forecasts a deletion count it never looked for:\n%s", dry)
+	if !strings.Contains(dry, "[+1 causes edge would be dropped]") {
+		t.Errorf("a dry run says nothing about the edge it would remove:\n%s", dry)
+	}
+	if strings.Contains(dry, "[+1 causes edge dropped]") {
+		t.Errorf("a dry run's row claims a deletion it did not make:\n%s", dry)
+	}
+	// The re-link clause follows the forecast rather than the relation alone: the
+	// relation did not change, but the edge the verdict wrote is a different edge
+	// from the one the row is about, so `re-affirmed` would be the false one.
+	if !strings.Contains(dry, "re-linked") {
+		t.Errorf("a dry run's row calls a corrected 'causes' edge a re-affirmation:\n%s", dry)
 	}
 
 	// The control: a re-affirmation that moved NOTHING stays off this block. A

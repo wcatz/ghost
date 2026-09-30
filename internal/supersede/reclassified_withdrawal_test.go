@@ -217,10 +217,13 @@ func TestRunReportsTheCausesEdgeTheSameWithdrawalRemoved(t *testing.T) {
 	}
 }
 
-// TestADryRunForecastsNoCausesDeletion: the count is what the write returned, and
-// a dry run writes nothing. A marker that read `+1 causes edge` over a pass that
-// deleted nothing is the one line this report must not print.
-func TestADryRunForecastsNoCausesDeletion(t *testing.T) {
+// TestADryRunCountsNoCausesDeletionItDidNotPerform: the count is what the write
+// returned, and a dry run writes nothing. A marker that read `+1 causes edge`
+// over a pass that deleted nothing is the one line this report must not print —
+// which is not the same as saying nothing, because the pass READ the edge and can
+// say what it would do with it. The observed count and the forecast are two
+// fields for that reason, and this test holds both to their own tense.
+func TestADryRunCountsNoCausesDeletionItDidNotPerform(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	newer, older := seedReclassifyPair(t, store, db)
@@ -238,6 +241,14 @@ func TestADryRunForecastsNoCausesDeletion(t *testing.T) {
 	}
 	if classified[0].CausesDropped != 0 {
 		t.Errorf("a dry run reported %d causes edge(s) dropped, and it dropped none", classified[0].CausesDropped)
+	}
+	// The forecast, which is what a dry run has instead. The pair holds a live
+	// 'causes' edge and the verdict is REVERSED, so the apply block would sweep
+	// it — and the forecast is counted off the pass's own read, which is the
+	// reason it can exist at all.
+	if classified[0].CausesDroppable != 1 {
+		t.Errorf("CausesDroppable = %d, want 1: a REVERSED verdict drops the pair's live 'causes' edge, and a dry run is the only place that can be said without doing it",
+			classified[0].CausesDroppable)
 	}
 	links, err := store.GetLinks(ctx, older)
 	if err != nil {

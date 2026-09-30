@@ -78,8 +78,8 @@ func retagBoth(t *testing.T, store *memory.Store, ids ...string) {
 	}
 }
 
-// TestALiveCausesEdgeHoldsItsPairInItsOwnDirection is the ordinary pass's half,
-// and it is the re-bill: a live 'causes' edge whose direction disagrees with the
+// TestALiveCausesEdgeHoldsItsPairQuiet is the ordinary pass's half, and it is the
+// re-bill #823 is about: a live 'causes' edge whose direction disagrees with the
 // scan's must produce NO classify call, because neither endpoint has moved since
 // the edge was written.
 //
@@ -87,7 +87,14 @@ func retagBoth(t *testing.T, store *memory.Store, ids ...string) {
 // be satisfied by a pass that asked the question and then declined to act on the
 // answer — which is the state #819 documented, and the one that costs a call per
 // pass forever.
-func TestALiveCausesEdgeHoldsItsPairInItsOwnDirection(t *testing.T) {
+//
+// The edge's STAMP is what buys the quiet and nothing else. It is not a
+// direction the pair is judged in — see TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn
+// for what reading it as one costs — so `OppositeLive` is 0 here where it was 1:
+// there is no refused orientation any more, because the pair is never proposed in
+// one that opposes the edge. A counted refusal was the wrong instrument for a
+// quiet, and the call count is the right one.
+func TestALiveCausesEdgeHoldsItsPairQuiet(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
@@ -126,8 +133,8 @@ func TestALiveCausesEdgeHoldsItsPairInItsOwnDirection(t *testing.T) {
 	}
 	// And the refusal is COUNTED, because a pass that declined to re-ask has to
 	// say so rather than reporting the totals of a pass that found nothing.
-	if res.OppositeLive != 1 {
-		t.Errorf("OppositeLive = %d, want 1: the scan proposed the reverse of a live edge and that orientation was refused, which is a different fact from the pass having nothing to do",
+	if res.OppositeLive != 0 {
+		t.Errorf("OppositeLive = %d, want 0: a 'causes' edge's direction does not decide the question, so there is no proposal opposing it and nothing to refuse",
 			res.OppositeLive)
 	}
 	if res.Bidirectional != 0 {
@@ -135,18 +142,23 @@ func TestALiveCausesEdgeHoldsItsPairInItsOwnDirection(t *testing.T) {
 	}
 }
 
-// TestAPassNeverWritesTheReverseOfALiveCausesEdgeWhenItDoesReAsk is the half
-// that cannot be reached through quiet: the endpoints HAVE moved, so
+// TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps is the
+// half that cannot be reached through quiet: the endpoints HAVE moved, so
 // skip-if-unchanged releases the pair and the pass really does spend a classify
-// call — and the edge it writes must still be the live edge's own direction.
+// call.
 //
-// This is the test that makes the direction override load-bearing rather than
-// merely quiet. A guard alone (what #819 shipped, and shipped on purpose) would
-// refuse this write, because the reverse of what the timestamps say is exactly
-// what is live; and then the pair is re-asked on every pass and refused on every
-// pass, for as long as the edge lives. A pass that asks and writes the live edge's
-// direction converges; a pass that asks and refuses does not.
-func TestAPassNeverWritesTheReverseOfALiveCausesEdgeWhenItDoesReAsk(t *testing.T) {
+// What it writes is the point. The pair is asked in the direction `orient` gives,
+// and a CAUSES verdict therefore writes `causes older→newer` — which is the
+// REVERSE of the edge a disagreeing store holds. It converges precisely because
+// the apply block drops what the pass read before it writes: the verdict
+// invalidates the live edge and then writes its own, so the pair ends up with ONE
+// 'causes' edge in the direction the model just chose. Asking the pair and then
+// refusing the write — a guard alone, which is what #819 shipped on purpose —
+// would converge on nothing and would re-ask forever, and writing the live edge's
+// direction instead would have meant asking a question the edge cannot answer,
+// since the edge is not a supersession (see
+// TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn).
+func TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
@@ -170,27 +182,29 @@ func TestAPassNeverWritesTheReverseOfALiveCausesEdgeWhenItDoesReAsk(t *testing.T
 		t.Fatalf("the pass asked about %d pair-orientation(s) %v, want exactly 1: both endpoints moved, so skip-if-unchanged cannot hold this pair and the re-ask is the point of the test",
 			len(cls.judged), cls.judged)
 	}
-	// The direction asked is the live edge's, read the way 'causes' is WRITTEN,
-	// and that is the reverse of the edge's own two ids: a 'causes' edge runs
-	// cause→effect, so its SOURCE is the note the edge calls older. The edge here
-	// says `newer` is the cause, so the pair is asked with `older` as the newer
-	// endpoint — the claim the graph makes, not the one the timestamps make.
-	if cls.judged[0] != [2]string{older, newer} {
-		t.Errorf("the pair was asked about as %v, want [%s %s]: a live edge's direction is the one the pair is judged in, and a REVERSED verdict has to be shown it or the wrong edge is the one that survives",
-			cls.judged[0], older, newer)
+	// The direction asked is the TIMESTAMPS'. The live edge runs newer→older,
+	// which asserts that the September note is the cause and the January one its
+	// effect, so a question in the edge's own direction would carry the edge's
+	// claim rather than the two notes' chronology — and a supersedes answer to it
+	// writes a demotion of the memory that is current.
+	if cls.judged[0] != [2]string{newer, older} {
+		t.Errorf("the pair was asked about as %v, want [%s %s]: the timestamps' direction, and a 'causes' edge is a claim about which note CAUSED which, not about which one replaces the other",
+			cls.judged[0], newer, older)
 	}
-	if res.OppositeLive != 1 {
-		t.Errorf("OppositeLive = %d, want 1: the scan's orientation was the reverse of the live edge and was refused", res.OppositeLive)
+	if res.OppositeLive != 0 {
+		t.Errorf("OppositeLive = %d, want 0: the pair is not proposed in a direction that opposes the live edge, it is asked in the direction it is written in", res.OppositeLive)
 	}
 	if len(classified) != 1 || !classified[0].Reclassified {
 		t.Fatalf("classified = %+v, want one row marked reclassified: this is a verdict about an edge in the store, not about a proposal", classified)
 	}
-	// The write landed in the edge's OWN direction, so the graph still holds one
-	// 'causes' edge and the pair is not a cycle.
+	// The write landed in the direction asked, and the edge it contradicts is
+	// gone: ONE live 'causes' edge, and the pair is not a cycle. The reverse is
+	// never left in place beside the write, which is the property the store-level
+	// guard exists to make impossible for a concurrent pass.
 	edges := liveCausesEdges(t, store, newer, older)
-	if len(edges) != 1 || edges[0] != [2]string{newer, older} {
-		t.Errorf("live 'causes' edges = %v, want exactly [%s %s]: a CAUSES verdict re-affirmed the live edge rather than writing its reverse",
-			edges, newer, older)
+	if len(edges) != 1 || edges[0] != [2]string{older, newer} {
+		t.Errorf("live 'causes' edges = %v, want exactly [%s %s]: the verdict's own direction was written and the edge it contradicted was dropped, so the pair converged on one edge rather than becoming a cycle",
+			edges, older, newer)
 	}
 	// The row names the relation it acted on, so a report can tell a
 	// re-affirmation from a change of relation — which is the difference between
@@ -202,8 +216,52 @@ func TestAPassNeverWritesTheReverseOfALiveCausesEdgeWhenItDoesReAsk(t *testing.T
 	if res.ReverseLive != 0 {
 		t.Errorf("ReverseLive = %d, want 0: the write was in the live edge's own direction, so nothing opposed it", res.ReverseLive)
 	}
+	if res.Reclassified != 1 {
+		t.Errorf("Reclassified = %d, want 1: the relation is unchanged, but a live 'causes' edge was DROPPED, so this row moved the graph and must not be reported as a quiet re-affirmation", res.Reclassified)
+	}
+}
+
+// TestACausesVerdictReAffirmsALiveCausesEdgeThatAgreesWithTheTimestamps is the
+// other half of the correction above, and the reason `Reclassified` is decided by
+// whether a ROW moved rather than by whether the relation changed. Here the live
+// edge already runs the way a CAUSES verdict writes, so the verdict re-stamps it
+// and the graph is unchanged — which is the one CAUSES outcome that is not a
+// reclassification.
+func TestACausesVerdictReAffirmsALiveCausesEdgeThatAgreesWithTheTimestamps(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	older := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// The live edge already runs the way `causes` is written — the CAUSE is the
+	// older note and the EFFECT the newer one — and it is stamped old so the pair
+	// is re-judged.
+	if err := store.CreateLinkJudged(ctx, older, newer, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	retagBoth(t, store, newer, older)
+
+	cls := &recordingCauses{}
+	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(cls.judged) != 1 || cls.judged[0] != [2]string{newer, older} {
+		t.Fatalf("asked about %v, want exactly [%s %s]", cls.judged, newer, older)
+	}
+	edges := liveCausesEdges(t, store, newer, older)
+	if len(edges) != 1 || edges[0] != [2]string{older, newer} {
+		t.Errorf("live 'causes' edges = %v, want exactly [%s %s]: a verdict that agrees with the live edge must leave it where it is, and one edge is not a cycle",
+			edges, older, newer)
+	}
+	if len(classified) != 1 || classified[0].ReclassifiedFrom != RelationCauses {
+		t.Errorf("classified = %+v, want one row that names the 'causes' edge it was judged against", classified)
+	}
 	if res.Reclassified != 0 {
-		t.Errorf("Reclassified = %d, want 0: a CAUSES verdict on a live 'causes' edge re-affirmed it, and the relation did not change", res.Reclassified)
+		t.Errorf("Reclassified = %d, want 0: nothing was dropped and the relation is unchanged, so the graph is byte-for-byte what it was and the row is not a reclassification", res.Reclassified)
+	}
+	if classified[0].CausesDropped != 0 {
+		t.Errorf("CausesDropped = %d, want 0: the edge the verdict re-affirmed is not dropped by its own verdict", classified[0].CausesDropped)
 	}
 }
 
@@ -360,12 +418,11 @@ func TestALiveCausesEdgeIsNeverCacheSkipped(t *testing.T) {
 	}
 	// The cache rows a previous pass would have left. BOTH orientations, and that
 	// is what makes this a test of the rule rather than of a lookup that happens
-	// to miss: the cache is keyed by the ORDERED pair, and the pair's orientation
-	// is exactly what #823 changed — a pass before it asked in the scan's order, a
-	// pass after it asks in the live edge's. A store that has been through both
-	// holds a row under each, and only the one the pass will look up is
-	// load-bearing, so seeding just the old one would let a regression hide behind
-	// a cache MISS.
+	// to miss: the cache is keyed by the ORDERED pair, and a store that has been
+	// judged in either orientation holds a row under each — #823 asked contested
+	// pairs in the live edge's direction, which for this fixture is older-first.
+	// Only the one the pass will look up is load-bearing, so seeding just the other
+	// one would let a regression hide behind a cache MISS.
 	//
 	// Each row carries the hashes of the notes ITS OWN key names — a row keyed
 	// (older, newer) records the older note's text under NewerHash — because the
@@ -394,8 +451,9 @@ func TestALiveCausesEdgeIsNeverCacheSkipped(t *testing.T) {
 	if len(cls.judged) != 1 {
 		t.Fatalf("the pass asked about %d pair(s) %v, want exactly 1", len(cls.judged), cls.judged)
 	}
-	if cls.judged[0] != [2]string{older, newer} {
-		t.Errorf("asked about %v, want [%s %s]: the live edge's direction, not the orientation the cache row was keyed by", cls.judged[0], older, newer)
+	if cls.judged[0] != [2]string{newer, older} {
+		t.Errorf("asked about %v, want [%s %s]: the direction the pair is asked in, which is the timestamps' and NOT the one the cache row keyed by the older-first pair names",
+			cls.judged[0], newer, older)
 	}
 }
 
@@ -547,6 +605,70 @@ func TestACausesCycleIsSettledRatherThanFrozen(t *testing.T) {
 	if second_res.Bidirectional != 0 || second_res.Unoriented != 0 {
 		t.Errorf("the second pass reported Bidirectional=%d Unoriented=%d, want 0/0: a settled pair is an ordinary quiet one",
 			second_res.Bidirectional, second_res.Unoriented)
+	}
+}
+
+// TestADryRunForecastsTheCausesCycleHalfItsVerdictWouldDrop is the preview half
+// of the test above, and it is the last thing a dry run got wrong: the verdict
+// deletes a live graph row, the applied run says so on the row, and the dry run
+// said nothing at all — because CausesDropped counts what --apply actually
+// invalidated, so a preview of a two-mutation verdict showed one of them.
+//
+// The forecast costs no read. It is counted off the same edges this pass loaded,
+// from the same claimsHold predicates the apply block's sweeps are gated on, so
+// the number the preview prints and the number the applied run reports are
+// computed from one snapshot and cannot disagree about whether there IS a row to
+// move. A prediction QUERY would have been the alternative and would have put a
+// second read's failure into a pass whose only fatal error is a write error.
+func TestADryRunForecastsTheCausesCycleHalfItsVerdictWouldDrop(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer, older := seedCausesCycle(t, store, db)
+
+	// apply=false, so the pass reads and judges and writes NOTHING.
+	cls := &recordingCauses{}
+	res, classified, err := Run(ctx, store, cls, "p", 0.9, false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Reclassified != 1 {
+		t.Errorf("Reclassified = %d, want 1: the counter is set from the same prediction the row carries, so a dry run's tally and its rows cannot disagree",
+			res.Reclassified)
+	}
+	if len(classified) != 1 {
+		t.Fatalf("classified = %+v, want exactly one row", classified)
+	}
+	row := classified[0]
+	if row.CausesDroppable != 1 {
+		t.Errorf("CausesDroppable = %d, want 1: the pair holds a 'causes' edge in the direction this verdict is about to write, and the other one is what the verdict drops",
+			row.CausesDroppable)
+	}
+	if row.CausesDropped != 0 {
+		t.Errorf("CausesDropped = %d, want 0: a dry run performed no invalidation, and the observed count must not claim one", row.CausesDropped)
+	}
+	if row.Withdrawn {
+		t.Error("Withdrawn = true, want false: a dry run withdrew nothing")
+	}
+	// The forecast is a forecast: the cycle is still intact, which is the half a
+	// number with no graph behind it gets wrong.
+	edges := liveCausesEdges(t, store, newer, older)
+	if len(edges) != 2 {
+		t.Errorf("live 'causes' edges = %v, want both directions: a dry run must not change the graph", edges)
+	}
+	// And it is the same verdict the applied run reaches, so the preview is a
+	// preview: the applied pass on the untouched cycle drops exactly one.
+	applied := &recordingCauses{}
+	ares, aclassified, err := Run(ctx, store, applied, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run (apply): %v", err)
+	}
+	if len(aclassified) != 1 || aclassified[0].CausesDropped != 1 {
+		t.Errorf("the applied run reported %+v, want one row with CausesDropped=1: the forecast has to name the same number the run moves, or it is not forecasting it",
+			aclassified)
+	}
+	if ares.Reclassified != 1 {
+		t.Errorf("Reclassified = %d, want 1: a 'causes' cycle answered CAUSES drops a live edge, and a row moved", ares.Reclassified)
 	}
 }
 
@@ -719,6 +841,96 @@ func (c *scriptedRelation) ClassifyBatch(_ context.Context, pairs []Candidate) (
 	out := make([]Relation, len(pairs))
 	for i := range pairs {
 		out[i] = c.relation
+	}
+	return out, nil
+}
+
+// TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn is a
+// BLOCKER, and it is the shape a live 'causes' override creates when it is allowed
+// to reach the supersedes relation.
+//
+// The fixture is the one the review reproduced, and it is deliberately the same
+// fixture as TestAPassNeverWritesTheReverseOfALiveCausesEdgeWhenItDoesReAsk with
+// the verdict changed:
+//
+//   - `newer` was created 2026-09, `older` 2026-01, so the CHRONOLOGY is
+//     unambiguous;
+//   - a live 'causes' edge runs `newer → older`, which asserts the opposite: that
+//     the September note is the cause and the January note its effect;
+//   - both endpoints moved, so skip-if-unchanged releases the pair;
+//   - the classifier answers SUPERSEDES.
+//
+// Read through the causes override, the pair is asked as (Newer=`older`,
+// Older=`newer`) — the prompt labelled the JANUARY note NEWER — and the
+// SUPERSEDES branch then writes `supersedes older → newer`. That edge DEMOTES the
+// September note, which the store's own ranking reads as the note that replaced
+// the January one, and it buries the memory that is actually current. This is
+// #641's damage produced by the pass rather than found by it, and it is worse than
+// a mislabelled prompt because the write is the thing the harm lands on.
+//
+// So the causes edge's direction may govern the CAUSES relation and nothing else.
+// Where the two disagree, the pair is asked in the direction `orient` gives —
+// which is what the pre-#823 pass did for every pair without a live supersedes
+// edge — so a SUPERSEDES verdict is written in the direction that can demote a
+// note and never in the one that buries it, and the prompt's NEWER label is the
+// chronologically newer note whenever the question is a supersedes one.
+//
+// A live SUPERSEDES edge keeps its own override, deliberately and for the reason
+// #641's repair needs: that edge IS the demotion, so the direction to judge it in
+// is the direction it was written in, and a REVERSED answer is how the model
+// declines a backwards claim.
+func TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	newer := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0}, "2026-09-01 00:00:00")
+	older := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+	// The live 'causes' edge, running the way the timestamps do NOT.
+	if err := store.CreateLinkJudged(ctx, newer, older, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	// Both endpoints move, so nothing about the quiet can be the reason the
+	// assertions below hold.
+	retagBoth(t, store, newer, older)
+
+	cls := &recordingDirections{}
+	_, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(cls.asked) != 1 {
+		t.Fatalf("asked about %d pair(s) %v, want exactly 1", len(cls.asked), cls.asked)
+	}
+	// The question, and the label on it. A supersedes question is asked with the
+	// chronologically newer note as NEWER, so the answer is a direction the pass
+	// can act on.
+	if cls.asked[0] != [2]string{newer, older} {
+		t.Errorf("asked about %v, want [%s %s]: a 'causes' edge's direction may not decide a supersedes question, and the pair is asked by the timestamps instead",
+			cls.asked[0], newer, older)
+	}
+	// And what was written, read from the graph rather than from the pass's own
+	// counters: no edge in the direction that buries the September note.
+	edges := liveSupersedesEdges(t, store, newer, older)
+	if len(edges) != 1 || edges[0] != [2]string{newer, older} {
+		t.Errorf("live supersedes edges = %v, want exactly [%s %s]: the January note must not supersede the September one — that edge demotes the memory that is actually current (#641)",
+			edges, newer, older)
+	}
+	if len(classified) != 1 || classified[0].NewerID != newer {
+		t.Errorf("classified = %+v, want one row whose NEWER endpoint is the September note", classified)
+	}
+}
+
+// recordingDirections answers SUPERSEDES to every pair and records each
+// orientation it was handed, which is the only way to see what the PROMPT said as
+// well as what the graph ended up holding. The two are different claims and the
+// blocker is about both.
+type recordingDirections struct{ asked [][2]string }
+
+func (c *recordingDirections) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
+	out := make([]Relation, len(pairs))
+	for i, p := range pairs {
+		c.asked = append(c.asked, [2]string{p.NewerID, p.OlderID})
+		out[i] = RelationSupersedes
 	}
 	return out, nil
 }

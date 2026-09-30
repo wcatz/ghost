@@ -1708,7 +1708,7 @@ func TestSupersedeReport(t *testing.T) {
 	}, "would link", 1, 0)
 	for _, want := range []string{
 		"  4 pair(s) not proposed:",
-		"  2 pair(s) proposed the reverse of a live supersedes or causes link:",
+		"  2 pair(s) proposed the reverse of a live supersedes link:",
 		"  1 pair(s) refused:",
 		// The REAL project name, not a `<project>` placeholder: the line is a
 		// command, and a command with a placeholder in it is one the operator

@@ -153,55 +153,51 @@ func isLogKeyLabel(s string) bool {
 //
 // which reads as three unrelated facts and names neither endpoint.
 //
-// It runs over BOTH relations since #823, because the line is about a pair rather
-// than about an edge and the two relations are written in opposite directions: a
-// reader given `link_source`/`link_target` and no relation cannot tell which end
-// of the pair those two ids are, and for a 'causes' edge the answer is the
-// opposite of the one the keys suggest. The relation is a value too, so it gets a
-// key like everything else.
+// It names the relation as well as the endpoints because a reader given
+// `link_source`/`link_target` and nothing else cannot tell which end of the pair
+// those two ids are: the two relations are written in OPPOSITE directions, so for
+// a 'causes' edge the source is the note a supersedes edge would call the older.
+// The relation is a value like every other one, so it gets a key too — and it is
+// a key rather than part of the message precisely because the line is structured
+// for grep and a bare value would not be findable.
 func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
+	// ONE case, and the fixture is the only shape in which the line is reachable
+	// at all: a live 'supersedes' edge pointing at the OLDER note. A 'causes'
+	// edge cannot produce it, because a causes edge's direction does not decide
+	// the question the pair is asked in (see pairVerdict), so there is never a
+	// proposal to oppose one — which is why the line's relation key is always
+	// 'supersedes' and is nonetheless carried explicitly rather than asserted by
+	// the caller.
 	for _, tc := range []struct {
 		name       string
 		relation   Relation
 		sourceText string
 		targetText string
-		// stamp is the edge's own created_at, so the pair is re-judged and the
-		// line is reached; the fresh scan has to disagree with the edge, and the
-		// timestamps below are what makes it disagree.
-		stamp        string
-		linkSourceAt string // the endpoint that is the edge's source, by clock
+		// stamp is the edge's own created_at, so the pair is re-judged; the fresh
+		// scan proposes the timestamps' direction and the edge names the other,
+		// which is what makes them disagree.
+		stamp string
 	}{
 		{
-			name:         "a live supersedes link",
-			relation:     RelationSupersedes,
-			sourceText:   "bug: the relay stalls on every consumer rebalance",
-			targetText:   "the relay rebalance stall is fixed: pin the consumer",
-			stamp:        "2020-01-01 00:00:00",
-			linkSourceAt: "2026-01-01 00:00:00",
-		},
-		{
-			name:         "a live causes link",
-			relation:     RelationCauses,
-			sourceText:   "the restore is being rewritten to run on one spindle",
-			targetText:   "the restore path on one spindle is safe and fast",
-			stamp:        "2020-01-01 00:00:00",
-			linkSourceAt: "2026-09-01 00:00:00",
+			name:       "a live supersedes link",
+			relation:   RelationSupersedes,
+			sourceText: "bug: the relay stalls on every consumer rebalance",
+			targetText: "the relay rebalance stall is fixed: pin the consumer",
+			stamp:      "2020-01-01 00:00:00",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, db := seed(t)
 			ctx := context.Background()
 
-			// The pair is built the same way both times: one note a month old
-			// and one a month new, so the timestamps have a chronology. The
-			// edge then runs the OTHER way, which is the only shape in which the
-			// scan's proposal and the edge's direction disagree.
+			// One note a month old and one a month new, so the timestamps have a
+			// chronology, and the edge running old→recent against it: the
+			// supersedes edge names the OLDER note as the one that supersedes,
+			// which is exactly the backwards edge #641 is about and the one shape
+			// the scan's proposal has to be measured against.
 			old := add(t, store, db, tc.sourceText, []float32{1, 0, 0}, "2026-01-01 00:00:00")
 			recent := add(t, store, db, tc.targetText, []float32{0.98, 0.02, 0}, "2026-09-01 00:00:00")
-			linkSource, linkTarget := recent, old
-			if tc.linkSourceAt == "2026-01-01 00:00:00" {
-				linkSource, linkTarget = old, recent
-			}
+			linkSource, linkTarget := old, recent
 			if err := store.CreateLinkJudged(ctx, linkSource, linkTarget, string(tc.relation), 0.95, "llm", tc.stamp); err != nil {
 				t.Fatal(err)
 			}
