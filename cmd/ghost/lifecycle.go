@@ -1420,7 +1420,14 @@ func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provi
 // supersedePair is one `--withdraw <source-id> <target-id>` pair as it was typed,
 // before the refs are resolved. Source is the superseding memory (a
 // 'supersedes' edge is written newer→older) and Target the superseded one.
-type supersedePair struct{ source, target, relation string }
+//
+// It carries NO relation: `--relation` is one flag applying to every `--withdraw`
+// on the command line, so the relation is a property of the REQUEST rather than of
+// a pair, and `toWithdrawPairs` is where the two meet. A per-pair field would be
+// the shape that lets a request name two relations in one command, and
+// `parseSupersedeArgs` cannot express that — so the field would be dead weight
+// inviting exactly the ambiguity the single flag exists to prevent.
+type supersedePair struct{ source, target string }
 
 // parseSupersedeArgs parses `ghost supersede`'s arguments (everything after
 // the subcommand word). Hand-rolled, matching the historical loop exactly:

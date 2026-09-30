@@ -12,6 +12,7 @@ import (
 	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
+	"github.com/wcatz/ghost/internal/supersede"
 )
 
 // linkWithdrawServer is testServer with the concrete store kept, because this
@@ -358,6 +359,46 @@ func TestLinkWithdrawRemovesACausesEdge(t *testing.T) {
 	for _, e := range entries {
 		if e.Phase == "unsupersede" {
 			t.Errorf("a 'causes' withdrawal wrote the unsupersede row: %+v", e)
+		}
+	}
+}
+
+// TestWithdrawnRelationsRendersTheDefaultRatherThanNothing: the header's
+// relation is the zero value of a struct a caller may have built by hand, and an
+// empty one has to render as 'supersedes' — the same default the ROW uses and the
+// same one the withdrawal resolves with. The failure this pins is not cosmetic:
+// `rel` is defaulted and then used, so a version that compared and appended
+// `l.Relation` separately put an empty string in the header and printed
+// "Withdrew 1 of 1 named  link(s)" — the report disagreeing with its own row over a
+// row whose relation nobody can read.
+//
+// The two-relation case is here for the same reason: the join is the only place
+// two relations can ever appear in this header, since one call takes one pair.
+func TestWithdrawnRelationsRendersTheDefaultRatherThanNothing(t *testing.T) {
+	unset := supersede.WithdrawnLink{SourceID: "A", TargetID: "T1", LinkSource: "llm"}
+	causes := supersede.WithdrawnLink{SourceID: "B", TargetID: "T2", Relation: "causes", LinkSource: "llm"}
+	sup := supersede.WithdrawnLink{SourceID: "C", TargetID: "T3", Relation: "supersedes", LinkSource: "llm"}
+
+	if got := withdrawnRelations(nil); got != "supersedes" {
+		t.Errorf("withdrawnRelations(nil) = %q, want %q", got, "supersedes")
+	}
+	if got := withdrawnRelations([]supersede.WithdrawnLink{unset}); got != "supersedes" {
+		t.Errorf("withdrawnRelations(unset) = %q, want %q", got, "supersedes")
+	}
+	if got := withdrawnRelations([]supersede.WithdrawnLink{causes}); got != "causes" {
+		t.Errorf("withdrawnRelations(causes) = %q, want %q", got, "causes")
+	}
+	// Deduplicated, and a 'supersedes' row beside a 'causes' one is not folded into
+	// either: the header aggregates, and a header naming one relation over rows of
+	// two is the #833 claim.
+	if got := withdrawnRelations([]supersede.WithdrawnLink{causes, sup, causes}); got != "causes and supersedes" {
+		t.Errorf("withdrawnRelations(causes, supersedes, causes) = %q, want %q", got, "causes and supersedes")
+	}
+	// The empty string never appears, whatever the rows are: that is the assertion
+	// a report reader cannot make and a test must.
+	for _, links := range [][]supersede.WithdrawnLink{{unset}, {causes, unset}, {unset, sup}} {
+		if got := withdrawnRelations(links); strings.Contains(got, "  ") || strings.TrimSpace(got) != got {
+			t.Errorf("withdrawnRelations(%+v) = %q, which contains a gap where a relation belongs", links, got)
 		}
 	}
 }

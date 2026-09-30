@@ -1179,6 +1179,13 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 // relation; the two-relation form exists because the pair resolution may settle
 // either way and a header that named only 'supersedes' over a 'causes' row would
 // contradict the row printed under it.
+//
+// An empty relation renders 'supersedes', the same default the row below it uses
+// and the same one the withdrawal resolves with — and it is read ONCE into `rel`
+// and then used for both the membership test and the append. A version that
+// defaulted into `rel` and then appended `l.Relation` would put an EMPTY string in
+// the header, and a header reading "Withdrew 1 of 1 named  link(s)" is the report
+// disagreeing with its own row over a row nobody can read a relation off.
 func withdrawnRelations(links []supersede.WithdrawnLink) string {
 	if len(links) == 0 {
 		return "supersedes"
@@ -1191,13 +1198,13 @@ func withdrawnRelations(links []supersede.WithdrawnLink) string {
 		}
 		found := false
 		for _, r := range relations {
-			if r == l.Relation {
+			if r == rel {
 				found = true
 				break
 			}
 		}
 		if !found {
-			relations = append(relations, l.Relation)
+			relations = append(relations, rel)
 		}
 	}
 	return strings.Join(relations, " and ")
