@@ -1085,6 +1085,23 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 		return false, false, downgraded, fmt.Errorf("import memory %s: begin tx: %w", m.ID, err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	// Re-check presence INSIDE the write transaction. The pre-check above is
+	// under s.mu, which is a per-Store lock and closes nothing across processes:
+	// a second `ghost import` on the same database can pass the pre-check, see
+	// the id as absent, and fail the INSERT with a UNIQUE constraint error where
+	// it used to return a skip. This re-check runs after BEGIN IMMEDIATE has
+	// taken SQLite's write lock, so a second process's BEGIN IMMEDIATE blocks
+	// until this one commits and then sees the row. The check-then-write is
+	// atomic because both halves are in the same transaction, which is the only
+	// thing that makes it so — the process mutex was never enough.
+	var presentInTx int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, m.ID).Scan(&presentInTx); err != nil {
+		if err != sql.ErrNoRows {
+			return false, false, downgraded, fmt.Errorf("import memory: re-check presence: %w", err)
+		}
+	} else {
+		return false, false, downgraded, nil
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memories (id, project_id, category, content, importance, access_count,
 			last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
@@ -1265,7 +1282,26 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 		}
 	}
 
-	_, err = s.execGuardedWrite(ctx, "import-task", `
+	// The write goes through beginWrite rather than execGuardedWrite so the
+	// presence re-check can sit in the SAME transaction as the INSERT. See
+	// ImportMemory for why: s.mu is a per-Store lock and closes nothing across
+	// processes, so a second `ghost import` can pass the pre-check and fail the
+	// INSERT with a UNIQUE constraint error. BEGIN IMMEDIATE takes SQLite's write
+	// lock, so the re-check inside it is the atomic half of the check-then-write.
+	tx, _, err := s.beginWrite(ctx, "import-task")
+	if err != nil {
+		return false, fmt.Errorf("import task %s: begin tx: %w", t.ID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var presentInTx int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM tasks WHERE id = ?`, t.ID).Scan(&presentInTx); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import task %s: re-check presence: %w", t.ID, err)
+		}
+	} else {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks (id, project_id, title, description, status, priority,
 			blocked_by, branch, pr_number, notes, created_at, updated_at, completed_at)
 		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, 0), NULLIF(?, ''),
@@ -1274,9 +1310,11 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 			NULLIF(?, ''))
 	`, t.ID, t.ProjectID, t.Title, t.Description, t.Status, t.Priority,
 		nullIfEmpty(t.BlockedBy), nullIfEmpty(t.Branch), t.PRNumber, t.Notes,
-		t.CreatedAt, t.UpdatedAt, t.CompletedAt)
-	if err != nil {
+		t.CreatedAt, t.UpdatedAt, t.CompletedAt); err != nil {
 		return false, fmt.Errorf("import task %s: %w", t.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("import task %s: commit: %w", t.ID, err)
 	}
 	return true, nil
 }
@@ -1385,16 +1423,34 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 
 	alts, _ := json.Marshal(d.Alternatives)
 	tags, _ := json.Marshal(d.Tags)
-	_, err = s.execGuardedWrite(ctx, "import-decision", `
+	// beginWrite rather than execGuardedWrite, for the reason ImportTask gives:
+	// the presence re-check has to be in the same transaction as the INSERT,
+	// and s.mu does not close the cross-process race.
+	tx, _, err := s.beginWrite(ctx, "import-decision")
+	if err != nil {
+		return false, fmt.Errorf("import decision %s: begin tx: %w", d.ID, err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var presentInTx int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM decisions WHERE id = ?`, d.ID).Scan(&presentInTx); err != nil {
+		if err != sql.ErrNoRows {
+			return false, fmt.Errorf("import decision %s: re-check presence: %w", d.ID, err)
+		}
+	} else {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO decisions (id, project_id, title, decision, alternatives, rationale,
 			status, superseded_by, tags, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?,
 			COALESCE(NULLIF(?, ''), datetime('now')),
 			COALESCE(NULLIF(?, ''), datetime('now')))
 	`, d.ID, d.ProjectID, d.Title, d.Decision, string(alts), d.Rationale,
-		d.Status, nullIfEmpty(d.SupersededBy), string(tags), d.CreatedAt, d.UpdatedAt)
-	if err != nil {
+		d.Status, nullIfEmpty(d.SupersededBy), string(tags), d.CreatedAt, d.UpdatedAt); err != nil {
 		return false, fmt.Errorf("import decision %s: %w", d.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("import decision %s: commit: %w", d.ID, err)
 	}
 	return true, nil
 }

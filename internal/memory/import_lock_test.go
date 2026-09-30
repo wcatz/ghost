@@ -63,17 +63,17 @@ func TestThePresenceCheckIsUnderTheLockAndBeforeTheShapeCheck(t *testing.T) {
 				t.Fatalf("one of the four statements is missing: lock=%d presence=%d shape=%d insert=%d",
 					lock, presence, shape, insert)
 			}
-			if !(lock < presence) {
+			if lock >= presence {
 				t.Errorf("the presence check is NOT under the mutex: s.mu.Lock() at %d, SELECT at %d — "+
 					"two imports of the same new id can both see it absent and the second fails the INSERT "+
 					"with a UNIQUE constraint error instead of returning a skip", lock, presence)
 			}
-			if !(presence < shape) {
+			if presence >= shape {
 				t.Errorf("the shape check is NOT after the presence check: SELECT at %d, CheckImported at %d — "+
 					"a record already in the store would be refused rather than skipped, breaking "+
 					"re-run-is-always-safe", presence, shape)
 			}
-			if !(shape < insert) {
+			if shape >= insert {
 				t.Errorf("the shape check is NOT before the INSERT: CheckImported at %d, INSERT at %d", shape, insert)
 			}
 		})
