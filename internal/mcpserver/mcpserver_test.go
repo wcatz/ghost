@@ -1180,6 +1180,105 @@ func TestPrompts_RecordDecision(t *testing.T) {
 	}
 }
 
+// The waits a subscription test makes, bounded far above what an in-memory
+// transport needs — the delivery is a channel hand-off, microseconds of work —
+// and far below the package timeout. A test that fails because the behaviour is
+// broken must not be able to look like a test that failed because the machine
+// was busy (#805), and a bound is only ever paid by a test that is genuinely
+// broken.
+const (
+	// subscriptionWait bounds the wait for a subscription to REGISTER.
+	subscriptionWait = 30 * time.Second
+	// notificationWait bounds the wait for a notification a test's own trigger
+	// emitted exactly once, which cannot be retried without changing what the
+	// test is about.
+	notificationWait = 30 * time.Second
+	// subscriptionProbeInterval paces the re-probe while a subscription is
+	// still registering.
+	subscriptionProbeInterval = 5 * time.Millisecond
+	// subscriptionQuiet is how long the channel must stay empty before the
+	// probes are treated as all delivered. It is a delivery-latency bound on
+	// an in-memory transport, not a timeout on the behaviour under test.
+	subscriptionQuiet = 100 * time.Millisecond
+)
+
+// awaitResourceSubscriptions blocks until the SERVER has registered a
+// subscription for every uri, and leaves nothing of its own probing in updated.
+//
+// It exists because ClientSession.Subscribe is fire-and-forget under go-sdk's
+// SEP-2575 protocol: it opens the background "subscriptions/listen" stream and
+// returns as soon as that call is on the wire, while the server handles the
+// stream on a goroutine of its own and then parks it for the life of the
+// subscription. Nothing sent after Subscribe is therefore ordered behind the
+// registration, and a tool call sent immediately after it can be handled
+// FIRST — the notification that tool emits then reaches zero subscribers and
+// is never delivered at all. That is a lost notification, not a late one, so
+// no longer wait repairs it: the same test with a 30s deadline still failed at
+// roughly the same rate as with 2s (#805), while this probe is a signal that a
+// subscription is genuinely live.
+func awaitResourceSubscriptions(t *testing.T, srv *Server, ctx context.Context, updated <-chan string, uris ...string) {
+	t.Helper()
+	// A notification for ANY of the requested URIs is progress: a probe that
+	// arrives late still proves the subscription it names is registered, and
+	// the re-probe loop can leave more than one of them in flight.
+	remaining := make(map[string]bool, len(uris))
+	for _, uri := range uris {
+		remaining[uri] = true
+	}
+	deadline := time.After(subscriptionWait)
+	for len(remaining) > 0 {
+		for uri := range remaining {
+			srv.notifyResourceUpdated(ctx, uri)
+		}
+		select {
+		case got := <-updated:
+			delete(remaining, got)
+		case <-time.After(subscriptionProbeInterval):
+		case <-deadline:
+			t.Fatalf("subscriptions never registered within %s, still missing: %v", subscriptionWait, remaining)
+		}
+	}
+	// Every URI is registered, but probes sent before its registration landed
+	// can still be on the wire, and a test that asserts on what arrives NEXT
+	// would read one of those as its own trigger's output.
+	drainQuiescent(t, updated)
+}
+
+// drainQuiescent empties updated and keeps it empty for quiet. A plain
+// non-blocking drain is not enough: a notification already sent is delivered
+// asynchronously by the client session, so it can land after the drain has
+// seen an empty channel. A test whose next assertion is "nothing arrives" would
+// then read the probe as the thing it is looking for.
+func drainQuiescent(t *testing.T, updated <-chan string) {
+	t.Helper()
+	deadline := time.After(subscriptionWait)
+	for {
+		select {
+		case <-updated:
+			// A probe still arriving; keep waiting for the quiet it implies.
+		case <-time.After(subscriptionQuiet):
+			return
+		case <-deadline:
+			t.Fatalf("probe notifications kept arriving for %s after every subscription registered", subscriptionWait)
+		}
+	}
+}
+
+// awaitNotification asserts the next notification is for want. The wait is on
+// the event itself — a channel the client's handler writes — so it ends when the
+// notification arrives and only expires if it never does.
+func awaitNotification(t *testing.T, updated <-chan string, want string) {
+	t.Helper()
+	select {
+	case got := <-updated:
+		if got != want {
+			t.Errorf("notified URI = %q, want %q", got, want)
+		}
+	case <-time.After(notificationWait):
+		t.Fatalf("no resources/updated notification for %q within %s", want, notificationWait)
+	}
+}
+
 func TestResourceSubscription_NotifiesOnMemorySave(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -1212,29 +1311,14 @@ func TestResourceSubscription_NotifiesOnMemorySave(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Subscribe's response only confirms the client's request round-trip
-	// completed; it races the server's own internal bookkeeping (server.go's
-	// subscribe() populates resourceSubscriptions under a separate lock
-	// acquisition after the response is already in flight in some
-	// interleavings — confirmed via server-side logging showing
-	// subscriber_count=0 on an immediate notify). A real client would only
-	// ever hit this by chance right at subscribe time; retry a few times
-	// with a short per-attempt wait rather than one long timeout, since a
-	// dropped notification here never arrives no matter how long we wait.
-	var got string
-	for attempt := 0; attempt < 10 && got == ""; attempt++ {
-		srv.notifyResourceUpdated(ctx, uri)
-		select {
-		case got = <-updated:
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	if got == "" {
-		t.Fatal("timed out waiting for resources/updated notification after retries")
-	}
-	if got != uri {
-		t.Errorf("notified URI = %q, want %q", got, uri)
-	}
+	// A real client would only ever hit the registration race by chance right
+	// at subscribe time, and it cannot retry a notification it never received —
+	// so wait for the subscription to be live before the notify under test,
+	// rather than re-sending the notify on a short timer.
+	awaitResourceSubscriptions(t, srv, ctx, updated, uri)
+
+	srv.notifyResourceUpdated(ctx, uri)
+	awaitNotification(t, updated, uri)
 
 	if err := session.Unsubscribe(ctx, &mcp.UnsubscribeParams{URI: uri}); err != nil {
 		t.Fatalf("Unsubscribe: %v", err)
@@ -1277,6 +1361,10 @@ func TestResourceSubscription_NotifiesNameSubscriberOnToolSave(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
+	// The save below emits its notifications exactly once, so a subscription
+	// that had not registered yet when it ran would lose them for good (#805).
+	awaitResourceSubscriptions(t, srv, ctx, updated, nameURI)
+
 	// Drive the real tool handler, which resolves name -> hash internally.
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_memory_save",
@@ -1285,14 +1373,7 @@ func TestResourceSubscription_NotifiesNameSubscriberOnToolSave(t *testing.T) {
 		t.Fatalf("CallTool ghost_memory_save: %v", err)
 	}
 
-	select {
-	case got := <-updated:
-		if got != nameURI {
-			t.Errorf("notified URI = %q, want %q", got, nameURI)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for resources/updated notification on name URI")
-	}
+	awaitNotification(t, updated, nameURI)
 }
 
 func TestResourceSubscription_NotifiesHashSubscriberOnToolSave(t *testing.T) {
@@ -1329,6 +1410,9 @@ func TestResourceSubscription_NotifiesHashSubscriberOnToolSave(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
+	// Same one-shot trigger as the name-URI sibling, and the same race.
+	awaitResourceSubscriptions(t, srv, ctx, updated, hashURI)
+
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_memory_save",
 		Arguments: map[string]any{"project_id": "myproj", "content": "hash subscriber should still be notified", "category": "fact"},
@@ -1336,14 +1420,7 @@ func TestResourceSubscription_NotifiesHashSubscriberOnToolSave(t *testing.T) {
 		t.Fatalf("CallTool ghost_memory_save: %v", err)
 	}
 
-	select {
-	case got := <-updated:
-		if got != hashURI {
-			t.Errorf("notified URI = %q, want %q", got, hashURI)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for resources/updated notification on hash URI")
-	}
+	awaitNotification(t, updated, hashURI)
 }
 
 // TestResourceSubscription_RejectsUnknownURI exercises handleSubscribe
@@ -2248,33 +2325,10 @@ func TestGhostProjectDelete_NotifiesSubscribersOnApply(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	// Subscribe's response only confirms the client's request round-trip
-	// completed; it races the server's own internal bookkeeping (see the
-	// identical note on TestResourceSubscription_NotifiesOnMemorySave).
-	// The deletion notifications below are emitted exactly once and can't
-	// be retried, so confirm each subscription actually registered — and
-	// drain these probe notifications — before triggering the real delete.
-	for _, uri := range []string{contextURI, tasksURI, decisionsURI} {
-		var seen bool
-		for attempt := 0; attempt < 10 && !seen; attempt++ {
-			srv.notifyResourceUpdated(ctx, uri)
-			select {
-			case <-updated:
-				seen = true
-			case <-time.After(100 * time.Millisecond):
-			}
-		}
-		if !seen {
-			t.Fatalf("subscription for %q never registered", uri)
-		}
-	}
-	for drained := true; drained; {
-		select {
-		case <-updated:
-		default:
-			drained = false
-		}
-	}
+	// The deletion notifications are emitted exactly once and can't be
+	// retried, so confirm each subscription actually registered before
+	// triggering the real delete.
+	awaitResourceSubscriptions(t, srv, ctx, updated, contextURI, tasksURI, decisionsURI)
 
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_project_delete",
@@ -2284,7 +2338,7 @@ func TestGhostProjectDelete_NotifiesSubscribersOnApply(t *testing.T) {
 	}
 
 	want := map[string]bool{contextURI: false, tasksURI: false, decisionsURI: false}
-	deadline := time.After(2 * time.Second)
+	deadline := time.After(notificationWait)
 	for remaining := len(want); remaining > 0; {
 		select {
 		case got := <-updated:
@@ -2335,6 +2389,12 @@ func TestGhostProjectDelete_DryRunDoesNotNotify(t *testing.T) {
 	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: contextURI}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
 	}
+
+	// A dry run that notifies nobody only proves something if this subscriber
+	// was actually registered: without the probe, a subscription that lost the
+	// registration race would silence the tool too, and the assertion below
+	// would pass for the wrong reason.
+	awaitResourceSubscriptions(t, srv, ctx, updated, contextURI)
 
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_project_delete",
