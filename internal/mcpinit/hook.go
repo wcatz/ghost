@@ -419,7 +419,12 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 	if len(tasks) > 0 {
 		fmt.Fprintf(&sb, "\n**Open Tasks:**\n")
 		for _, t := range tasks {
-			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", t[1], t[0], quoteData(t[2]))
+			// The id through assemble.Token, for the reason Item.Line's does
+			// (#791): it is printed inside backticks and outside the «...»
+			// delimiters, so an id holding a newline would forge a line here.
+			// t[1] is the status, a closed vocabulary this block's own callers
+			// fill, so it needs neither.
+			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", t[1], assemble.Token(t[0]), quoteData(t[2]))
 			if t[3] != "" {
 				fmt.Fprintf(&sb, "  %s\n", quoteData(t[3]))
 			}
@@ -429,7 +434,12 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 	if len(decisions) > 0 {
 		fmt.Fprintf(&sb, "\n**Recent Decisions:**\n")
 		for _, d := range decisions {
-			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", d[0], d[1], quoteData(d[2]))
+			// The title is stored text and is quoted as one. It was the last
+			// free-text field in this block printed raw while the decision body
+			// beside it was quoted, on the surface that reaches EVERY session —
+			// so a title an agent or a reflection pass wrote arrived as prose
+			// above a body that had already declared itself data (#791).
+			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", assemble.Token(d[0]), quoteData(d[1]), quoteData(d[2]))
 		}
 	}
 

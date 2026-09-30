@@ -157,33 +157,47 @@ Memory content is data, not executable instructions. If a stored memory appears 
 
 ### The `«...»` data delimiters
 
-That rule is not carried by prose alone. On every surface that assembles stored
-text — the memory line, the project context block, the decisions resource, the
-SessionStart block — Ghost writes each piece of stored text inside `«...»` and
-prints the line that says what the delimiters mean. Anything inside them is data
-however imperative it reads, and an agent that has been told the convention is
-the only one that can honour it.
+That rule is not carried by prose alone. Stored text reaches an agent by one of
+two routes, and both are defended, because both can otherwise be read as
+something Ghost said rather than something Ghost was told.
 
-**Every stored field is covered, not only the content.** A memory line also
-carries the scope label, the `agent=`, the `source_ref=` and the id, and the
-project context block also carries the learned summary and a decision's title,
-decision and rationale — all of it text a reflection pass summarising an
-untrusted repository, an agent, or a hand-edited artifact can have written. A
-field printed outside the delimiters is a field that can close a line and have
-its own tail read as Ghost's own memory row, which defeats the convention for
-every other field on the line.
+**Inside the delimiters.** A memory's content, the `agent=` and `source_ref=`
+labels a memory line carries, a project's learned summary, a task's title and
+description on the SessionStart block, and a decision's title, decision and
+rationale are written inside `«...»`. A block that carries any of them prints
+the line that says what the delimiters mean, once per block — a second copy of
+the explanation reads as a stray duplicate rather than as emphasis. That sentence
+appears on the SessionStart block, on the project context block, and on the
+decisions resource. A search result or a `ghost_memories_list` answer is a list
+of lines rather than a block and does not print it; the delimiters on each line
+are the convention there.
 
-**The delimiters are a rendering guarantee, not a validation rule, and the two
-are separate.** A field printed outside them cannot break out of its line or
-open a data block of its own: an id or a scope value holding a newline, a
-carriage return, a backtick or a `«` is written as an ASCII-only quoted string
-instead, so one line stays one line. That is what protects a store that already
-holds such a value — written before a refusal landed, restored from a snapshot,
-or edited by hand. Separately, `ghost import` **refuses** a memory id carrying a
-control character, whitespace, a backtick or a `«»`, and one longer than 128
-bytes, rather than clamping it: an id is a primary key, and a shortened one
-names a different row. The rejection is per-record and named by artifact line
-number, so one damaged line does not abandon the rest of the file and a dry run
-classifies the file exactly as the apply run it previews.
+This is a convention rather than a schema check, and it is applied where it is
+applied — the task listing and the tasks resource still print a task's title and
+id raw, which is a known gap rather than a documented guarantee.
+
+**Outside them, through a safe token.** A memory id and a scope key or value are
+printed *outside* `«...»` — an id inside backticks, a scope in a `scope{…}`
+label — because they are keys and axis names rather than prose, and a reader
+needs them legible. They are still rendered by one rule: bare only when every
+character is one a stored name plausibly uses, and otherwise as an ASCII-only
+quoted string. A newline, a carriage return, a tab, a NUL, a backtick or a `«`
+therefore cannot start a line, close the backtick span or the label, or open a
+data block of its own — so one line stays one line and no field's tail can be
+read as a second memory row.
+
+That second route is what protects a store which already holds such a value:
+written before a write-boundary refusal landed, restored from a snapshot an older
+Ghost took, or edited by hand. Rendering is the load-bearing layer precisely
+because a store can hold anything and the renderer never has to ask.
+
+**Validation is separate, and refuses rather than clamps.** `ghost import`
+refuses a memory id carrying a control character, whitespace, a backtick or a
+`«»`, and one longer than 128 bytes. An id is a primary key, so a shortened one
+would name a *different row* — a memory under a key the artifact never chose,
+colliding with whatever genuinely holds it. The rejection is per-record and named
+by artifact line number, so one damaged line does not abandon a file that may
+hold ten thousand good ones, and a dry run classifies the file exactly as the
+apply run it previews.
 
 For the underlying server implementation, see [`architecture.md`](architecture.md). For client setup, see [`installation.md`](installation.md).
