@@ -386,6 +386,17 @@ func orient(a, b memory.Memory) (newer, older memory.Memory, ok bool) {
 // Classified pairs a Candidate with the verdict Run() reached for it — used
 // by callers (the CLI) to report the actual relation written, not just that
 // "something" was confirmed.
+//
+// Reclassified and Withdrawn are what make a row about an EXISTING edge rather
+// than about a proposal, and they are two fields because they are two facts a
+// report must not merge. Reclassified says the pair carried a live 'supersedes'
+// edge, so any verdict but SUPERSEDES withdrew something the graph already
+// held; Withdrawn says this call's invalidation actually moved that edge, which
+// is 0 in a dry run and can be lower than the count under --apply when a
+// concurrent pass took the edge first. A row that carried only the verdict was
+// indistinguishable from a fresh pair the pass declined (#785), so a caller
+// could neither name the edge the pass withdrew nor the memory whose
+// resolution that withdrawal orphaned.
 type Classified struct {
 	Candidate
 	Relation Relation
@@ -397,6 +408,15 @@ type Classified struct {
 	// set out. Empty only when an endpoint is missing from that snapshot, which
 	// the existence check has already refused by then.
 	JudgedAt string
+	// Reclassified marks a pair the graph already asserted: a live 'supersedes'
+	// edge decided which way round it was judged, so the verdict is about an
+	// edge in the store and not about a proposal.
+	Reclassified bool
+	// Withdrawn is true only when --apply invalidated that live edge in THIS
+	// run. It is false in a dry run, and false under --apply when a concurrent
+	// pass withdrew the edge first — the same distinction Reassess draws, for
+	// the same reason: the report must not claim a graph change it did not make.
+	Withdrawn bool
 }
 
 // Result summarizes a pass.
@@ -933,10 +953,17 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 				}
 				continue
 			}
-			classified = append(classified, Classified{Candidate: c, Relation: verdict, JudgedAt: judgedAt(aliveByID, c)})
-
 			key := newPairKey(c.NewerID, c.OlderID)
 			wasReclassify := livePair[key]
+			// Carried on the row rather than left to the caller to reconstruct:
+			// `livePair` dies with this call, and a caller reading only the
+			// report could not tell a withdrawal from a fresh pair's silence
+			// (#785). JudgedAt is #792's: the content freshness the apply block
+			// stamps onto the edge it creates, read from this pass's own snapshot.
+			classified = append(classified, Classified{
+				Candidate: c, Relation: verdict, JudgedAt: judgedAt(aliveByID, c),
+				Reclassified: wasReclassify,
+			})
 
 			switch verdict {
 			case RelationSupersedes:
@@ -972,7 +999,13 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		// from it: inserting a row for a deleted endpoint would hit the FK
 		// and roll back every other pair's row with it.
 		writable := make(map[[2]string]bool, len(classified))
-		for _, c := range classified {
+		// Indexed, because the row records what its own write moved: the
+		// supersedes invalidation's count is the only evidence of whether THIS
+		// run withdrew the edge or a concurrent pass had already taken it, and a
+		// report that cannot tell those apart claims a graph change nobody made
+		// (#785, the same distinction Reassess draws).
+		for i := range classified {
+			c := &classified[i]
 			// Pre-write existence check: the candidate was alive at
 			// selection (and possibly at the batch check above), but a
 			// concurrent reflect pass may have replaced it during the
@@ -1005,13 +1038,17 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 				if err := store.CreateLinkJudged(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm", c.JudgedAt); err != nil {
 					return res, nil, fmt.Errorf("create causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
-				if _, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
+				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
+				if err != nil {
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
+				c.Withdrawn = c.Reclassified && dropped > 0
 			case RelationNeither:
-				if _, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
+				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
+				if err != nil {
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
+				c.Withdrawn = c.Reclassified && dropped > 0
 				if _, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
 					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
@@ -1033,6 +1070,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 				if err != nil {
 					return res, nil, fmt.Errorf("invalidate reversed causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
+				c.Withdrawn = c.Reclassified && dropped > 0
 				// Info, and only when a row really changed: a fresh reversed
 				// candidate usually carries no link, so claiming a drop there
 				// would put a graph mutation in lifecycle.log that never
