@@ -230,3 +230,135 @@ func TestMemoryIDsByIDPrefixFindsANonASCIID(t *testing.T) {
 		}
 	}
 }
+
+// TestSupersedesLinksIntoReachesAGlobalSource is #786 at the read a withdrawal
+// decides on. A promotion moves a memory into `_global` and KEEPS its links, so a
+// live 'supersedes' edge is left with one endpoint in the project and one in the
+// shared scope — and the project is the one whose memory the edge buries. The
+// read's project predicate is on the SOURCE alone, so that edge was invisible from
+// the project being harmed, which is what left `ghost supersede <project>
+// --withdraw` and `ghost_link_withdraw` refusing an edge that was demoting a
+// memory the operator could see missing from every session.
+//
+// `_global` is in scope from EVERY project, and no other project is: that is the
+// same rule the ref resolver follows, so the two halves of a withdrawal agree
+// about which memories an operator may name.
+func TestSupersedesLinksIntoReachesAGlobalSource(t *testing.T) {
+	s := linkTestStore(t)
+	ctx := context.Background()
+	source := mustCreate(t, s, "p1", "A note promoted to _global after it superseded another.")
+	target := mustCreate(t, s, "p1", "The p1 note that the promoted one superseded.")
+	other := mustCreate(t, s, "p1", "An unrelated p1 note, to prove the read is not a match test.")
+	// A second project's edge into a memory of its own, and one into OURS: the
+	// first must stay invisible from p1 (p1 does not own it), and the second is
+	// p1's own memory, so p1 is entitled to withdraw the edge burying it.
+	foreignNewer := mustCreate(t, s, "p2", "A p2 note that supersedes a p2 note.")
+	foreignOlder := mustCreate(t, s, "p2", "A p2 note that is stale.")
+	foreignIntoOurs := mustCreate(t, s, "p2", "A p2 note that supersedes one of p1's.")
+
+	mustLink(t, s, source, target, "supersedes", 0.95, "llm")
+	mustLink(t, s, foreignNewer, foreignOlder, "supersedes", 0.95, "llm")
+	mustLink(t, s, foreignIntoOurs, target, "supersedes", 0.95, "llm")
+	if err := s.PromoteToGlobal(ctx, "p1", source); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	links, err := s.SupersedesLinksInto(ctx, "p1", target)
+	if err != nil {
+		t.Fatalf("SupersedesLinksInto: %v", err)
+	}
+	if len(links) != 2 {
+		t.Fatalf("SupersedesLinksInto(p1) = %+v, want 2 live edges into p1's target: the promoted source's and the p2 one that buries a p1 memory", links)
+	}
+	seen := map[string]bool{}
+	for _, l := range links {
+		seen[l.SourceID] = true
+	}
+	if !seen[source] {
+		t.Errorf("SupersedesLinksInto(p1) cannot see the edge whose SOURCE was promoted to _global: %+v", links)
+	}
+	if !seen[foreignIntoOurs] {
+		t.Errorf("SupersedesLinksInto(p1) cannot see the edge burying its OWN target: %+v", links)
+	}
+
+	// Neither of p2's OTHER memories is reachable from p1: "either endpoint" is
+	// about the edge, not about the whole store.
+	if got, err := s.SupersedesLinksInto(ctx, "p1", foreignOlder); err != nil {
+		t.Fatalf("SupersedesLinksInto(p1, p2's target): %v", err)
+	} else if len(got) != 0 {
+		t.Errorf("SupersedesLinksInto(p1) reached an edge with no endpoint in p1 or _global: %+v", got)
+	}
+	if got, err := s.SupersedesLinksInto(ctx, "p1", other); err != nil {
+		t.Fatalf("SupersedesLinksInto(p1, unrelated): %v", err)
+	} else if len(got) != 0 {
+		t.Errorf("SupersedesLinksInto(p1, unrelated) = %+v, want none", got)
+	}
+	// And the shared scope is not every project: naming `_global` reaches the
+	// promoted source's edge, and p2's edge into p1's target is NOT one of them
+	// even though p1 can see it — the rule is "either endpoint is OURS", and
+	// neither endpoint of that edge is in `_global`.
+	if got, err := s.SupersedesLinksInto(ctx, GlobalProjectID, foreignOlder); err != nil {
+		t.Fatalf("SupersedesLinksInto(_global, p2's target): %v", err)
+	} else if len(got) != 0 {
+		t.Errorf("SupersedesLinksInto(_global) reached an edge with no endpoint in the shared scope: %+v", got)
+	}
+	if got, err := s.SupersedesLinksInto(ctx, GlobalProjectID, target); err != nil {
+		t.Fatalf("SupersedesLinksInto(_global, p1's target): %v", err)
+	} else if len(got) != 1 || got[0].SourceID != source {
+		t.Errorf("SupersedesLinksInto(_global) = %+v, want only the edge whose source IS in the shared scope", got)
+	}
+}
+
+// TestLinksByRelationSourceReachesAGlobalSource is the same rule on the read
+// every OTHER supersede surface goes through: the repair pass's load, the
+// ordinary pass's reclassify half, resolve's supersedes piggyback and the floor
+// that holds a resolved row down. All four scope on the edge's SOURCE, so a
+// promoted source put the edge outside all four at once — including the floor,
+// which then released a target the ranking was still demoting. They read one
+// method for exactly this reason, and the consistency is the invariant.
+func TestLinksByRelationSourceReachesAGlobalSource(t *testing.T) {
+	s := linkTestStore(t)
+	ctx := context.Background()
+	source := mustCreate(t, s, "p1", "A note promoted to _global after it superseded another.")
+	target := mustCreate(t, s, "p1", "The p1 note that the promoted one superseded.")
+	foreignNewer := mustCreate(t, s, "p2", "A p2 note that supersedes a p2 note.")
+	foreignOlder := mustCreate(t, s, "p2", "A p2 note that is stale.")
+	foreignIntoOurs := mustCreate(t, s, "p2", "A p2 note that supersedes one of p1's.")
+	mustLink(t, s, source, target, "supersedes", 0.95, "llm")
+	mustLink(t, s, foreignNewer, foreignOlder, "supersedes", 0.95, "llm")
+	mustLink(t, s, foreignIntoOurs, target, "supersedes", 0.95, "llm")
+	if err := s.PromoteToGlobal(ctx, "p1", source); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+
+	links, err := s.LinksByRelationSource(ctx, "p1", "supersedes", "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource: %v", err)
+	}
+	if len(links) != 1 || links[0].SourceID != source || links[0].TargetID != target {
+		t.Fatalf("LinksByRelationSource(p1) = %+v, want the %s→%s edge whose source is in the shared scope", links, source, target)
+	}
+	// p2 owns the one edge it sources into p2. It does NOT get the edge p2
+	// sources into a p1 memory, and it does not get p1's promoted one: this read
+	// is about who may JUDGE an edge, and judging one acts on both its endpoints,
+	// so an edge with an endpoint outside the caller's project is that other
+	// project's edge to correct.
+	links, err = s.LinksByRelationSource(ctx, "p2", "supersedes", "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource(p2): %v", err)
+	}
+	if len(links) != 1 || links[0].SourceID != foreignNewer {
+		t.Fatalf("LinksByRelationSource(p2) = %+v, want only the edge with BOTH endpoints in p2 or _global", links)
+	}
+	// The shared scope is not every project, and the TARGET half is what makes
+	// that so here: from `_global`, p1's promoted edge does not load, because one
+	// of its endpoints is a p1 memory and judging the edge means acting on that
+	// memory. A pass is run against a project, and this is the read a pass uses.
+	got, err := s.LinksByRelationSource(ctx, GlobalProjectID, "supersedes", "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource(_global): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("LinksByRelationSource(_global) = %+v, want none: the one edge with a _global source has a p1 target", got)
+	}
+}

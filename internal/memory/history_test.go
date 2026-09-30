@@ -1708,6 +1708,29 @@ func countOccurrences(t *testing.T, db *sql.DB, text string) (int, error) {
 		// hold no content.
 		{"memory_provenance.source_ref", `SELECT count(*) FROM memory_provenance WHERE source_ref = ?`},
 		{"memory_snapshot_evidence.source_ref", `SELECT count(*) FROM memory_snapshot_evidence WHERE source_ref = ?`},
+		// The retrieval record (#646), EVERY column, matched as a literal
+		// SUBSTRING rather than by equality. A struct check is a claim about this
+		// build's type; this is a claim about what is on the disk, which is what a
+		// purge, an export and a reader actually meet.
+		//
+		// Substring is the sensitivity that matters, and equality would have made
+		// this list decorative: a leak that stored the question inside a longer
+		// value, or a memory's content inside a verdict object, would never equal
+		// the text searched for and the scan would report zero. instr rather than
+		// LIKE, so a % or _ in the text is not a wildcard — a false positive here
+		// is harmless (it fails a test), a false negative is the whole point.
+		//
+		// Every column, not just the ones the INSERT names, so a column added later
+		// without thought is caught in review rather than in production.
+		{"retrieval_record.project_id", `SELECT count(*) FROM retrieval_record WHERE instr(project_id, ?) > 0`},
+		{"retrieval_record.source", `SELECT count(*) FROM retrieval_record WHERE instr(source, ?) > 0`},
+		{"retrieval_record.session_id", `SELECT count(*) FROM retrieval_record WHERE instr(session_id, ?) > 0`},
+		{"retrieval_record.query_hash", `SELECT count(*) FROM retrieval_record WHERE instr(query_hash, ?) > 0`},
+		{"retrieval_record.as_of", `SELECT count(*) FROM retrieval_record WHERE instr(as_of, ?) > 0`},
+		{"retrieval_record.reason", `SELECT count(*) FROM retrieval_record WHERE instr(reason, ?) > 0`},
+		{"retrieval_record.verdicts", `SELECT count(*) FROM retrieval_record WHERE instr(verdicts, ?) > 0`},
+		{"retrieval_record.outcome", `SELECT count(*) FROM retrieval_record WHERE instr(outcome, ?) > 0`},
+		{"retrieval_record.recorded_at", `SELECT count(*) FROM retrieval_record WHERE instr(recorded_at, ?) > 0`},
 	} {
 		var n int
 		if err := db.QueryRow(q.query, text).Scan(&n); err != nil {

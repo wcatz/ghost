@@ -9,20 +9,6 @@ import (
 	"testing"
 )
 
-// Point config.DataDirPath at a temp tree and return that tree's ghost
-// subdirectory, standing in for ~/.local/share/ghost. Without this the tests
-// would tighten the developer's real data directory.
-func fakeDataDir(t *testing.T) string {
-	t.Helper()
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	dir := filepath.Join(dataHome, "ghost")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir data dir: %v", err)
-	}
-	return dir
-}
-
 func permOf(t *testing.T, path string) os.FileMode {
 	t.Helper()
 	info, err := os.Lstat(path)

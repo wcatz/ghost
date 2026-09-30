@@ -70,6 +70,12 @@ func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb
 	if _, err := fmt.Fprintf(out, "  audit_log:    %d\n", summary.AuditLog); err != nil {
 		return err
 	}
+	// Last, in the struct's own order. The audit trail's rows for this project
+	// (#646): DeleteProject removes them, and a summary that omitted a table its
+	// own command deletes would under-report what the user is about to lose.
+	if _, err := fmt.Fprintf(out, "  retrievals:   %d\n", summary.RetrievalRecords); err != nil {
+		return err
+	}
 	return nil
 }
 

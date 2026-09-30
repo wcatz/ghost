@@ -161,7 +161,7 @@ func runValidity(p *pipeline) {
 		p.trace.Signals[c.ID] = sig
 	}
 	p.rows = kept
-	p.trace.record(stageValidity, in, len(kept), dropped, false)
+	p.trace.record(stageValidity, in, len(kept), dropped)
 }
 
 // runPredicates is stage 3: the category, retention-tier and scope verdicts, applied over the
@@ -213,7 +213,7 @@ func runPredicates(p *pipeline) {
 		items = append(items, it)
 	}
 	p.rows, p.items = kept, items
-	p.trace.record(stagePredicates, in, len(kept), dropped, false)
+	p.trace.record(stagePredicates, in, len(kept), dropped)
 }
 
 // provenanceWeight is stage 4's weight, as the trace records it, and only that:
@@ -266,7 +266,7 @@ func runProvenance(p *pipeline) {
 		sig.Evidence = p.evidenceOf(id)
 		p.trace.Signals[id] = sig
 	}
-	p.trace.record(stageProvenance, len(p.rows), len(p.rows), nil, false,
+	p.trace.record(stageProvenance, len(p.rows), len(p.rows), nil,
 		"provenance weight is pinned at 1.0: no measured threshold justifies scoring confidence yet")
 }
 
@@ -346,14 +346,15 @@ func runConflicts(p *pipeline) {
 		}
 	}
 	p.blockNotes = append(p.blockNotes, notes...)
-	p.trace.record(stageConflicts, in, len(p.rows), dropped, false, append(append([]string(nil), stageNotes...), notes...)...)
+	p.trace.record(stageConflicts, in, len(p.rows), dropped, append(append([]string(nil), stageNotes...), notes...)...)
 }
 
 // runDedup is stage 6. The retriever reorders the window by supersede and
-// near-duplicate edges already, and the source policy for dropping a demoted
-// loser belongs to the session-start surface, which is not on this seam yet. The
-// stage is a pass-through in v1 and says so in the trace rather than pretending
-// to have deduplicated.
+// near-duplicate edges already, and the policy for dropping a demoted loser is
+// the CALLER's — `Slice.DropDemotedLosers`, which reaches the retriever through
+// `passivePolicies` and which the session-start surface sets for `_global` — so
+// the stage reports the policy and nothing else. The stage is a pass-through in
+// v1 and says so in the trace rather than pretending to have deduplicated.
 func runDedup(p *pipeline) {
 	// The sentence is about what the RETRIEVER did, and a passive bucket can have
 	// had losers removed rather than ranked last — so the old wording ("no source
@@ -381,7 +382,7 @@ func runDedup(p *pipeline) {
 		note += "; no source policy drops losers on this surface yet"
 	}
 	p.blockNotes = append(p.blockNotes, note)
-	p.trace.record(stageDedup, len(p.rows), len(p.rows), nil, false, note)
+	p.trace.record(stageDedup, len(p.rows), len(p.rows), nil, note)
 }
 
 // dropsDemotedLosers reports whether any bucket in the request ASKS the retriever
@@ -403,7 +404,7 @@ func (p *pipeline) dropsDemotedLosers() bool {
 func runDiversity(p *pipeline) {
 	note := "diversity is off by default: no measured per-bucket quota"
 	p.blockNotes = append(p.blockNotes, note)
-	p.trace.record(stageDiversity, len(p.rows), len(p.rows), nil, false, note)
+	p.trace.record(stageDiversity, len(p.rows), len(p.rows), nil, note)
 }
 
 // runBudget is stage 8: the final closure. The order the retriever returned is
@@ -489,7 +490,7 @@ func runBudget(p *pipeline) {
 	if p.windowDisclosure != "" {
 		notes = append(notes, p.windowDisclosure)
 	}
-	p.trace.record(stageBudget, in, len(rows), dropped, false, notes...)
+	p.trace.record(stageBudget, in, len(rows), dropped, notes...)
 }
 
 // runRender is stage 9: the shared item renderer. Each surface keeps its own
@@ -498,7 +499,7 @@ func runBudget(p *pipeline) {
 // response-fit post-pass, which needs the framing to measure a complete
 // response, is not part of this stage — it runs after the outcome.
 func runRender(p *pipeline) {
-	p.trace.record(stageRender, len(p.rows), len(p.items), nil, false)
+	p.trace.record(stageRender, len(p.rows), len(p.items), nil)
 }
 
 // trim drops the rows keepRow marks false, recording each one.

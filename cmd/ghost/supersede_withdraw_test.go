@@ -201,17 +201,22 @@ func TestSupersedeWithdrawReportApplied(t *testing.T) {
 // repairable id and no id whose edge is still live.
 func TestWithdrawFollowUpRendersTheSharedRepairableSet(t *testing.T) {
 	links := []supersede.WithdrawnLink{
-		{SourceID: "A", TargetID: "T1", Withdrawn: true},
-		{SourceID: "B", TargetID: "T1", Withdrawn: true}, // a second edge, one target
-		{SourceID: "C", TargetID: "T2", Withdrawn: true},
-		{SourceID: "D", TargetID: "T3", NotAttempted: true},     // never reached: still live
-		{SourceID: "E", TargetID: "T4", WithdrawalFailed: true}, // the write errored
-		{SourceID: "F", TargetID: "T5"},                         // a concurrent pass took it
+		{SourceID: "A", TargetID: "T1", TargetProjectID: "myproj", Withdrawn: true},
+		{SourceID: "B", TargetID: "T1", TargetProjectID: "myproj", Withdrawn: true}, // a second edge, one target
+		{SourceID: "C", TargetID: "T2", TargetProjectID: "myproj", Withdrawn: true},
+		{SourceID: "D", TargetID: "T3", TargetProjectID: "myproj", NotAttempted: true},     // never reached: still live
+		{SourceID: "E", TargetID: "T4", TargetProjectID: "myproj", WithdrawalFailed: true}, // the write errored
+		{SourceID: "F", TargetID: "T5", TargetProjectID: "myproj"},                         // a concurrent pass took it
 	}
 	got := supersede.RepairableTargets(links)
-	// The list is what the shared formatter turns into a command naming
-	// exactly these memories.
-	followup := supersedeReassessFollowup("myproj", got, "")
+	if len(got) != 1 {
+		t.Fatalf("RepairableTargets = %+v, want one project group", got)
+	}
+	// The group is what the shared formatter turns into a command naming exactly
+	// these memories, and it is keyed by the project that owns them — the same
+	// project here, and the whole difference for a `_global` call over a target
+	// in a project (#786).
+	followup := supersedeReassessFollowup(got[0].ProjectID, got[0].Targets, "")
 	if !strings.Contains(followup, "T1") || !strings.Contains(followup, "T5") {
 		t.Errorf("the follow-up does not name every repairable target:\n%s", followup)
 	}

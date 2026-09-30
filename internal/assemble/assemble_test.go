@@ -655,6 +655,66 @@ func TestSliceBudgetsMembershipPerBucket(t *testing.T) {
 	}
 }
 
+// TestTheSliceByteCapIsExactAtTheLimit: the byte cap admits a row that EXACTLY
+// fills what is left of the bucket's budget, because `docs/architecture.md`
+// promises both bounds are "tested at, just under, and just over the limit" and
+// this is the "at". The comparison is a strict `>`, so a row that lands on the
+// cap is admitted; relaxing it to `>=` drops a row that fitted, and nothing else
+// in this package can see that — every other fixture either empties the set with
+// a cap of one byte or never puts two rows into one bucket whose bytes add up to
+// a round number.
+//
+// The rows are 10 bytes each so a cap of 20 is filled exactly by two of them and
+// a cap of 10 by one: the single-row case is the boundary on the first row, the
+// two-row case is the same boundary on the SECOND, which is the one that exercises
+// the running `bytes[bucket]` total rather than a comparison against zero.
+func TestTheSliceByteCapIsExactAtTheLimit(t *testing.T) {
+	fill := strings.Repeat("x", 10)
+	row := func(id string) memory.Candidate { return candidate(id, "proj", "fact", fill, 0.5) }
+	// Budget.MaxBytes stays 0 throughout: it bounds the COMPLETE response and the
+	// response-fit post-pass would trim on its own budget, so setting it would test
+	// the other cap. The slice cap is the one under test.
+	for _, tc := range []struct {
+		name    string
+		rows    []memory.Candidate
+		maxByte int
+		want    []string
+	}{
+		{"one row, one byte over the cap", []memory.Candidate{row("A1")}, 9, nil},
+		{"one row, exactly at the cap", []memory.Candidate{row("A1")}, 10, []string{"A1"}},
+		{"one row, one byte under the cap", []memory.Candidate{row("A1")}, 11, []string{"A1"}},
+		{"the second row exactly fills the cap", []memory.Candidate{row("A1"), row("A2")}, 20, []string{"A1", "A2"}},
+		{"the second row is one byte over", []memory.Candidate{row("A1"), row("A2")}, 19, []string{"A1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := baseRequest()
+			req.Budget = Budget{MaxItems: 10, Slices: []Slice{{Bucket: "proj", MaxBytes: tc.maxByte}}}
+
+			res := run(t, &fakeRetriever{set: setOf(tc.rows...)}, req)
+
+			if got := itemIDs(res.Items); !eq(got, tc.want) {
+				t.Errorf("items = %v, want %v: a cap of %d bytes over %d 10-byte rows admits the rows that fit "+
+					"exactly", got, tc.want, tc.maxByte, len(tc.rows))
+			}
+		})
+	}
+	// The removal is attributed to the CONTENT byte cap rather than to a row
+	// count, because the sentence that names the remedy is read from which bound
+	// cut the row: a caller told to raise the limit for a byte-capped row gets
+	// the identical block back and learns nothing.
+	over := baseRequest()
+	over.Budget = Budget{MaxItems: 10, Slices: []Slice{{Bucket: "proj", MaxBytes: 9}}}
+	res := run(t, &fakeRetriever{set: setOf(row("A1"))}, over)
+	if res.Reason != "all_over_budget" {
+		t.Errorf("reason = %q, want all_over_budget: the only cap this request set is the slice's content bytes",
+			res.Reason)
+	}
+	if !strings.Contains(res.Abstention, "CONTENT byte cap") {
+		t.Errorf("abstention must name the CONTENT byte cap, since raising the row limit would change nothing here: %q",
+			res.Abstention)
+	}
+}
+
 // TestSliceClampPreservesUTF8Boundaries: a presentation clamp cuts on a rune
 // boundary, so a multi-byte memory is never left half a character.
 func TestSliceClampPreservesUTF8Boundaries(t *testing.T) {
@@ -734,10 +794,18 @@ func TestRowWithoutAValidityClaimKeepsItsPlace(t *testing.T) {
 	}
 }
 
-// TestPassiveModeIsNotImplementedYet: an empty query selects passive retrieval,
-// which arrives with the session-start migration. It must fail as an error
-// rather than return an empty result that reads as an empty store.
-func TestPassiveModeIsNotImplementedYet(t *testing.T) {
+// TestAPassiveRequestWithNoBucketPoliciesIsRefused: an empty query selects passive
+// retrieval, and passive retrieval is a request PER BUCKET — a slice states the
+// window and the policy the store selects under. A query that arrives with none
+// (here: baseRequest's `MaxItems: 2` and no slices) has nothing to retrieve by,
+// so it must fail as an error rather than return an empty result that reads as an
+// empty store — and it must fail BEFORE the retriever is called, because a store
+// asked a question it cannot answer answers it with a whole-store scan.
+//
+// The name this test carried said the opposite of what it asserted, which is its
+// own kind of defect: a reader grepping for the session-start migration would
+// have found a test claiming the migration had not happened.
+func TestAPassiveRequestWithNoBucketPoliciesIsRefused(t *testing.T) {
 	r := &fakeRetriever{set: setOf()}
 	req := baseRequest()
 	req.Query = ""

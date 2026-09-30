@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -190,6 +191,50 @@ type Request struct {
 	// shows the answerable and no-answer cosine distributions overlap.
 	AbstainCosine float32
 	Explain       bool
+	// Record receives one retrieval record per SUCCESSFUL Run: the query as a
+	// digest, the ids this call judged, and each one's kept/dropped verdict with
+	// the stage and reason the stages gave it (#646).
+	//
+	// nil is the ordinary case — the bench, every test in this package, and any
+	// caller that wants no audit — and it is checked per Request rather than
+	// through a package global, so two Runs cannot record into each other's
+	// store. A failure to record never fails the search; see emit in record.go.
+	Record RecordSink
+	// SuppressRecordWhenLegsFailed states that this caller returns a result with
+	// a FAILED leg and nothing admitted as an ERROR rather than as an answer, so
+	// such a call is not a retrieval the audit should count.
+	//
+	// It exists because "a successful Run" is not the same as "a call the caller
+	// received an answer for", and the difference is a surface's to make: the MCP
+	// handler turns exactly that case into a retryable error so an agent never
+	// reads "nothing matched" as a fact. A record written anyway would put a row
+	// in the audit's denominator for a call that returned no memories at all —
+	// the same error TestNoRecordIsWrittenForACallThatReturnedNothing exists to
+	// prevent, one layer out, where Run cannot see it.
+	//
+	// false (the default) records such a result normally, which is right for a
+	// caller that renders it. The caller keeps its own predicate; all this states
+	// is which of Run's results that caller is going to convert.
+	SuppressRecordWhenLegsFailed bool
+	// Logger receives this Run's own diagnostics — today, only a record that could
+	// not be written — and nil is the process default.
+	//
+	// It is on the Request because NO Ghost process configures the default: a
+	// repo-wide search finds slog.SetDefault only in tests, in `ghost bench`, and
+	// in the two bench mains, all of which install a DISCARD handler. `ghost mcp`
+	// builds its own logger in bootstrap and passes it around, so a diagnostic
+	// sent to slog.Default() from a live server reaches a handler nobody reads —
+	// which would make "a failed record is logged, not silent" true only in tests.
+	Logger *slog.Logger
+	// SessionID names the caller's session, and reaches nothing but the record.
+	// It is on the Request rather than stamped by a decorator in the caller so
+	// the row is built in exactly one place — a record assembled from two
+	// packages is a record whose fields can disagree about which call it is.
+	//
+	// Empty over the stdio transport Ghost ships, whose connection reports no
+	// session; that is why Request.Source is a first-class column of the record
+	// rather than something a reader infers from this being empty.
+	SessionID string
 }
 
 // Result is the assembled block. Run owns the whole response — listing, verdict
@@ -364,12 +409,51 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	// MEANS, where Outcome and Reason are derived here. fitResponse sets both of
 	// those itself, which is why this no longer calls outcome()/reason() —
 	// outcome.go's verdict() supersedes both.
-	return p.fitResponse(Result{
+	res, err := p.fitResponse(Result{
 		Items:      p.items,
 		Trace:      p.trace,
 		Notes:      p.notes(),
 		Qualifiers: p.qualifiers,
 	})
+	// AFTER fitResponse, and only when it succeeded (#646). The post-pass drops
+	// rows from the bottom of the ranking and records each as a `response_fit`
+	// decision, so a record written before it would name a row the caller never
+	// received as kept — a false "used" verdict, in the direction that flatters
+	// Ghost. And the error paths write nothing: a retrieval that failed, a
+	// request Run refused and an envelope that cannot fit all return an error
+	// instead of a Result, and a record for any of them would put a denominator
+	// in the audit for calls that returned no memories at all.
+	//
+	// SuppressRecordWhenLegsFailed covers the one case Run cannot see from
+	// inside: a result that is perfectly valid, and that the CALLER then turns
+	// into an error because a leg failed and nothing was admitted. Recording that
+	// would count a call that delivered no answer.
+	if err == nil && !req.convertsToError(res) {
+		emit(ctx, req.Record, req, res)
+	}
+	return res, err
+}
+
+// convertsToError reports whether this caller will turn this result into an
+// error instead of returning it — the one case where a successful Run did not
+// reach the caller as an answer.
+//
+// It mirrors the MCP handler's rule rather than sharing its helper on purpose:
+// the handler's failedLegs is also what it puts in the error message, and tying
+// a message to a recording decision would couple two things that should be able
+// to differ. The two agree today, and this side is deliberately the weaker: a
+// failed leg with rows ADMITTED is still an answer, degraded, and the handler
+// returns it.
+func (r Request) convertsToError(res Result) bool {
+	if !r.SuppressRecordWhenLegsFailed || res.Outcome != OutcomeEmpty || res.Trace == nil {
+		return false
+	}
+	for _, leg := range res.Trace.Legs {
+		if leg.Applicable && leg.Attempted && !leg.Available {
+			return true
+		}
+	}
+	return false
 }
 
 // candidateRequest maps a Request onto the store's retriever request without

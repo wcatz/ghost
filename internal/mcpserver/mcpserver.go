@@ -255,14 +255,16 @@ type resolveCapableStore interface {
 }
 
 // linkCapableStore narrows provider.MemoryStore's concrete backing store to what
-// ghost_link_withdraw needs beyond it: the ref resolution, the live-edge read
-// scoped to the project that owns the edge, and the invalidation that writes the
-// `unsupersede` history row. None of those three is on provider.MemoryStore, so
-// s.store is type-asserted to this interface at call time; *memory.Store
-// satisfies it — the same shape resolveCapableStore and historyCapableStore
-// take. The fourth method it embeds, GetByIDs, IS on provider.MemoryStore and
-// needs no assertion: the result quotes the memory each edge was burying, and
-// that read is one the interface already offers.
+// ghost_link_withdraw needs beyond it: the ref resolution (twice over — the
+// project's, and the shared scope's, which is what makes a pair whose source was
+// promoted to _global nameable at all), the live-edge read scoped to the edges
+// the project owns through EITHER endpoint or the shared scope, and the
+// invalidation that writes the `unsupersede` history row. None of those is on
+// provider.MemoryStore, so s.store is type-asserted to this interface at call
+// time; *memory.Store satisfies it — the same shape resolveCapableStore and
+// historyCapableStore take. The fourth method it embeds, GetByIDs, IS on
+// provider.MemoryStore and needs no assertion: the result quotes the memory each
+// edge was burying, and that read is one the interface already offers.
 type linkCapableStore interface {
 	supersede.WithdrawStore
 }
@@ -305,6 +307,78 @@ type historyCapableStore interface {
 // present. *memory.Store satisfies it.
 type asOfCapableStore interface {
 	MemoriesAsOf(ctx context.Context, projectID string, t time.Time) (*memory.AsOfSet, error)
+}
+
+// windowCountCapableStore narrows provider.MemoryStore to the count the
+// project-context surface needs to say a sentence about a project: how many of its
+// rows a retrieval window could have admitted.
+//
+// It is a capability assertion rather than a new interface method for the reason
+// the others are, and the choice is load-bearing rather than a matter of taste. The
+// count that is on `provider.MemoryStore` — `CountMemories` — answers a DIFFERENT
+// question: it has no `resolved_at` predicate, so it counts rows `ghost resolve`
+// has withdrawn, which no window reads. Using it to decide whether a project "has
+// rows" is what let a project whose only row was withdrawn be told those rows "were
+// withheld as out of date" — a cause it did not have, explaining rows belonging to
+// `_global`. *memory.Store satisfies it.
+//
+// A provider without it answers the surfaces anyway and simply says less: the
+// consequence of the missing count is silence, and silence is the cheap direction
+// here. A hard error would fail a read that a project listing can still answer.
+type windowCountCapableStore interface {
+	CountActiveMemories(ctx context.Context, projectID string) (int, error)
+}
+
+// retrievalCapableStore narrows provider.MemoryStore to the retrieval record
+// ghost_memory_search writes (#646). A capability assertion for the reason
+// assembleCapableStore is one — the audit trail is a storage detail, not part of
+// the tool surface — and it is asserted rather than required so a provider
+// without it still answers searches: a store that cannot be audited is a smaller
+// problem than a store that cannot be searched, and the missing record is a gap
+// in a report rather than a failed call. *memory.Store satisfies it.
+type retrievalCapableStore interface {
+	assemble.RecordSink
+}
+
+// queryKeyWarmer is the optional startup half: a store that can resolve its
+// per-install retrieval key before the first search does. Separate from
+// retrievalCapableStore because a provider may well be able to record without
+// being able to warm, and the two failures are different.
+type queryKeyWarmer interface {
+	WarmQueryKey() error
+}
+
+// recordSink is the assembler's seam, resolved to whatever the store can do.
+// nil when it cannot, and the assembler treats a nil sink as "record nothing",
+// so this is one branch rather than a special case at the call site.
+func (s *Server) recordSink() assemble.RecordSink {
+	if r, ok := s.store.(retrievalCapableStore); ok {
+		return r
+	}
+	return nil
+}
+
+// sessionIDFor is the session a call arrived on, and ONLY that.
+//
+// It is separated from provenanceFor because that function's other half is
+// harness detection, which is expensive and belongs on the write paths: with a
+// client the MCP session does not recognise it falls back to detectCallingSource,
+// which on Linux walks /proc and on darwin SPAWNS `ps` and walks the ancestor
+// chain. Reading a search's session id through it would put a process walk — and
+// on macOS a subprocess — on every formatted search, to obtain a value that is
+// "" over the stdio transport Ghost actually ships (#746's note on why that is
+// the answer rather than a problem).
+//
+// The value is a name, not a claim: it is the transport's own id, recorded as
+// given, and the record's Source column is what tells an injection from a search
+// when this is empty.
+func sessionIDFor(req *mcp.CallToolRequest) string {
+	if req == nil || req.Session == nil {
+		return ""
+	}
+	// ID() is "" unless the underlying connection assigns session ids; see
+	// provenanceFor's note on why that is the answer rather than a problem.
+	return req.Session.ID()
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
@@ -509,6 +583,26 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		store:          store,
 		logger:         logger,
 		searchMaxBytes: searchResponseMaxBytes,
+	}
+
+	// Resolve the retrieval record's per-install key now, at construction, so the
+	// search path never does. A cold key costs a data-directory resolution, a
+	// read, and on a first install a mkdir and a create — unbounded filesystem
+	// work inside the first search every process serves, which is exactly the
+	// post-answer wait the record write's 250ms budget exists to prevent.
+	//
+	// Best-effort and logged, never fatal: a store whose records cannot be grouped
+	// by question is a degraded audit, not a server that cannot search, and the
+	// per-call path reports the same failure with the same reason if it persists.
+	// Only when the store can actually RECORD, because a key nothing will digest
+	// is a file this startup would create for nobody: a provider that can warm but
+	// not record has no search that will ever ask for a digest, and writing its
+	// per-install secret to disk on its behalf is not the server's business.
+	if warmer, ok := s.store.(queryKeyWarmer); ok && s.recordSink() != nil {
+		if err := warmer.WarmQueryKey(); err != nil {
+			logger.Warn("retrieval key not available at startup; searches will record no query digest until it is",
+				"error", err)
+		}
 	}
 
 	s.mcp = mcp.NewServer(&mcp.Implementation{
@@ -910,8 +1004,8 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 		}
 		fmt.Fprintf(&sb, "  %s  %s -> %s  [%s]  %s\n", marker, shortID(l.SourceID), shortID(l.TargetID), l.LinkSource, assemble.PreviewLine(l.TargetText, 70))
 	}
-	targets := supersede.RepairableTargets(res.Links)
-	if len(targets) == 0 {
+	groups := supersede.RepairableTargets(res.Links)
+	if len(groups) == 0 {
 		// Every row was one this call never wrote and never reached, so every
 		// edge is still live and resolve's floor still defends every target: there
 		// is nothing repairable to name. (A row a CONCURRENT pass took is not this
@@ -937,57 +1031,19 @@ func (s *Server) withdrawSupersedesLink(ctx context.Context, projectID, sourceID
 	// this string is the tool's whole answer, and a clause addressed to the
 	// implementer inside it reads as an instruction to the agent reading it. That
 	// guidance lives in this function's doc comment instead.
-	cmd, viaFileOnly, unnameable := followup.ResolveCommand(projectID, targets)
-	// The heading says "a SCOPED repair" because the command below it is scoped —
-	// so when no id is carriable there is no command, and the sentence has to
-	// change rather than dangle over an empty line. The unscoped form is never
-	// printed: it is the project-wide re-judge #698 measured, and an agent handed
-	// it verbatim would run the one command that does the most harm.
-	if cmd != "" {
-		fmt.Fprintf(&sb, "\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of\n"+
-			"ranked injection until a SCOPED repair clears it. There is no MCP tool for that repair, so it is a CLI\n"+
-			"command — an agent with no shell cannot run it, and should say so rather than reach for ghost_resolve,\n"+
-			"which is the forward pass and would stamp more memories resolved:\n  %s\n", cmd)
-		sb.WriteString("That pass honours a live edge as a floor, which is why the edge has to go first.")
-	}
-	if len(viaFileOnly) > 0 {
-		// Named rather than omitted, because this surface writes no --only-file and
-		// the command cannot carry these ids at all: `--only` splits on commas, so
-		// an id holding one becomes two selectors that name nothing however it is
-		// quoted. An agent told nothing would run the command above, judge fewer
-		// memories than this call orphaned, and report a repair that did not
-		// happen. The id is given verbatim so a person can put it in a file
-		// themselves — one id per line, and the --only-file reader never splits.
-		if cmd == "" {
-			sb.WriteString("\nNo --only command can name the target: its id holds a comma, which --only splits on.")
+	for _, g := range groups {
+		// The project that can reach these targets, spelled the way the CALLER
+		// spelled its own project when these are its own targets. That keeps the
+		// ordinary answer byte-identical to what it always was; a group for some
+		// other project — a `_global` call over a target in a project — is spelled
+		// by its id, which ResolveProject accepts.
+		spelling := g.ProjectID
+		if g.ProjectID == resolvedProjectID {
+			spelling = projectID
 		}
-		// The unscoped repair is described, never written out: a copy-pasteable
-		// line that re-judges every resolved memory in the project is exactly what
-		// this answer must not hand an agent.
-		fmt.Fprintf(&sb, "\n%d id(s) below are reachable only through `ghost resolve --reassess --only-file` with\n"+
-			"one id per line — write that file yourself, or hand the ids to someone with a shell. Do NOT fall\n"+
-			"back on the same command without --only: that re-judges every resolved memory in the project.\n",
-			len(viaFileOnly))
-		for _, id := range viaFileOnly {
-			fmt.Fprintf(&sb, "  %s\n", id)
-		}
+		sb.WriteString(repairInstructions(spelling, g.Targets))
 	}
-	if len(unnameable) > 0 {
-		// The file is one id per line, so an id holding a newline is two selectors
-		// there too. No surface can name it, and the only honest answer says so:
-		// an agent that believes otherwise leaves a memory resolved with nothing
-		// able to clear it.
-		fmt.Fprintf(&sb, "\n%d id(s) can be named by NO surface — the id holds a newline, which both --only (it\n"+
-			"splits on commas) and --only-file (one id per line) cannot carry. These memories stay resolved\n"+
-			"until the row is rewritten: delete and re-save the memory, or re-import it under an id with no\n"+
-			"newline.\n", len(unnameable))
-		for _, id := range unnameable {
-			fmt.Fprintf(&sb, "  %q\n", id)
-		}
-	}
-	if cmd == "" && len(viaFileOnly) == 0 && len(unnameable) == 0 {
-		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
-	}
+
 	// Invalidating a live edge changes what the context resource serves: the
 	// supersede ranking guard demotes an edge's target while the edge stands, so
 	// ghost://project/<id>/context is stale the moment this call returns. Every
@@ -1274,6 +1330,23 @@ func (s *Server) registerTools() {
 		Title:       "Search Memories",
 		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category, retention and scope are all applied before the result window is closed, over a retrieval window of up to three times the limit (capped at 100 rows) when one of those is given, plus the rows that window cut, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Every formatted answer (explain:true returns a JSON breakdown instead) ends with a machine-readable verdict line, `[ghost:outcome=answerable|weak|empty reason=... floor_fts_rank=... abstain_cosine=... candidates=... admitted=... legs=... tokens_est=...], optionally followed by \" retrieval_partial\" inside the brackets when a retrieval leg ran and failed` \u2014 `abstain_cosine=off` means no cosine floor is configured, `not_applied` means one is but no cosine could be compared (the vector leg never ran, or ran and failed), and `admitted` is how many rows the answer carries after any trim: `answerable` means nothing was withheld as weak (read its reason: no_floor_arm and retrieval_partial mean no floor could be applied at all, so those rows are unjudged), `weak` means the memories are listed but none cleared the floor \u2014 treat them as leads and verify before relying on them \u2014 and `empty` means the reason on the line says why. A `weak` answer, and an `empty` answer whose reason names a filter or the budget, say so in words as well, because in those cases the rows were found and are not good enough (or were withheld) rather than absent. The complete answer is capped at 16000 bytes \u2014 enough for one memory at the store's own 8,000-byte content cap \u2014 so a large result is trimmed to its highest-ranked memories and the line reports how many were admitted. Pass as_of (RFC 3339) to search the store as it stood at that instant instead: the wording each memory held then, including memories deleted since, matched by keyword only because an embedding records current content. as_of cannot be combined with explain, which diagnoses the current ranking. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
+			// ReadOnlyHint stays TRUE, and it is worth saying why, because #646 made
+			// this path write. The annotation is a claim a client acts on — it
+			// decides whether to auto-approve or to ask the user — so the claim has
+			// to be about the thing a user would want to confirm, and a search
+			// confirms nothing: it creates no memory, deletes nothing, and changes
+			// no answer. What it now also does is append one row to Ghost's own
+			// audit table (#646), which is bookkeeping about the call rather than a
+			// change to what Ghost knows, and which no other tool or surface can
+			// observe.
+			//
+			// The alternative is to declare it false, and that is a real cost
+			// rather than a technicality: a host that gates a non-read-only tool
+			// behind a confirmation prompt would then ask the user to approve every
+			// search, on the most-used tool Ghost has. If a client ever reads the
+			// annotation as the stricter "modifies its environment" rather than the
+			// user-facing reading above, this is the line to change — and the
+			// refusal to make the record is one `s.recordSink()` returning nil.
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
 		},
@@ -1354,6 +1427,28 @@ func (s *Server) registerTools() {
 			Now:           time.Now().UTC(),
 			AsOf:          asOf,
 			AbstainCosine: s.contextCfg.AbstainCosine,
+			// The retrieval record (#646). Set here and not inside the assembler,
+			// because this is the only place that knows the session the call
+			// arrived on — and the assembler writes the row, so nothing about the
+			// record's shape is duplicated across the two.
+			//
+			// It is nil when the store cannot record, which the assembler treats
+			// as "record nothing". A provider that cannot be audited is a gap in a
+			// report, not a failed search.
+			Record:    s.recordSink(),
+			SessionID: sessionIDFor(req),
+			// The server's own logger, not the process default: nothing in Ghost
+			// calls slog.SetDefault, so a diagnostic the assembler sent there would
+			// reach a handler nobody reads and a failed record would be silent in
+			// production while looking logged in tests.
+			Logger: s.logger,
+			// This handler returns an ERROR — not an answer — when a leg failed
+			// and nothing was admitted (the `result.Outcome == OutcomeEmpty` branch
+			// below), so that call must not be recorded as a retrieval. Without this
+			// the audit's denominator would carry a row for a call that returned no
+			// memories at all: the leg failure is in the trace, not in the record,
+			// so nothing downstream could tell it from a real empty answer.
+			SuppressRecordWhenLegsFailed: true,
 		}
 		// explain returns the store's ranking diagnosis instead of the
 		// formatted list. The explain projection of the assembler's trace
@@ -1806,7 +1901,16 @@ func (s *Server) registerTools() {
 			// A block the stages EMPTIED is not an empty project, and the census
 			// below would say it is. So the two are separated by the verdict, and
 			// only an empty over-fetched window may claim absence.
-			if note := projectContextEmptyNote(memories); note != "" {
+			//
+			// The note is the SAME function the non-empty branch uses, and that is
+			// the point rather than a deduplication: it is the only place the
+			// project-scoped count and the union-scoped verdict are reconciled, and
+			// a gate that merely permitted the abstention would read that count and
+			// then throw it away — leaving a project whose rows were all withdrawn
+			// by `ghost resolve` (so the FETCH emptied the window while
+			// `CountMemories`, which has no `resolved_at` predicate, still counts
+			// them) with the never-saved census, which is false.
+			if note := s.projectContextOwnRowsNote(ctx, args.ProjectID, memories); note != "" {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: note}},
 				}, nil, nil
@@ -1827,6 +1931,14 @@ func (s *Server) registerTools() {
 			// store holds any, so this case never reached an empty block. Appended
 			// rather than substituted, because there IS an answer above — the
 			// cross-project rows are wanted, they are simply not this project's.
+			//
+			// The other shape that reaches only this branch is a block made of the
+			// sections rendered OUTSIDE the assembler, with an empty memory read
+			// behind it: `## Learned Context` above is exactly that, and for a
+			// project reflection has summarised it means the summary's own source
+			// rows were withheld (#788). The function picks the sentence by the
+			// verdict, so this call site does not ask what kind of non-empty block
+			// it is holding.
 			text += "\n\n" + note
 		}
 
@@ -2361,7 +2473,7 @@ func (s *Server) registerTools() {
 
 	// ghost_link_withdraw — remove one named 'supersedes' edge.
 	type linkWithdrawArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project name the superseding memory belongs to (required for ownership check)"`
+		ProjectID string `json:"project_id" jsonschema:"Project the edge belongs to (required for ownership check). Ownership is EITHER endpoint, plus _global, which every project owns: a memory promoted to _global keeps its links, so a project may withdraw the edge burying one of its own memories, and _global may withdraw an edge whose endpoint is in any project. Under _global a ref may also name a memory in any project. An edge with neither endpoint in this project or _global is another project's and is neither withdrawable nor discoverable here."`
 		SourceID  string `json:"source_id" jsonschema:"ID of the SUPERSEDING memory — the newer note the edge points FROM. A full id, or 8 or more characters of one."`
 		TargetID  string `json:"target_id" jsonschema:"ID of the SUPERSEDED memory — the older note the edge points AT, the one being buried. A full id, or 8 or more characters of one."`
 	}
@@ -2829,6 +2941,11 @@ func (s *Server) registerTools() {
 		fmt.Fprintf(&sb, "  decisions:    %d\n", summary.Decisions)
 		fmt.Fprintf(&sb, "  token_usage:  %d\n", summary.TokenUsage)
 		fmt.Fprintf(&sb, "  audit_log:    %d\n", summary.AuditLog)
+		// The audit trail's rows for this project (#646). Rendered here for the
+		// same reason as in printDeleteSummary: this is the same summary an agent
+		// reads before deciding to delete, and a line missing from one surface is
+		// a count the caller cannot see.
+		fmt.Fprintf(&sb, "  retrievals:   %d\n", summary.RetrievalRecords)
 		if !args.Apply {
 			sb.WriteString("\nRe-run with apply:true to actually delete.")
 		}
@@ -3413,17 +3530,21 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	}
 
 	if sb.Len() == 0 {
-		// Same two cases as the tool's, for the same reason: a block the stages
-		// emptied is not an empty project, and "No memories found for this
-		// project" would say it is.
-		if note := projectContextEmptyNote(memories); note != "" {
+		// Same two cases as the tool's, and the same function, for the same reasons:
+		// a block the stages emptied is not an empty project, and this is the one
+		// place the project-scoped count and the union-scoped verdict are
+		// reconciled.
+		if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 			return note, nil
 		}
 		return "No memories found for this project.", nil
 	}
 	// The same note the tool appends, for the same reason, and at the same place:
 	// a block whose rows are all cross-project is not this project's context, and
-	// `## Recent Decisions` or `## Learned Context` above do not change that.
+	// `## Recent Decisions` or `## Learned Context` above do not change that. They
+	// are also how this branch is reached with an EMPTY memory read behind it, which
+	// is the case #788 is about — the function picks the sentence by the verdict, so
+	// this one does not ask what filled the block above.
 	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(note)
@@ -3577,4 +3698,70 @@ func sourceLabel(source string) string {
 		return ""
 	}
 	return " source=" + label
+}
+
+// repairInstructions renders the follow-up for ONE project's repairable targets:
+// the scoped `ghost resolve <project> --reassess --only … --apply` an agent runs in
+// a shell, plus what to do about the ids that command cannot carry.
+//
+// It takes ONE project and that project's ids, because a resolve repair's pool is
+// ResolvedCandidates(projectID), which filters `project_id = ?` — so a selector
+// resolved against one project and repaired against another is a SILENT no-op,
+// every id reported as a miss, under a message that says the repair is available.
+// The caller therefore calls it once per project, and the grouping that decides
+// how many is supersede.RepairableTargets' (#786).
+func repairInstructions(project string, targets []string) string {
+	var sb strings.Builder
+	cmd, viaFileOnly, unnameable := followup.ResolveCommand(project, targets)
+	// The heading says "a SCOPED repair" because the command below it is scoped —
+	// so when no id is carriable there is no command, and the sentence has to
+	// change rather than dangle over an empty line. The unscoped form is never
+	// printed: it is the project-wide re-judge #698 measured, and an agent handed
+	// it verbatim would run the one command that does the most harm.
+	if cmd != "" {
+		fmt.Fprintf(&sb, "\nThe edge is only half the repair: a target it buried is still stamped resolved and stays out of\n"+
+			"ranked injection until a SCOPED repair clears it. There is no MCP tool for that repair, so it is a CLI\n"+
+			"command — an agent with no shell cannot run it, and should say so rather than reach for ghost_resolve,\n"+
+			"which is the forward pass and would stamp more memories resolved:\n  %s\n", cmd)
+		sb.WriteString("That pass honours a live edge as a floor, which is why the edge has to go first.")
+	}
+	if len(viaFileOnly) > 0 {
+		// Named rather than omitted, because this surface writes no --only-file and
+		// the command cannot carry these ids at all: `--only` splits on commas, so
+		// an id holding one becomes two selectors that name nothing however it is
+		// quoted. An agent told nothing would run the command above, judge fewer
+		// memories than this call orphaned, and report a repair that did not
+		// happen. The id is given verbatim so a person can put it in a file
+		// themselves — one id per line, and the --only-file reader never splits.
+		if cmd == "" {
+			sb.WriteString("\nNo --only command can name the target: its id holds a comma, which --only splits on.")
+		}
+		// The unscoped repair is described, never written out: a copy-pasteable
+		// line that re-judges every resolved memory in the project is exactly what
+		// this answer must not hand an agent.
+		fmt.Fprintf(&sb, "\n%d id(s) below are reachable only through `ghost resolve --reassess --only-file` with\n"+
+			"one id per line — write that file yourself, or hand the ids to someone with a shell. Do NOT fall\n"+
+			"back on the same command without --only: that re-judges every resolved memory in the project.\n",
+			len(viaFileOnly))
+		for _, id := range viaFileOnly {
+			fmt.Fprintf(&sb, "  %s\n", id)
+		}
+	}
+	if len(unnameable) > 0 {
+		// The file is one id per line, so an id holding a newline is two selectors
+		// there too. No surface can name it, and the only honest answer says so:
+		// an agent that believes otherwise leaves a memory resolved with nothing
+		// able to clear it.
+		fmt.Fprintf(&sb, "\n%d id(s) can be named by NO surface — the id holds a newline, which both --only (it\n"+
+			"splits on commas) and --only-file (one id per line) cannot carry. These memories stay resolved\n"+
+			"until the row is rewritten: delete and re-save the memory, or re-import it under an id with no\n"+
+			"newline.\n", len(unnameable))
+		for _, id := range unnameable {
+			fmt.Fprintf(&sb, "  %q\n", id)
+		}
+	}
+	if cmd == "" && len(viaFileOnly) == 0 && len(unnameable) == 0 {
+		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
+	}
+	return sb.String()
 }

@@ -38,6 +38,21 @@ var symmetricRelations = map[string]bool{"related": true}
 // either memory's currency is asserted by an edge the linker adds on cosine
 // similarity alone.
 func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error {
+	return s.CreateLinkJudged(ctx, sourceID, targetID, relation, strength, source, "")
+}
+
+// CreateLinkJudged is CreateLink for a caller that made a JUDGEMENT about the
+// pair, and the only difference between the two a caller can see is the stamp it
+// writes: judgedAt rather than the write clock. `ghost supersede` is that
+// caller, and linkInsertSQL sets out why the stamp has to be the freshness of
+// what was judged rather than when the row landed — in short, the two are
+// minutes apart, and an edit landing between them is one no verdict was given
+// for.
+//
+// An empty judgedAt is CreateLink, and every other caller wants exactly that:
+// the linker's `related` edges, the bench seeders and the restore paths make no
+// judgement, so the write clock is the honest stamp.
+func (s *Store) CreateLinkJudged(ctx context.Context, sourceID, targetID, relation string, strength float32, source, judgedAt string) error {
 	if sourceID == targetID {
 		return fmt.Errorf("create link: self-links not allowed (id %s)", sourceID)
 	}
@@ -68,7 +83,7 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 		if err != nil {
 			return err
 		}
-		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source); err != nil {
+		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source, judgedAt); err != nil {
 			return err
 		}
 		// Only when the edge BECOMES active. `ghost supersede` re-writes a pair
@@ -97,7 +112,7 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 	}
 
 	_, err := s.execGuardedWrite(ctx, "create-link-autocommit", linkInsertSQL,
-		sourceID, targetID, relation, strength, source)
+		sourceID, targetID, relation, strength, source, judgedAt)
 	if err != nil {
 		return fmt.Errorf("create link: %w", err)
 	}
@@ -105,21 +120,44 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 }
 
 // linkInsertSQL is the upsert CreateLink performs: re-inserting an existing
-// (source, target, relation) keeps the higher strength and clears any
-// invalidation. Shared by the autocommit path and the transaction the
-// supersede history row shares, so the two cannot record different edges.
+// (source, target, relation) keeps the higher strength, clears any
+// invalidation, and stamps created_at from judgedAt. Shared by the autocommit
+// path and the transaction the supersede history row shares, so the two cannot
+// record different edges.
+//
+// created_at on a link row is not a claim about when the edge entered the graph.
+// Its one reader is `ghost supersede`'s skip-if-unchanged test, which compares
+// each endpoint's updated_at against it to decide whether the pair has moved
+// since it was last JUDGED — so it is a judgement stamp, and a re-judgement that
+// leaves it where it was is why an edge whose endpoint was ever edited was
+// re-billed on every pass after it (#784). The history row is keyed on the edge
+// BECOMING active rather than on this column, so the stamp writes no history.
+//
+// judgedAt is passed in rather than taken from a clock, and that is the whole of
+// the subtlety. `ghost supersede` reads both endpoints at the TOP of a pass and
+// then spends a classify call that takes seconds to minutes, and an edit landing
+// in that window — reflect's consolidation rewrite, a save through a live
+// `ghost mcp` — carries an updated_at newer than the text the classifier actually
+// saw but older than the moment the write lands. Stamping the WRITE would cover
+// that edit instead of stopping short of it, and the pair would then sit quiet
+// against text no verdict was ever given for, so the caller stamps the freshness
+// of what it judged. An empty judgedAt means no judgement was made here and falls
+// back to the write clock, which is what every caller but supersede wants (the
+// linker's `related` edges, which nothing reads this column for, and the bench
+// seeders).
 const linkInsertSQL = `
-		INSERT INTO memory_links (source_id, target_id, relation, strength, source)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
-			strength = MAX(strength, excluded.strength),
-			invalidated_at = NULL
+	INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at)
+	VALUES (?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), datetime('now')))
+	ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
+		strength = MAX(strength, excluded.strength),
+		invalidated_at = NULL,
+		created_at = excluded.created_at
 `
 
 // insertLinkTx is linkInsertSQL inside an open transaction.
-func insertLinkTx(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation string, strength float32, source string) error {
+func insertLinkTx(ctx context.Context, tx *sql.Tx, sourceID, targetID, relation string, strength float32, source, judgedAt string) error {
 	if _, err := tx.ExecContext(ctx, linkInsertSQL,
-		sourceID, targetID, relation, strength, source); err != nil {
+		sourceID, targetID, relation, strength, source, judgedAt); err != nil {
 		return fmt.Errorf("create link: %w", err)
 	}
 	return nil
@@ -382,9 +420,41 @@ func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string
 }
 
 // LinksByRelationSource returns all valid (non-invalidated) links of the given
-// relation and source whose SOURCE endpoint belongs to projectID. Used by
-// ghost supersede to find previously-created 'supersedes'/llm links so it can
-// reclassify them alongside freshly-discovered candidate pairs.
+// relation and source whose BOTH endpoints belong to projectID or to `_global`.
+// Used by ghost supersede to find previously-created 'supersedes'/llm links so it
+// can reclassify them alongside freshly-discovered candidate pairs, by the repair
+// pass to load what it re-judges, and by resolve's supersedes piggyback and its
+// repair pass's floor.
+//
+// The scope is BOTH endpoints, and it is deliberately STRICTER than
+// SupersedesLinksInto's, because the two reads answer different questions. That
+// one is a targeted withdrawal, and the caller has already NAMED the target: the
+// question is which edges bury this memory, and the memory's own project may
+// answer it however the edge came to be sourced. This one feeds a PASS, and a pass
+// judges a pair and then WRITES links on it -- so an edge with an endpoint outside
+// the caller's project is that other project's pair, and a pass that judged it
+// would be writing on a graph it was not run against.
+//
+// That half is what a promotion creates. `ghost_memory_promote` and `ghost reflect
+// --promote-globals` move a memory into `_global` and KEEP its links, so a live
+// edge is left with its source in the shared scope and its target where it was --
+// and a predicate on the source alone put that edge outside all four of these
+// readers at once (#786). SupersedePenalties, which carries no project predicate
+// at all, went on demoting the target, while the repair pass could not load the
+// edge to withdraw it and the floor let go of the resolution the demotion was
+// still justifying. The TARGET half is what fixes that, and what keeps the pass
+// inside its project: from `p` the promoted edge's two endpoints are the shared
+// scope and `p`, so it loads; from `q` the target is a `p` memory, so it does not.
+//
+// Nothing downstream of this read re-filters the target either, which is why the
+// exclusion half is load-bearing rather than tidiness: Run's apply block
+// invalidates AND creates links on whatever pair it loaded, so a read that
+// admitted an edge whose target belongs to a third project would let
+// `ghost supersede p --reassess` delete a claim in `q`'s graph.
+//
+// `_global` is in scope from every project and NO other project is, which is the
+// same rule the ref resolver follows (MemoryIDsByIDPrefix): a memory in the
+// shared scope is visible in every project, and a project is a boundary.
 func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]Link, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -392,9 +462,12 @@ func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT l.source_id, l.target_id, l.relation, l.strength, l.source, l.created_at, l.invalidated_at
 		FROM memory_links l
-		JOIN memories m ON m.id = l.source_id
-		WHERE m.project_id = ? AND l.relation = ? AND l.source = ? AND l.invalidated_at IS NULL
-	`, projectID, relation, source)
+		JOIN memories source_mem ON source_mem.id = l.source_id
+		JOIN memories target_mem ON target_mem.id = l.target_id
+		WHERE (source_mem.project_id = ? OR source_mem.project_id = ?)
+		  AND (target_mem.project_id = ? OR target_mem.project_id = ?)
+		  AND l.relation = ? AND l.source = ? AND l.invalidated_at IS NULL
+	`, projectID, GlobalProjectID, projectID, GlobalProjectID, relation, source)
 	if err != nil {
 		return nil, fmt.Errorf("links by relation source: %w", err)
 	}
@@ -412,20 +485,35 @@ func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, 
 }
 
 // SupersedesLinksInto returns the live 'supersedes' edges whose TARGET is
-// memoryID and whose source endpoint belongs to projectID.
+// memoryID and whose EITHER endpoint belongs to projectID or to `_global`.
 //
 // It is the read a targeted withdrawal decides on, and it answers two questions
 // with one query: whether the exact edge the operator named is live, and — when
 // it is not — which edges DO point at that memory, so a refusal can name them
 // instead of leaving the reader to grep the graph.
 //
-// The project predicate is on the edge's SOURCE, matching
-// LinksByRelationSource: a 'supersedes' edge is written newer→older, so the
-// source is the memory the project owns, and a target that has been promoted to
-// `_global` or moved by `ghost project merge` does not move the edge out of the
-// project's reach. An edge another project owns is neither withdrawable from
-// here nor visible through here, which is what keeps a project-scoped call from
-// reporting (or changing) a graph that is not its own.
+// The ownership rule is "either endpoint is ours", and each half is about a
+// different memory of the pair. The SOURCE is the one making the claim, so an
+// edge sourced from the shared scope is a claim every project can see and every
+// project can withdraw — that is what a `ghost_memory_promote`d source needs, and
+// it is what the predicate used to be for (#786: a promoted source put the edge
+// outside every project at once, so nothing could withdraw it). The TARGET is the
+// one being buried, so the project that owns it is entitled to name the edge
+// burying it however that edge came to be sourced: from the shared scope, or from
+// a project that no longer holds the memory `ghost project merge` moved.
+//
+// `_global` is in scope from every project, and a project is not in scope from
+// another. An edge with both endpoints in a third project is that project's edge:
+// neither withdrawable from here nor visible through here, which is what keeps a
+// project-scoped call from reporting (or changing) a graph that is not its own.
+//
+// The TARGET half is reachable from a `_global` call only, and that asymmetry is
+// not an oversight. `_global`'s refs resolve without a project predicate (see
+// MemoryIDsByIDPrefixAnyProject), so a project-scoped call cannot even NAME a pair
+// whose source is in another project, while a `_global` call can name one whose
+// target is the promoted memory — which is the case the half exists for. A caller
+// reaching this read with a project it does not own therefore still gets nothing
+// it could not have had.
 func (s *Store) SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]Link, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -433,10 +521,12 @@ func (s *Store) SupersedesLinksInto(ctx context.Context, projectID, memoryID str
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT l.source_id, l.target_id, l.relation, l.strength, l.source, l.created_at, l.invalidated_at
 		FROM memory_links l
-		JOIN memories m ON m.id = l.source_id
+		JOIN memories source_mem ON source_mem.id = l.source_id
+		JOIN memories target_mem ON target_mem.id = l.target_id
 		WHERE l.relation = 'supersedes' AND l.invalidated_at IS NULL
-		  AND m.project_id = ? AND l.target_id = ?
-	`, projectID, memoryID)
+		  AND l.target_id = ?
+		  AND (source_mem.project_id IN (?, ?) OR target_mem.project_id IN (?, ?))
+	`, memoryID, projectID, GlobalProjectID, projectID, GlobalProjectID)
 	if err != nil {
 		return nil, fmt.Errorf("supersedes links into: %w", err)
 	}

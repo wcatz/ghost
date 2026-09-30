@@ -227,7 +227,7 @@ func TestConfirmProjectDeleteName_RejectsMismatch(t *testing.T) {
 }
 
 // TestPrintDeleteSummary_FieldsNotTransposed pins the label-to-value mapping
-// with six distinct values (one per field) and a whole-string comparison, so
+// with seven distinct values (one per field) and a whole-string comparison, so
 // swapping any two summary.X arguments inside printDeleteSummary — the same
 // bug class the memory-layer fixture in store_test.go was hardened against —
 // fails this test instead of passing silently.
@@ -242,6 +242,12 @@ func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
 		Decisions:   4,
 		TokenUsage:  5,
 		AuditLog:    6,
+		// A seventh distinct value, one per field, so a swap inside
+		// printDeleteSummary fails this test rather than passing silently --
+		// which is the whole reason the fixture is shaped this way. RetrievalRecords
+		// is here because DeleteProject removes those rows (#646), and a summary
+		// that omitted a table its own command deletes would under-report.
+		RetrievalRecords: 7,
 	}, "Would delete"); err != nil {
 		t.Fatalf("printDeleteSummary: %v", err)
 	}
@@ -253,6 +259,7 @@ func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
   decisions:    4
   token_usage:  5
   audit_log:    6
+  retrievals:   7
 `
 	if out.String() != want {
 		t.Errorf("printDeleteSummary output mismatch:\ngot:\n%s\nwant:\n%s", out.String(), want)

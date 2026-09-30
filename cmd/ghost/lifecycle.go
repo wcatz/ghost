@@ -2038,15 +2038,15 @@ func runSupersede() {
 		// that did land orphaned resolutions that only a scoped resolve repair
 		// can clear, and an operator who does not learn that from this run
 		// learns it from a memory that stayed out of every session.
-		if targets := withdrawnTargets(withdrawn); apply && len(targets) > 0 {
-			path, werr := writeReassessTargets(projectName, targets, "ghost supersede --reassess --apply")
-			if werr != nil {
-				// The repair already landed and the command is printed either
-				// way, so a scratch file that could not be written is a warning
-				// and not a failed run.
-				fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", werr)
+		if apply {
+			// Per project, because the target's own project is what a resolve
+			// repair can reach — a target promoted to `_global` is not in
+			// `ResolvedCandidates(<project>)`, so a block scoped to the pass's
+			// project would name a command that resolves the selector and then
+			// finds nothing to clear.
+			for _, group := range withdrawnTargets(withdrawn) {
+				fmt.Print(printReassessFollowup(group.ProjectID, group.Targets, "ghost supersede --reassess --apply"))
 			}
-			fmt.Print(supersedeReassessFollowup(projectName, targets, path))
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -2091,19 +2091,164 @@ func runSupersede() {
 		// already invalidated, and the log carries the per-pair truth.
 		fmt.Printf("  %d pair(s) refused: reversed verdict — the older note is the current one, so no supersedes link is written and the verdict is not cached (re-asked on a later pass); under --apply the pair's supersedes/causes links are dropped\n", res.Reversed)
 	}
-	for _, c := range classified {
-		switch c.Relation {
-		case supersede.RelationSupersedes:
-			fmt.Printf("  %s  supersedes  %s\n", shortID(c.NewerID), shortID(c.OlderID))
-		case supersede.RelationCauses:
-			fmt.Printf("  %s  causes  %s\n", shortID(c.OlderID), shortID(c.NewerID))
-		case supersede.RelationReversed:
-			fmt.Printf("  %s  reversed, not written: %s supersedes it\n", shortID(c.NewerID), shortID(c.OlderID))
+	fmt.Print(supersedePairLines(apply, classified))
+	// The second half of the repair, over the same rows the block above names:
+	// every withdrawal orphans a `resolved_at` the edge's piggyback stamped on
+	// its target, and nothing in the graph clears it. Only an --apply run has
+	// withdrawn anything, so only one has a follow-up — the same block, the same
+	// renderer and the same id file `--reassess` and `--withdraw` print, because
+	// three surfaces printing three versions of one command is how a repair ends
+	// up run against the wrong list (#785).
+	withdrawn := reclassifiedWithdrawals(classified)
+	if apply {
+		// One scoped repair per project the targets live in, which is one project
+		// in every ordinary case — and the difference is not cosmetic, because a
+		// resolve repair's pool is filtered by project, so a block scoped to a
+		// project that does not hold the memory promises a clear it cannot
+		// perform. Only an --apply run has anything to follow up on.
+		for _, group := range withdrawnTargets(withdrawn) {
+			fmt.Print(printReassessFollowup(group.ProjectID, group.Targets, "ghost supersede --apply"))
 		}
 	}
-	if !apply && res.WouldWriteLinks() {
-		fmt.Println("\nRe-run with --apply to write these links.")
+	if !apply {
+		if res.WouldWriteLinks() {
+			fmt.Println("\nRe-run with --apply to write these links.")
+		}
+		if len(withdrawn) > 0 {
+			fmt.Println("\nRe-run with --apply to withdraw these edges.")
+		}
 	}
+}
+
+// reclassifiedWithdrawals projects the pairs whose live 'supersedes' edge this
+// pass withdrew, in the shape the report and the follow-up share. It is
+// []supersede.WithdrawnEdge and not a bespoke struct because those two are the
+// consumers, and a second type here would be a second answer to which memories
+// a repair can still clear.
+//
+// Only a pair that CARRIED a live edge and came back denied counts. A fresh
+// NEITHER is a pair the pass declined to link, so no edge ever justified a
+// resolution on it and there is nothing to repair; a reclassify that came back
+// SUPERSEDES keeps its edge, so nothing was withdrawn either. Every verdict
+// that does withdraw counts, INCLUDING a reversal — the pass drops the same
+// supersedes edge on all three, so the target is left holding the same orphaned
+// resolution.
+//
+// A row this run did not write counts too, and withdrawnTargets says why: a
+// concurrent pass that took the edge first left the identical state behind.
+func reclassifiedWithdrawals(classified []supersede.Classified) []supersede.WithdrawnEdge {
+	var out []supersede.WithdrawnEdge
+	for _, c := range classified {
+		if !c.Reclassified || c.Relation == supersede.RelationSupersedes {
+			continue
+		}
+		switch c.Relation {
+		case supersede.RelationNeither, supersede.RelationCauses, supersede.RelationReversed:
+		default:
+			// An unparseable verdict: nothing was decided and nothing moved, so
+			// there is no edge this run withdrew.
+			continue
+		}
+		out = append(out, supersede.WithdrawnEdge{
+			NewerID:         c.NewerID,
+			OlderID:         c.OlderID,
+			Reason:          supersedeReclassifyReason(c.Relation),
+			Written:         c.Withdrawn,
+			TargetProjectID: c.TargetProjectID,
+		})
+	}
+	return out
+}
+
+// supersedeReclassifyReason is the finding behind a withdrawn edge, in the same
+// words Reassess uses for the same three verdicts. They are one classifier
+// answering one question about one edge, so a reader who has seen one report
+// reads the other without a glossary — and the reason is the part that tells a
+// wrong edge from a genuinely obsolete one.
+func supersedeReclassifyReason(relation supersede.Relation) string {
+	switch relation {
+	case supersede.RelationNeither:
+		return "neither: both notes are still true"
+	case supersede.RelationCauses:
+		return "causes: the older note is still independently true"
+	case supersede.RelationReversed:
+		return "reversed: the older note is the current one"
+	}
+	return ""
+}
+
+// supersedePairLines renders one line per judged pair, which is where the report
+// says what the pass did with each of them.
+//
+// The lines are a named function rather than a loop inside runSupersede because
+// the block is the report, and a report nobody can read without running the
+// command is a report that goes unchecked when the wording matters.
+//
+// The withdrawal rows are the ones #785 is about. A live 'supersedes' edge the
+// pass re-judges and that comes back denied is a real graph mutation, made
+// through the same InvalidateLink path and leaving the same orphaned
+// `resolved_at` as the two repair modes — so it is reported in the same shape
+// they report theirs: the edge by both ids, the verdict that withdrew it, and a
+// marker that claims a write only where one landed. It is the same three
+// markers `--reassess` uses, and the same reasons, for the same reason: "0
+// reclassified" over an edge the pass withdrew is the line a report must not
+// leave standing.
+//
+// A row whose marker is `already gone` under --apply is one of two states — a
+// concurrent pass withdrew the edge, or a concurrent pass replaced an endpoint
+// and the edge cascaded away with it — and this block says neither, because the
+// pass cannot tell them from where it stands and both mean the same thing to
+// whoever reads it: the edge is not live, and this run did not move it.
+func supersedePairLines(apply bool, classified []supersede.Classified) string {
+	var b strings.Builder
+	for _, c := range classified {
+		if c.Reclassified && c.Relation != supersede.RelationSupersedes {
+			// The three markers, spelled as supersedeReassessReport spells them and
+			// padded as it pads them, so a reader moving between the two reports
+			// reads one vocabulary rather than two.
+			marker := "would withdraw"
+			switch {
+			case c.Withdrawn:
+				marker = "withdrew   "
+			case apply:
+				marker = "already gone"
+			}
+			// Both verdicts that deny the pair move a SECOND graph row, and a line
+			// that named only the supersedes edge would say the run moved one row
+			// when it moved two — the same `[+N causes edge]` marker
+			// supersedeReassessReport puts on its own rows, for the same reason.
+			// A CAUSES verdict CREATES the row; NEITHER and REVERSED drop one.
+			extra := ""
+			switch {
+			case c.Relation == supersede.RelationCauses:
+				verb := "re-linked"
+				if !apply {
+					verb = "re-linked by --apply"
+				}
+				extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
+					shortID(c.OlderID), "causes", shortID(c.NewerID))
+			case apply && c.CausesDropped > 0:
+				// Only what the write actually moved, so a dry run says nothing
+				// here rather than forecasting a deletion nobody performed: Run
+				// makes no prediction read for this, and adding one would put a
+				// second read's failure in a pass whose only fatal error is a
+				// write error.
+				extra = fmt.Sprintf("  [+%d causes edge dropped]", c.CausesDropped)
+			}
+			fmt.Fprintf(&b, "  %s  %s -> %s  [%s%s]\n",
+				marker, shortID(c.NewerID), shortID(c.OlderID), supersedeReclassifyReason(c.Relation), extra)
+			continue
+		}
+		switch c.Relation {
+		case supersede.RelationSupersedes:
+			fmt.Fprintf(&b, "  %s  supersedes  %s\n", shortID(c.NewerID), shortID(c.OlderID))
+		case supersede.RelationCauses:
+			fmt.Fprintf(&b, "  %s  causes  %s\n", shortID(c.OlderID), shortID(c.NewerID))
+		case supersede.RelationReversed:
+			fmt.Fprintf(&b, "  %s  reversed, not written: %s supersedes it\n", shortID(c.NewerID), shortID(c.OlderID))
+		}
+	}
+	return b.String()
 }
 
 // resolveArgs is `ghost resolve`'s parsed command line, as one value rather
@@ -2160,15 +2305,16 @@ func runSupersedeWithdraw(ctx context.Context, store *memory.Store, logger *slog
 	// printing different commands for the same situation. It is printed before
 	// the error below, for the reason that error exists at all: a partial
 	// withdrawal still orphaned the targets it did reach.
-	if targets := supersede.RepairableTargets(res.Links); apply && len(targets) > 0 {
-		path, werr := writeReassessTargets(projectName, targets, "ghost supersede --withdraw --apply")
-		if werr != nil {
-			// The withdrawal already landed and the command is printed either way,
-			// so a scratch file that could not be written is a warning and not a
-			// failed run — the same trade --reassess makes.
-			fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", werr)
+	if apply {
+		// Scoped to the project that OWNS each target, not to the project the
+		// command was named with: they are the same project for a project's own
+		// edge, and different exactly for a `ghost supersede _global --withdraw`
+		// whose target stayed in a project — where `ghost resolve _global
+		// --reassess` resolves the selector and then finds nothing, because
+		// ResolvedCandidates filters `project_id = ?` (#786).
+		for _, group := range supersede.RepairableTargets(res.Links) {
+			fmt.Print(printReassessFollowup(group.ProjectID, group.Targets, "ghost supersede --withdraw --apply"))
 		}
-		fmt.Print(supersedeReassessFollowup(projectName, targets, path))
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

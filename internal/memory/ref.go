@@ -70,6 +70,61 @@ func (s *Store) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix strin
 	return ids, rows.Err()
 }
 
+// MemoryIDsByIDPrefixAnyProject returns, in ascending order, the ids of the
+// memories in ANY project whose id begins with prefix. It is the LIVE-ROW half of
+// the whole store; AnyMemoryIDsByIDPrefix is the whole store including the
+// deleted ones, and the difference between the two reads is the difference
+// between naming a row that is about to be changed and naming a tombstone.
+//
+// It exists for exactly one caller, and for one shape. A `ghost supersede
+// _global --withdraw <source> <target>` names a pair whose source was promoted
+// into `_global` while its target stayed in a project, so scoping both refs to
+// `_global` — which is what MemoryIDsByIDPrefix does when projectID IS `_global` —
+// left the target unnameable and the withdrawal impossible from the one scope
+// whose memory is the edge's claim (#786). `_global` is the shared scope: a memory
+// there is visible in every project, every ref resolves to it from everywhere, and
+// so the edge it sources is a claim every project can see and withdraw. Its
+// endpoint is nameable there too, and WHICH edge may then be withdrawn is decided
+// by SupersedesLinksInto's ownership rule — a project is still not reachable, so a
+// ref resolving into one buys nothing.
+//
+// The history table is EXCLUDED, which is the whole difference from
+// AnyMemoryIDsByIDPrefix and the reason this is a second read rather than a reuse:
+// a deleted memory would otherwise resolve, and the request would fail on the
+// edge lookup with a message about the graph instead of about the ref.
+//
+// Everything else is MemoryIDsByIDPrefix's rule, unchanged and for the same
+// reasons: LITERAL text of the caller's own length (so neither SQL wildcard widens
+// the search), case-insensitive, bounded by a RUNE COUNT rather than a byte
+// length, ascending order, and a miss is an empty slice and no error because what
+// a miss means is the caller's decision. The set is scanned rather than served by
+// the primary key, for the same non-ASCII reason, and this is a one-off operator
+// read of a report's id rather than a retrieval path.
+func (s *Store) MemoryIDsByIDPrefixAnyProject(ctx context.Context, prefix string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM memories
+		WHERE lower(substr(id, 1, ?)) = lower(?)
+		ORDER BY id
+	`, utf8.RuneCountInString(prefix), prefix)
+	if err != nil {
+		return nil, fmt.Errorf("memory ids by prefix (any project): %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // AnyMemoryIDsByIDPrefix returns, in ascending order, the ids in the WHOLE store
 // that begin with prefix: every id `memories` still holds, plus every
 // `memory_history.memory_id`, the deleted ones included.

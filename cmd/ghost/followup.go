@@ -37,25 +37,50 @@ import (
 // yet — and resolve would refuse it anyway, because the edges are still live
 // and that is exactly what its floor checks.
 
-// withdrawnTargets returns the ids of the memories whose 'supersedes' edges the
-// pass withdrew, deduplicated, in the order the edges were reported.
+// withdrawnTargets returns the memories whose 'supersedes' edges the pass
+// withdrew, deduplicated and grouped by the project each one lives in.
 //
 // Every row counts, including one this run did not itself invalidate: a
 // concurrent pass that took an edge first left the same state behind, which is
 // to say no live edge and a resolved_at nothing defends any more. The
 // alternative — reporting only the edges this process wrote — would drop a
 // memory that is just as repairable from a list the operator is about to run.
-func withdrawnTargets(withdrawn []supersede.WithdrawnEdge) []string {
-	var out []string
-	seen := make(map[string]bool, len(withdrawn))
+//
+// The grouping is the repair's own requirement, not a presentation choice: a
+// resolve repair draws its pool from ResolvedCandidates(projectID), which filters
+// `project_id = ?`, so a `--only` selector resolved in one project and repaired
+// against another is a silent no-op under a block that promises a clear. It is
+// almost always one group — the project the pass was run against — and the
+// difference only appears for a target that lives in `_global` or, for
+// `ghost supersede _global --withdraw`, in a project (#786).
+func withdrawnTargets(withdrawn []supersede.WithdrawnEdge) []supersede.ProjectTargets {
+	rows := make([]supersede.RepairTarget, 0, len(withdrawn))
 	for _, w := range withdrawn {
-		if w.OlderID == "" || seen[w.OlderID] {
+		if w.OlderID == "" {
 			continue
 		}
-		seen[w.OlderID] = true
-		out = append(out, w.OlderID)
+		rows = append(rows, supersede.RepairTarget{ID: w.OlderID, ProjectID: w.TargetProjectID})
 	}
-	return out
+	return supersede.GroupByProject(rows)
+}
+
+// printReassessFollowup writes the follow-up block for ONE project's repairable
+// targets, and the id file beside it, and returns the path it wrote ("" when there
+// was nothing to write, or the write failed).
+//
+// It is a function over the two helpers because a caller that has targets in more
+// than one project calls it once per project, and three call sites doing that
+// loop by hand is three chances to print a command scoped to a project whose pool
+// does not hold the memory. The warning is returned to the caller rather than
+// printed here, so the caller decides where a scratch file that could not be
+// written goes: the repair it describes has already landed either way, so it is a
+// warning and not a failed run.
+func printReassessFollowup(projectName string, targets []string, writtenBy string) string {
+	path, err := writeReassessTargets(projectName, targets, writtenBy)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: write the follow-up id file: %v\n", err)
+	}
+	return supersedeReassessFollowup(projectName, targets, path)
 }
 
 // resolveFollowupCommand renders the follow-up as a command line the operator

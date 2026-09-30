@@ -9,7 +9,9 @@
 // injection everywhere — and resolve's own repair pass deliberately HONOURS a
 // live 'supersedes' edge as a floor, so it cannot undo the resolution while the
 // edge stands. Nothing in the ordinary pass can reach an edge whose endpoints
-// have not changed: skip-if-unchanged holds it quiet forever.
+// have not changed: skip-if-unchanged holds it quiet forever, whichever way its
+// own candidate scan proposes the pair (#787) and however long ago the edge was
+// last confirmed (#784).
 //
 // This pass is the operator-facing undo. It re-applies the deterministic
 // imperative veto and the current classifier to every live 'supersedes'/'llm'
@@ -312,6 +314,12 @@ type WithdrawnEdge struct {
 	// Written is true only when --apply actually invalidated the edge, so a
 	// dry-run list can never be read as a change that happened.
 	Written bool
+	// TargetProjectID is the project the target lives in, and the follow-up is
+	// scoped to IT rather than to the project the pass was run against. Those are
+	// the same project for every target the pass loaded — its own edges — and
+	// differ only for a target promoted to `_global`, whose resolved_at no
+	// `ghost resolve <project> --reassess` could clear. See RepairableTargets.
+	TargetProjectID string
 }
 
 // liveCausesPairs returns the [olderID, newerID] pairs carrying a live
@@ -663,7 +671,14 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 
 	withdrawn := make([]WithdrawnEdge, 0, len(settled))
 	for _, j := range settled {
-		w := WithdrawnEdge{NewerID: j.cand.NewerID, OlderID: j.cand.OlderID, Reason: j.reason, Vetoed: j.vetoed}
+		w := WithdrawnEdge{
+			NewerID: j.cand.NewerID, OlderID: j.cand.OlderID,
+			Reason: j.reason, Vetoed: j.vetoed,
+			// From the same byID the pass already loaded the pair from, so this
+			// costs no read: the follow-up is about the memory being un-hidden, and
+			// a repair scoped to any other project's pool cannot reach it.
+			TargetProjectID: byID[j.cand.OlderID].ProjectID,
+		}
 		if j.sweep {
 			// A PREDICTION, for a dry run only: the row says how many 'causes'
 			// edges this withdrawal would take with it. Under --apply the field

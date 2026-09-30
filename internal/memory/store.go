@@ -1562,6 +1562,12 @@ var projectMergeStatements = []string{
 	`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
 	`UPDATE memory_history SET project_id = ? WHERE project_id = ?`,
 	`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
+	// The retrieval records move with their project, and because project_id is
+	// deliberately not a foreign key nothing does this for us. A record left
+	// naming the merged-away project would outlive it: the report would attribute
+	// calls about memories that now live elsewhere to a project that no longer
+	// exists, and a later DeleteProject of that stale id could not reach it.
+	`UPDATE retrieval_record SET project_id = ? WHERE project_id = ?`,
 }
 
 // mergeProjectTx folds oldID's rows into newID and deletes oldID.
@@ -1694,6 +1700,12 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		// describes, and the rows' own project_id is only how a reader filters.
 		`UPDATE memory_history SET project_id = ? WHERE project_id = ?`,
 		`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
+		// The retrieval records, and this is the SECOND of the two copies named
+		// in projectMergeStatements' comment — kept in step deliberately rather
+		// than deduplicated here. A record left naming the outgoing project names
+		// one that no longer exists, which makes it both misattributed in a report
+		// and unreachable by a later delete of that stale id.
+		`UPDATE retrieval_record SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
@@ -1722,6 +1734,11 @@ type DeleteProjectSummary struct {
 	Decisions   int
 	TokenUsage  int
 	AuditLog    int
+	// RetrievalRecords is the audit trail's rows for this project (#646). It is
+	// counted and reported because the summary is documented as covering EVERY
+	// table that references the project, and a count that silently omits a table
+	// the same command deletes is a summary that under-reports its own work.
+	RetrievalRecords int
 }
 
 // DeleteProject permanently removes a project and everything under it.
@@ -1803,6 +1820,16 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if _, err := tx.ExecContext(ctx, `DELETE FROM audit_log WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete audit_log: %w", err)
 	}
+	// The retrieval records for the same reason, and with the same shape: a row
+	// left behind would outlive the project it describes, so a report over the
+	// store would carry calls for a project that no longer exists — evidence
+	// about a corpus an operator asked to remove. There is no foreign key to
+	// cascade this because project_id is deliberately not one (the project purge
+	// needs to reach these rows with a plain predicate), which makes this
+	// explicit delete the only thing that will.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_record WHERE project_id = ?`, id); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_record: %w", err)
+	}
 	if err := deleteProjectRowTx(ctx, tx, id); err != nil {
 		return DeleteProjectSummary{}, err
 	}
@@ -1817,7 +1844,8 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	s.logger.Info("deleted project", "project_id", id, "project_name", name,
 		"memories", summary.Memories, "memory_links", summary.MemoryLinks,
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
-		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog)
+		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog,
+		"retrieval_records", summary.RetrievalRecords)
 	return summary, nil
 }
 
@@ -1854,6 +1882,11 @@ func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProje
 		`SELECT count(*) FROM decisions WHERE project_id = ?`, id,
 	).Scan(&summary.Decisions); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("count decisions: %w", err)
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM retrieval_record WHERE project_id = ?`, id,
+	).Scan(&summary.RetrievalRecords); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_record: %w", err)
 	}
 	if err := q.QueryRowContext(ctx,
 		`SELECT count(*) FROM token_usage WHERE project_id = ?`, id,
@@ -6340,6 +6373,32 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE project_id = ?`, projectID).Scan(&count)
+	return count, err
+}
+
+// CountActiveMemories counts the project's memories the way a RETRIEVAL window sees
+// them: `resolved_at IS NULL`, and nothing else. It is not CountMemories with a
+// filter applied for tidiness — the two answer different questions, and the
+// difference is the whole of what each is for.
+//
+// A withdrawn row is one `ghost resolve` has ruled on. It stays in the store, stays
+// listed by `ghost_memories_list`, and stays countable by CountMemories; it is out
+// of every window a ranking surface reads, because `passiveFetchSQL` and the query
+// path both bind `resolved_at IS NULL`. So "how many does this project hold" and
+// "how many of its rows can a block have been assembled from" are different counts,
+// and a caller that needs the second cannot derive it from the first.
+//
+// It is deliberately not `CountMemories` minus something: the exclusion is in the
+// SQL the window uses, and duplicating that predicate here is what keeps the two in
+// step. A caller that wants the WINDOW's population should be counting what the
+// window admits.
+func (s *Store) CountActiveMemories(ctx context.Context, projectID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL`, projectID).Scan(&count)
 	return count, err
 }
 

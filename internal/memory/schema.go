@@ -505,6 +505,84 @@ CREATE TABLE IF NOT EXISTS memory_snapshot_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_snapshot_evidence ON memory_snapshot_evidence(snapshot_id, memory_id);
 
+-- One row per retrieval call: what it retrieved and what it kept (#646). The
+-- grain is the call, not the (call, memory) pair, because the audit's
+-- denominator is calls — a table holding only the calls that admitted something
+-- has already dropped the ones worth auditing.
+--
+-- No foreign key on project_id, deliberately, and for the reason memory_history
+-- has none on its own: a purge of the PROJECT must be able to find these rows
+-- with a plain predicate even after the memories are gone, and a project is not
+-- deleted by a memory purge. The column is a name in a record, not a claim that
+-- the memory table is the owner of it.
+--
+-- No text anywhere. query_hash is an HMAC-SHA256 digest under a per-install key,
+-- or empty, and the CHECK is what makes that structural rather than a convention:
+-- a column whose only accepted values are 64 hex characters and the empty string
+-- cannot hold a question however a future writer builds its statement.
+--
+-- The key is a sibling FILE in the data directory, NOT in this database, because
+-- 'ghost backup' is a VACUUM INTO of this file and a backup is the most ordinary
+-- thing to hand a colleague. The cost, stated here because this is the column's
+-- comment: a restore ON ANOTHER MACHINE re-keys every row it carries, so grouping
+-- repeat questions holds within one install and not across two. An empty hash
+-- means either "this call carried no query" (a session-start injection) or "the
+-- key could not be read" -- both are logged -- so the column never guesses.
+CREATE TABLE IF NOT EXISTS retrieval_record (
+    project_id TEXT NOT NULL,
+    -- Empty over stdio, which reports no session. Load-bearing alongside
+    -- source: on the transport Ghost ships, a session-start injection and a
+    -- search are indistinguishable by session alone.
+    session_id TEXT NOT NULL DEFAULT '',
+    -- The surface the call came from (search, session_start, ...), so an audit
+    -- can tell an injection from a search without re-reading the transcript.
+    source     TEXT NOT NULL,
+    query_hash TEXT NOT NULL DEFAULT ''
+                CHECK (query_hash = '' OR
+                       (length(query_hash) = 64 AND query_hash NOT GLOB '*[^0-9a-f]*')),
+    -- The instant a historical read was assembled at, RFC 3339; empty for a
+    -- current one, which is a fact and not an absent value.
+    as_of   TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL,
+    reason  TEXT NOT NULL DEFAULT '',
+    -- The per-memory verdicts as a JSON array of {id, kept, stage, reason},
+    -- because one call judges many rows and a row-per-pair table cannot also be
+    -- the row that says the call happened.
+    --
+    -- Deliberately NOT CHECK(json_valid(verdicts)): the column's readers must
+    -- tolerate a document they cannot read, and a constraint that refuses to
+    -- store one would only mean the tolerance was unreachable from Ghost's own
+    -- writers. Two different functions RAISE on a column they cannot read --
+    -- json_each on a document that is not JSON, and the ->> path accessor on the
+    -- value json_each yields from one that is an OBJECT rather than an array --
+    -- so the ONE read that goes through either, the purge's predicate (a
+    -- predicate must decide in SQL), goes through readableVerdicts, which closes
+    -- both. RetrievalRecords reads the column raw on purpose and settles the
+    -- same cases in one Go decode, which is cheaper than the two parses
+    -- json_valid and json_type would each cost.
+    verdicts    TEXT NOT NULL DEFAULT '[]',
+    -- The STORE's clock, never the assembler's Now: the assembler binds Now for
+    -- its own decisions and must not read a wall clock, and the instant a row
+    -- became durable is the one that places it against a transcript.
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- One b-tree, on project_id, for the per-project read the audit report needs
+-- (#646 asks for "real precision per project"). HONEST ACCOUNTING: nothing in
+-- this build reads it yet -- RetrievalRecords takes a limit and no project, and
+-- the purge matches on a memory id -- so today this is an insert nobody uses.
+-- It is kept rather than added later because the reader that uses it is the next
+-- part and re-adding an index is itself a schema migration, and because the cost
+-- is one b-tree insert per search inside a write that already costs 5000-row
+-- cap's INSERT (measured ~45us total). A future reader that is NOT per project
+-- should drop this, and the assertion that would catch a second index is the
+-- stray-index count in TestMigrateFreshDBHasRetrievalRecord (migrate_test.go),
+-- which is where the "one index, because every one is an insert inside the write
+-- lock" rule is kept honest for this table.
+-- recorded_at is deliberately NOT indexed, for the reason memory_history's is
+-- not: it is second-precision, so a lookup by it is a range scan that can return
+-- a window of rows the report cannot order within.
+CREATE INDEX IF NOT EXISTS idx_retrieval_record_project ON retrieval_record(project_id);
+
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     kind                 TEXT NOT NULL,
@@ -654,6 +732,24 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		}
 	}
 
+	// A same-named table that is not Ghost's, refused BEFORE initSQL rather than
+	// beside the evidence check below. The difference is which error the operator
+	// gets: initSQL's own `CREATE INDEX ... ON retrieval_record(project_id)` is
+	// the statement that fails against a foreign table, and it fails with "no such
+	// column: project_id" — which names neither the table nor the way out. The
+	// evidence check sits below because initSQL's index on it cannot fail against
+	// the #664 shape (that table has memory_id, which is all it names); this index
+	// names a column, so the check has to come first.
+	//
+	// It runs before the DDL and therefore also before backupBeforeMigrate, for
+	// the reason the branch below spells out: the condition is permanent, the step
+	// rolls back, so every later open re-enters — and a refusal that has already
+	// written a copy is not the refusal we want.
+	if err := refuseForeignRetrievalRecordTable(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
 	if _, err := db.Exec(initSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -687,6 +783,8 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 			_ = db.Close()
 			return nil, err
 		}
+		// The retrieval record's shape refusal has already run above, before
+		// initSQL — see the note there on why it cannot be checked from here.
 		// Migration steps rebuild and DROP tables, so a bug in a step is
 		// unrecoverable without a copy. Fail closed: if the backup cannot be
 		// written, do not migrate.

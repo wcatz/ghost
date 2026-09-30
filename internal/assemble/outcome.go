@@ -944,7 +944,7 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 		}
 	}
 
-	p.trace.record(stageResponseFit, in, len(p.items), dropped, false, fitNotes...)
+	p.trace.record(stageResponseFit, in, len(p.items), dropped, fitNotes...)
 	p.trace.Notes = res.Notes
 	return res, nil
 }

@@ -302,8 +302,10 @@ func TestWithdrawRefusesAPairWithNoLiveLink(t *testing.T) {
 	}
 	// The refusal names the target's remaining live edges, because "no live
 	// supersedes link A→B" on its own is a dead end and "B is still superseded by
-	// C" is an answer.
-	if !strings.Contains(err.Error(), "superseded, from this project, by "+b[:8]) {
+	// C" is an answer. It says nothing about WHOSE the holder is: the read reaches
+	// a `_global` source as well as the project's own, so a claim of ownership
+	// would be one the read has not established (#786).
+	if !strings.Contains(err.Error(), "still superseded by "+b[:8]) {
 		t.Errorf("the refusal does not name the target's live edges: %v", err)
 	}
 	if got := liveEdgeCount(t, store, target); got != 1 {
@@ -407,50 +409,13 @@ func TestWithdrawLeavesAnotherProjectsEdgeAlone(t *testing.T) {
 	}
 }
 
-// TestWithdrawRefusesAnEdgeWhoseSourceLeftTheProject is the case the ref scoping
-// alone cannot answer. `ghost_memory_promote` moves a memory to _global and KEEPS
-// its links, so a live edge's source can leave the project while its target
-// stays — and then BOTH ids resolve from the project, because _global is
-// resolvable everywhere. Nothing but the edge's own ownership refuses the
-// withdrawal, so without that predicate a project could reach a graph that is not
-// its own by promoting the superseding note.
-func TestWithdrawRefusesAnEdgeWhoseSourceLeftTheProject(t *testing.T) {
-	store, _ := seed(t)
-	ctx := context.Background()
-	newer := mustCreatePlain(t, store, "A note that was promoted to _global after superseding another.")
-	target := mustCreatePlain(t, store, "The note the promoted one superseded.")
-	if err := store.CreateLink(ctx, newer, target, string(RelationSupersedes), 0.95, "llm"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.PromoteToGlobal(ctx, "p", newer); err != nil {
-		t.Fatalf("PromoteToGlobal: %v", err)
-	}
-	// Both refs resolve from p — that is what makes this the interesting case.
-	_, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: newer, Target: target}}, false, discardLogger())
-	if err == nil {
-		t.Fatal("both refs resolved, so a nil error here would mean the pair was accepted")
-	}
-	if !strings.Contains(err.Error(), "no live supersedes link") {
-		t.Fatalf("the refusal is not about the edge's ownership: %v", err)
-	}
-	// Every claim in it is scoped to the project the read was scoped to. The edge
-	// exists — under _global — so "nothing supersedes that memory" would be false
-	// and the sentence has to name the project it looked in.
-	if strings.Contains(err.Error(), "nothing supersedes that memory") {
-		t.Errorf("the refusal makes a claim about the whole graph: %v", err)
-	}
-
-	if links, err := store.SupersedesLinksInto(ctx, "p", target); err != nil {
-		t.Fatalf("SupersedesLinksInto(p): %v", err)
-	} else if len(links) != 0 {
-		t.Errorf("the edge is reachable from p = %d live row(s), want 0: the project that owns the SOURCE is what scopes it", len(links))
-	}
-	if links, err := store.SupersedesLinksInto(ctx, memory.GlobalProjectID, target); err != nil {
-		t.Fatalf("SupersedesLinksInto(_global): %v", err)
-	} else if len(links) != 1 {
-		t.Errorf("the edge = %d live row(s) under _global, want 1: it must be untouched", len(links))
-	}
-}
+// The case `ghost_memory_promote` leaves behind — a live edge whose SOURCE has
+// moved to _global while its target stayed — is TestWithdrawReachesAnEdgeWhose-
+// SourceWasPromoted in global_source_test.go, with the reachability this file
+// used to refuse: the ownership rule is now "either endpoint is ours", and
+// `_global` is ours from every project. What must still be refused is an edge no
+// project claims, which TestWithdrawLeavesAnotherProjectsEdgeAlone above and
+// TestWithdrawStillRefusesAnEdgeNoProjectClaims there pin.
 
 // TestWithdrawChainsIntoResolveReassess is the step that makes a withdrawal
 // visible in a session. A 'supersedes' edge is not informational: resolve's

@@ -152,3 +152,87 @@ func TestAnyMemoryIDsByIDPrefixMeasuresTheBoundInCharacters(t *testing.T) {
 		}
 	}
 }
+
+// TestMemoryIDsByIDPrefixAnyProjectReachesEveryLiveMemory is the unscoped half
+// of a `_global` withdrawal's ref resolution. `_global` is the shared scope, so a
+// ref an operator types while working on it may name a memory in any project — and
+// the edge read is what decides whether that memory may be touched. A project is
+// not the shared scope, so this read is never used for one: it exists because
+// scoping a ref to `_global` alone made the target of a promoted source's edge
+// unnameable from the one command that can withdraw it (#786).
+//
+// It differs from AnyMemoryIDsByIDPrefix in exactly one thing and the difference
+// is the point: history is EXCLUDED, so a ref cannot name a deleted memory and be
+// reported as a live edge's endpoint. And it differs from MemoryIDsByIDPrefix in
+// the other: no project predicate at all, which is what makes the name say
+// "project" the thing it does not do.
+func TestMemoryIDsByIDPrefixAnyProjectReachesEveryLiveMemory(t *testing.T) {
+	store := linkTestStore(t)
+	ctx := context.Background()
+	for _, p := range []string{"p1", "p2", GlobalProjectID} {
+		if _, _, _, err := store.ImportMemory(ctx, PortableMemory{
+			ID: "id-" + p, ProjectID: p, Category: "fact",
+			Content: "A note in " + p + ".", Source: "mcp",
+		}, ImportOptions{Apply: true}); err != nil {
+			t.Fatalf("ImportMemory(%s): %v", p, err)
+		}
+	}
+	got, err := store.MemoryIDsByIDPrefixAnyProject(ctx, "id-")
+	if err != nil {
+		t.Fatalf("MemoryIDsByIDPrefixAnyProject: %v", err)
+	}
+	want := []string{"id-" + GlobalProjectID, "id-p1", "id-p2"}
+	if len(got) != len(want) {
+		t.Fatalf("MemoryIDsByIDPrefixAnyProject(\"id-\") = %v, want %v: a memory in any project", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("MemoryIDsByIDPrefixAnyProject(\"id-\") = %v, want %v: ascending order is the same rule every other id set follows", got, want)
+		}
+	}
+
+	// A deleted memory has no row in `memories`; naming it would resolve, and the
+	// withdrawal would then fail on the edge lookup with a message about the
+	// graph rather than about the ref. So the history table is not read here.
+	if err := store.Delete(ctx, "id-p2"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	got, err = store.MemoryIDsByIDPrefixAnyProject(ctx, "id-")
+	if err != nil {
+		t.Fatalf("MemoryIDsByIDPrefixAnyProject(after delete): %v", err)
+	}
+	for _, id := range got {
+		if id == "id-p2" {
+			t.Fatalf("MemoryIDsByIDPrefixAnyProject = %v, want the deleted memory gone: this set is for naming a row that is about to be changed", got)
+		}
+	}
+	// The miss is an empty set and no error, exactly as every other id read here.
+	if got, err := store.MemoryIDsByIDPrefixAnyProject(ctx, "ffffffff"); err != nil || len(got) != 0 {
+		t.Errorf("MemoryIDsByIDPrefixAnyProject(miss) = %v, %v; want empty and no error", got, err)
+	}
+}
+
+// TestMemoryIDsByIDPrefixAnyProjectMeasuresTheBoundInCharacters: the id column is
+// TEXT and SQLite's substr() slices by CHARACTER, so a byte bound would make a
+// non-ASCII ref unfindable in a store that plainly holds it — and `ghost import`
+// writes ids verbatim, so such ids exist.
+func TestMemoryIDsByIDPrefixAnyProjectMeasuresTheBoundInCharacters(t *testing.T) {
+	store := linkTestStore(t)
+	ctx := context.Background()
+	const japanese = "日本語-メモ"
+	if _, _, _, err := store.ImportMemory(ctx, PortableMemory{
+		ID: japanese, ProjectID: "p1", Category: "fact",
+		Content: "An imported note whose id is not ASCII.", Source: "mcp",
+	}, ImportOptions{Apply: true}); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	for _, prefix := range []string{japanese, "日本語"} {
+		got, err := store.MemoryIDsByIDPrefixAnyProject(ctx, prefix)
+		if err != nil {
+			t.Fatalf("MemoryIDsByIDPrefixAnyProject(%q): %v", prefix, err)
+		}
+		if len(got) != 1 || got[0] != japanese {
+			t.Errorf("MemoryIDsByIDPrefixAnyProject(%q) = %q, want [%s]", prefix, got, japanese)
+		}
+	}
+}
