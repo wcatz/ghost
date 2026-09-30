@@ -934,3 +934,56 @@ func (c *recordingDirections) ClassifyBatch(_ context.Context, pairs []Candidate
 	}
 	return out, nil
 }
+
+// TestATiedCausesOnlyPairTheScanAlsoFoundIsCountedOnce is a report-counting
+// defect, and the only shape in this file that is about the total rather than
+// about the graph.
+//
+// `order` is the union of the scan's fresh candidates and the live-edge pairs,
+// deduped by pair key, so a tied `causes`-only pair is reached twice: once as a
+// near neighbour the scan refused to propose, and once as a live edge whose
+// endpoints the reconciliation cannot orient. Both halves answer "no chronology,
+// not judged", and both increment `Result.Unoriented`, so one pair prints as two
+// on the `not proposed` line — a line documented as a per-pair count, and reached
+// by exactly the corpus the new wording advertises (a bulk import stamps a whole
+// batch at once, so bulk-imported pairs tie by construction).
+//
+// A live `supersedes` edge does not have this problem because the `pairDirected`
+// path never calls `orient` at all: the edge carries a direction, so there is
+// nothing to refuse.
+func TestATiedCausesOnlyPairTheScanAlsoFoundIsCountedOnce(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	// Two near neighbours sharing BOTH timestamps — a bulk import's stamp, so
+	// every pair in this fixture ties and only the vectors say which are
+	// neighbours. The two pairs live in ORTHOGONAL directions so the scan finds
+	// exactly the one it is meant to, and a count that is off by the number of
+	// pairs cannot be mistaken for a count that is off by one per sighting.
+	tied := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0, 0}, "2026-09-20 09:26:05")
+	tiedOther := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.99, 0, 0.14, 0}, "2026-09-20 09:26:05")
+	if err := store.CreateLinkJudged(ctx, tied, tiedOther, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+	// The second tied causes-only pair sits in its own direction, so the scan
+	// cannot see it as a near neighbour at all and only its live edge reaches
+	// it — which is why the count is still owed for a pair the scan never did.
+	hidden := add(t, store, db, "an unrelated note about the ingest queue", []float32{0, 1, 0, 0}, "2026-09-20 09:26:05")
+	hiddenOther := add(t, store, db, "another unrelated note about the deploy queue", []float32{0, 0.99, 0, 0.14}, "2026-09-20 09:26:05")
+	if err := store.CreateLinkJudged(ctx, hidden, hiddenOther, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
+		t.Fatal(err)
+	}
+
+	cls := &recordingCauses{}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(cls.judged) != 0 {
+		t.Fatalf("the pass asked about %v, want nothing: two rows sharing both timestamps have no direction to ask in", cls.judged)
+	}
+	if res.Unoriented != 2 {
+		t.Errorf("Unoriented = %d, want 2: two tied causes-only pairs, one of them the scan also found as a near neighbour and one of them reachable only through its live edge. A pair the scan refused is not also refused by the reconciliation.",
+			res.Unoriented)
+	}
+}

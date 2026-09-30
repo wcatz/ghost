@@ -221,6 +221,15 @@ type Selection struct {
 	// Counted per unordered PAIR, not per sighting: every endpoint sees every
 	// pair, so a per-sighting count would report each refusal twice.
 	Unoriented int
+	// unorientedPairs is the same refusals as KEYS, and it exists because the
+	// count alone cannot be reconciled against a second refusal of the same
+	// pair: Run's reconciliation reaches a tied pair by its live edges as well
+	// as by this scan, and the pair that carries a 'causes' edge and is ALSO a
+	// near neighbour is refused by both halves — once here and once there. It is
+	// unexported because nothing outside this package needs it: `Unoriented` is
+	// the number a caller reports, and this is the bookkeeping that keeps the
+	// number a per-PAIR count rather than a per-half count.
+	unorientedPairs map[pairKey]bool
 }
 
 // SelectCandidates returns the deduped ordered candidate pairs for a project:
@@ -338,6 +347,10 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 				// proposed, so no call is spent on it and nothing is cached
 				// under a direction nobody read.
 				sel.Unoriented++
+				if sel.unorientedPairs == nil {
+					sel.unorientedPairs = make(map[pairKey]bool)
+				}
+				sel.unorientedPairs[key] = true
 				continue
 			}
 			if newer.ID == older.ID {
@@ -1521,10 +1534,21 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// direction — and a 'causes' edge does not, so this is the one
 				// live shape the tie reaches, which is why the report line has
 				// to say which.
-				res.Unoriented++
-				if logger != nil {
-					logger.Info("supersede: a pair linked only by 'causes' whose two rows share both timestamps; no direction to judge it in",
-						"a", edges[0].newer, "b", edges[0].older)
+				//
+				// Counted only where the SCAN did not already count this pair.
+				// Both halves of a pass reach it — the scan as a near
+				// neighbour, this loop as a live edge — and `Unoriented` is
+				// documented as a per-pair count on a report line an operator
+				// reads as pairs. The scan's refusal is kept and this one
+				// suppressed rather than the reverse, because the scan's set is
+				// the one built for the purpose: a pair it never reached has no
+				// key in it, so it is still counted here.
+				if !sel.unorientedPairs[key] {
+					res.Unoriented++
+					if logger != nil {
+						logger.Info("supersede: a pair linked only by 'causes' whose two rows share both timestamps; no direction to judge it in",
+							"a", edges[0].newer, "b", edges[0].older)
+					}
 				}
 				continue
 			}
