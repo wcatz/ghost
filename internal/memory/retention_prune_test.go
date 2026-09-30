@@ -110,9 +110,24 @@ func backdateWrite(t *testing.T, s *Store, id, when string) {
 	}
 }
 
-// stamp renders a time the way every timestamp column here stores one.
+// stamp renders a time the way every timestamp column here stores one, read from
+// the clock NOW.
+//
+// A test that stamps a row and then holds that stamp to an expectation must use
+// stampAt instead, once, and derive both from the one base. Two stamp calls are
+// two clock reads, and a second boundary between them moves the expectation one
+// second past the value the row already holds — which reads as a production
+// defect and is not one (#800). The same holds for two stamps meant to describe
+// the same instant, or to sit a fixed distance apart: the two rows a boundary
+// test pins either side of a threshold are only a minute apart if the minute is
+// measured from one instant.
 func stamp(offset time.Duration) string {
-	return time.Now().UTC().Add(offset).Format("2006-01-02 15:04:05")
+	return stampAt(time.Now().UTC(), offset)
+}
+
+// stampAt is stamp at a base the caller chose.
+func stampAt(base time.Time, offset time.Duration) string {
+	return base.UTC().Add(offset).Format("2006-01-02 15:04:05")
 }
 
 func liveCount(t *testing.T, s *Store, projectID string) int {
@@ -161,27 +176,32 @@ func TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace(t *testing.T) {
 	// Written first, aged second, for the reason pruneFixture gives: every one of
 	// these is a near-duplicate of another, so a save made after a row was aged
 	// folds into it and refreshes its expiry.
+	//
+	// One instant for the whole table. Several rows are meant to carry the SAME
+	// expiry and the same recorded read, and separate clock reads make those values
+	// differ from each other by a second without any of them being wrong (#800).
+	now := time.Now().UTC()
 	rows := []struct{ content, tier, expires, lastAccessed string }{
 		{content: "a session note expired long ago and untouched since", tier: RetentionSession,
-			expires: stamp(-30 * 24 * time.Hour), lastAccessed: stamp(-29 * 24 * time.Hour)},
+			expires: stampAt(now, -30*24*time.Hour), lastAccessed: stampAt(now, -29*24*time.Hour)},
 		{content: "a session note that has not reached its expiry", tier: RetentionSession,
-			expires: stamp(time.Hour), lastAccessed: stamp(-29 * 24 * time.Hour)},
+			expires: stampAt(now, time.Hour), lastAccessed: stampAt(now, -29*24*time.Hour)},
 		{content: "a session note expired but read yesterday", tier: RetentionSession,
-			expires: stamp(-30 * 24 * time.Hour), lastAccessed: stamp(-24 * time.Hour)},
+			expires: stampAt(now, -30*24*time.Hour), lastAccessed: stampAt(now, -24*time.Hour)},
 		// No recorded access: the grace falls back to the row's last write, so this
 		// row has to be old in both columns to be a candidate.
 		{content: "a session note expired and never read", tier: RetentionSession,
-			expires: stamp(-30 * 24 * time.Hour)},
+			expires: stampAt(now, -30*24*time.Hour)},
 		// And the row that is expired, never read, and last written a minute ago:
 		// inside the grace, so kept. This is the default shape of a real session
 		// memory, and it is the case a prune that measured only the expiry would
 		// delete.
 		{content: "a session note expired seconds after it was saved", tier: RetentionSession,
-			expires: stamp(-time.Hour)},
+			expires: stampAt(now, -time.Hour)},
 		{content: "a durable fact that is just as old", tier: RetentionProject,
-			expires: stamp(-30 * 24 * time.Hour), lastAccessed: stamp(-29 * 24 * time.Hour)},
+			expires: stampAt(now, -30*24*time.Hour), lastAccessed: stampAt(now, -29*24*time.Hour)},
 		{content: "a keep-forever fact with a stale expiry", tier: RetentionPersistent,
-			expires: stamp(-30 * 24 * time.Hour), lastAccessed: stamp(-29 * 24 * time.Hour)},
+			expires: stampAt(now, -30*24*time.Hour), lastAccessed: stampAt(now, -29*24*time.Hour)},
 	}
 	ids := make([]string, len(rows))
 	for i, r := range rows {
@@ -192,7 +212,7 @@ func TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace(t *testing.T) {
 	}
 	longExpired, notExpired, insideGrace, neverAccessed, freshWrite := ids[0], ids[1], ids[2], ids[3], ids[4]
 	durable, keepForever := ids[5], ids[6]
-	backdateWrite(t, s, neverAccessed, stamp(-30*24*time.Hour))
+	backdateWrite(t, s, neverAccessed, stampAt(now, -30*24*time.Hour))
 
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
 	if err != nil {
@@ -236,13 +256,17 @@ func TestPrunePinsTheGraceBoundaryFromBothSides(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	const grace = 24 * time.Hour
+	// One instant for both rows. The comment below claims they differ by a minute
+	// and by nothing else, and two clock reads make them differ by a minute plus
+	// whatever second boundary fell between them (#800).
+	now := time.Now().UTC()
 
 	// Both expired a month ago, so only the grace decides. Aged after both saves
 	// for the reason pruneFixture gives.
 	justOutside := pruneRow(t, s, testProject, "a session note last touched a minute past the grace", RetentionSession)
 	justInside := pruneRow(t, s, testProject, "a session note last touched a minute inside the grace", RetentionSession)
-	agePruneRow(t, s, justOutside, stamp(-30*24*time.Hour), stamp(-grace-time.Minute))
-	agePruneRow(t, s, justInside, stamp(-30*24*time.Hour), stamp(-grace+time.Minute))
+	agePruneRow(t, s, justOutside, stampAt(now, -30*24*time.Hour), stampAt(now, -grace-time.Minute))
+	agePruneRow(t, s, justInside, stampAt(now, -30*24*time.Hour), stampAt(now, -grace+time.Minute))
 
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: grace})
 	if err != nil {
@@ -265,10 +289,13 @@ func TestPrunePinsTheExpiryBoundaryToo(t *testing.T) {
 
 	expired := pruneRow(t, s, testProject, "a session note one minute past its expiry", RetentionSession)
 	live := pruneRow(t, s, testProject, "a session note one minute short of its expiry", RetentionSession)
+	// One instant for both rows, so the pair is a minute either side of the same
+	// boundary rather than of two boundaries (#800).
+	now := time.Now().UTC()
 	// Aged after both saves: these two are near-duplicates, so the second save
 	// folds into the first and refreshes its expiry (pruneFixture).
-	agePruneRow(t, s, expired, stamp(-time.Minute), stamp(-30*24*time.Hour))
-	agePruneRow(t, s, live, stamp(time.Minute), stamp(-30*24*time.Hour))
+	agePruneRow(t, s, expired, stampAt(now, -time.Minute), stampAt(now, -30*24*time.Hour))
+	agePruneRow(t, s, live, stampAt(now, time.Minute), stampAt(now, -30*24*time.Hour))
 
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: 0})
 	if err != nil {
@@ -399,8 +426,12 @@ func TestPruneNeverRemovesAPinnedRow(t *testing.T) {
 	// folds into the first, so a fixture that aged first would be measuring the
 	// refresh rather than the pin — and a pinned row kept because its expiry was
 	// fresh proves nothing about pinned = 0.
-	agePruneRow(t, s, pinned, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
-	agePruneRow(t, s, control, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+	// One instant for both rows: the argument below is that the control differs
+	// from the pinned row by `pinned` and by nothing else (#800).
+	now := time.Now().UTC()
+	aged, newer := stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour)
+	agePruneRow(t, s, pinned, aged, newer)
+	agePruneRow(t, s, control, aged, newer)
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, pinned); err != nil {
 		t.Fatalf("pin %s: %v", pinned, err)
 	}
@@ -525,14 +556,19 @@ func TestPruneSparesARowThatStoppedMatchingMidRun(t *testing.T) {
 			s := testStore(t)
 			ctx := context.Background()
 			const total = pruneBatchSize + 1 // two batches
+			// One instant for the whole backlog. Every row below is meant to carry
+			// the same expiry and the same recorded read, and prune orders the
+			// removal by activity, so reading the clock per row would order the
+			// batches differently from run to run (#800).
+			now := time.Now().UTC()
+			aged, newer := stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour)
 			for i := 0; i < total-1; i++ {
-				seedPruneRow(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession,
-					stamp(-30*24*time.Hour), stamp(-30*24*time.Hour))
+				seedPruneRow(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession, aged, aged)
 			}
 			// Newer activity, so it sorts last in the removal order and the first
 			// batch cannot reach it.
 			spared := seedPruneRow(t, s, "the row a write reaches between batches", RetentionSession,
-				stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+				aged, newer)
 			// The id is store-minted hex, so inlining it into the trigger cannot
 			// carry a quote out of the literal.
 			installPruneSpareTrigger(t, s, fmt.Sprintf(tc.change, spared))
@@ -635,9 +671,12 @@ func TestPruneBatchesCommitPerBatch(t *testing.T) {
 	ctx := context.Background()
 
 	const total = 3*pruneBatchSize + 50 // four batches
+	// One instant for the whole backlog, for the reason the other batch loop
+	// gives: the rows are identical in shape and differ only in content (#800).
+	now := time.Now().UTC()
+	aged, newer := stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour)
 	for i := 0; i < total; i++ {
-		seedPruneRow(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession,
-			stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+		seedPruneRow(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession, aged, newer)
 	}
 	if liveCount(t, s, testProject) != total {
 		t.Fatalf("seeded %d rows, store has %d", total, liveCount(t, s, testProject))
@@ -664,8 +703,7 @@ func TestPruneBatchesCommitPerBatch(t *testing.T) {
 		t.Fatalf("clear history between directions: %v", err)
 	}
 	for i := 0; i < total; i++ {
-		seedPruneRow(t, s, fmt.Sprintf("an expired session note %d again", i), RetentionSession,
-			stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
+		seedPruneRow(t, s, fmt.Sprintf("an expired session note %d again", i), RetentionSession, aged, newer)
 	}
 
 	var seamCalls int
