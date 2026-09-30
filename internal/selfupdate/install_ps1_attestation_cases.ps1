@@ -76,6 +76,14 @@ $boundary = @(
     @{ Version = '0.43.0-'; Required = $true },    # empty prerelease
     @{ Version = 'garbage'; Required = $true },
     @{ Version = 'v'; Required = $true },
+    # An UPPERCASE V. PowerShell's -replace is case-insensitive and Go's
+    # strings.TrimPrefix is not, so the script used to read this as 0.42.9 — older
+    # than the cutover, attestation skipped — while the client called it
+    # unparseable and required one. The only row that catches it is one that
+    # carries the capital, because every other row here is lower-case.
+    @{ Version = 'V0.42.9'; Required = $true },
+    @{ Version = 'V0.43.0'; Required = $true },
+    @{ Version = 'V'; Required = $true },
     # --- the rows that DISCRIMINATE. Every adversarial row above is on or above
     # --- the cutover, where "unparseable" and "at or after the cutover" happen to
     # --- agree — so a mutation that made the parser stricter, or dropped the
@@ -489,15 +497,21 @@ $psCode = Get-CodeOnly $raw
 # coverage is enumerated, and every pattern has a control proving it fires on the
 # construct and does not fire on a 5.1 spelling of the same idea.
 #
-# WHAT THIS IS NOT: a parser. It strips comments, not string literals, so a pattern
-# must not be matchable from inside a quoted string — the controls below include
-# lines that put the token names in strings, and the patterns are shaped to survive
-# them. A construct expressed in a way no pattern here anticipates would pass this
-# check and still fail to parse on 5.1; that is the residual, and the honest way to
-# state it is in the comment rather than to imply the check is complete. A first
-# version of the -Parallel pattern was a bare token and a control caught a legal
-# `$parallel` variable immediately, which is the reason the patterns are shaped
-# rather than loose.
+# WHAT THIS IS NOT: a parser. Get-CodeOnly removes comments AND string literals,
+# so a pattern can never fire from inside a quoted string — that is what the
+# stripper is for, and it is why a bare `-AsHashtable` token is safe here where it
+# would not be in the script itself. (An earlier version of this comment said the
+# opposite: it claimed literals were NOT stripped and that the patterns were shaped
+# to survive them. The code was rewritten to strip literals in the same change and
+# the prose was not, so the comment told the next person to write patterns for a
+# scanner that no longer existed.)
+#
+# The residual is a construct spelled in a shape no pattern here anticipates: it
+# would pass this check and still fail to parse on 5.1. That is stated rather than
+# implied away. The patterns are still shaped rather than loose, because a stripper
+# is not a parser either — a first version of the -Parallel pattern was the bare
+# token `-Parallel` and a control caught a legal `$parallel` variable on the next
+# run.
 $ps7Only = [ordered]@{
     'null-coalescing operator'   = '\?\?'
     'null-conditional operator'  = '\?\.'
@@ -567,6 +581,8 @@ foreach ($legal in @(
     'Join-Path $a "b"',
     'Join-Path -Path $a -ChildPath "b"',
     '$parallel = 1; $r = $a -eq $parallel',
+    # Passes because the stripper DELETES the literal, not because the pattern is
+    # shaped to survive it. Which is the whole point of the stripper.
     '$msg = "use -AsHashtable on PowerShell 7 only"'
 )) {
     $hit = $false

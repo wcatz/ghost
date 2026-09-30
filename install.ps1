@@ -178,7 +178,13 @@ function Get-ComparableVersion {
 
     if ([string]::IsNullOrWhiteSpace($Version)) { return $null }
 
-    $rest = $Version -replace '^v', ''
+    # -creplace, NOT -replace. PowerShell's -replace is case-INsensitive, so
+    # -replace '^v' also strips an uppercase V and read "V0.42.9" as 0.42.9 — an
+    # older version than the cutover, and no attestation. Go uses
+    # strings.TrimPrefix(s, "v"), which is case-sensitive, so the client calls
+    # "V0.42.9" unparseable and requires one. Same input, opposite answers, and
+    # the wrong one is the installer skipping its check.
+    $rest = $Version -creplace '^v', ''
     $plus = $rest.IndexOf('+')
     if ($plus -ge 0) { $rest = $rest.Substring(0, $plus) }
 
@@ -325,7 +331,10 @@ function Get-AttestationIdentity {
     param([AllowEmptyString()][string]$Version)
 
     $core = Get-ComparableVersion $Version
-    if ([string]::IsNullOrEmpty($core)) { $core = $Version -replace '^v', '' }
+    # -creplace for the same reason as in Get-ComparableVersion: this is the
+    # fallback for a version with no numeric core, and it must not quietly
+    # normalise case on its way into the certificate identity.
+    if ([string]::IsNullOrEmpty($core)) { $core = $Version -creplace '^v', '' }
     return [ordered]@{
         Repo         = $script:Repo
         ReleaseTag   = 'v' + $core

@@ -225,5 +225,15 @@ jobs:
       # cover it on linux. The point of adding this is the ONE thing no other job
       # could check — that the script's decisions agree with the Go client's on
       # the version boundary, and that it parses and runs on a Windows host.
+      #
+      # GHOST_REQUIRE_PWSH makes a missing pwsh a FAILURE rather than a skip. Two
+      # of the four tests go through requirePwsh, and `go test` exits 0 when every
+      # selected test SKIPS — so without this the step would stay green while
+      # running nothing, the day a runner image stopped shipping PowerShell 7, and
+      # the gap this step exists to close would reopen silently. Same concern as
+      # the lint job's assertion on a literal `Ran [1-9][0-9]* test` line: zero
+      # tests must not read as a pass.
       - name: install.ps1 decision tests
+        env:
+          GHOST_REQUIRE_PWSH: '1'
         run: go test -count=1 -run 'TestInstallPS1|^TestTheTwoBoundariesAgree$|^TestFirstAttestedVersionIsTheSameConstantInBoth$|^TestTheReleaseWorkflowIdentityIsTheSameStringInBoth$' ./internal/selfupdate/
