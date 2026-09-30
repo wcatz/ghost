@@ -16,19 +16,45 @@ import (
 // reads as a mistake.
 func TestWithdrawnTargetsDedupesInListOrder(t *testing.T) {
 	edges := []supersede.WithdrawnEdge{
-		{NewerID: "n1", OlderID: "aaaaaaaa1111111111111111111111", Written: true},
-		{NewerID: "n2", OlderID: "bbbbbbbb2222222222222222222222", Written: true},
-		{NewerID: "n3", OlderID: "aaaaaaaa1111111111111111111111", Written: true},
+		{NewerID: "n1", OlderID: "aaaaaaaa1111111111111111111111", TargetProjectID: "myproj", Written: true},
+		{NewerID: "n2", OlderID: "bbbbbbbb2222222222222222222222", TargetProjectID: "myproj", Written: true},
+		{NewerID: "n3", OlderID: "aaaaaaaa1111111111111111111111", TargetProjectID: "myproj", Written: true},
 	}
 	got := withdrawnTargets(edges)
+	if len(got) != 1 {
+		t.Fatalf("withdrawnTargets = %+v, want one project group", got)
+	}
 	want := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
-	if len(got) != len(want) {
-		t.Fatalf("withdrawnTargets = %v, want %v", got, want)
+	if got[0].ProjectID != "myproj" || len(got[0].Targets) != len(want) {
+		t.Fatalf("withdrawnTargets = %+v, want one group for myproj holding %v", got, want)
 	}
 	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("withdrawnTargets[%d] = %q, want %q", i, got[i], want[i])
+		if got[0].Targets[i] != want[i] {
+			t.Errorf("withdrawnTargets()[0].Targets[%d] = %q, want %q", i, got[0].Targets[i], want[i])
 		}
+	}
+}
+
+// TestWithdrawnTargetsGroupsByTheProjectThatCanRepairThem: the grouping is the
+// repair's own requirement and not presentation. A resolve repair draws its pool
+// from ResolvedCandidates(projectID), which filters `project_id = ?`, so a --only
+// selector resolved against one project and repaired against another is a SILENT
+// no-op — every id reported as a miss, under a block that says the repair is
+// available. One group per project, and the group is the TARGET's.
+func TestWithdrawnTargetsGroupsByTheProjectThatCanRepairThem(t *testing.T) {
+	got := withdrawnTargets([]supersede.WithdrawnEdge{
+		{NewerID: "n1", OlderID: "aaaa1111", TargetProjectID: "p", Written: true},
+		{NewerID: "n2", OlderID: "bbbb2222", TargetProjectID: "other", Written: true},
+		{NewerID: "n3", OlderID: "cccc3333", TargetProjectID: "p", Written: true},
+	})
+	if len(got) != 2 {
+		t.Fatalf("withdrawnTargets = %+v, want two groups", got)
+	}
+	if got[0].ProjectID != "p" || len(got[0].Targets) != 2 || got[0].Targets[0] != "aaaa1111" || got[0].Targets[1] != "cccc3333" {
+		t.Errorf("the first group = %+v, want project p holding both of its targets in report order", got[0])
+	}
+	if got[1].ProjectID != "other" || len(got[1].Targets) != 1 || got[1].Targets[0] != "bbbb2222" {
+		t.Errorf("the second group = %+v, want project other holding its one target", got[1])
 	}
 }
 

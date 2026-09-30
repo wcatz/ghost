@@ -182,6 +182,15 @@ func (r raceStore) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix st
 	return r.inner.MemoryIDsByIDPrefix(ctx, projectID, prefix)
 }
 
+// Declared because linkCapableStore embeds supersede.WithdrawStore, whose
+// interface grew it for a `_global` withdrawal (#786). It is never called on this
+// fake — the tool's assertion is at call time, so an incomplete fake here is a
+// runtime failure in whichever test happens to name `_global` first, which is the
+// worst way to find out.
+func (r raceStore) MemoryIDsByIDPrefixAnyProject(ctx context.Context, prefix string) ([]string, error) {
+	return r.inner.MemoryIDsByIDPrefixAnyProject(ctx, prefix)
+}
+
 func (r raceStore) SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]memory.Link, error) {
 	return r.inner.SupersedesLinksInto(ctx, projectID, memoryID)
 }

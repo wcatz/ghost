@@ -44,6 +44,7 @@ package supersede
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -67,8 +68,14 @@ type WithdrawStore interface {
 	// MemoryIDsByIDPrefix resolves one ref to the memory ids it can mean,
 	// scoped to the project (plus _global).
 	MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix string) ([]string, error)
+	// MemoryIDsByIDPrefixAnyProject resolves one ref to the ids it can mean
+	// across the whole store's live rows, with no project predicate. It is
+	// reached only when the named project IS `_global` — the shared scope,
+	// where an edge's endpoint may live in any project (#786).
+	MemoryIDsByIDPrefixAnyProject(ctx context.Context, prefix string) ([]string, error)
 	// SupersedesLinksInto returns the live 'supersedes' edges pointing at a
-	// memory, restricted to the ones the project owns through their source.
+	// memory, restricted to the ones the project owns through EITHER endpoint
+	// (or through the shared scope).
 	SupersedesLinksInto(ctx context.Context, projectID, memoryID string) ([]memory.Link, error)
 	// GetByIDs loads the targets' text, so the report can answer "did I
 	// withdraw the right edge?" from its own output.
@@ -102,6 +109,17 @@ type WithdrawnLink struct {
 	LinkSource string  // the edge's own `source` column
 	Strength   float32 // the edge's stored similarity, as written
 	Withdrawn  bool    // this call moved it out of the live set
+	// TargetProjectID is the project the target lives in, and the follow-up the
+	// withdrawal prints is SCOPED TO IT rather than to the project the command was
+	// run against. That is the same project in every ordinary case and a
+	// different one exactly where it has to be: a `ghost supersede _global
+	// --withdraw` whose target stayed in a project, where `ResolvedCandidates`
+	// filters `project_id = ?` and a `ghost resolve _global --reassess` can
+	// therefore never see the memory. Scoping the repair to the wrong project
+	// does not fail loudly — the selector resolves and the row is not in the pool
+	// — so a block promising a clear that cannot happen is the one failure this
+	// field exists to prevent (#786).
+	TargetProjectID string
 	// WithdrawalFailed marks the row whose own write errored, and NotAttempted
 	// the rows after it, which this run never reached because each invalidation
 	// is its own transaction. They are separate states because a report that
@@ -112,9 +130,22 @@ type WithdrawnLink struct {
 	NotAttempted     bool
 }
 
-// RepairableTargets is the follow-up's id list: the targets of the edges a
-// withdrawal reported, deduplicated, in the order the rows were reported, and in
-// FULL — not the eight-character abbreviations the reports use, because a
+// ProjectTargets is one project's share of a repairable set: the ids to name, and
+// the project whose repair can reach them. It exists because the two are not
+// separable — a resolve repair's pool is `ResolvedCandidates(projectID)`, which
+// filters `project_id = ?`, so a selector resolved against one project and
+// repaired against another is a silent no-op, not an error (#786).
+type ProjectTargets struct {
+	ProjectID string
+	Targets   []string
+}
+
+// RepairableTargets is the follow-up: the targets of the edges a withdrawal
+// reported, DEDUPLICATED, in FULL, and GROUPED by the project each one lives in,
+// in the order the rows were reported. A caller prints one scoped repair per
+// group, and every group is a project the repair can actually reach.
+//
+// In FULL, not the eight-character abbreviations the reports use, because a
 // selector is a repair about to be run and a prefix that is unambiguous now may
 // not be after the operator's next save.
 //
@@ -128,6 +159,12 @@ type WithdrawnLink struct {
 // send the repair after a row its own floor reports as still asserted. A row
 // with no resolved target is out because there is nothing to name.
 //
+// The grouping is nearly always ONE project — the one the command named — and a
+// caller that gets a single group cannot tell the difference from today's flat
+// list, which is the point: `ghost supersede _global --withdraw` on a pair whose
+// target stayed in a project is the case that needs the split, and it is exactly
+// the case a flat list got wrong.
+//
 // It is EXPORTED and lives here because two surfaces printed this exact rule
 // (cmd/ghost for `ghost supersede --withdraw`, internal/mcpserver for
 // ghost_link_withdraw) over `[]WithdrawnLink` — the same type, so nothing forced
@@ -135,15 +172,54 @@ type WithdrawnLink struct {
 // to which memories a repair can still clear, and a wrong answer does not print a
 // wrong report, it clears the wrong memories. `TestRepairableTargets*` pins it
 // once, in the package that owns the type.
-func RepairableTargets(links []WithdrawnLink) []string {
-	var out []string
+func RepairableTargets(links []WithdrawnLink) []ProjectTargets {
+	rows := make([]RepairTarget, 0, len(links))
 	seen := make(map[string]bool, len(links))
 	for _, l := range links {
 		if l.TargetID == "" || seen[l.TargetID] || l.NotAttempted || l.WithdrawalFailed {
 			continue
 		}
 		seen[l.TargetID] = true
-		out = append(out, l.TargetID)
+		rows = append(rows, RepairTarget{ID: l.TargetID, ProjectID: l.TargetProjectID})
+	}
+	return GroupByProject(rows)
+}
+
+// RepairTarget is one memory a repair can still clear, with the project it lives
+// in — the pair a follow-up command has to name, and the only two things a
+// grouping needs. It is its own type so one grouping rule serves both withdrawal
+// row types (`WithdrawnLink` and `WithdrawnEdge`) rather than being written twice
+// over two structs that differ in everything but these two fields.
+type RepairTarget struct {
+	ID        string
+	ProjectID string
+}
+
+// GroupByProject groups a repairable set by the project that owns each memory,
+// preserving the order the rows were reported in, and in that same order among the
+// projects — so a report's list of repairs reads in the order the rows did.
+//
+// A row with no project keeps its own single-member group under the empty id, and
+// the id is never dropped: a caller that cannot name the project it repairs in
+// has to render the unscoped form, and dropping the row would hide a memory that
+// is still stuck. A caller that groups by the project it was run against instead
+// is the bug this replaces.
+func GroupByProject(rows []RepairTarget) []ProjectTargets {
+	var out []ProjectTargets
+	index := make(map[string]int, len(rows))
+	seen := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		if r.ID == "" || seen[r.ID] {
+			continue
+		}
+		seen[r.ID] = true
+		i, ok := index[r.ProjectID]
+		if !ok {
+			i = len(out)
+			index[r.ProjectID] = i
+			out = append(out, ProjectTargets{ProjectID: r.ProjectID})
+		}
+		out[i].Targets = append(out[i].Targets, r.ID)
 	}
 	return out
 }
@@ -265,12 +341,17 @@ func attachTargetText(ctx context.Context, store WithdrawStore, links []Withdraw
 	if err != nil {
 		return fmt.Errorf("load withdrawn targets: %w", err)
 	}
-	textByID := make(map[string]string, len(mems))
+	type loaded struct {
+		content string
+		project string
+	}
+	byID := make(map[string]loaded, len(mems))
 	for _, m := range mems {
-		textByID[m.ID] = m.Content
+		byID[m.ID] = loaded{content: m.Content, project: m.ProjectID}
 	}
 	for i := range links {
-		links[i].TargetText = textByID[links[i].TargetID]
+		links[i].TargetText = byID[links[i].TargetID].content
+		links[i].TargetProjectID = byID[links[i].TargetID].project
 	}
 	return nil
 }
@@ -287,11 +368,27 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		}
 		return link, fmt.Errorf("the %s ref is empty in the pair (%q, %q)", empty, pair.Source, pair.Target)
 	}
-	sourceID, err := resolveRef(ctx, store, projectID, "source", pair.Source)
+	// The TARGET is resolved first, and the order is the point rather than a
+	// convenience. It is the memory the caller is un-burying, so it is the one
+	// whose project the command has to be able to name; and once it is named, the
+	// live edges pointing at it are in scope, which is what makes a SOURCE in
+	// another project nameable. `ghost project merge` moves a memory between
+	// projects and leaves its links, so an edge can end up with its target here
+	// and its source in `q` — a claim that buries one of this project's memories
+	// and that neither project's own ref scope could name, which is the same
+	// "demoted by a claim no command can reach" state #786 removed for a promoted
+	// source. Resolving the source against the target's own holders closes it,
+	// and it is a narrow widening: the id set is derived from an edge the caller
+	// can already SEE, so it cannot be used to ask what else exists in `q`.
+	targetID, err := resolveRef(ctx, store, projectID, "target", pair.Target)
 	if err != nil {
 		return link, err
 	}
-	targetID, err := resolveRef(ctx, store, projectID, "target", pair.Target)
+	into, err := store.SupersedesLinksInto(ctx, projectID, targetID)
+	if err != nil {
+		return link, err
+	}
+	sourceID, err := resolveSource(ctx, store, projectID, into, pair.Source)
 	if err != nil {
 		return link, err
 	}
@@ -300,11 +397,6 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		// never be one, and saying that is more use than "no live supersedes
 		// link" for an operator who mistyped a ref.
 		return link, fmt.Errorf("%s supersedes itself: both refs are memory %s", short(targetID), targetID)
-	}
-
-	into, err := store.SupersedesLinksInto(ctx, projectID, targetID)
-	if err != nil {
-		return link, err
 	}
 	for _, l := range into {
 		if l.SourceID != sourceID {
@@ -321,19 +413,94 @@ func resolvePair(ctx context.Context, store WithdrawStore, projectID string, pai
 		short(sourceID), short(targetID), projectID, intoSuffix(into))
 }
 
+// resolveSource turns the SOURCE ref into a memory id, in the project's own scope
+// first and then against the memories that hold the target.
+//
+// The second attempt is what lets `ghost supersede p --withdraw` reach an edge a
+// note in `q` makes about a note in `p` — a shape `ghost project merge` leaves
+// behind, and one the project-scoped read cannot name from either end: `p` cannot
+// resolve a `q` memory, and `q` cannot resolve a `p` one. The target's own read
+// already returned the holder, so the id is in hand and only the REF standing for
+// it was missing; the operator has that id on screen, because the refusal that
+// would have named it is built from the same read.
+//
+// The project's scope is tried FIRST so the refusal a mistyped ref gets is the
+// project-scoped one, naming the project the operator was working in. The holders
+// are a fallback, never a replacement, and the rules are memref's either way — so
+// an ambiguous holder is still a refusal with the matches listed, and a ref that
+// names nothing is still told it names nothing.
+func resolveSource(ctx context.Context, store WithdrawStore, projectID string, into []memory.Link, ref string) (string, error) {
+	id, scopedErr := resolveRef(ctx, store, projectID, "source", ref)
+	if scopedErr == nil {
+		return id, nil
+	}
+	// Only a MISS falls through to the holders. An AMBIGUOUS ref is a refusal
+	// about a real ambiguity in the project's own ids, and answering it from a
+	// different id set would resolve the very spelling the refusal said cannot
+	// address either of its matches — so a ref too short to be a prefix stays
+	// refused too, and neither reaches the fallback.
+	if !errors.Is(scopedErr, memref.ErrNoMatch) {
+		return "", scopedErr
+	}
+	ids := make([]string, 0, len(into))
+	for _, l := range into {
+		ids = append(ids, l.SourceID)
+	}
+	if id, err := memref.ResolveIn(ids, "source", ref); err == nil {
+		return id, nil
+	}
+	return "", scopedErr
+}
+
 // resolveRef turns one ref into a memory id in the project, through the shared
 // rules in internal/memref. It stays a named function so the two call sites in
 // resolvePair read as what they are — the SOURCE and the TARGET — and so `which`
 // reaches the refusal.
+//
+// `_global` is the one project whose refs are not project-scoped, and the reason
+// is the same one makes it the shared scope everywhere else: an edge whose source
+// was promoted out of a project is a claim made FROM `_global`, and the endpoint
+// it buries may be in any project. Naming such a pair from `_global` — which is
+// where `ghost supersede _global --reassess` finds it, and what an operator
+// reaches for after the project's own surfaces refuse — needs both refs to resolve
+// without a project predicate, or the pair is unnameable and the repair #786 is
+// about does not exist (#786).
+//
+// This is the WIDENING of a ref's scope and nothing else. It decides which
+// memories may be NAMED, never which edge may be changed: the request still ends
+// at SupersedesLinksInto, whose ownership rule requires an endpoint in `_global`
+// itself, so a ref that resolves into some other project buys the operator
+// nothing but an honest refusal about the edge. And it is not reachable for a
+// named project — `ghost supersede p --withdraw` still cannot name a memory in q.
 func resolveRef(ctx context.Context, store WithdrawStore, projectID, which, ref string) (string, error) {
+	if projectID == memory.GlobalProjectID {
+		ids, err := store.MemoryIDsByIDPrefixAnyProject(ctx, ref)
+		if err != nil {
+			return "", err
+		}
+		// The rules, not a second copy: ResolveIn is memref's unscoped entry
+		// point, so a ref is judged identically here and a refusal names no
+		// project, because the set it searched is not confined to one.
+		return memref.ResolveIn(ids, which, ref)
+	}
 	return memref.Resolve(ctx, store, projectID, which, ref)
 }
 
 // intoSuffix names the live edges that DO point at a target, for the refusal
-// that follows a missing one. It is project-scoped by the read it came from, so
-// it cannot report another project's edge — and every sentence it produces says
-// so, because an edge whose source was promoted to `_global` exists without
-// being visible here and "nothing supersedes that memory" would be false.
+// that follows a missing one.
+//
+// It names the holders and says NOTHING about whose they are, which is a change
+// and not an omission. The read is scoped to "either endpoint is ours", so a
+// holder is as likely to be a memory in `_global` — promoted there with its links
+// intact — as one in the project itself, and the sentence that claimed otherwise
+// was asserting an ownership the read does not establish (#786's review). Every
+// claim it does make is about the TARGET, which the caller named and which is in
+// scope by construction: these edges bury that memory, and one of them may still
+// hold it down after the pair they asked about is withdrawn.
+//
+// The empty case is scoped on purpose and says "in this project": with no holder
+// the sentence is a claim about the whole graph, and one is false whenever the
+// edge exists under a scope this read cannot see.
 func intoSuffix(links []memory.Link) string {
 	if len(links) == 0 {
 		return " (no memory in this project supersedes it)"
@@ -342,7 +509,7 @@ func intoSuffix(links []memory.Link) string {
 	for _, l := range links {
 		parts = append(parts, short(l.SourceID))
 	}
-	return " (superseded, from this project, by " + strings.Join(parts, ", ") +
+	return " (still superseded by " + strings.Join(parts, ", ") +
 		" — withdraw that pair as well, or note that the other edge still buries it)"
 }
 
