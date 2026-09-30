@@ -444,11 +444,19 @@ func Data(s string) string {
 // `Label` — those would quote every tag holding a space, which is most of them,
 // and `tags:["golden","pinned"]` is what every existing store, golden and test
 // already asserts on.
+//
+// WHAT THE LABEL BOUNDS is a decision this function did not have to make before,
+// and it is the same one AgentLabel and SourceRefLabel make: the value printed here
+// is not necessarily one a writer capped (#821). `boundTags` cuts each tag at
+// MaxRenderedTagLen and marks the cut — before the marshal, so the marker sits
+// inside the JSON string like every other character of it, and after the
+// substitution, so a shortened tag is still neutralised on the way out. The two
+// rules are independent and a value that trips both must satisfy both.
 func TagsLabel(tags []string) string {
 	if len(tags) == 0 {
 		return ""
 	}
-	b, err := json.Marshal(tags)
+	b, err := json.Marshal(boundTags(tags))
 	if err != nil {
 		// Unreachable: tags is a []string, which json.Marshal always encodes. A
 		// dropped label is the answer if it ever were not, because a raw
@@ -456,6 +464,74 @@ func TagsLabel(tags []string) string {
 		return ""
 	}
 	return " tags:" + neutralizeTagLabel(string(b))
+}
+
+// MaxRenderedTagLen bounds what a listing prints of ONE tag. It is a DISPLAY
+// bound, not a claim about the column, for the reason AgentLabel and
+// SourceRefLabel carry one: the renderer is the one layer that cannot assume its
+// input came from a writer that enforces a cap.
+//
+// For a tag the write-side cap is `validateTags`' tagMaxLen, and it reaches only
+// the four MCP tools that take a tag list. Three writers deliberately do not reach
+// it — `RestoreSnapshot` writes the column in SQL from the snapshot table,
+// `CreateFromCorpus` reaches `insertMemory` directly, and `ReplaceNonManual`
+// inherits the rewritten row's union of tags — and a restored artifact writes a
+// tag verbatim. So an over-long tag is reachable without any of Ghost's tools
+// writing one, which is exactly the class the two labels beside this one were
+// added for.
+//
+// The value is 64, the number `mcpserver.tagMaxLen` cuts at, and the direction of
+// that agreement is what matters: this bound must never be TIGHTER than the
+// writer's, or a tag the writer accepted whole and stored whole would print
+// shortened — a display bound quietly becoming a data change, which is the one
+// thing a renderer must not do. It is allowed to be looser, because a looser print
+// bound costs nothing. The writer's constant is unexported in a package that
+// IMPORTS this one, so the agreement cannot be a compile-time fact here and has to
+// be held by a test that can see both: `mcpserver`'s
+// TestTheRendererNeverShortensATagThisWriterAccepts drives a tag of exactly
+// tagMaxLen through the real tool and then through this renderer. This package's own
+// test holds the value at the boundary from the other side.
+const MaxRenderedTagLen = 64
+
+// tagTruncationMarker is what an over-long tag prints as its last characters. It
+// is the same shape AgentLabel and SourceRefLabel use, deliberately: a reader who
+// has met one truncation marker on this line knows what the others mean, and the
+// alternative — a bare cut — presents a shortened label as the whole one, which is
+// a claim about the row that is not true.
+const tagTruncationMarker = "…[tag truncated]"
+
+// boundTags returns tags with every over-long entry cut to MaxRenderedTagLen and
+// marked, which is the whole of the display bound for a tag list.
+//
+// It allocates only when it has to, because this runs on every row of every
+// listing and a listing whose tags are all short — which is every listing a real
+// store produces — must cost nothing. A list is bounded TAG BY TAG rather than as
+// one value because a tag is a label: bounding the list as a whole would have to
+// drop or merge entries, and dropping a tag is worse than showing part of one,
+// exactly as a shortened tag is a different label rather than a different row.
+//
+// It never touches the stored value, and it cannot: it hands back a list to
+// marshal, and the row keeps whatever the writer put in the column.
+func boundTags(tags []string) []string {
+	var bounded []string
+	for i, t := range tags {
+		if len(t) <= MaxRenderedTagLen {
+			continue
+		}
+		if bounded == nil {
+			bounded = make([]string, len(tags))
+			copy(bounded, tags)
+		}
+		// clampBytes, not a raw slice, for the reason SourceRefLabel uses it: this
+		// bound handles values no writer vouched for, so its input is exactly the
+		// untrusted non-ASCII text a writer would have refused, and a cut through a
+		// multi-byte rune would put an invalid byte inside the JSON array.
+		bounded[i] = clampBytes(t, MaxRenderedTagLen) + tagTruncationMarker
+	}
+	if bounded == nil {
+		return tags
+	}
+	return bounded
 }
 
 // tagBacktickEscape is what a backtick in a tag prints as.

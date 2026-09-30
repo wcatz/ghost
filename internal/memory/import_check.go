@@ -47,6 +47,34 @@ import (
 //     anyway (`labelOrID` on the import side, `assemble.Token` on the export side),
 //     so the id appeared twice in an import refusal and now appears once.
 //
+//   - NEITHER PROJECT SHAPE MESSAGE SPELLS OUT A CHARACTER IT REFUSES. They used
+//     to say "backtick or «»", and the prose put a data delimiter into the very
+//     sentence that exists to keep one out of a report — so a reader, and a test,
+//     could no longer tell a message MENTIONING a delimiter from one CARRYING the
+//     caller's. It is the same rule `mcpserver.validateTags` follows for a tag,
+//     and it is why the prose here says "backtick or data delimiter". This matters
+//     more since #824: the write boundary quotes the refused value beside THIS
+//     message through `assemble.Token` so the caller can see what to change, and a
+//     sentence that already held a « would make the quoted value unreadable as
+//     data — exactly the ambiguity the quoting exists to remove.
+//
+//     `CheckImportedID` is the one message here that still spells its characters
+//     out, and it is not the same case: no write boundary quotes a refused RECORD
+//     id beside this sentence, because the record id is a value the artifact's
+//     author already chose and is about to be told to change. Named here so a
+//     reader who greps for the class finds the exception rather than assuming the
+//     property is file-wide.
+//
+//   - NEITHER PROJECT SHAPE MESSAGE SAYS ITS VALUE IS NEVER SHOWN, because #824
+//     made that false. Both used to close "the offending value is not shown,
+//     because it is the value being refused", and the write boundary now names the
+//     value immediately after that sentence through `assemble.Token` — so a message
+//     that kept it would tell a caller not to look for a value printed right
+//     beside the words. They say instead that THIS SENTENCE does not repeat it,
+//     and why: the same text is the export report's, where quoting the caller's
+//     text is noise and a hazard. True on both surfaces, which is what a message
+//     two surfaces share has to be.
+//
 //   - A predicate checks a RECORD, never a STORE. Everything that depends on what
 //     the destination holds — the project a record names, a project this store
 //     already records the same checkout for, a task's blocker, an id that still has
@@ -330,6 +358,27 @@ func CheckImportedDecision(d Decision) error {
 	return rejectSecretList("alternatives", d.Alternatives)
 }
 
+// createdProject assembles the project record a WRITE is about to store, so
+// `CheckImportedProject` judges the stored shape rather than the caller's spelling
+// of it (#824).
+//
+// The one substitution is the store's own: `ensureProjectLocked` normalizes an
+// empty path to the id, because `projects.path` is UNIQUE and MCP callers pass
+// path="" because they name a project rather than describe a checkout. Judging the
+// empty path instead would refuse every project an ordinary save creates, over a
+// field the store had already decided what to put in it.
+//
+// It is a function rather than three lines at each site because the two project
+// creation routes — `ensureProjectLocked` and `ResolveOrCreateRepoProject` —
+// build the same record and must be judged by the same call, and a second
+// hand-assembled copy is exactly the drift this file exists to prevent.
+func createdProject(id, path, name string) PortableProject {
+	if path == "" {
+		path = id
+	}
+	return PortableProject{ID: id, Name: name, Path: path}
+}
+
 // MaxImportedIDLen is the byte cap on a memory id a portable artifact may carry.
 //
 // The value bounds a KEY, not prose, and it is deliberately generous: the id
@@ -427,10 +476,12 @@ func CheckImportedID(id string) error {
 // a line are. See CheckImportedProjectText, which has never had a bound.
 func CheckImportedProjectID(id string) error {
 	if unprintableInIdentifier(id, false) != "" {
-		return fmt.Errorf("project id must hold no control character, backtick or «» — it is printed inside backticks " +
-			"and outside the «...» data delimiters, so one of those ends the line or the span. A space is fine, and so " +
-			"is any length: a project id is often a filesystem path, and a deep checkout is a longer one. The offending " +
-			"id is not shown, because it is the value being refused")
+		return fmt.Errorf("project id must hold no control character, backtick or data delimiter — it is printed inside backticks " +
+			"and outside the data delimiters, so one of those ends the line or the span. A space is fine, and so " +
+			"is any length: a project id is often a filesystem path, and a deep checkout is a longer one. This " +
+			"sentence does not repeat the offending id, because it is also the export report's, where the caller's " +
+			"text is noise and a hazard; a write boundary that names the value it refused does so beside this " +
+			"sentence, through the safe renderer")
 	}
 	return nil
 }
@@ -444,9 +495,11 @@ func CheckImportedProjectID(id string) error {
 // path is still one line, and the renderer keeps it that way whatever it holds.
 func CheckImportedProjectText(field, value string) error {
 	if unprintableInIdentifier(value, false) != "" {
-		return fmt.Errorf("project %s must hold no control character, backtick or «» — it is printed as a label on "+
+		return fmt.Errorf("project %s must hold no control character, backtick or data delimiter — it is printed as a label on "+
 			"every listing and in the session-start block's own heading, and one of those ends the line. A space is "+
-			"fine. The offending value is not shown, because it is the value being refused", field)
+			"fine. This sentence does not repeat the offending value, because it is also the export report's, where "+
+			"the caller's text is noise and a hazard; a write boundary that names the value it refused does so "+
+			"beside this sentence, through the safe renderer", field)
 	}
 	return nil
 }

@@ -142,6 +142,38 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 		return resolvedID, nil, nil
 	}
 
+	// The SHAPE of the project this save would OPEN, refused here rather than only
+	// in the store (#824).
+	//
+	// The store applies the same rule — it is `memory.CheckImportedProject`, the
+	// importer's own predicate, at both project-creation routes — and this call is
+	// not a second rule but the SAME predicate asked one step earlier, for a message
+	// the store's cannot produce. A store refusal deliberately does not name the
+	// offending value (the same message is the export report's, where quoting the
+	// caller's text is noise and a hazard), but an agent that passed `project_id` can
+	// fix it, and "project id must hold no data delimiter" without the value leaves
+	// it guessing which of several arguments was wrong. So the value is named here,
+	// through `assemble.Token` — the renderer the row itself uses — and the sentence
+	// holds NONE of the three characters it refuses.
+	//
+	// It runs AFTER the exact-id lookup above, which is the load-bearing part: a
+	// store that already holds a project of this shape (a pre-guard save, a
+	// restored snapshot, a hand edit) keeps accepting saves into it. Placing the
+	// check first would refuse every save into such a project and orphan its
+	// memories with nothing reported — the user would be told their project_id was
+	// invalid while the session they were working in said otherwise.
+	// The record is the caller's argument in all three fields, which is what both
+	// branches below store: the non-remote route passes path="" and the store
+	// normalizes it to the id, and the repository route passes the same value three
+	// times (see ensureProjectForWithRemote). `repo_remote` is not part of the
+	// predicate and never was — `NormalizeRepoRemote` strips the userinfo, so it
+	// cannot carry a password.
+	if err := memory.CheckImportedProject(memory.PortableProject{
+		ID: projectID, Name: projectID, Path: projectID,
+	}); err != nil {
+		return "", nil, fmt.Errorf("%w — project_id %s", err, assemble.Token(projectID))
+	}
+
 	pathShaped := strings.ContainsAny(projectID, `/\`)
 	remote := ""
 	if pathShaped {

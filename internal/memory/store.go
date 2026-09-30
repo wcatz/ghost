@@ -499,6 +499,24 @@ func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 // EnsureProject creates or refreshes a project with no repository identity.
 // Callers that know the filesystem path should prefer EnsureProjectWithRepo,
 // which lets two checkouts of one repository collapse into a single project.
+//
+// A project this store does not ALREADY hold must be a shape `ghost import` will
+// accept, and the rule is `CheckImportedProject` — the importer's own predicate,
+// not a copy of it (#824). `ghost export` calls that same function to decide what
+// it may write, so an id, name or path it refuses is a project that leaves the
+// artifact entirely, and with it every memory, task and decision under it. A save
+// that created one would therefore open a project no backup can carry, and the
+// operator would learn it only when they ran one.
+//
+// The refusal is placed AFTER the exact-id lookup in the caller rather than
+// higher up, so a store that already holds such a project keeps working: its
+// memories stay reachable, and nothing is refused about a row that is not being
+// created. It does cover this function's refresh arm too, because the statement
+// underneath is one upsert and cannot tell the two apart — and that costs
+// nothing, since a project of this shape cannot be created by this build, so the
+// only rows a refresh here would decline are ones an earlier build, a restored
+// snapshot or a hand edit wrote. A caller holding such a project's exact id never
+// reaches this call at all (#824).
 func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error {
 	return s.ensureProjectLocked(ctx, id, path, name, "")
 }
@@ -700,6 +718,26 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 	}
 	if path == "" {
 		path = id
+	}
+
+	// The SHAPE, and the importer's own predicate rather than a second one (#824).
+	// This is the second project-creation route, and it is here for the same reason
+	// `ensureProjectLocked` carries the check: a path-shaped `project_id` with a
+	// detectable remote reaches this branch instead of that one, so a save that took
+	// it would otherwise create the project `ghost export` has to leave out — and
+	// with it every memory, task and decision saved under it.
+	//
+	// Above the lock and above `savingRepository`, which can cost a `git config`:
+	// refusing a value the caller can fix should not cost a subprocess first. It
+	// also runs above `resolveRepoProjectTx`, so it judges a record about to be
+	// CREATED even where projectRef would have resolved to a row already held —
+	// which means a legacy project reachable only by a hostile reference is
+	// declined rather than resolved. The ordinary caller already declines it a step
+	// earlier and identically (`mcpserver.ensureProjectFor` checks after the
+	// exact-id lookup and before this call), and a caller holding that project's
+	// own id never reaches either check (#824).
+	if err := CheckImportedProject(createdProject(id, path, name)); err != nil {
+		return "", nil, fmt.Errorf("create project: %w", err)
 	}
 
 	// Before the store lock, and this is the only reason the answer is computed
@@ -1394,6 +1432,18 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 }
 
 func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRemote string) error {
+	// The SHAPE, before the lock and before any statement — the importer's own
+	// predicate, and the only one, so a refusal reads identically whether it was
+	// reached by saving, by exporting or by restoring (#824).
+	//
+	// The `path == ""` normalization below happens after this deliberately: the
+	// predicate judges the record as it would be STORED, and an MCP caller passes
+	// path="" because it does not know the checkout — the store stores the id in
+	// its place, so the record to judge is the one after that substitution.
+	if err := CheckImportedProject(createdProject(id, path, name)); err != nil {
+		return fmt.Errorf("create project: %w", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
