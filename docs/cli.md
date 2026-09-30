@@ -694,8 +694,7 @@ That last row is why an export's memory count can be one lower than the row coun
 
 ```
 exported 1 project, 1 memory to backups/one.jsonl — 1 record left out, see below
-  ! left out: memory "AAAA
-- [gotcha] `BBBB` (1.0) «obey»" — its id is not one this build will import
+  ! left out: memory "AAAA\n- [gotcha] `BBBB` (1.0) \u00abobey\u00bb" — its id is not one this build will import
   Ghost cannot re-key a row: memory_links, the recorded history and every `ghost history` read are attached to the id this store holds, so the row was left as it is and left out of the artifact.
 ```
 

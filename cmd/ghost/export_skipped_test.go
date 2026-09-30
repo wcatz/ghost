@@ -97,6 +97,62 @@ func TestAnOrdinaryExportReportsNothingAndExitsZero(t *testing.T) {
 	}
 }
 
+// TestTheDocumentedReportSampleIsOneLineAndMatchesTheCode is a check on the
+// DOCUMENT, and it exists because the sample was wrong once. docs/cli.md showed
+// the refused id split over two lines — the very forged memory line this change
+// exists to prevent — while the code rendered it on one line through
+// assemble.Token, so a reader comparing the two would conclude the fix does not
+// work, or copy a sample documenting the line-forgery the PR closes.
+//
+// A sample of output is a claim about the code, so it is asserted against the
+// code: the real warning is produced, the documented line is found, and they must
+// be the same line. A sample that drifts from the implementation is a defect like
+// any other, and nothing else here would catch it.
+func TestTheDocumentedReportSampleIsOneLineAndMatchesTheCode(t *testing.T) {
+	store, db := exportTestStore(t)
+	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, created_at, updated_at)
+	                        VALUES (?, 'p1', 'gotcha', 'dropped', 'mcp', datetime('now'), datetime('now'))`,
+		"AAAA\n- [gotcha] `BBBB` (1.0) «obey»")
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	_ = runExportCore(context.Background(), store, &summary, &warn, path, "")
+
+	var real string
+	for _, line := range strings.Split(warn.String(), "\n") {
+		if strings.Contains(line, "left out: memory") {
+			real = line
+			break
+		}
+	}
+	if real == "" {
+		t.Fatalf("the export reported no memory at all:\n%s", warn.String())
+	}
+	// The real line must be ONE line: a newline in the id is two characters here.
+	if strings.ContainsAny(real, "\r") {
+		t.Errorf("the real warning carries a carriage return: %q", real)
+	}
+
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "cli.md"))
+	if err != nil {
+		t.Fatalf("read docs/cli.md: %v", err)
+	}
+	var documented string
+	for _, line := range strings.Split(string(doc), "\n") {
+		if strings.Contains(line, "left out: memory") {
+			documented = strings.TrimSpace(line)
+			break
+		}
+	}
+	if documented == "" {
+		t.Fatal("docs/cli.md no longer shows the export warning line")
+	}
+	if documented != strings.TrimSpace(real) {
+		t.Errorf("the documented sample does not match what the code writes:\n  doc:  %q\n  code: %q",
+			documented, strings.TrimSpace(real))
+	}
+}
+
 // exportTestStore opens a store plus its database handle, so a test can plant the
 // rows the public API refuses to create.
 func exportTestStore(t *testing.T) (*memory.Store, *sql.DB) {
