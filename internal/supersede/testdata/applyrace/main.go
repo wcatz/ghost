@@ -73,7 +73,13 @@ type report struct {
 	// the two relations are written through different writers (the second is
 	// guarded since #823 and the first always was), so one total cannot answer
 	// "did the guarded writer get there" for a run that wrote either.
+	//
+	// It counts VERDICTS, which is the asymmetry #834 is about: over the race
+	// this harness stages both passes reach one and only one write lands, so the
+	// two counters here disagree by exactly the refused write. CausesWritten is
+	// the write count that pairs with Created.
 	CausesCreated int    `json:"causes_created"`
+	CausesWritten int    `json:"causes_written"`
 	Error         string `json:"error,omitempty"`
 }
 
@@ -136,7 +142,7 @@ func main() {
 		Apply:     true,
 	}, logger)
 	rep.Created, rep.Confirmed, rep.Refused, rep.Opposite = res.Created, res.Confirmed, res.ReverseLive, res.OppositeLive
-	rep.CausesCreated = res.CausesCreated
+	rep.CausesCreated, rep.CausesWritten = res.CausesCreated, res.CausesWritten
 	rep.Asked = cls.asked
 	if err != nil {
 		rep.Error = err.Error()

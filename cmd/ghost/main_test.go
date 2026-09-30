@@ -1674,10 +1674,10 @@ func TestReassessMissLines(t *testing.T) {
 // reads as "nothing was skipped" (#686).
 func TestSupersedeReport(t *testing.T) {
 	dry := "proj: 4 candidate pairs in 1 classify call(s), 2 cached, 1 supersedes, 0 causes, 0 reclassified, would link\n"
-	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1, 0); got != dry {
+	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", false, 1, 0); got != dry {
 		t.Errorf("supersedeReport() with nothing vetoed = %q, want %q", got, dry)
 	}
-	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1, 0)
+	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", false, 1, 0)
 	if !strings.HasPrefix(got, dry) {
 		t.Errorf("supersedeReport() = %q, want the summary line first, unchanged", got)
 	}
@@ -1687,10 +1687,48 @@ func TestSupersedeReport(t *testing.T) {
 	if !strings.Contains(got, "no classify call") || !strings.Contains(got, "not cached") {
 		t.Errorf("supersedeReport() = %q, want it to say what the veto costs and does not cost", got)
 	}
+	supersedeReportCountsEdges(t)
+	// The two STALE populations, and they are two lines because one counter for
+	// both would need a wording true of each, which does not exist. A pre-classify
+	// drop spent NO classify call; a pre-write drop spent one and wrote nothing.
+	// Both leave the pair in no count on the page, so both get a line in BOTH modes.
+	//
+	// The pre-write one exists for #834's reason: it is counted as a verdict, so
+	// under --apply the summary (which counts writes) does not carry it, and
+	// trading a false count for no count still needs the difference to be on the
+	// page somewhere.
+	preWrite := supersedeReport("proj", supersede.Result{Candidates: 1, Confirmed: 1, Created: 0, StaleAtWrite: 1}, "linked", true, 1, 0)
+	if !strings.Contains(preWrite, "  1 pair(s) not written: an endpoint was replaced by a concurrent pass between the classify and the write") {
+		t.Errorf("supersedeReport() apply = %q, want the pre-write stale line: a judged pair that wrote no edge is in no count", preWrite)
+	}
+	if strings.Contains(preWrite, "no call was spent") {
+		t.Errorf("supersedeReport() = %q claims no classify call was spent for the PRE-WRITE drop; that pair was classified", preWrite)
+	}
+	// The pre-classify one must NOT claim a call was spent, and must print in a dry
+	// run too — it fires there, and `Result.Candidates` is recomputed from the
+	// surviving set, so the pair is in no count on the page in EITHER mode.
+	for _, apply := range []bool{true, false} {
+		verb := "would link"
+		if apply {
+			verb = "linked"
+		}
+		pre := supersedeReport("proj", supersede.Result{Candidates: 1, StaleSkipped: 1}, verb, apply, 0, 0)
+		if !strings.Contains(pre, "  1 pair(s) not proposed: an endpoint was replaced by a concurrent pass before the classify") {
+			t.Errorf("supersedeReport() apply=%v = %q, want the pre-classify stale line in BOTH modes: the pair is in no count on this page", apply, pre)
+		}
+		if strings.Contains(pre, "no edge was written") {
+			t.Errorf("supersedeReport() apply=%v = %q describes the pre-classify drop as a failed WRITE; no call was spent and there was nothing to write", apply, pre)
+		}
+	}
+	// And the two never share a line: a reader must be able to tell which of the
+	// two populations a run reported without reading the code.
+	if both := supersedeReport("proj", supersede.Result{Candidates: 2, StaleSkipped: 1, StaleAtWrite: 1}, "linked", true, 1, 0); strings.Count(both, "pair(s) ") != 2 {
+		t.Errorf("supersedeReport() = %q, want one line per stale population, not a single merged count", both)
+	}
 	// The report is mode-agnostic about the veto: a vetoed pair is never linked,
 	// so there is nothing for --apply to write either. The apply verb is the
 	// only thing that changes.
-	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0, 0)
+	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", true, 0, 0)
 	if !strings.HasPrefix(apply, "proj: 1 candidate pairs in 0 classify call(s), 0 cached, 0 supersedes, 0 causes, 0 reclassified, linked\n") {
 		t.Errorf("supersedeReport() apply = %q, want the apply verb and the veto count", apply)
 	}
@@ -1705,7 +1743,7 @@ func TestSupersedeReport(t *testing.T) {
 	// never seen — and the two call for opposite follow-ups from the operator.
 	orientation := supersedeReport("proj", supersede.Result{
 		Candidates: 3, Unoriented: 4, OppositeLive: 2, Bidirectional: 1,
-	}, "would link", 1, 0)
+	}, "would link", false, 1, 0)
 	for _, want := range []string{
 		"  4 pair(s) not proposed:",
 		"  2 pair(s) proposed the reverse of a live supersedes link:",
@@ -1726,7 +1764,7 @@ func TestSupersedeReport(t *testing.T) {
 	// A project name that is not one bare shell word is rendered through
 	// --project in single quotes, which is the quoting rule the followup package
 	// owns and the one that decides whether the pasted command runs at all.
-	awkward := supersedeReport("my proj", supersede.Result{Bidirectional: 1}, "would link", 0, 0)
+	awkward := supersedeReport("my proj", supersede.Result{Bidirectional: 1}, "would link", false, 0, 0)
 	if !strings.Contains(awkward, "ghost supersede --project 'my proj' --reassess --apply") {
 		t.Errorf("supersedeReport() for a name holding a space = %q, want the --project form a shell reads as one argument", awkward)
 	}
@@ -1736,7 +1774,7 @@ func TestSupersedeReport(t *testing.T) {
 	// reads as a link it did not write is the one false claim this report may
 	// not make. Its repair is the next ordinary pass plus the settled form of
 	// --reassess, and both are named.
-	raced := supersedeReport("proj", supersede.Result{Candidates: 2, Confirmed: 1, ReverseLive: 1}, "linked", 1, 0)
+	raced := supersedeReport("proj", supersede.Result{Candidates: 2, Confirmed: 1, ReverseLive: 1}, "linked", true, 1, 0)
 	for _, want := range []string{
 		"  1 pair(s) not written:",
 		"a concurrent pass got there first",
@@ -1780,12 +1818,108 @@ func TestSupersedeReport(t *testing.T) {
 	// A pass with no refusals prints the summary alone, and the reasons do not
 	// accumulate across calls: they are per-pass facts, each conditional on its
 	// own count.
-	if plain := supersedeReport("proj", supersede.Result{Candidates: 2}, "would link", 1, 0); strings.Count(plain, "\n") != 1 {
+	if plain := supersedeReport("proj", supersede.Result{Candidates: 2}, "would link", false, 1, 0); strings.Count(plain, "\n") != 1 {
 		t.Errorf("supersedeReport() = %q, want the summary line and no refusal lines when nothing was refused", plain)
 	}
-	retried := supersedeReport("proj", supersede.Result{Candidates: 4, Confirmed: 1}, "would link", 3, 1)
+	retried := supersedeReport("proj", supersede.Result{Candidates: 4, Confirmed: 1}, "would link", false, 3, 1)
 	if !strings.Contains(retried, "in 3 classify call(s), 1 retried after a failed call, 0 cached") {
 		t.Errorf("supersedeReport() = %q, want the retried call counted next to the calls it made", retried)
+	}
+}
+
+// supersedeReportCountsEdges is #834 on the report: the summary's two edge
+// counts are WRITES under --apply and WOULD-BE WRITES in a dry run, and the
+// refused write is named on its own line rather than counted as an edge.
+//
+// The defect was an asymmetry between the two relations that only became
+// reachable when #823 made the 'causes' write guarded: Result.Created counted
+// writes while Result.CausesCreated counted verdicts, and the summary printed
+// both. So a pass that reached one CAUSES verdict and had the write refused
+// reported "1 causes" — a claim about the graph that the refusal line two lines
+// below it takes back. Before that change this test's rows below are what the
+// report printed under --apply; they are the report lines the fix moves, and
+// they are listed as such in the PR.
+//
+// Why a synthetic Result and not the command: one process cannot reach this
+// state. The apply block sweeps the reverse 'causes' edge whenever the pass's
+// own read saw it, so the guarded writer is only refused when another process
+// committed that edge between the read and the write — a cross-process race,
+// which internal/supersede's two-process applyrace harness stages for real and
+// where this same split is asserted on the live counters. What is left for the
+// report is the pairing of the two numbers, and that is a formatter's job.
+func supersedeReportCountsEdges(t *testing.T) {
+	t.Helper()
+	for _, tc := range []struct {
+		name  string
+		res   supersede.Result
+		verb  string
+		apply bool
+		// want is the counts clause of the summary line, which is the whole of
+		// what this test is about: the two numbers and the mode they came from.
+		want string
+		// refuse is the line naming the write-time refusals, and it has to be
+		// there for the applied rows: a count of 0 with nothing else on the page
+		// is a pass that reported nothing to do.
+		refuse bool
+	}{
+		{
+			// The #834 row: one verdict, no write. "1 causes" here is the false
+			// claim the issue is filed against.
+			name: "a refused causes write is not a created edge",
+			res:  supersede.Result{Candidates: 2, CausesCreated: 1, ReverseLive: 1},
+			verb: "linked", apply: true,
+			want: "0 supersedes, 0 causes", refuse: true,
+		},
+		{
+			// The same refusal on the 'supersedes' side, which Result.Created has
+			// always counted as a write but the summary used to print
+			// Result.Confirmed over. Same one-pair-lost-the-race run, same move.
+			name: "a refused supersedes write is not a created edge",
+			res:  supersede.Result{Candidates: 2, Confirmed: 1, ReverseLive: 1},
+			verb: "linked", apply: true,
+			want: "0 supersedes, 0 causes", refuse: true,
+		},
+		{
+			name: "writes that landed are counted",
+			res:  supersede.Result{Candidates: 3, Confirmed: 2, Created: 2, CausesCreated: 1, CausesWritten: 1},
+			verb: "linked", apply: true,
+			want: "2 supersedes, 1 causes", refuse: false,
+		},
+		{
+			// The dry run's numbers are the verdicts, because a dry run attempts
+			// no write and has nothing else to count. This is the promise the
+			// "Re-run with --apply to write these links." hint below the report
+			// makes, and it is keyed off the same two fields (Result.WouldWriteLinks).
+			name: "a dry run counts what it would write",
+			res:  supersede.Result{Candidates: 3, Confirmed: 2, CausesCreated: 1},
+			verb: "would link", apply: false,
+			want: "2 supersedes, 1 causes", refuse: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := supersedeReport("proj", tc.res, tc.verb, tc.apply, 1, 0)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("the summary does not count %q:\n%s", tc.want, out)
+			}
+			// The other count must not appear at all: "0 causes" alongside a
+			// stray "1 causes" somewhere else on the page would be the same
+			// false claim in a second place, and this report is read by people
+			// scanning for the number they expect.
+			for _, other := range []string{"1 supersedes", "2 causes"} {
+				if !strings.Contains(tc.want, other) && strings.Contains(out, other) {
+					t.Errorf("the summary counts %q as well:\n%s", other, out)
+				}
+			}
+			if got := strings.Contains(out, "  1 pair(s) not written:"); got != tc.refuse {
+				t.Errorf("the refusal line is present=%v, want %v:\n%s", got, tc.refuse, out)
+			}
+			// The refusal names what this run did not do, in the words the issue
+			// asks for: no edge written, and the pair keeps the edge that is
+			// there. A count of 0 alone would read as a pass that found nothing.
+			if tc.refuse && !strings.Contains(out, "this run wrote no edge for them") {
+				t.Errorf("the refusal does not say this run wrote nothing:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -2052,7 +2186,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, 0.80},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			project, source, apply, reassess, threshold, _, withdraw, err := parseSupersedeArgs(tc.args)
+			project, source, apply, reassess, threshold, _, withdraw, _, err := parseSupersedeArgs(tc.args)
 			if err != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", tc.args, err)
 			}
@@ -2078,7 +2212,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"threshold missing value", []string{"myproj", "--threshold"}, `unknown flag "--threshold"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, _, _, _, _, err := parseSupersedeArgs(tc.args)
+			_, _, _, _, _, _, _, _, err := parseSupersedeArgs(tc.args)
 			if err == nil {
 				t.Fatalf("parseSupersedeArgs(%v) must fail", tc.args)
 			}
@@ -2148,7 +2282,7 @@ func TestDashProjectLifecycleRoundTrip(t *testing.T) {
 			}
 			got, apply = p.project, p.apply
 		case "supersede":
-			project, _, a, reassess, _, _, withdraw, perr := parseSupersedeArgs(args)
+			project, _, a, reassess, _, _, withdraw, _, perr := parseSupersedeArgs(args)
 			if perr != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", ph.args, perr)
 			}

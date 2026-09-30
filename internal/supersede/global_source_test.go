@@ -140,14 +140,14 @@ func TestWithdrawStillRefusesAnEdgeNoProjectClaims(t *testing.T) {
 	if err == nil {
 		t.Fatal("Withdraw from _global reached an edge with no endpoint in the shared scope")
 	}
-	if !strings.Contains(err.Error(), "no live supersedes link") {
+	if !strings.Contains(err.Error(), "no live supersedes or causes link") {
 		t.Errorf("the refusal is not about the edge's ownership: %v", err)
 	}
 	if strings.Contains(err.Error(), "nothing supersedes that memory") {
 		t.Errorf("the refusal makes a claim about the whole graph: %v", err)
 	}
-	if links, lerr := store.SupersedesLinksInto(ctx, memory.GlobalProjectID, target); lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	if links, lerr := store.LinksInto(ctx, memory.GlobalProjectID, target, "supersedes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
 	} else if len(links) != 0 {
 		t.Errorf("the other project's edge is visible from _global as %d live row(s): the shared scope is not every project", len(links))
 	}
@@ -314,6 +314,78 @@ func TestWithdrawReachesAnEdgeWhoseTargetWasPromoted(t *testing.T) {
 	}
 }
 
+// TestWithdrawReachesABothRelationsEdgeWhoseSourceIsInAnotherProject is
+// #843's read meeting the `ghost project merge` shape, and the one case where
+// widening `LinksInto` to both relations could BREAK a ref that used to resolve.
+//
+// A source in another project is reachable only through `resolveSource`'s holder
+// fallback, and the holder set is built from the edges pointing at the resolved
+// target. One holder held one id before #833, because the read was hardcoded to
+// 'supersedes'. After it, a source holding BOTH relations appears TWICE in that
+// set — and `memref.ResolveIn` treats its input as a set of distinct memories: a
+// prefix ref then matches twice, the byte-exact shortcut misses, and the folded
+// branch refuses two ids that are the same id. The refusal the caller sees is the
+// project-scoped one `resolveSource` falls back to, so the operator is told the
+// ref names nothing in their own project — which is TRUE, and useless, because the
+// fallback that was supposed to reach the other project cannot.
+//
+// So the edge is reachable, the ref is NOT, and the whole #786 repair — reached
+// through the only path that can reach it — is closed by a duplicate.
+func TestWithdrawReachesABothRelationsEdgeWhoseSourceIsInAnotherProject(t *testing.T) {
+	store, _ := seed(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "q", "/tmp/q", "q"); err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.Create(ctx, "q", memory.Memory{
+		Category: "fact", Content: "A note in q that both supersedes and causes one in p.", Source: "mcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := mustCreatePlain(t, store, "The p note that a q note replaced, and kept when q was merged away.")
+	for _, relation := range []string{string(RelationSupersedes), string(RelationCauses)} {
+		if err := store.CreateLink(ctx, source, target, relation, 0.95, "llm"); err != nil {
+			t.Fatalf("CreateLink(%s): %v", relation, err)
+		}
+	}
+	// The precondition this test is about: the read really does return the same
+	// holder twice, which is what makes it a duplicate and not a hypothesis.
+	if n := liveLinkCount(t, store, target); n != 2 {
+		t.Fatalf("live edges into the target = %d, want 2 (one per relation): the fixture is not the shape under test", n)
+	}
+
+	// A prefix, because that is what the reports hand an operator and what the
+	// refusal claims cannot address either way.
+	ref := source[:8]
+	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: ref, Target: target}}, true, discardLogger())
+	if err != nil {
+		t.Fatalf("Withdraw could not reach a both-relations edge through the holder fallback: %v", err)
+	}
+	if res.Withdrawn != 1 {
+		t.Fatalf("Withdrawn = %d, want 1", res.Withdrawn)
+	}
+	if res.Links[0].Relation != string(RelationSupersedes) {
+		t.Errorf("the edge withdrawn carried relation %q, want %q: one holder, one edge, and the default picks it",
+			res.Links[0].Relation, RelationSupersedes)
+	}
+	if n := liveLinkCount(t, store, target); n != 1 {
+		t.Errorf("live edges into the target = %d after the withdrawal, want 1: the 'causes' edge is still live", n)
+	}
+	// And the other relation, reached by name on the same ref.
+	res, err = Withdraw(ctx, store, "p", []WithdrawPair{{Source: ref, Target: target, Relation: string(RelationCauses)}}, true, discardLogger())
+	if err != nil {
+		t.Fatalf("Withdraw(--relation causes) could not reach the second edge: %v", err)
+	}
+	if res.Withdrawn != 1 || res.Links[0].Relation != string(RelationCauses) {
+		t.Errorf("the pinned withdrawal = %d edge(s), relation %q; want 1 'causes'",
+			res.Withdrawn, res.Links[0].Relation)
+	}
+	if n := liveLinkCount(t, store, target); n != 0 {
+		t.Errorf("live edges into the target = %d, want 0", n)
+	}
+}
+
 // TestWithdrawReachesAnEdgeWhoseSourceIsInAnotherProject is the last shape #786
 // left, and the one its own first fix created. `ghost project merge` moves a
 // memory between projects and leaves its links, so a project can own a TARGET
@@ -348,10 +420,10 @@ func TestWithdrawReachesAnEdgeWhoseSourceIsInAnotherProject(t *testing.T) {
 	// The ranking was demoting that target the whole time, which is what made the
 	// missing repair worth closing. The read is the one a withdrawal makes: the
 	// target is in p, so p can see the edge burying it.
-	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	if links, lerr := store.LinksInto(ctx, "p", target, "supersedes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
 	} else if len(links) != 1 {
-		t.Fatalf("SupersedesLinksInto(p) = %+v, want the one edge burying p's own memory", links)
+		t.Fatalf("LinksInto(p) = %+v, want the one edge burying p's own memory", links)
 	}
 
 	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: source, Target: target}}, true, discardLogger())
@@ -361,8 +433,8 @@ func TestWithdrawReachesAnEdgeWhoseSourceIsInAnotherProject(t *testing.T) {
 	if res.Withdrawn != 1 {
 		t.Errorf("Withdrawn = %d, want 1", res.Withdrawn)
 	}
-	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	if links, lerr := store.LinksInto(ctx, "p", target, "supersedes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
 	} else if len(links) != 0 {
 		t.Errorf("live edge(s) = %d after the withdrawal, want 0", len(links))
 	}
@@ -413,8 +485,8 @@ func TestAProjectScopedRefStillRefusesWhatItCannotName(t *testing.T) {
 	if !strings.Contains(err.Error(), "too short to be a prefix") {
 		t.Errorf("a short ref was not refused on its length: %v", err)
 	}
-	if links, lerr := store.SupersedesLinksInto(ctx, "p", target); lerr != nil {
-		t.Fatalf("SupersedesLinksInto: %v", lerr)
+	if links, lerr := store.LinksInto(ctx, "p", target, "supersedes"); lerr != nil {
+		t.Fatalf("LinksInto: %v", lerr)
 	} else if len(links) != 1 {
 		t.Errorf("live edge(s) = %d, want 1: the two refusals above wrote nothing", len(links))
 	}

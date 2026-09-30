@@ -12,7 +12,7 @@ import (
 // get wrong — the operands must not be read as the project, because parseSupersedeArgs
 // takes the project from any bare word.
 func TestParseSupersedeArgsWithdraw(t *testing.T) {
-	project, source, apply, reassess, threshold, _, withdraw, err := parseSupersedeArgs([]string{
+	project, source, apply, reassess, threshold, _, withdraw, _, err := parseSupersedeArgs([]string{
 		"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--withdraw", "11223344", "55667788", "--apply",
 	})
 	if err != nil {
@@ -53,7 +53,7 @@ func TestParseSupersedeArgsWithdrawOperandErrors(t *testing.T) {
 		{"ghost", "--withdraw", "a1b2c3d4"},
 		{"ghost", "--withdraw", "a1b2c3d4", "--apply"},
 	} {
-		_, _, _, _, _, _, withdraw, err := parseSupersedeArgs(args)
+		_, _, _, _, _, _, withdraw, _, err := parseSupersedeArgs(args)
 		if err == nil {
 			t.Errorf("parseSupersedeArgs(%v) = no error, want one; it read %d pair(s)", args, len(withdraw))
 			continue
@@ -68,7 +68,7 @@ func TestParseSupersedeArgsWithdrawOperandErrors(t *testing.T) {
 // two different repairs, and one command doing both has two dry-run answers.
 // The reader is told which one they asked for twice.
 func TestParseSupersedeArgsWithdrawRefusesReassess(t *testing.T) {
-	_, _, _, _, _, _, _, err := parseSupersedeArgs([]string{"ghost", "--reassess", "--withdraw", "a1b2c3d4", "e5f6a7b8"})
+	_, _, _, _, _, _, _, _, err := parseSupersedeArgs([]string{"ghost", "--reassess", "--withdraw", "a1b2c3d4", "e5f6a7b8"})
 	if err == nil {
 		t.Fatal("parseSupersedeArgs accepted --reassess with --withdraw")
 	}
@@ -99,9 +99,9 @@ func TestSupersedeWithdrawReportDistinguishesTheRowsItNeverReached(t *testing.T)
 		Resolved:  3,
 		Withdrawn: 1,
 		Links: []supersede.WithdrawnLink{
-			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", LinkSource: "llm", Withdrawn: true},
-			{SourceID: "11112222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF1", LinkSource: "llm", WithdrawalFailed: true},
-			{SourceID: "22222222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF2", LinkSource: "llm", NotAttempted: true},
+			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", Relation: "supersedes", LinkSource: "llm", Withdrawn: true},
+			{SourceID: "11112222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF1", Relation: "supersedes", LinkSource: "llm", WithdrawalFailed: true},
+			{SourceID: "22222222333344445555666677778888", TargetID: "00112233445566778899AABBCCDDEEFF2", Relation: "supersedes", LinkSource: "llm", NotAttempted: true},
 		},
 	}
 	out := supersedeWithdrawReport("ghost", res, true)
@@ -123,8 +123,8 @@ func TestSupersedeWithdrawReportDryRun(t *testing.T) {
 	res := supersede.WithdrawResult{
 		Resolved: 2,
 		Links: []supersede.WithdrawnLink{
-			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", TargetText: "The restore path on one spindle is safe.", LinkSource: "llm", Strength: 0.95},
-			{SourceID: "FFEEDDCCBBAA99887766554433221100", TargetID: "00112233445566778899AABBCCDDEEFF1", TargetText: "The ingest service runs Redis 6.2.", LinkSource: "manual", Strength: 0.8},
+			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", TargetText: "The restore path on one spindle is safe.", Relation: "supersedes", LinkSource: "llm", Strength: 0.95},
+			{SourceID: "FFEEDDCCBBAA99887766554433221100", TargetID: "00112233445566778899AABBCCDDEEFF1", TargetText: "The ingest service runs Redis 6.2.", Relation: "supersedes", LinkSource: "manual", Strength: 0.8},
 		},
 	}
 	out := supersedeWithdrawReport("ghost", res, false)
@@ -167,7 +167,7 @@ func TestSupersedeWithdrawReportApplied(t *testing.T) {
 		Resolved:  2,
 		Withdrawn: 1,
 		Links: []supersede.WithdrawnLink{
-			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", TargetText: "The restore path on one spindle is safe.", LinkSource: "llm", Withdrawn: true},
+			{SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0", TargetText: "The restore path on one spindle is safe.", Relation: "supersedes", LinkSource: "llm", Withdrawn: true},
 			{SourceID: "FFEEDDCCBBAA99887766554433221100", TargetID: "00112233445566778899AABBCCDDEEFF1", TargetText: "The ingest service runs Redis 6.2.", LinkSource: "llm"},
 		},
 	}
@@ -187,6 +187,227 @@ func TestSupersedeWithdrawReportApplied(t *testing.T) {
 	}
 	if strings.Contains(out, "resolve") {
 		t.Errorf("the report names the resolve pass; the shared follow-up owns that:\n%s", out)
+	}
+}
+
+// TestSupersedeWithdrawReportNamesTheRelationItResolved: --withdraw reaches a
+// 'causes' edge as well as a 'supersedes' one (#833), so the report's two places
+// that name the edge have to follow. The HEADER aggregates and the ROW is
+// per-edge, and both are load-bearing: the header's number is the one an operator
+// quotes back when they ask why a 'causes' pair could not be withdrawn, and the
+// relation is what decides whether the row's withdrawal also cleared a resolution
+// — only a 'supersedes' edge ever stamped the `resolved_at` the follow-up clears.
+//
+// The mixed case is the one a single-relation header gets wrong in a way nobody
+// reads as a bug: one request, two relations, and a header that named only the
+// first would still look right on the first row.
+func TestSupersedeWithdrawReportNamesTheRelationItResolved(t *testing.T) {
+	causes := supersede.WithdrawnLink{
+		SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0",
+		TargetText: "The restore path on one spindle is safe.", Relation: "causes", LinkSource: "llm",
+		Strength: 0.81, Withdrawn: true,
+	}
+	sup := supersede.WithdrawnLink{
+		SourceID: "FFEEDDCCBBAA99887766554433221100", TargetID: "00112233445566778899AABBCCDDEEFF1",
+		TargetText: "The ingest service runs Redis 6.2.", Relation: "supersedes", LinkSource: "llm",
+		Strength: 0.8, Withdrawn: true,
+	}
+
+	out := supersedeWithdrawReport("ghost", supersede.WithdrawResult{Resolved: 1, Withdrawn: 1, Links: []supersede.WithdrawnLink{causes}}, true)
+	if !strings.Contains(out, "1 causes edge(s) named") {
+		t.Errorf("a 'causes' withdrawal is reported as a 'supersedes' one:\n%s", out)
+	}
+	if !strings.Contains(out, "[causes, source llm, strength 0.81]") {
+		t.Errorf("the row does not name the relation and the edge's own source:\n%s", out)
+	}
+
+	mixed := supersedeWithdrawReport("ghost", supersede.WithdrawResult{Resolved: 2, Withdrawn: 2, Links: []supersede.WithdrawnLink{causes, sup}}, true)
+	if !strings.Contains(mixed, "2 supersedes and causes edge(s) named") {
+		t.Errorf("a request holding both relations names one of them:\n%s", mixed)
+	}
+
+	// A row whose relation is empty is the ZERO VALUE of a struct a caller may
+	// have built by hand, and it renders 'supersedes' rather than a blank bracket:
+	// a report printing an empty bracket over one of its own rows is a report that
+	// cannot be matched against the follow-up rule.
+	unset := supersede.WithdrawnLink{
+		SourceID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", TargetID: "00112233445566778899AABBCCDDEEFF0",
+		LinkSource: "llm", Strength: 0.81,
+	}
+	blank := supersedeWithdrawReport("ghost", supersede.WithdrawResult{Resolved: 1, Links: []supersede.WithdrawnLink{unset}}, false)
+	if !strings.Contains(blank, "1 supersedes edge(s) named") {
+		t.Errorf("a request resolving nothing did not fall back to the default relation:\n%s", blank)
+	}
+	if !strings.Contains(blank, "[supersedes, source llm, strength 0.81]") {
+		t.Errorf("an unset relation renders as an empty bracket rather than 'supersedes':\n%s", blank)
+	}
+}
+
+// TestParseSupersedeArgsRelation is the CLI half of #833, and it was the one
+// half with no test at all: three mutations — accepting any word, dropping the
+// relation on the way to the core, and deleting the "needs --withdraw" refusal —
+// were all GREEN.
+//
+// Both spellings have to work and have to refuse identically, which is the same
+// pairing `checkSupersedeConsensus` already has, and for the same reason: two
+// parsers for one flag means two answers to "what relation did I just pin", and an
+// unknown word that fell through to the default would withdraw the OTHER edge of a
+// pair that holds both.
+func TestParseSupersedeArgsRelation(t *testing.T) {
+	for _, args := range [][]string{
+		{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation", "causes"},
+		{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation=causes"},
+	} {
+		_, _, _, _, _, _, withdraw, relation, err := parseSupersedeArgs(args)
+		if err != nil {
+			t.Fatalf("parseSupersedeArgs(%v): %v", args, err)
+		}
+		if relation != "causes" {
+			t.Errorf("parseSupersedeArgs(%v) relation = %q, want %q: both spellings are one flag", args, relation, "causes")
+		}
+		if len(withdraw) != 1 {
+			t.Fatalf("parseSupersedeArgs(%v) resolved %d pair(s), want 1", args, len(withdraw))
+		}
+		// The flag is a property of the REQUEST, so it reaches every pair, carried
+		// onto each one by the same mapping the CLI uses to build the call.
+		pairs := toWithdrawPairs(withdraw, relation)
+		if len(pairs) != 1 || pairs[0].Relation != "causes" {
+			t.Errorf("toWithdrawPairs = %+v, want one pair carrying relation %q", pairs, "causes")
+		}
+	}
+
+	// 'supersedes' is accepted by name, and it is the DEFAULT — so accepting it
+	// explicitly has to be a no-op rather than a second path.
+	_, _, _, _, _, _, _, relation, err := parseSupersedeArgs([]string{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation", "supersedes"})
+	if err != nil || relation != "supersedes" {
+		t.Errorf("the explicit default = %q, %v; want %q and no error", relation, err, "supersedes")
+	}
+
+	// No flag at all means auto-select, which the core reads as the empty relation.
+	_, _, _, _, _, _, _, relation, err = parseSupersedeArgs([]string{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8"})
+	if err != nil || relation != "" {
+		t.Errorf("relation = %q, %v; want the empty auto-select relation", relation, err)
+	}
+
+	// An unknown word is refused by BOTH spellings with the SAME sentence, and the
+	// sentence names the two that exist: a refusal listing the accepted set is the
+	// difference between a typo and a dead end.
+	var refusals []string
+	for _, args := range [][]string{
+		{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation", "supersede"},
+		{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation=contradicts"},
+	} {
+		_, _, _, _, _, _, _, _, perr := parseSupersedeArgs(args)
+		if perr == nil {
+			t.Errorf("parseSupersedeArgs(%v) accepted an unknown relation", args)
+			continue
+		}
+		if !strings.Contains(perr.Error(), "supersedes or causes") {
+			t.Errorf("parseSupersedeArgs(%v) refusal does not name the accepted relations: %v", args, perr)
+		}
+		refusals = append(refusals, perr.Error())
+	}
+	// The two spellings share one SENTENCE, which is compared with the offending
+	// word factored out — echoing the word is the message's job, so the strings
+	// cannot be equal and comparing them whole would be a test that could only
+	// ever pass for inputs that happen to use the same misspelling.
+	if len(refusals) == 2 {
+		skeleton := func(s string) string {
+			if i := strings.Index(s, "not "); i >= 0 {
+				return s[:i+4] + "<word>"
+			}
+			return s
+		}
+		if skeleton(refusals[0]) != skeleton(refusals[1]) {
+			t.Errorf("the two spellings refuse differently:\n%s\n%s", refusals[0], refusals[1])
+		}
+	}
+
+	// An EMPTY value is refused by BOTH spellings, and this is the case the flag
+	// cannot express any other way. The empty string is the auto-select value, so
+	// `--relation ""` and "no --relation" are indistinguishable by the value alone —
+	// and a script writes it by accident, as `--relation "$REL"` with REL unset. The
+	// first cut of this check sat only in the `--relation=` arm, so the space form
+	// still fell through to auto-select: a pair holding both relations silently lost
+	// its 'causes' edge and had its 'supersedes' edge withdrawn instead, which is
+	// the exact wrong-edge withdrawal the flag exists to prevent.
+	//
+	// So the guard is on WHETHER THE FLAG WAS TYPED, and this asserts the space form
+	// specifically because it is the one that was missed.
+	for _, args := range [][]string{
+		{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation", ""},
+		{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation="},
+	} {
+		_, _, _, _, _, _, _, _, rerr := parseSupersedeArgs(args)
+		if rerr == nil {
+			t.Errorf("parseSupersedeArgs(%v) accepted an EMPTY --relation, which silently means auto-select", args)
+			continue
+		}
+		if !strings.Contains(rerr.Error(), "--relation requires a value") {
+			t.Errorf("parseSupersedeArgs(%v) refusal = %q, want the requires-a-value sentence", args, rerr)
+		}
+	}
+	// And the refusal is not the "no --withdraw" one: this command DID withdraw
+	// something, so telling the operator to add --withdraw would send them off to
+	// run a command that has the same bug.
+	if _, _, _, _, _, _, _, _, rerr := parseSupersedeArgs([]string{"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--relation", ""}); rerr != nil && strings.Contains(rerr.Error(), "use it with --withdraw") {
+		t.Errorf("the empty-value refusal is the wrong sentence: %v", rerr)
+	}
+
+	// Without --withdraw there is no edge for the flag to choose between, and it is
+	// REFUSED rather than ignored: a command that took it, said nothing, and ran
+	// the ordinary pass is a command whose argv does not describe it.
+	_, _, _, _, _, _, _, _, err = parseSupersedeArgs([]string{"ghost", "--relation", "causes"})
+	if err == nil {
+		t.Error("parseSupersedeArgs accepted --relation without --withdraw")
+	} else if !strings.Contains(err.Error(), "--withdraw") {
+		t.Errorf("the refusal does not say what --relation needs: %v", err)
+	}
+}
+
+// TestSupersedeUsageStatesBothWithdrawalOutcomes: the help is what an operator
+// reads before typing the command, so a rule stated in the flag table and
+// contradicted four lines below it is worse than a rule left out. #833 added
+// --relation to this string and left its two neighbours describing only the
+// 'supersedes' withdrawal — the flag entry promising "--apply writes the
+// unsupersede history row" directly above the new --relation entry saying a
+// 'causes' withdrawal writes none, and the long help saying BOTH runs print a
+// follow-up.
+//
+// Nothing pinned this string at all, which is how it came to contradict itself.
+func TestSupersedeUsageStatesBothWithdrawalOutcomes(t *testing.T) {
+	usage := supersedeUsage
+	for _, want := range []string{
+		"--relation",          // the new flag is documented at all
+		"causes",              // and its relation is named
+		"unsupersede history", // the audit row is still promised, for the right relation
+	} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("the help omits %q", want)
+		}
+	}
+	// The claims that are FALSE for a 'causes' withdrawal must not be stated
+	// unconditionally. Each is matched as a sentence, because a word is not a
+	// claim, and the old wording is quoted exactly so this test fails if it comes
+	// back rather than merely passing while something else is wrong.
+	if strings.Contains(usage, "Withdrawing an edge (--withdraw --apply, or --reassess --apply) writes the") {
+		t.Error("the help says a withdrawal always writes the history row; only a 'supersedes' one does")
+	}
+	// "BOTH runs" is allowed to appear — it is TRUE once its subject is scoped to a
+	// 'supersedes' withdrawal — so what is pinned is the subject it hangs off. The
+	// unscoped sentence is quoted exactly, because a test that merely forbade the
+	// phrase would fail if it came back and pass if the sentence were reworded into
+	// a new false claim.
+	if i := strings.Index(usage, "BOTH runs therefore print their own follow-up"); i >= 0 {
+		subject := usage[:i]
+		if !strings.Contains(subject, "Withdrawing a SUPERSEDES edge") {
+			t.Error("the help claims BOTH runs print a follow-up without scoping it to a 'supersedes' withdrawal")
+		}
+	}
+	// And the relation-dependent fact is stated affirmatively, so the help is not
+	// merely silent about it.
+	if !strings.Contains(usage, "prints NO follow-up") {
+		t.Error("the help never says that a 'causes' withdrawal prints no follow-up")
 	}
 }
 

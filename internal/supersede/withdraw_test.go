@@ -31,11 +31,51 @@ func seedTwoEdges(t *testing.T, store *memory.Store, db *sql.DB) (a, b, target s
 // liveEdgeCount reports how many live 'supersedes' edges still point at target.
 func liveEdgeCount(t *testing.T, store *memory.Store, target string) int {
 	t.Helper()
-	links, err := store.SupersedesLinksInto(context.Background(), "p", target)
+	links, err := store.LinksInto(context.Background(), "p", target, "supersedes")
 	if err != nil {
-		t.Fatalf("SupersedesLinksInto: %v", err)
+		t.Fatalf("LinksInto: %v", err)
 	}
 	return len(links)
+}
+
+// liveLinkCount reports how many live edges of ANY relation point at target,
+// through the empty-relation read a withdrawal uses. It is the #833 counter: a
+// 'causes' withdrawal moves a row this one counts and liveEdgeCount does not, so
+// a fixture that seeds one has to be able to see it leave.
+func liveLinkCount(t *testing.T, store *memory.Store, target string) int {
+	t.Helper()
+	links, err := store.LinksInto(context.Background(), "p", target, "")
+	if err != nil {
+		t.Fatalf("LinksInto: %v", err)
+	}
+	return len(links)
+}
+
+// liveRelationCount reports how many live edges of ONE relation point at target.
+func liveRelationCount(t *testing.T, store *memory.Store, target, relation string) int {
+	t.Helper()
+	links, err := store.LinksInto(context.Background(), "p", target, relation)
+	if err != nil {
+		t.Fatalf("LinksInto(%s): %v", relation, err)
+	}
+	return len(links)
+}
+
+// seedCausesEdge writes a live 'causes'/'llm' edge from cause to effect and
+// returns the two ids. The edge points the way 'causes' points — cause→effect —
+// and both endpoints share created_at AND updated_at, which is the #778 tie: the
+// ordinary pass has no chronology to orient such a pair by, counts it
+// Result.Unoriented, and will never judge it. It is the pair no pass repairs.
+func seedCausesEdge(t *testing.T, store *memory.Store, db *sql.DB) (cause, effect string) {
+	t.Helper()
+	ctx := context.Background()
+	const stamp = "2026-06-01 00:00:00"
+	cause = add(t, store, db, "The migration script left the lock table populated.", []float32{1, 0, 0, 0}, stamp)
+	effect = add(t, store, db, "The replica fell behind by four hours after the migration.", []float32{1, 0, 0, 0}, stamp)
+	if err := store.CreateLink(ctx, cause, effect, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	return cause, effect
 }
 
 // pinID writes a memory under a chosen id, so a fixture can make two of them
@@ -199,7 +239,7 @@ func TestWithdrawNamesAnImportedID(t *testing.T) {
 	pinID(t, db, "abc", "A third imported note with a three character id.")
 	if _, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: "abc", Target: older}}, false, discardLogger()); err == nil {
 		t.Fatal("a full id shorter than the prefix floor was refused")
-	} else if !strings.Contains(err.Error(), "no live supersedes link") {
+	} else if !strings.Contains(err.Error(), "no live supersedes or causes link") {
 		t.Errorf("the short full id was not resolved, so the refusal is about resolution: %v", err)
 	}
 }
@@ -368,6 +408,246 @@ func TestWithdrawRefusesASelfPair(t *testing.T) {
 	_ = a
 }
 
+// TestWithdrawReachesACausesEdgeByName is #833 at the store-independent layer.
+// A 'causes' edge is load-bearing since #823 — its direction decides which way a
+// pair is judged — so a person has to be able to withdraw one by hand. Until this
+// the withdrawal read 'supersedes' rows only and wrote InvalidateLink with that
+// relation hardcoded, so a pair whose only live edge is a 'causes' one had no
+// repair at all. The fixture is the #778 TIE on purpose: both endpoints share
+// created_at AND updated_at, so the ordinary pass has no chronology, counts it
+// Unoriented, and will never judge the pair — the withdrawal is the only surface
+// that can settle it.
+func TestWithdrawReachesACausesEdgeByName(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	cause, effect := seedCausesEdge(t, store, db)
+
+	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: cause, Target: effect}}, true, discardLogger())
+	if err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	if res.Resolved != 1 || res.Withdrawn != 1 {
+		t.Fatalf("resolved=%d withdrawn=%d, want 1 and 1", res.Resolved, res.Withdrawn)
+	}
+	// The row reports the relation it resolved, because the WRITE is relation-
+	// scoped and a report that said 'supersedes' over a 'causes' withdrawal would
+	// be naming an edge the operator never named.
+	if got := res.Links[0].Relation; got != string(RelationCauses) {
+		t.Errorf("Relation = %q, want %q", got, RelationCauses)
+	}
+	if got := liveLinkCount(t, store, effect); got != 0 {
+		t.Errorf("live edges into the effect = %d, want 0: the named edge is still there", got)
+	}
+	// A 'causes' withdrawal writes NO unsupersede row, and that is the point
+	// rather than an omission: a 'causes' claim never demoted its target and never
+	// stamped resolved_at on it, so there is no standing to reverse and no audit
+	// row that would say otherwise.
+	if hasUnsupersedeHistory(t, store, effect) {
+		t.Error("a 'causes' withdrawal wrote the unsupersede history row; that claim never held its target down")
+	}
+}
+
+// TestWithdrawPrefersSupersedesWhenAPairHoldsBoth: the default. A pair holding
+// both relations is the one case where picking the wrong edge would withdraw
+// something the operator did not name, so 'supersedes' wins — the relation every
+// existing call site and every pre-#833 report meant, and the one whose removal
+// actually un-hides a memory.
+func TestWithdrawPrefersSupersedesWhenAPairHoldsBoth(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	cause, effect := seedCausesEdge(t, store, db)
+	// The same pair in the other relation, in the same direction, as a live
+	// 'supersedes' row: cause supersedes effect is wrong in this fixture's own
+	// terms, but the withdrawal does not judge an edge, and a pair holding both
+	// is the case the default exists for.
+	if err := store.CreateLink(ctx, cause, effect, string(RelationSupersedes), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: cause, Target: effect}}, true, discardLogger())
+	if err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	if got := res.Links[0].Relation; got != string(RelationSupersedes) {
+		t.Fatalf("Relation = %q, want %q: 'supersedes' is the default", got, RelationSupersedes)
+	}
+	if got := liveRelationCount(t, store, effect, string(RelationCauses)); got != 1 {
+		t.Errorf("live 'causes' edges = %d, want 1: only the default relation is withdrawn", got)
+	}
+	if got := liveRelationCount(t, store, effect, string(RelationSupersedes)); got != 0 {
+		t.Errorf("live 'supersedes' edges = %d, want 0", got)
+	}
+}
+
+// TestWithdrawHonoursAnExplicitRelation: the flag is what makes the pair holding
+// both edges repairable. Without it the default decides, and the default is
+// right often enough to be dangerous — an operator who typed `--relation causes`
+// and got the 'supersedes' edge would see "withdrew 1" and the wrong edge gone.
+func TestWithdrawHonoursAnExplicitRelation(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	cause, effect := seedCausesEdge(t, store, db)
+	if err := store.CreateLink(ctx, cause, effect, string(RelationSupersedes), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Withdraw(ctx, store, "p", []WithdrawPair{{Source: cause, Target: effect, Relation: string(RelationCauses)}}, true, discardLogger())
+	if err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	if got := res.Links[0].Relation; got != string(RelationCauses) {
+		t.Errorf("Relation = %q, want %q: the pair's own relation decides", got, RelationCauses)
+	}
+	if got := liveRelationCount(t, store, effect, string(RelationCauses)); got != 0 {
+		t.Errorf("live 'causes' edges = %d, want 0", got)
+	}
+	// The other relation is untouched, which is the whole content of "the one I
+	// named" — a withdrawal is not a statement about every edge on the pair.
+	if got := liveRelationCount(t, store, effect, string(RelationSupersedes)); got != 1 {
+		t.Errorf("live 'supersedes' edges = %d, want 1: the pinned relation is the only one acted on", got)
+	}
+}
+
+// TestWithdrawRefusesTheOtherRelationItWasPinnedAwayFrom: pinning is a filter,
+// not a hint. A pair whose only live edge is the OTHER relation must be refused
+// rather than falling back to the default, because falling back is the exact
+// wrong-edge withdrawal the pin exists to prevent — and the refusal has to say
+// which relation it searched, or the operator re-runs it without the flag and
+// withdraws an edge they had just excluded.
+func TestWithdrawRefusesTheOtherRelationItWasPinnedAwayFrom(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	cause, effect := seedCausesEdge(t, store, db)
+
+	_, err := Withdraw(ctx, store, "p",
+		[]WithdrawPair{{Source: cause, Target: effect, Relation: string(RelationSupersedes)}}, true, discardLogger())
+	if err == nil {
+		t.Fatal("Withdraw fell back to the other relation instead of refusing the pinned one")
+	}
+	if !strings.Contains(err.Error(), "no live supersedes link") {
+		t.Errorf("the refusal does not name the relation it searched for: %v", err)
+	}
+	// And it still NAMES the edge that is there, which is what makes the refusal
+	// an answer rather than a dead end.
+	if !strings.Contains(err.Error(), short(effect)[:8]) {
+		t.Errorf("the refusal does not name the target's live edges: %v", err)
+	}
+	if got := liveLinkCount(t, store, effect); got != 1 {
+		t.Errorf("live edges into the effect = %d, want 1: a refused pair must write nothing", got)
+	}
+}
+
+// TestWithdrawRefusalNamesBothRelations: the refusal's whole job is to be the
+// next thing an operator reads, and the common mistake is naming the pair with
+// the wrong relation. So it names the live edges of BOTH relations rather than
+// only the one it looked for — the #833 report, from the other side.
+func TestWithdrawRefusalNamesBothRelations(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	cause, effect := seedCausesEdge(t, store, db)
+	holder := add(t, store, db, "A second note asserts the same replacement of the effect.", []float32{0, 1, 0, 0}, "2026-07-01 00:00:00")
+	if err := store.CreateLink(ctx, holder, effect, string(RelationSupersedes), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The suffix a missing pair gets, with both relations live into the same
+	// target, names both holders rather than filtering to the pinned relation.
+	_, err := Withdraw(ctx, store, "p",
+		[]WithdrawPair{{Source: add(t, store, db, "A note with no claim on the effect at all.", []float32{0, 0, 1, 0}, "2026-08-01 00:00:00"), Target: effect}},
+		false, discardLogger())
+	if err == nil {
+		t.Fatal("Withdraw accepted a pair with no live edge")
+	}
+	for _, want := range []string{short(cause)[:8], short(holder)[:8]} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal omits the holder %s, which points at the target in the other relation: %v", want, err)
+		}
+	}
+}
+
+// TestIntoSuffixNamesTheRelationWithoutClaimingItBuries pins the refusal's whole
+// vocabulary, arm by arm, because all four of its branches were unasserted and one
+// of them was a false claim.
+//
+// The false one is the closing clause. It used to read "or note that the other edge
+// still buries it" for every holder set, which was true while the read returned
+// only 'supersedes' rows. A 'causes' edge buries nothing — both the demotion
+// penalty and resolve's piggyback filter `relation = 'supersedes'` — so over a
+// 'causes'-only holder set the sentence told an operator to worry about a memory
+// nothing holds down, and named the wrong remedy. The VERB and the ADVICE are
+// therefore different questions, and are asked of different helpers: "still caused
+// by C" is accurate, "that edge still buries it" is not.
+//
+// Reachable from the CLI: `ghost supersede p --withdraw C B --relation supersedes
+// --apply` over a pair whose only live edge is `C causes→B`.
+func TestIntoSuffixNamesTheRelationWithoutClaimingItBuries(t *testing.T) {
+	const id = "A1B2C3D4E5F60718293A4B5C6D7E8F90"
+	sup := []memory.Link{{SourceID: id, Relation: string(RelationSupersedes)}}
+	causes := []memory.Link{{SourceID: id, Relation: string(RelationCauses)}}
+	both := []memory.Link{{SourceID: id, Relation: string(RelationSupersedes)}, {SourceID: id, Relation: string(RelationCauses)}}
+
+	for _, c := range []struct {
+		name  string
+		links []memory.Link
+		want  string
+	}{
+		{"a supersedes holder buries the target", sup, "still superseded by A1B2C3D4"},
+		{"a causes holder does not", causes, "still caused by A1B2C3D4"},
+		{"both relations are named as such", both, "still linked (superseded or caused) by A1B2C3D4"},
+		// And the holder is named ONCE for the both-relations case. The `both` set
+		// above is two EDGES with one source id, which is what the empty-relation
+		// read returns since #833; a suffix that printed it twice reads as two
+		// holders and sends the reader looking for a second edge that is not there.
+		// A `Contains` assertion cannot see this, so the count is asserted.
+		{"one holder, one id, both relations", both, "by A1B2C3D4 —"},
+		{"no holder is scoped to the project", nil, "no memory in this project links it"},
+		{"an empty holder set is the same sentence", []memory.Link{}, "no memory in this project links it"},
+	} {
+		got := intoSuffix(c.links)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%s: intoSuffix = %q, want it to contain %q", c.name, got, c.want)
+		}
+	}
+
+	// The advice is the whole of the claim, so it is checked in both directions: it
+	// must be there exactly where a 'supersedes' edge is among the holders — and
+	// the `both` case is on THAT side, because one of its two edges really does
+	// bury the target. Only the 'causes'-only set has no edge that holds it down.
+	for _, links := range [][]memory.Link{sup, both} {
+		if got := intoSuffix(links); !strings.Contains(got, "still buries it") {
+			t.Errorf("intoSuffix(%v) = %q, and a live 'supersedes' edge among the holders means the target IS still held down", links, got)
+		}
+	}
+	if got := intoSuffix(causes); strings.Contains(got, "still buries it") {
+		t.Errorf("intoSuffix(causes-only) = %q claims an edge still buries the target, and a 'causes' edge buries nothing", got)
+	}
+	// The id list has no duplicate, over any set that carries one.
+	for _, c := range []struct {
+		name  string
+		links []memory.Link
+	}{
+		{"both relations on one source", both},
+		{"the same id three times", []memory.Link{{SourceID: id, Relation: string(RelationCauses)}, {SourceID: id, Relation: string(RelationSupersedes)}, {SourceID: id, Relation: string(RelationCauses)}}},
+	} {
+		got := intoSuffix(c.links)
+		if n := strings.Count(got, "A1B2C3D4"); n != 1 {
+			t.Errorf("%s: intoSuffix names the holder %d time(s), want 1:\n%q", c.name, n, got)
+		}
+	}
+
+	// A 'causes'-only suffix must instead say the reassuring thing, so the reader is
+	// not left with a bare list of ids and no guidance.
+	if got := intoSuffix(causes); !strings.Contains(got, "does not bury its target") {
+		t.Errorf("a 'causes'-only suffix does not say the target is not held down: %q", got)
+	}
+	// And the empty case must not claim a relation it has none of: before #833 it
+	// said "no memory in this project supersedes it", which is false over a pair
+	// whose only edge is a 'causes' one.
+	if got := intoSuffix(nil); strings.Contains(got, "supersedes it") {
+		t.Errorf("the empty suffix = %q, which claims a 'supersedes' edge it cannot see", got)
+	}
+}
+
 // TestWithdrawLeavesAnotherProjectsEdgeAlone: the edge is found through the
 // project that owns its SOURCE, so a project can neither withdraw nor be told
 // about an edge belonging to another one. This is the same scoping
@@ -400,9 +680,9 @@ func TestWithdrawLeavesAnotherProjectsEdgeAlone(t *testing.T) {
 	if !strings.Contains(err.Error(), "no memory in project p") {
 		t.Errorf("the refusal is not the project-scoped ref resolution: %v", err)
 	}
-	links, err := store.SupersedesLinksInto(ctx, "q", older)
+	links, err := store.LinksInto(ctx, "q", older, "supersedes")
 	if err != nil {
-		t.Fatalf("SupersedesLinksInto: %v", err)
+		t.Fatalf("LinksInto: %v", err)
 	}
 	if len(links) != 1 {
 		t.Errorf("the other project's edge = %d live row(s), want 1: it must be untouched", len(links))

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -782,12 +783,65 @@ func TestRun_SkipsPairWhoseEndpointVanishedMidRun(t *testing.T) {
 	if res.Created != 0 {
 		t.Errorf("got Created=%d, want 0 (endpoint gone before write)", res.Created)
 	}
-	if res.StaleSkipped != 1 {
-		t.Errorf("got StaleSkipped=%d, want 1", res.StaleSkipped)
+	// StaleAtWrite and NOT StaleSkipped, and the two are distinguished by exactly
+	// when the endpoint vanished. This fixture deletes it from inside the Classify
+	// call, so the pair WAS classified — a verdict was reached and paid for — and
+	// only the write was skipped. The pre-classify population is the other site,
+	// where a re-read of the graph finds the endpoint already gone and no call is
+	// spent at all (TestRunDropsAPairThatWentStaleBeforeTheClassify).
+	if res.StaleAtWrite != 1 {
+		t.Errorf("got StaleAtWrite=%d, want 1: the pair was classified, so this is the pre-write drop", res.StaleAtWrite)
+	}
+	if res.StaleSkipped != 0 {
+		t.Errorf("got StaleSkipped=%d, want 0: this pair was classified, so it is not the pre-classify drop", res.StaleSkipped)
+	}
+	// And the verdict really was reached, which is what makes the distinction matter
+	// to a report: a line claiming no classify call was spent would be false here.
+	if res.Confirmed != 1 {
+		t.Errorf("got Confirmed=%d, want 1: the classifier ran before the endpoint vanished", res.Confirmed)
 	}
 	pairs, _ := store.SupersedesWithin(ctx, []string{v1, v2})
 	if len(pairs) != 0 {
 		t.Errorf("found %d links for a deleted endpoint; want none", len(pairs))
+	}
+}
+
+// TestTheTwoStaleDropsCountApart is a STRUCTURAL assertion, and it is structural
+// because the two populations are not separable any other way in a test.
+//
+// `Result.StaleSkipped` and `Result.StaleAtWrite` count two different facts about
+// where a candidate was dropped: one is gone before the pass spends a classify
+// call on it, the other is classified and then loses its endpoint before the write.
+// Only the second may be reported as "a verdict was reached and no edge was
+// written", and only the first is guaranteed to have cost nothing — so a report
+// line about either is false for the other, and one counter for both would have to
+// word one line for both.
+//
+// The pre-classify window (between the candidate scan and the existence re-check)
+// is not reachable deterministically from a fixture: nothing runs inside it that a
+// test can hook, and forcing one would need a seam that exists only for the test.
+// So the invariant is pinned where it can be — on the source — by counting the
+// increments, and the pre-WRITE half is pinned behaviourally above.
+func TestTheTwoStaleDropsCountApart(t *testing.T) {
+	src, err := os.ReadFile("supersede.go")
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	pre := strings.Count(string(src), "res.StaleSkipped++")
+	write := strings.Count(string(src), "res.StaleAtWrite++")
+	// Exactly one site each. Two sites on one counter is the defect this split
+	// exists to prevent, and zero on either is a counter nothing reports.
+	if pre != 1 {
+		t.Errorf("supersede.go has %d site(s) incrementing res.StaleSkipped, want exactly 1: the pre-classify drop is one fact with one place it happens", pre)
+	}
+	if write != 1 {
+		t.Errorf("supersede.go has %d site(s) incrementing res.StaleAtWrite, want exactly 1", write)
+	}
+	// And the declaration carries both, so neither is a field nothing reads.
+	for _, field := range []string{"StaleSkipped int", "StaleAtWrite int"} {
+		if !strings.Contains(string(src), field) {
+			t.Errorf("Result does not declare %q", field)
+		}
 	}
 }
 
@@ -823,8 +877,15 @@ func TestRunStalePairDoesNotRollBackNeitherCacheWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run must not fail when a stale pair is in the batch: %v", err)
 	}
-	if res.StaleSkipped != 1 {
-		t.Fatalf("StaleSkipped = %d, want 1", res.StaleSkipped)
+	// StaleAtWrite: this fixture deletes the endpoint from inside the classify
+	// call, so the pair was classified and only the WRITE was skipped — the same
+	// population TestRun_SkipsPairWhoseEndpointVanishedMidRun pins, and the reason
+	// the two counters exist.
+	if res.StaleAtWrite != 1 {
+		t.Fatalf("StaleAtWrite = %d, want 1: the pair was classified, so this is the pre-write drop", res.StaleAtWrite)
+	}
+	if res.StaleSkipped != 0 {
+		t.Fatalf("StaleSkipped = %d, want 0: nothing was dropped before the classify", res.StaleSkipped)
 	}
 
 	checked, err := store.SupersedeChecked(ctx, "p")
@@ -1266,6 +1327,11 @@ func TestResultWouldWriteLinks(t *testing.T) {
 		{"one no-write reclassification and one real reclassification", Result{Reclassified: 2, Reversed: 1, ReclassifiedNoWrite: 1}, true},
 		// Only refusals, and the cache is not a graph change either way.
 		{"cache hits and unclassified pairs", Result{Skipped: 3, Unclassified: 2}, false},
+		// The WRITE counts never appear here (#834). They are 0 in every dry run,
+		// which is the run that prints this hint, so keying the promise off them
+		// would make it false on exactly the pass it is for; and a result carrying
+		// one is a result of an --apply, which prints the hint not at all.
+		{"writes alone, no verdicts", Result{Created: 1, CausesWritten: 1}, false},
 	}
 	for _, c := range cases {
 		if got := c.res.WouldWriteLinks(); got != c.want {
@@ -1305,9 +1371,9 @@ func TestRunCountsNoWriteReclassifications(t *testing.T) {
 				t.Fatalf("got reclassified=%d noWrite=%d, want 1/1 for a %s verdict",
 					res.Reclassified, res.ReclassifiedNoWrite, verdict)
 			}
-			if res.Created != 0 || res.CausesCreated != 0 {
-				t.Errorf("a %s reclassification must write nothing, got created=%d causes=%d",
-					verdict, res.Created, res.CausesCreated)
+			if res.Created != 0 || res.CausesCreated != 0 || res.CausesWritten != 0 {
+				t.Errorf("a %s reclassification must write nothing, got created=%d causes=%d causesWritten=%d",
+					verdict, res.Created, res.CausesCreated, res.CausesWritten)
 			}
 			if res.WouldWriteLinks() {
 				t.Errorf("a pass whose only finding is a %s reclassification must not promise a link to write", verdict)

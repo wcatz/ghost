@@ -605,7 +605,7 @@ func TestTheReportHeadersRenderAProjectNameAsALabel(t *testing.T) {
 		"resolve --mark":       resolveMarkReport(name, resolve.MarkResult{Resolved: 1}, true),
 		"resolve":              resolveSummaryLine(name, resolve.Result{}, true, 0, 0),
 		"resolve --reassess":   reassessSummaryLine(name, resolve.ReassessResult{}, true, 0, 0),
-		"supersede":            supersedeReport(name, supersede.Result{}, "named", 0, 0),
+		"supersede":            supersedeReport(name, supersede.Result{}, "named", false, 0, 0),
 		"supersede --reassess": supersedeReassessReport(name, supersede.ReassessResult{}, true, nil, 0, 0),
 		"supersede --withdraw": supersedeWithdrawReport(name, supersede.WithdrawResult{Resolved: 1}, true),
 	} {

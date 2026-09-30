@@ -85,7 +85,7 @@ func (s *Store) MemoryIDsByIDPrefix(ctx context.Context, projectID, prefix strin
 // there is visible in every project, every ref resolves to it from everywhere, and
 // so the edge it sources is a claim every project can see and withdraw. Its
 // endpoint is nameable there too, and WHICH edge may then be withdrawn is decided
-// by SupersedesLinksInto's ownership rule — a project is still not reachable, so a
+// by LinksInto's ownership rule — a project is still not reachable, so a
 // ref resolving into one buys nothing.
 //
 // The history table is EXCLUDED, which is the whole difference from

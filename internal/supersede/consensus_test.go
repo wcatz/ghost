@@ -344,8 +344,8 @@ func TestConsensusUnanimousNeitherCachesAndUnanimousReversedRefuses(t *testing.T
 		if err != nil {
 			t.Fatalf("RunWith: %v", err)
 		}
-		if res.Created != 0 || res.CausesCreated != 0 {
-			t.Errorf("a unanimous NEITHER wrote an edge: created/causes = %d/%d", res.Created, res.CausesCreated)
+		if res.Created != 0 || res.CausesCreated != 0 || res.CausesWritten != 0 {
+			t.Errorf("a unanimous NEITHER wrote an edge: created/causes/causesWritten = %d/%d/%d", res.Created, res.CausesCreated, res.CausesWritten)
 		}
 		checks, err := store.SupersedeChecked(context.Background(), "p")
 		if err != nil {
