@@ -309,6 +309,26 @@ type asOfCapableStore interface {
 	MemoriesAsOf(ctx context.Context, projectID string, t time.Time) (*memory.AsOfSet, error)
 }
 
+// windowCountCapableStore narrows provider.MemoryStore to the count the
+// project-context surface needs to say a sentence about a project: how many of its
+// rows a retrieval window could have admitted.
+//
+// It is a capability assertion rather than a new interface method for the reason
+// the others are, and the choice is load-bearing rather than a matter of taste. The
+// count that is on `provider.MemoryStore` — `CountMemories` — answers a DIFFERENT
+// question: it has no `resolved_at` predicate, so it counts rows `ghost resolve`
+// has withdrawn, which no window reads. Using it to decide whether a project "has
+// rows" is what let a project whose only row was withdrawn be told those rows "were
+// withheld as out of date" — a cause it did not have, explaining rows belonging to
+// `_global`. *memory.Store satisfies it.
+//
+// A provider without it answers the surfaces anyway and simply says less: the
+// consequence of the missing count is silence, and silence is the cheap direction
+// here. A hard error would fail a read that a project listing can still answer.
+type windowCountCapableStore interface {
+	CountActiveMemories(ctx context.Context, projectID string) (int, error)
+}
+
 // retrievalCapableStore narrows provider.MemoryStore to the retrieval record
 // ghost_memory_search writes (#646). A capability assertion for the reason
 // assembleCapableStore is one — the audit trail is a storage detail, not part of
@@ -1871,7 +1891,16 @@ func (s *Server) registerTools() {
 			// A block the stages EMPTIED is not an empty project, and the census
 			// below would say it is. So the two are separated by the verdict, and
 			// only an empty over-fetched window may claim absence.
-			if note := projectContextEmptyNote(memories); note != "" {
+			//
+			// The note is the SAME function the non-empty branch uses, and that is
+			// the point rather than a deduplication: it is the only place the
+			// project-scoped count and the union-scoped verdict are reconciled, and
+			// a gate that merely permitted the abstention would read that count and
+			// then throw it away — leaving a project whose rows were all withdrawn
+			// by `ghost resolve` (so the FETCH emptied the window while
+			// `CountMemories`, which has no `resolved_at` predicate, still counts
+			// them) with the never-saved census, which is false.
+			if note := s.projectContextOwnRowsNote(ctx, args.ProjectID, memories); note != "" {
 				return &mcp.CallToolResult{
 					Content: []mcp.Content{&mcp.TextContent{Text: note}},
 				}, nil, nil
@@ -1892,6 +1921,14 @@ func (s *Server) registerTools() {
 			// store holds any, so this case never reached an empty block. Appended
 			// rather than substituted, because there IS an answer above — the
 			// cross-project rows are wanted, they are simply not this project's.
+			//
+			// The other shape that reaches only this branch is a block made of the
+			// sections rendered OUTSIDE the assembler, with an empty memory read
+			// behind it: `## Learned Context` above is exactly that, and for a
+			// project reflection has summarised it means the summary's own source
+			// rows were withheld (#788). The function picks the sentence by the
+			// verdict, so this call site does not ask what kind of non-empty block
+			// it is holding.
 			text += "\n\n" + note
 		}
 
@@ -3399,17 +3436,21 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	}
 
 	if sb.Len() == 0 {
-		// Same two cases as the tool's, for the same reason: a block the stages
-		// emptied is not an empty project, and "No memories found for this
-		// project" would say it is.
-		if note := projectContextEmptyNote(memories); note != "" {
+		// Same two cases as the tool's, and the same function, for the same reasons:
+		// a block the stages emptied is not an empty project, and this is the one
+		// place the project-scoped count and the union-scoped verdict are
+		// reconciled.
+		if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 			return note, nil
 		}
 		return "No memories found for this project.", nil
 	}
 	// The same note the tool appends, for the same reason, and at the same place:
 	// a block whose rows are all cross-project is not this project's context, and
-	// `## Recent Decisions` or `## Learned Context` above do not change that.
+	// `## Recent Decisions` or `## Learned Context` above do not change that. They
+	// are also how this branch is reached with an EMPTY memory read behind it, which
+	// is the case #788 is about — the function picks the sentence by the verdict, so
+	// this one does not ask what filled the block above.
 	if note := s.projectContextOwnRowsNote(ctx, projectID, memories); note != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(note)
