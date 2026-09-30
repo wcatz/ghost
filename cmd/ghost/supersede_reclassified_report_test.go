@@ -791,3 +791,54 @@ func TestSupersedePairLinesNamesTheEdgeACausesCycleRemoved(t *testing.T) {
 		t.Errorf("a re-affirmation that moved nothing is dressed as a withdrawal:\n%s", out)
 	}
 }
+
+// TestSupersedePairLinesSaysKeptWhenTheEdgeItIsAboutSurvived is the shape the
+// second review round found, and it is a line that made THREE claims where two
+// were false.
+//
+// A live 'supersedes' edge re-AFFIRMED beside a 'causes' CYCLE: the pass kept the
+// edge (and re-stamped it), and the verdict removed the cycle's two rows. The row
+// was routed into the withdrawal block because the run did move graph rows, and
+// the block's markers then said `already gone` — a claim about the 'supersedes'
+// edge, which is still live and which this run never removed — over a `re-linked`
+// clause announcing a change of relation that had not happened.
+func TestSupersedePairLinesSaysKeptWhenTheEdgeItIsAboutSurvived(t *testing.T) {
+	row := supersede.Classified{
+		Candidate: supersede.Candidate{
+			NewerID: reclassNewer, OlderID: reclassOlder,
+		},
+		Relation:         supersede.RelationSupersedes,
+		Reclassified:     true,
+		ReclassifiedFrom: supersede.RelationSupersedes,
+		CausesDropped:    2,
+		TargetProjectID:  "proj",
+	}
+	out := supersedePairLines(true, []supersede.Classified{row})
+	for _, want := range []string{
+		"kept",
+		"supersedes: the newer note replaces the older one",
+		"re-affirmed",
+		"[+2 causes edge dropped]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the row does not say %q:\n%s", want, out)
+		}
+	}
+	// The two markers that would be false, named.
+	for _, notWant := range []string{"already gone", "would withdraw", "re-linked"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("the row claims %q, and the edge it is about never left the graph:\n%s", notWant, out)
+		}
+	}
+
+	// The control in the other direction: a row whose edge really WAS taken by a
+	// concurrent pass still says `already gone`, because that is a fact about the
+	// graph and the marker above is only a fact about THIS run.
+	taken := row
+	taken.Relation = supersede.RelationNeither
+	taken.ReclassifiedFrom = supersede.RelationSupersedes
+	taken.CausesDropped = 0
+	if out := supersedePairLines(true, []supersede.Classified{taken}); !strings.Contains(out, "already gone") {
+		t.Errorf("an edge this run did not remove is not reported as already gone:\n%s", out)
+	}
+}

@@ -2558,19 +2558,20 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 		if c.OpposedLive {
 			notWritten = "  [not written: the pair's reverse direction is already live — a concurrent pass wrote it first]"
 		}
-		// The pair's live edge is gone, or a second one is: the verdict came
-		// back as something OTHER than the relation the edge carried, or it
-		// re-affirmed that relation and still removed a row of the other one —
-		// which is what a 'causes' CYCLE answered CAUSES does, keeping the
-		// direction it was asked about and dropping the edge asserting the
-		// other. Either way the row is a graph change rather than a decision,
-		// and a verdict that moved nothing is not here.
+		// The pair's live claim moved: the verdict came back as something OTHER
+		// than the relation the edge carried, OR it came back as that relation
+		// and the run still removed a row — which is what a 'causes' CYCLE
+		// answered CAUSES does, keeping the direction it was asked about and
+		// dropping the edge asserting the other one.
 		//
-		// The second clause is why CausesDropped is in the test and not only in
-		// the clause below it. Without it a settled 'causes' cycle printed as an
-		// ordinary `causes` line over a run that really did delete an edge,
-		// while the summary said "0 reclassified" — the false-claim class this
-		// whole block exists to prevent, wearing the row's own markers.
+		// Both of those are this block, and the MARKER is what tells them apart,
+		// because they are two different things that happened to one pair. The
+		// block's last marker used to be `already gone` — a claim about the edge
+		// a concurrent pass took first — and it is also what a row fell through
+		// to when the run had removed NOTHING: a live 'supersedes' edge
+		// re-affirmed beside a 'causes' cycle has its own edge still in the
+		// graph, so `already gone` described an edge that never left. Hence the
+		// `kept` case, which is a statement and not a euphemism.
 		if c.Reclassified && (c.Relation != c.ReclassifiedFrom || c.CausesDropped > 0) {
 			// The markers, spelled as supersedeReassessReport spells them and padded
 			// as it pads them, so a reader moving between the two reports reads one
@@ -2581,9 +2582,24 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 			switch {
 			case c.OpposedLive:
 				marker = "not written"
+			case !apply:
+				// Nothing has happened yet, so nothing is claimed — including
+				// the second graph row, which the dropped-rows clause below
+				// also holds back.
 			case c.Withdrawn:
 				marker = "withdrew   "
-			case apply:
+			case c.Relation == c.ReclassifiedFrom:
+				// The edge this row is about SURVIVED — the verdict affirmed the
+				// very relation it carried — and the run took rows of the OTHER
+				// relation instead, which the [ +N ] clause below names. Both of
+				// the markers above are false here: nothing is left to withdraw
+				// and a concurrent pass removed nothing, while the edge this
+				// line is about is still in the graph.
+				marker = "kept        "
+			default:
+				// The edge IS gone and this run did not remove it: a concurrent
+				// pass's invalidation won, and the row says so rather than
+				// claiming the write.
 				marker = "already gone"
 			}
 			// TWO clauses, and they are independent rather than alternatives,
@@ -2606,24 +2622,28 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 				// somehow does is held to the same rule rather than to whatever
 				// it happens to hold. The DROPPED clause below is unaffected: it
 				// is about the other relation, not about the refused write.
-			case c.Relation == supersede.RelationCauses:
+			case c.Relation == supersede.RelationCauses, c.Relation == supersede.RelationSupersedes:
+				// What the pass WROTE, and the verb distinguishes the two things
+				// writing it can be. A relation CHANGE is a re-link, and the
+				// SUPERSEDES arm here was missing entirely, so a live 'causes'
+				// edge replaced by a supersession went unmentioned while the
+				// summary said "1 reclassified". A relation UNCHANGED is a
+				// re-affirmation: the upsert re-stamped the edge and kept it, and
+				// calling that a re-link announced a change of relation that had
+				// not happened.
 				verb := "re-linked"
-				if !apply {
-					verb = "re-linked by --apply"
+				if c.Relation == c.ReclassifiedFrom {
+					verb = "re-affirmed"
+				} else if !apply {
+					verb = verb + " by --apply"
 				}
-				extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
-					shortID(c.OlderID), "causes", shortID(c.NewerID))
-			case c.Relation == supersede.RelationSupersedes:
-				// The mirror of the clause above, and it was missing: a live
-				// 'causes' edge replaced by a supersession is a graph change
-				// nobody was told about, and "0 reclassified" over it is the
-				// misleading line this block exists to prevent.
-				verb := "re-linked"
-				if !apply {
-					verb = "re-linked by --apply"
+				if c.Relation == supersede.RelationCauses {
+					extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
+						shortID(c.OlderID), "causes", shortID(c.NewerID))
+				} else {
+					extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
+						shortID(c.NewerID), "supersedes", shortID(c.OlderID))
 				}
-				extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
-					shortID(c.NewerID), "supersedes", shortID(c.OlderID))
 			}
 			// Only what the write actually moved, so a dry run says nothing here
 			// rather than forecasting a deletion nobody performed: Run makes no
