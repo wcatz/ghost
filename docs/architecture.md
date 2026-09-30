@@ -2056,6 +2056,8 @@ CGO_ENABLED=0 go build -o ghost ./cmd/ghost
 
 GoReleaser produces Linux, macOS, and Windows binaries for amd64 and arm64, with checksums. The Docker build uses a Go Alpine builder and an Alpine runtime, also with `CGO_ENABLED=0`. CI runs tests, race tests, vetting, linting, vulnerability scanning, and workflow validation.
 
+Every workflow job names `ubuntu-24.04` explicitly rather than `ubuntu-latest`, decided 2026-09-30 (#812): GitHub moves that label to Ubuntu 26 on 2026-10-19, and every release attestation published to date was minted on 24.04, so a floating label would move the image under the provenance clients verify. A non-required `ubuntu-26-canary` job in `ci.yml` runs the `build-and-test` steps on `ubuntu-26.04` so the eventual bump is made against a run that has already been green — the pin moves when the canary passes, not when the date arrives.
+
 ## Testing
 
 Three layers, and the third is about the artifact rather than the packages.

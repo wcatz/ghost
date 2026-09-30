@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   review:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The ONE place maintainers list review-model preferences. The selection
     # step uses this order first, then appends free models discovered at run
     # time; if every free candidate fails, the review uses the single paid

@@ -93,7 +93,7 @@ env:
 jobs:
   fts:
     name: fts (retrieval-only, no Ollama)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Skip only when a manual dispatch explicitly asked for hybrid alone.
     if: github.event_name != 'workflow_dispatch' || inputs.condition != 'hybrid'
     timeout-minutes: 30
@@ -134,7 +134,7 @@ jobs:
 
   hybrid:
     name: hybrid (Ollama embeddings)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Manual only — cold-cache embedding is too slow to gate PRs or to run on
     # a schedule (see the header comment). Runs on manual dispatch unless the
     # input explicitly asked for fts alone.

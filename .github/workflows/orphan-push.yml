@@ -38,7 +38,7 @@ jobs:
     # branch has a closed PR behind it. Without this the check would fail
     # on routine post-merge cleanup.
     if: github.event.deleted != true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Refuse commits on a branch whose pull requests have all closed
         env:
