@@ -9,6 +9,7 @@ import (
 	"go/token"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -241,6 +242,7 @@ func assertDrivenLoggers(t *testing.T, cases []struct {
 		// so the table is keyed on entry points rather than on every small
 		// function that happens to emit a line.
 		loggers := declaredLoggers(file)
+		seenInFile := 0
 		var stack []*ast.FuncDecl
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch node := n.(type) {
@@ -251,6 +253,7 @@ func assertDrivenLoggers(t *testing.T, cases []struct {
 					return true
 				}
 				found++
+				seenInFile++
 				fn := stack[len(stack)-1].Name.Name
 				if _, ok := covered[fn]; !ok {
 					t.Errorf("%s:%d: %s logs, but no case covers it: its log lines are outside assertLogKeysAreLabels",
@@ -259,10 +262,28 @@ func assertDrivenLoggers(t *testing.T, cases []struct {
 			}
 			return true
 		})
+		// Per FILE, not just per package: a file that declares a logger and is
+		// then seen making no level call is a gap in the scan, not a file that
+		// happens not to log. With only a package-wide count, that loss is
+		// silent — the other files keep `found` above zero, the file's cases stop
+		// being load-bearing, and deleting them from the table would still pass.
+		if len(loggers) > 0 && seenInFile == 0 {
+			t.Errorf("%s declares a *slog.Logger (%v) but the scan found no level call in it: the scan is not reading this file's logging, so its case covers nothing",
+				name, sortedKeys(loggers))
+		}
 	}
 	if found == 0 {
 		t.Fatal("no slog level call found in the package: this test has stopped seeing the code it guards")
 	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // slogLevelNames are the methods and functions that emit a record. Anything else
@@ -292,9 +313,9 @@ func isSlogLevelCall(call *ast.CallExpr, loggers map[string]bool) bool {
 			return true
 		}
 		// A method on a logger the file declares: a parameter, a struct field
-		// (`h.logger`), or a local. The name is resolved to a declaration in the
-		// same file, so `err.Error()` cannot pass and a logger reached through a
-		// local can.
+		// (`h.logger`), or a local. The receiver's name is resolved against a
+		// declaration in the same file, so `err.Error()` cannot pass, and a
+		// logger reached through a field or a local can.
 		return loggers[baseIdentName(fun.X)]
 	case *ast.Ident:
 		return slogLevelNames[fun.Name] // slog.Info(...) at package level
@@ -303,10 +324,18 @@ func isSlogLevelCall(call *ast.CallExpr, loggers map[string]bool) bool {
 }
 
 // declaredLoggers returns the names a file binds a *slog.Logger to: parameters,
-// results, struct fields and var declarations. A name bound to a logger ANYWHERE
-// in the file counts, which over-approximates by one declaration at worst and
-// under-approximates never for this package — every logger here is a parameter
-// or a field.
+// results, struct fields, var declarations and locals. A name bound to a logger
+// ANYWHERE in the file counts.
+//
+// The struct-field arm is load-bearing, not decoration. `RelationClassifier`
+// holds its logger in a field, so without that arm declaredLoggers(relation.go)
+// sees only SetLogger's parameter — named `l` — while every one of that file's
+// five log calls is `h.logger.Warn(...)`, whose receiver name is `logger`. The
+// scan then reports no logging function in the file at all, which is a silent
+// loss rather than a visible one, so the per-file check in assertDrivenLoggers
+// is the second half of the same fix: a file that declares a logger and is seen
+// making no level call is reported, and a scan that recognises nothing in a file
+// it has a logger in cannot hide behind the files that work.
 func declaredLoggers(file *ast.File) map[string]bool {
 	names := map[string]bool{}
 	bind := func(expr ast.Expr, ident *ast.Ident) {
@@ -314,19 +343,26 @@ func declaredLoggers(file *ast.File) map[string]bool {
 			names[ident.Name] = true
 		}
 	}
+	bindFieldList := func(list *ast.FieldList) {
+		if list == nil {
+			return
+		}
+		for _, field := range list.List {
+			for _, ident := range field.Names {
+				bind(field.Type, ident)
+			}
+		}
+	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch node := n.(type) {
 		case *ast.FuncDecl:
-			for _, list := range []*ast.FieldList{node.Recv, node.Type.Params, node.Type.Results} {
-				if list == nil {
-					continue
-				}
-				for _, field := range list.List {
-					for _, ident := range field.Names {
-						bind(field.Type, ident)
-					}
-				}
-			}
+			bindFieldList(node.Recv)
+			bindFieldList(node.Type.Params)
+			bindFieldList(node.Type.Results)
+		case *ast.StructType:
+			// A logger held as a field: RelationClassifier's `logger`, which is
+			// how this package's one long-lived component gets one.
+			bindFieldList(node.Fields)
 		case *ast.ValueSpec:
 			for i, ident := range node.Names {
 				if i < len(node.Values) {
@@ -338,7 +374,7 @@ func declaredLoggers(file *ast.File) map[string]bool {
 		case *ast.AssignStmt:
 			// A local logger: `logger := slog.New(...)`. The RHS is not checked
 			// for *slog.Logger — that needs a type checker — so this is admitted
-			// only for an assignment whose right side mentions slog at all.
+			// only for an assignment from the slog package.
 			if len(node.Lhs) != len(node.Rhs) {
 				return true
 			}
@@ -347,7 +383,7 @@ func declaredLoggers(file *ast.File) map[string]bool {
 				if !isIdent {
 					continue
 				}
-				if _, mentionsSlog := node.Rhs[i].(*ast.CallExpr); mentionsSlog && rhsNamesSlog(node.Rhs[i]) {
+				if rhsIsSlogNew(node.Rhs[i]) {
 					names[ident.Name] = true
 				}
 			}
@@ -357,9 +393,9 @@ func declaredLoggers(file *ast.File) map[string]bool {
 	return names
 }
 
-// rhsNamesSlog reports whether expr's outermost call is a slog package
-// function, which is the only way this package ever obtains a logger.
-func rhsNamesSlog(expr ast.Expr) bool {
+// rhsIsSlogNew reports whether expr is a call to slog.New, which is the only way
+// this package ever obtains a logger.
+func rhsIsSlogNew(expr ast.Expr) bool {
 	call, isCall := ast.Unparen(expr).(*ast.CallExpr)
 	if !isCall {
 		return false
