@@ -177,7 +177,7 @@ GhostMem does not require a separate Anthropic API key. The selected CLI harness
 
 - Remove the `ghost` MCP entry to stop the server for a client.
 - Set `embedding.enabled: false` to use FTS5 only.
-- Keep `reflection.auto_reflect`, `reflection.auto_resolve`, and `reflection.auto_supersede` disabled to avoid automatic lifecycle work.
+- Keep `reflection.auto_reflect`, `reflection.auto_resolve`, and `reflection.auto_supersede` disabled to avoid automatic lifecycle work. If you do enable the last one, `reflection.supersede_consensus` (default 3) makes the automatic phase write only the edges its classifier agrees on across that many passes.
 - Delete `$XDG_DATA_HOME/ghost` (or `~/.local/share/ghost`) to remove the local store.
 
 The configuration reference is [`docs/configuration.md`](docs/configuration.md).

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +97,17 @@ func runLifecycle() {
 	reflectSkipped := cfg.Reflection.AutoReflect && !llmOK
 	if reflectSkipped {
 		fmt.Fprintln(os.Stderr, "lifecycle: skipping reflect — no CLI binary available")
+	}
+
+	// A reflection.supersede_consensus below the minimum makes the supersede phase
+	// run UNGATED, and NOTHING on that phase's own report says so — an ungated
+	// pass prints no gate line, so a clamped phase's output is byte-identical to
+	// one with no key at all. This is what makes the clamp findable, and it is
+	// said here, beside the reflect-skip notice and in the same voice, because
+	// this function reports its own preconditions on stderr and that is where the
+	// unattended path collects them.
+	if cfg.Reflection.AutoSupersede {
+		fmt.Fprint(os.Stderr, supersedeConsensusClampNotice(projectName, cfg.Reflection.SupersedeConsensus))
 	}
 
 	// Stale per-invocation scratch dirs from crashed harness children would
@@ -331,9 +343,95 @@ func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifec
 		phases = append(phases, lifecyclePhase{"resolve", []string{"resolve", "--project", projectName, "--apply"}, timeout})
 	}
 	if cfg.Reflection.AutoSupersede {
-		phases = append(phases, lifecyclePhase{"supersede", []string{"supersede", "--project", projectName, "--apply"}, timeout})
+		args := []string{"supersede", "--project", projectName, "--apply"}
+		// The flag is emitted only when the gate is actually on, rather than
+		// always with the clamped number: a phase that printed `--consensus 1`
+		// would be asserting a gate it is not running, and the parser refuses 1
+		// precisely because a gate of one gates on nothing. Omitting it is also
+		// what makes the ungated automatic phase byte-identical to the argv this
+		// emitted before the key existed.
+		//
+		// The phase's TIMEOUT is deliberately NOT scaled with N. That bound is a
+		// HANG DETECTOR — it exists so a phase that will not finish stops holding
+		// the per-project PID claim instead of wedging maintenance until someone
+		// kills it by hand — and multiplying it by the work factor makes it N
+		// times longer to notice a model that never answers, which is how a hang
+		// detector stops being one. The multiplier therefore lands on the operator
+		// instead, and the cost of an expired deadline is stated in the three
+		// places the key is described.
+		if n := supersedePhaseConsensus(cfg); n >= supersede.MinConsensus {
+			args = append(args, "--consensus", strconv.Itoa(n))
+		}
+		phases = append(phases, lifecyclePhase{"supersede", args, timeout})
 	}
 	return phases
+}
+
+// supersedePhaseConsensus is the --consensus the automatic supersede phase runs
+// with, clamped into the range the flag accepts.
+//
+// The clamp is here rather than in the config package so the rule sits with the
+// one caller that turns the number into a command line, and so a config value of
+// zero or a negative reaches the same ungated pass an operator would get by
+// leaving the flag off. Refusing it would fail a phase nobody is watching, hours
+// after the typo, with a message about quorum arithmetic; running the ordinary
+// pass is the safe reading of a value the operator could not have meant as a
+// smaller gate.
+//
+// A CLAMP IS NOT VISIBLE ON THE PHASE'S OWN REPORT, and this function's callers
+// have to say so rather than imply otherwise: `lifecyclePhases` omits the flag
+// entirely, the pass runs with Consensus == 1, and supersedeReport prints its
+// gate line only when Consensus > 1 — so a clamped phase's stdout is
+// byte-identical to a phase with no key at all. What makes it visible instead is
+// the notice runLifecycle prints beside its reflect-skip notice, which on the
+// unattended path is the phase tail and the lifecycle.log beneath it. That is
+// the right place for it: the phase's own report is the thing that cannot say
+// it, and the config line that caused it is in a file the operator wrote, so a
+// line they can find is worth more than one they would have to know to read.
+//
+// The boundary is MinConsensus, not 1: below it there is no gate, not a smaller
+// one, which is why the flag is omitted rather than emitted as a number the
+// parser refuses.
+//
+// WHY THE DEFAULT IS 3 lives with the key, in config.Reflection.SupersedeConsensus
+// — it is that field's value, not a second constant here, and a second copy of a
+// tunable is a second place for it to be wrong. Briefly: 3 is the number #779's
+// own measurement used, and the only unanimity subset that cleared a bar worth
+// automating (0.79 for edges proposed in all three runs against 0.55 over
+// distinct proposals and 0.33 for one proposed in a single run), so a lower
+// default would be a gate chosen for costing less than the evidence supports.
+//
+// A value ABOVE MinConsensus is honoured as typed, however large: it costs more
+// calls and buys a stricter gate, and a cap would make a number in the config a
+// different number from the one written there.
+func supersedePhaseConsensus(cfg *config.Config) int {
+	n := cfg.Reflection.SupersedeConsensus
+	if n < supersede.MinConsensus {
+		return 1
+	}
+	return n
+}
+
+// supersedeConsensusClampNotice is the one line `ghost lifecycle` prints when
+// reflection.supersede_consensus is below the minimum, and it exists because the
+// clamp is otherwise invisible: lifecyclePhases omits --consensus entirely, the
+// pass runs with Consensus == 1, and supersedeReport prints its gate line only
+// when Consensus > 1 — so a clamped phase's output is byte-identical to a phase
+// with no key at all. An operator who typed `supersede_consensus: 0` to be safe
+// would get an ungated phase and nothing anywhere saying so.
+//
+// Empty above the minimum, so the ordinary path is unchanged, and it names the
+// project, the key, the value and the boundary: "ran ungated" without them is
+// not actionable, and a reader who does not know the minimum cannot tell whether
+// their number was off by a little or by an order of magnitude. The boundary is
+// supersede.MinConsensus rather than 1 because below it there is no gate at all,
+// not a smaller one.
+func supersedeConsensusClampNotice(projectName string, n int) string {
+	if n >= supersede.MinConsensus {
+		return ""
+	}
+	return fmt.Sprintf("lifecycle: reflection.supersede_consensus is %d, below the minimum of %d — the supersede phase for %s runs UNGATED (one classification pass, no agreement gate)\n",
+		n, supersede.MinConsensus, projectName)
 }
 
 // clampReflectMemories applies the shared content cap (memory.MaxContentLen)
@@ -1336,6 +1434,15 @@ type supersedePair struct{ source, target string }
 // for every project; a valueless --project is an error. Extracted from
 // runSupersede so the argv contract is unit-testable without os.Exit.
 //
+// --consensus N gates the WRITES on N independent classification passes over the
+// same candidate set, and is off unless typed (one pass, the historical
+// behaviour). N below supersede.MinConsensus is refused rather than clamped: a
+// gate of 1 runs the ordinary pass and writes whatever it proposed, which is the
+// ungated pass wearing the flag of a safety control, and an operator who typed
+// the flag meant to gate something. It is refused alongside the two repair modes
+// for the same kind of reason --withdraw is: those judge edges the graph already
+// holds, and the measurement the gate rests on was made about NEW proposals.
+//
 // --withdraw takes TWO operands and is refused alongside --reassess, for the two
 // reasons that are load-bearing rather than stylistic. Its operands are
 // consumed by the flag, so they can never be mistaken for the positional
@@ -1358,29 +1465,67 @@ type supersedePair struct{ source, target string }
 // And a command that re-judged every edge AND removed named ones would have two
 // dry-run answers, so the reader is told which of the two repairs they asked for
 // twice.
-func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, withdraw []supersedePair, err error) {
+//
+// The 1 here is not a default anyone chose for the AUTOMATIC path: that number
+// lives in config.Reflection.SupersedeConsensus, whose own comment says why it
+// is 3, and this comment deliberately does not restate it — a second copy of a
+// tunable is a second place for it to be wrong, and the config field is the one
+// the lifecycle phase reads.
+// checkSupersedeConsensus refuses a gate below supersede.MinConsensus. It is one
+// function rather than a check in each of the two flag arms because the message
+// is the contract: both spellings have to refuse identically, and a duplicated
+// fmt.Errorf is a sentence a later edit fixes in one arm and forgets in the
+// other, which is a silent divergence in an error path nothing else tests.
+func checkSupersedeConsensus(n int) error {
+	if n < supersede.MinConsensus {
+		return fmt.Errorf("--consensus needs at least %d passes (1 would run the ordinary pass again and gate on nothing)", supersede.MinConsensus)
+	}
+	return nil
+}
+
+func parseSupersedeArgs(args []string) (project, source string, apply, reassess bool, threshold float32, consensus int, withdraw []supersedePair, err error) {
 	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
+	consensus = 1    // one pass: the flag is off until it is typed
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--apply":
 			apply = true
 		case args[i] == "--reassess":
 			reassess = true
+		case args[i] == "--consensus" && i+1 < len(args):
+			v, cerr := strconv.Atoi(args[i+1])
+			if cerr != nil {
+				return "", "", false, false, 0, 0, nil, fmt.Errorf("--consensus needs a whole number of passes: %q", args[i+1])
+			}
+			if verr := checkSupersedeConsensus(v); verr != nil {
+				return "", "", false, false, 0, 0, nil, verr
+			}
+			consensus = v
+			i++
+		case strings.HasPrefix(args[i], "--consensus="):
+			v, cerr := strconv.Atoi(strings.TrimPrefix(args[i], "--consensus="))
+			if cerr != nil {
+				return "", "", false, false, 0, 0, nil, fmt.Errorf("--consensus needs a whole number of passes")
+			}
+			if verr := checkSupersedeConsensus(v); verr != nil {
+				return "", "", false, false, 0, 0, nil, verr
+			}
+			consensus = v
 		case args[i] == "--withdraw" && i+2 < len(args) && !strings.HasPrefix(args[i+1], "-") && !strings.HasPrefix(args[i+2], "-"):
 			withdraw = append(withdraw, supersedePair{source: args[i+1], target: args[i+2]})
 			i += 2
 		case args[i] == "--withdraw":
-			return "", "", false, false, 0, nil, fmt.Errorf("--withdraw needs a source id and a target id: --withdraw <source-id> <target-id>")
+			return "", "", false, false, 0, 0, nil, fmt.Errorf("--withdraw needs a source id and a target id: --withdraw <source-id> <target-id>")
 		case args[i] == "--project":
 			if i+1 >= len(args) {
-				return "", "", false, false, 0, nil, errors.New("--project requires a value")
+				return "", "", false, false, 0, 0, nil, errors.New("--project requires a value")
 			}
 			project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
 			project = strings.TrimPrefix(args[i], "--project=")
 			if project == "" {
-				return "", "", false, false, 0, nil, errors.New("--project requires a value")
+				return "", "", false, false, 0, 0, nil, errors.New("--project requires a value")
 			}
 		case args[i] == "--threshold" && i+1 < len(args):
 			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
@@ -1399,13 +1544,22 @@ func parseSupersedeArgs(args []string) (project, source string, apply, reassess 
 		case !strings.HasPrefix(args[i], "-"):
 			project = args[i]
 		default:
-			return "", "", false, false, 0, nil, fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, 0, 0, nil, fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
 	if len(withdraw) > 0 && reassess {
-		return "", "", false, false, 0, nil, errors.New("--withdraw removes the edges you name and --reassess re-judges every edge in the graph; run them as two commands")
+		return "", "", false, false, 0, 0, nil, errors.New("--withdraw removes the edges you name and --reassess re-judges every edge in the graph; run them as two commands")
 	}
-	return project, source, apply, reassess, threshold, withdraw, nil
+	if consensus > 1 && (reassess || len(withdraw) > 0) {
+		// Both repair modes judge edges the graph ALREADY holds, one verdict per
+		// edge, and a gate that quietly tripled those calls would make the repair
+		// cost three times what its report says it cost — and would refuse to
+		// withdraw an edge the passes happen to split on, which is the one job
+		// the repair exists to do. The creation pass is where the measurement
+		// applied; a repair is a decision about an edge that is already live.
+		return "", "", false, false, 0, 0, nil, errors.New("--consensus applies to the creation pass; --reassess and --withdraw judge edges that are already in the graph, one verdict per edge")
+	}
+	return project, source, apply, reassess, threshold, consensus, withdraw, nil
 }
 
 // supersedeUsage is the help for `ghost supersede`: stderr when the project
@@ -1426,6 +1580,14 @@ Flags:
                       unsupersede history row; without it nothing is written.
                       --source and --threshold are not used: nothing is classified.
                       Cannot be combined with --reassess (run them as two commands).
+  --consensus N       Classify the candidate set N times and write ONLY what all
+                      N passes proposed, in the same direction (N >= 2; default 1,
+                      which is no gate). A pair the passes split on is reported as
+                      "not agreed" with its count and ids, and nothing is written
+                      for it. Costs N times the classify calls of an ungated pass.
+                      Refused with --reassess and --withdraw, which judge edges
+                      already in the graph. Not used in a dry run beyond telling
+                      you what --apply would write.
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
   --source string     CLI harness to classify through: claude-code, opencode,
                       codex, or goose. Defaults to the calling harness
@@ -1448,6 +1610,17 @@ Runs through the configured CLI harness of the calling session (--source
 overrides; otherwise detected from the environment and process ancestry — an
 undetectable caller is an error, never a fallback to a different harness). The
 harness owns its authentication and billing.
+
+--consensus is the gate for a pass you intend to APPLY, and it is the one the
+measurement points at: over copies of three real stores, edges the classifier
+proposed in all three dry runs were 79% correct against 55% over distinct
+proposals and 33% for the ones proposed in a single run. So it requires
+unanimity rather than a majority — a 2-of-3 majority would write exactly the
+middle row — and it reports every pair it suppressed, with the ids and the tally,
+because a gated run that wrote nothing and said nothing reads as a run that found
+nothing. Pairs skip-if-unchanged or the NEITHER cache would have skipped are
+skipped once and not asked N times, so the multiplier falls on the pairs that
+were going to be asked anyway.
 
 --withdraw is the other repair, and the one for an edge the rules still accept:
 --reassess withdraws what the current rubric rejects, so a pair that is wrong for
@@ -1775,6 +1948,16 @@ func cycleEdgeState(c supersede.CyclicPair, edge supersede.CycleOutcome, apply b
 func supersedeReport(projectName string, res supersede.Result, verb string, calls, retries int) string {
 	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s)%s, %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
 		projectName, res.Candidates, calls, retryNote(retries), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	// The gate's own line, and it is printed BEFORE the not-agreed rows because
+	// it is what makes those rows readable: without the multiplier on the page, a
+	// reader cannot tell an empty consensus result from a pass that found nothing
+	// to gate. The pairs count is Result.ConsensusPairsAsked rather than a
+	// recount of the call log, so the number is the multiplier APPLIED and not
+	// the number of spawns that happened to cover it.
+	if res.Consensus > 1 {
+		out += fmt.Sprintf("  consensus %d: %d pair(s) asked, and only what all %d passes proposed was %s\n",
+			res.Consensus, res.ConsensusPairsAsked, res.Consensus, verb)
+	}
 	if res.Vetoed > 0 {
 		out += fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
 	}
@@ -1792,7 +1975,73 @@ func supersedeReport(projectName string, res supersede.Result, verb string, call
 		out += fmt.Sprintf("  %d pair(s) refused: a supersedes link is already live in BOTH directions, which demotes both endpoints — not judged, not written, and not withdrawn here; run `%s` to settle the cycle\n",
 			res.Bidirectional, followup.ReassessCommand(projectName))
 	}
+	out += supersedeNotAgreedLines(res)
 	return out
+}
+
+// supersedeNotAgreedLines renders the pairs the consensus gate suppressed, one
+// line each, and nothing at all when the gate was off or nothing was split.
+//
+// It is a count AND a list because the count alone is not actionable: an
+// operator deciding whether to keep a consensus gate needs to see WHICH pairs
+// were suppressed and how narrowly they split, since a pair that split 2-1 is a
+// different finding from one that split four ways. The wording is the same in a
+// dry run and under --apply on purpose — nothing was written either way, so
+// there is no tense to change and a tense that changed would imply a run's
+// outcome depends on a flag that did not affect it.
+func supersedeNotAgreedLines(res supersede.Result) string {
+	if len(res.Disputed) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	// The advice, and the SECOND half of it matters more than it looks: raising
+	// N makes unanimity strictly HARDER, never easier, because a pair that split
+	// 2-1 at N=3 has to satisfy one more pass at N=4. Nothing in the split path
+	// converts into agreement by asking more times — only a fresh draw of answers
+	// can, and only a lower N or a different harness changes what is being asked.
+	// So the two remedies offered are the two that are real, and the report must
+	// not contradict the dry-run hint further down, which says the same thing.
+	fmt.Fprintf(&b, "  %d pair(s) not agreed: the classification passes split, so no edge was written and none was cached — re-run to ask again (fresh passes may agree), or drop --consensus to write the first pass's answer; raising it makes unanimity harder, not easier\n", res.NotAgreed)
+	for _, d := range res.Disputed {
+		// The tally in DESCENDING VOTE ORDER so the line reads as the finding
+		// rather than as a map dump, because the verdict a reader takes away is
+		// the one the MAJORITY gave. A fixed verdict order cannot do that: it
+		// prints `1 supersedes, 2 neither` for a split whose majority is NEITHER,
+		// leading with the minority, and this gate's whole finding is that the
+		// leading verdict is what a reader keeps. Ties keep the fixed order, so a
+		// 1-1-1 split is still deterministic and still reads supersedes, causes,
+		// neither, reversed, unreadable.
+		//
+		// An unreadable pass is named as its own verdict because it is a
+		// different failure from a split between two readable ones: one is the
+		// model, the other is the harness or the prompt.
+		parts := make([]string, 0, len(d.Tally))
+		rels := make([]supersede.Relation, 0, len(d.Tally))
+		for _, rel := range []supersede.Relation{supersede.RelationSupersedes, supersede.RelationCauses, supersede.RelationNeither, supersede.RelationReversed, ""} {
+			if d.Tally[rel] > 0 {
+				rels = append(rels, rel)
+			}
+		}
+		sort.SliceStable(rels, func(i, j int) bool { return d.Tally[rels[i]] > d.Tally[rels[j]] })
+		for _, rel := range rels {
+			parts = append(parts, fmt.Sprintf("%d %s", d.Tally[rel], relationWord(rel)))
+		}
+		fmt.Fprintf(&b, "  %s -> %s  [not agreed: %s]\n",
+			shortID(d.NewerID), shortID(d.OlderID), strings.Join(parts, ", "))
+	}
+	return b.String()
+}
+
+// relationWord names a verdict for a tally line. The empty Relation is the
+// parser's "no recognizable verdict", and it gets the word the report uses
+// everywhere else rather than a blank or a zero: a pass whose reply could not be
+// read is a fact about the run, and rendering it as nothing would make a
+// two-verdict split look like a unanimous one that simply lost a vote.
+func relationWord(rel supersede.Relation) string {
+	if rel == "" {
+		return "unreadable"
+	}
+	return string(rel)
 }
 
 // retryNote is the ", N retried call(s)" clause the call counts share: empty
@@ -1995,7 +2244,7 @@ func embedSupersedeCorpus(ctx context.Context, cfg *config.Config, store *memory
 // would otherwise report an empty result for a corpus the operator can see (#716).
 // The other two modes read no vectors, which is why the pre-scan sits after them.
 func runSupersede() {
-	projectName, source, apply, reassess, threshold, withdrawPairs, parseErr := parseSupersedeArgs(os.Args[2:])
+	projectName, source, apply, reassess, threshold, consensus, withdrawPairs, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
 		os.Exit(1)
@@ -2066,7 +2315,11 @@ func runSupersede() {
 	// reads the vector index at all.
 	embedded, budgetExpired := embedSupersedeCorpus(ctx, cfg, store, projectID, supersedeEmbedBudget, logger)
 
-	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
+	res, classified, err := supersede.RunWith(ctx, store, cls, projectID, supersede.Options{
+		Threshold: threshold,
+		Apply:     apply,
+		Consensus: consensus,
+	}, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -2121,6 +2374,49 @@ func runSupersede() {
 			fmt.Println("\nRe-run with --apply to withdraw these edges.")
 		}
 	}
+	// A gated DRY RUN that would have written nothing BECAUSE THE GATE REFUSED is
+	// the case the re-run hint above cannot serve: there is no --apply worth
+	// running, because the gate would refuse the same pairs again. Saying so is
+	// the difference between an operator who re-runs with --apply and gets an
+	// empty result, and one who knows the model is unstable on this corpus.
+	fmt.Print(supersedeConsensusDryRunHint(apply, res))
+}
+
+// supersedeConsensusDryRunHint is the one extra block a gated DRY RUN prints, and
+// it is a named function rather than a conditional Print inside runSupersede
+// because the whole reason it exists is a wording and a CONDITION, and
+// runSupersede ends in os.Exit — so a condition nobody can call cannot be tested
+// at all, which is how the first version came to assert a cause the run may not
+// have had.
+//
+// `apply` is a parameter rather than read from the enclosing function because
+// the block is about a run that has NOT happened yet, and an --apply run whose
+// unanimous verdicts were all `neither` or `reversed` satisfies every other
+// condition here: it wrote no links, it had splits, and it is gated. Printing
+// "so --apply would write nothing for them" after the summary already said
+// `linked` is a prediction about a run that has already run, and advice to
+// re-apply a flag for an apply that already happened. A dry run is the only mode
+// where the sentence is true.
+//
+// The rest is gated on `res.NotAgreed > 0` and not on the absence of writes, and
+// that is the load-bearing line. A gated run writes nothing for three unrelated
+// reasons, and only one of them is this block's business:
+//
+//   - every candidate vetoed. The veto line is already on the page and the
+//     remedy is to read it. Nothing was asked, so nothing could disagree.
+//   - every pass unreadable. The unclassifiable line is already on the page, and
+//     the remedy is a prompt or a harness, not a quorum.
+//   - the passes split. THIS one, and only this one, is a re-run's problem.
+//
+// Telling an operator the model "is not deterministic" because nothing could be
+// parsed is the exact conflation the pass's three-outcome split exists to avoid,
+// so the block stays silent unless a split is what actually happened.
+func supersedeConsensusDryRunHint(apply bool, res supersede.Result) string {
+	if apply || res.Consensus <= 1 || res.NotAgreed == 0 || res.WouldWriteLinks() {
+		return ""
+	}
+	return fmt.Sprintf("\nThe %d consensus pass(es) split on %d pair(s), so --apply would write nothing for them. Re-run to ask again — the model is not deterministic, and a fresh sample may agree — or drop --consensus to write the first pass's answer. Raising it makes unanimity harder, not easier.\n",
+		res.Consensus, res.NotAgreed)
 }
 
 // reclassifiedWithdrawals projects the pairs whose live 'supersedes' edge this

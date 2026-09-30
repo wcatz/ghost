@@ -2027,7 +2027,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false, 0.80},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			project, source, apply, reassess, threshold, withdraw, err := parseSupersedeArgs(tc.args)
+			project, source, apply, reassess, threshold, _, withdraw, err := parseSupersedeArgs(tc.args)
 			if err != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", tc.args, err)
 			}
@@ -2053,7 +2053,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 		{"threshold missing value", []string{"myproj", "--threshold"}, `unknown flag "--threshold"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, _, _, _, err := parseSupersedeArgs(tc.args)
+			_, _, _, _, _, _, _, err := parseSupersedeArgs(tc.args)
 			if err == nil {
 				t.Fatalf("parseSupersedeArgs(%v) must fail", tc.args)
 			}
@@ -2123,7 +2123,7 @@ func TestDashProjectLifecycleRoundTrip(t *testing.T) {
 			}
 			got, apply = p.project, p.apply
 		case "supersede":
-			project, _, a, reassess, _, withdraw, perr := parseSupersedeArgs(args)
+			project, _, a, reassess, _, _, withdraw, perr := parseSupersedeArgs(args)
 			if perr != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", ph.args, perr)
 			}

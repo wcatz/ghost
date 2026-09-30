@@ -309,6 +309,7 @@ reflection:
   auto_reflect: false
   auto_resolve: false
   auto_supersede: false
+  supersede_consensus: 3
   lifecycle_timeout_minutes: 60
   consolidation_timeout_minutes: 10
 ```
@@ -337,12 +338,68 @@ one. A `supersedes` now has to retire **every** claim of the older note, and a
 log entry, a recurring defect and a parallel investigation are not chains. The
 same measurement found the wrong edges are an *unstable* classifier as much as a
 wrong one — 79% precision on edges proposed in all three passes, 33% on those
-proposed in one — which is why a plain `--apply` is still not the way to turn this
-phase on. (The second half of that measurement, a gate on agreement between
-repeated passes, is not in this PR.) Turning the phase on still means writing
-real edges from a model that
-has not been measured on your notes; running `ghost supersede <project>` by hand
-and reading the list is free of that, and it is dry-run by default.
+proposed in one — which is what `supersede_consensus` is for.
+
+### `supersede_consensus`
+
+**Read only when `auto_supersede: true`.** The automatic supersede phase
+classifies its candidate set this many times and writes **only what every pass
+proposed, in the same direction**; a pair the passes split on is reported as "not
+agreed" with its count and ids, and nothing is written for it. Unanimity rather
+than a majority, because a 2-of-3 majority writes exactly the 0.56 row of that
+measurement. Default `3`, the number the measurement used. Raising the count
+makes the gate **harder**, not easier — a pair that split 2-1 at 3 has to satisfy
+one more pass at 4 — so a higher value suppresses more and costs more. It is
+worth setting for a corpus you want to be conservative about, not as a way to
+settle a specific pair.
+
+The cost is real and worth naming: a gated phase asks the classifier **N times**
+what an ungated one asks once, and the harness bills every call. Two things do
+*not* scale with N, and both are why the multiplier is affordable: a pair
+`skip-if-unchanged` or the NEITHER cache would have skipped is skipped **once**,
+not N times, and an unchanged live edge is not re-asked at all — so on a
+converged project the gate costs almost nothing, and the cost is concentrated on
+the passes that were about to be asked anyway.
+
+**The phase's wall time scales with N and its deadline does not.**
+`lifecycle_timeout_minutes` still bounds the whole supersede phase, unchanged, and
+it is a hang detector rather than a work budget, so it is deliberately not
+multiplied: raising it to fit N would make it N times longer to notice a model
+that never answers, which is how a hang detector stops being one. Turning the gate
+on at the default 3 therefore multiplies the work against the same 60 minutes —
+on a large project, raise `lifecycle_timeout_minutes` or set the count to 2.
+
+Know what an expired deadline costs under `--apply`. The bound is enforced by
+`SIGTERM` to the phase's process group, and that signal can land **inside the
+apply block**, whose per-pair link writes are separate transactions — so an
+expired deadline leaves a **partial write**, **no report at all** (the CLI prints
+nothing on the error path) and a `lifecycle-last-failure` marker the next
+session-start turns into an alert. Nothing is corrupted: the writes that landed
+are correct and a re-run converges from the graph's own state. But there is no
+partial report to read either, which is the reason to raise the bound rather than
+rely on the retry.
+
+A value below `2` runs the **ungated** pass, and the phase prints no
+`--consensus` at all: a value under the minimum is not a smaller gate but no
+gate, and the flag is omitted rather than emitted as a number the parser refuses.
+Nothing on the phase's own output says so — an ungated pass prints no gate line —
+so `ghost lifecycle` announces it on stderr, beside its reflect-skip notice, and
+that is where the unattended path collects it (the phase tail, and
+`lifecycle.log` beneath it). Understand what an ungated phase is choosing: the
+measurement that motivates the gate says those edges are 0.55 correct, and a
+wrong one buries a live memory. A gated run's own report says which number ran,
+so the two are told apart by that notice rather than by the phase's stdout.
+
+The flag `ghost supersede <project> --apply --consensus N` is the same gate by
+hand, and it is **off unless typed** — a hand-run pass is never silently tripled.
+It is refused with `--reassess` and `--withdraw`, which judge edges already in
+the graph, where a split verdict would refuse the withdrawal the repair exists to
+perform.
+
+Turning the phase on still means writing real edges from a model that has not
+been measured on your notes; running `ghost supersede <project>` by hand and
+reading the list is free of that, and it is dry-run by default.
+
 
 **Upgrading from before #779: run `--reassess` once.** The tightened rubric
 applies to pairs judged from here on — the NEITHER cache's key prefix moved with
@@ -488,6 +545,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_REFLECTION_AUTO_REFLECT` | `reflection.auto_reflect` |
 | `GHOST_REFLECTION_AUTO_RESOLVE` | `reflection.auto_resolve` |
 | `GHOST_REFLECTION_AUTO_SUPERSEDE` | `reflection.auto_supersede` |
+| `GHOST_REFLECTION_SUPERSEDE_CONSENSUS` | `reflection.supersede_consensus` |
 | `GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES` | `reflection.lifecycle_timeout_minutes` |
 | `GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES` | `reflection.consolidation_timeout_minutes` |
 | `GHOST_LINKING_DEMOTION_THRESHOLD` | `linking.demotion_threshold` |

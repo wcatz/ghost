@@ -12,7 +12,7 @@ import (
 // get wrong — the operands must not be read as the project, because parseSupersedeArgs
 // takes the project from any bare word.
 func TestParseSupersedeArgsWithdraw(t *testing.T) {
-	project, source, apply, reassess, threshold, withdraw, err := parseSupersedeArgs([]string{
+	project, source, apply, reassess, threshold, _, withdraw, err := parseSupersedeArgs([]string{
 		"ghost", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--withdraw", "11223344", "55667788", "--apply",
 	})
 	if err != nil {
@@ -53,7 +53,7 @@ func TestParseSupersedeArgsWithdrawOperandErrors(t *testing.T) {
 		{"ghost", "--withdraw", "a1b2c3d4"},
 		{"ghost", "--withdraw", "a1b2c3d4", "--apply"},
 	} {
-		_, _, _, _, _, withdraw, err := parseSupersedeArgs(args)
+		_, _, _, _, _, _, withdraw, err := parseSupersedeArgs(args)
 		if err == nil {
 			t.Errorf("parseSupersedeArgs(%v) = no error, want one; it read %d pair(s)", args, len(withdraw))
 			continue
@@ -68,7 +68,7 @@ func TestParseSupersedeArgsWithdrawOperandErrors(t *testing.T) {
 // two different repairs, and one command doing both has two dry-run answers.
 // The reader is told which one they asked for twice.
 func TestParseSupersedeArgsWithdrawRefusesReassess(t *testing.T) {
-	_, _, _, _, _, _, err := parseSupersedeArgs([]string{"ghost", "--reassess", "--withdraw", "a1b2c3d4", "e5f6a7b8"})
+	_, _, _, _, _, _, _, err := parseSupersedeArgs([]string{"ghost", "--reassess", "--withdraw", "a1b2c3d4", "e5f6a7b8"})
 	if err == nil {
 		t.Fatal("parseSupersedeArgs accepted --reassess with --withdraw")
 	}
