@@ -605,13 +605,39 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	// UNREADABLE row whose id contains one of those is not reached by this arm. It
 	// is a gap in a best-effort arm for malformed rows, not in the parsed one,
 	// which compares ids exactly and covers every row Ghost wrote.
+	//
+	// TWO statements, ONE predicate (#852). The verdicts filed against the calls
+	// this removes go WITH them, so the purge is keyed on the CALL that is going
+	// away rather than on the memory that named it. A call that admitted MEM1 and
+	// MEM2 loses its whole record row when MEM1 is purged, and its (call, MEM2)
+	// verdict is that call's own: the `memory_id = ?` arm below reaches MEM1's
+	// verdict and nothing else, so the rest survived pointing at a row that no
+	// longer existed — and retrieval_record has no AUTOINCREMENT, so the freed
+	// rowid was handed to the NEXT call, which inherited a verdict about a memory
+	// it never admitted. So the sweep SELECTs the doomed rowids with exactly the
+	// predicate the record delete uses; retrievalRecordNamingMemory is one function
+	// for both, because two copies of this text could drift into removing the
+	// record rows and keeping their verdicts, which is the orphan the pairing
+	// exists to prevent.
+	//
+	// The sweep comes FIRST, and that order is load-bearing rather than a style
+	// choice: its predicate is a subquery over retrieval_record, so once those rows
+	// are gone it can no longer see them and would silently match nothing.
+	//
+	// Cost, since there is no index here to hide it behind: one scan of
+	// retrieval_audit — what the report's own read costs anyway, on a table
+	// bounded at retrievalAuditRowsCap. TestRetrievalAuditsCarryOneIndex forbids an
+	// index on record_rowid because every insert would pay for it inside the write
+	// lock and nothing reads it but these sweeps, so the alternative of collecting
+	// the doomed rowids in Go costs the same scan plus a statement per batch.
 	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM retrieval_record
-		 WHERE EXISTS (
-			SELECT 1 FROM json_each(`+readableVerdicts(`retrieval_record.verdicts`)+`)
-			WHERE value->>'id' = ?
-		) OR (COALESCE(`+verdictsUnreadable(`retrieval_record.verdicts`)+`, 0)
-		     AND instr(retrieval_record.verdicts, '"id":' || json_quote(?)) > 0)`,
+		`DELETE FROM retrieval_audit WHERE record_rowid IN (
+			SELECT rowid FROM retrieval_record WHERE `+retrievalRecordNamingMemory()+`)`,
+		memoryID, memoryID); err != nil {
+		return 0, fmt.Errorf("purge the verdicts of the purged calls: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM retrieval_record WHERE `+retrievalRecordNamingMemory(),
 		memoryID, memoryID); err != nil {
 		return 0, fmt.Errorf("purge retrieval records: %w", err)
 	}
@@ -620,9 +646,14 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	// record arm above deletes rather than redacts: a verdict's subject is a memory
 	// ID, and a purge that removed the memory while its verdicts kept naming it
 	// would leave a report counting judgments about a memory that no longer exists.
-	// This one is a plain equality on a real column rather than a scan of a JSON
-	// document, which is the same cost the table's cap makes free: a redaction is
-	// rare and the table is bounded.
+	//
+	// This arm is not redundant with the sweep above, and the difference is what
+	// each is for: the sweep reaches the verdicts of calls that are going away,
+	// this one reaches the verdicts whose CALL SURVIVES — every unattributed row
+	// (record_rowid 0, which the replacement refuses to treat as a key) and any
+	// row whose call judged the memory without naming it. A plain equality on a
+	// real column rather than a scan of a JSON document, which is the same cost the
+	// table's cap makes free: a redaction is rare and the table is bounded.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM retrieval_audit WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge retrieval audits: %w", err)

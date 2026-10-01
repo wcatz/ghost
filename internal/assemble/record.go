@@ -44,6 +44,14 @@ import (
 // call that already happened: the answer is in the caller's hands either way, and
 // a report with a hole in it is recoverable where a stalled tool is not. Every
 // drop is logged, so the gap is visible rather than inferred.
+//
+// The ~45us is a store that has filed no verdicts. At the audit cap the same
+// write also takes the evicted call's verdicts with it (#852), and that pairing
+// is a sequential scan of retrieval_audit: ~5ms measured at
+// retrievalAuditRowsCap, ~16us when the audit table is empty. It is inside this
+// budget because it is inside this transaction, and the sweep's own reasoning —
+// the cost, and why it is not moved to the audit pass — is at the cap eviction in
+// internal/memory/retrieval_record.go.
 const recordWriteBudget = 250 * time.Millisecond
 
 // RecordSink receives the retrieval record for a successful Run. It is the

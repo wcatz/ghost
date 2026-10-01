@@ -80,10 +80,30 @@ type Summary struct {
 	// clean run, and this is precisely the state an operator is in when they
 	// need the report: memories deleted since the call.
 	Unreadable int
+	// Unfiled counts verdicts this run judged and the store then REFUSED, because
+	// the call that admitted the memory had been purged since the run read it
+	// (#852). They are counted rather than dropped for the same reason Unreadable
+	// is: every other figure here is subtracted from them, so a run that silently
+	// lost a pair would print a smaller total and no indication that it did — the
+	// same shape as a clean run, and indistinguishable from one. The report's
+	// figures describe what the table HOLDS; this is the difference between that
+	// and what the run judged, stated rather than absorbed.
+	Unfiled int
 	// Degraded is the scanner's reason for a partial read, or "". Every verdict
 	// in this run is about the transcript as far as it was read, so this rides
 	// with the run and with each stored row.
 	Degraded string
+}
+
+// placed is one verdict this run reached, with the call it belongs to and the
+// surface that call came from. It is the run's own ordered list of what it is
+// about to file, and dropUnfiled reconciles it against what the store actually
+// stored — so it is a package type rather than a local one.
+type placed struct {
+	verdict Verdict
+	record  int64
+	source  string
+	sess    string
 }
 
 // SourceSummary is one source's figures, and its denominator is CALLS.
@@ -133,12 +153,6 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 	// to. That is what makes the write idempotent: the replacement is keyed by
 	// the call's row, so a re-run replaces exactly the verdicts it judged before
 	// and leaves every other call's alone.
-	type placed struct {
-		verdict Verdict
-		record  int64
-		source  string
-		sess    string
-	}
 	var kept []placed
 	bySource := map[string]*SourceSummary{}
 
@@ -221,8 +235,19 @@ func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals)
 		})
 	}
 	if len(rows) > 0 {
-		if err := store.RecordRetrievalAudits(ctx, rows); err != nil {
+		refused, err := store.RecordRetrievalAudits(ctx, rows)
+		if err != nil {
 			return res, fmt.Errorf("audit: record verdicts: %w", err)
+		}
+		// Every figure above was counted from what this run JUDGED, and the store
+		// may have stored less: it refuses a verdict whose call was purged after
+		// the run read it. The sources are rebuilt from the corrected map so the
+		// printed per-source lines carry the correction too, not just the total.
+		res.dropUnfiled(kept, bySource, refused)
+		for i := range res.Sources {
+			if sum := bySource[res.Sources[i].Source]; sum != nil {
+				res.Sources[i] = *sum
+			}
 		}
 	}
 	return res, nil
@@ -240,6 +265,81 @@ func (s *SourceSummary) count(o Outcome) {
 	case OutcomeContradicted:
 		s.Contradicted++
 	}
+}
+
+// uncount takes one back out, and is count's exact inverse. A verdict the store
+// refused was counted here before the write and is not in the table after it, so
+// leaving it would make this bucket a figure about a row that does not exist.
+func (s *SourceSummary) uncount(o Outcome) {
+	switch o {
+	case OutcomeUsed:
+		s.Used--
+	case OutcomeIgnored:
+		s.Ignored--
+	case OutcomeSuperseded:
+		s.Superseded--
+	case OutcomeContradicted:
+		s.Contradicted--
+	}
+}
+
+// unfiledKey identifies one (call, memory) pair — the grain both the table and
+// the report count in. It is a key rather than a whole row because the store
+// returns the row it refused, and the pair is what has to be matched back.
+type unfiledKey struct {
+	record int64
+	memory string
+}
+
+// dropUnfiled takes the verdicts the store REFUSED back out of every figure this
+// run built, and counts them.
+//
+// The store refuses a verdict whose call was purged after the run read it, and it
+// returns exactly which rows it refused (#852). Without this, `Run` counts each
+// verdict as it judges it — into Verdicts, into VerdictList and into the per-source
+// buckets — and then writes them, and a refusal disappears inside the write. The
+// printed report then claims a number the table does not hold, with nothing
+// anywhere recording that the difference was taken: a hole nobody can see is not
+// an honest hole, it is a wrong number, and it is indistinguishable from a clean
+// run to the one reader who has to act on it. Every figure the report prints
+// describes what the table HOLDS; the loss is reported beside them, not folded
+// into them.
+//
+// `kept` is the run's own ordered list and is parallel to res.VerdictList, so a
+// refusal is matched back by (call, memory) and taken out of both. The pair is
+// unique within a batch — a call judges each memory at most once, and calls hold
+// distinct rowids — so the match is exact rather than first-come.
+func (r *Summary) dropUnfiled(kept []placed, bySource map[string]*SourceSummary, refused []memory.RetrievalAuditRow) {
+	if len(refused) == 0 {
+		return
+	}
+	r.Unfiled = len(refused)
+
+	gone := make(map[unfiledKey]bool, len(refused))
+	for _, row := range refused {
+		gone[unfiledKey{record: row.RecordRowID, memory: row.MemoryID}] = true
+	}
+	dropped := make([]bool, len(kept))
+	for i, p := range kept {
+		if !gone[unfiledKey{record: p.record, memory: p.verdict.MemoryID}] {
+			continue
+		}
+		dropped[i] = true
+		if sum := bySource[p.source]; sum != nil {
+			sum.uncount(p.verdict.Outcome)
+		}
+	}
+	// Kept in order, because VerdictList's order is the order the calls were read
+	// and a caller reading it positionally against anything else would otherwise
+	// find a silent reordering rather than a shorter list.
+	list := make([]Verdict, 0, len(kept)-len(refused))
+	for i, p := range kept {
+		if !dropped[i] {
+			list = append(list, p.verdict)
+		}
+	}
+	r.VerdictList = list
+	r.Verdicts = len(list)
 }
 
 // String renders the summary for an operator, and states on its face the three
@@ -267,6 +367,15 @@ func (r Summary) String() string {
 	fmt.Fprintf(&b, "  %d verdict(s) over the memories those calls kept\n", r.Verdicts)
 	if r.Unreadable > 0 {
 		fmt.Fprintf(&b, "  %d kept memory/memories no longer exist and were not judged\n", r.Unreadable)
+	}
+	if r.Unfiled > 0 {
+		// Printed, not folded into the counts above: the figures describe the
+		// table, and this is what is missing from it. Naming the reason is the
+		// point — a pair lost to a purge is not a lost pair, and an operator
+		// reading a shortfall needs to know which of the two they are looking at.
+		fmt.Fprintf(&b, "  %d verdict(s) were not filed because the call that admitted the memory was "+
+			"purged after this run read it, so the figures above count %d stored verdict(s) and not the "+
+			"%d judged\n", r.Unfiled, r.Verdicts, r.Verdicts+r.Unfiled)
 	}
 	if r.Degraded != "" {
 		fmt.Fprintf(&b, "  the transcript was only partly read (%s), so an ignored verdict is a claim "+

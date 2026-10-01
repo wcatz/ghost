@@ -162,6 +162,58 @@ func verdictsUnreadable(col string) string {
 		col + ") = 1 THEN " + col + " END), 'not-an-array') <> 'array')"
 }
 
+// retrievalRecordNamingMemory is the ONE predicate that answers "does this
+// recorded call name this memory", and it returns it as SQL with the memory's id
+// bound TWICE — once per arm.
+//
+// It is a function because two statements now need it and must not be able to
+// disagree: `ghost history purge` deletes the record rows by it, and deletes the
+// verdicts filed against exactly those rows by SELECTing their rowids with it
+// (#852). Two copies of this text would drift, and the drift would be silent in
+// the exact direction that matters — a record row removed and its verdicts kept,
+// which is the orphan the whole arrangement exists to prevent. See
+// purgeHistoryTx for what each arm reaches and why the textual one is scoped.
+func retrievalRecordNamingMemory() string {
+	return `EXISTS (
+			SELECT 1 FROM json_each(` + readableVerdicts(`retrieval_record.verdicts`) + `)
+			WHERE value->>'id' = ?
+		) OR (COALESCE(` + verdictsUnreadable(`retrieval_record.verdicts`) + `, 0)
+		     AND instr(retrieval_record.verdicts, '"id":' || json_quote(?)) > 0)`
+}
+
+// retrievalRecordKeepingMemory is the ONE predicate that answers "is the call on
+// this rowid one that KEPT this memory", and it is the audit write's guard against
+// filing a verdict under a call that never admitted the memory's subject.
+//
+// It is not the same question as retrievalRecordNamingMemory above, which asks
+// whether the call MENTIONS the memory at all — that one serves a purge, whose
+// polarity is to MISS nothing, so it carries a fuzzy textual arm for rows whose
+// verdicts JSON cannot be walked. This one serves a report, whose polarity is to
+// claim nothing it cannot support: an unreadable verdicts column substitutes an
+// empty array (readableVerdicts), so a call Ghost cannot read about itself is a
+// call that kept nothing, and a verdict filed under it would be a claim no build
+// can check. A hole is the honest answer; the alternative is the exact defect
+// #852 exists to remove.
+//
+// `kept = 1` and not merely "the id is present", because a record carries
+// DROPPED verdicts too: a call that considered a memory and did not admit it must
+// not be credited with what the agent did with it. Every verdict Ghost files comes
+// from a kept one (audit.Run reads rec.Verdicts and skips `!v.Kept`), so this
+// refuses nothing the real caller can produce.
+//
+// NUMERIC, not `= '1'` and not `= 'true'`. `->>` returns a JSON boolean as the
+// INTEGER 1 with typeof 'integer' — it does not render the token — so both of those
+// compare an integer against text, never match, and silently reduce this predicate
+// to "never". Measured on this build's SQLite (3.53.4): `value->>'kept' = 1`
+// answers 1 for a kept verdict and 0 for a dropped one, while `= '1'` answers 0
+// for both. `value->>'id' = ?` above binds TEXT against TEXT and has no such
+// hazard, which is what makes the difference easy to miss.
+func retrievalRecordKeepingMemory() string {
+	return `EXISTS (
+			SELECT 1 FROM json_each(` + readableVerdicts(`retrieval_record.verdicts`) + `)
+			WHERE value->>'id' = ? AND value->>'kept' = 1)`
+}
+
 // retrievalRecordRowsCap bounds the table as a whole, oldest row first.
 //
 // The cap is measured in CALLS because that is the unit the report needs: 5000
@@ -299,6 +351,64 @@ func (s *Store) RecordRetrieval(ctx context.Context, rec RetrievalRecord) error 
 	// the cap rather than cap+1 — a window of cap-1 after a prune is not the
 	// documented policy.
 	if rowid > int64(retrievalRecordRowsCap) {
+		// The verdicts filed against the calls this evicts go WITH them (#852),
+		// and they go by the SAME bound rather than by a memory id, because the
+		// two tables number their rows in one space: a verdict names record_rowid
+		// exactly, so the rows about to go are exactly the ones at or below the
+		// bound. Before this, an evicted call's verdicts survived it and were
+		// counted by RetrievalAudits — the report's denominator — under a call the
+		// store no longer holds.
+		//
+		// `record_rowid > 0` is load-bearing and not decoration. Zero is the
+		// deliberate "not attributable to a call" value, the bound is >= 1
+		// whenever this arm runs, and a bare `<= ?` would therefore delete every
+		// unattributed verdict in the table the first time the cap evicted
+		// anything — the one verdict shape the replacement refuses to treat as a
+		// key.
+		//
+		// What it costs, measured on this build's driver against a store at both
+		// caps (5000 calls, 50000 verdicts, a 7.5MiB audit table): ~5ms per
+		// recorded call. retrieval_audit carries one index and it is not on
+		// record_rowid — TestRetrievalAuditsCarryOneIndex refuses the second one —
+		// so this is a sequential scan, and a delete keyed by record_rowid is
+		// O(rows stored) in this schema whichever transaction runs it. It is NOT
+		// amortised over the eviction, and it must not be read as though it were:
+		// retrieval_record has no AUTOINCREMENT, so its rowid grows monotonically
+		// and this arm runs on EVERY insert past the cap, not only on the one that
+		// first crossed it. What the steady state evicts is exactly one record row
+		// and the verdicts filed against it.
+		//
+		// What bounds the scan is the audit table's own size: empty for a store
+		// that has never judged a call, where it measures ~16us — and a
+		// `SELECT 1 FROM retrieval_audit LIMIT 1` existence guard in front of it
+		// costs ~10us there, which is why there is no guard. At the other end
+		// that ~5ms is ~2% of the assembler's 250ms recordWriteBudget, and it is
+		// not a scan the product did not already pay: the audit pass spends an
+		// identical one per distinct record_rowid when it replaces a pass's
+		// verdicts (RecordRetrievalAudits). What this changes is which transaction
+		// pays it.
+		//
+		// Scoping the sweep to the evicted calls' own project, so the one index
+		// this table has carries it, was measured and not adopted: it turns the
+		// steady state into ~2.4ms on a six-project store and ~10.6ms on a
+		// single-project one, against ~5ms for the unscoped scan either way. The
+		// index makes the DELETE seek, but it has to visit every row of the
+		// project to reach the one column it does not carry, so a store with one
+		// project — the case where every row is a candidate — pays twice. The
+		// unscoped form is the one whose cost does not depend on how the store's
+		// rows are divided up.
+		//
+		// Why it is here and not in that pass: a pairing deferred to the next
+		// judged turn has no bound. A store that stops judging keeps the orphan
+		// forever, and until it goes the report counts verdicts under a call the
+		// store no longer holds, which is the whole of what #852 is about. The
+		// window closes at commit or not at all.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM retrieval_audit WHERE record_rowid > 0 AND record_rowid <= ?`,
+			rowid-int64(retrievalRecordRowsCap),
+		); err != nil {
+			return fmt.Errorf("record retrieval: take the verdicts of the evicted calls: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM retrieval_record WHERE rowid <= ?`, rowid-int64(retrievalRecordRowsCap),
 		); err != nil {
