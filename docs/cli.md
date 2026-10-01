@@ -962,17 +962,20 @@ ghost context --audit --since 168h                 # only the last week
 retrieval audit report for project ghost
 
 retrieval audit — window: everything the store still holds
-  search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 18 ignored, 0 superseded in session, 2 contradicted, 3 kept nothing
+  search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 15 ignored, 1 superseded in session, 2 contradicted, 3 kept nothing
+    2 of those verdicts are degraded (scan transcript: truncated)
   session_start: no rows — this source has recorded no calls in this window
   project_context: no rows — this source has recorded no calls in this window
+  contradicted (search):
+    91C0983A1162AE3AAEA00518B6A4C96E
+    B2AB0F6DD58B80C74B21FF76885727A3
   figures are per source and are never pooled: a search and an injection answer different questions
   "ignored" means the agent's own words never mentioned the memory; it is not a relevance or usefulness score
   missed: searches that kept nothing are counted above; the other half of "missed" — a fact the agent re-derived in-session and was never shown — is not measured and is reported as no figure at all: no heuristic can tell one from a fact it worked out, so read no number into it
   search: 2 of its 30 verdict(s) were judged against a partly-read transcript (scan transcript: truncated), so an ignored verdict there is a claim about the text that was read
-  contradicted (search):
-    1F2E3D4C5B6A7988
-    9A8B7C6D5E4F3A2B
 ```
+
+That block is one store's real output, not a sketch: 9 recorded searches admitted 30 memories (one kept six, the rest three) and 3 more admitted none, and the lifecycle audit filed 30 verdicts over those 30 pairs. The four buckets sum to the denominator because a verdict is in exactly one of them.
 
 Read it with these four things in mind:
 
@@ -981,7 +984,7 @@ Read it with these four things in mind:
 - **A source with no rows says so.** It does not report 0% used, which would read as a verdict on a source that has never run here. `session_start` and `project_context` are in that state on every store until their passive injections write their own records.
 - **`ignored` is the residual, not a score.** It means the agent's own words never mentioned the memory. Nothing here ranks a memory, and a reader treating 60% ignored as advice about which memories to delete is reading a heuristic that never saw the session.
 
-`--since` bounds both retrieval tables by their `recorded_at`, and applies the same window to the calls and to the verdicts — so a window can never pair calls from one period with verdicts from another. A row whose stamp cannot be read is kept rather than dropped. `--since` is a duration, not a date, and `7d` is not one. `--as-of` cannot be combined with `--audit`: one reports the store at an instant, the other reports retrieval over a window, and each available answer to the combination is a confident wrong one.
+`--since` bounds both retrieval tables by their `recorded_at`, and applies the same window to the calls and to the verdicts — so a window can never pair calls from one period with verdicts from another. A row whose stamp cannot be read is kept rather than dropped. The window is echoed in its own line (`window: the last 168h0m0s`), because a figure with no window is a standing state and a window is not. `--since` is a duration, not a date, and `7d` is not one. `--as-of` cannot be combined with `--audit`: one reports the store at an instant, the other reports retrieval over a window, and each available answer to the combination is a confident wrong one.
 
 The verdicts are written by the lifecycle audit ([`ghost lifecycle`](#ghost-lifecycle)); a store whose sessions have not been audited shows `no verdict recorded yet` rather than a percentage. `ghost_health` carries the same figures in a shorter form, so an agent can read them without a terminal.
 
