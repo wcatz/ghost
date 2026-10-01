@@ -353,6 +353,64 @@ func causesRow(relation supersede.Relation, withdrawn bool) supersede.Classified
 	}
 }
 
+// TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs is the CLI half of
+// the stale-row rule, and it is a separate test because the fix is in two files:
+// `internal/supersede` clears `Classified.WithdrawSuppressed` at the site that
+// learns an endpoint is gone (pinned there by
+// TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs), and this file holds
+// what the REPORT says once it has — the row falls back to `already gone`, and
+// the summary carries no withheld line.
+//
+// Both matter because the two are what the flag drives: `WithdrawSuppressed`
+// selects the `STILL LIVE` clause on the row and gates the `N pair(s) withheld`
+// count in the summary, and a stale row carries neither. A report that printed
+// the clause would assert an edge is still live and still demoting its target for
+// a memory the concurrent reflect pass had already deleted — and
+// `memory_links.source_id`/`target_id` are `ON DELETE CASCADE`, so the edge went
+// with it. Before #845 that row said `already gone`, which is the truth.
+//
+// The rows here are built by hand rather than driven from a pass, because the
+// pass cannot emit them: the stale shape is exactly the one the pass now refuses
+// to emit, so a fixture that reached it through `runSupersede` would be testing
+// the fix's absence. What is held is the renderer's rule over both shapes, and
+// the summary's count, so a future producer of a stale row cannot make the report
+// claim a live edge.
+func TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs(t *testing.T) {
+	// The shape the pass emits for a stale pair: classified, relation differs from
+	// the edge it carried, `Withdrawn` false because nothing here removed it, and
+	// `WithdrawSuppressed` FALSE because the edge is not there to withhold.
+	stale := reclassRow(supersede.RelationNeither, true, false)
+	rows := supersedePairLines(true, []supersede.Classified{stale})
+	if !strings.Contains(rows, "already gone") {
+		t.Errorf("a stale pair's row does not say its edge is gone:\n%s", rows)
+	}
+	for _, notWant := range []string{"STILL LIVE", "would withdraw", "withdrew"} {
+		if strings.Contains(rows, notWant) {
+			t.Errorf("a stale pair's row claims %q about an edge a concurrent pass cascade-deleted:\n%s", notWant, rows)
+		}
+	}
+	// The row is still REACHED: a verdict was reached and a classify call was
+	// spent, so dropping the row too would leave the run reporting less than it
+	// did, which is the other half of the same lie.
+	if !strings.Contains(rows, shortID(reclassNewer)+" -> "+shortID(reclassOlder)) {
+		t.Errorf("a stale pair's row is not reported at all:\n%s", rows)
+	}
+
+	// And the summary's withheld line is keyed on the SAME flag, so a pass whose
+	// only stale row contributed nothing to the count prints the stale line and not
+	// the withheld one — which is the compounding the review named, "still live and
+	// still demoting its target" over a memory that no longer exists.
+	summary := supersedeReport("projy", supersede.Result{
+		Reclassified: 1, StaleAtWrite: 1,
+	}, "linked", true, 1, 0)
+	if !strings.Contains(summary, "1 pair(s) not written") {
+		t.Errorf("the summary does not report the stale pair:\n%s", summary)
+	}
+	if strings.Contains(summary, "pair(s) withheld") || strings.Contains(summary, "STILL LIVE") {
+		t.Errorf("the summary counts a stale pair as a withheld withdrawal:\n%s", summary)
+	}
+}
+
 // TestSupersedePairLinesPrintsNothingForAnEmptyPass: the header line above says
 // how many pairs were considered, and a block that printed a header of its own
 // would be a second count of the same thing.

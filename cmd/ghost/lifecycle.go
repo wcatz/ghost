@@ -1919,7 +1919,18 @@ and deleting the edge promoted a memory that was current and un-hid one that was
 not, both behind a flag the operator set for WRITES. So the edge stays until you
 remove it on purpose: --reassess --apply re-judges it under the current rules and
 withdraws what does not hold, and --withdraw removes the edge you name without
-asking a model. A withheld edge is not cached either, so it is reported again on
+asking a model.
+
+Read the --reassess dry run before its --apply. The measurement above is about the
+VERDICT, and --reassess acts on that same verdict while reading it exactly once: it
+asks the classifier one time per edge, which is why --consensus is refused beside it
+(a gate there would refuse the withdrawal the repair exists to perform). So the one
+remaining path to a deletion is the least-gated one, and it can still delete a correct
+edge on a single answer — run it without --apply first and read what it says it would
+withdraw. --withdraw carries no such caveat: it removes the edge you name, on your
+say-so, with no model involved.
+
+A withheld edge is not cached either, so it is reported again on
 every later pass until it goes. The 'causes' sweep is not withheld: --reassess
 loads live 'supersedes'/'llm' edges only and so can never see a 'causes' edge, so
 leaving one contradicting a supersession would put a contradiction in the graph
@@ -2424,8 +2435,17 @@ func supersedeReport(projectName string, res supersede.Result, verb string, appl
 	// APPLIED form, for the reason the OppositeLive and ReverseLive lines above
 	// quote theirs that way: the flagless command is a dry run that withdraws
 	// nothing.
+	//
+	// The repair is quoted WITH its residual risk rather than bare, because #845's
+	// measurement is about the VERDICT and `--reassess` acts on that same verdict
+	// while reading it exactly once: `Reassess` spends a single `ClassifyBatch`
+	// per chunk (reassess.go), and `parseSupersedeArgs` refuses `--consensus`
+	// alongside `--reassess`/`--withdraw` precisely because a split would refuse
+	// the withdrawal the repair exists to perform. So the one remaining deletion
+	// path is the least-gated one, and an operator who reads this line has to be
+	// told that the flagless run is the step that shows what the model said.
 	if res.WithdrawSuppressed > 0 {
-		out += fmt.Sprintf("  %d pair(s) withheld: a live supersedes edge this pass would withdraw on a denying verdict is REPORTED and left in the graph — measured over a real store, 6 of 11 such withdrawals were wrong (a newer note retiring one claim of an older note whose other claims still held), so the edge is still live and still demoting its target; --apply does not remove it either, and the repair is `%s`\n",
+		out += fmt.Sprintf("  %d pair(s) withheld: a live supersedes edge this pass would withdraw on a denying verdict is REPORTED and left in the graph — measured over a real store, 6 of 11 such withdrawals were wrong (a newer note retiring one claim of an older note whose other claims still held), so the edge is still live and still demoting its target; --apply does not remove it either, and the repair is `%s` — which reads ONE verdict per edge and cannot be consensus-gated, so run it without --apply first and read what it says it would withdraw\n",
 			res.WithdrawSuppressed, followup.ReassessCommand(projectName))
 	}
 	// The two STALE populations, and they are two lines because they are two
@@ -3154,7 +3174,7 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 			// this run removed it, and `kept` that the verdict affirmed it — three
 			// false statements about an edge that is in the graph and should not be.
 			if c.WithdrawSuppressed {
-				extra += ", and the edge it would have withdrawn is STILL LIVE — this pass reports a supersedes withdrawal and never makes one; `ghost supersede --reassess --apply` or `--withdraw` is what removes it"
+				extra += ", and the edge it would have withdrawn is STILL LIVE — this pass reports a supersedes withdrawal and never makes one; `ghost supersede --reassess --apply` reads ONE verdict for it and cannot be consensus-gated, so read its dry run first, and `--withdraw <source> <target> --apply` removes the edge you name without asking a model at all"
 			}
 			// The rows the run REMOVED: counted from what it moved under
 			// --apply, and counted from what it READ where nothing was applied.

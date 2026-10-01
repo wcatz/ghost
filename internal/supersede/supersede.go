@@ -2162,6 +2162,28 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// spent and no edge was written. The pre-classify site above cannot
 				// say that, which is why the two are counted apart.
 				res.StaleAtWrite++
+				// A WITHHELD withdrawal is UNDONE here, and this is the only site
+				// that can undo it (#845). `WithdrawSuppressed` was set in the
+				// classify loop, before this check, and the edge it says is still
+				// live is NOT: `memory_links.source_id`/`target_id` are
+				// `ON DELETE CASCADE`, so the replacement that made this endpoint
+				// stale took the edge with it. A row left claiming a live edge
+				// here would say the opposite of the truth for a memory that no
+				// longer exists, and the summary's withheld line would compound it
+				// ("still live and still demoting its target"). Clearing the row
+				// puts it back on `already gone`, which is what it was before
+				// #845 and is exactly what happened.
+				//
+				// The counter is decremented rather than left alone for the same
+				// reason the row is cleared: it is the count OF these rows, and the
+				// report quotes it as what the pass is still holding in the graph.
+				// A stale pair is dropped from the NEITHER cache below (`writable`),
+				// so it is re-judged next pass regardless, and nothing is lost by
+				// not counting it here.
+				if c.WithdrawSuppressed {
+					c.WithdrawSuppressed = false
+					res.WithdrawSuppressed--
+				}
 				if logger != nil {
 					logger.Info("supersede: skipping write, endpoint replaced by a concurrent pass",
 						"newer", c.NewerID, "older", c.OlderID)

@@ -8,6 +8,14 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// The two bodies of the npm pair, named so a test that has to recognise the
+// pair INSIDE a classify call can. Classifier mocks are handed content, not
+// ids, so matching on content is also what a hook into the batch actually sees.
+const (
+	npmShippedContent = "note: the publishable npm package shipped on 2026-08-25"
+	npmRemovedContent = "note: the standalone npm package was removed on 2026-08-26"
+)
+
 // seedNpmPackagePair is #845's measured failure shape as a graph state: a live
 // 'supersedes'/'llm' edge over two notes where the NEWER one retires a single
 // claim of the older one and leaves the rest standing.
@@ -35,8 +43,8 @@ import (
 func seedNpmPackagePair(t *testing.T, store *memory.Store, db *sql.DB) (newer, older string) {
 	t.Helper()
 	ctx := context.Background()
-	older = add(t, store, db, "note: the publishable npm package shipped on 2026-08-25", []float32{1, 0, 0}, "2026-08-25 09:00:00")
-	newer = add(t, store, db, "note: the standalone npm package was removed on 2026-08-26", []float32{0.99, 0, 0}, "2026-08-26 09:00:00")
+	older = add(t, store, db, npmShippedContent, []float32{1, 0, 0}, "2026-08-25 09:00:00")
+	newer = add(t, store, db, npmRemovedContent, []float32{0.99, 0, 0}, "2026-08-26 09:00:00")
 	if err := store.CreateLink(ctx, newer, older, string(RelationSupersedes), 0.95, "llm"); err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +173,99 @@ func TestASuppressedWithdrawalIsNotRecordedAndIsReportedAgainNextPass(t *testing
 		if got := liveSupersedes(t, store, "p"); got != 1 {
 			t.Fatalf("pass %d: live supersedes edge(s) = %d, want 1", pass, got)
 		}
+	}
+}
+
+// TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs is the concurrent-
+// reflect race, and it exists because #845's flag is set BEFORE the pre-write
+// existence check rather than after it.
+//
+// The rule says a withheld edge is STILL LIVE — and in the ordinary case it is.
+// In THIS case it is not: `memory_links.source_id`/`target_id` are
+// `ON DELETE CASCADE`, so when reflect replaced the endpoint between the classify
+// call and the write, the replacement took the edge with it. A row left carrying
+// `WithdrawSuppressed` would assert the opposite of the truth for a memory that
+// no longer exists, and the summary's withheld line would compound it with "still
+// live and still demoting its target". Before #845 the same row fell through to
+// `already gone`, which is what actually happened.
+//
+// So the flag is cleared at the one site that learns the endpoint is gone, and the
+// count with it — the counter is the count OF those rows, so a row that is not
+// withheld cannot be counted as withheld.
+func TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	npmNew, npmOld := seedNpmPackagePair(t, store, db)
+	// A second pair so the batch is not a single row, which is what makes this a
+	// BATCH the write loop walks after one ClassifyBatch call rather than a shape
+	// the single-pair path could get right by accident. Its embeddings sit on a
+	// different axis from the npm pair's (cosine 0 across the two), so the two
+	// pairs stay separate candidates above the threshold and the deleted endpoint
+	// belongs to exactly one row.
+	otherNew := add(t, store, db, "note: the nightly backup moved to object storage", []float32{0, 1, 0}, "2026-08-27 09:00:00")
+	otherOld := add(t, store, db, "note: the nightly backup ran on the db host", []float32{0, 0.99, 0}, "2026-08-24 09:00:00")
+
+	// Delete an endpoint of the withheld pair from inside the classify call,
+	// which is where reflect's consolidation replacement lands in this race. A
+	// classifier is handed CONTENT, so the hook matches on content and deletes
+	// by id — the same two-step TestRunStalePairDoesNotRollBackNeitherCacheWrite
+	// uses, and the same race.
+	cls := &mockClassifier{verdict: func(newer, older string) Relation {
+		if newer == npmRemovedContent && older == npmShippedContent {
+			if err := store.Delete(ctx, npmOld); err != nil {
+				t.Errorf("delete stale endpoint: %v", err)
+			}
+		}
+		return RelationNeither
+	}}
+
+	res, classified, err := RunWith(ctx, store, cls, "p", Options{Threshold: 0.9, Apply: true}, nil)
+	if err != nil {
+		t.Fatalf("RunWith: %v", err)
+	}
+	if res.StaleAtWrite != 1 {
+		t.Fatalf("StaleAtWrite = %d, want 1: the endpoint was replaced during the classify call, so the pair was classified and only the write was skipped", res.StaleAtWrite)
+	}
+	if res.WithdrawSuppressed != 0 {
+		t.Errorf("WithdrawSuppressed = %d, want 0: the stale row's edge was CASCADE-deleted with its endpoint, so the summary would be quoting a live edge for a memory that is gone", res.WithdrawSuppressed)
+	}
+
+	var stale *Classified
+	for i := range classified {
+		if classified[i].NewerID == npmNew {
+			stale = &classified[i]
+		}
+	}
+	if stale == nil {
+		t.Fatalf("no row for the withheld pair %s→%s; classified = %+v", npmNew, npmOld, classified)
+	}
+	if stale.WithdrawSuppressed {
+		t.Error("WithdrawSuppressed = true on a stale row: the row claims an edge is STILL LIVE and the report would print `already gone` never, over a memory the concurrent pass deleted")
+	}
+
+	// The cascade is the reason, so it is asserted rather than assumed: the edge is
+	// gone from the graph, which is what the row now has to agree with.
+	if got := liveSupersedes(t, store, "p"); got != 0 {
+		t.Errorf("live supersedes edge(s) = %d, want 0: deleting the endpoint cascades the edge away, so the row's claim of a live edge would be false", got)
+	}
+	// And the OTHER pair in the batch is untouched by all of this: the fix is one
+	// field on one row, not a pass-wide suppression. It carried no live edge, so it
+	// never had a withdrawal to withhold — but it still has to be a row, or the
+	// batch would have been the single-pair shape this comment rules out.
+	if len(classified) != 2 {
+		t.Fatalf("classified = %d row(s), want 2: the batch has to hold a second pair for this to be the concurrent-reflect shape rather than a single-pair one", len(classified))
+	}
+	var survivor *Classified
+	for i := range classified {
+		if classified[i].NewerID == otherNew && classified[i].OlderID == otherOld {
+			survivor = &classified[i]
+		}
+	}
+	if survivor == nil {
+		t.Fatalf("no row for %s→%s; classified = %+v", otherNew, otherOld, classified)
+	}
+	if survivor.WithdrawSuppressed {
+		t.Error("WithdrawSuppressed = true on a row with no live edge: there was nothing to withhold, so the flag is the pass losing track of its own reason")
 	}
 }
 
