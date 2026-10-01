@@ -278,7 +278,10 @@ func mustHookConfig(t *testing.T) *config.Config {
 func passiveGlobals(t *testing.T, db *sql.DB, projectID string) (globals []sessionMemory) {
 	t.Helper()
 	store := memory.NewStoreWithRead(db, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	_, globals = loadSessionPassive(context.Background(), store, config.LoadForHook(), projectID, time.Now())
+	// nil sink: this helper reads a handle the test owns and asserts on the rows,
+	// so the record would be a write into a database the assertions do not expect
+	// to change. The recording path is covered by passive_record_test.go.
+	_, globals = loadSessionPassive(context.Background(), store, config.LoadForHook(), projectID, time.Now(), nil)
 	return globals
 }
 
