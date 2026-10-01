@@ -1,9 +1,7 @@
 package ai
 
 import (
-	"bytes"
 	"context"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,10 +65,12 @@ func TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn(t *testing.T) {
 		t.Fatalf("write foreign file: %v", err)
 	}
 
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	// captureProcessLogs, not a bare bytes.Buffer: this funnel spawns under a
+	// caller that can walk away from an in-flight child (harnessCommand is what
+	// every probe runs under), and scratch.EnforceBudget below warns through the
+	// process default logger from whatever goroutine reaches it. See
+	// lockedBuffer.
+	logs := captureProcessLogs(t)
 
 	cmd, release, err := harnessCommand(context.Background(), "true", nil, nil, harnessClaude)
 	t.Cleanup(release)

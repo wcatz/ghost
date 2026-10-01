@@ -1,12 +1,10 @@
 package ai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -335,13 +333,16 @@ func resetCodexFeatureProbe(t *testing.T) {
 // buffer holding what was logged. The warning is a WARN because it has to
 // interrupt a lifecycle phase's output, and a test that cannot see it cannot
 // prove it fires once rather than once per call.
-func captureCodexWarnings(t *testing.T) *bytes.Buffer {
+//
+// It is captureProcessLogs under the name these tests read by, and the return
+// type is the locked one rather than a bare bytes.Buffer: a caller that gave up
+// on a probe leaves that probe running, and it logs from the goroutine
+// singleflight started — see lockedBuffer. Every method these tests call on the
+// result is the locked one, so no assertion here needs to know which probe is
+// still in flight.
+func captureCodexWarnings(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &logs
+	return captureProcessLogs(t)
 }
 
 // TestCodexProbePassesEveryKeyWhenAllAreDeclared: the ordinary case must be
