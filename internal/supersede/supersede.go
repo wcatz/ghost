@@ -57,9 +57,19 @@
 // the verdict changes. That is a deliberate billable repeat per reversed pair,
 // paid so the refusal is never frozen; it is not zero calls overall.
 // Run() also re-classifies existing 'llm' links — of EITHER relation (#823) —
-// whose endpoints have changed since the link was written, invalidating the link
-// (flipping it to the other relation, or dropping it on a reversed verdict) when
-// the verdict no longer matches. The pass is re-runnable and self-heals after reflection's cascade-delete of links, like
+// whose endpoints have changed since the link was written, replacing the link
+// with the other relation when the verdict differs, and REPORTING a live
+// 'supersedes' edge a denying or reversing verdict no longer supports rather
+// than removing it (#845): measured over a real store, 6 of 11 such withdrawals
+// were wrong, so the deletion became `ghost supersede --reassess` / `--withdraw`,
+// each of which re-judges the edge and shows the operator what it is about to
+// remove. The 'causes' sweep is NOT withheld — Reassess loads live
+// 'supersedes'/'llm' edges only, so withholding that sweep would leave a
+// contradiction under a repair that cannot reach it, and nothing demotes on a
+// 'causes' edge (see ordinaryPassWithdrawsSupersedes). A WITHHELD withdrawal is
+// not cached, so
+// the edge is re-reported on every later pass until a person withdraws it. The
+// pass is re-runnable and self-heals after reflection's cascade-delete of links, like
 // the cosine linking worker rebuilds 'related' edges — though reclassification
 // of existing links only fires for a pair whose endpoint content actually
 // changed after the link was written; pairs whose link predates this 4-way
@@ -642,7 +652,14 @@ func claimsHold(claims map[pairKey][]liveEdge, newer, older string, relation Rel
 // A NEITHER and a REVERSED are counted by the caller instead, because they deny
 // the pair outright and `verdict != liveRelation` already covers them; their counts
 // here are only what a row's clause names.
-func verdictDrops(claims map[pairKey][]liveEdge, live, verdict Relation, newer, older string) (supersedes, causes int) {
+//
+// The third value is what withholdSupersedesDrop decided: a non-zero `supersedes`
+// count the ordinary pass will not act on, because the apply block deletes nothing
+// (#845). It is returned rather than applied here so that the ONE prediction, the
+// ONE row field, the ONE counter and the ONE guard in the apply block are all
+// derived from the same decision — a suppression applied in two places is one a
+// later change can half-undo.
+func verdictDrops(claims map[pairKey][]liveEdge, live, verdict Relation, newer, older string) (supersedes, causes int, suppressed bool) {
 	// A 'causes' edge `older→newer` carries the claim (newer, older) and one
 	// running `newer→older` carries (older, newer): 'causes' is written
 	// cause→effect, so the note it calls older is its SOURCE. Naming the two
@@ -687,7 +704,67 @@ func verdictDrops(claims map[pairKey][]liveEdge, live, verdict Relation, newer, 
 			causes++
 		}
 	}
-	return supersedes, causes
+	return withholdSupersedesDrop(supersedes, causes)
+}
+
+// withdrawsSupersedes is the ordinary pass's answer to "does a denying verdict
+// remove a live 'supersedes' edge?", and it is NO (#845).
+//
+// The pass has always written new links and, since #785, withdrawn old ones on a
+// four-way verdict, and the withdrawal was the part that was never safe: measured
+// over a real store, 4 of 11 withdrawals were correct, 1 unsure and 6 wrong, and
+// the wrong ones shared a shape — a newer note retiring ONE claim of an older one
+// whose other claims were still true. The verdict was a fair reading of the two
+// bodies under the every-claim rule, and the pass deleted a correct edge. What
+// goes with the deletion is not nothing: the ranking stops demoting the target,
+// and every `resolved_at` the edge's piggyback stamped stays, so a wrong
+// withdrawal is a stale memory promoted and a current memory hidden, both by a
+// flag the operator set for WRITES.
+//
+// So the ordinary pass names the edges it would withdraw and reports them, in
+// both modes, and the withdrawal itself is `ghost supersede --reassess` or
+// `--withdraw`: the two commands a person asked for, each of which re-judges the
+// edge under the current rules and shows the operator what it is about to remove.
+// A creation pass that can delete a correct edge is a pass whose errors are
+// invisible until a memory stops being reminded of, which is the opposite of the
+// KEEP bias the rest of this file is built on.
+//
+// It is a constant rather than an Options field because it is not a threshold an
+// operator tunes: there is no setting under which the ordinary pass stops
+// reporting a withdrawal it declines to make, and a flag that restores the delete
+// would have to name the harm it restores. WRITES are untouched — a new
+// 'supersedes' or 'causes' edge is still written, and so is the 'causes' sweep
+// that denies a supersession (see withholdSupersedesDrop for why that one is not
+// withheld: Reassess cannot reach a 'causes' edge, and nothing demotes on one).
+const ordinaryPassWithdrawsSupersedes = false
+
+// withholdSupersedesDrop turns a verdictDrops PREDICTION into what the pass will
+// actually do, and records the difference for the report.
+//
+// It takes the two counts the prediction returned and returns the counts the
+// apply block will realise. The 'supersedes' count is zeroed whenever it is
+// non-zero, because that is precisely the case the ordinary pass declines
+// (ordinaryPassWithdrawsSupersedes), and the 'causes' count is passed through
+// untouched: a 'causes' edge is swept, not withheld, and the reason is that
+// Reassess — the repair every report here names, and the one that re-judges an
+// edge under the current rules — loads live 'supersedes'/'llm' edges and can
+// never see a 'causes' one, so a 'causes' edge left contradicting a supersession
+// would be a contradiction under a repair that cannot reach it, which is the
+// shape Result.Bidirectional refuses to create when it declines to judge a cycle.
+// (`--withdraw` can remove a 'causes' edge, but only for a pair an operator has
+// already named by hand; it is a targeted undo, not a re-judge.) It costs no
+// demotion either: nothing ranks on a 'causes' edge, so the harm this rule exists
+// to stop cannot come from leaving one live.
+//
+// suppressed is true only for a pair that CARRIED a live 'supersedes' edge, which
+// is what makes the report's two counts disjoint: a fresh pair sweeps nothing
+// because there is nothing to sweep, and a 'causes'-edge pair's withdrawal is a
+// real one the run really made.
+func withholdSupersedesDrop(supersedes, causes int) (dropSup, dropCauses int, suppressed bool) {
+	if supersedes > 0 && !ordinaryPassWithdrawsSupersedes {
+		return 0, causes, true
+	}
+	return supersedes, causes, false
 }
 
 // sweepCausesBothWays removes the pair's live 'causes' edges in BOTH directions
@@ -773,6 +850,22 @@ type Classified struct {
 	// distinction Reassess draws, for the same reason: the report must not claim
 	// a graph change it did not make.
 	Withdrawn bool
+	// WithdrawSuppressed marks a row whose verdict WOULD have taken the pair's
+	// live 'supersedes' edge away and did not, because the ordinary pass reports
+	// a withdrawal instead of making one (#845). It is the third of the three
+	// facts a reclassified row carries — the edge was the pair's
+	// (`Reclassified`), this call did not move it (`Withdrawn`), and this call
+	// declined to move it — and it is its own field because it is the only one of
+	// the three the operator can act on by re-running the same command: a
+	// concurrent pass took the edge first, and nothing more is owed, while here
+	// the edge is still live and still demoting its target until `--reassess` or
+	// `--withdraw` removes it.
+	//
+	// It is set in BOTH modes and on a dry run, because the rule is the pass's
+	// and not the flag's: `--apply` is a write flag, and the pass it selects
+	// writes links. It says nothing about a 'causes' edge, which the pass really
+	// does sweep (see withdrawsSupersedes).
+	WithdrawSuppressed bool
 	// OpposedLive marks a row whose edge this run did NOT write because the
 	// pair's opposite direction was already live when the write was attempted
 	// (#806). Without it the row prints as a link the pass created, which is
@@ -818,6 +911,41 @@ type Classified struct {
 	CausesDroppable int
 }
 
+// withdrewLiveEdge reports whether THIS run took the pair's live edge away, from
+// the two counts the apply block's invalidations returned.
+//
+// The suppressed case is false and not `true`, and that is the whole of #845: the
+// pair's 'supersedes' edge is still in the graph, so a row that claimed a
+// withdrawal over it would be claiming a deletion nobody made — the identical
+// false claim `Withdrawn` is documented against, reached one rule earlier. The
+// `causes` rows really did go, so the row still names them (CausesDropped, and
+// the report's `[+N causes edge dropped]` clause); they are a different edge, and
+// a graph that lost two rows did not keep the one this row is about.
+func (c *Classified) withdrewLiveEdge(dropped int64, causesDropped int) bool {
+	if c.WithdrawSuppressed {
+		return false
+	}
+	return c.Reclassified && (dropped > 0 || causesDropped > 0)
+}
+
+// withdrawSupersedesEdge removes the pair's live 'supersedes' edge, unless this
+// run is withholding that removal (#845), in which case it removes nothing and
+// the row says so.
+//
+// It is one function because it is ONE rule, reached from all three apply-block
+// branches that deny a pair: a CAUSES verdict, a NEITHER and a REVERSED each
+// used to spell the invalidation out, so restoring the delete after #845 would
+// have meant finding three call sites and asking whether any of them had grown a
+// reason of its own. It returns 0 for a withheld row, which is what keeps the
+// branches' `Withdrawn` arithmetic honest through withdrewLiveEdge rather than
+// through three separate guards.
+func withdrawSupersedesEdge(ctx context.Context, store vectorStore, c *Classified) (int64, error) {
+	if c.WithdrawSuppressed {
+		return 0, nil
+	}
+	return store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
+}
+
 // Result summarizes a pass.
 type Result struct {
 	Candidates int
@@ -843,6 +971,17 @@ type Result struct {
 	// pair already held is not one of them, and the distinction is what
 	// Classified.ReclassifiedFrom is for.
 	Reclassified int // existing links whose relation changed or was invalidated
+	// WithdrawSuppressed counts the pairs whose live 'supersedes' edge a denying
+	// verdict would have removed and this pass reported instead (#845). It is a
+	// count of its own rather than a subtraction from Reclassified because the
+	// two are different findings for the operator: Reclassified says the graph
+	// changed, this says an edge is still in it that the current rules no longer
+	// support, and only a command a person asked for takes that edge out. Counted
+	// in both modes — the rule is the pass's, not the flag's — and a pair is
+	// counted at most once, because a supersession is written in one direction
+	// and a pair that carried the edge in the other is the cycle Result.Bidirectional
+	// refuses rather than judges.
+	WithdrawSuppressed int
 	// StaleSkipped is the PRE-CLASSIFY existence drop: a candidate whose endpoint
 	// a concurrent pass had already replaced when the pass re-read the graph, so
 	// the pair was discarded BEFORE any harness call was spent on it. It happens in
@@ -1910,16 +2049,29 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			// pair, so a judged pair with an empty `livePair` entry is a pair with
 			// no live edges — which is what `claims` being empty for it says. A
 			// reset keyed on `wasReclassify` would be a second copy of that.
-			dropSup, dropCauses := verdictDrops(claims, liveRelation, verdict, c.NewerID, c.OlderID)
+			dropSup, dropCauses, suppressed := verdictDrops(claims, liveRelation, verdict, c.NewerID, c.OlderID)
 			classified = append(classified, Classified{
-				Candidate:        c,
-				Relation:         verdict,
-				JudgedAt:         judgedAt(aliveByID, c),
-				Reclassified:     wasReclassify,
-				ReclassifiedFrom: liveRelation,
-				CausesDroppable:  dropCauses,
-				TargetProjectID:  aliveByID[c.OlderID].ProjectID,
+				Candidate:          c,
+				Relation:           verdict,
+				JudgedAt:           judgedAt(aliveByID, c),
+				Reclassified:       wasReclassify,
+				ReclassifiedFrom:   liveRelation,
+				CausesDroppable:    dropCauses,
+				WithdrawSuppressed: suppressed,
+				TargetProjectID:    aliveByID[c.OlderID].ProjectID,
 			})
+			if suppressed {
+				// Counted HERE rather than where the apply block would have
+				// invalidated the row, for the reason Reclassified is counted
+				// here: a dry run runs no block, and the report has to carry this
+				// number in both modes because the rule it reports is the pass's
+				// and not --apply's.
+				res.WithdrawSuppressed++
+				if logger != nil {
+					logger.Info("supersede: a denying verdict on a live supersedes edge is reported, not applied (ghost supersede --reassess --apply withdraws it)",
+						"newer", c.NewerID, "older", c.OlderID, "verdict", string(verdict))
+				}
+			}
 
 			switch verdict {
 			case RelationSupersedes:
@@ -1954,7 +2106,22 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			// reported "0 reclassified"; verdictSweepsBeyond is the half that
 			// catches it, on the same predicate the apply block's sweeps are
 			// gated on.
-			if wasReclassify && (verdict != liveRelation || dropSup > 0 || dropCauses > 0) {
+			//
+			// A WITHHELD withdrawal is excluded from the whole test, because
+			// it is not a change: a NEITHER and a REVERSED on a pair whose
+			// only live edge was the withheld 'supersedes' one now move
+			// nothing, and counting them prints "1 reclassified" over an
+			// --apply pass that wrote no link and deleted none (#845). The
+			// relation test still differs for such a pair, so it cannot be
+			// dropped to exclude them — the exclusion is its own term. A
+			// CAUSES verdict is exempt because the 'causes' write beside the
+			// withheld withdrawal really does land, which is the difference
+			// between a pair that changed and one that only declined.
+			movedSomething := verdict != liveRelation || dropSup > 0 || dropCauses > 0
+			if suppressed && verdict != RelationCauses {
+				movedSomething = dropCauses > 0
+			}
+			if wasReclassify && movedSomething {
 				res.Reclassified++
 				// The other affirmative verdict re-links the pair; NEITHER and a
 				// reversal only drop what is there.
@@ -2116,7 +2283,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// writing the reverse between the sweep and the write is what
 				// makes the write refuse, which is the same one-off race
 				// 'supersedes' has.
-				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
+				dropped, err := withdrawSupersedesEdge(ctx, store, c)
 				if err != nil {
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
@@ -2167,10 +2334,13 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// sweeps rather than the 'supersedes' one alone: a live
 				// 'causes' cycle judged CAUSES dropped an edge here, and a
 				// report that said "would withdraw" over a row this run removed
-				// is the same false claim in the other direction.
-				c.Withdrawn = c.Reclassified && (dropped > 0 || causesDropped > 0)
+				// is the same false claim in the other direction. A WITHHELD
+				// 'supersedes' sweep is not part of that sum (#845) — it removed
+				// nothing, so the row names no withdrawal over it and reports the
+				// withholding instead.
+				c.Withdrawn = c.withdrewLiveEdge(dropped, causesDropped)
 			case RelationNeither:
-				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
+				dropped, err := withdrawSupersedesEdge(ctx, store, c)
 				if err != nil {
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
@@ -2183,19 +2353,28 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// away", and the marker above this row is a claim about the
 				// graph: a causes-only pair has no 'supersedes' edge to drop, so
 				// deriving it from that count alone printed `already gone` over a
-				// run that really did remove a live 'causes' edge.
-				c.Withdrawn = c.Reclassified && (dropped > 0 || causesDropped > 0)
+				// run that really did remove a live 'causes' edge. A WITHHELD
+				// 'supersedes' sweep took nothing away, so it is not a withdrawal
+				// either (#845).
+				c.Withdrawn = c.withdrewLiveEdge(dropped, causesDropped)
 			case RelationReversed:
 				// Nothing is written, in either direction: the classifier
 				// says the OLDER note is the current one, so the only link
 				// this pair could carry is the backwards one. Links a
 				// previous verdict left behind are dropped, exactly as a
 				// NEITHER verdict drops both relations — a backwards
-				// 'supersedes' link is the harm #641 found, and a 'causes'
-				// link pointing INTO the obsolete note asserts the opposite
-				// of what this verdict just said. It is also the only way
-				// either link ever leaves the graph.
-				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
+				// 'causes' link pointing INTO the obsolete note asserts the
+				// opposite of what this verdict just said.
+				//
+				// 'supersedes' is the ONE relation the ordinary pass leaves
+				// alone (#845), and a backwards supersession is the very case
+				// that leaves, so the only way it leaves the graph is
+				// `ghost supersede --reassess --apply` — which re-judges the
+				// edge under the current rules and shows the operator what it
+				// is about to remove. That is the trade #845 makes for the
+				// 6-of-11 withdrawals that were wrong, and it is named here
+				// because this branch is where the backwards edge used to die.
+				dropped, err := withdrawSupersedesEdge(ctx, store, c)
 				if err != nil {
 					return res, nil, fmt.Errorf("invalidate reversed supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
@@ -2203,7 +2382,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				if err != nil {
 					return res, nil, err
 				}
-				c.Withdrawn = c.Reclassified && (dropped > 0 || causesDropped > 0)
+				c.Withdrawn = c.withdrewLiveEdge(dropped, causesDropped)
 				c.CausesDropped = causesDropped
 				// Info, and only when a row really changed: a fresh reversed
 				// candidate usually carries no link, so claiming a drop there

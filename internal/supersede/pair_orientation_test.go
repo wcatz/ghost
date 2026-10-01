@@ -148,13 +148,20 @@ func TestRunJudgesOneDirectionForAPairTheScanAndALiveLinkDisagreeAbout(t *testin
 	}
 }
 
-// TestRunWithdrawsAWrongLiveEdgeWhoseDirectionTheScanContradicts is the pay-off
+// TestRunReportsAWrongLiveEdgeWhoseDirectionTheScanContradicts is the pay-off
 // of keeping the LINK's direction rather than the scan's: a classifier that can
 // decline a direction is handed the edge the graph asserts, so its REVERSED
-// verdict reaches the edge that is actually wrong and withdraws it. Asked the
-// scan's orientation instead, the same model would answer SUPERSEDES and the
-// stale note would keep demoting the fix (#641).
-func TestRunWithdrawsAWrongLiveEdgeWhoseDirectionTheScanContradicts(t *testing.T) {
+// verdict reaches the edge that is actually wrong. Asked the scan's orientation
+// instead, the same model would answer SUPERSEDES and the stale note would keep
+// demoting the fix (#641).
+//
+// It REPORTS that edge rather than withdrawing it, which is #845's trade stated
+// where it costs something: a backwards supersession no longer self-heals in the
+// ordinary pass, so a store carrying #641's damage keeps carrying it until
+// `ghost supersede --reassess --apply` removes it. The orientation rule above is
+// unaffected — it is what makes the verdict reach the wrong edge at all, and the
+// report names the edge it names, so `--reassess` is handed the right pair.
+func TestRunReportsAWrongLiveEdgeWhoseDirectionTheScanContradicts(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
@@ -180,8 +187,11 @@ func TestRunWithdrawsAWrongLiveEdgeWhoseDirectionTheScanContradicts(t *testing.T
 	if res.Reversed != 1 {
 		t.Errorf("Result.Reversed = %d, want 1: the pass must judge the pair in the direction the graph asserts, or the reversal never reaches the wrong edge", res.Reversed)
 	}
-	if edges := liveSupersedesEdges(t, store, stale, fix); len(edges) != 0 {
-		t.Errorf("live supersedes edges = %v, want none: a reversed verdict must drop the link the pass was asked about", edges)
+	if res.WithdrawSuppressed != 1 {
+		t.Errorf("Result.WithdrawSuppressed = %d, want 1: the edge the verdict contradicts is still live, so it has to be named somewhere the operator reads it", res.WithdrawSuppressed)
+	}
+	if edges := liveSupersedesEdges(t, store, stale, fix); len(edges) != 1 {
+		t.Errorf("live supersedes edges = %v, want the one reported edge: #845 withdraws it from `--reassess`, not from the ordinary pass", edges)
 	}
 }
 

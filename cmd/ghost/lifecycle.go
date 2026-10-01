@@ -1838,11 +1838,14 @@ func checkSupersedeRelation(relation string) error {
 const supersedeUsage = `Usage: ghost supersede <project> [flags]
 
 Flags:
-  --apply             Write the supersedes/causes links (default is dry-run/preview)
+  --apply             Write the supersedes/causes links (default is dry-run/preview).
+                      It does NOT withdraw a supersedes link: a denying verdict on
+                      a live one is REPORTED (see below), never applied.
   --reassess          Re-judge the supersedes links ALREADY in the graph and, with
                       --apply, withdraw the ones that no longer hold. This is how a
-                      wrong supersession is repaired. --threshold is not used: there
-                      are no candidates to select.
+                      wrong supersession is repaired, and the only way an ordinary
+                      pass reports one out of the graph. --threshold is not used:
+                      there are no candidates to select.
   --withdraw <source-id> <target-id>
                       Withdraw the ONE link from source-id to target-id: the
                       supersedes link if the pair has one, else the causes link
@@ -1905,6 +1908,24 @@ nothing. Pairs skip-if-unchanged or the NEITHER cache would have skipped are
 skipped once and not asked N times, so the multiplier falls on the pairs that
 were going to be asked anyway.
 
+An ordinary pass WRITES links and never WITHDRAWS one. A live supersedes link whose
+endpoints moved is re-judged like any other candidate, and if the verdict denies it
+the pass prints the edge — both ids, the verdict, and the fact that the edge is
+still live — and leaves it there, in a dry run and under --apply alike. Measured
+over a real store, 6 of 11 of those withdrawals were wrong, and they shared a
+shape: a newer note retiring ONE claim of an older note whose other claims still
+held. That verdict is a fair reading of the two bodies under the every-claim rule,
+and deleting the edge promoted a memory that was current and un-hid one that was
+not, both behind a flag the operator set for WRITES. So the edge stays until you
+remove it on purpose: --reassess --apply re-judges it under the current rules and
+withdraws what does not hold, and --withdraw removes the edge you name without
+asking a model. A withheld edge is not cached either, so it is reported again on
+every later pass until it goes. The 'causes' sweep is not withheld: --reassess
+loads live 'supersedes'/'llm' edges only and so can never see a 'causes' edge, so
+leaving one contradicting a supersession would put a contradiction in the graph
+under a repair line that cannot reach it, and nothing in the ranking demotes on a
+'causes' edge, so the harm the withholding buys on 'supersedes' does not apply.
+
 --withdraw is the other repair, and the one for an edge the rules still accept:
 --reassess withdraws what the current rubric rejects, so a pair that is wrong for
 a reason no rubric can see (the newer note is not a replacement of the older one
@@ -1920,8 +1941,9 @@ pair is the case where guessing wrong withdraws the edge you did not mean. A
 refusal names the live edges of BOTH relations, since the missing one is the
 common case for an operator who has the pair but not the relation.
 
-Withdrawing a SUPERSEDES edge (--withdraw --apply, or --reassess --apply) writes
-the unsupersede history row and leaves the resolution it may have caused in place:
+Withdrawing a SUPERSEDES edge — which only --reassess --apply or --withdraw
+--apply does, never an ordinary pass — writes the unsupersede history row and
+leaves the resolution it may have caused in place:
 resolve treats a live edge as a floor, so that resolution becomes clearable only
 now. BOTH runs therefore print their own follow-up — the exact
 
@@ -2387,6 +2409,25 @@ func supersedeReport(projectName string, res supersede.Result, verb string, appl
 		out += fmt.Sprintf("  %d pair(s) not written: the pair's opposite direction was already live when the write was attempted, so a concurrent pass got there first — this run wrote no edge for them, and the pair keeps the edge that is there; the next pass judges it in the direction the live edge asserts, and for a 'supersedes' edge `%s` settles it if the two passes disagree about which note is current (it loads live 'supersedes' edges only, so on a 'causes' pair the next ordinary pass is the whole of the repair)\n",
 			res.ReverseLive, followup.ReassessCommand(projectName))
 	}
+	// The population #845 created, and it is a line of its own rather than a
+	// subtraction from Reclassified because the two are different findings for the
+	// operator: that one says the graph CHANGED, this one says an edge is still in
+	// it that the current rules no longer support, and only a command a person
+	// asked for takes that edge out. Folding it into Reclassified would print "1
+	// reclassified" over an --apply pass that deleted nothing, which is the same
+	// false count the two edge counts above are chosen by MODE to avoid.
+	//
+	// It is printed in BOTH modes for the reason the verdict is a rule of the PASS
+	// rather than of --apply: an --apply run declines the same withdrawal a dry run
+	// declines, so a report whose line appears only without the flag would tell the
+	// operator the flag is the repair. It is not. The repair is quoted in its
+	// APPLIED form, for the reason the OppositeLive and ReverseLive lines above
+	// quote theirs that way: the flagless command is a dry run that withdraws
+	// nothing.
+	if res.WithdrawSuppressed > 0 {
+		out += fmt.Sprintf("  %d pair(s) withheld: a live supersedes edge this pass would withdraw on a denying verdict is REPORTED and left in the graph — measured over a real store, 6 of 11 such withdrawals were wrong (a newer note retiring one claim of an older note whose other claims still held), so the edge is still live and still demoting its target; --apply does not remove it either, and the repair is `%s`\n",
+			res.WithdrawSuppressed, followup.ReassessCommand(projectName))
+	}
 	// The two STALE populations, and they are two lines because they are two
 	// different facts about where a pair was dropped. One counter for both would
 	// have to word one line for both, and there is no wording that is true of each:
@@ -2776,11 +2817,17 @@ func runSupersede() {
 		// Only what holds for every counted pair: a supersedes link is never
 		// written for one, in either mode, and the verdict never reaches the
 		// NEITHER cache. Whether the pair comes back as a candidate, and
-		// whether --apply dropped an existing link, are per-pair.
-		// The drop is stated as what --apply does to the pair, not as what a run
-		// will have done: the apply path skips it for a pair a concurrent pass
-		// already invalidated, and the log carries the per-pair truth.
-		fmt.Printf("  %d pair(s) refused: reversed verdict — the older note is the current one, so no supersedes link is written and the verdict is not cached (re-asked on a later pass); under --apply the pair's supersedes/causes links are dropped\n", res.Reversed)
+		// whether --apply moved an existing row, are per-pair.
+		// The 'causes' sweep is stated as what --apply does to the pair, not as
+		// what a run will have done: the apply path skips it for a pair a
+		// concurrent pass already invalidated, and the log carries the per-pair
+		// truth. The sentence used to cover 'supersedes' too, and that clause is
+		// the one #845 removed — a backwards live supersedes edge (#641's shape)
+		// is now REPORTED by this pass and withdrawn by --reassess, so a line
+		// promising this flag drops it sends an operator to a re-run that changes
+		// nothing. The withheld line above, and the rows below, are where that
+		// finding lives now.
+		fmt.Printf("  %d pair(s) refused: reversed verdict — the older note is the current one, so no supersedes link is written and the verdict is not cached (re-asked on a later pass); under --apply the pair's live causes link is dropped, while a backwards supersedes link is only reported (this pass withdraws no supersedes edge)\n", res.Reversed)
 	}
 	fmt.Print(supersedePairLines(apply, classified))
 	// The second half of the repair, over the same rows the block above names:
@@ -2867,6 +2914,16 @@ func supersedeConsensusDryRunHint(apply bool, res supersede.Result) string {
 // does withdraw counts, INCLUDING a reversal — the pass drops the same supersedes
 // edge on all three, so the target is left holding the same orphaned resolution.
 //
+// A WITHHELD withdrawal is excluded, and that exclusion is the whole of #845's
+// effect here: the edge is still live, so the piggyback that stamped the
+// `resolved_at` is still holding that target down and there is no orphaned
+// resolution to clear. Listing it would print a repair for a memory nothing needs
+// re-hiding, and in a dry run it would also print "Re-run with --apply to
+// withdraw these edges." — a promise of a flag that does not withdraw it, which
+// is how a report talks an operator into a second run that cannot help. The row
+// is still REPORTED by supersedePairLines, and counted by Result.WithdrawSuppressed
+// above; this function is the follow-up list and never was the report's.
+//
 // The RELATION is the filter, and it is there because the live edge is no longer
 // only ever a 'supersedes' one (#823). The follow-up is a `ghost resolve
 // --reassess`, and resolve's supersedes piggyback — the thing that stamped
@@ -2877,11 +2934,20 @@ func supersedeConsensusDryRunHint(apply bool, res supersede.Result) string {
 // directly: this function is the follow-up list and never was the report's.
 //
 // A row this run did not write counts too, and withdrawnTargets says why: a
-// concurrent pass that took the edge first left the identical state behind.
+// concurrent pass that took the edge first left the identical state behind. That
+// is NOT the withheld case, and the two are told apart by WithdrawSuppressed
+// rather than by `Withdrawn`: this run declining to remove a live edge leaves the
+// edge there, while a concurrent pass leaving the identical state behind left it
+// NOT there.
 func reclassifiedWithdrawals(classified []supersede.Classified) []supersede.WithdrawnEdge {
 	var out []supersede.WithdrawnEdge
 	for _, c := range classified {
 		if !c.Reclassified || c.ReclassifiedFrom != supersede.RelationSupersedes {
+			continue
+		}
+		if c.WithdrawSuppressed {
+			// The edge is still in the graph, so nothing it justified is orphaned.
+			// Not a withdrawal by any of the three spellings below.
 			continue
 		}
 		switch c.Relation {
@@ -2993,6 +3059,18 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 			switch {
 			case c.OpposedLive:
 				marker = "not written"
+			case c.WithdrawSuppressed:
+				// The marker's own value, unchanged, and that is the point: what
+				// the pass did not do is the same claim in a dry run and under
+				// --apply, because --apply does not do it either (#845). The row
+				// is reached at all under --apply because `Withdrawn` is false
+				// and the relation differs, so it would otherwise have fallen to
+				// `already gone` below — a claim that a concurrent pass removed an
+				// edge that is in the graph, and one no re-run of this command can
+				// fix. The clause added below is what names the true state; the
+				// marker alone cannot, since `would withdraw` is also what an
+				// ordinary --apply row whose edge a concurrent pass took first
+				// must NOT print.
 			case !apply:
 				// Nothing has happened yet, so nothing is claimed — including
 				// the second graph row, which the dropped-rows clause below
@@ -3061,6 +3139,22 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 					extra = fmt.Sprintf(", and %s as %s %s -> %s", verb,
 						shortID(c.NewerID), "supersedes", shortID(c.OlderID))
 				}
+			}
+			// A WITHHELD withdrawal is a THIRD clause, and it is independent of the
+			// two above rather than an alternative to them: a CAUSES verdict on a
+			// live 'supersedes' edge leaves BOTH relations live (#845 — the
+			// withdrawal is withheld and the 'causes' write is not), so that row
+			// names a re-link AND says the edge it is about is still there. Only
+			// the withdrawal half is withheld, which is why the clause says so
+			// rather than standing in for the whole row.
+			//
+			// It is what makes the row a claim about the GRAPH rather than about
+			// this run's intent, and it is the sentence an operator scanning rows
+			// needs: `already gone` would say the edge is absent, `withdrew` that
+			// this run removed it, and `kept` that the verdict affirmed it — three
+			// false statements about an edge that is in the graph and should not be.
+			if c.WithdrawSuppressed {
+				extra += ", and the edge it would have withdrawn is STILL LIVE — this pass reports a supersedes withdrawal and never makes one; `ghost supersede --reassess --apply` or `--withdraw` is what removes it"
 			}
 			// The rows the run REMOVED: counted from what it moved under
 			// --apply, and counted from what it READ where nothing was applied.
