@@ -280,8 +280,13 @@ const cueGap = 1
 //
 // Everything an agent can put between a cue and a memory that is NOT here is the
 // safe direction: the denial goes unfound, which is the miss this arm is allowed
-// to make. The words that would reopen the false contradiction are subjects and
-// verbs — "per", "I'll", "formatter", "covers" — and none of them is a filler.
+// to make. What the set must not contain is a SUBJECT or a VERB, because those are
+// what a sentence's own clause is made of: "per", "my", "formatter", "covers".
+//
+// The guard #858 exists for is safe on this side by that, not by any property of
+// its own — "I'll" is a subject and it does NOT reopen it only because splitWords
+// tokenises it to two words, so "Per <id>, I now ignore the formatting" is the
+// same sentence with the contraction expanded and is pinned as a negative too.
 //
 // Membership and not proximity: every word between them must be in this set, so a
 // gap of the allowance's width containing ONE word outside it is not an allowance
@@ -447,21 +452,48 @@ func cueSpans(words []string) []cueSpan {
 // cue one word at a time and never skips a word that is not in the closed set, so
 // it cannot match "is wrong" inside "xis wrongy" any more than the exact form
 // could, and it cannot match a cue with a filler beyond the bound ("is very
-// obsolete"). The tolerance is on the words BETWEEN, which is the whole of #860's
-// claim: a closed-set word cannot hide a cue, it only fails to hide one.
+// obsolete"). The tolerance is on the words BETWEEN a cue's own words, which is
+// the whole of #860's claim: a closed-set word cannot hide a cue, it only fails to
+// hide one.
+//
+// NEVER before the first word, which is what keeps the tolerance from becoming a
+// second way to widen cueGap: a filler ahead of the cue is part of the distance
+// the id arm measures, so consuming it would move the cue's leading edge onto the
+// filler and reach one word further than the constants allow
+// (TestANAdjacentFillerIsStillApartOfTheDistance).
 //
 // Reported as a span rather than a match so the binding downstream counts the same
-// positions this function matched, and a filler inside a run counts as inside the
-// cue — it is not what the cue is about, so it is not a candidate for being bound
-// (see insideCue).
+// positions this function matched, and a filler INSIDE a run counts as inside the
+// cue. That is what it is — the cue's own extent — but it has a consequence worth
+// naming, because it is the one place this tolerance can lose a genuine denial: if
+// the memory's own distinctive word is the filler ("that entry is obsolete" for a
+// memory about "the entry that records weekly releases"), insideCue tells the
+// sideward skip to step over it and the binding never reaches a word the memory
+// holds. The alternative — treating an interior filler as outside the cue — lets
+// the skip stop ON it instead, which is a false contradiction on any memory whose
+// wording shares a cue-adjacent closed-set word. Both words are in Ghost's own
+// vocabulary, so neither error is avoidable by choosing a set that is narrower;
+// the one taken here is the one that reports a denial as `used`, which is the
+// honest direction (see cueGap).
 func cueRun(words, cue []string, i int) (int, bool) {
 	pos := i
 	for k := 0; k < len(cue); k++ {
-		for skipped := 0; pos < len(words) && words[pos] != cue[k]; skipped++ {
-			if skipped >= cueRunFillers || !cueFillers[words[pos]] {
-				break
+		if k > 0 {
+			// Interior only, and never before the FIRST word. A filler ahead of the
+			// cue is a word BETWEEN the cue and whatever the cue is about, and
+			// consuming it here would move the cue's leading edge onto the filler:
+			// "Per <id>, I now ignore the formatting" would gain a span starting at
+			// "now", the id would then be one word from THAT instead of from "ignore",
+			// and an agent agreeing with a memory would be filed as having found it
+			// wrong -- the false contradiction this whole rule exists to stop, reached
+			// through the tolerance meant to prevent it. So the leading position is an
+			// exact match or nothing.
+			for skipped := 0; pos < len(words) && words[pos] != cue[k]; skipped++ {
+				if skipped >= cueRunFillers || !cueFillers[words[pos]] {
+					break
+				}
+				pos++
 			}
-			pos++
 		}
 		if pos >= len(words) || words[pos] != cue[k] {
 			return 0, false

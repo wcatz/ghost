@@ -204,12 +204,12 @@ func (s *Signals) AddProse(text string) {
 		// Two bindings, and they are not the same rule: an id is bound by counting
 		// the words between it and the cue — up to one arbitrary word, or up to
 		// three drawn from the closed set (cueFillers), so "ignore the advice in
-		// <id>" binds while "Per <id>, I'll ignore the formatting" does not — because
-		// an id is always a token and a rule that skipped to the nearest token would
-		// reach across a subject clause; the fingerprints are bound by skipping to
-		// the nearest word that could BE a token, because a clause boundary is not a
-		// word and the denial-then-restatement shape puts one between a cue and what
-		// it denies.
+		// <id>" binds while "Per <id>, I now ignore the formatting" does not —
+		// because an id is always a token and a rule that skipped to the nearest
+		// token would reach across a subject clause; the fingerprints are bound by
+		// skipping to the nearest word that could BE a token, because a clause
+		// boundary is not a word and the denial-then-restatement shape puts one
+		// between a cue and what it denies.
 		var boundWords []string
 		for _, i := range boundPositions(words, cues) {
 			boundWords = append(boundWords, words[i])
