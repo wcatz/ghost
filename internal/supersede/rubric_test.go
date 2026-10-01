@@ -481,19 +481,24 @@ func TestTheRubricUpgradeNoteReachesExistingEdges(t *testing.T) {
 	}{
 		{
 			path: "../../docs/cli.md",
+			// The upgrade step names the GATED repair (#862): an ungated
+			// `--reassess --apply` withdraws on one classifier verdict per edge,
+			// which is the weakest version of the command that reaches a live edge
+			// at all — and a note that tells an operator to run the weak one is a
+			// note that keeps every wrong edge they already had.
 			want: []string{
 				"only `--reassess` reaches the edges already in the graph",
 				"skip-if-unchanged",
-				"ghost supersede <project> --reassess --apply",
+				"ghost supersede <project> --reassess --consensus 3 --apply",
 				"a cached verdict is a decision about a pair the graph never linked",
 			},
 		},
 		{
 			path: "../../docs/configuration.md",
 			want: []string{
-				"run `--reassess` once",
+				"run `--reassess --consensus 3` once",
 				"skip-if-unchanged",
-				"ghost supersede <project> --reassess --apply",
+				"ghost supersede <project> --reassess --consensus 3 --apply",
 			},
 		},
 	} {

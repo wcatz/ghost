@@ -146,13 +146,13 @@ func TestResolveCommandSeparatesUnnameableFromFileOnly(t *testing.T) {
 // spelling. The cases that matter are the ones where a bare name is not one shell
 // word, and where --apply is the difference between a repair and a prediction.
 func TestSupersedeCommandsQuoteTheProjectAndCarryApply(t *testing.T) {
-	if got, want := ReassessCommand("myproj"), "ghost supersede myproj --reassess --apply"; got != want {
+	if got, want := ReassessCommand("myproj", 3), "ghost supersede myproj --reassess --consensus 3 --apply"; got != want {
 		t.Errorf("ReassessCommand = %q, want %q", got, want)
 	}
-	if got := ReassessCommand("my proj"); got != `ghost supersede --project 'my proj' --reassess --apply` {
+	if got := ReassessCommand("my proj", 3); got != `ghost supersede --project 'my proj' --reassess --consensus 3 --apply` {
 		t.Errorf("ReassessCommand for a name holding a space = %q, want the --project form a shell reads as one argument", got)
 	}
-	if got := ReassessCommand("proj; rm -rf /"); got != `ghost supersede --project 'proj; rm -rf /' --reassess --apply` {
+	if got := ReassessCommand("proj; rm -rf /", 3); got != `ghost supersede --project 'proj; rm -rf /' --reassess --consensus 3 --apply` {
 		t.Errorf("ReassessCommand for a name holding a semicolon = %q, want it quoted: an unquoted name executes when pasted", got)
 	}
 	if got, nameable := WithdrawCommand("myproj", "abc123", "def456"); !nameable || got != "ghost supersede myproj --withdraw 'abc123' 'def456' --apply" {
@@ -176,10 +176,19 @@ func TestSupersedeCommandsQuoteTheProjectAndCarryApply(t *testing.T) {
 	// Both commands are repairs, and a repair without --apply is a dry run: the
 	// flag is part of the command, not something the operator adds.
 	withdrawCmd, _ := WithdrawCommand("p", "a", "b")
-	for _, cmd := range []string{ReassessCommand("p"), withdrawCmd} {
+	for _, cmd := range []string{ReassessCommand("p", 3), withdrawCmd} {
 		if !strings.Contains(cmd, "--apply") {
 			t.Errorf("%q names a repair that predicts rather than performs", cmd)
 		}
+	}
+	// --apply exactly ONCE, and it is this renderer that keeps it that way: an
+	// earlier version appended `--consensus 3 --apply` to a string that already
+	// ended in `--apply`, which printed `--reassess --apply --consensus 3
+	// --apply`. That still parses — both flags are boolean — so only the
+	// rendered text catches it.
+	repair := ReassessCommand("myproj", 3)
+	if n := strings.Count(repair, "--apply"); n != 1 {
+		t.Errorf("ReassessCommand = %q, want --apply once, got %d", repair, n)
 	}
 }
 

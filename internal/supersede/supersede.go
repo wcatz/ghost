@@ -1662,10 +1662,11 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 			// judged into a state worth keeping. Refused, counted, and
 			// reported with the repair to run — this pass creates links, and
 			// withdrawing one is `ghost supersede --reassess`, which is the
-			// one repair that can see a 'supersedes' edge.
+			// one repair that can see a 'supersedes' edge — and the repair names
+			// its gate, because since #845 it is the only path that deletes one.
 			res.Bidirectional++
 			if logger != nil {
-				logger.Info("supersede: refusing a pair the graph claims in both directions (ghost supersede --reassess --apply withdraws one)",
+				logger.Info("supersede: refusing a pair the graph claims in both directions (ghost supersede --reassess --consensus 3 --apply withdraws one)",
 					"newer", edges[0].source, "older", edges[0].target)
 			}
 			continue
@@ -2068,7 +2069,7 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 				// and not --apply's.
 				res.WithdrawSuppressed++
 				if logger != nil {
-					logger.Info("supersede: a denying verdict on a live supersedes edge is reported, not applied (ghost supersede --reassess --apply withdraws it)",
+					logger.Info("supersede: a denying verdict on a live supersedes edge is reported, not applied (ghost supersede --reassess --consensus 3 --apply withdraws it)",
 						"newer", c.NewerID, "older", c.OlderID, "verdict", string(verdict))
 				}
 			}

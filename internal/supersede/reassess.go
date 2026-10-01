@@ -21,6 +21,19 @@
 // repair is auditable: a corpus whose history shows a supersession and no
 // withdrawal reads as though the stale claim is still live.
 //
+// SINCE #845 THIS IS THE ONLY PATH THAT DELETES, and that is why it now takes a
+// gate (#862). The creation pass reports a supersedes withdrawal instead of
+// making one, so every deletion in the product happens here — and here the
+// classifier was asked ONCE per edge while `--consensus` was refused beside it,
+// which made the sole deletion path the least-gated of the two. The measurement
+// behind both issues is the argument: on a copy of a production-shaped store,
+// withdrawals on a NEITHER verdict were 4 of 11 correct EVEN when three
+// unanimous passes produced them (#845's run, restated in #862), so one verdict
+// is weaker still. ReassessWith therefore asks the open pairs N times and moves
+// an edge only when all N agree; the default stays one pass, so an existing
+// `--reassess --apply` keeps doing exactly what it did, and an ungated applied
+// run says so in a note. The veto is deliberately NOT gated — see below.
+//
 // Withdrawing the edge is half the repair. A memory that only a now-withdrawn
 // edge justified is still stamped resolved_at, and only `ghost resolve
 // --reassess` can clear that — see TestReassessResolvesAChainIntoResolveReassess,
@@ -50,6 +63,13 @@
 // Run's veto is deliberately NOT withdrawn on the ordinary pass for the same
 // reason: a creation pass is not where graph history gets deleted.
 //
+// The veto is also deliberately NOT gated, and #862 is what makes that a
+// decision rather than an oversight: it runs before any classify call, on the
+// two note bodies, and N passes of a model cannot agree a rule about those
+// bodies more than one does. Asking three times to reach the same deterministic
+// answer would buy nothing and bill for it. So the gate covers the model's
+// verdicts, which are the part #845 measured.
+//
 // A CYCLE — one pair live in BOTH directions — is the one shape this pass used to
 // get wrong, and getting it wrong looked like success (#778). It loaded every live
 // edge as an independent candidate, so a pair claimed in both directions was asked
@@ -62,10 +82,12 @@
 // `supersedes` names one of the two live edges as current, so that edge stands and
 // its reverse is withdrawn; `reversed` names the other, so the other stands;
 // `neither` and `causes` deny the replacement in either direction, so both go. The
-// two outcomes that decide NOTHING are separate values — a missing verdict is
-// answered by a RERUN, a pair with no knowable direction only by the operator —
-// and neither withdraws, because withdrawing half a cycle on a hunch would leave a
-// live edge this pass never judged: the state the cycle itself is a report about.
+// THREE outcomes that decide NOTHING are separate values — a missing verdict is
+// answered by a RERUN, a pair with no knowable direction only by the operator, and
+// since #862 a pair the N passes SPLIT on by neither a rerun nor a single extra
+// answer — and none of them withdraws, because withdrawing half a cycle on a hunch
+// would leave a live edge this pass never judged: the state the cycle itself is a
+// report about.
 // `ReassessResult.Cyclic` is a list for that reason, and the veto is not applied
 // to a cycle: it asks one orientation's question, and a cycle has two over the
 // same two bodies. A CycleOutcome holds no prose, because the report is the only
@@ -153,14 +175,17 @@ type ReassessResult struct {
 	// missing verdict is answered by a RERUN, and only a pair with no knowable
 	// direction is the operator's to decide.
 	Cyclic []CyclicPair
-	// Unjudged names the pairs the classifier produced no verdict for, because
-	// the call that carried them failed on both attempts or the reply's verdict
-	// count did not match the pairs asked about (#699). Their edges are LEFT
-	// ALIVE: nothing was decided about them, and the next pass re-asks them, so
-	// this is the list of what a rerun still owes. It is a list rather than a
-	// count because "a project of 87 edges, 6 of them unjudged" is a different
-	// thing for an operator than "6 unjudged" with no way to find them — and one
-	// failed call can be the whole set.
+	// Unjudged names the pairs this run did not DECIDE, and the rule for that is
+	// the gate's (#862): ungated, a pair is unjudged when the classifier produced
+	// no verdict for it — the call that carried it failed on both attempts, or
+	// the reply's verdict count did not match the pairs asked about (#699); under
+	// `--consensus N` it is unjudged when FEWER THAN N passes answered it, which
+	// covers the same failures and adds the pair one answer short of a quorum.
+	// Their edges are LEFT ALIVE: nothing was decided about them, and the next
+	// pass re-asks them, so this is the list of what a rerun still owes. It is a
+	// list rather than a count because "a project of 87 edges, 6 of them
+	// unjudged" is a different thing for an operator than "6 unjudged" with no way
+	// to find them — and one failed call can be the whole set.
 	//
 	// It is the pairs the FAILED calls carried, not every open pair: a project's
 	// open pairs are chunked across several harness calls, and a call that fails
@@ -168,6 +193,21 @@ type ReassessResult struct {
 	// the pairs the calls before it already answered (#808). Those verdicts are
 	// applied like any others, so a rerun owes this list and not the whole pass.
 	Unjudged []UnjudgedPair
+	// Consensus is the number of classification passes this run made over the
+	// live edges: 1 for the ungated repair every existing script uses, N for a
+	// `--consensus N` one. It is reported rather than inferred so a reader can
+	// tell "0 withdrawn" over a gated run from the same total over an ungated
+	// one — the two are different claims, and only this field says which.
+	Consensus int
+	// NotAgreed counts the edges whose N passes did not agree, and Disputed
+	// names them with the tally. Under a gate those edges are LEFT EXACTLY AS
+	// THEY WERE and the split is the report's finding: #779's measurement is
+	// why unanimity is the rule rather than a majority, so a pair two passes
+	// called NEITHER and one called SUPERSEDES has not been agreed out of the
+	// graph, and #845's measurement is why a single one of those verdicts must
+	// not delete a correct edge on its own.
+	NotAgreed int
+	Disputed  []Disputed
 }
 
 // UnjudgedPair is one live edge whose pair the classifier never answered. It
@@ -198,7 +238,7 @@ type CyclicPair struct {
 	// Outcome names what happened, because "0 withdrawn" over a pair whose both
 	// edges are still live is the single most misleading line this report could
 	// print, and the reader cannot tell it from a pass that had nothing to do.
-	// It is one of the four CycleOutcome values.
+	// It is one of the five CycleOutcome values.
 	Outcome CycleOutcome
 }
 
@@ -207,7 +247,8 @@ type CyclicPair struct {
 // wording lives, because only the report knows whether this was a dry run, and a
 // constant that spelled out "was withdrawn" would put a past-tense claim under a
 // list of "would withdraw" rows (#780's review). Each value is a claim the pass
-// can make from the verdict it received:
+// can make from the answers it received — four of them from one verdict, and the
+// fifth from the N of them under a consensus gate:
 //
 //   - A SUPERSEDES verdict names the direction the pair runs, so that edge stays
 //     and the edge asserting the opposite goes. KeptFirst is the ordinary case
@@ -217,16 +258,18 @@ type CyclicPair struct {
 //     other edge is the one that stands.
 //   - NEITHER and CAUSES deny the same-fact replacement in either direction, so
 //     both go: an edge left live asserts what the verdict just denied.
-//   - The two outcomes that decide NOTHING are SEPARATE, because they are
+//   - The THREE outcomes that decide NOTHING are SEPARATE, because they are
 //     different facts and the operator's next step is different for each. A
 //     missing verdict — an unparseable reply, or a classify call that failed —
 //     means the pass asked and got nothing, so a RERUN is the answer and the
 //     cycle is not yet the operator's call. An unoriented pair — two rows sharing
 //     every timestamp, so there is no direction to ask about — means the pass
 //     deliberately did not ask, and a rerun will not change that, so the
-//     operator decides. Collapsing the two into one sentence had the transient
-//     #699 failure reported as a missing chronology and answered with "delete an
-//     edge".
+//     operator decides. And a pair whose N passes did NOT AGREE (#862) is a third
+//     finding again: the passes answered and no direction was named, so a rerun
+//     may find one and neither edge moves until it does. Collapsing the first two
+//     into one sentence had the transient #699 failure reported as a missing
+//     chronology and answered with "delete an edge".
 type CycleOutcome string
 
 const (
@@ -244,10 +287,20 @@ const (
 	// direction to ask about (#778) and the pass did not ask. Both edges stand,
 	// and a rerun will not change that.
 	CycleUnoriented CycleOutcome = "unoriented"
+	// CycleNotAgreed: under a consensus gate the N passes SPLIT, so no direction
+	// was named and neither edge moved. It is its own value rather than
+	// CycleNoVerdict because the two findings have different remedies and the
+	// report must not confuse them: NoVerdict is a harness fault answered by a
+	// RERUN of the same command, while a split is the model disagreeing with
+	// itself — answered by a fresh draw of passes, a different N, or a different
+	// harness, and NOT by withdrawing half the cycle. Withdrawing one edge of a
+	// pair on a hunch leaves a live edge this pass never judged, which is the
+	// state the cycle itself is a report about.
+	CycleNotAgreed CycleOutcome = "not-agreed"
 )
 
-// cycleDecision is the working state of one cyclic pair while its single verdict
-// is outstanding: the two live edges it holds, and which of them the pass asked
+// cycleDecision is the working state of one cyclic pair while its answer is
+// outstanding — one verdict ungated, one quorum under a gate (#862): the two live edges it holds, and which of them the pass asked
 // about. It carries nothing else — the verdict's outcome is returned to the caller
 // as the CyclicPair and the withdrawals, so there is no second copy of a decision
 // to read back and no field a verdict could set without anyone consulting.
@@ -402,9 +455,26 @@ func retriesOf(cls Classifier) int {
 	return 0
 }
 
+// ReassessOptions carries ReassessWith's per-call decisions: Apply (write what
+// the verdicts decide) and Consensus (how many passes must agree before a live
+// edge moves). See ReassessWith for why both are here and what the gate does to
+// the pass. The zero value is today's ungated repair.
+//
+// Consensus below MinConsensus is the UNGATED repair rather than an error, the
+// same reading RunWith takes of its own Consensus: it degrades to today's
+// behaviour instead of failing, and the refusal — with its reason — belongs at
+// the boundary that can explain it, which is parseSupersedeArgs (and the
+// lifecycle phase's own clamp). So a caller that wants a gate asks for MinConsensus
+// or more, and `Result.Consensus` carries back what actually ran.
+type ReassessOptions struct {
+	Apply     bool
+	Consensus int
+}
+
 // Reassess re-judges every live 'supersedes'/'llm' edge in the project with the
 // current rules and returns the edges the pass withdrew, or would withdraw with
-// --apply. A dry run (apply=false) writes nothing.
+// --apply. A dry run (apply=false) writes nothing. It is ReassessWith with no
+// consensus: one verdict per edge, which is what `--reassess` has always meant.
 //
 // A classifier call that keeps failing is NOT fatal to the rows a deterministic
 // rule already settled (#699). The veto needs no harness, and withdrawing an edge
@@ -428,7 +498,10 @@ func retriesOf(cls Classifier) int {
 // are reported unjudged; the error, and the non-zero exit it produces, are
 // unchanged. What #699's rehearsal lost 76 edges to was a failure with nothing
 // decided behind it, and that case is unchanged: a failure on the FIRST chunk
-// still decides nothing.
+// still decides nothing. That partial repair is the UNGATED pass's, and it is the
+// one thing a consensus gate takes away: ReassessWith asks for the pairs N times,
+// so "a pair was answered" is no longer enough to act on — it needs all N
+// answers, or it is unjudged with its edge live. See classifyVotes.
 //
 // An unparseable verdict is not an error at all: the edge stays, and the pair is
 // counted as Unclassified, so a later pass can ask again.
@@ -456,7 +529,40 @@ func retriesOf(cls Classifier) int {
 // may be linked, not about whether this one was a supersession. Such edges are
 // counted as Skipped, along with an edge whose endpoint no longer exists.
 func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectID string, apply bool, logger *slog.Logger) (ReassessResult, []WithdrawnEdge, error) {
+	return ReassessWith(ctx, store, cls, projectID, ReassessOptions{Apply: apply}, logger)
+}
+
+// ReassessWith is Reassess with the per-call decisions in one value, and the
+// gate it adds is #862's: since the creation pass stopped withdrawing (#845) this
+// repair is the only path that DELETES a live 'supersedes' edge, and it was the
+// one reading a single verdict per edge while `--consensus` was refused beside it.
+//
+// Consensus is the ORDINARY PASS'S GATE — the same voteCount, the same
+// voteCount.quorum, the same Disputed record — rather than a second implementation
+// of consensus, because two would drift and #779's measurement behind them is one
+// measurement. It changes WHERE the decision is made, not what a decision is: a
+// vetoed edge is still settled by the deterministic veto with no harness call,
+// because the veto is a rule about the two note bodies rather than a model's
+// opinion and N passes of a model cannot agree it more; a unanimous verdict
+// settles exactly as one verdict did, through the same settleOne; and a pair the
+// passes split on is left EXACTLY as the pass found it and REPORTED, because the
+// measurement behind #845 put 6 of 11 withdrawals on a NEITHER verdict wrong even
+// with three unanimous passes behind them.
+//
+// It is NOT free, and the asymmetry is deliberate: N times the classify calls,
+// and a split blocks a withdrawal the repair exists to perform. That is the trade
+// the operator is choosing when they type the flag — which is why Reassess (the
+// wrapper, and what `--reassess` still means by default) stays ungated rather
+// than quietly changing what every existing script does, and why the CLI prints a
+// note recommending --consensus 3 after an ungated applied run instead.
+func ReassessWith(ctx context.Context, store reassessStore, cls Classifier, projectID string, opts ReassessOptions, logger *slog.Logger) (ReassessResult, []WithdrawnEdge, error) {
+	passes := opts.Consensus
+	if passes < 1 {
+		passes = 1
+	}
+	apply := opts.Apply
 	var res ReassessResult
+	res.Consensus = passes
 	links, err := store.LinksByRelationSource(ctx, projectID, string(RelationSupersedes), "llm")
 	if err != nil {
 		return res, nil, fmt.Errorf("load supersedes links: %w", err)
@@ -605,53 +711,82 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	// is left. A run that recorded a partial state has the most to explain.
 	var fail error
 	if len(open) > 0 {
-		verdicts, err := cls.ClassifyBatch(ctx, open)
-		if err == nil && len(verdicts) != len(open) {
-			err = fmt.Errorf("classifier returned %d verdict(s) for %d pair(s)", len(verdicts), len(open))
+		votes, asked, classifyErr := classifyVotes(ctx, cls, open, passes)
+		if classifyErr != nil {
+			fail = errors.Join(fail, classifyErr)
 		}
-		// How much of the question was answered, which is not always none of it
+		// How much of the question was answered, which is not always all of it
 		// (#808). ClassifyBatch chunks a project's open pairs across several
 		// harness calls, and a transport failure in one of them leaves the
 		// chunks before it holding complete, parsed, number-indexed verdicts.
 		// Nothing downstream needs the whole set — a cycle is ONE candidate and
 		// so lives in a single chunk, and an ordinary edge's verdict is read on
-		// its own — so the answered prefix is settled below and only the pairs
-		// the failed call carried are reported unjudged. A reply whose verdict
-		// count does not match is NOT a partial answer: the mapping from reply
-		// to pair is exactly what is in doubt there, so nothing is settled.
-		answered := len(open)
-		if err != nil {
-			answered = answeredPrefix(verdicts, len(open), err)
-		}
-		switch {
-		case err != nil:
-			if answered > 0 {
-				settleOpen(&res, &settled, open[:answered], verdicts[:answered], openCycles[:answered])
-			}
-			fail = fmt.Errorf("classify %d live supersedes edge(s): %w", len(open), err)
-			res.Unjudged = unjudgedPairs(open[answered:])
-			// A cycle whose question was on the failed call is reported NO-VERDICT
-			// alongside the ordinary unjudged pairs, and for the same reason: the
-			// call answered nothing about any pair it carried, so no edge of the
-			// cycle moves. Silently omitting the cycle from a report that is
-			// otherwise listing every unjudged pair would leave the operator
-			// believing its two edges were left alone on purpose.
-			//
-			// NoVerdict, not Unoriented, and the difference is the operator's next
-			// step: the harness died, so the report tells them to RE-RUN this pass.
-			// Only a pair with no knowable direction is theirs to settle, and that
-			// one is the report's --withdraw commands.
-			for _, dec := range openCycles[answered:] {
-				if dec != nil {
+		// its own — so a pair is settled on the answers it holds. A reply whose
+		// verdict count does not match is NOT a partial answer: the mapping from
+		// reply to pair is exactly what is in doubt there, so nothing settles.
+		//
+		// The threshold is N, the number of passes, and that is the ONE place the
+		// gate reaches this pass. A pair all N passes answered is read through
+		// the ordinary pass's own quorum, so a unanimous verdict settles here
+		// exactly as a single one did; a pair fewer than N passes answered has
+		// NOT been agreed by N passes, and acting on the answers it does have is
+		// the ungated behaviour the gate exists to remove — a wrong withdrawal on
+		// one of three answers is precisely what #845 measured. So it is
+		// unjudged, its edge LIVE, and the next pass asks it again.
+		answered := 0
+		for i, c := range open {
+			if asked[i] < passes {
+				res.Unjudged = append(res.Unjudged, UnjudgedPair{NewerID: c.NewerID, OlderID: c.OlderID})
+				// A cycle whose question was not answered by every pass is
+				// reported NO-VERDICT alongside the ordinary unjudged pairs, and
+				// for the same reason: nothing was decided about it, so no edge
+				// of the cycle moves. Silently omitting the cycle from a report
+				// that is otherwise listing every unjudged pair would leave the
+				// operator believing its two edges were left alone on purpose.
+				//
+				// NoVerdict, not Unoriented, and the difference is the operator's
+				// next step: the harness died, so the report tells them to RE-RUN
+				// this pass. Only a pair with no knowable direction is theirs to
+				// settle, and that one is the report's --withdraw commands.
+				if dec := openCycles[i]; dec != nil {
 					res.Cyclic = append(res.Cyclic, CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleNoVerdict})
 				}
+				continue
 			}
-			if logger != nil {
-				logger.Warn("supersede reassess: the classifier failed; the edges it would have judged stand",
-					"answered", answered, "unjudged", len(res.Unjudged), "settled", len(settled), "error", err)
+			answered++
+			verdict, state := votes[i].quorum(passes)
+			if state == disputed {
+				// The gate's whole claim: a split moves NOTHING. The edge is
+				// exactly as the pass found it — no invalidation, no 'causes'
+				// sweep, no outcome counter — and the tally is the report's
+				// finding, because "0 withdrawn" over a pair the passes disagreed
+				// about is indistinguishable from a pass that had nothing to do.
+				res.NotAgreed++
+				res.Disputed = append(res.Disputed, Disputed{
+					NewerID: c.NewerID, OlderID: c.OlderID,
+					Tally: votes[i].tally(), Unreadable: votes[i].unreadable,
+				})
+				if dec := openCycles[i]; dec != nil {
+					res.Cyclic = append(res.Cyclic, CyclicPair{First: dec.first, Second: dec.second, Outcome: CycleNotAgreed})
+				}
+				if logger != nil {
+					top, n := votes[i].best()
+					logger.Info("supersede reassess: the passes did not agree; no edge withdrawn",
+						"newer", c.NewerID, "older", c.OlderID,
+						"passes", passes, "top", string(top), "top_votes", n)
+				}
+				continue
 			}
-		default:
-			settleOpen(&res, &settled, open, verdicts, openCycles)
+			// undecided carries an empty verdict, and the switch below counts it
+			// as Unclassified and leaves the edge alone — the single-pass
+			// behaviour, reached here by the same quorum function the creation
+			// pass uses rather than by a second rule.
+			settleOne(&res, &settled, c, verdict, openCycles[i])
+		}
+		if classifyErr != nil && logger != nil {
+			logger.Warn("supersede reassess: the classifier failed; the edges it would have judged stand",
+				"answered", answered, "unjudged", len(res.Unjudged), "settled", len(settled),
+				"passes", passes, "error", classifyErr)
 		}
 	}
 
@@ -783,6 +918,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
 			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
 			"reversed", res.Reversed, "unknown", res.Unclassified, "unjudged", len(res.Unjudged),
+			"consensus", res.Consensus, "not_agreed", res.NotAgreed,
 			"cyclic", len(res.Cyclic), "unoriented", res.Unoriented,
 			"withdrawn", res.Withdrawn, "causes_withdrawn", res.CausesWithdrawn,
 			"causes_sweep_failed", res.CausesSweepFailed,
@@ -795,63 +931,98 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	return res, withdrawn, nil
 }
 
-// settleOpen reads one verdict per pair into the counts it moves and the
-// withdrawals it implies. It is a named function because Reassess now calls it
-// twice — once for the whole set and once for the prefix a failed classify call
-// left answered (#808) — and the two must settle a verdict by the same rules,
-// which a copy of this switch would not guarantee.
+// classifyVotes asks the same open pairs `passes` times and tallies each pair's
+// answers, returning one voteCount per pair and how many passes ANSWERED it.
 //
-// The three slices are parallel and are the SAME slice of the pass's work:
-// pairs[i] is what verdicts[i] is about, and cycles[i] is the cycle that pair
-// contributed (nil for an ordinary edge). A cycle is settled by settleCycle,
-// which reads the verdict as a direction, and an ordinary edge by the four-way
-// switch below. A missing verdict is neither a denial nor a withdrawal in either
-// path: the edge stays, the pair is counted, and the next pass asks again.
-func settleOpen(res *ReassessResult, settled *[]judged, pairs []Candidate, verdicts []Relation, cycles []*cycleDecision) {
-	for i, c := range pairs {
-		if dec := cycles[i]; dec != nil {
-			*settled = append(*settled, settleCycle(dec, verdicts[i], res)...)
-			continue
+// The two return values are not the same number and the difference is the whole
+// of the repair pass's partial-repair contract under a gate (#808): a pair whose
+// call died was answered on some passes and not others, and the number that
+// matters is how many did. So a caller settles a pair only when asked[i] ==
+// passes, reports the rest unjudged with their edges live, and returns the error
+// so the exit says "rerun me" — the same treatment the ungated pass gives the
+// tail a failed call carried, with N passes to answer instead of one.
+//
+// It is the ordinary pass's gate, not a second one: voteCount and quorum are the
+// creation pass's, and a pair all N passes agreed on is read by exactly the
+// function that decides a WRITE there. Two implementations of "the N passes
+// disagreed" would be two rules about #779's one measurement, and they would
+// drift.
+//
+// A failing pass STOPS the loop, and that is a COST decision rather than a
+// correctness one — the pairs the failed call carried cannot reach a quorum from
+// the passes that did answer, so they are unjudged and stand either way, and the
+// pairs it DID answer in its prefix could still be settled by more passes.
+// It stops because the harness that just died is the same one the next pass would
+// spawn: #699's rehearsal is what re-asking after a dead `opencode run` cost an
+// operator, 76 of 87 edges waiting on a rerun, so a repair that keeps paying for
+// calls against a dead harness buys a worse report and a bigger bill. The pass
+// returns the error, so the exit says "rerun me", and the rerun asks everything
+// again — nothing is cached for an unanswered edge. The error names which pass
+// died, as the creation pass's does.
+func classifyVotes(ctx context.Context, cls Classifier, pairs []Candidate, passes int) ([]voteCount, []int, error) {
+	votes := make([]voteCount, len(pairs))
+	asked := make([]int, len(pairs))
+	var fail error
+	for pass := 0; pass < passes; pass++ {
+		relations, err := cls.ClassifyBatch(ctx, pairs)
+		if err == nil && len(relations) != len(pairs) {
+			err = fmt.Errorf("classifier returned %d verdict(s) for %d pair(s)", len(relations), len(pairs))
 		}
-		switch verdicts[i] {
-		case RelationSupersedes:
-			res.Confirmed++
-		case RelationCauses:
-			res.Causes++
-			*settled = append(*settled, judged{cand: c, reason: "causes: the older note is still independently true"})
-		case RelationReversed:
-			res.Reversed++
-			*settled = append(*settled, judged{cand: c, reason: "reversed: the older note is the current one", sweep: true})
-		case RelationNeither:
-			res.Neither++
-			*settled = append(*settled, judged{cand: c, reason: "neither: both notes are still true", sweep: true})
-		default:
-			// Relation("") and any invalid value are a missing judgment, not a
-			// denial: the edge stays, counted, and the pair is offered again.
-			res.Unclassified++
+		answered := len(pairs)
+		if err != nil {
+			answered = answeredPrefix(relations, len(pairs), err)
+			fail = errors.Join(fail, fmt.Errorf("classify %d live supersedes edge(s) (pass %d of %d): %w", len(pairs), pass+1, passes, err))
+		}
+		for i := 0; i < answered; i++ {
+			votes[i].add(relations[i])
+			asked[i]++
+		}
+		if err != nil {
+			break
 		}
 	}
+	return votes, asked, fail
 }
 
-// unjudgedPairs projects the open pairs no verdict arrived for: the tail a
-// failed classify call carried, and — when the first call itself failed — every
-// open pair, because that call answered nothing about anything it carried. The
-// next pass re-asks all of them either way (nothing is cached for an unanswered
-// edge), so this list is what a rerun still owes rather than a claim about which
-// of them the harness had looked at.
-func unjudgedPairs(open []Candidate) []UnjudgedPair {
-	out := make([]UnjudgedPair, 0, len(open))
-	for _, c := range open {
-		out = append(out, UnjudgedPair{NewerID: c.NewerID, OlderID: c.OlderID})
+// settleOne reads ONE settled verdict into the counts it moves and the
+// withdrawals it implies. dec is the cycle that pair contributed, or nil for an
+// ordinary edge; a cycle is settled by settleCycle, which reads the verdict as a
+// direction, and an ordinary edge by the four-way switch below. A missing verdict
+// is neither a denial nor a withdrawal in either path: the edge stays, counted,
+// and the next pass asks again.
+//
+// It is per pair and not per batch because the gate settles pairs INDIVIDUALLY —
+// one pair's split must not withhold the verdicts the other pairs' passes agreed
+// on, which is the #808 partial repair a gate has to keep.
+func settleOne(res *ReassessResult, settled *[]judged, c Candidate, verdict Relation, dec *cycleDecision) {
+	if dec != nil {
+		*settled = append(*settled, settleCycle(dec, verdict, res)...)
+		return
 	}
-	return out
+	switch verdict {
+	case RelationSupersedes:
+		res.Confirmed++
+	case RelationCauses:
+		res.Causes++
+		*settled = append(*settled, judged{cand: c, reason: "causes: the older note is still independently true"})
+	case RelationReversed:
+		res.Reversed++
+		*settled = append(*settled, judged{cand: c, reason: "reversed: the older note is the current one", sweep: true})
+	case RelationNeither:
+		res.Neither++
+		*settled = append(*settled, judged{cand: c, reason: "neither: both notes are still true", sweep: true})
+	default:
+		// Relation("") and any invalid value are a missing judgment, not a
+		// denial: the edge stays, counted, and the pair is offered again.
+		res.Unclassified++
+	}
 }
 
 // settleCycle reads ONE verdict about a pair live in both directions into the
 // withdrawals it implies, and records the pair on the result so the report can
 // name the cycle whether or not anything moved.
 //
-// The four branches are CycleOutcome's table, read as a direction: a verdict
+// The four VERDICT branches are CycleOutcome's table, read as a direction: a verdict
 // that NAMES one of the two live edges as current keeps it and withdraws the
 // other, and a verdict that denies the same-fact replacement withdraws both. The
 // default is the important one — a missing verdict withdraws NEITHER, because a
