@@ -72,13 +72,40 @@ func seedAuditedCall(t *testing.T, dataHome string) {
 	}); err != nil {
 		t.Fatalf("RecordRetrieval: %v", err)
 	}
+	// The install key the sidecar's tokens are signed with. runAuditPhase resolves
+	// this file read-only and skips the phase without it, so a fixture that
+	// omitted it would make every test below pass by never comparing anything.
+	//
+	// The file is written directly rather than through WarmQueryKey because that
+	// path caches one key per PROCESS: in a suite where each test has its own
+	// sandbox, the first test to warm it decides the key for all of them and
+	// writes no file in any later sandbox. The real format is used — 32 bytes as
+	// lower-case hex at 0600 — because the reader classifies what it finds.
+	const keyHex = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+	if err := os.WriteFile(filepath.Join(dataHome, "ghost", "retrieval-record.key"),
+		[]byte(keyHex), 0o600); err != nil {
+		t.Fatalf("write the install key: %v", err)
+	}
 }
 
 // writeAuditSidecar writes the signals a stop hook would have left for this
 // session and returns the path.
+//
+// It signs with the SANDBOX's install key, which is the key runAuditPhase will
+// resolve for its own side of the comparison. A sidecar signed with a literal
+// would parse and then match nothing, so the phase would file "ignored" and the
+// test would pass while asserting nothing.
 func writeAuditSidecar(t *testing.T, dir string) string {
 	t.Helper()
-	s := &audit.Signals{}
+	key, err := memory.ReadRetrievalKey()
+	if err != nil {
+		t.Fatalf("ReadRetrievalKey: %v", err)
+	}
+	hasher, err := audit.NewHasher(key)
+	if err != nil {
+		t.Fatalf("NewHasher: %v", err)
+	}
+	s := audit.NewWithHasher(hasher)
 	s.AddProse("the scratch directory is reaped before the lifecycle run begins")
 	path, err := audit.WriteSidecar(dir, s)
 	if err != nil {
@@ -144,6 +171,70 @@ func TestRunLifecycleJudgesTheSessionFromItsSidecar(t *testing.T) {
 	}
 }
 
+// TestRunLifecycleDoesNotDeleteAFileItWasHanded: `--signals` names a path, and a
+// path is whatever the caller composed. The child used to delete it
+// unconditionally, before reading it, so `ghost lifecycle --signals <any file>`
+// removed that file whether or not it was a sidecar — including a file the child
+// had just refused as unreadable.
+//
+// Both halves of the rule are pinned here, because the two conditions fail
+// differently and only one of them is the name. A file with a sidecar's NAME and
+// somebody else's content is still a stranger's file, so it survives too; the
+// sweep takes it when it goes stale, under the same two conditions.
+func TestRunLifecycleDoesNotDeleteAFileItWasHanded(t *testing.T) {
+	cases := []struct {
+		name    string
+		file    string
+		content string
+	}{
+		{"an ordinary file at an ordinary path", "notes.txt", "my own notes\n"},
+		{"a sidecar-named file with somebody else's content", "ghost-audit-notours.signals", "not ours\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dataHome := isolatedLifecycleEnv(t)
+			seedAuditedCall(t, dataHome)
+
+			path := filepath.Join(t.TempDir(), tc.file)
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			runLifecycleWithArgs(t, "--project", auditLifecycleProject, "--signals", path)
+
+			if rows := storedVerdicts(t, dataHome); len(rows) != 0 {
+				t.Errorf("a refused file filed %d verdict(s), want 0", len(rows))
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("the child deleted a file it was merely handed: %v", err)
+			}
+			if string(raw) != tc.content {
+				t.Errorf("the file's content changed to %q", raw)
+			}
+		})
+	}
+}
+
+// TestRunLifecycleStillDeletesTheSidecarItRead is the other half, and it is what
+// keeps the first one from being fixed by never deleting anything: a real
+// sidecar must still be consumed, or the file lives for the whole sweep window on
+// every turn of every session.
+func TestRunLifecycleStillDeletesTheSidecarItRead(t *testing.T) {
+	dataHome := isolatedLifecycleEnv(t)
+	seedAuditedCall(t, dataHome)
+	sidecar := writeAuditSidecar(t, t.TempDir())
+
+	runLifecycleWithArgs(t, "--project", auditLifecycleProject, "--signals", sidecar)
+
+	if rows := storedVerdicts(t, dataHome); len(rows) != 1 {
+		t.Fatalf("got %d stored verdict(s), want 1", len(rows))
+	}
+	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+		t.Errorf("the sidecar this run read survived it: %v", err)
+	}
+}
+
 // TestRunLifecycleSurvivesAnUnreadableSidecar: a path that is not one this build
 // wrote is a refusal, not a comparison. The audit is lost; the chain is not.
 func TestRunLifecycleSurvivesAnUnreadableSidecar(t *testing.T) {
@@ -182,8 +273,12 @@ func TestRunLifecycleSurvivesAnUnreadableSidecar(t *testing.T) {
 			t.Errorf("the refused audit was recorded as a failed %q phase; the marker is about consolidation", ph)
 		}
 	}
-	if _, err := os.Stat(foreign); !os.IsNotExist(err) {
-		t.Errorf("a sidecar the child could not read must still be cleaned up by it: %v", err)
+	// The file SURVIVES, deliberately. The child's delete is gated on the header
+	// this package writes, and a file it refused is exactly the case where
+	// deleting would mean deleting a stranger's. SweepSidecars applies the same
+	// two conditions and takes it when it goes stale.
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("a file the child refused to read was deleted anyway: %v", err)
 	}
 }
 

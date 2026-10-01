@@ -161,11 +161,28 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 // them degraded — which is the mark that lets a verdict filed from them be
 // discounted by whoever reads it. An empty scan returns nil rather than an empty
 // Signals: see Signals.Empty for the reading that would otherwise be persisted.
+//
+// The one failure that is NOT fail-open is a missing key, and that is by design:
+// a scan without one produces no tokens, so "no key" and "no evidence" would be
+// the same answer, and the second of those gets persisted as a claim. Instead the
+// key is resolved first, read-only, and a store that has never recorded a
+// retrieval — and so has no key file — produces no sidecar at all, which costs
+// this turn's audit and nothing else.
 func scanAuditSignals(p hostevent.Payload, stderr io.Writer) *audit.Signals {
 	if p.Contract == nil || p.TranscriptPath == "" {
 		return nil
 	}
 	if _, ok := hostevent.CapabilityFor(p.HostSource()); !ok {
+		return nil
+	}
+	key, err := memory.ReadRetrievalKey()
+	if err != nil {
+		logFailOpen(stderr, "read the retrieval key for the audit", err)
+		return nil
+	}
+	hasher, err := audit.NewHasher(key)
+	if err != nil {
+		logFailOpen(stderr, "build the audit token hasher", err)
 		return nil
 	}
 	f, err := os.Open(p.TranscriptPath)
@@ -175,7 +192,7 @@ func scanAuditSignals(p hostevent.Payload, stderr io.Writer) *audit.Signals {
 	}
 	defer f.Close() //nolint:errcheck
 
-	sig, ok, err := hostevent.ScanAudit(p.Contract.TranscriptFormat, f)
+	sig, ok, err := hostevent.ScanAudit(p.Contract.TranscriptFormat, f, hasher)
 	if !ok {
 		// No audit scanner for this format means the audit is off for this host —
 		// never that the host misbehaved — so this is not a fail-open line either.
@@ -402,6 +419,13 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 	if err := startLifecycleChild(cmd); err != nil {
 		slog.Warn("lifecycle spawn: starting the detached process failed", "error", err)
 		recordSpawnFailure(projectID, cfg, err)
+		// The sidecar was written for a child that will never read it. Without
+		// this it sits in the OS temp dir holding the turn's fingerprints until
+		// the sweep finds it a day later, and every failed spawn on a machine
+		// that cannot detach leaves one behind.
+		if signalsPath != "" {
+			_ = os.Remove(signalsPath)
+		}
 		return
 	}
 }

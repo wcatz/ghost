@@ -378,6 +378,43 @@ func digestWith(key []byte, query string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// ReadRetrievalKey returns the per-install key for a caller that must not create
+// it — the retrieval AUDIT's stop hook, which runs synchronously on a path an
+// agent is waiting on and may read a file but writes nothing.
+//
+// It resolves the same path loadOrCreateQueryKey does, through
+// config.DataDirPath, so GHOST_DEV_FORBID_DATA_DIR is honoured rather than
+// bypassed, and it reads through the same classifyQueryKey so "too short" and
+// "not hex" mean the same thing here as everywhere else.
+//
+// It NEVER creates the key, and a missing one is an error rather than an empty
+// one. That is the whole point of the difference from queryKey: a hook that
+// created the key would be writing to a user's data directory on a synchronous
+// path, and a hook handed an empty key would write a sidecar whose tokens are
+// reproducible by anyone holding a word list — which is the property the audit's
+// fingerprints exist to deny. So a store that has never searched (and therefore
+// never created the key) yields no sidecar at all, and the turn's audit is lost
+// rather than filed in the clear.
+//
+// The caller degrades on this error. Nothing here fails open on its own because
+// "fail open" here would mean writing something unprotected.
+func ReadRetrievalKey() ([]byte, error) {
+	dir, err := config.DataDirPath()
+	if err != nil {
+		return nil, fmt.Errorf("locate the data directory for the retrieval key: %w", err)
+	}
+	path := filepath.Join(dir, queryKeyFileName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("the retrieval key at %s does not exist yet (a store that has "+
+				"never recorded a retrieval has no key, and the audit will not create one)", path)
+		}
+		return nil, fmt.Errorf("read the retrieval key at %s: %w", path, err)
+	}
+	return classifyQueryKey(raw, path)
+}
+
 // QueryDigest is the retrieval record's query_hash: an HMAC-SHA256 of the query
 // under the per-install key, as 64 hex characters, or "" for a call that carried
 // no query at all.

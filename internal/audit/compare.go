@@ -102,10 +102,14 @@ type Verdict struct {
 // The rule is pinned by TestCompareTokenArmNeedsEnoughOfTheMemory and
 // TestCompareTokenArmNeedsEveryTokenOfAShortMemory rather than only stated here,
 // because both directions of it are arithmetic and arithmetic drifts.
+//
+// There is deliberately no fourth constant: the negation arm uses the SAME two
+// thresholds as the token arm. A lower bar for contradiction was the original
+// design and it was wrong — contradiction outranks every other verdict, so a
+// loose bar there reports ordinary use as a finding the operator would act on.
 const (
-	tokenFloor     = 3
-	tokenFraction  = 3
-	negationShared = 2
+	tokenFloor    = 3
+	tokenFraction = 3
 )
 
 // Compare judges every retrieved memory against the signals, and returns one
@@ -140,7 +144,7 @@ func CompareAgainst(s *Signals, j Judged) (Verdict, bool) {
 	if j.MemoryID == "" {
 		return Verdict{}, false
 	}
-	toks := DistinctTokens(j.Content)
+	toks := s.h.DistinctTokens(j.Content)
 
 	switch {
 	case s.contradicts(toks, j.MemoryID):
@@ -186,26 +190,33 @@ func (s *Signals) matchesSaves(toks []string) bool {
 	return clearsTokenBar(sharedTokens(s.saves, toks), len(toks))
 }
 
-// contradicts reports whether the agent denied this memory in one sentence.
+// contradicts reports whether the agent denied THIS memory, in one sentence.
 //
-// The bar is two shared fingerprints rather than the token arm's three, and it
-// is LOWER on purpose. Every other bucket's cost of a false positive is a
-// misfiled row; this one's is an operator being told the agent found a memory
-// wrong when it did not, which is the finding they would act on first. A cue
-// sentence that shares two of a memory's own distinctive words with it is a
-// denial of that memory whatever the agent's model happened to be, so the
-// threshold sits where a coincidence stops being likely rather than where
-// certainty begins.
+// Two requirements, both STRONGER than the token arm, because contradiction
+// outranks every other verdict — a false contradiction reports ordinary use as a
+// memory the agent found wrong.
 //
-// And the id counts on its own, with no overlap at all: "ignore <id>, that
-// guidance is obsolete" denies a memory the agent never restated, and requiring
-// a restatement would miss the clearest denial in the transcript.
+//  1. The denial must be about this memory. The cue lives in a sentence; the
+//     sentence must share at least the SAME token bar the `used` arm uses (>=3
+//     distinct fingerprints AND >= 3/4 of the memory's tokens), not a lower
+//     threshold. Two shared tokens is too loose: a memory about "cache lockfile
+//     directory" would be contradicted by any sentence mentioning two of those
+//     three words in a denial context, even when the denial is about something
+//     else entirely.
+//
+//  2. The id arm requires the cue to be present in a sentence naming the memory.
+//     Without the cue, naming an id is merely USING it (the identifier arm), not
+//     denying it. Requiring the cue prevents "per memory <id>, that applies" from
+//     being read as contradiction.
 func (s *Signals) contradicts(toks []string, memoryID string) bool {
 	for _, seg := range s.negated {
+		// The id arm: the sentence must both name the id AND carry a denial cue
+		// (seg.fps and seg.ids were only populated when HasNegationCue was true).
 		if seg.idsNamed(memoryID) {
 			return true
 		}
-		if sharedTokens(seg.fps, toks) >= negationShared {
+		// The fingerprint arm: the same threshold the `used` arm uses.
+		if clearsTokenBar(sharedTokens(seg.fps, toks), len(toks)) {
 			return true
 		}
 	}

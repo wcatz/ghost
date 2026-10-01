@@ -1,7 +1,7 @@
 package audit
 
 import (
-	"hash/fnv"
+	"encoding/hex"
 	"strings"
 	"unicode"
 )
@@ -54,44 +54,32 @@ var stopWords = map[string]bool{
 	"your": true,
 }
 
-// Fingerprint is the sidecar's token key: a 64-bit FNV-1a hash of one
-// lower-cased word, as sixteen hex characters.
-//
-// A HASH rather than the word itself, and that is a constraint rather than an
-// optimisation. The sidecar is a file on disk for the length of a session, and it
-// has to hold something; what it must not hold is what the agent said. A hash of
-// a word cannot be read back as that word, so the file cannot become a transcript
-// somebody later finds — which is the same reasoning that puts the query's digest
-// in retrieval_record rather than the query.
-//
-// FNV-1a is a non-cryptographic hash chosen for being three lines and having no
-// table to keep. The security property here is one-directionalness, not
-// collision resistance: a collision merges two words into one token, which can
-// only ever ADD a match (a false "used"), never hide one, and 64 bits makes that
-// remote for the vocabulary of a session.
-func Fingerprint(word string) string {
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(strings.ToLower(word)))
-	return hex64(h.Sum64())
-}
-
 // hex64 renders a hash the way the sidecar and both readers agree on: sixteen
 // lower-case hex characters, zero-padded. Fixed width matters because the file is
 // parsed positionally.
-func hex64(v uint64) string {
-	const digits = "0123456789abcdef"
+//
+// It is a RENDERER, not the hash: the hash itself is Hasher.Fingerprint, and
+// keeping the two apart matters because a render is the one part of a token
+// anybody may recompute from the file, while the value it renders is the part
+// that took a key.
+func hex64(sum []byte) string {
 	var buf [16]byte
-	for i := 15; i >= 0; i-- {
-		buf[i] = digits[v&0xf]
-		v >>= 4
-	}
-	return string(buf[:])
+	n := hex.Encode(buf[:], sum)
+	// A shorter digest would leave the tail zero-padded, which is a DIFFERENT
+	// sixteen-character field rather than a shorter one — the file is parsed by
+	// width, so padding would turn a truncation into a plausible token that
+	// matches nothing. Truncating instead keeps the field's meaning honest.
+	return string(buf[:n])
 }
 
-// unhex64 is Fingerprint's inverse, and it REFUSES anything that is not sixteen
-// hex characters. A truncated or padded field would silently become a different
+// unhex64 REFUSES anything that is not sixteen lower-case hex characters. A
+// truncated, padded or upper-cased field would silently become a different
 // token — a token nothing in the session ever matched — so a malformed line is
 // an error the reader reports rather than a value it invents.
+//
+// Lower-case only, and deliberately: an id is upper-case, so the two vocabularies
+// stay disjoint and isIDField can tell them apart by case alone. Widening this to
+// A-F would be the same defect class isHex had — see parseNegSegment.
 func unhex64(s string) (string, bool) {
 	if len(s) != 16 {
 		return "", false
@@ -105,32 +93,9 @@ func unhex64(s string) (string, bool) {
 	return s, true
 }
 
-// DistinctTokens is the fingerprints of text's words, in first-seen order.
-//
-// Order is the memory's own, not a sorted or frequency-ordered list, because a
-// caller's rule over it ("half of the first eight") has to be a statement about
-// the memory's opening, and a set with no order could not make one. Deduplicated
-// so a memory that repeats a word is not weighted by the repetition.
-//
-// It is a function of the TEXT and nothing else — no store, no clock, no
-// configuration — which is what lets the transcript side fingerprint a word and
-// this side fingerprint a memory with the same code and get the same answer.
-func DistinctTokens(text string) []string {
-	var out []string
-	seen := make(map[string]bool)
-	for _, word := range splitWords(text) {
-		if len(word) < minTokenLen || stopWords[word] {
-			continue
-		}
-		fp := Fingerprint(word)
-		if seen[fp] {
-			continue
-		}
-		seen[fp] = true
-		out = append(out, fp)
-	}
-	return out
-}
+// DistinctTokens lives on Hasher, in hasher.go: a token is a function of the
+// text AND the install key, so there is no text-only spelling of it to reach for
+// by accident. This file is the tokenizer both sides share.
 
 // splitWords is the ONE tokenizer, used by both sides of the comparison.
 //
@@ -190,31 +155,34 @@ func memoryIDs(text string) []string {
 func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}
 	return true
 }
 
-// negationCues are the phrases that mark a sentence as denying something.
+// negationCues are explicit denial constructions. Each one must deny a CLAIM —
+// not merely contain a negative-sounding word.
 //
-// A list, deliberately, and the reason is the failure mode it avoids: a
-// general-purpose model would be a better judge of contradiction than a cue list,
-// and it would also cost a subscription-billed call per verdict, store text a
-// model saw on a machine the operator did not choose, and be unavailable on every
-// host with no harness configured. #646 asks for a heuristic, and the honest
-// consequence is that "contradicted" means "the agent's own words, in the same
-// sentence as this memory's wording, carried one of these" — not that Ghost knows
-// the agent was wrong.
+// "not ", "n't " and "never " are NOT cues here: they fire on "I will not touch
+// the cache lockfile directory today" (an instruction to the agent) and on
+// "that is not unrelated to the sweep" (a mention, not a denial), producing a
+// contradicted verdict about a memory the agent plainly used. "actually",
+// "correction" and "instead of" are likewise rejected: they fire on "Per memory
+// <id>, actually that applies here" (agreement) and on ordinary rewording.
 //
-// The list holds PHRASES rather than single words on purpose. A bare "not" would
-// fire on "this is not unrelated to the sweep", which is a mention. Each cue is a
-// construction whose presence in one sentence makes that sentence a denial.
+// The only cues kept are constructions where a denial of some specific claim is
+// grammatically required: the copula pair ("is wrong", "is incorrect",
+// "is false", "is not true"), temporal invalidation ("no longer", "is
+// outdated", "is obsolete", "is stale"), and explicit withdrawal ("ignore",
+// "disregard"). A sentence containing one of these is denying something, and
+// the contradicts arm then requires that the denial be ABOUT this memory.
 var negationCues = []string{
-	"no longer", "not ", "n't ", "never ", "instead of", "rather than",
-	"correction", "actually", "wrong", "obsolete", "outdated", "deprecated",
-	"superseded", "stale", "incorrect", "false",
+	"is wrong", "is incorrect", "is false", "is not true", "is not correct",
+	"is obsolete", "is outdated", "is stale", "is deprecated", "is superseded",
+	"no longer applies", "no longer true", "no longer correct",
+	"disregard", "ignore",
 }
 
 // HasNegationCue reports whether a single sentence denies something.

@@ -27,33 +27,33 @@ const testMemoryID = "D20E133860CC4AFE38B485AD5371BA59"
 // expressed against.
 func memTokens(t *testing.T) []string {
 	t.Helper()
-	got := DistinctTokens(memContent)
+	got := testTokens(memContent)
 	want := make([]string, len(memWords))
 	for i, w := range memWords {
-		want[i] = Fingerprint(w)
+		want[i] = testHasher.Fingerprint(w)
 	}
 	if !slices.Equal(got, want) {
-		t.Fatalf("DistinctTokens(%q) = %d fingerprints, want %d in first-seen order %v", memContent, len(got), len(want), memWords)
+		t.Fatalf("testTokens(%q) = %d fingerprints, want %d in first-seen order %v", memContent, len(got), len(want), memWords)
 	}
 	return got
 }
 
 func TestDistinctTokensKeepsLongWordsAndDropsStopwords(t *testing.T) {
-	got := DistinctTokens("The opencode plugin materializes 123 the AND of a with about mkdtemp")
+	got := testTokens("The opencode plugin materializes 123 the AND of a with about mkdtemp")
 	want := []string{"opencode", "plugin", "materializes", "mkdtemp"}
 	if len(got) != len(want) {
 		t.Fatalf("DistinctTokens = %d fingerprints, want %d (%v)", len(got), len(want), got)
 	}
 	for i, w := range want {
-		if got[i] != Fingerprint(w) {
+		if got[i] != testHasher.Fingerprint(w) {
 			t.Errorf("token %d = %s, want the fingerprint of %q", i, got[i], w)
 		}
 	}
 }
 
 func TestDistinctTokensDeduplicatesInFirstSeenOrder(t *testing.T) {
-	got := DistinctTokens("mkdtemp rm-rfs mkdtemp hook mkdtemp close")
-	want := []string{Fingerprint("mkdtemp"), Fingerprint("hook"), Fingerprint("close")}
+	got := testTokens("mkdtemp rm-rfs mkdtemp hook mkdtemp close")
+	want := []string{testHasher.Fingerprint("mkdtemp"), testHasher.Fingerprint("hook"), testHasher.Fingerprint("close")}
 	if len(got) != len(want) {
 		t.Fatalf("DistinctTokens = %v, want %d distinct fingerprints", got, len(want))
 	}
@@ -68,7 +68,7 @@ func TestDistinctTokensDeduplicatesInFirstSeenOrder(t *testing.T) {
 // do not agree on capitalisation, and a rule keyed on exact case would report
 // every mixed-case restatement as ignored.
 func TestDistinctTokensIsCaseInsensitive(t *testing.T) {
-	if Fingerprint("Mkdtemp") != Fingerprint("mkdtemp") {
+	if testHasher.Fingerprint("Mkdtemp") != testHasher.Fingerprint("mkdtemp") {
 		t.Error("Fingerprint is case-sensitive; a restated sentence that capitalises a word would never match")
 	}
 }
@@ -77,12 +77,12 @@ func TestDistinctTokensIsCaseInsensitive(t *testing.T) {
 // overlap, so hashing one as a word would let a 32-character hex string stand in
 // for the memory's own wording.
 func TestAddProseKeepsIDsOutOfTheTokenSet(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("looked at " + testMemoryID + " and moved on")
 	if !s.HasID(testMemoryID) {
 		t.Error("HasID = false for an id the agent named")
 	}
-	if s.matches(DistinctTokens(testMemoryID)) {
+	if s.matches(testTokens(testMemoryID)) {
 		t.Error("an id read as a word; the token arm must not be satisfied by the id itself")
 	}
 }
@@ -91,26 +91,39 @@ func TestAddProseKeepsIDsOutOfTheTokenSet(t *testing.T) {
 // TestDistinctTokensIsCaseInsensitive for the identifier arm: Ghost mints ids
 // in upper case and a host may render them in either.
 func TestHasIDIsCaseInsensitive(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("see " + strings.ToLower(testMemoryID))
 	if !s.HasID(testMemoryID) {
 		t.Error("HasID = false for an id the transcript spells in lower case")
 	}
 }
 
+// TestNegationCue holds the cue list to the property it has to have: every entry
+// is a construction where denying some claim is grammatically required.
+//
+// The second half is the load-bearing one, and it is not decoration. The list
+// originally held "not ", "n't ", "never ", "instead of", "correction",
+// "actually" and "wrong" as bare cues, and each of those fires on ordinary text —
+// an instruction ("we don't rm -rf the directory"), a mention ("it is not
+// unrelated"), or outright AGREEMENT ("actually the path survives"). Since
+// contradiction outranks every other verdict, each of those is an ordinary use
+// reported as a finding the operator would act on. A cue list is only defensible
+// while every entry in it is a denial of a claim.
 func TestNegationCue(t *testing.T) {
 	cued := []string{
 		"that is no longer true",
-		"the transcript is not materialised anywhere else",
-		"we don't rm-rf the directory",
-		"it never lands on disk",
-		"use the state directory instead of mkdtemp",
-		"correction: the plugin owns the sweep",
-		"actually the path survives",
 		"that reading is wrong",
 		"the key is obsolete",
 		"the transcript path is stale",
-		"superseded by the fd handoff",
+		"that flag is incorrect",
+		"the cache directory setting is false",
+		"that value is not true",
+		"the override is no longer correct",
+		"the limit no longer applies",
+		"the env override is deprecated",
+		"the pointer table is superseded",
+		"ignore that memory",
+		"disregard the earlier note",
 	}
 	for _, seg := range cued {
 		if !HasNegationCue(seg) {
@@ -121,6 +134,18 @@ func TestNegationCue(t *testing.T) {
 		"the opencode plugin materializes its transcript under mkdtemp",
 		"i checked the directory and it is gone",
 		"nothing here contradicts the memory",
+		// General negatives: an instruction or a mention, never a denial.
+		"the transcript is not materialised anywhere else",
+		"we don't rm-rf the directory",
+		"it never lands on disk",
+		"use the state directory instead of mkdtemp",
+		"i will not touch the cache lockfile directory today",
+		// Agreement, which the old "actually" cue read as denial.
+		"correction: the plugin owns the sweep",
+		"actually the path survives",
+		// A bare adjective with no copula: "wrong" on its own is a value, not a
+		// denial, and the list keeps only the copula forms.
+		"the wrong directory was passed to rm-rf",
 	}
 	for _, seg := range clear {
 		if HasNegationCue(seg) {
@@ -141,7 +166,7 @@ func TestNegationCue(t *testing.T) {
 // true, which is the failure the sentence split exists to prevent.
 func TestAddProseAttributesANegationToItsOwnSentence(t *testing.T) {
 	toks := memTokens(t)
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("First, " + memContent + ". " +
 		"Second, that recollection is wrong; the cleanup helper owns this now. " +
 		"Third, mkdtemp is a POSIX call.")
@@ -155,7 +180,7 @@ func TestAddProseAttributesANegationToItsOwnSentence(t *testing.T) {
 
 func TestAddSaveArgsIsNotUsage(t *testing.T) {
 	toks := memTokens(t)
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddSaveArgs("what I learned: " + memContent)
 	if s.matches(toks) {
 		t.Error("a save's own content counted as usage; the superseded-in-session bucket could then never be non-empty")
@@ -173,7 +198,7 @@ func TestAddSaveArgsIsNotUsage(t *testing.T) {
 // asserting otherwise here would pin a threshold the tests elsewhere hold.
 func TestAddToolArgsIsUsage(t *testing.T) {
 	toks := memTokens(t)
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddToolArgs(`{"tool":"Edit","input":{"old_string":"` + memContent + `"}}`)
 	if !s.matches(toks) {
 		t.Error("a non-save tool call's arguments are the agent's own words and must count as usage")
@@ -184,7 +209,7 @@ func TestAddToolArgsIsUsage(t *testing.T) {
 }
 
 func TestSignalsDegraded(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	if reason, ok := s.Degraded(); ok || reason != "" {
 		t.Errorf("Degraded() = %q,%v on a clean scan, want \"\",false", reason, ok)
 	}
@@ -199,12 +224,14 @@ func TestSignalsDegraded(t *testing.T) {
 // as the hook returns. Anything the comparison needs must survive that trip, and
 // the trip must not become a channel for transcript text.
 func TestSignalsRoundTripThroughTheSidecar(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp and mentions " + testMemoryID)
-	// Two of the memory's own words, so this clears the negation arm's bar rather
-	// than merely carrying a cue — the point of the case is that the cued segment
-	// survives the round trip, and a segment under the bar would not.
-	s.AddProse("that is wrong, the transcript never lands anywhere near the directory")
+	// Enough of the memory's own words to clear the negation arm's bar rather than
+	// merely carrying a cue — the point of the case is that the cued segment
+	// survives the round trip, and a segment under the bar would not. The bar is
+	// the SAME one the used arm applies (>=3 fingerprints and >=3/4 of the memory),
+	// because a denial needs to be about the memory for the same reason a use does.
+	s.AddProse("that is wrong, the opencode plugin does not materialize its transcript under mkdtemp")
 	s.AddSaveArgs("the opencode plugin materializes its transcript under mkdtemp")
 	s.MarkDegraded("scan transcript: truncated")
 
@@ -212,7 +239,7 @@ func TestSignalsRoundTripThroughTheSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WriteSidecar: %v", err)
 	}
-	got, err := ReadSidecar(path)
+	got, err := ReadSidecar(path, testHasher)
 	if err != nil {
 		t.Fatalf("ReadSidecar: %v", err)
 	}
@@ -238,7 +265,7 @@ func TestSignalsRoundTripThroughTheSidecar(t *testing.T) {
 // length of a session — it must hold fingerprints and ids and nothing that
 // could be read back as what the agent said.
 func TestSidecarCarriesNoTranscriptText(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("mangoes are the only durable fruit in this transcript")
 	s.AddSaveArgs("bananas belong in the same sentence as a save")
 	path, err := WriteSidecar(t.TempDir(), s)
@@ -264,10 +291,10 @@ func TestSidecarCarriesNoTranscriptText(t *testing.T) {
 // before writing the file, and the degradation reason does not make an empty
 // scan worth comparing: a partial read of nothing is still nothing.
 func TestSignalsEmptyIsWhatTheHookRefusesToCompare(t *testing.T) {
-	if !(&Signals{}).Empty() {
+	if !(newTestSignals(t)).Empty() {
 		t.Error("a fresh Signals must be empty")
 	}
-	onlyDegraded := &Signals{}
+	onlyDegraded := newTestSignals(t)
 	onlyDegraded.MarkDegraded("scan transcript: stopped before the end (unexpected EOF)")
 	if !onlyDegraded.Empty() {
 		t.Error("a scan that found nothing is empty even when it says it stopped early: " +
@@ -286,7 +313,7 @@ func TestSignalsEmptyIsWhatTheHookRefusesToCompare(t *testing.T) {
 		{"prose that is all stopwords", func(s *Signals) { s.AddProse("the of and it is as that with") }, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &Signals{}
+			s := newTestSignals(t)
 			tc.add(s)
 			if got := s.Empty(); got != tc.empty {
 				t.Errorf("Empty() = %v, want %v", got, tc.empty)
@@ -323,7 +350,7 @@ func TestReadSidecarRejectsAnUnknownHeader(t *testing.T) {
 	if err := writeFileString(path, "not a sidecar\n"); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := ReadSidecar(path); err == nil {
+	if _, err := ReadSidecar(path, testHasher); err == nil {
 		t.Error("ReadSidecar accepted a file it did not write; a stale or foreign path would silently audit nothing")
 	}
 }

@@ -43,7 +43,14 @@ import (
 // "ignored" as a claim about the session rather than about the text that was
 // read. The signals are still returned on an error: the lines that were read are
 // real evidence, and discarding them would turn a partial answer into none.
-type AuditScanFunc func(io.Reader) (*audit.Signals, error)
+//
+// The hasher is a parameter because a token is a function of the word AND the
+// per-install key, and the scanner is the first thing that computes one. A
+// scanner handed no hasher would produce a Signals with no tokens, which is Empty,
+// and the caller would read that as "this transcript held no evidence" rather than
+// as "no key" — so the key arrives with the reader and a caller that has none
+// stops before it gets here.
+type AuditScanFunc func(io.Reader, audit.Hasher) (*audit.Signals, error)
 
 // auditScanners is the audit's format-keyed registry, and it is a SEPARATE map
 // from scanners rather than a second field on one entry.
@@ -73,12 +80,12 @@ var auditScanners = map[string]AuditScanFunc{
 // host. An unregistered format means the audit is off for that host — never that
 // the host misbehaved — so returning a signals value there would invite a caller
 // to persist a verdict derived from nothing.
-func ScanAudit(format string, r io.Reader) (*audit.Signals, bool, error) {
+func ScanAudit(format string, r io.Reader, h audit.Hasher) (*audit.Signals, bool, error) {
 	fn, ok := auditScanners[format]
 	if !ok {
 		return nil, false, nil
 	}
-	sig, err := fn(r)
+	sig, err := fn(r, h)
 	return sig, true, err
 }
 
@@ -190,8 +197,8 @@ type claudeAuditLine struct {
 // retrieval — see the file comment. Unparseable lines are skipped rather than
 // fatal, exactly as the save-nudge's scanner skips them: one bad line must not
 // cost a whole session's audit.
-func AuditScanClaudeJSONL(r io.Reader) (*audit.Signals, error) {
-	sig := &audit.Signals{}
+func AuditScanClaudeJSONL(r io.Reader, h audit.Hasher) (*audit.Signals, error) {
+	sig := audit.NewWithHasher(h)
 	err := streamJSONL(r, func(line []byte) {
 		var l claudeAuditLine
 		if err := json.Unmarshal(line, &l); err != nil || l.Type != "assistant" {
@@ -233,8 +240,8 @@ type opencodeAuditLine struct {
 // AuditScanOpencodeMessages streams an opencode-messages transcript for what the
 // agent wrote. Assistant messages only, and inside them the text parts and the
 // INPUT of each tool part — never the output.
-func AuditScanOpencodeMessages(r io.Reader) (*audit.Signals, error) {
-	sig := &audit.Signals{}
+func AuditScanOpencodeMessages(r io.Reader, h audit.Hasher) (*audit.Signals, error) {
+	sig := audit.NewWithHasher(h)
 	err := streamJSONL(r, func(line []byte) {
 		var l opencodeAuditLine
 		if err := json.Unmarshal(line, &l); err != nil || l.Info.Role != "assistant" {
@@ -286,8 +293,8 @@ const codeModeTool = "execute"
 
 // AuditScanOpencodeV2Messages streams an opencode-v2-messages transcript for
 // what the agent wrote.
-func AuditScanOpencodeV2Messages(r io.Reader) (*audit.Signals, error) {
-	sig := &audit.Signals{}
+func AuditScanOpencodeV2Messages(r io.Reader, h audit.Hasher) (*audit.Signals, error) {
+	sig := audit.NewWithHasher(h)
 	err := streamJSONL(r, func(line []byte) {
 		var l opencodeV2AuditLine
 		if err := json.Unmarshal(line, &l); err != nil || l.Type != "assistant" {
@@ -346,8 +353,8 @@ type codexAuditLine struct {
 // activity, and omitting it would report almost every codex session as using
 // nothing — a false negative the operator would read as a finding about their
 // memories.
-func AuditScanCodexRollout(r io.Reader) (*audit.Signals, error) {
-	sig := &audit.Signals{}
+func AuditScanCodexRollout(r io.Reader, h audit.Hasher) (*audit.Signals, error) {
+	sig := audit.NewWithHasher(h)
 	err := streamJSONL(r, func(line []byte) {
 		var l codexAuditLine
 		if err := json.Unmarshal(line, &l); err != nil || l.Type != "response_item" {

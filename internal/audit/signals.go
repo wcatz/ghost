@@ -31,9 +31,21 @@ const (
 // transcript synchronously and must not touch the database; the comparison has to
 // happen in the detached lifecycle child, by which time an adapter-materialized
 // transcript has been swept. So the hook writes these signals to a sidecar and
-// passes its path, and what crosses the gap is ids and hashes — which is also
-// why the file is safe to leave on disk for a while.
+// passes its path, and what crosses the gap is ids and keyed hashes — which is
+// also why the file is safe to leave on disk for a while, and why it is keyed
+// rather than merely hashed (see hasher.go).
+//
+// The zero Signals has no key and is therefore Empty: it produced nothing,
+// rather than something anybody holding a word list could reverse. That is what
+// makes New's error safe to degrade on, and it is why there is no way to build
+// one that fingerprints without a key.
 type Signals struct {
+	// h keys every token this Signals records and every token it later computes
+	// for a memory. It is the same field on both sides of the comparison, which
+	// is what makes the two agree: a hook and the detached child that read the
+	// same sidecar with different keys would find nothing in common and file
+	// every memory as ignored.
+	h     Hasher
 	ids   []string
 	prose []string
 	saves []string
@@ -43,6 +55,34 @@ type Signals struct {
 	negated  []negSegment
 	degraded string
 }
+
+// New returns an empty Signals keyed by the per-install key.
+//
+// It is the only constructor a caller should use, and it is fallible for the
+// reason the whole hasher exists: a key that is absent or too short is refused
+// rather than defaulted to something unkeyed. Callers degrade by writing no
+// sidecar at all, which costs one turn's audit — the honest cost — rather than
+// writing a file whose tokens are reproducible from an English word list.
+//
+// It takes the key BYTES rather than opening anything, because the stop hook
+// runs synchronously and must not open a database; memory.ReadRetrievalKey is
+// the resolver, and it never creates a key.
+func New(key []byte) (*Signals, error) {
+	h, err := NewHasher(key)
+	if err != nil {
+		return nil, err
+	}
+	return &Signals{h: h}, nil
+}
+
+// NewWithHasher returns an empty Signals over an already-built hasher, for the
+// caller that resolved the key once and will hand the same hasher to several
+// scans.
+func NewWithHasher(h Hasher) *Signals { return &Signals{h: h} }
+
+// Hasher returns the hasher these signals are keyed by, so a reader can tell
+// whether a Signals it was given can fingerprint a memory at all.
+func (s *Signals) Hasher() Hasher { return s.h }
 
 // negSegment is ONE cued sentence: the fingerprints of its words and the ids it
 // names.
@@ -86,19 +126,32 @@ func (s *Signals) AddID(id string) {
 	s.ids = append(s.ids, upper)
 }
 
+// addWords records text as the agent's own words without drawing any negation
+// arm from it. Ids are lifted out separately and reported on their own arm; a
+// token is computed over the words as written, id-shaped run included, because
+// the token arm's floor of three is what stops a lone id from standing in for a
+// memory's own wording — TestAddProseKeepsIDsOutOfTheTokenSet pins that.
+func (s *Signals) addWords(text string) {
+	s.addFingerprints(&s.prose, s.h.DistinctTokens(text))
+	for _, id := range memoryIDs(text) {
+		s.AddID(id)
+	}
+}
+
 // AddProse records the agent's own words: its prose, and the arguments of the
 // tool calls it made. Ids are lifted out separately, so the token arm can never be
 // satisfied by an id (an id is evidence on its own arm, and hashing it as a word
 // would let a memory "match itself" without the agent saying anything).
+//
+// Negation segments are extracted ONLY from prose (the agent's own narrative),
+// never from tool-call arguments, because tool argument strings routinely contain
+// negative-sounding values ("return false") that are not denials of the memory.
 func (s *Signals) AddProse(text string) {
-	s.addFingerprints(&s.prose, DistinctTokens(text))
-	for _, id := range memoryIDs(text) {
-		s.AddID(id)
-	}
+	s.addWords(text)
 	for _, seg := range segments(text) {
 		if HasNegationCue(seg) {
 			s.negated = append(s.negated, negSegment{
-				fps: DistinctTokens(seg),
+				fps: s.h.distinctTokens(splitWords(seg)),
 				ids: memoryIDs(seg),
 			})
 		}
@@ -112,15 +165,21 @@ func (s *Signals) AddProse(text string) {
 // not a use — and if save text counted as usage, that bucket could never be
 // non-empty.
 func (s *Signals) AddSaveArgs(text string) {
-	s.addFingerprints(&s.saves, DistinctTokens(text))
+	s.addFingerprints(&s.saves, s.h.DistinctTokens(text))
 	for _, id := range memoryIDs(text) {
 		s.AddID(id)
 	}
 }
 
-// AddToolArgs records a non-save tool call's arguments, which are the agent's own
-// words like any other.
-func (s *Signals) AddToolArgs(text string) { s.AddProse(text) }
+// AddToolArgs records a non-save tool call's arguments.
+//
+// Tool-call arguments MUST NOT feed the negation arm, because values like
+// "return false" or "cache lockfile directory" routinely contain negative-
+// sounding words that are not denials of a memory. Only the agent's prose
+// sentences may contribute negation segments.
+func (s *Signals) AddToolArgs(text string) {
+	s.addWords(text)
+}
 
 // MarkDegraded records why the scan stopped early. Its argument is a reason from
 // the fail-open vocabulary the hook already prints, never a transcript phrase.
@@ -151,7 +210,18 @@ func (s *Signals) Degraded() (string, bool) {
 //
 // A degradation reason does not make an empty scan worth comparing. It is a
 // caveat ON a comparison, and there is nothing here to compare.
+//
+// A Signals with no KEY is Empty even when it collected ids, which is the whole
+// point of the check and not an oversight in it. Ids alone cannot carry a
+// comparison: without a token hasher the memory side has no words to meet them
+// on, so the only verdict such a set could produce is "ignored" for every kept
+// memory — a claim of total silence from a caller that never read a word. So a
+// keyless scan reports itself as having found nothing, and the hook writes no
+// sidecar.
 func (s *Signals) Empty() bool {
+	if !s.h.HasKey() {
+		return true
+	}
 	return len(s.ids) == 0 && len(s.prose) == 0 && len(s.saves) == 0
 }
 
@@ -184,7 +254,17 @@ func (s *Signals) addFingerprints(dst *[]string, fps []string) {
 // A CreateTemp name rather than a composed one: the path is handed to a detached
 // child on a command line, and a name built from a project id would be a name
 // another project could collide with or a caller could predict.
+//
+// It REFUSES an unkeyed Signals, and the refusal is the load-bearing part of this
+// function rather than a guard against a caller mistake. An unkeyed write is not a
+// degraded sidecar, it is a sidecar that undoes the design: a file of unkeyed
+// 64-bit hashes is a file anybody with a word list can read as plain text, and it
+// would be written silently by any caller that forgot a key. So the one way to
+// get an unkeyed file onto disk is to not be able to build one.
 func WriteSidecar(dir string, s *Signals) (string, error) {
+	if !s.h.HasKey() {
+		return "", errNoKey
+	}
 	f, err := os.CreateTemp(dir, "ghost-audit-*.signals")
 	if err != nil {
 		return "", fmt.Errorf("audit: create sidecar: %w", err)
@@ -220,14 +300,20 @@ func WriteSidecar(dir string, s *Signals) (string, error) {
 	return path, nil
 }
 
-// ReadSidecar reads a Signals back, refusing any file that is not one this
-// version wrote.
+// ReadSidecar reads a Signals back under the given hasher, refusing any file
+// that is not one this version wrote.
+//
+// The hasher is a parameter and not something the file carries, because a key
+// written into the sidecar would be a key beside the hashes it protects. The
+// caller therefore has to have resolved the SAME per-install key the writer used,
+// and a caller that cannot has nothing to compare with — which is the correct
+// outcome, and a skipped audit rather than a wrong one.
 //
 // Strict on purpose: the path arrives on a command line from a hook, so a
 // truncated, edited or foreign file must fail rather than be read as "the agent
 // used nothing" — which is the one reading that would make the report confidently
 // wrong. A field it cannot parse is an error, not a default.
-func ReadSidecar(path string) (*Signals, error) {
+func ReadSidecar(path string, h Hasher) (*Signals, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("audit: read sidecar: %w", err)
@@ -236,7 +322,7 @@ func ReadSidecar(path string) (*Signals, error) {
 	if !ok {
 		return nil, errors.New("audit: sidecar header is not " + SidecarHeader)
 	}
-	s := &Signals{}
+	s := &Signals{h: h}
 	for i, line := range bytes.Split(rest, []byte("\n")) {
 		if len(line) == 0 {
 			continue
@@ -349,6 +435,28 @@ func SweepStale(dir string) (int, error) {
 	return SweepSidecars(dir, sidecarStaleAfter)
 }
 
+// IsSidecarName reports whether a base name is one this package writes.
+//
+// The one predicate for the naming rule, shared by the sweep and by the child's
+// decision to DELETE the file it was handed. Both need it, and they must agree:
+// a sweep that is narrower than the delete leaves files behind, and a sweep that
+// is wider removes another process's, and neither failure is visible in a test
+// that only exercises one of them.
+func IsSidecarName(name string) bool {
+	return strings.HasPrefix(name, "ghost-audit-") && strings.HasSuffix(name, ".signals")
+}
+
+// IsSidecarPath reports whether path's base name is a sidecar this package
+// writes, whatever the directory it sits in.
+//
+// It is deliberately about the NAME and not the content. A caller asking "may I
+// delete this file" has to be able to ask before reading it, and the content test
+// belongs to whoever has read it — see ReadSidecar, which refuses any header this
+// package did not write.
+func IsSidecarPath(path string) bool {
+	return IsSidecarName(filepath.Base(path))
+}
+
 // SweepSidecars removes sidecars in dir older than maxAge, and reports how many
 // it took.
 //
@@ -371,7 +479,7 @@ func SweepSidecars(dir string, maxAge time.Duration) (int, error) {
 			continue
 		}
 		name := ent.Name()
-		if !strings.HasPrefix(name, "ghost-audit-") || !strings.HasSuffix(name, ".signals") {
+		if !IsSidecarName(name) {
 			continue
 		}
 		path := filepath.Join(dir, name)

@@ -73,7 +73,7 @@ func TestRunJudgesEveryVerdict(t *testing.T) {
 	seedMemory(t, store, projectID, "IGNID", "Bench seeds restore content through the shared clamp helper")
 	recordCall(t, store, projectID, "search", "USEDID", "SUPID", "CONID", "IGNID")
 
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("as I read it, the opencode plugin materializes its transcript under mkdtemp")
 	s.AddSaveArgs("pinned versions come from the lockfile and never a floating tag")
 	s.AddProse("that is wrong: the v20 migration runs after the pre-migration backup")
@@ -108,7 +108,7 @@ func TestRunSkipsMemoriesItCannotRead(t *testing.T) {
 	seedMemory(t, store, projectID, "HERE", memContent)
 	recordCall(t, store, projectID, "search", "HERE", "GONE")
 
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 
 	res, err := Run(context.Background(), store, projectID, s)
@@ -142,7 +142,7 @@ func TestRunDoesNotJudgeDroppedRows(t *testing.T) {
 		t.Fatalf("RecordRetrieval: %v", err)
 	}
 
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	res, err := Run(context.Background(), store, projectID, s)
 	if err != nil {
@@ -171,7 +171,7 @@ func TestRunFilesOneVerdictPerCallAndMemory(t *testing.T) {
 	recordCall(t, store, projectID, "search", "M1")
 	recordCall(t, store, projectID, "session_start", "M1")
 
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	if _, err := Run(context.Background(), store, projectID, s); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -206,7 +206,7 @@ func TestRunIsIdempotentOverTheSameCall(t *testing.T) {
 	seedMemory(t, store, projectID, "M1", memContent)
 	recordCall(t, store, projectID, "search", "M1")
 
-	silent := &Signals{}
+	silent := newTestSignals(t)
 	silent.AddProse("worked on something unrelated entirely")
 	if _, err := Run(context.Background(), store, projectID, silent); err != nil {
 		t.Fatalf("first run: %v", err)
@@ -215,7 +215,7 @@ func TestRunIsIdempotentOverTheSameCall(t *testing.T) {
 		t.Fatalf("first run = %q, want %q", got["M1"], OutcomeIgnored)
 	}
 
-	talkative := &Signals{}
+	talkative := newTestSignals(t)
 	talkative.AddProse("the opencode plugin materializes its transcript under mkdtemp, so the sidecar is synchronous")
 	if _, err := Run(context.Background(), store, projectID, talkative); err != nil {
 		t.Fatalf("second run: %v", err)
@@ -239,7 +239,7 @@ func TestRunReplacesOnlyTheCallsItJudged(t *testing.T) {
 	recordCall(t, store, projectID, "search", "M1")
 	recordCall(t, store, projectID, "search", "M2")
 
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	if _, err := Run(context.Background(), store, projectID, s); err != nil {
 		t.Fatalf("run both: %v", err)
@@ -255,7 +255,7 @@ func TestRunReplacesOnlyTheCallsItJudged(t *testing.T) {
 	restore := CallWindow
 	CallWindow = 1
 	t.Cleanup(func() { CallWindow = restore })
-	if _, err := Run(context.Background(), store, projectID, &Signals{}); err != nil {
+	if _, err := Run(context.Background(), store, projectID, newTestSignals(t)); err != nil {
 		t.Fatalf("narrow run: %v", err)
 	}
 	got := mustRead(t, store, projectID)
@@ -272,7 +272,7 @@ func TestRunReportsSearchesAndSessionStartsSeparately(t *testing.T) {
 	recordCall(t, store, projectID, "search", "M1")
 	recordCall(t, store, projectID, "session_start", "M1")
 
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 	res, err := Run(context.Background(), store, projectID, s)
 	if err != nil {
@@ -299,7 +299,7 @@ func TestRunCountsSearchesThatKeptNothing(t *testing.T) {
 	recordCall(t, store, projectID, "search", "M1")
 	seedMemory(t, store, projectID, "M1", memContent)
 
-	res, err := Run(context.Background(), store, projectID, &Signals{})
+	res, err := Run(context.Background(), store, projectID, newTestSignals(t))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestRunCountsSearchesThatKeptNothing(t *testing.T) {
 // say nothing, which reads downstream as "the audit found no problems".
 func TestRunRefusesAnEmptyProject(t *testing.T) {
 	store, _ := auditStore(t)
-	if _, err := Run(context.Background(), store, "", &Signals{}); err == nil {
+	if _, err := Run(context.Background(), store, "", newTestSignals(t)); err == nil {
 		t.Error("Run accepted an empty project id")
 	}
 }
@@ -346,7 +346,7 @@ func TestRunStandsOnWhatItReads(t *testing.T) {
 	seedMemory(t, store, projectID, "M1", secret)
 	recordCall(t, store, projectID, "search", "M1")
 
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("unrelated")
 	res, err := Run(context.Background(), store, projectID, s)
 	if err != nil {
@@ -368,7 +368,7 @@ func TestRunStoresTheTranscriptDegradation(t *testing.T) {
 	seedMemory(t, store, projectID, "M1", memContent)
 	recordCall(t, store, projectID, "search", "M1")
 
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.MarkDegraded("scan transcript: read failure mid-transcript")
 	res, err := Run(context.Background(), store, projectID, s)
 	if err != nil {

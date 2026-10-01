@@ -14,6 +14,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -70,9 +71,60 @@ func sidecarPathFrom(t *testing.T, argv []string) string {
 // spawn. Returns the project directory to use as the payload's cwd.
 func auditHookRun(t *testing.T) (dataHome, projDir string) {
 	t.Helper()
+	projDir, dataHome = isolatedProjectDir(t)
+	// The install key. A live one always exists — the MCP server resolves it at
+	// startup — and the hook READS it and never creates it (memory.ReadRetrievalKey
+	// refuses to), so without a key in this sandbox the audit is off and every
+	// test below would be vacuously green.
+	seedRetrievalKey(t, dataHome)
+	return dataHome, projDir
+}
+
+// seedRetrievalKey writes an install key where a real install has one.
+//
+// The FILE is written directly rather than through memory.WarmQueryKey, and the
+// reason is the key cache: it is a package-level one-key-per-process cache, so in
+// a suite where each test gets its own sandbox the first test to warm it poisons
+// every later one — WarmQueryKey would report the first sandbox's key and write
+// no file here at all. The hook's contract is to read this file, so writing it is
+// the fixture that matches the contract. The format is the real one (32 bytes,
+// lower-case hex, 0600) because the reader classifies it.
+func seedRetrievalKey(t *testing.T, dataHome string) {
+	t.Helper()
+	dir := filepath.Join(dataHome, "ghost")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir the data directory: %v", err)
+	}
+	// Fixed rather than random: a test that reads the key back (auditTestKey) and a
+	// test that signs a sidecar have to agree, and a random key per call would make
+	// the second of those fail for a reason that has nothing to do with the code.
+	const keyHex = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+	path := filepath.Join(dir, "retrieval-record.key")
+	if err := os.WriteFile(path, []byte(keyHex), 0o600); err != nil {
+		t.Fatalf("write the install key: %v", err)
+	}
+}
+
+// auditTestKey is the sandbox's install key, which is the key the hook signs the
+// sidecar with — so a test that signs with a literal of its own is signing with
+// something the child could never reproduce.
+func auditTestKey(t *testing.T) []byte {
+	t.Helper()
+	key, err := memory.ReadRetrievalKey()
+	if err != nil {
+		t.Fatalf("ReadRetrievalKey: %v", err)
+	}
+	return key
+}
+
+// isolatedProjectDir is auditHookRun without its install key, for the one test
+// whose subject IS the absent key. Everything else about the sandbox — the
+// auto_resolve config that reaches the spawn, the project the cwd resolves to —
+// has to match, or the chain would not run for a second and unrelated reason and
+// the test would prove nothing.
+func isolatedProjectDir(t *testing.T) (projDir, dataHome string) {
+	t.Helper()
 	dataHome = isolatedHome(t)
-	// auto_resolve reaches the spawn without the no-LLM guard, which only gates
-	// a reflect-only chain: the audit rides whatever the lifecycle already runs.
 	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
 	t.Setenv("PATH", t.TempDir())
 
@@ -85,7 +137,7 @@ func auditHookRun(t *testing.T) (dataHome, projDir string) {
 		t.Fatalf("EvalSymlinks: %v", err)
 	}
 	seedProject(t, dataHome, "p1", canonical, "audited")
-	return dataHome, canonical
+	return canonical, dataHome
 }
 
 // TestTheStopHookHandsTheLifecycleAnAuditSidecar: the turn's evidence crosses
@@ -213,15 +265,110 @@ func TestTheStopHookHandsOverNothingWithoutEvidence(t *testing.T) {
 	}
 }
 
+// TestASidecarWrittenForAChildThatNeverStartedIsRemoved: the sidecar is written
+// BEFORE the spawn, because writing it after would mean the file outlives the
+// turn whenever the spawn is refused — and the spawn is refused for ordinary
+// reasons (no executable, a full disk, a fork limit). A file nobody reads and
+// nobody owns is what the sweep exists for, but waiting a day for it on every
+// failed spawn is the sweep doing housekeeping that the hook could have done at
+// the moment it knew.
+func TestASidecarWrittenForAChildThatNeverStartedIsRemoved(t *testing.T) {
+	_, projDir := auditHookRun(t)
+
+	real := startLifecycleChild
+	t.Cleanup(func() { startLifecycleChild = real })
+	var handed [][]string
+	startLifecycleChild = func(cmd *exec.Cmd) error {
+		handed = append(handed, cmd.Args)
+		return errors.New("cannot fork")
+	}
+
+	transcript := writeTranscript(t,
+		lineUser,
+		auditProseLine("per "+auditTranscriptMemoryID+" the hook sweeps on close"),
+		lineGhostSave,
+	)
+	var out bytes.Buffer
+	RunHostEvent("stop", "claude-code",
+		strings.NewReader(stopInputIn(t, projDir, transcript, "claude-jsonl")),
+		&out, io.Discard)
+
+	if len(handed) != 1 {
+		t.Fatalf("the hook tried to start %d child(ren), want exactly 1", len(handed))
+	}
+	path := sidecarPathFrom(t, handed[0])
+	if path == "" {
+		t.Fatal("no sidecar was written, so this case proves nothing about removing one")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a sidecar written for a child that never started is still there: %v", err)
+	}
+}
+
+// TestNoKeyMeansNoSidecarAndStillALifecycle: the degradation the key forces, and
+// it is the one case in this file where the answer is "nothing happened".
+//
+// The hook resolves the install key READ-ONLY, so a store that has never recorded
+// a retrieval — and so has no key file — produces no sidecar. The alternative was
+// available and was the one this design refuses: hash the words anyway, in the
+// clear, into a file in the shared temp directory. An absent sidecar costs this
+// turn's audit; an unkeyed one costs the property the sidecar is for, on a turn
+// nobody was watching.
+//
+// The other half is that the lifecycle chain is UNAFFECTED. The audit rides
+// whatever the lifecycle already runs, so a missing key must not cost the phases
+// that maintain the store — those are worth running whether or not this turn
+// produced evidence.
+func TestNoKeyMeansNoSidecarAndStillALifecycle(t *testing.T) {
+	projDir, dataHome := isolatedProjectDir(t)
+	// Deliberately NO seedRetrievalKey here: the key file is absent, which is the
+	// whole condition under test.
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost", "retrieval-record.key")); !os.IsNotExist(err) {
+		t.Fatalf("this test needs NO install key, but one exists: %v", err)
+	}
+	spawned := captureLifecycleChild(t)
+
+	transcript := writeTranscript(t,
+		lineUser,
+		auditProseLine("the transcript under mkdtemp holds "+auditTranscriptMemoryID),
+		lineGhostSave,
+	)
+	var out, errOut bytes.Buffer
+	RunHostEvent("stop", "claude-code",
+		strings.NewReader(stopInputIn(t, projDir, transcript, "claude-jsonl")),
+		&out, &errOut)
+
+	if len(*spawned) != 1 {
+		t.Fatalf("the hook started %d child(ren), want exactly 1: a missing key must not "+
+			"cost the lifecycle chain", len(*spawned))
+	}
+	if got := sidecarPathFrom(t, (*spawned)[0]); got != "" {
+		t.Errorf("the child was handed a sidecar signed with no key: %q", got)
+	}
+	// And the operator is told, on the channel the hook already fails open on,
+	// because a silently absent audit is indistinguishable from an agent that used
+	// nothing.
+	if !strings.Contains(errOut.String(), "retrieval key") {
+		t.Errorf("nothing on stderr said why the audit was skipped:\n%s", errOut.String())
+	}
+}
+
 // TestASidecarGoesToTheTempDirAndNotTheRepository: it is a temp file handed to a
 // detached child, so its directory is a parameter of the write rather than a
 // property of wherever the session happened to be running.
 func TestASidecarGoesToTheTempDirAndNotTheRepository(t *testing.T) {
+	// The sandbox and its install key, because a sidecar can only be written
+	// with one and the hook's key is the sandbox's.
+	auditHookRun(t)
 	dir := t.TempDir()
 	t.Cleanup(func() { auditSidecarDir = func() string { return os.TempDir() } })
 	auditSidecarDir = func() string { return dir }
 
-	s := &audit.Signals{}
+	hasher, err := audit.NewHasher(auditTestKey(t))
+	if err != nil {
+		t.Fatalf("NewHasher: %v", err)
+	}
+	s := audit.NewWithHasher(hasher)
 	s.AddProse("the transcript under mkdtemp holds " + auditTranscriptMemoryID)
 	path, err := audit.WriteSidecar(auditSidecarDir(), s)
 	if err != nil {

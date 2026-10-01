@@ -302,16 +302,48 @@ func runLifecycle() {
 // job instead, which is why that is a separate step above rather than a fallback
 // in here.
 func runAuditPhase(projectName, signalsPath string) {
-	defer func() { _ = os.Remove(signalsPath) }()
 	skip := func(reason string) {
 		fmt.Fprintf(os.Stderr, "lifecycle: retrieval audit skipped: %s\n", reason)
 	}
 
-	sig, err := audit.ReadSidecar(signalsPath)
+	// Delete the sidecar ONLY once it has proved to be one. The deferred remove
+	// this replaces ran before the read, so `--signals <any path>` deleted
+	// whatever it was handed — a path that reached this argument from a shell, a
+	// mistake, or a caller that composed it, and the deletion happened even when
+	// the file was refused as unreadable. This is an internal subcommand, which
+	// makes it exactly as reachable as the other internal phases and no less.
+	//
+	// Both conditions are required, and in this order. The NAME first, because a
+	// file that is not named like a sidecar is not one however valid its header
+	// turns out to be; the HEADER second, because a file that merely borrowed the
+	// name is not this package's to delete either. A sidecar this run cannot parse
+	// is left for the sweep, which is scoped by the same two rules.
+	if ok := audit.IsSidecarPath(signalsPath); !ok {
+		skip("not a sidecar path")
+		return
+	}
+	// The SAME per-install key the hook signed the sidecar with, resolved
+	// read-only. A child under a different key would find no token in common with
+	// the memory it is judging, and would file every kept memory as ignored — a
+	// confident report of ordinary use as total silence, from a store that was
+	// fine. So the key is resolved BEFORE the read, and a missing one skips the
+	// phase rather than comparing under a key of its own.
+	key, err := memory.ReadRetrievalKey()
 	if err != nil {
 		skip(err.Error())
 		return
 	}
+	hasher, err := audit.NewHasher(key)
+	if err != nil {
+		skip(err.Error())
+		return
+	}
+	sig, err := audit.ReadSidecar(signalsPath, hasher)
+	if err != nil {
+		skip(err.Error())
+		return
+	}
+	defer func() { _ = os.Remove(signalsPath) }()
 	store, err := openAuditStore()
 	if err != nil {
 		skip(err.Error())

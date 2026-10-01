@@ -3,6 +3,7 @@ package hostevent
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,6 +23,23 @@ const injectedText = "the opencode plugin materializes its transcript under mkdt
 
 // agentText is what the agent SAID, in its own words, and it is what does count.
 const agentText = "as I read it, the opencode plugin materializes its transcript under mkdtemp, so the sidecar has to be written synchronously"
+
+// auditTestKey is the per-install key this package's audit tests sign with. It is
+// a literal because it is not a secret and because a fixture that had to provision
+// a real key could only assert the same thing more slowly; what matters is that
+// both the scan and the comparison in the helpers below use this one, and that a
+// test which needs a DIFFERENT one builds it explicitly.
+var auditTestKey = []byte("hostevent-audit-test-key-not-secret")
+
+// auditTestHasher is auditTestKey's hasher.
+func auditTestHasher(t *testing.T) audit.Hasher {
+	t.Helper()
+	h, err := audit.NewHasher(auditTestKey)
+	if err != nil {
+		t.Fatalf("NewHasher(auditTestKey): %v", err)
+	}
+	return h
+}
 
 // matchesFixture reports whether the signals judge the fixture memory as used.
 func usedBySignals(t *testing.T, sig *audit.Signals) bool {
@@ -44,7 +62,7 @@ func scanAudit(t *testing.T, format, transcript string) *audit.Signals {
 		t.Fatalf("open the fixture: %v", err)
 	}
 	defer r.Close() //nolint:errcheck
-	sig, ok, err := ScanAudit(format, r)
+	sig, ok, err := ScanAudit(format, r, auditTestHasher(t))
 	if err != nil {
 		t.Fatalf("ScanAudit: %v", err)
 	}
@@ -262,7 +280,7 @@ func TestScanAuditMarksAPartialReadDegraded(t *testing.T) {
 	// One whole line, then a partial one with no terminator, then a read error.
 	data := full + "\n" + `{"type":"assistant","mess`
 	r := &errReader{data: []byte(data)}
-	sig, ok, err := ScanAudit(FormatClaudeJSONL, r)
+	sig, ok, err := ScanAudit(FormatClaudeJSONL, r, auditTestHasher(t))
 	if !ok {
 		t.Fatal("no audit scanner registered for claude-jsonl")
 	}
@@ -291,7 +309,44 @@ func TestScanAuditRegistryCoversEveryScanFormat(t *testing.T) {
 }
 
 func TestScanAuditUnknownFormat(t *testing.T) {
-	if _, ok, err := ScanAudit("", strings.NewReader("")); ok || err != nil {
+	if _, ok, err := ScanAudit("", strings.NewReader(""), auditTestHasher(t)); ok || err != nil {
 		t.Error(`ScanAudit("") must stay unregistered so callers fail open`)
+	}
+}
+
+// TestAScanWithNoKeyProducesNoTokens: the hasher is a parameter of every scanner,
+// and this is why that is not an optional convenience.
+//
+// A keyless scan is Empty. That is load-bearing rather than incidental: the hook's
+// precondition for writing a sidecar is Empty, and a scan that recorded tokens
+// without a key would hand the detached child a file of unkeyed hashes — the
+// exact thing the keyed token is for. It is better for the scan to report that it
+// found nothing than for it to report something it cannot protect.
+func TestAScanWithNoKeyProducesNoTokens(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	// agentText, in a real transcript line, so the fixture exercises the scanner
+	// rather than the registry.
+	if err := os.WriteFile(path, []byte(
+		`{"type":"assistant","message":{"content":[{"type":"text","text":`+
+			strconv.Quote(agentText)+`}]}}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write the fixture: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open the fixture: %v", err)
+	}
+	defer f.Close() //nolint:errcheck
+
+	sig, ok, err := ScanAudit(FormatClaudeJSONL, f, audit.Hasher{})
+	if err != nil {
+		t.Fatalf("ScanAudit with no key: %v", err)
+	}
+	if !ok {
+		t.Fatal("the format is registered, so ok must be true")
+	}
+	if !sig.Empty() {
+		t.Error("a keyless scan reported evidence; it must produce nothing rather than " +
+			"tokens nobody can verify")
 	}
 }

@@ -27,7 +27,7 @@ func compareOneAs(t *testing.T, s *Signals, memoryID, content string) Verdict {
 }
 
 func TestCompareUsedByIdentifier(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the transcript is documented on MEM1") // not id-shaped
 	// The real id, named by the agent while saying nothing about the wording.
 	s.AddProse("applied the fix from " + testMemoryID)
@@ -39,7 +39,7 @@ func TestCompareUsedByIdentifier(t *testing.T) {
 }
 
 func TestCompareUsedByTokenOverlap(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("remember that the opencode plugin materializes its transcript under mkdtemp")
 
 	got := compareOne(t, s, memContent)
@@ -52,7 +52,7 @@ func TestCompareUsedByTokenOverlap(t *testing.T) {
 // says the agent's own words never mentioned the memory, and nothing about
 // whether the memory was any good. The signal column is empty in both cases.
 func TestCompareIgnoreIsNotAUsefulnessScore(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("refactored the loader and moved on")
 
 	got := compareOne(t, s, memContent)
@@ -68,7 +68,7 @@ func TestCompareIgnoreIsNotAUsefulnessScore(t *testing.T) {
 // asked for: an in-session save that restates the memory is its own bucket, and
 // is not counted as either a use or a contradiction.
 func TestCompareSupersededIsSeparateFromContradicted(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddSaveArgs("learned this session: " + memContent)
 
 	got := compareOne(t, s, memContent)
@@ -81,7 +81,7 @@ func TestCompareSupersededIsSeparateFromContradicted(t *testing.T) {
 }
 
 func TestCompareContradictedNeedsAnExplicitNegation(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("note that the opencode plugin materializes its transcript under mkdtemp")
 
 	got := compareOne(t, s, memContent)
@@ -100,7 +100,7 @@ func TestCompareContradictedNeedsAnExplicitNegation(t *testing.T) {
 // then said it was wrong has the more urgent finding on it, and an audit that
 // filed the use first would bury the one an operator has to act on.
 func TestCompareContradictedOutranksAUse(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("starting from the opencode plugin materializes its transcript under mkdtemp")
 	s.AddProse("on reflection the opencode plugin materializes its transcript under mkdtemp is not true any more")
 
@@ -114,7 +114,7 @@ func TestCompareContradictedOutranksAUse(t *testing.T) {
 // the wording, so a sentence that renames a memory in the negative is caught
 // without any token overlap at all.
 func TestCompareContradictedByIdentifier(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("ignore " + testMemoryID + ", that guidance is obsolete")
 
 	got := compareOneAs(t, s, testMemoryID, "a memory whose wording the agent never repeated")
@@ -128,7 +128,7 @@ func TestCompareContradictedByIdentifier(t *testing.T) {
 // was read.
 func TestCompareTokenArmNeedsEnoughOfTheMemory(t *testing.T) {
 	toks := memTokens(t)
-	s := &Signals{}
+	s := newTestSignals(t)
 	// Exactly two of the memory's own words, and nothing else.
 	s.AddProse(memWords[0] + " " + memWords[1])
 	if s.matches(toks) {
@@ -146,11 +146,11 @@ func TestCompareTokenArmNeedsEnoughOfTheMemory(t *testing.T) {
 // three that is all three. A longer memory can clear the bar with a fraction —
 // which is the case TestCompareTokenArmNeedsEnoughOfTheMemory covers.
 func TestCompareTokenArmNeedsEveryTokenOfAShortMemory(t *testing.T) {
-	toks := DistinctTokens("alpine meadow protocol")
+	toks := testTokens("alpine meadow protocol")
 	if len(toks) != 3 {
 		t.Fatalf("fixture = %d tokens, want 3", len(toks))
 	}
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("alpine meadow")
 	if s.matches(toks) {
 		t.Error("two of three words satisfied the token arm")
@@ -167,7 +167,7 @@ func TestCompareTokenArmNeedsEveryTokenOfAShortMemory(t *testing.T) {
 // token arm cannot claim such a memory at all, so it falls through to whatever
 // the id and negation arms found.
 func TestCompareAMemoryTooShortToMatchIsNeverUsedByToken(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("use postgres everywhere")
 
 	got := compareOne(t, s, "Use Postgres everywhere")
@@ -177,7 +177,7 @@ func TestCompareAMemoryTooShortToMatchIsNeverUsedByToken(t *testing.T) {
 }
 
 func TestCompareEmptyContentIsIgnored(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 
 	got := compareOne(t, s, "")
@@ -189,7 +189,7 @@ func TestCompareEmptyContentIsIgnored(t *testing.T) {
 // TestCompareIsPerMemory: one transcript carries many verdicts, and a memory the
 // agent restated must not drag its neighbours to `used` with it.
 func TestCompareIsPerMemory(t *testing.T) {
-	s := &Signals{}
+	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
 
 	vs := Compare(s, []Judged{
