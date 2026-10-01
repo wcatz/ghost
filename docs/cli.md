@@ -817,7 +817,7 @@ A row refused by the credential guard is different from every other left-out row
 ```text
   ! left out: memory m-9f3c — its content is credential-shaped, and ghost import refuses to store one by design — Ghost never stores a credential value
   A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. Replace the value with WHERE it lives and how to read it, never the value itself, then re-export: a corrected row is still refused until the artifact is written again.
-  · `ghost_memory_update` edits content, source_ref or tags
+  · `ghost_memory_update` edits content, source_ref or tags — on a memory row; a decision's tags have no tool (see below)
   · `ghost_task_complete` edits notes — which also marks the task done
   · `ghost_task_update` edits description
   · No tool edits a memory's agent and session_id — the memory update overwrites both with the EDITING SESSION's identity, because a caller must not be able to name its own author, so it cannot clear a value a pre-#656 row already holds; edit the row's agent and session_id in the database directly

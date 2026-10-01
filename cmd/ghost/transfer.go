@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -921,6 +922,15 @@ func printSecretFixes(out io.Writer) error {
 		// out of it.
 		if tool == "ghost_task_complete" {
 			line += " — which also marks the task done"
+		}
+		// `tags` is the one field on any of these lines whose fix depends on the
+		// RECORD KIND (#835). It is a memory column this tool edits, and a decision
+		// has no update tool of any kind — so naming it bare here reads as covering
+		// both, and a reader holding a decision row runs this call and gets a
+		// rejection. The decision's own sentence is below, in the unwritable list;
+		// this says so rather than leaving the reader to find it.
+		if tool == "ghost_memory_update" && slices.Contains(byTool[tool], "tags") {
+			line += " — on a memory row; a decision's tags have no tool (see below)"
 		}
 		if _, err := fmt.Fprintln(out, line); err != nil {
 			return err

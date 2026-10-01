@@ -254,6 +254,81 @@ func TestATagLongerThanTheBoundIsCutOnARuneBoundary(t *testing.T) {
 	}
 }
 
+// TestTheDecisionToolRefusesATagCarryingACredential is the tool layer over the
+// credential guard, and it is here because the file above tests the other class.
+//
+// The test above is about a tag's SHAPE — the characters that could forge a line —
+// and it passes for `ghost_decision_record` because `validateTags` runs at the tool.
+// A CREDENTIAL is the other question, and it is asked one layer down, in
+// `RecordDecision`'s `rejectSecretList("tags", …)`. Nothing at the tool boundary
+// tests it: `TestEveryTagBearingWriterIsGuarded` in internal/memory drives
+// `RecordDecision` as a Go function, so a guard that was correctly placed in the
+// store would still pass that test if the TOOL stopped passing tags through at all,
+// or coerced them into something the guard cannot see. This calls the tool.
+//
+// Three assertions, and the last one is the reason the other two exist: a decision
+// writes its text TWICE — the decisions row and a companion memory row assembled
+// from the same three fields — so a guard that fired between the two INSERTs would
+// leave a memory behind that no future export could carry. The guard is before the
+// lock and the transaction, and this is what holds it there.
+//
+// The tag is the OpenAI legacy shape, `sk-` plus 48 base62 characters, which is what
+// `internal/secret`'s `openai-key` rule matches (\bsk-[A-Za-z0-9]{48}\b). It is
+// assembled from a repeat rather than written out, because GitHub push protection
+// matches a complete provider token anywhere in a diff and rejects the push (GH013)
+// before review. A shorter `sk-` value would pass validateTags and the guard alike,
+// so a fixture built from one would assert nothing.
+func TestTheDecisionToolRefusesATagCarryingACredential(t *testing.T) {
+	credential := "sk-" + strings.Repeat("a1B2c3D4e5F6", 4)
+	srv, session := newValiditySession(t)
+	res := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "vproj", "title": "rotate the pool keys",
+		"decision": "rotate them quarterly", "rationale": "quarterly is enough",
+		"tags": []string{"ops", credential},
+	})
+	out := resultText(res)
+	if !res.IsError {
+		t.Fatalf("ghost_decision_record accepted a credential as a tag (answer: %s) — the tag "+
+			"is marshalled into BOTH the decisions row and its companion memory row", out)
+	}
+	// The POSITION, not just the field: a two-tag list has to say which one to
+	// change, or the agent edits the wrong one and is refused again.
+	if !strings.Contains(out, "tags[1]") {
+		t.Errorf("the refusal does not name the tag it refused, so a caller cannot tell which to change:\n%s", out)
+	}
+	// And no copy of the value. This is the tool boundary, where the answer goes
+	// straight into an agent's context and a transcript — the credential would be
+	// handed back by the very call that refused to store it.
+	if strings.Contains(out, credential) {
+		t.Errorf("the refusal printed the credential back to the caller:\n%s", out)
+	}
+	// Nothing was written: not the decision, and not the companion memory. The
+	// companion is the half that is easy to miss and the expensive one, because it
+	// is an ordinary memory assembled into every search row and quoted into the next
+	// reflect prompt — so a guard placed between the INSERTs would leak it while
+	// every decision-shaped assertion still passed.
+	decisions, err := srv.store.ListDecisions(context.Background(), "vproj", "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(decisions) != 0 {
+		t.Errorf("a refused record still wrote %d decision row(s): %+v", len(decisions), decisions[0].Title)
+	}
+	if got := countProjectMemories(t, srv, "vproj"); got != 0 {
+		t.Errorf("a refused record still wrote %d companion memory row(s)", got)
+	}
+	// And the guard is a CREDENTIAL check, not a second shape check: an ordinary
+	// tag list through the same tool is accepted, or the refusal above would pass
+	// for a guard that simply refuses tags.
+	if res := callTool(t, session, "ghost_decision_record", map[string]any{
+		"project_id": "vproj", "title": "rotate the pool keys",
+		"decision": "rotate them quarterly", "rationale": "quarterly is enough",
+		"tags": []string{"ops", "cardano"},
+	}); res.IsError {
+		t.Errorf("the same tool refused ordinary tags: %s", resultText(res))
+	}
+}
+
 func countProjectMemories(t *testing.T, srv *Server, projectID string) int {
 	t.Helper()
 	rows, err := srv.store.GetTopMemories(context.Background(), projectID, 100)
