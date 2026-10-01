@@ -558,6 +558,13 @@ func TestTheCredentialAdviceCoversEveryGuardedField(t *testing.T) {
 		"decision/decision":     withCredDec(okDec, func(d *memory.Decision) { d.Decision = "d " + cred }),
 		"decision/rationale":    withCredDec(okDec, func(d *memory.Decision) { d.Rationale = "r " + cred }),
 		"decision/alternatives": withCredDec(okDec, func(d *memory.Decision) { d.Alternatives = []string{cred} }),
+		// #835. The field name this row contributes is the bare `tags` — the
+		// guard reports `tags[0]`, and the advice has to be findable by the column.
+		// That it is a DECISION's tags is the half no table can carry, so
+		// TestADecisionTagCredentialNamesADecisionRouteNotAMemoryOne holds it: the
+		// same column is editable on a memory row and uneditable on a decision one,
+		// and an advice keyed by field alone cannot say which.
+		"decision/tags": withCredDec(okDec, func(d *memory.Decision) { d.Tags = []string{cred} }),
 	}
 
 	advice := secretFixText()
@@ -581,6 +588,81 @@ func TestTheCredentialAdviceCoversEveryGuardedField(t *testing.T) {
 		if !strings.Contains(advice, field) {
 			t.Errorf("the advice does not mention %q, which is the field a refusal of %s names:\n%s", field, name, advice)
 		}
+	}
+}
+
+// TestADecisionTagCredentialNamesADecisionRouteNotAMemoryOne is the half of the
+// advice that no field table can carry, and it exists because `tags` is the one
+// column in this report that is editable on one record kind and not on another.
+//
+// `secretFieldFixers` is keyed by FIELD, deliberately — a field is what the `!` line
+// above named, so it is what the operator is holding — and it maps `tags` to
+// `ghost_memory_update`. That is true of a memory's tags and false of a decision's:
+// there is no decision update tool of any kind, so a reader holding a decision row
+// would read the memory route, run it, and get a rejected call. The harm this
+// report is careful about everywhere else (a command that cannot do the job is worse
+// than no command) applies to a field name that means different things per kind.
+//
+// So the decision group has to name the field AND say that the memory tool does not
+// reach it, and both are asserted on the line that carries them: a sentence that
+// named `tags` somewhere else in the paragraph would satisfy a whole-block search and
+// still send the operator to the wrong tool.
+func TestADecisionTagCredentialNamesADecisionRouteNotAMemoryOne(t *testing.T) {
+	store, db := exportTestStore(t)
+	cred := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
+	plantExportRow(t, db, `INSERT INTO decisions
+	                        (id, project_id, title, decision, rationale, status, created_at, updated_at)
+	                        VALUES ('d-tags', 'p1', 't', 'd', 'r', 'active', datetime('now'), datetime('now'))`)
+	// A JSON ARRAY, because the column holds one: a bare quoted string there is
+	// not valid JSON for the shape the readers expect, the decoder's error is
+	// ignored, and the row arrives holding no tags at all — which would make every
+	// assertion below pass or fail for a reason that has nothing to do with the
+	// guard.
+	plantExportRow(t, db, `UPDATE decisions SET tags = ? WHERE id = ?`,
+		`["ops-`+cred+`"]`, "d-tags")
+
+	var summary, warn strings.Builder
+	if err := runExportCore(context.Background(), store, &summary, &warn,
+		filepath.Join(t.TempDir(), "artifact.jsonl"), ""); err == nil {
+		t.Error("the export reported no record left out and returned no error, so a " +
+			"credential in a decision's tags is carried into the artifact silently")
+	}
+	report := warn.String()
+
+	// (1) The `!` line: named, on the DECISION kind, naming the field, and holding
+	// no copy of the value. This is the whole of what the operator sees before the
+	// advice, so each clause is its own assertion.
+	if !strings.Contains(report, "! left out: decision") {
+		t.Errorf("the report did not name the decision it left out:\n%s", report)
+	}
+	if !strings.Contains(report, "tags[0]") {
+		t.Errorf("the `!` line does not name the tag to fix:\n%s", report)
+	}
+	if strings.Contains(report, cred) {
+		t.Errorf("the report printed the credential itself:\n%s", report)
+	}
+
+	// (2) The decision group's own sentence, found by the line rather than the
+	// paragraph: it must name the field and must rule out the memory tool.
+	var group string
+	for _, line := range strings.Split(report, "\n") {
+		l := strings.TrimSpace(line)
+		if strings.Contains(l, "No tool edits") && strings.Contains(l, "decision's") {
+			group = l
+			break
+		}
+	}
+	if group == "" {
+		t.Fatalf("the advice has no sentence for a decision's fields:\n%s", report)
+	}
+	if !strings.Contains(group, "tags") {
+		t.Errorf("the decision sentence does not name tags, so an operator holding a "+
+			"decision whose tag is refused finds no route for it in that sentence:\n%s", group)
+	}
+	if !strings.Contains(group, "ghost_memory_update") {
+		t.Errorf("the decision sentence does not say that `ghost_memory_update` edits a "+
+			"MEMORY's tags rather than a decision's, while the line above names that tool "+
+			"for tags:\n%s", report)
 	}
 }
 

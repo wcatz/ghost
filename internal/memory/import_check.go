@@ -323,6 +323,18 @@ func CheckImportedTask(t Task) error {
 // destination store rather than about this record, and the portable importer
 // resolves them first (orderDecisions drops a pointer to a decision the artifact
 // does not contain).
+//
+// Its tags are judged for CREDENTIALS and for nothing else, and the asymmetry with
+// a memory's tags is deliberate and settled: `CheckImportedMemory` guards them the
+// same way (below), while neither of them judges a tag's SHAPE (#822). A tag's
+// characters are a fact about a RENDERING, and `ghost export` calls this predicate
+// to decide what may be left out of a backup — so a shape check here would put a
+// decision with a hostile label outside every export on the day the operator needs
+// the file. A credential is the other question: the artifact's tags column is
+// untrusted input from a file, it was being written raw, and a token in it is
+// re-emitted by the next `ghost export` into the file most likely to be pasted into
+// a support channel. The refusal therefore names the field and never the value, and
+// it makes such a decision a `!` line rather than a silent loss.
 func CheckImportedDecision(d Decision) error {
 	if d.ID == "" {
 		return fmt.Errorf("decision id is required")
@@ -355,7 +367,18 @@ func CheckImportedDecision(d Decision) error {
 	); err != nil {
 		return err
 	}
-	return rejectSecretList("alternatives", d.Alternatives)
+	if err := rejectSecretList("alternatives", d.Alternatives); err != nil {
+		return err
+	}
+	// And the tags, in the same order RecordDecision checks them and with the same
+	// predicate CheckImportedMemory uses, so a decision and a memory cannot be
+	// guarded on one route and not the other. This was the gap #835 closed: the
+	// write path has refused a credential-shaped tag since #656 and the artifact's
+	// tags column was written raw into the same table, so a token arriving in a
+	// file was stored verbatim and re-emitted by every export afterwards.
+	//
+	// Not a SHAPE check, on the reasoning above and in CheckImportedMemory.
+	return rejectSecretList("tags", d.Tags)
 }
 
 // createdProject assembles the project record a WRITE is about to store, so
