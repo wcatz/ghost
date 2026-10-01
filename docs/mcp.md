@@ -21,7 +21,7 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Project | `ghost_project_delete` | Permanently delete a project and its child records |
 | Context | `ghost_project_context` | Load top memories and the learned-context summary (assembled, so a memory whose validity window has closed is withheld; tasks and decisions are separate tools and resources) |
 | Context | `ghost_list_projects` | List known projects and their IDs |
-| Context | `ghost_health` | Report store, embedding, Ollama, link, and `memory_history` growth health |
+| Context | `ghost_health` | Report store, embedding, Ollama, link, `memory_history` growth, and per-source retrieval health |
 | Tasks | `ghost_task_create` | Create a durable task |
 | Tasks | `ghost_task_list` | List tasks, optionally filtered by status |
 | Tasks | `ghost_task_update` | Change task status, priority, or description |
@@ -93,6 +93,54 @@ named memory is within 14 days of a retention cap at the current rate. The repai
 is `ghost history compact`, a CLI command with no MCP equivalent, and the warning
 names it — there is no tool here that removes history rows, because that is an
 operator's decision about a table the agent only reads.
+
+### Retrieval health
+
+### Retrieval health
+
+`ghost_health` also reports what retrieval did, one line per source, below the
+history block. It is the same `audit` report `ghost context --audit` prints for one
+project, with the projects pooled **within** each source and shortened to one line —
+so a figure here and a figure there are the same number over the same rows:
+
+```text
+**Retrieval audit** — per source, every call this store has recorded; a search and an injection are never pooled
+  search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 18 ignored, 0 superseded in session, 2 contradicted, 3 kept nothing
+  session_start: no rows — this source has recorded no calls
+  project_context: no rows — this source has recorded no calls
+  "ignored" is the residual, not a relevance or usefulness score: it means the agent's own words never mentioned the memory
+```
+
+An agent debugging "search returns things I did not use" is exactly who needs
+this, and it is here rather than in a twenty-third tool because every caller
+already fetches `ghost_health` — the tool count is 22 and this block does not
+change it.
+
+Four things the block is careful about, each because the cheaper version is a
+confident wrong answer:
+
+- **Per source, never pooled.** A search asks whether the agent used what it
+  looked up; an injection asks whether it used what it was handed. There is no
+  total, so there is nothing here that can be quoted as "the" precision.
+- **Empty sources are NAMED.** A source with no rows says so rather than
+  reporting 0% used, which would read as a verdict on a source that has never run
+  here. Before the passive injections write their own records,
+  `session_start` and `project_context` are in that state on every store.
+- **`ignored` is the residual, not a score.** It is the only field here that an
+  agent is likely to misread as a judgement about memory quality, and nothing in
+  this package ranks a memory. The sentence is printed whenever any verdict
+  exists to misread.
+- **A degraded verdict is counted, not hidden.** A verdict filed under a partial
+  transcript read stays in the denominator, so the precision beside it is exact
+  about a transcript that stopped early — which is what the `⚠` line under that
+  source says, naming the reason.
+
+The scope is the whole store, with projects pooled **within** a source and never
+sources with each other. It is a store-wide view rather than a per-project one
+because this tool is store-wide everywhere else; the per-project report, with the
+window filter and the list of contradicted memory ids, is
+`ghost context --audit`. That report opens the store read-only, and this one does
+not open it at all.
 
 Nothing an agent writes is excluded from `ghost reflect` by its `source`: seeds are `builtin`, agent saves are `mcp`, and reflection writes are `reflection`. `ghost_memory_save` therefore takes an optional `pin` so a memory can opt out of consolidation in the call that stores it, rather than in a second `ghost_memory_pin` call that a session might never make. On a near-duplicate save both rows are pinned — the copy just stored and the existing row the text folded into, which is the one a later consolidation is most likely to absorb — and the result message says so.
 

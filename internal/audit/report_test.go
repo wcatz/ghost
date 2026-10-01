@@ -1,0 +1,753 @@
+package audit
+
+// #646 part 3: the REPORT. Part 2 wrote verdicts; this reads them back and
+// prints per-source figures, and every property below is about what the printed
+// bytes are allowed to mean.
+//
+// Four of them are load-bearing:
+//
+//  1. Sources are never pooled. A ratio over "used of kept" pooled across a
+//     search and an injection is a number about neither question.
+//  2. A source with no rows says so, rather than reporting 0% — which would read
+//     as "nothing it showed was used" about a source that has never run.
+//  3. Precision is used / KEPT, and kept is the verdict count, not the call
+//     count: one call can keep twenty memories.
+//  4. The output carries ids and counts only. No memory content, no query text,
+//     no signal text — the same constraint part 1 and part 2 held to the rows,
+//     held to the report.
+
+import (
+	"context"
+	"database/sql"
+	"io"
+	"log/slog"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/wcatz/ghost/internal/memory"
+)
+
+// reportStore is a store holding one project, ready for the report fixtures. The
+// memories are seeded with distinctive wording so the comparison arms have
+// something to match.
+//
+// It opens the store itself rather than reusing auditStore because the fixtures
+// need the DATABASE PATH: recorded_at is stamped by SQLite at write time and no
+// store API can backdate it, so a --since fixture has to reach the file. A second
+// handle is how the rest of the suite does it (see mcpserver's seedRestatements).
+func reportStore(t *testing.T) (*memory.Store, string, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := store.EnsureProject(ctx, "p1", "/tmp/audit-report-p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	seedMemory(t, store, "p1", "USEDID", memContent)
+	seedMemory(t, store, "p1", "IGNID", "Bench seeds restore content through the shared clamp helper")
+	seedMemory(t, store, "p1", "CONID", "The v20 migration runs before the pre-migration backup")
+	return store, "p1", dbPath
+}
+
+// backdateRetrievalRows moves both tables' recorded_at for a project into the
+// past, through a SECOND handle on the file.
+//
+// Both tables, because a window that filtered one and not the other would report
+// calls with nothing kept by them, and that is exactly the bug
+// TestReportSinceFiltersBothTables exists to fail.
+func backdateRetrievalRows(t *testing.T, dbPath, projectID string, ago time.Duration) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s to backdate: %v", dbPath, err)
+	}
+	defer db.Close() //nolint:errcheck
+	stamp := time.Now().Add(-ago).UTC().Format(memory.StoredStampLayout)
+	for _, table := range []string{"retrieval_record", "retrieval_audit"} {
+		if _, err := db.Exec(`UPDATE `+table+` SET recorded_at = ? WHERE project_id = ?`, stamp, projectID); err != nil {
+			t.Fatalf("backdate %s: %v", table, err)
+		}
+	}
+}
+
+// judge runs one audit over the seeded project so the report has verdicts, which
+// is the only way a report fixture reaches the state a real session reaches.
+func judge(t *testing.T, store *memory.Store, projectID string, s *Signals) {
+	t.Helper()
+	if _, err := Run(context.Background(), store, projectID, s); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
+// TestReportKeepsEachSourceSeparate is property 1. Two sources, deliberately with
+// opposite figures, and the assertion is that NEITHER number moves when the other
+// source is present. A pooled implementation passes a test that only checks the
+// total, so this one pins the per-source figure itself.
+func TestReportKeepsEachSourceSeparate(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	seedMemory(t, store, projectID, "SSID", "Scratch directories are reaped before each lifecycle run begins")
+	seedMemory(t, store, projectID, "SSIGN", "The relay listens on port 2222 in production")
+
+	// A search that kept three memories: one used, one contradicted, one ignored.
+	recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
+	// A session-start injection that kept two, and used neither.
+	recordCall(t, store, projectID, "session_start", "SSID", "SSIGN")
+
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	s.AddProse("that is wrong: the v20 migration runs after the pre-migration backup")
+	judge(t, store, projectID, s)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	search := rep.Source("search")
+	if search == nil {
+		t.Fatal("the report has no search figures at all")
+	}
+	// 3 kept, 1 used. The precision is over KEPT MEMORIES, not over calls: a
+	// pooled-or-call-denominator implementation would say 1/1 here.
+	if search.Kept != 3 || search.Used != 1 || search.Scored != 3 {
+		t.Errorf("search kept %d, scored %d, used %d; want 3/3/1", search.Kept, search.Scored, search.Used)
+	}
+	if got, want := search.PrecisionPercent(), 33; got != want {
+		t.Errorf("search precision = %d%%, want %d%%", got, want)
+	}
+
+	start := rep.Source("session_start")
+	if start == nil {
+		t.Fatal("the report has no session_start figures at all")
+	}
+	if start.Kept != 2 || start.Used != 0 || start.Scored != 2 {
+		t.Errorf("session_start kept %d, scored %d, used %d; want 2/2/0", start.Kept, start.Scored, start.Used)
+	}
+	if got := start.PrecisionPercent(); got != 0 {
+		t.Errorf("session_start precision = %d%%, want 0%% — and a SOURCE with rows may say 0", got)
+	}
+	// The proof that nothing pooled: search's figure is unaffected by a source
+	// sitting at zero, and vice versa.
+	if rep.Pooled() != nil {
+		t.Errorf("the report exposes a pooled figure (%v); the sources must never be pooled", *rep.Pooled())
+	}
+}
+
+// TestReportSaysNoRowsRatherThanZeroPercent is property 2, and it is the one a
+// fresh install hits: `ghost context --audit` on a store nobody has searched has
+// three sources and no rows at all. "0% used" would be a measurement of nothing.
+func TestReportSaysNoRowsRatherThanZeroPercent(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	out := rep.String()
+	for _, source := range KnownSources {
+		if !strings.Contains(out, source+": no rows") {
+			t.Errorf("the report does not say %s has no rows:\n%s", source, out)
+		}
+		if strings.Contains(out, source+": 0%") {
+			t.Errorf("the report printed a precision for %s, which has no rows:\n%s", source, out)
+		}
+	}
+	// And every known source is NAMED. A source absent from the report cannot be
+	// told apart from a source this Ghost does not know about, and #850's passive
+	// sources are exactly the case: before their wiring lands they have no rows,
+	// and the report has to say so rather than stay silent about them.
+	for _, source := range KnownSources {
+		if !strings.Contains(out, source) {
+			t.Errorf("the report never names the known source %s:\n%s", source, out)
+		}
+	}
+}
+
+// TestReportNamesSourcesThatHaveNoRowsWhileOthersDo: mixed state is the state a
+// real install reaches — a searched project before #850's wiring lands has
+// search figures and empty session_start. The empty one must still be named, and
+// must not borrow a percentage.
+func TestReportNamesSourcesThatHaveNoRowsWhileOthersDo(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID")
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, projectID, s)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	out := rep.String()
+	if !strings.Contains(out, "search:") {
+		t.Errorf("the report lost the source that has rows:\n%s", out)
+	}
+	for _, source := range []string{"session_start", "project_context"} {
+		if !strings.Contains(out, source+": no rows") {
+			t.Errorf("the report does not say %s has no rows alongside a source that does:\n%s", source, out)
+		}
+	}
+	if strings.Contains(out, "session_start: 0%") {
+		t.Errorf("the report gave an empty source a precision:\n%s", out)
+	}
+}
+
+// TestReportListsContradictedIDsAndNothingElse is property 4, asserted on the
+// printed bytes rather than on a type — because a renderer is where text can
+// reach a report even when every field it reads is an id or a count.
+//
+// The seeded wording is deliberately distinctive, and the query the call recorded
+// a digest of is never printed either: the report has no access to the query text
+// and must not acquire one.
+func TestReportListsContradictedIDsAndNothingElse(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
+
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	s.AddProse("that is wrong: the v20 migration runs after the pre-migration backup")
+	judge(t, store, projectID, s)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	out := rep.String()
+
+	if !strings.Contains(out, "CONID") {
+		t.Errorf("the report does not name the contradicted memory:\n%s", out)
+	}
+	// The content the comparison read, and the agent's own prose, must not be
+	// reachable from the report.
+	for _, leak := range []string{
+		"v20 migration runs before the pre-migration backup",
+		"migration runs before",
+		"materializes its transcript",
+		"that is wrong",
+	} {
+		if strings.Contains(out, leak) {
+			t.Errorf("the report leaked %q into its output:\n%s", leak, out)
+		}
+	}
+	// And only the CONTRADICTED one is listed: an id list that named every
+	// verdict would answer a different question, and would put the corpus's ids
+	// in a report an operator pastes into an issue.
+	if strings.Contains(out, "IGNID") || strings.Contains(out, "USEDID") {
+		t.Errorf("the report lists ids that were not contradicted:\n%s", out)
+	}
+}
+
+// TestReportCountsDegradedVerdictsAndNamesTheReason: a verdict filed under a
+// partial transcript read is a claim about the text that WAS read. A report that
+// counted those verdicts into a clean precision would be overstating what it
+// knows, and one that dropped them would be silently reporting a smaller
+// denominator than the store holds.
+func TestReportCountsDegradedVerdictsAndNamesTheReason(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID", "IGNID")
+
+	// A degraded run: the scanner says it only read part of the transcript.
+	degradedSignals := newTestSignals(t)
+	degradedSignals.MarkDegraded("transcript truncated")
+	degradedSignals.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, projectID, degradedSignals)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	search := rep.Source("search")
+	if search == nil {
+		t.Fatal("the report has no search figures")
+	}
+	if search.DegradedVerdicts != 2 {
+		t.Errorf("DegradedVerdicts = %d, want 2 — both verdicts were filed under a partial read", search.DegradedVerdicts)
+	}
+	if search.Scored != 2 {
+		t.Errorf("Scored = %d, want 2 — a degraded verdict is still a verdict and still in the denominator", search.Scored)
+	}
+	out := rep.String()
+	if !strings.Contains(out, "degraded") || !strings.Contains(out, "transcript truncated") {
+		t.Errorf("the report does not name the degraded verdict count and its reason:\n%s", out)
+	}
+}
+
+// TestReportStatesItsLimitsOnItsFace: "ignored" is the most misreadable number
+// this audit produces, and the owner's own note on the issue is that the report
+// has to say what it is not. These are the same sentences part 2's summary
+// prints, asserted on the report because a report is a different artifact read by
+// a different person.
+func TestReportStatesItsLimitsOnItsFace(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID", "IGNID")
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, projectID, s)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	out := rep.String()
+
+	for _, want := range []string{
+		// "ignored" is a statement about the transcript, not about the memory.
+		"not a relevance or usefulness score",
+		// Sources are separate denominators.
+		"never pooled",
+		// The undetectable half of "missed" must read as NOT MEASURED. Printing
+		// it as 0 would be the worst possible lie: a zero here reads as "nothing
+		// was re-derived", which is the one claim no heuristic here can support.
+		"re-derived",
+		"not measured",
+		// The detectable half IS reported, and the report says so.
+		"kept nothing",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the report does not state %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestReportKeptNothingCountsOnlySearchesThatAdmittedNothing: the detectable
+// half of "missed". A call whose kept set is empty is a lookup the agent made
+// that returned nothing, and it is only a MISS if the source is one where the
+// agent chose to look — an injection that admitted nothing is not a failed
+// search.
+//
+// The report counts both but distinguishes them by name, because pooling them
+// would report an injection's silence as a search failure.
+func TestReportKeptNothingCountsOnlySearchesThatAdmittedNothing(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	// A search that kept nothing, and a search that kept one.
+	recordCall(t, store, projectID, "search")
+	recordCall(t, store, projectID, "search", "IGNID")
+	// An injection that kept nothing.
+	recordCall(t, store, projectID, "session_start")
+
+	// No judging: kept-nothing is a property of the RECORD, read straight off the
+	// call, and a report must report it even in a store nobody has audited yet.
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+
+	search := rep.Source("search")
+	if search == nil {
+		t.Fatal("the report has no search figures")
+	}
+	if search.KeptNothing != 1 {
+		t.Errorf("search KeptNothing = %d, want 1 — one of the two searches admitted nothing", search.KeptNothing)
+	}
+	// Kept is read off the RECORD, not off the verdicts, which is why it is
+	// available with no audit run at all — the whole point of a report over a
+	// store nobody has judged yet.
+	if search.Kept != 1 {
+		t.Errorf("search Kept = %d, want 1", search.Kept)
+	}
+	if search.Scored != 0 {
+		t.Errorf("search Scored = %d, want 0 — nothing judged these calls", search.Scored)
+	}
+	if _, ok := search.Precision(); ok {
+		t.Error("search reports a precision over calls no verdict was filed against")
+	}
+	if !strings.Contains(rep.String(), "no verdict recorded yet") {
+		t.Errorf("the report prints a figure for an unaudited source instead of saying so:\n%s", rep.String())
+	}
+	start := rep.Source("session_start")
+	if start == nil {
+		t.Fatal("the report has no session_start figures")
+	}
+	if start.KeptNothing != 1 {
+		t.Errorf("session_start KeptNothing = %d, want 1 — an injection that admitted nothing is still counted, and named as such", start.KeptNothing)
+	}
+	if search.Calls != 2 {
+		t.Errorf("search Calls = %d, want 2", search.Calls)
+	}
+}
+
+// TestReportSinceFiltersBothTables: --since has only recorded_at to work with on
+// both tables, and the rows it excludes must disappear from BOTH halves of the
+// figure — a window that filtered the verdicts but not the calls would report
+// calls with nothing kept by them.
+func TestReportSinceFiltersBothTables(t *testing.T) {
+	store, projectID, dbPath := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID")
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, projectID, s)
+
+	backdateRetrievalRows(t, dbPath, projectID, 72*time.Hour)
+
+	// A window that excludes the rows. Every known source is still NAMED — the
+	// report says which sources have no rows in this window, rather than going
+	// quiet about the ones this window excluded.
+	recent, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID, Since: time.Hour})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if src := recent.Source("search"); src == nil {
+		t.Error("a 1h window over 72h-old rows does not name the search source at all")
+	} else if !src.NoRows() || src.Calls != 0 || src.Kept != 0 {
+		t.Errorf("a 1h window over 72h-old rows reports figures: %+v", *src)
+	}
+
+	// A window that includes them.
+	wide, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID, Since: 30 * 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	src := wide.Source("search")
+	if src == nil {
+		t.Fatal("a 30d window over 72h-old rows reports no search figures")
+	}
+	if src.Calls != 1 || src.Kept != 1 || src.Used != 1 {
+		t.Errorf("a 30d window reports calls=%d kept=%d used=%d; want 1/1/1", src.Calls, src.Kept, src.Used)
+	}
+}
+
+// TestReportEchoesItsWindow: a saved report has to say what it measured. A
+// figure printed without its window reads as the store's standing state.
+func TestReportEchoesItsWindow(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID, Since: 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if !strings.Contains(rep.String(), "24h") {
+		t.Errorf("the report does not echo the window it measured:\n%s", rep.String())
+	}
+}
+
+// TestReportReadsAnotherProjectsRowsForNothing: the scoping refusal, asserted on
+// the figures. Two projects with opposite numbers, and the report is handed one
+// of them.
+func TestReportReadsAnotherProjectsRowsForNothing(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID")
+
+	other := "p2"
+	if err := store.EnsureProject(context.Background(), other, "/tmp/audit-report-p2", "p2"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	seedMemory(t, store, other, "OTHERID", "The relay listens on port 2222 in production")
+	recordCall(t, store, other, "search", "OTHERID")
+
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, projectID, s)
+	judge(t, store, other, s)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	src := rep.Source("search")
+	if src == nil {
+		t.Fatal("the report has no search figures for the requested project")
+	}
+	if src.Calls != 1 {
+		t.Errorf("Calls = %d, want 1 — the other project's call must not be counted", src.Calls)
+	}
+	if got, want := src.PrecisionPercent(), 100; got != want {
+		t.Errorf("precision = %d%%, want %d%%", got, want)
+	}
+}
+
+// TestReportHasNoRowsForAnUnknownProject: the empty case, which is also the case
+// a mistyped --project produces if resolution were skipped. Every source says no
+// rows, and no figure is invented.
+func TestReportHasNoRowsForAnUnknownProject(t *testing.T) {
+	store, _, _ := reportStore(t)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: "no-such-project"})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	for _, source := range KnownSources {
+		if src := rep.Source(source); src == nil || !src.NoRows() {
+			t.Errorf("%s does not report as empty for a project with no rows: %+v", source, src)
+		}
+	}
+	if !strings.Contains(rep.String(), "no rows") {
+		t.Errorf("the report does not say it has no rows:\n%s", rep.String())
+	}
+}
+
+// TestReportRefusesNoProject: a report pooled over every project would be a
+// figure about no project, and the store's own writers refuse the same absence.
+func TestReportRefusesNoProject(t *testing.T) {
+	store, _, _ := reportStore(t)
+
+	if _, err := BuildReport(context.Background(), store, ReportOptions{}); err == nil {
+		t.Fatal("Report with no project succeeded; it must be refused rather than pooled over everything")
+	}
+}
+
+// TestReportRendersContradictedIDsThroughToken: the ids go through the same
+// <<...>> contract every other stored text in an answer uses, so an id carrying
+// a quote or a newline cannot forge a line of the report.
+func TestReportRendersContradictedIDsThroughToken(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	const hostile = `A"B` + "\n- search: 100% used, all verdicts contradicted"
+	seedMemory(t, store, projectID, hostile, "The v20 migration runs before the pre-migration backup")
+	recordCall(t, store, projectID, "search", hostile)
+
+	s := newTestSignals(t)
+	s.AddProse("that is wrong: the v20 migration runs after the pre-migration backup")
+	judge(t, store, projectID, s)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	out := rep.String()
+	if strings.Contains(out, "\n- search: 100%") {
+		t.Errorf("a memory id forged a line of the report:\n%s", out)
+	}
+	// Token's contract is strconv.QuoteToASCII for anything outside its own rune
+	// set — a JSON-style escape, so the newline is a two-character sequence in the
+	// output rather than a line break. Asserting on the escape rather than merely
+	// on the absence of a forged line is what pins the RENDERER: a raw %s would
+	// also fail to forge that particular line.
+	if !strings.Contains(out, `\n`) {
+		t.Errorf("the id was not escaped, so its newline reached the output raw:\n%s", out)
+	}
+	if !strings.Contains(out, `"A\"B`) {
+		t.Errorf("the id was not rendered through the token contract:\n%s", out)
+	}
+}
+
+// TestReportSourceStringsAreOneLineEach: the report is read by a person and
+// pasted into an issue, so a source label that breaks the line structure would
+// break both. Source names come from the assembler's vocabulary, but they are
+// stored in a text column and a hand-written row can hold anything.
+func TestReportSourceStringsAreOneLineEach(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID")
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, projectID, s)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	rep.Sources[0].Source = "search\n- forged: 100% used"
+
+	out := rep.String()
+	if strings.Contains(out, "\n- forged: 100%") {
+		t.Errorf("a source label forged a line of the report:\n%s", out)
+	}
+}
+
+// TestMergeProjectsPoolsProjectsAndNeverSources: the health block's one combining
+// operation, and the direction it is allowed to combine in.
+//
+// The figures are chosen so that summing and averaging cannot be confused: p1 ran
+// three used verdicts and p2 ran one ignored one. Summed, the store's search
+// precision is 3 of 4 — 75%. Averaged per project it is (100% + 0%) / 2, also a
+// number, and a number about no verdict at all: a project with one verdict counts
+// as much as one with three hundred. So the counts and the percentage are both
+// asserted, and an implementation that averaged fails both.
+//
+// The structural properties are asserted alongside, because they are the ones that
+// matter on a store with no figures at all: one entry per source, the known
+// sources still named in order when empty, and no pooled figure reachable.
+func TestMergeProjectsPoolsProjectsAndNeverSources(t *testing.T) {
+	store, p1, _ := reportStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p2", "/tmp/audit-report-p2", "p2"); err != nil {
+		t.Fatalf("EnsureProject p2: %v", err)
+	}
+	// Three memories p1's one call kept, all of them restated by the agent's prose
+	// — so p1 is 100% used over three verdicts, not over one.
+	for _, id := range []string{"A1", "A2", "A3"} {
+		seedMemory(t, store, p1, id, memContent)
+	}
+	// And one only p2's call kept, whose wording the prose never mentions.
+	seedMemory(t, store, "p2", "B1", "The ledger reindexes itself after a snapshot restore")
+
+	recordCall(t, store, p1, "search", "A1", "A2", "A3")
+	recordCall(t, store, p1, "search")
+	recordCall(t, store, "p2", "search", "B1")
+
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, p1, s)
+	judge(t, store, "p2", s)
+
+	first, err := BuildReport(ctx, store, ReportOptions{ProjectID: p1})
+	if err != nil {
+		t.Fatalf("BuildReport p1: %v", err)
+	}
+	second, err := BuildReport(ctx, store, ReportOptions{ProjectID: "p2"})
+	if err != nil {
+		t.Fatalf("BuildReport p2: %v", err)
+	}
+	merged := MergeProjects([]Report{first, second})
+
+	// One entry per source, and only the sources: a merge that appended a total
+	// row would answer the question this package exists to refuse.
+	seen := map[string]int{}
+	for _, src := range merged.Sources {
+		seen[src.Source]++
+	}
+	for name, n := range seen {
+		if n != 1 {
+			t.Errorf("the merged report holds %d entries for %q, want 1", n, name)
+		}
+	}
+	if merged.Pooled() != nil {
+		t.Error("the merged report can be asked for a pooled figure; the whole rule is that it cannot")
+	}
+	// The known sources are still all named, in their documented order, even the
+	// ones no project has rows for: a store-wide view that dropped them would read
+	// as "one source, healthy" rather than "two sources, never measured".
+	var order []string
+	for _, src := range merged.Sources {
+		order = append(order, src.Source)
+	}
+	if strings.Join(order, ",") != strings.Join(KnownSources, ",") {
+		t.Errorf("merged sources = %v, want the known sources in order %v", order, KnownSources)
+	}
+
+	search := merged.Source("search")
+	if search == nil {
+		t.Fatal("the merged report has no search figures")
+	}
+	if search.Calls != 3 {
+		t.Errorf("merged search calls = %d, want 3 (two in p1, one in p2)", search.Calls)
+	}
+	if search.Kept != 4 || search.Scored != 4 || search.Used != 3 || search.Ignored != 1 {
+		t.Errorf("merged search kept %d, scored %d, used %d, ignored %d; want 4/4/3/1 — the counts summed, not averaged",
+			search.Kept, search.Scored, search.Used, search.Ignored)
+	}
+	if got, want := search.PrecisionPercent(), 75; got != want {
+		t.Errorf("merged search precision = %d%%, want %d%%", got, want)
+	}
+	if search.KeptNothing != 1 {
+		t.Errorf("merged search kept nothing %d times, want 1 (p1's empty call)", search.KeptNothing)
+	}
+	// The merged report is about no project, so it must not be printable as one.
+	if merged.ProjectID != "" {
+		t.Errorf("the merged report claims project %q; it is a store-wide view", merged.ProjectID)
+	}
+}
+
+// TestMergeProjectsDoesNotTouchItsInputs: the merge copies each source's name
+// lists, because a caller holding a report and merging another into it must not
+// find its own contradicted ids rewritten. Aliasing the slice would be invisible
+// until a later merge appended to a shared backing array.
+func TestMergeProjectsDoesNotTouchItsInputs(t *testing.T) {
+	first := Report{ProjectID: "p1", Sources: []SourceReport{
+		{Source: "search", Calls: 1, ContradictedIDs: []string{"AAAA"}},
+	}}
+	second := Report{ProjectID: "p2", Sources: []SourceReport{
+		{Source: "search", Calls: 1, ContradictedIDs: []string{"BBBB"}},
+	}}
+
+	merged := MergeProjects([]Report{first, second})
+
+	if got := merged.Source("search").ContradictedIDs; len(got) != 2 || got[0] != "AAAA" || got[1] != "BBBB" {
+		t.Errorf("merged contradicted ids = %v, want [AAAA BBBB] sorted", got)
+	}
+	if got := first.Source("search").ContradictedIDs; len(got) != 1 || got[0] != "AAAA" {
+		t.Errorf("the merge changed the first report's contradicted ids to %v", got)
+	}
+}
+
+// TestReportStringNamesNoScope: the report's own rendering carries no project id,
+// because the SCOPE is the caller's to state. `ghost context --audit` states it;
+// a merged store-wide view has none to state, and a renderer that printed the field
+// unconditionally would label that one "retrieval audit for " — which reads as a
+// report whose subject failed to load rather than as a report over the store.
+func TestReportStringNamesNoScope(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID")
+	judge(t, store, projectID, newTestSignals(t))
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	if strings.Contains(rep.String(), projectID) {
+		t.Errorf("the report named its own scope:\n%s", rep.String())
+	}
+
+	merged := MergeProjects([]Report{rep})
+	if merged.ProjectID != "" {
+		t.Fatalf("a merged report claims project %q; it is about none", merged.ProjectID)
+	}
+	if strings.Contains(merged.String(), projectID) {
+		t.Errorf("a merged report printed a project id:\n%s", merged.String())
+	}
+	// And the window is still on it, because that IS a property of the report.
+	if !strings.Contains(merged.String(), "window") {
+		t.Errorf("the report dropped its window:\n%s", merged.String())
+	}
+}
+
+// TestSummaryIsOneLinePerSource: the compact shape, for the block in ghost_health
+// where every source is one line. The report's own line() wraps two figures onto a
+// second line, which is right there and wrong here — a block that claims one line
+// per source and then wraps is a block nobody can scan column-wise.
+func TestSummaryIsOneLinePerSource(t *testing.T) {
+	cases := []struct {
+		name string
+		src  SourceReport
+		want string
+	}{
+		{
+			name: "no rows",
+			src:  SourceReport{Source: "search"},
+			want: "search: no rows — this source has recorded no calls",
+		},
+		{
+			name: "calls but no verdicts",
+			src:  SourceReport{Source: "search", Calls: 2, Kept: 3},
+			want: "search: 2 call(s), 3 kept, no verdict recorded yet for the 3 kept, 0 ignored, 0 superseded in session, 0 contradicted, 0 kept nothing",
+		},
+		{
+			name: "figures",
+			src:  SourceReport{Source: "search", Calls: 2, Kept: 4, Scored: 3, Used: 1, Ignored: 2, Superseded: 1, Contradicted: 1, KeptNothing: 1},
+			want: "search: 2 call(s), 4 kept, 33% used (1 of 3 scored), 2 ignored, 1 superseded in session, 1 contradicted, 1 kept nothing",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.src.Summary()
+			if got != tc.want {
+				t.Errorf("Summary() =\n%q\nwant\n%q", got, tc.want)
+			}
+			if strings.Contains(got, "\n") {
+				t.Errorf("Summary() broke the line: %q", got)
+			}
+		})
+	}
+}
+
+// TestSummaryQuotesItsOwnSourceLabel: a source name is text in a column, and the
+// health block's contract is one line per source. A label with a newline would
+// forge a figure, exactly as it would in the report's own line().
+func TestSummaryQuotesItsOwnSourceLabel(t *testing.T) {
+	src := SourceReport{Source: "search\n- forged: 100% used", Calls: 1, Kept: 1, Scored: 1, Used: 1}
+	got := src.Summary()
+	if strings.Contains(got, "\n- forged: 100%") {
+		t.Errorf("a source label forged a line of the summary: %q", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("Summary() broke the line: %q", got)
+	}
+}

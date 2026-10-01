@@ -939,7 +939,7 @@ Import does not run Upsert's near-duplicate probe. A restore is putting back wha
 
 ### `ghost context`
 
-Prints the passive session-start context block:
+Two modes. Without `--audit` it prints the passive session-start context block:
 
 ```bash
 ghost context
@@ -947,6 +947,43 @@ ghost context --cwd /path/to/project
 ```
 
 This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response.
+
+#### `ghost context --audit`
+
+The other mode reports on what retrieval actually did — what Ghost returned, and what the agent did with it. It shares almost nothing with the block above: the store is opened **read-only** (no migration, no builtin seeding, and a store whose schema is behind is refused with the remedy rather than quietly rewritten), none of the block's side effects run, and there is no session counted.
+
+```bash
+ghost context --audit                              # the project this directory resolves to
+ghost context --audit --project ghost              # one project, by name or id
+ghost context --audit --since 168h                 # only the last week
+```
+
+```text
+retrieval audit report for project ghost
+
+retrieval audit — window: everything the store still holds
+  search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 18 ignored, 0 superseded in session, 2 contradicted, 3 kept nothing
+  session_start: no rows — this source has recorded no calls in this window
+  project_context: no rows — this source has recorded no calls in this window
+  figures are per source and are never pooled: a search and an injection answer different questions
+  "ignored" means the agent's own words never mentioned the memory; it is not a relevance or usefulness score
+  missed: searches that kept nothing are counted above; the other half of "missed" — a fact the agent re-derived in-session and was never shown — is not measured and is reported as no figure at all: no heuristic can tell one from a fact it worked out, so read no number into it
+  search: 2 of its 30 verdict(s) were judged against a partly-read transcript (scan transcript: truncated), so an ignored verdict there is a claim about the text that was read
+  contradicted (search):
+    1F2E3D4C5B6A7988
+    9A8B7C6D5E4F3A2B
+```
+
+Read it with these four things in mind:
+
+- **The scope is always one project.** With no `--project`, it is the project the current directory (or `--cwd`) resolves to. A name, an id or a directory Ghost has never heard of is an error that names the remedy — never a report pooled over every project, because a mistyped project name answered with the whole corpus is a report about a scope nobody asked for.
+- **Figures are per source and never pooled.** A search asks "did the agent use what it looked up"; an injection asks "did it use what it was handed". A ratio over both is a number about neither, so there is no total.
+- **A source with no rows says so.** It does not report 0% used, which would read as a verdict on a source that has never run here. `session_start` and `project_context` are in that state on every store until their passive injections write their own records.
+- **`ignored` is the residual, not a score.** It means the agent's own words never mentioned the memory. Nothing here ranks a memory, and a reader treating 60% ignored as advice about which memories to delete is reading a heuristic that never saw the session.
+
+`--since` bounds both retrieval tables by their `recorded_at`, and applies the same window to the calls and to the verdicts — so a window can never pair calls from one period with verdicts from another. A row whose stamp cannot be read is kept rather than dropped. `--since` is a duration, not a date, and `7d` is not one. `--as-of` cannot be combined with `--audit`: one reports the store at an instant, the other reports retrieval over a window, and each available answer to the combination is a confident wrong one.
+
+The verdicts are written by the lifecycle audit ([`ghost lifecycle`](#ghost-lifecycle)); a store whose sessions have not been audited shows `no verdict recorded yet` rather than a percentage. `ghost_health` carries the same figures in a shorter form, so an agent can read them without a terminal.
 
 ### `ghost history <memory-ref>` / `ghost history purge <memory-id>` / `ghost history compact`
 
