@@ -255,9 +255,20 @@ func rejectSecretList(field string, values []string) error {
 //     enumerate the set rather than assert it — so the writers that take a tag
 //     list are: Create, UpsertWithOptions, UpdateMemory, RecordDecision (which
 //     marshals tags into BOTH the decisions row and a companion memory row, and
-//     the companion is an ordinary memory), and the portable importers, whose
-//     tags column came straight out of an artifact file. All five, each before
-//     its lock, and TestEveryTagBearingWriterIsGuarded is the table.
+//     the companion is an ordinary memory), and the two portable importers that
+//     have a tags column at all — ImportMemory and ImportDecision, whose columns
+//     came straight out of an artifact file. All six, each before its lock, and
+//     TestEveryTagBearingWriterIsGuarded is the table.
+//
+//     The sixth is the one this paragraph had counted as if it were guarded, and
+//     the way it went missing is the reason the set is now written out rather than
+//     totalled: `RecordDecision` refused a credential-shaped tag from the start and
+//     `ImportDecision` did not, because a decision's tags are checked by a
+//     PREDICATE (CheckImportedDecision) rather than in a writer's own body, and a
+//     guard that lives in a shared function has no call site to grep for at the
+//     writer. "All five" was true of neither set — it counted the two importers as
+//     one and so claimed the decision route was covered. #835 closed it and this
+//     paragraph now says six because the code says six.
 //
 //     What is left unguarded is agent and session_id as the HARNESS states
 //     them, and a project's name and path. `source_ref` is not in that list any

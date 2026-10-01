@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -846,7 +847,17 @@ var secretUnfixableRoutes = []string{
 	"a task's title — written when the task is created; `ghost_task_update` takes status, priority and description only, so the only route is the database directly",
 
 	// A decision's fields. No decision update tool exists.
-	"a decision's title, decision, rationale and alternatives — there is no decision update tool of any kind, so the only route is the database directly",
+	//
+	// `tags` is here rather than in the map above for a reason the map's own keys
+	// cannot express: `secretFieldFixers` is keyed by field because a field is what
+	// the `!` line named, and `tags` is editable on a MEMORY row and not on a
+	// decision one. So this sentence names the field and names the tool that does
+	// not reach it — otherwise a reader holding a decision whose tag was refused
+	// reads the `ghost_memory_update` line, runs it against a decisions row, and
+	// gets a rejected call. That is the same harm as the delete sentence naming a
+	// command that cannot run, one level up: a route that exists for a different
+	// record.
+	"a decision's title, decision, rationale, tags and alternatives — there is no decision update tool of any kind, and `ghost_memory_update` edits a MEMORY's tags rather than a decision's, so the only route is the database directly",
 
 	// A project's name and path — and the two are NOT the same case, which is
 	// why they are two clauses. `ghost project bind` writes path (and
@@ -911,6 +922,15 @@ func printSecretFixes(out io.Writer) error {
 		// out of it.
 		if tool == "ghost_task_complete" {
 			line += " — which also marks the task done"
+		}
+		// `tags` is the one field on any of these lines whose fix depends on the
+		// RECORD KIND (#835). It is a memory column this tool edits, and a decision
+		// has no update tool of any kind — so naming it bare here reads as covering
+		// both, and a reader holding a decision row runs this call and gets a
+		// rejection. The decision's own sentence is below, in the unwritable list;
+		// this says so rather than leaving the reader to find it.
+		if tool == "ghost_memory_update" && slices.Contains(byTool[tool], "tags") {
+			line += " — on a memory row; a decision's tags have no tool (see below)"
 		}
 		if _, err := fmt.Fprintln(out, line); err != nil {
 			return err

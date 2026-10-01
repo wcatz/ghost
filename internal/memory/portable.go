@@ -1071,7 +1071,7 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 // Every refusal about the record's own bytes is made by CheckImportedDecision,
 // which `ghost export` calls too (#813): the id's shape, project_id, title,
 // decision, rationale, the status value set, and the credential guard over all
-// four plus alternatives.
+// four plus alternatives and tags.
 //
 // superseded_by is inserted as given: the caller orders the records so a
 // superseding decision exists first, and drops a pointer to a decision that is
@@ -1099,9 +1099,10 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	}
 	// THEN CheckImportedDecision, the importer's OWN refusal predicate and the same
 	// one `ghost export` calls (#813). Every refusal about the record's own bytes
-	// lives there — including alternatives, which is a list because it is one:
-	// ghost_decisions_list renders it back to the agent, so an entry is as
-	// replayable as the rationale beside it.
+	// lives there — including alternatives and tags, which are lists because they
+	// are: ghost_decisions_list renders alternatives back to the agent, and the
+	// tags column arrives from an artifact file and is re-emitted into the next
+	// one, so an entry in either is as replayable as the rationale beside it.
 	if err := CheckImportedDecision(d); err != nil {
 		return false, err
 	}

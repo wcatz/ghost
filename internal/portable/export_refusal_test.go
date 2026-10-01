@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -348,6 +349,32 @@ func storeReachableGrounds(cred string) []ground {
 					`["the deploy token is `+cred+`"]`, "d-secret-alternatives")
 			},
 		},
+		{
+			// #835, and the only ground here whose field was guarded on the WRITE
+			// path and not on the import one — which is the whole defect: the
+			// artifact's tags column was written raw into the same table
+			// `RecordDecision` guards, and re-emitted by every export afterwards.
+			//
+			// Planted by UPDATE because `plantDecision` writes the column as '[]',
+			// and the states a store reaches this through are a row written before
+			// the guard, a `RestoreSnapshot`, a hand edit or an artifact from another
+			// tool — reachable either way, which is what makes it a ground rather
+			// than a hypothetical.
+			//
+			// A JSON ARRAY, not a bare quoted string, and that is not tidiness: the
+			// first version of this fixture stored a quoted SCALAR there, the
+			// decoder's error is ignored, and the row arrived with no tags at all —
+			// so the ground asserted a refusal against a row that never had one and
+			// failed for a reason that had nothing to do with the guard. The same
+			// trap the hostile-shape fixture in export_decision_tags_test.go names.
+			kind: TypeDecision, id: "d-secret-tags", wantField: "tags[0]",
+			credential: true,
+			plant: func(t *testing.T, db *sql.DB) {
+				plantDecision(t, db, "d-secret-tags", "p1", "a title", "a decision", "a rationale", "active")
+				plantRaw(t, db, `UPDATE decisions SET tags = ? WHERE id = ?`,
+					"["+strconv.Quote("ops-"+cred)+"]", "d-secret-tags")
+			},
+		},
 	}
 }
 
@@ -624,6 +651,13 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 			importRefuses: func() error {
 				return memory.CheckImportedDecision(withDecision(func(d *memory.Decision) { d.Alternatives = []string{"token " + cred} }))
 			}},
+		// #835. It is listed beside alternatives because it is the same rule and
+		// the same sentence, and because a memory's tags have had a row here
+		// since #813 while a decision's did not — the asymmetry is the defect.
+		{name: "decision/tags credential", counterpart: "predicate",
+			importRefuses: func() error {
+				return memory.CheckImportedDecision(withDecision(func(d *memory.Decision) { d.Tags = []string{"ops-" + cred} }))
+			}},
 		{name: "decision/superseder not in this store", counterpart: "store",
 			why: "a fact about the DESTINATION, and orderDecisions drops a pointer to a decision the artifact does not contain, exactly as orderTasks does for a blocker."},
 		{name: "decision/project not found", counterpart: "store",
@@ -678,18 +712,18 @@ func TestEveryImportRefusalPathHasAnExportCounterpart(t *testing.T) {
 	// is counted from the predicates rather than transcribed, so it cannot drift
 	// from them by being wrong.
 	//
-	// 17 = a project's name and path (2) + a memory's content, source_ref, agent,
+	// 18 = a project's name and path (2) + a memory's content, source_ref, agent,
 	// session_id and tags (5) + an evidence record's agent, session_id and
 	// source_ref (3) + a task's title, description and notes (3) + a decision's
-	// title, decision, rationale and alternatives (4).
-	if got, want := credentialFields(), 17; got != want {
+	// title, decision, rationale, alternatives and tags (5).
+	if got, want := credentialFields(), 18; got != want {
 		t.Errorf("the table covers %d credential-guarded field(s), want %d — a field was added to a predicate's guard, so it needs a row here", got, want)
 	}
 }
 
 // credentialFields counts the credential-guarded fields across the four
-// predicates: a project has 2, a memory has 4 at the row level plus 3 per evidence
-// record, a task has 3, a decision has 4 (3 fields plus alternatives). It is
+// predicates: a project has 2, a memory has 5 at the row level plus 3 per evidence
+// record, a task has 3, a decision has 5 (4 fields plus alternatives and tags). It is
 // computed by driving each predicate and reading which field the refusal names, so
 // it cannot drift from the predicates by construction.
 func credentialFields() int {
@@ -731,6 +765,8 @@ func credentialFields() int {
 		Decision: "d", Rationale: "token " + cred, Status: "active"}))
 	guard(memory.CheckImportedDecision(memory.Decision{ID: "d1", ProjectID: "p1", Title: "t",
 		Decision: "d", Rationale: "r", Alternatives: []string{cred}, Status: "active"}))
+	guard(memory.CheckImportedDecision(memory.Decision{ID: "d1", ProjectID: "p1", Title: "t",
+		Decision: "d", Rationale: "r", Tags: []string{cred}, Status: "active"}))
 	return n
 }
 
