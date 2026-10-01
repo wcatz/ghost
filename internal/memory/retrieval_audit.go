@@ -70,6 +70,21 @@ package memory
 // what the run judged, and what the table holds — are stated.
 // TestTheAuditWriteReportsTheVerdictsItRefused holds the store's half and
 // TestRunReconcilesWhatTheStoreRefused the call site's.
+//
+// AND THE GUARD GATES THE REPLACE-DELETE AS WELL AS THE INSERT, which is the half
+// that is easy to leave open. A verdict is filed by replacing the call's existing
+// rows, and that delete used to run for every rowid in the batch, up front and
+// unconditionally — so a batch carrying a row the guard refuses still WIPED that
+// rowid's verdicts on the way to refusing it. In the re-let window that destroys a
+// legitimate call's evidence: a stale pass deletes the verdict a successor holding
+// the freed rowid already filed, and is then refused its own row. The table loses a
+// stored pair, nothing re-files it, and the successor's already-printed report
+// claims a figure the table does not hold — the same wrong number, reached through
+// the DELETE rather than the INSERT. So the claim is EARNED: a pass may replace a
+// call's verdicts only once the guard has accepted a row for it.
+// TestALatePassCannotWipeTheSuccessorsVerdicts, and
+// TestAPartlyRefusedBatchStillKeepsTheRowsItFiled for the shape where one batch is
+// both refused and accepted on the same call.
 
 import (
 	"context"
@@ -175,17 +190,11 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
-	seen := map[int64]bool{}
-	for _, r := range rows {
-		if r.RecordRowID <= 0 || seen[r.RecordRowID] {
-			continue
-		}
-		seen[r.RecordRowID] = true
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM retrieval_audit WHERE record_rowid = ?`, r.RecordRowID); err != nil {
-			return nil, fmt.Errorf("record retrieval audits: replace the verdicts of call %d: %w", r.RecordRowID, err)
-		}
-	}
+	// Which calls this batch has already replaced. The replacement is keyed by
+	// record_rowid, so a call's verdicts are replaced ONCE per batch however many
+	// rows name it — and only once the guard below has accepted a row for it, which
+	// is the whole point: see the REPLACE block after the insert.
+	replaced := map[int64]bool{}
 
 	var maxRowID int64
 	// The rows the guard below refused, returned so the caller can take them out
@@ -289,6 +298,40 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 		// skipping one moves nothing. When every row was dropped, maxRowID stays
 		// 0, the table did not grow, and the eviction does not run.
 		maxRowID = filed
+
+		// REPLACE, and only now. The delete used to run for every distinct rowid
+		// in the batch, up front and unconditionally, which meant a batch whose
+		// rows the guard refuses still WIPED that rowid's existing verdicts on the
+		// way to refusing them. In the re-let window that destroys a legitimate
+		// call's evidence: a purge frees the newest call's rowid, a successor takes
+		// it and files its own verdict, and a stale pass then deletes that verdict
+		// and is refused its own row — so the table loses a stored pair, nothing
+		// re-files it, and the successor's already-printed report claims a figure
+		// the table does not hold. The wrong number, reached through the DELETE
+		// rather than the INSERT.
+		//
+		// So the claim is earned, not assumed: a pass may replace a call's verdicts
+		// only once it has filed a row for that call, and the guard is what decides.
+		// `rowid <> ?` keeps the row just written, so the replacement is still a
+		// replacement — a re-audit drops the previous pass's rows for the same
+		// (call, memory) pair rather than doubling the table's denominators — and a
+		// batch naming several memories of one call still replaces once, not once
+		// per row, which is what `replaced` is for.
+		//
+		// It cannot be a whole-call delete on a row the guard will refuse, and it
+		// cannot be narrowed to (record_rowid, memory_id) pairs either: the call
+		// this batch is entitled to speak for is the one it read, and the rows
+		// already in the table under that rowid may name memories THIS pass judged
+		// differently or did not reach at all. Replacing them is the point.
+		if r.RecordRowID > 0 && !replaced[r.RecordRowID] {
+			replaced[r.RecordRowID] = true
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM retrieval_audit WHERE record_rowid = ? AND rowid <> ?`,
+				r.RecordRowID, filed); err != nil {
+				return nil, fmt.Errorf("record retrieval audits: replace the verdicts of call %d: %w",
+					r.RecordRowID, err)
+			}
+		}
 	}
 
 	// Oldest first by rowid, bounded by the row just written, so the table settles

@@ -1120,6 +1120,186 @@ func recordCallDropping(t *testing.T, s *Store, memory string, n int) int64 {
 	return recs[0].RowID
 }
 
+// TestALatePassCannotWipeTheSuccessorsVerdicts: the guard gates the INSERT, and
+// that leaves the DELETE half of the same write ungated — which is the same defect
+// reached through the other statement.
+//
+// RecordRetrievalAudits replaces a call's verdicts by deleting every row naming
+// that call's rowid, then inserting the batch's rows for it. The delete used to run
+// for every distinct rowid in the batch, unconditionally and up front, so a batch
+// carrying a row the guard would refuse still WIPED that rowid's existing verdicts
+// first. In the re-let window that destroys a legitimate call's evidence:
+//
+//  1. call A is the newest, rowid R, keeping MEM-X; a pass P is in flight having
+//     already read A.
+//  2. a purge of MEM-X deletes A and frees R (the sweep takes A's verdicts too).
+//  3. a new search records call B, which takes rowid R and keeps a different memory.
+//  4. a later pass Q reads B and files (R, MEM-B). That row is in the table, and Q's
+//     report says one verdict stored.
+//  5. P writes its stale batch: the replace-delete removes (R, MEM-B), and only
+//     THEN does the guard refuse P's (R, MEM-X) row because B never kept MEM-X.
+//
+// The table no longer holds B's verdict, nothing re-files it, and Q's already-printed
+// report claims a figure the table does not hold — the wrong number
+// Summary.Unfiled was added to prevent, reached through the delete rather than the
+// insert. So a pass may only REPLACE a call's verdicts when it is going to file
+// some: the guard's own outcome decides whether the batch has a claim on that
+// rowid at all.
+//
+// This is a separate test from the one above rather than another phase of it,
+// because the two pin different statements. That one is about what gets WRITTEN;
+// this is about what gets ERASED, and a fix to the insert's guard leaves the delete
+// exactly as exposed.
+func TestALatePassCannotWipeTheSuccessorsVerdicts(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The doomed call is the newest, so its rowid is the table's maximum and the
+	// one a successor takes. recordCallKeeping creates the memory it names, which
+	// the purge below needs to exist.
+	doomed := recordCallKeeping(t, s, testProject, "MEM-X", 840)
+	stale := []RetrievalAuditRow{{
+		ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+		MemoryID: "MEM-X", Outcome: "used", Signal: "identifier",
+	}}
+	if _, err := s.RecordRetrievalAudits(ctx, stale); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the first pass): %v", err)
+	}
+	if err := s.DeleteWithOptions(ctx, "MEM-X", DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// The successor takes the freed rowid, keeping a different memory, and its own
+	// pass files that verdict. This row is what the late pass must not destroy.
+	successor := recordCallKeeping(t, s, testProject, "MEM-Y", 841)
+	if successor != doomed {
+		t.Fatalf("the successor took rowid %d, not the freed %d — freed rowids are no longer reused, so this "+
+			"test no longer demonstrates anything and must be re-read", successor, doomed)
+	}
+	if _, err := s.RecordRetrievalAudits(ctx, []RetrievalAuditRow{{
+		ProjectID: testProject, RecordRowID: successor, SessionID: "s2", Source: "search",
+		MemoryID: "MEM-Y", Outcome: "used", Signal: "identifier",
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the successor's pass): %v", err)
+	}
+	if got := readAuditRows(t, s); len(got) != 1 {
+		t.Fatalf("the table holds %+v before the late pass, want the successor's one verdict — the premise is "+
+			"that it is there to be destroyed", got)
+	}
+
+	// The late pass, filing what it judged before the purge.
+	if _, err := s.RecordRetrievalAudits(ctx, stale); err != nil {
+		t.Fatalf("RecordRetrievalAudits (the late pass): %v", err)
+	}
+
+	got := readAuditRows(t, s)
+	if len(got) != 1 || got[0].RecordRowID != successor || got[0].MemoryID != "MEM-Y" {
+		t.Fatalf("the table holds %+v, want the successor's (MEM-Y, rowid %d) verdict still there. A refused "+
+			"verdict has no claim on that rowid, so this pass must not delete what the successor's own pass "+
+			"filed — and nothing re-files it, so the loss is permanent and the successor's printed report "+
+			"already claimed it", got, successor)
+	}
+}
+
+// TestAPartlyRefusedBatchStillKeepsTheRowsItFiled: the replacement delete runs
+// immediately after the FIRST row the guard accepts for a call, so it has to
+// exclude that row — and whether it can is decided by the order the batch happens
+// to name memories in, which is the one thing a caller does not control.
+//
+// The reachable shape is a partly-refused batch. The doomed call kept two
+// memories, so purging one frees its row; the successor takes the freed rowid and
+// kept ONE of the same two. The stale pass then names both: the memory the
+// successor dropped is refused, the one it kept is accepted. If the delete did not
+// exclude the row it had just written, that accepted row would delete ITSELF and
+// the table would end the pass holding nothing at all — a loss strictly worse than
+// the refusal it was avoiding, and one that a batch naming its memories in the
+// other order would not show.
+//
+// The order in the batch below is deliberate and load-bearing: the refused row
+// comes FIRST, so the delete lands after the accepted one has been written.
+func TestAPartlyRefusedBatchStillKeepsTheRowsItFiled(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The doomed call kept both memories, so purging one frees its row and leaves
+	// the other live for the successor to consider. Both are real rows because the
+	// purge below refuses to delete a name it cannot find.
+	for _, id := range []string{"MEM-X", "MEM-Y"} {
+		if _, err := s.CreateWithID(ctx, testProject, id, Memory{
+			Content: "a fixture memory " + id, Category: "gotcha", Source: "manual",
+		}); err != nil {
+			t.Fatalf("CreateWithID %s: %v", id, err)
+		}
+	}
+	doomed := recordCallKeepingAll(t, s, []string{"MEM-X", "MEM-Y"}, 850)
+	stale := []RetrievalAuditRow{
+		{ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-X", Outcome: "used", Signal: "identifier"},
+		{ProjectID: testProject, RecordRowID: doomed, SessionID: "s1", Source: "search",
+			MemoryID: "MEM-Y", Outcome: "ignored"},
+	}
+	if err := s.DeleteWithOptions(ctx, "MEM-X", DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+
+	// The successor takes the freed rowid and kept only MEM-Y, so MEM-X is refused
+	// and MEM-Y is not. recordCallDropping alone would name nothing the guard could
+	// accept, so the successor's own kept set is MEM-Y and MEM-X is recorded as
+	// considered-and-dropped alongside it.
+	successor := recordCallKeepingAndDropping(t, s, []string{"MEM-Y", "MEM-X"}, 851)
+	if successor != doomed {
+		t.Fatalf("the successor took rowid %d, not the freed %d — freed rowids are no longer reused, so this "+
+			"test no longer demonstrates anything and must be re-read", successor, doomed)
+	}
+
+	refused, err := s.RecordRetrievalAudits(ctx, stale)
+	if err != nil {
+		t.Fatalf("RecordRetrievalAudits (the late pass): %v", err)
+	}
+	if len(refused) != 1 || refused[0].MemoryID != "MEM-X" {
+		t.Fatalf("the pass refused %+v, want exactly the MEM-X row — the successor kept MEM-Y, so this test's "+
+			"premise is one refusal and one acceptance in that order", refused)
+	}
+
+	got := readAuditRows(t, s)
+	if len(got) != 1 || got[0].MemoryID != "MEM-Y" {
+		t.Fatalf("the table holds %+v, want the one row the guard accepted (MEM-Y). The replacement delete runs "+
+			"just after that row is written, so without excluding it the accepted row erases itself and the "+
+			"pass ends having stored nothing", got)
+	}
+}
+
+// recordCallKeepingAndDropping records one call that KEPT the first memory and
+// CONSIDERED-AND-DROPPED the rest, and returns its rowid. It is the mixed shape a
+// successor takes over a freed rowid when the dead call and the new one share some
+// of their memories.
+func recordCallKeepingAndDropping(t *testing.T, s *Store, memories []string, n int) int64 {
+	t.Helper()
+	ctx := context.Background()
+	verdicts := make([]RowVerdict, 0, len(memories))
+	for i, m := range memories {
+		v := RowVerdict{ID: m, Stage: "fit", Reason: "fit_response", Kept: true}
+		if i > 0 {
+			v = RowVerdict{ID: m, Stage: "window", Reason: "outside_window", Kept: false}
+		}
+		verdicts = append(verdicts, v)
+	}
+	if err := s.RecordRetrieval(ctx, RetrievalRecord{
+		ProjectID: testProject, Source: "search", QueryHash: digest(n),
+		Outcome: "answerable", Verdicts: verdicts,
+	}); err != nil {
+		t.Fatalf("RecordRetrieval (%v): %v", memories, err)
+	}
+	recs, err := s.RetrievalRecords(ctx, 1)
+	if err != nil {
+		t.Fatalf("RetrievalRecords: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("RetrievalRecords returned %d rows, want 1", len(recs))
+	}
+	return recs[0].RowID
+}
+
 // TestEveryWriterThatDeletesRetrievalRecordsTakesTheirVerdicts is the structural
 // half of the two behavioural tests above, and it exists because the gap was
 // invisible to the tests that were here: two delete paths, each correct about the
