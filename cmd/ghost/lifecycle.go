@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/followup"
@@ -29,7 +31,7 @@ import (
 
 // lifecycleUsage is the help for the internal `ghost lifecycle` subcommand:
 // stderr for its usage error, stdout for -h/--help (see handleHelp).
-const lifecycleUsage = `Usage: ghost lifecycle --project <name> [--source <src>]
+const lifecycleUsage = `Usage: ghost lifecycle --project <name> [--source <src>] [--signals <path>]
 
 Internal subcommand spawned by the Stop hook: runs the enabled
 auto-consolidation phases — reflect, then resolve, then supersede — for one
@@ -37,6 +39,14 @@ project in order, in a single process. Not the normal way to start
 maintenance; run ghost reflect <project> (or resolve/supersede) by hand.
 A positional project is accepted, but --project takes the next argument
 verbatim, so dash-prefixed names work.
+
+  --signals <path>  The stop hook's audit sidecar: memory ids and token
+                    fingerprints of what the agent wrote this session, which
+                    this run compares against what retrieval admitted and
+                    records as used / ignored / superseded / contradicted.
+                    Written by the hook, read and deleted here. Omitted when
+                    the hook had no evidence, which is every run not spawned
+                    by a stop hook.
 `
 
 // runLifecycle runs the enabled auto-consolidation phases for one project, in
@@ -53,9 +63,14 @@ verbatim, so dash-prefixed names work.
 // replace rows while supersede was classifying them (foreign-key aborts and
 // lost resolved_at stamps).
 //
+// The retrieval audit is the one step that runs HERE rather than as a child
+// (`runAuditPhase`), because it is the step that needs this process's own
+// timeline: it must judge a call against the transcript as it stood when the
+// hook read it, which is before reflect rewrote a single memory.
+//
 // Internal subcommand: not listed in help.
 func runLifecycle() {
-	projectName, source, err := parseLifecycleArgs(os.Args[2:])
+	projectName, source, signalsPath, err := parseLifecycleArgs(os.Args[2:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -121,6 +136,17 @@ func runLifecycle() {
 		fmt.Fprintf(os.Stderr, "lifecycle: scratch reap removed=%d\n", removed)
 	}
 
+	// The audit sidecars no child ever claimed: a lifecycle that crashed, was
+	// killed, or exited before its audit step. Its own sweep for the files this
+	// process did not get to, beside the scratch reap above for the same reason
+	// and with the same posture — a warning, never a stop. A sidecar a child
+	// DID read deletes itself.
+	if removed, sweepErr := audit.SweepStale(os.TempDir()); sweepErr != nil {
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: audit sidecar sweep failed: %v\n", sweepErr)
+	} else {
+		fmt.Fprintf(os.Stderr, "lifecycle: audit sidecar sweep removed=%d\n", removed)
+	}
+
 	// Outcome tracking for the end-of-run marker: a phase that could not run
 	// (skipped for want of an LLM backend — the original silent incident) or
 	// exited non-zero counts as failed; success counts only phases that
@@ -158,6 +184,31 @@ func runLifecycle() {
 	// Best-effort: a missing stamp only costs one extra spawn.
 	if err := mcpinit.TouchLifecycleStart(projectName); err != nil {
 		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record the run start (%v)\n", err)
+	}
+
+	// The retrieval audit, before the first phase and inside the claim above.
+	//
+	// BEFORE is the whole of it: a verdict is a comparison between a memory's
+	// wording and the words the agent wrote, and reflect — the first phase —
+	// rewrites those wordings. Judged after it, this would be measuring what
+	// consolidation produced rather than what the agent was handed, and the
+	// "used" verdicts would credit a memory for text that did not exist when
+	// the agent read it.
+	//
+	// It is deliberately NOT one of lifecyclePhases. Those are separate `ghost`
+	// children so one failure cannot corrupt the next, and this step wants the
+	// opposite: this process's own store handle, and the pre-reflect corpus the
+	// phases are about to change. A phase timeout would also be the wrong bound
+	// for it — it is a bounded read and one transaction on a path nobody waits
+	// for, and a deadline is a hang detector, not a budget to spend.
+	//
+	// A failure here is a line on stderr and nothing else. It records no
+	// lifecycle failure, because the marker and the session-start alert it raises
+	// are about consolidation ("Memory consolidation is paused"), and a failed
+	// audit has paused nothing — a false claim in a surface an operator reads at
+	// the start of every session is worse than a hole in a report.
+	if signalsPath != "" {
+		runAuditPhase(projectName, signalsPath)
 	}
 
 	for _, ph := range lifecyclePhases(cfg, projectName, llmOK) {
@@ -232,6 +283,143 @@ func runLifecycle() {
 	}
 }
 
+// runAuditPhase judges the calls this session made against the transcript the
+// stop hook read, persists the verdicts, prints the report and deletes the
+// sidecar it was handed.
+//
+// Fail-open at every step, and the shape of every line below says so: a line on
+// stderr and a return. This process is detached, nobody reads its exit status,
+// and the phases behind it are the ones that maintain the store — so a sidecar
+// that cannot be read, a store that will not open, a project that resolves to
+// nothing: each costs one turn's audit and nothing else. Not exiting is the
+// point; a `return` here is a hole in a report, and the report is read by
+// somebody deciding whether to trust what Ghost put in front of an agent.
+//
+// The file is removed ONLY after a read that succeeded, and only once it is known
+// to be named like a sidecar. The remove used to sit in a defer BEFORE the read,
+// on the reasoning that a refusal has read the bytes too — which meant
+// `--signals <any path>` deleted whatever it was handed, and kept deleting it
+// even when the read then refused the file as unreadable. A file this phase
+// declines to claim is left where it lies, and reclaiming it is
+// SweepSidecars' job — the separate step above, which applies the SAME name and
+// header tests plus a staleness bound, so a file neither of them claims survives
+// to the next sweep rather than being destroyed on the way past. Deleting a file
+// you have not identified is not cleanup, and this is the only destructive
+// statement in the function, which is why it carries two conditions instead of
+// one.
+func runAuditPhase(projectName, signalsPath string) {
+	skip := func(reason string) {
+		fmt.Fprintf(os.Stderr, "lifecycle: retrieval audit skipped: %s\n", reason)
+	}
+
+	// Delete the sidecar ONLY once it has proved to be one. The deferred remove
+	// this replaces ran before the read, so `--signals <any path>` deleted
+	// whatever it was handed — a path that reached this argument from a shell, a
+	// mistake, or a caller that composed it, and the deletion happened even when
+	// the file was refused as unreadable. This is an internal subcommand, which
+	// makes it exactly as reachable as the other internal phases and no less.
+	//
+	// Both conditions are required, and in this order. The NAME first, because a
+	// file that is not named like a sidecar is not one however valid its header
+	// turns out to be; the HEADER second, because a file that merely borrowed the
+	// name is not this package's to delete either. A sidecar this run cannot parse
+	// is left for the sweep, which is scoped by the same two rules.
+	if ok := audit.IsSidecarPath(signalsPath); !ok {
+		skip("not a sidecar path")
+		return
+	}
+	// The SAME per-install key the hook signed the sidecar with, resolved
+	// read-only. A child under a different key would find no token in common with
+	// the memory it is judging, and would file every kept memory as ignored — a
+	// confident report of ordinary use as total silence, from a store that was
+	// fine. So the key is resolved BEFORE the read, and a missing one skips the
+	// phase rather than comparing under a key of its own.
+	key, err := memory.ReadRetrievalKey()
+	if err != nil {
+		skip(err.Error())
+		return
+	}
+	hasher, err := audit.NewHasher(key)
+	if err != nil {
+		skip(err.Error())
+		return
+	}
+	sig, err := audit.ReadSidecar(signalsPath, hasher)
+	if err != nil {
+		skip(err.Error())
+		return
+	}
+	defer func() { _ = os.Remove(signalsPath) }()
+	store, err := openAuditStore()
+	if err != nil {
+		skip(err.Error())
+		return
+	}
+	defer store.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	// Resolved rather than trusted: --project is whatever the hook knew at
+	// session start, and a project that has been renamed, deleted or never bound
+	// has to be a skipped audit rather than a report filed under nothing.
+	projectID, _, err := store.ResolveProject(ctx, projectName)
+	if err != nil {
+		skip(err.Error())
+		return
+	}
+	if projectID == "" {
+		skip("project " + projectName + " does not exist")
+		return
+	}
+
+	sum, err := audit.Run(ctx, store, projectID, sig)
+	if err != nil {
+		// Distinct from "skipped": this one may have persisted some verdicts
+		// before failing on a later write, and a reader deciding whether the
+		// figures hold needs to know the run was not complete.
+		fmt.Fprintf(os.Stderr, "lifecycle: retrieval audit incomplete: %v\n", err)
+		return
+	}
+	// stderr, not stdout: on the detached path this is the phase tail an
+	// operator reads in lifecycle.log, and on a foreground run — the retry an
+	// operator types from the maintenance alert — it is beside the phase
+	// output rather than in the middle of it. The report carries ids and counts
+	// only, which is what lets it be a log line at all.
+	fmt.Fprint(os.Stderr, sum.String())
+}
+
+// openAuditStore opens the store the audit reads and writes, on its own rather
+// than through bootstrap.
+//
+// bootstrap is the right wiring for a command an operator is watching — it prints
+// a config or database failure and exits 1, which is exactly right for a command
+// they asked for. Here that exit would take the consolidation phases down with
+// it, and the phases are this process's actual job: one turn's audit is not worth
+// a skipped reflect/resolve/supersede. So every failure is returned for the
+// caller to print and return from.
+//
+// Its own handle, not bootstrap's shared one, for the same reason: the audit runs
+// before the phases and the phases are separate processes with their own stores,
+// so nothing here is borrowed. It opens no read-only companion — the audit needs
+// the primary connection's write transaction to file verdicts, and every read it
+// makes is a read of the same connection.
+//
+// WARN and above go to stderr, which for a detached run is lifecycle.log. A store
+// that complains here — a refused migration, a newer schema, a foreign table — is
+// a thing an operator has to see, and INFO is not: this step prints its own
+// report and has no business adding to the noise around it.
+func openAuditStore() (*memory.Store, error) {
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return nil, fmt.Errorf("data dir: %w", err)
+	}
+	db, err := memory.OpenDB(filepath.Join(dataDir, "ghost.db"))
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	return memory.NewStore(db, logger), nil
+}
+
 // parseLifecycleArgs parses the internal lifecycle subcommand's arguments. The
 // project comes from --project when given, so a project whose name begins with
 // a dash — or is literally "--source" — cannot be misread as a flag: without
@@ -243,42 +431,59 @@ func runLifecycle() {
 // name round-trips through the whole chain. Anything unexpected is an error
 // rather than being ignored, because a silently misparsed project is a
 // wrong-project write.
-func parseLifecycleArgs(args []string) (project, source string, err error) {
-	projectSet, sourceSet := false, false
+//
+// --signals is the stop hook's audit sidecar, and it takes the next argument
+// verbatim like --project does: the path is a temp file this process created, and
+// a parser that tried to read a leading dash in it as a flag would refuse a
+// perfectly ordinary name. It is a value flag rather than a bare switch because
+// the file has to be handed over explicitly — a run that had to FIND the newest
+// sidecar in a shared temp directory would be judging whichever turn's evidence
+// it happened to reach first.
+func parseLifecycleArgs(args []string) (project, source, signals string, err error) {
+	projectSet, sourceSet, signalsSet := false, false, false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--project":
 			if projectSet {
-				return "", "", fmt.Errorf("--project given more than once")
+				return "", "", "", fmt.Errorf("--project given more than once")
 			}
 			if i+1 >= len(args) {
-				return "", "", fmt.Errorf("--project requires a value")
+				return "", "", "", fmt.Errorf("--project requires a value")
 			}
 			project, projectSet = args[i+1], true
 			i++
 		case "--source":
 			if sourceSet {
-				return "", "", fmt.Errorf("--source given more than once")
+				return "", "", "", fmt.Errorf("--source given more than once")
 			}
 			if i+1 >= len(args) {
-				return "", "", fmt.Errorf("--source requires a value")
+				return "", "", "", fmt.Errorf("--source requires a value")
 			}
 			source, sourceSet = args[i+1], true
 			i++
+		case "--signals":
+			if signalsSet {
+				return "", "", "", fmt.Errorf("--signals given more than once")
+			}
+			if i+1 >= len(args) {
+				return "", "", "", fmt.Errorf("--signals requires a value")
+			}
+			signals, signalsSet = args[i+1], true
+			i++
 		default:
 			if strings.HasPrefix(args[i], "-") {
-				return "", "", fmt.Errorf("unknown flag %q", args[i])
+				return "", "", "", fmt.Errorf("unknown flag %q", args[i])
 			}
 			if projectSet {
-				return "", "", fmt.Errorf("unexpected extra argument %q", args[i])
+				return "", "", "", fmt.Errorf("unexpected extra argument %q", args[i])
 			}
 			project, projectSet = args[i], true
 		}
 	}
 	if !projectSet || project == "" {
-		return "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
+		return "", "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
 	}
-	return project, source, nil
+	return project, source, signals, nil
 }
 
 // consolidationContext bounds a single consolidation call by

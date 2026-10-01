@@ -616,6 +616,18 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("purge retrieval records: %w", err)
 	}
 
+	// The audit's rows are REDACTED, not left behind, and for the same reason the
+	// record arm above deletes rather than redacts: a verdict's subject is a memory
+	// ID, and a purge that removed the memory while its verdicts kept naming it
+	// would leave a report counting judgments about a memory that no longer exists.
+	// This one is a plain equality on a real column rather than a scan of a JSON
+	// document, which is the same cost the table's cap makes free: a redaction is
+	// rare and the table is bounded.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM retrieval_audit WHERE memory_id = ?`, memoryID); err != nil {
+		return 0, fmt.Errorf("purge retrieval audits: %w", err)
+	}
+
 	res, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_history WHERE memory_id = ?`, memoryID)
 	if err != nil {

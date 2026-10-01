@@ -583,6 +583,68 @@ CREATE TABLE IF NOT EXISTS retrieval_record (
 -- a window of rows the report cannot order within.
 CREATE INDEX IF NOT EXISTS idx_retrieval_record_project ON retrieval_record(project_id);
 
+-- #646 part 2: the retrieval AUDIT, one row per (call, kept memory), saying what
+-- the agent did with what the call admitted. The grain is the PAIR and not the
+-- call, because a memory's fate is a fact about that memory in that session that
+-- no per-call row can hold -- and the pair is what makes a verdict replaceable:
+-- keyed by record_rowid, a second pass over the same call overwrites exactly the
+-- rows the first pass wrote, so a stop hook that fires after every turn does not
+-- grow this table with the length of a session.
+CREATE TABLE IF NOT EXISTS retrieval_audit (
+    -- The project is the report's denominator. Every figure is per project, so a
+    -- row that named no project would be a verdict about which project's retrieval
+    -- — which is the same reason the write refuses one.
+    project_id   TEXT NOT NULL,
+    -- The call this verdict belongs to, as the retrieval_record row's OWN rowid:
+    -- read rather than inferred, because recorded_at is second-precision and two
+    -- calls in one second have no defined order by it. 0 is the "not attributable
+    -- to a call" value, and the replacement ignores it — deleting "every row with
+    -- rowid 0" would delete every unattributed verdict in the table.
+    record_rowid INTEGER NOT NULL DEFAULT 0,
+    session_id   TEXT NOT NULL DEFAULT '',
+    -- The call's OWN source, copied onto each of its verdicts so a report can
+    -- split the denominators without a join back to retrieval_record. session_start
+    -- and search are reported separately and never pooled; the column is what
+    -- makes that split a WHERE rather than an inference.
+    source       TEXT NOT NULL,
+    -- Deliberately NOT CHECK(length(memory_id) = 32 AND ...), unlike the
+    -- history tables. The verdict's subject is an id Ghost itself minted, and the
+    -- constraint would protect the table from a writer that is this build's own
+    -- code -- while forbidding the test that seeds a deliberately malformed row,
+    -- and forbidding any future build that moves to a different id shape. The
+    -- column is NOT NULL and the read skips an empty id, so an unreportable row
+    -- still cannot be counted.
+    memory_id    TEXT NOT NULL,
+    -- Deliberately NOT CHECK against a bucket list, and this one costs a real
+    -- argument. This table's rows are read back by builds that did not write
+    -- them, and a build that has since added a bucket must still be readable by
+    -- this one — its rows are still rows to count. A CHECK would make that
+    -- tolerance unreachable from Ghost's own writers, which is the mirror image
+    -- of the problem the purge's json guard avoids. The comparison owns the
+    -- vocabulary; the table stores what it is given.
+    outcome      TEXT NOT NULL,
+    -- What PROVED a positive verdict, from a closed vocabulary, empty on the
+    -- buckets a signal cannot prove. Kept as its own column rather than folded
+    -- into outcome because "used because the transcript named the id" and "used
+    -- because three of its distinctive words appear" are different strengths of
+    -- claim, and a reader deciding how much to trust a figure needs the second.
+    signal       TEXT NOT NULL DEFAULT '',
+    -- The scanner's reason for a partial transcript read, or ''. It rides with the
+    -- row rather than with the run because a verdict is read back on its own: an
+    -- "ignored" filed here is a claim about the text that WAS read, and a reader
+    -- who cannot see that caveat would read it as a claim about the session.
+    degraded     TEXT NOT NULL DEFAULT '',
+    -- The STORE's clock, for the reason retrieval_record's is: the instant a row
+    -- became durable is what places it against a transcript.
+    recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+-- One b-tree, on project_id, for the same per-project read the record table's has.
+-- The audit's other predicate is record_rowid, and that one rides inside a
+-- transaction that deletes the rows it re-inserts, so a second index would be an
+-- insert maintained for a predicate whose rows are about to be removed.
+-- TestRetrievalAuditsCarryOneIndex is what keeps this honest.
+CREATE INDEX IF NOT EXISTS idx_retrieval_audit_project ON retrieval_audit(project_id);
+
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     kind                 TEXT NOT NULL,
@@ -746,6 +808,18 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	// rolls back, so every later open re-enters — and a refusal that has already
 	// written a copy is not the refusal we want.
 	if err := refuseForeignRetrievalRecordTable(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// The audit table's guard, for the reason the record table's is, and it must
+	// sit here rather than only in migrateV21: initSQL's
+	// `CREATE INDEX ... ON retrieval_audit(project_id)` is the statement that
+	// fails against somebody else's table of this name, and it fails with "no such
+	// column: project_id" — which names neither the table nor the way out. Before
+	// the DDL, hence before backupBeforeMigrate, for the same reason as above: the
+	// condition is permanent, so a refusal that has already copied the database is
+	// not the refusal we want.
+	if err := refuseForeignRetrievalAuditTable(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

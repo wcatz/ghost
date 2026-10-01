@@ -248,6 +248,9 @@ func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
 		// is here because DeleteProject removes those rows (#646), and a summary
 		// that omitted a table its own command deletes would under-report.
 		RetrievalRecords: 7,
+		// And an eighth, for the verdicts derived from them. Same reason, and the
+		// distinct value is what keeps a swap of the two audit lines from passing.
+		RetrievalAudits: 8,
 	}, "Would delete"); err != nil {
 		t.Fatalf("printDeleteSummary: %v", err)
 	}
@@ -260,6 +263,7 @@ func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
   token_usage:  5
   audit_log:    6
   retrievals:   7
+  audits:       8
 `
 	if out.String() != want {
 		t.Errorf("printDeleteSummary output mismatch:\ngot:\n%s\nwant:\n%s", out.String(), want)
@@ -1218,24 +1222,30 @@ func TestParseLifecycleArgs(t *testing.T) {
 		args    []string
 		project string
 		source  string
+		signals string
 	}{
-		{[]string{"--project", "ghost"}, "ghost", ""},
-		{[]string{"--project", "my project", "--source", "opencode"}, "my project", "opencode"},
-		{[]string{"ghost"}, "ghost", ""}, // positional still works for manual use
-		{[]string{"ghost", "--source", "cli"}, "ghost", "cli"},
-		{[]string{"--project", "-dashy"}, "-dashy", ""}, // dash-prefixed names round-trip through the phases now
-		{[]string{"--project", "--odd"}, "--odd", ""},
-		{[]string{"--project", "--source"}, "--source", ""}, // value is verbatim, not re-aligned
+		{[]string{"--project", "ghost"}, "ghost", "", ""},
+		{[]string{"--project", "my project", "--source", "opencode"}, "my project", "opencode", ""},
+		{[]string{"ghost"}, "ghost", "", ""}, // positional still works for manual use
+		{[]string{"ghost", "--source", "cli"}, "ghost", "cli", ""},
+		{[]string{"--project", "-dashy"}, "-dashy", "", ""}, // dash-prefixed names round-trip through the phases now
+		{[]string{"--project", "--odd"}, "--odd", "", ""},
+		{[]string{"--project", "--source"}, "--source", "", ""}, // value is verbatim, not re-aligned
+		// The audit's sidecar, handed over by the stop hook. Its value is a path,
+		// so the verbatim rule is the same one the project operand needs: a path
+		// beginning with a dash is a path, not a flag.
+		{[]string{"--project", "ghost", "--signals", "/tmp/ghost-audit-1.signals"}, "ghost", "", "/tmp/ghost-audit-1.signals"},
+		{[]string{"--project", "ghost", "--signals", "-dashy"}, "ghost", "", "-dashy"},
 	}
 	for _, tc := range ok {
-		project, source, err := parseLifecycleArgs(tc.args)
+		project, source, signals, err := parseLifecycleArgs(tc.args)
 		if err != nil {
 			t.Errorf("parseLifecycleArgs(%v) error: %v", tc.args, err)
 			continue
 		}
-		if project != tc.project || source != tc.source {
-			t.Errorf("parseLifecycleArgs(%v) = (%q, %q), want (%q, %q)",
-				tc.args, project, source, tc.project, tc.source)
+		if project != tc.project || source != tc.source || signals != tc.signals {
+			t.Errorf("parseLifecycleArgs(%v) = (%q, %q, %q), want (%q, %q, %q)",
+				tc.args, project, source, signals, tc.project, tc.source, tc.signals)
 		}
 	}
 
@@ -1247,11 +1257,13 @@ func TestParseLifecycleArgs(t *testing.T) {
 		{"a", "b"},                           // extra positional
 		{"--project", "a", "b"},              // extra positional after flag
 		{"--project", "a", "--project", "b"}, // duplicate flag must not last-win
-		{"--project", "a", "--source", "s", "--source", "t"}, // duplicate --source
+		{"--project", "a", "--source", "s", "--source", "t"},   // duplicate --source
+		{"--project", "a", "--signals"},                        // missing value
+		{"--project", "a", "--signals", "s", "--signals", "t"}, // duplicate --signals
 		{"-dashy"}, // bare dash-prefixed positional: indistinguishable from a flag; use --project -dashy
 	}
 	for _, args := range bad {
-		if _, _, err := parseLifecycleArgs(args); err == nil {
+		if _, _, _, err := parseLifecycleArgs(args); err == nil {
 			t.Errorf("parseLifecycleArgs(%v) = nil error, want an error", args)
 		}
 	}
@@ -2230,7 +2242,7 @@ func TestParseSupersedeArgs(t *testing.T) {
 // the name resolves in the store the way each phase's resolveProjectOrExit
 // resolves it.
 func TestDashProjectLifecycleRoundTrip(t *testing.T) {
-	proj, _, err := parseLifecycleArgs([]string{"--project", "-dashy"})
+	proj, _, _, err := parseLifecycleArgs([]string{"--project", "-dashy"})
 	if err != nil {
 		t.Fatalf("parseLifecycleArgs --project -dashy: %v", err)
 	}

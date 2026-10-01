@@ -1,0 +1,291 @@
+package audit
+
+// The runner: read the calls this session made, judge each memory it kept, and
+// persist the verdicts.
+//
+// It is deliberately the ONLY place that touches the store on this path, and it
+// is a detached process. The stop hook's own path is synchronous and does not
+// open a database at all — it reads the transcript, writes a sidecar of
+// fingerprints, and returns. Everything here is therefore off the agent's
+// critical path: a failure costs a hole in the report, never a slow turn, and
+// every error path returns rather than retries.
+//
+// What comes OUT is ids, counts and a fixed vocabulary. What went IN — the
+// transcript's words, the query, a memory's content — is read, compared against
+// fingerprints and dropped. There is no field on Summary that text could reach,
+// which is why TestRunStandsOnWhatItReads can assert it on the printed report
+// rather than on a type.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/wcatz/ghost/internal/memory"
+)
+
+// errNoProject and errNoSignals are the two inputs a run cannot do anything with.
+//
+// Refused rather than defaulted, and for the reason retrieval_record's own project
+// refusal gives: a run with no project would persist rows filed under nothing and
+// report figures about every project at once, which is a claim about no call. A
+// run with no signals would judge every kept memory against an empty transcript
+// and file the lot as ignored — a confident report saying the agent used nothing,
+// produced by a caller that failed to read the transcript at all.
+var (
+	errNoProject = errors.New("a project id is required")
+	errNoSignals = errors.New("there are no signals to compare against")
+)
+
+// CallWindow is how many recent calls a run judges.
+//
+// A package var because the number is a POLICY — how much of the recent past one
+// turn's audit is responsible for — and a policy is what a test has to be able
+// to change to assert it. It is also the reason Run is idempotent: the second
+// turn re-judges the same call, and the write replaces the verdicts it judged
+// rather than adding to them, so a long session's table grows with its calls
+// rather than with its turns.
+//
+// The window is bounded rather than "everything", because the transcript the
+// signals come from is one turn's: a memory from a call the agent made before
+// the transcript begins has no evidence either way, and judging it against
+// words the agent wrote afterwards would be a claim about a conversation that is
+// not the one this verdict belongs to.
+var CallWindow = 50
+
+// Summary is what one run found, in a form a report can print without reading
+// the store.
+//
+// Verdicts is a COUNT and VerdictList is the list, and they are separate fields
+// because they answer different questions: the count is what a per-project
+// figure is made of, and the list is what the contradicted view is made of. A
+// caller that only wants the number should not have to walk the list, and a
+// caller that wants the ids should not have to make them from counts.
+type Summary struct {
+	ProjectID string
+	// Sources holds one entry per source seen, and never a pooled total. A search
+	// and a session-start injection answer different questions — "did the agent
+	// use what it looked up" against "did the agent use what it was handed" — and
+	// a ratio over both of them is a number about neither.
+	Sources []SourceSummary
+	// Verdicts is how many memories were judged in total.
+	Verdicts int
+	// VerdictList is every verdict, in the order the calls were read (newest
+	// call first).
+	VerdictList []Verdict
+	// Unreadable counts kept memories that no longer exist. They are counted
+	// rather than dropped because a report that silently omits them reads as a
+	// clean run, and this is precisely the state an operator is in when they
+	// need the report: memories deleted since the call.
+	Unreadable int
+	// Degraded is the scanner's reason for a partial read, or "". Every verdict
+	// in this run is about the transcript as far as it was read, so this rides
+	// with the run and with each stored row.
+	Degraded string
+}
+
+// SourceSummary is one source's figures, and its denominator is CALLS.
+type SourceSummary struct {
+	Source string
+	// Calls is how many recorded calls came from this source, including the ones
+	// that kept nothing — a lookup that returned nothing is a lookup worth
+	// auditing, which is why the grain of retrieval_record is the call.
+	Calls int
+	// Used, Ignored, Superseded and Contradicted count VERDICTS, not calls: one
+	// call can keep twenty memories, so these do not sum to Calls.
+	Used         int
+	Ignored      int
+	Superseded   int
+	Contradicted int
+	// KeptNothing counts the calls this source made that admitted no memory at
+	// all. It is the detectable half of the issue's "missed": a lookup the agent
+	// made that returned nothing it could use.
+	KeptNothing int
+}
+
+// Run judges the calls this session made and persists what it found.
+//
+// Fail-open by construction at the two places it can fail: a read that errors
+// returns the error to a detached child that logs it and exits successfully, and a
+// verdict about a memory that no longer exists is counted as unreadable rather
+// than filed. Nothing here is on the agent's critical path, so there is no
+// version of this that should block a turn.
+func Run(ctx context.Context, store *memory.Store, projectID string, s *Signals) (Summary, error) {
+	if projectID == "" {
+		return Summary{}, fmt.Errorf("audit: %w", errNoProject)
+	}
+	if s == nil {
+		return Summary{}, fmt.Errorf("audit: %w", errNoSignals)
+	}
+	res := Summary{ProjectID: projectID}
+	if reason, ok := s.Degraded(); ok {
+		res.Degraded = reason
+	}
+
+	records, err := store.RetrievalRecordsForProject(ctx, projectID, CallWindow)
+	if err != nil {
+		return res, fmt.Errorf("audit: read retrieval records: %w", err)
+	}
+
+	// Judge per call, so a memory's verdict is filed against the call it belongs
+	// to. That is what makes the write idempotent: the replacement is keyed by
+	// the call's row, so a re-run replaces exactly the verdicts it judged before
+	// and leaves every other call's alone.
+	type placed struct {
+		verdict Verdict
+		record  int64
+		source  string
+		sess    string
+	}
+	var kept []placed
+	bySource := map[string]*SourceSummary{}
+
+	for _, rec := range records {
+		sum := bySource[rec.Source]
+		if sum == nil {
+			sum = &SourceSummary{Source: rec.Source}
+			bySource[rec.Source] = sum
+		}
+		sum.Calls++
+
+		// Only KEPT memories reached the agent, so only a kept one can have been
+		// used, ignored, superseded or contradicted. A dropped row was never
+		// shown, and judging it would report a retrieval failure that happened to
+		// nobody.
+		//
+		// De-duplicated WITHIN this call, and deliberately not across calls: a
+		// memory two calls both kept is two (call, memory) pairs, which is this
+		// table's grain and the only thing that keeps each source's denominator
+		// right. A run-wide dedupe would also have made the second call report
+		// KeptNothing — "a lookup that admitted no memory at all" — about an
+		// injection that admitted one, which is the opposite of what it did.
+		// Idempotence does not need it: re-judging a call REPLACES that call's rows.
+		ids := make([]string, 0, len(rec.Verdicts))
+		withinCall := make(map[string]bool, len(rec.Verdicts))
+		for _, v := range rec.Verdicts {
+			if !v.Kept || withinCall[v.ID] {
+				continue
+			}
+			withinCall[v.ID] = true
+			ids = append(ids, v.ID)
+		}
+		if len(ids) == 0 {
+			sum.KeptNothing++
+			continue
+		}
+
+		mems, err := store.GetByIDs(ctx, ids)
+		if err != nil {
+			return res, fmt.Errorf("audit: read the memories a call kept: %w", err)
+		}
+		content := make(map[string]string, len(mems))
+		for _, m := range mems {
+			content[m.ID] = m.Content
+		}
+		judged := make([]Judged, 0, len(ids))
+		for _, id := range ids {
+			c, ok := content[id]
+			if !ok {
+				res.Unreadable++
+				continue
+			}
+			judged = append(judged, Judged{MemoryID: id, Content: c})
+		}
+		for _, v := range Compare(s, judged) {
+			res.Verdicts++
+			res.VerdictList = append(res.VerdictList, v)
+			kept = append(kept, placed{verdict: v, record: rec.RowID, source: rec.Source, sess: rec.SessionID})
+			sum.count(v.Outcome)
+		}
+	}
+
+	// Sorted by source so a report reads the same way twice, and so a test's
+	// expectations do not depend on the order the calls happened to be read in.
+	for _, name := range sortedKeys(bySource) {
+		res.Sources = append(res.Sources, *bySource[name])
+	}
+
+	rows := make([]memory.RetrievalAuditRow, 0, len(kept))
+	for _, p := range kept {
+		rows = append(rows, memory.RetrievalAuditRow{
+			ProjectID:   projectID,
+			RecordRowID: p.record,
+			SessionID:   p.sess,
+			Source:      p.source,
+			MemoryID:    p.verdict.MemoryID,
+			Outcome:     string(p.verdict.Outcome),
+			Signal:      string(p.verdict.Signal),
+			Degraded:    res.Degraded,
+		})
+	}
+	if len(rows) > 0 {
+		if err := store.RecordRetrievalAudits(ctx, rows); err != nil {
+			return res, fmt.Errorf("audit: record verdicts: %w", err)
+		}
+	}
+	return res, nil
+}
+
+// count files one verdict under its bucket.
+func (s *SourceSummary) count(o Outcome) {
+	switch o {
+	case OutcomeUsed:
+		s.Used++
+	case OutcomeIgnored:
+		s.Ignored++
+	case OutcomeSuperseded:
+		s.Superseded++
+	case OutcomeContradicted:
+		s.Contradicted++
+	}
+}
+
+// String renders the summary for an operator, and states on its face the three
+// things a reader would otherwise have to guess: that "ignored" is not a
+// usefulness score, that the sources are separate denominators, and that one of
+// the two halves of "missed" cannot be counted by any heuristic.
+//
+// The limits are printed rather than returned as fields because they are not
+// numbers that can go stale: a count is data and a limit is a property of the
+// method, and a caller rendering figures could drop one field and keep the other.
+// A line of prose cannot be dropped by accident, because it is the same string
+// every time.
+func (r Summary) String() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "retrieval audit for %s\n", r.ProjectID)
+	for _, src := range r.Sources {
+		fmt.Fprintf(&b, "  %s: %d call(s), %d used, %d ignored, %d superseded in session, "+
+			"%d contradicted, %d kept nothing\n",
+			src.Source, src.Calls, src.Used, src.Ignored, src.Superseded, src.Contradicted, src.KeptNothing)
+	}
+	if len(r.Sources) > 1 {
+		b.WriteString("  figures are per source and are never pooled: a search and an injection " +
+			"answer different questions\n")
+	}
+	fmt.Fprintf(&b, "  %d verdict(s) over the memories those calls kept\n", r.Verdicts)
+	if r.Unreadable > 0 {
+		fmt.Fprintf(&b, "  %d kept memory/memories no longer exist and were not judged\n", r.Unreadable)
+	}
+	if r.Degraded != "" {
+		fmt.Fprintf(&b, "  the transcript was only partly read (%s), so an ignored verdict is a claim "+
+			"about the text that was read\n", r.Degraded)
+	}
+	b.WriteString("  \"ignored\" means the agent's own words never mentioned the memory; " +
+		"it is not a relevance or usefulness score\n")
+	b.WriteString("  a fact the agent re-derived in-session that was never injected is not counted: " +
+		"no heuristic can tell one from a fact it worked out, so only searches that kept " +
+		"nothing are reported as missed\n")
+	return b.String()
+}
+
+// sortedKeys is the map iteration made deterministic.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
