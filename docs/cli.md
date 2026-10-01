@@ -1438,6 +1438,8 @@ ghost lifecycle <project>
 
 This is an internal integration command rather than the normal way to start maintenance. It runs enabled phases in order—`reflect`, `resolve`, then `supersede`—and logs progress to the Ghost data directory. Each phase is bounded by the lifecycle timeout configured in `docs/configuration.md`.
 
+When the Stop hook spawns it for a turn, it also passes `--signals <path>`, the audit sidecar holding the memory ids and token fingerprints of what the agent wrote this session. The command compares those against what retrieval admitted, records a verdict per kept memory, prints the figures to the log and deletes the file. The flag is never typed by hand: a run without it judges nothing, and a sidecar that cannot be read costs the audit and nothing else.
+
 ## Development builds: refusing a real store
 
 `GHOST_DEV_FORBID_DATA_DIR` names data directories a build that is **not a

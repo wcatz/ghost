@@ -1,0 +1,297 @@
+package hostevent
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/wcatz/ghost/internal/audit"
+)
+
+// The audit reads a transcript for what the AGENT DID, and the whole design is
+// the line between the agent's own words and the text Ghost handed it. So the
+// fixtures below put the memory's wording in both places and ask which one the
+// scan counted — a scan that read the injected block would report every
+// retrieval as used, which is the one result that makes the audit worthless.
+const auditMemoryID = "D20E133860CC4AFE38B485AD5371BA59"
+
+// injectedText is what the agent was SHOWN: the memory's wording arriving as a
+// tool result. It must not make the memory count as used.
+const injectedText = "the opencode plugin materializes its transcript under mkdtemp and rm-rfs the directory on hook close"
+
+// agentText is what the agent SAID, in its own words, and it is what does count.
+const agentText = "as I read it, the opencode plugin materializes its transcript under mkdtemp, so the sidecar has to be written synchronously"
+
+// matchesFixture reports whether the signals judge the fixture memory as used.
+func usedBySignals(t *testing.T, sig *audit.Signals) bool {
+	t.Helper()
+	v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText})
+	if !ok {
+		t.Fatal("the fixture memory could not be judged at all")
+	}
+	return v.Outcome == audit.OutcomeUsed
+}
+
+func scanAudit(t *testing.T, format, transcript string) *audit.Signals {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(f, []byte(transcript), 0o600); err != nil {
+		t.Fatalf("write the fixture: %v", err)
+	}
+	r, err := os.Open(f)
+	if err != nil {
+		t.Fatalf("open the fixture: %v", err)
+	}
+	defer r.Close() //nolint:errcheck
+	sig, ok, err := ScanAudit(format, r)
+	if err != nil {
+		t.Fatalf("ScanAudit: %v", err)
+	}
+	if !ok {
+		t.Fatalf("no audit scanner registered for %q", format)
+	}
+	return sig
+}
+
+func TestScanAuditClaudeJSONL(t *testing.T) {
+	// The agent's own text, a Bash call, the memory's wording arriving as the
+	// tool result, and the id named in a later message.
+	transcript := strings.Join([]string{
+		`{"type":"user","message":{"content":[{"type":"tool_result","content":"` + injectedText + ` (id ` + auditMemoryID + `)"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + agentText + `"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls internal/memory"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"applying what ` + auditMemoryID + ` records"}]}}`,
+		"",
+	}, "\n")
+
+	sig := scanAudit(t, FormatClaudeJSONL, transcript)
+	if !sig.HasID(auditMemoryID) {
+		t.Error("HasID = false for an id the agent named in its own message")
+	}
+	if !usedBySignals(t, sig) {
+		t.Error("the agent's restatement of the memory did not count as a use")
+	}
+}
+
+// TestScanAuditDoesNotReadWhatGhostInjected is the load-bearing negative: the
+// injected block carries the memory's exact wording, and reading it would make
+// every retrieval look used no matter what the agent did.
+func TestScanAuditDoesNotReadWhatGhostInjected(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"type":"user","message":{"content":[{"type":"tool_result","content":"` + injectedText + ` (id ` + auditMemoryID + `)"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"moving on to something else entirely"}]}}`,
+		"",
+	}, "\n")
+
+	sig := scanAudit(t, FormatClaudeJSONL, transcript)
+	if usedBySignals(t, sig) {
+		t.Error("the injected block counted as the agent's use of the memory")
+	}
+	if sig.HasID(auditMemoryID) {
+		t.Error("an id inside the injected block counted as the agent naming it")
+	}
+}
+
+// TestScanAuditProseIsNotASave: a save is what SUPERSEDES a memory in-session, so
+// reading a save's own content as usage would leave that bucket permanently
+// empty — the two rules are distinguished by where the text came from.
+func TestScanAuditProseIsNotASave(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + agentText + `"}]}}`,
+		"",
+	}, "\n")
+	sig := scanAudit(t, FormatClaudeJSONL, transcript)
+	if v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText}); !ok || v.Outcome != audit.OutcomeUsed {
+		t.Errorf("outcome = %+v, want used: prose IS usage", v)
+	}
+
+	saveTranscript := strings.Join([]string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_memory_save","input":{"content":"` + injectedText + `"}}]}}`,
+		"",
+	}, "\n")
+	sig = scanAudit(t, FormatClaudeJSONL, saveTranscript)
+	v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText})
+	if !ok {
+		t.Fatal("the save could not be judged")
+	}
+	if v.Outcome != audit.OutcomeSuperseded {
+		t.Errorf("outcome = %+v, want %q: a save restating the memory is not a use", v, audit.OutcomeSuperseded)
+	}
+}
+
+func TestScanAuditOpencodeMessages(t *testing.T) {
+	// opencode V1: an assistant message's tool part carries input AND output, and
+	// the output is where the memory's wording comes back. Only the input is the
+	// agent's own.
+	// The id appears in the tool's OUTPUT, where the agent did not write it, and
+	// again in a message the agent DID write. Only the second is the agent naming
+	// the memory — which is what TestScanAuditOpencodeMessagesIgnoresToolOutput
+	// rules out for the first.
+	transcript := strings.Join([]string{
+		`{"info":{"id":"m1","role":"user"},"parts":[{"type":"text","text":"` + injectedText + `"}]}`,
+		`{"info":{"id":"m2","role":"assistant"},"parts":[{"type":"tool","tool":"ghost_ghost_memory_search","state":{"status":"completed","input":{"query":"transcript"},"output":"` + injectedText + ` (id ` + auditMemoryID + `)"}}]}`,
+		`{"info":{"id":"m3","role":"assistant"},"parts":[{"type":"text","text":"` + agentText + `"}]}`,
+		`{"info":{"id":"m4","role":"assistant"},"parts":[{"type":"text","text":"applying what ` + auditMemoryID + ` records"}]}`,
+		"",
+	}, "\n")
+
+	sig := scanAudit(t, FormatOpencodeMessages, transcript)
+	if !sig.HasID(auditMemoryID) {
+		t.Error("HasID = false for an id the agent named")
+	}
+	if !usedBySignals(t, sig) {
+		t.Error("the agent's restatement did not count as a use")
+	}
+}
+
+func TestScanAuditOpencodeMessagesIgnoresToolOutput(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"info":{"id":"m1","role":"assistant"},"parts":[{"type":"tool","tool":"ghost_ghost_memory_search","state":{"status":"completed","input":{"query":"transcript"},"output":"` + agentText + `"}}]}`,
+		"",
+	}, "\n")
+	if usedBySignals(t, scanAudit(t, FormatOpencodeMessages, transcript)) {
+		t.Error("a tool's OUTPUT counted as the agent's own words")
+	}
+}
+
+func TestScanAuditOpencodeV2Messages(t *testing.T) {
+	// V2 Code Mode: the `execute` entry holds the inner call's metadata, and the
+	// inner call's input is the save's content. Reading the outer code alone
+	// would call a save a tool argument, which is a use.
+	transcript := strings.Join([]string{
+		`{"type":"assistant","content":[{"type":"tool","name":"execute","state":{"status":"completed","input":{"code":"return 1"},"metadata":{"toolCalls":[]}}}]}`,
+		`{"type":"assistant","content":[{"type":"tool","name":"execute","state":{"status":"completed","input":{"code":"await tools.ghost.ghost_memory_save({})"},"metadata":{"toolCalls":[{"tool":"ghost.ghost_memory_save","status":"completed","input":{"content":"` + injectedText + `"}}]}}}]}`,
+		`{"type":"assistant","content":[{"type":"text","text":"` + agentText + `"}]}`,
+		"",
+	}, "\n")
+
+	sig := scanAudit(t, FormatOpencodeV2Messages, transcript)
+	v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText})
+	if !ok {
+		t.Fatal("the fixture could not be judged")
+	}
+	// Used, because the agent also said it in prose — and that is the point of
+	// this fixture: the save inside `execute` must not have decided the bucket on
+	// its own, because it is present in the same transcript.
+	if v.Outcome != audit.OutcomeUsed {
+		t.Errorf("outcome = %+v, want used from the prose", v)
+	}
+}
+
+func TestScanAuditOpencodeV2SaveInCodeModeIsASave(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"type":"assistant","content":[{"type":"tool","name":"execute","state":{"status":"completed","input":{"code":"await tools.ghost.ghost_memory_save({})"},"metadata":{"toolCalls":[{"tool":"ghost.ghost_memory_save","status":"completed","input":{"content":"` + injectedText + `"}}]}}}]}`,
+		"",
+	}, "\n")
+	sig := scanAudit(t, FormatOpencodeV2Messages, transcript)
+	v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText})
+	if !ok {
+		t.Fatal("the fixture could not be judged")
+	}
+	if v.Outcome != audit.OutcomeSuperseded {
+		t.Errorf("outcome = %+v, want %q", v, audit.OutcomeSuperseded)
+	}
+}
+
+func TestScanAuditCodexRollout(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"timestamp":"t0","type":"session_meta","payload":{"id":"s"}}`,
+		`{"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"` + agentText + `"}]}}`,
+		`{"timestamp":"t2","type":"response_item","payload":{"type":"function_call","name":"ghost_memory_save","namespace":"mcp__ghost","arguments":"{\"content\":\"` + injectedText + `\"}"` + `}}`,
+		`{"timestamp":"t3","type":"response_item","payload":{"type":"function_call_output","output":"` + agentText + `"}}`,
+		"",
+	}, "\n")
+
+	sig := scanAudit(t, FormatCodexRollout, transcript)
+	v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText})
+	if !ok {
+		t.Fatal("the fixture could not be judged")
+	}
+	if v.Outcome != audit.OutcomeUsed {
+		t.Errorf("outcome = %+v, want used: the assistant message is the agent's own, and a function_call_output is not", v)
+	}
+}
+
+func TestScanAuditCodexSaveArgumentsAreASave(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"timestamp":"t2","type":"response_item","payload":{"type":"function_call","name":"ghost_memory_save","namespace":"mcp__ghost","arguments":"{\"content\":\"` + injectedText + `\"}"` + `}}`,
+		"",
+	}, "\n")
+	sig := scanAudit(t, FormatCodexRollout, transcript)
+	v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditMemoryID, Content: injectedText})
+	if !ok {
+		t.Fatal("the fixture could not be judged")
+	}
+	if v.Outcome != audit.OutcomeSuperseded {
+		t.Errorf("outcome = %+v, want %q", v, audit.OutcomeSuperseded)
+	}
+}
+
+// TestScanAuditCodexIgnoresFunctionCallOutput is the negative half of the codex
+// contract, and it needs its own fixture: the rollout test above cannot pin it,
+// because the assistant message in that transcript already supplies the evidence
+// — a function_call_output could be read as prose and the verdict would not move.
+// Here the ONLY agent-authored text carrying the memory's wording is the output,
+// so reading it would flip the verdict.
+func TestScanAuditCodexIgnoresFunctionCallOutput(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"timestamp":"t0","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"searching for the sweep"}]}}`,
+		`{"timestamp":"t1","type":"response_item","payload":{"type":"function_call_output","output":"` + agentText + `"}}`,
+		"",
+	}, "\n")
+	if usedBySignals(t, scanAudit(t, FormatCodexRollout, transcript)) {
+		t.Error("a function_call_output counted as the agent's own words")
+	}
+}
+
+// TestScanAuditSkipsUnparseableLines keeps the same posture the save-nudge's
+// scanner has: a line Ghost cannot read is skipped, never fatal, because a
+// whole session's audit must not be lost to one bad line.
+func TestScanAuditSkipsUnparseableLines(t *testing.T) {
+	transcript := "garbage not json\n" + `{"type":"assistant","message":{"content":[{"type":"text","text":"` + agentText + `"}]}}` + "\n{{{{\n"
+	if !usedBySignals(t, scanAudit(t, FormatClaudeJSONL, transcript)) {
+		t.Error("a transcript with unparseable lines lost the agent's own text")
+	}
+}
+
+// TestScanAuditMarksAPartialReadDegraded: a truncated transcript would otherwise
+// produce a confident report saying the agent never used anything.
+func TestScanAuditMarksAPartialReadDegraded(t *testing.T) {
+	full := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + agentText + `"}]}}`
+	// One whole line, then a partial one with no terminator, then a read error.
+	data := full + "\n" + `{"type":"assistant","mess`
+	r := &errReader{data: []byte(data)}
+	sig, ok, err := ScanAudit(FormatClaudeJSONL, r)
+	if !ok {
+		t.Fatal("no audit scanner registered for claude-jsonl")
+	}
+	if err == nil {
+		t.Fatal("a partial read returned no error")
+	}
+	if _, degraded := sig.Degraded(); !degraded {
+		t.Error("a partial read was not marked degraded; the report would claim the agent used nothing")
+	}
+}
+
+func TestScanAuditRegistryCoversEveryScanFormat(t *testing.T) {
+	// The save-nudge's registry and the audit's are separate, so a format added
+	// to one and not the other would silently disable the audit for that host's
+	// users — the failure the scanner registry comment is about, one level up.
+	for format := range scanners {
+		if _, ok := auditScanners[format]; !ok {
+			t.Errorf("format %q has a save-nudge scanner but no audit scanner", format)
+		}
+	}
+	for format := range auditScanners {
+		if _, ok := scanners[format]; !ok {
+			t.Errorf("format %q has an audit scanner but no save-nudge scanner", format)
+		}
+	}
+}
+
+func TestScanAuditUnknownFormat(t *testing.T) {
+	if _, ok, err := ScanAudit("", strings.NewReader("")); ok || err != nil {
+		t.Error(`ScanAudit("") must stay unregistered so callers fail open`)
+	}
+}

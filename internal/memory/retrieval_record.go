@@ -67,6 +67,12 @@ type RowVerdict struct {
 // the reason vocabulary the assembler itself produced.
 type RetrievalRecord struct {
 	ProjectID string
+	// RowID is the record's own rowid, and it is what a verdict is filed against.
+	// It is read rather than inferred, because the verdict's replacement has to
+	// name the exact call it supersedes: recorded_at is second-precision so two
+	// calls in one second have no defined order by it, and a record's position in
+	// a read window moves as older calls are evicted.
+	RowID int64
 	// SessionID is "" over the shipped stdio transport, which reports no
 	// session. That is why Source is a first-class column rather than something
 	// inferred: a session-start injection and a search are indistinguishable by
@@ -471,69 +477,8 @@ func (s *Store) DigestQuery(query string) (string, error) { return QueryDigest(q
 // number to keep in step with it.
 //
 // A row whose verdicts column cannot be parsed is returned with NO verdicts
-// rather than failing the read. A reader that errors on one bad row cannot report
-// on the store at all, which is the state an operator is in precisely when they
-// need the report — and the empty list is honest, where a partial parse would
-// claim a row the tool could not read was judged clean. The rest of the record
-// is still returned, so the call is still countable and still attributable.
+// rather than failing the read — see retrievalRecords, which owns the decode and
+// the reason.
 func (s *Store) RetrievalRecords(ctx context.Context, limit int) ([]RetrievalRecord, error) {
-	if limit <= 0 {
-		limit = retrievalRecordRowsCap
-	}
-	// The preallocation is clamped to the cap even though the LIMIT is not,
-	// because the table cannot hold more rows than the cap: a caller asking for
-	// limit=1e9 would get one 120MB allocation for at most 5000 rows. The query
-	// keeps the caller's number, so a caller that wants a wider window than the
-	// table holds still gets the whole table rather than a silent clamp.
-	prealloc := limit
-	if prealloc > retrievalRecordRowsCap {
-		prealloc = retrievalRecordRowsCap
-	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// The pool is safe here: no transaction is open on this handle. Ordered by
-	// rowid rather than recorded_at, for the precision reason above.
-	//
-	// The verdicts column is read RAW rather than through readableVerdicts, and
-	// the guard below lives in Go instead. The purge needs the check in SQL
-	// because its predicate is a predicate; a reader can decide for itself, and
-	// deciding in Go costs one parse per row instead of the two json_valid and
-	// json_type would each cost — which is the difference between a 200-record
-	// report read and a report that is slow enough to be run less often.
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT project_id, session_id, source, query_hash, as_of, outcome, reason,
-		       verdicts, recorded_at
-		FROM retrieval_record
-		ORDER BY rowid DESC
-		LIMIT ?`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("read retrieval records: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-
-	out := make([]RetrievalRecord, 0, prealloc)
-	for rows.Next() {
-		var rec RetrievalRecord
-		var verdictJSON string
-		if err := rows.Scan(&rec.ProjectID, &rec.SessionID, &rec.Source, &rec.QueryHash,
-			&rec.AsOf, &rec.Outcome, &rec.Reason, &verdictJSON, &rec.RecordedAt,
-		); err != nil {
-			return nil, fmt.Errorf("read retrieval records: %w", err)
-		}
-		// One decode settles every case the SQL guard would: a document that is
-		// not JSON, a valid JSON document that is not an array, and an array of
-		// something that is not a verdict. All three read as "this call judged
-		// nothing", which is honest, where a partial parse would claim a row the
-		// tool could not read was judged clean.
-		if err := json.Unmarshal([]byte(verdictJSON), &rec.Verdicts); err != nil {
-			rec.Verdicts = nil
-		}
-		out = append(out, rec)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read retrieval records: %w", err)
-	}
-	return out, nil
+	return s.retrievalRecords(ctx, "", limit)
 }

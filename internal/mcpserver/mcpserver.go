@@ -3275,6 +3275,10 @@ func (s *Server) registerTools() {
 		// reads before deciding to delete, and a line missing from one surface is
 		// a count the caller cannot see.
 		fmt.Fprintf(&sb, "  retrievals:   %d\n", summary.RetrievalRecords)
+		// And this feature's verdicts, for the reason the line above gives: an
+		// agent reading this before it deletes needs to see the whole of what the
+		// call removes.
+		fmt.Fprintf(&sb, "  audits:       %d\n", summary.RetrievalAudits)
 		if !args.Apply {
 			sb.WriteString("\nRe-run with apply:true to actually delete.")
 		}

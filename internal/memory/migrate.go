@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 20
+const schemaVersion = 21
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -83,6 +83,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV18,
 	migrateV19,
 	migrateV20,
+	migrateV21,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1353,6 +1354,114 @@ func migrateV20(tx *sql.Tx) error {
 // them is a column a same-named foreign table would plausibly carry: it is
 // keyed by project, and it is the table that stores a JSON array of verdicts.
 var retrievalRecordIdentity = []string{"project_id", "source", "verdicts"}
+
+// migrateV21 adds retrieval_audit: one row per (call, kept memory) saying what
+// the agent did with what the call admitted (#646 part 2).
+//
+// The table exists at all because a derived verdict must be PERSISTED, and that
+// is the whole argument: the verdicts are a function of the transcript, and no
+// part of Ghost can read a transcript again after the hook that wrote the sidecar
+// has run — opencode and codex remove theirs on hook close, and Claude's
+// transcript is not Ghost's to re-derive from on demand. A verdict computed live
+// and reported once would answer a question that gets asked twice, the second time
+// with no way to answer it.
+//
+// Nothing is backfilled, for the reason migrateV20 gives for its own table, and it
+// is sharper here: a verdict is a judgement ABOUT a transcript, and a store
+// upgrading to this version has no transcript to judge. A synthesised row per
+// memory would report every call before this version as ignored — a claim about
+// sessions nobody watched, in the denominator of a report that is about precision.
+//
+// The DDL below is a COPY of initSQL's, and the repetition is pinned by
+// TestMigrateV21MatchesTheFreshDatabaseSchema, which compares the two shapes
+// rather than trusting this comment. The guard is the half a copy of the DDL does
+// not bring with it, for the reason the record step's guard exists: IF NOT EXISTS
+// is a SILENT no-op against a table somebody else already owns, so the step would
+// stamp v21 and every later audit write would fail on a column that is not there.
+func migrateV21(tx *sql.Tx) error {
+	// BEFORE the create, and that placement is the point: the create's own
+	// statements are what fail on a foreign table, and their error names neither
+	// the table nor a remedy. See refuseForeignRetrievalAuditTable.
+	if err := refuseForeignRetrievalAuditTable(tx); err != nil {
+		return err
+	}
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS retrieval_audit (
+    project_id   TEXT NOT NULL,
+    record_rowid INTEGER NOT NULL DEFAULT 0,
+    session_id   TEXT NOT NULL DEFAULT '',
+    source       TEXT NOT NULL,
+    memory_id    TEXT NOT NULL,
+    outcome      TEXT NOT NULL,
+    signal       TEXT NOT NULL DEFAULT '',
+    degraded     TEXT NOT NULL DEFAULT '',
+    recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_retrieval_audit_project ON retrieval_audit(project_id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("v21 retrieval audit: %w", err)
+		}
+	}
+	return nil
+}
+
+// retrievalAuditIdentity is the columns that identify a `retrieval_audit` as
+// Ghost's, and it is deliberately NOT the full column set — the same rule, for the
+// same reason, as retrievalRecordIdentity.
+//
+// A guard that compared every column would turn a table one version AHEAD of
+// this build into a refusal whose remedy is `DROP TABLE retrieval_audit`, and this
+// one runs from OpenDB on EVERY open. The pair {record_rowid, outcome} is what
+// makes the identity specific to this table rather than to retrieval_record's:
+// it is the only Ghost table holding a bucket per row with a call's rowid beside
+// it, and neither column is one a same-named foreign table would plausibly carry.
+var retrievalAuditIdentity = []string{"project_id", "record_rowid", "outcome"}
+
+// refuseForeignRetrievalAuditTable returns an error naming the remedy when the
+// database already holds a `retrieval_audit` that is NOT Ghost's verdict table.
+//
+// It REFUSES rather than adapts, for the reason refuseForeignRetrievalRecordTable
+// does: the rows are somebody else's, there is no shape to convert them into, and
+// the pre-migration backup OpenDB has already taken is the net a conversion would
+// be guessing past. The remedy is STATED rather than logged, because the failure
+// it prevents is silent — `CREATE TABLE IF NOT EXISTS` is a no-op against the
+// existing table, so the step would stamp v21 over a shape nothing here can
+// write, and every later audit write would fail with "no such column: memory_id".
+//
+// It is called from TWO places, and the second is the point, for the reasons
+// refuseForeignRetrievalRecordTable's second call has:
+//
+//   - from `migrateV21`, so the step that owns the precondition is safe on its
+//     own and does not depend on its caller having checked;
+//   - from `OpenDB`, BEFORE initSQL — and therefore before the pre-migration
+//     backup — because initSQL's own `CREATE INDEX ... ON
+//     retrieval_audit(project_id)` is the statement that fails against a foreign
+//     table, and it fails with an error naming neither the table nor the way out.
+func refuseForeignRetrievalAuditTable(tx tableInspector) error {
+	present, err := tableExists(tx, "retrieval_audit")
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	for _, c := range retrievalAuditIdentity {
+		has, err := columnExists(tx, "retrieval_audit", c)
+		if err != nil {
+			return err
+		}
+		if !has {
+			return fmt.Errorf(
+				"this database already holds a retrieval_audit table without a %q column, so it is not Ghost's "+
+					"retrieval audit — a same-named table makes CREATE TABLE IF NOT EXISTS a silent no-op, so the "+
+					"migration would stamp v21 over a shape every later write would fail on. Drop it and reopen: "+
+					"sqlite3 <db> 'DROP TABLE retrieval_audit'", c)
+		}
+	}
+	return nil
+}
 
 // refuseForeignRetrievalRecordTable returns an error naming the remedy when the
 // database already holds a `retrieval_record` that is NOT Ghost's retrieval

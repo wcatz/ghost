@@ -48,7 +48,7 @@ var helpValueFlagsByCommand = map[string]map[string]bool{
 	"history":                   {"--limit": true, "--project": true, "--before": true},
 	"prune":                     {"--grace": true, "--project": true},
 	"hook":                      {"--source": true},
-	"lifecycle":                 {"--project": true, "--source": true},
+	"lifecycle":                 {"--project": true, "--source": true, "--signals": true},
 	"mcp init":                  {"--client": true},
 	"mcp status":                {"--client": true},
 	"obsidian":                  {"--out": true, "--project": true, "--interval": true},

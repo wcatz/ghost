@@ -1674,6 +1674,11 @@ var projectMergeStatements = []string{
 	// calls about memories that now live elsewhere to a project that no longer
 	// exists, and a later DeleteProject of that stale id could not reach it.
 	`UPDATE retrieval_record SET project_id = ? WHERE project_id = ?`,
+	// And the verdicts derived from those calls, which have the same two problems
+	// and one more: a verdict left naming the merged-away project is misattributed
+	// AND names a memory the report would try to render under a project that no
+	// longer exists.
+	`UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?`,
 }
 
 // mergeProjectTx folds oldID's rows into newID and deletes oldID.
@@ -1812,6 +1817,11 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		// one that no longer exists, which makes it both misattributed in a report
 		// and unreachable by a later delete of that stale id.
 		`UPDATE retrieval_record SET project_id = ? WHERE project_id = ?`,
+		// And this feature's verdicts, for the reason the list's own comment gives
+		// for every table in it, with the sharper edge that a verdict is only
+		// readable through its project: the report reads per project, so an orphan
+		// here is not merely misattributed, it is INVISIBLE.
+		`UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
@@ -1845,14 +1855,19 @@ type DeleteProjectSummary struct {
 	// table that references the project, and a count that silently omits a table
 	// the same command deletes is a summary that under-reports its own work.
 	RetrievalRecords int
+	// RetrievalAudits is the same for this feature's second table (#646): a
+	// verdict names a memory, and DeleteProject removes memories, so an audit row
+	// left behind would be the one row in the store that names a memory nobody can
+	// reach and a project nobody can find.
+	RetrievalAudits int
 }
 
 // DeleteProject permanently removes a project and everything under it.
 // memories (with their FTS index entries, embeddings, links, and link_scans),
 // tasks, decisions, ghost_state, and memory_snapshots all cascade from the
-// projects row via ON DELETE CASCADE (see schema.go). token_usage and
-// audit_log carry a project_id column but no foreign key, so they're deleted
-// explicitly in the same transaction.
+// projects row via ON DELETE CASCADE (see schema.go). token_usage, audit_log,
+// retrieval_record and retrieval_audit carry a project_id column but no foreign
+// key, so they're deleted explicitly in the same transaction.
 //
 // input is resolved exactly like every other command resolves a project (see
 // ResolveProject): id, name, path-prefix, or basename all work.
@@ -1943,6 +1958,15 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_record WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_record: %w", err)
 	}
+	// And the verdicts, for the same reason with one difference that makes them
+	// the harder case: a verdict's ONLY payload is a memory id and a bucket, so a
+	// surviving row names a memory that is gone under a project that is gone, in a
+	// table nothing else reaches — `ghost history purge` deletes by memory id and
+	// the report reads by project id, and neither of those ids is reachable from
+	// what a delete leaves behind.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_audit WHERE project_id = ?`, id); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_audit: %w", err)
+	}
 	if err := deleteProjectRowTx(ctx, tx, id); err != nil {
 		return DeleteProjectSummary{}, err
 	}
@@ -1958,7 +1982,8 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		"memories", summary.Memories, "memory_links", summary.MemoryLinks,
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
 		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog,
-		"retrieval_records", summary.RetrievalRecords)
+		"retrieval_records", summary.RetrievalRecords,
+		"retrieval_audits", summary.RetrievalAudits)
 	return summary, nil
 }
 
@@ -2000,6 +2025,11 @@ func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProje
 		`SELECT count(*) FROM retrieval_record WHERE project_id = ?`, id,
 	).Scan(&summary.RetrievalRecords); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_record: %w", err)
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM retrieval_audit WHERE project_id = ?`, id,
+	).Scan(&summary.RetrievalAudits); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_audit: %w", err)
 	}
 	if err := q.QueryRowContext(ctx,
 		`SELECT count(*) FROM token_usage WHERE project_id = ?`, id,

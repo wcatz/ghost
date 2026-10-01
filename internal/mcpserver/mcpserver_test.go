@@ -2242,6 +2242,15 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 	if !strings.Contains(text.Text, "audit_log:    0") {
 		t.Errorf("expected summary line %q in response, got %q", "audit_log:    0", text.Text)
 	}
+	// The two audit-trail lines, which were the gap in this list: a Contains set
+	// that stops at audit_log leaves a renderer free to drop a field the same
+	// struct's other renderer prints, and a missing line reads as a zero.
+	if !strings.Contains(text.Text, "retrievals:   0") {
+		t.Errorf("expected summary line %q in response, got %q", "retrievals:   0", text.Text)
+	}
+	if !strings.Contains(text.Text, "audits:       0") {
+		t.Errorf("expected summary line %q in response, got %q", "audits:       0", text.Text)
+	}
 
 	all, err := store.GetAll(ctx, "abc123", 100)
 	if err != nil {

@@ -356,7 +356,7 @@ func TestSpawnLifecycleIfConfigured_NoOpWhenDisabled(t *testing.T) {
 	// lifecycle.log.
 	dataHome := isolatedHome(t)
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "")
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected ghost data dir to never be created when every phase is disabled, stat err = %v", err)
@@ -379,7 +379,7 @@ func TestSpawnLifecycleIfConfigured_NoOpWithoutLLM(t *testing.T) {
 	}
 	t.Setenv("PATH", t.TempDir()) // no claude, no opencode
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "")
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected no ghost data dir when no LLM is available, stat err = %v", err)
@@ -401,7 +401,7 @@ func TestSpawnLifecycleIfConfigured_ProceedsWhenResolveEnabledWithoutLLM(t *test
 	}
 	t.Setenv("PATH", t.TempDir())
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "")
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); err != nil {
 		t.Errorf("expected the resolve phase to reach config.DataDir, stat err = %v", err)
@@ -433,7 +433,7 @@ func TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker(t *testing.T) {
 	}
 	seedProject(t, dataHome, "p1", canonical, "myproj")
 
-	spawnLifecycleIfConfigured(canonical, "")
+	spawnLifecycleIfConfigured(canonical, "", nil)
 
 	// Per-project marker: the seed above registers p1, and the spawn resolves
 	// the session directory to it, so that is the file written.
