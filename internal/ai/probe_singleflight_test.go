@@ -113,6 +113,66 @@ func codexIdentityFor(t *testing.T, binary string) codexBinaryID {
 	return codexBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
 }
 
+// claudeIdentityFor is codexIdentityFor for the claude probe's key, so
+// settleAbandonedProbes can drain a claude flight the same way it drains a
+// codex one instead of the two tests growing their own.
+func claudeIdentityFor(t *testing.T, binary string) claudeBinaryID {
+	t.Helper()
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		t.Fatalf("LookPath(%s): %v", binary, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%s): %v", path, err)
+	}
+	return claudeBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
+}
+
+// settleAbandonedProbes blocks until no probe goroutine for any of binaries is
+// still running, and registers the same wait as a cleanup.
+//
+// The wait is the fix's other half and it is a JOIN, not a sleep. Both
+// codexFeaturesFor and claudeCapabilitiesFor deliberately walk away from a
+// flight whose caller has stopped waiting — a caller that cannot use the
+// verdict must not block on it — so the goroutine singleflight started outlives
+// them and keeps logging through the process default logger. A locked capture
+// buffer makes that write safe (see lockedBuffer); this makes it FINISHED, which
+// is what stops a straggler from one test's abandoned probe landing in the NEXT
+// test's capture and failing an assertion that nothing was logged.
+//
+// singleflight.Group.DoChan is the join primitive, and it is exact rather than
+// hopeful: with a call already in flight for the key, DoChan hands back THAT
+// call's result channel and never runs the function below, so receiving from it
+// means the abandoned probe has finished. With nothing in flight the function
+// runs and returns at once, which is the same answer. There is no window to
+// sleep through, and no dependence on the probe's 10s cap.
+//
+// It is also safe against the callers a test still has running: doCall deletes
+// the key from the group's map BEFORE it sends on the result channels, so by the
+// time this returns no later caller can join the no-op flight and be handed
+// `codexFeatureSupport{}` as a verdict. The no-op stores nothing, so it cannot
+// poison the cache either.
+//
+// Both groups are drained for each binary because a caller cannot tell from a
+// path whether the flight it abandoned was a probe or a capability probe, and
+// joining a group with nothing in flight costs one function call.
+func settleAbandonedProbes(t *testing.T, binaries ...string) {
+	t.Helper()
+	drain := func() {
+		for _, bin := range binaries {
+			<-codexProbeGroup.DoChan(codexIdentityFor(t, bin).probeKey(), func() (any, error) {
+				return codexFeatureSupport{}, nil
+			})
+			<-claudeProbeGroup.DoChan(claudeIdentityFor(t, bin).probeKey(), func() (any, error) {
+				return claudeCapabilities{}, nil
+			})
+		}
+	}
+	drain()
+	t.Cleanup(drain)
+}
+
 // sleepingCodexFake is a codex fake that records each `features list` probe and
 // holds it open for two seconds, which is what makes "a second caller joined the
 // flight" a fact rather than a timing hope. It is countingClaudeFake's codex
@@ -275,6 +335,10 @@ printf '%s' 'KEEP'
 func TestClaudeCapabilityProbeFollowerDoesNotInheritALeaderCancellation(t *testing.T) {
 	resetClaudeCapabilityProbe(t)
 	bin, _ := countingClaudeFake(t)
+	// The cancelled leader below walks away from a flight that keeps running, so
+	// the probe it abandoned must not outlive the test — see
+	// settleAbandonedProbes.
+	settleAbandonedProbes(t, bin)
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	leaderDone := make(chan error, 1)
@@ -325,6 +389,11 @@ func TestClaudeCapabilityProbeFollowerDoesNotInheritALeaderCancellation(t *testi
 func TestClaudeCapabilityProbeFollowerWithADeadContextDoesNotInheritSuccess(t *testing.T) {
 	resetClaudeCapabilityProbe(t)
 	bin, _ := countingClaudeFake(t)
+	// This caller is dead on arrival, so it enters the group and then leaves
+	// without waiting — the flight it joined is somebody else's, and the leader
+	// below does wait for it, but a dead caller that found the cache COLD would
+	// have led a flight of its own and abandoned that. Drain it either way.
+	settleAbandonedProbes(t, bin)
 
 	leaderDone := make(chan error, 1)
 	go func() {
@@ -355,6 +424,9 @@ func TestClaudeCapabilityProbeFollowerWithADeadContextDoesNotInheritSuccess(t *t
 func TestCodexProbeFollowerDoesNotInheritALeaderCancellation(t *testing.T) {
 	resetCodexFeatureProbe(t)
 	bin, probeLog := sleepingCodexFake(t)
+	// A cancelled leader abandons the flight it started; drain it so the probe
+	// cannot outlive the test — see settleAbandonedProbes.
+	settleAbandonedProbes(t, bin)
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	go func() { _ = codexFeaturesFor(leaderCtx, bin) }()
@@ -438,6 +510,10 @@ func TestCodexProbeCancelledLeaderLeavesNoCachedNegative(t *testing.T) {
 	resetCodexFeatureProbe(t)
 	bin, probeLog := sleepingCodexFake(t)
 	id := codexIdentityFor(t, bin)
+	// This is the case with NO follower, so nothing else in the test is waiting
+	// on the flight the cancelled leader started: it is the one place where the
+	// abandoned probe is entirely unwitnessed.
+	settleAbandonedProbes(t, bin)
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	leaderDone := make(chan struct{})
@@ -505,6 +581,17 @@ printf '%s' 'KEEP'
 	if _, _, err := (&CodexClient{binary: bin}).Reflect(cancelled, "prompt"); err == nil {
 		t.Fatal("a cancelled turn reported success")
 	}
+	// Settle the probe this call walked away from before reading the log. Two
+	// reasons, and the second is the one that made this test a data race on
+	// main (#853). The abandoned goroutine keeps running after Reflect returns —
+	// deliberately, so a caller that cannot use the verdict does not block on it
+	// — and harnessCommand inside it logs a scratch-budget warning through the
+	// process default logger, which is `logs`. And even with that write made
+	// safe, an unsettled probe makes BOTH assertions below read a log mid-write:
+	// the first could see a half-written record, and a straggler could still add
+	// a line after the test has moved on. Settling is what makes "the cancelled
+	// turn reported nothing" a statement about the whole turn.
+	settleAbandonedProbes(t, bin)
 	if strings.Contains(logs.String(), "unverified") {
 		t.Errorf("a caller that stopped waiting reported the unverified verdict: %q", logs.String())
 	}
@@ -532,6 +619,9 @@ printf '%s' 'KEEP'
 func TestClaudeCapabilityProbeFollowersReDeduplicateAfterALeaderCancellation(t *testing.T) {
 	resetClaudeCapabilityProbe(t)
 	bin, probeLog := countingClaudeFake(t)
+	// The leader below is cancelled mid-flight and walks away from it; drain it
+	// so the second probe it spawns is not still running when the test ends.
+	settleAbandonedProbes(t, bin)
 	const followers = 20
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
@@ -577,6 +667,9 @@ func TestClaudeCapabilityProbeFollowersReDeduplicateAfterALeaderCancellation(t *
 func TestCodexProbeFollowersReDeduplicateAfterALeaderCancellation(t *testing.T) {
 	resetCodexFeatureProbe(t)
 	bin, probeLog := sleepingCodexFake(t)
+	// As above: a leader cancelled mid-flight leaves a probe running, and this is
+	// the burst that re-probes behind it.
+	settleAbandonedProbes(t, bin)
 	const followers = 20
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
