@@ -2,7 +2,6 @@ package audit
 
 import (
 	"encoding/hex"
-	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -205,6 +204,11 @@ func isHex(s string) bool {
 // pinned per entry by TestACueIsMatchedAsWholeWords, because the defect was
 // EVERY entry and a test that asserted only "some cue still matches" would have
 // passed with all fifteen still substring-matched.
+//
+// "Consecutive" counts closed-set words as absent (cueFillers, #860): "is now
+// obsolete" is "is obsolete" with an adverb in it, and an agent writes the first
+// as readily as the second. That tolerance is bounded at one word and it is a
+// membership test rather than a distance — see cueRunFillers.
 var negationCues = []string{
 	"is wrong", "is incorrect", "is false", "is not true", "is not correct",
 	"is obsolete", "is outdated", "is stale", "is deprecated", "is superseded",
@@ -225,8 +229,8 @@ var negationCueWords = func() [][]string {
 	return out
 }()
 
-// cueGap is how many WORDS may stand between a cue and the id it denies, which is
-// the id arm's whole binding rule.
+// cueGap is how many ARBITRARY words may stand between a cue and the id it
+// denies, which is the id arm's whole binding rule.
 //
 // A gap rather than exact adjacency because both constructions a denial takes put
 // a word in between: "ignore memory <id>" has a noun between the cue and the id,
@@ -243,13 +247,89 @@ var negationCueWords = func() [][]string {
 // direction (see splitWords), while one it admits is ordinary use reported to an
 // operator as a finding.
 //
-// The count is of words STANDING BETWEEN, so boundToCue tests c.start-cueGap-1 and
-// c.end+cueGap+1. The extra 1 on each side is the cue's own edge, not slack: a
-// bound written as c.end+cueGap reads as "cueGap words may separate them" and
-// admits none, which silently drops "ignore memory <id>" — the construction this
-// constant exists for — while the comment above still claims it.
+// The count is of a SLICE of the words between them, so the constant cannot mean
+// adjacency by accident again: it was once written as a pair of position bounds
+// (c.start-cueGap-1 and c.end+cueGap+1), where the extra 1 on each side is the
+// cue's own edge and dropping it reads as "one word may separate them" while
+// admitting none — which silently lost "ignore memory <id>", the construction this
+// constant exists for, while the comment still claimed it (#858). A slice has no
+// such edge to get wrong.
 // TestTheGapIsAWordGapAndNotAdjacency holds the sentence rather than the formula.
 const cueGap = 1
+
+// cueFillers is the CLOSED SET of words a cue may be separated from what it denies
+// by, or separated from its own next word by, and it is the whole of #860.
+//
+// A set rather than a distance, because the distance is not the thing that is
+// wrong. One word was narrow enough to be right and narrower than English: "Memory
+// <id> is now obsolete", "disregard the memory <id>" and "ignore the advice in
+// <id>" are all denials, and each puts a determiner, a noun or a preposition
+// between the cue and the memory. Widening cueGap instead would trade those misses
+// for the false contradiction #858 exists to prevent, because the sentence that
+// rule is FOR — "Per <id>, I'll ignore the formatting" — also reaches an id across
+// two ordinary words.
+//
+// What the set holds is the point, so it is worth saying why each entry earns its
+// place and what the test at the edge of it is:
+//
+//   - the determiners an agent uses for a memory: the, this, that, a, an,
+//   - the nouns Ghost's own vocabulary is written in, so "ignore the note <id>"
+//     reads as the denial it is: memory, note, entry, advice,
+//   - the one preposition that binds a cue to a thing it is about: in,
+//   - and the two adverbs an agent reaches for mid-sentence: now, also.
+//
+// Everything an agent can put between a cue and a memory that is NOT here is the
+// safe direction: the denial goes unfound, which is the miss this arm is allowed
+// to make. The words that would reopen the false contradiction are subjects and
+// verbs — "per", "I'll", "formatter", "covers" — and none of them is a filler.
+//
+// Membership and not proximity: every word between them must be in this set, so a
+// gap of the allowance's width containing ONE word outside it is not an allowance
+// at all ("ignore the linter advice in <id>"). That is the edge
+// TestTheGapWidensOnlyAcrossAClosedSetOfWords pins from both sides, along with the
+// width itself.
+var cueFillers = map[string]bool{
+	"a": true, "an": true, "the": true, "this": true, "that": true,
+	"memory": true, "note": true, "entry": true, "advice": true,
+	"in": true, "now": true, "also": true,
+}
+
+// cueFillerGap is how many closed-set words may stand between a cue and the id it
+// denies. Three, not two, and the sentence that fixes it is "ignore the advice in
+// <id>" — a determiner, the noun an agent actually reaches for when it means the
+// memory, and a preposition. Two admits "disregard the memory <id>" and still
+// misses that one, and a miss here is a contradiction that is not filed.
+//
+// The bound is not slack either: a run of four closed-set words is beyond it
+// ("ignore the memory note in <id>"), so the set is a set and not an unlimited
+// reach over whatever happens to be nearby.
+const cueFillerGap = 3
+
+// cueRunFillers is how many closed-set words may stand INSIDE a cue's own run of
+// words — "is now obsolete" for the cue "is obsolete".
+//
+// One, which is all the real constructions need: an agent interrupts a denial with
+// an adverb, not with a clause. It is a different constant from cueFillerGap
+// because it is a different question — what separates two words of ONE cue, rather
+// than a cue and the thing it denies — and a cue run is the whole of what makes a
+// sentence a negation SEGMENT, so the wider bound would be widening the list of
+// sentences this package considers denials at all.
+const cueRunFillers = 1
+
+// allCueFillers reports whether every one of these words is a closed-set word.
+//
+// All of them rather than most: a gap the allowance reaches has to BE the set, so
+// one word outside it ends the reach. "ignore the formatter, <id>" is two words
+// long and inside the width, and it must stay unbound — the cue is about the
+// formatter, which is exactly what #858's binding rule exists to notice.
+func allCueFillers(words []string) bool {
+	for _, w := range words {
+		if !cueFillers[w] {
+			return false
+		}
+	}
+	return true
+}
 
 // isDistinctive is whether a word is one this package would fingerprint.
 //
@@ -352,12 +432,43 @@ func cueSpans(words []string) []cueSpan {
 	var out []cueSpan
 	for _, cue := range negationCueWords {
 		for i := 0; i+len(cue) <= len(words); i++ {
-			if slices.Equal(words[i:i+len(cue)], cue) {
-				out = append(out, cueSpan{start: i, end: i + len(cue) - 1})
+			if end, ok := cueRun(words, cue, i); ok {
+				out = append(out, cueSpan{start: i, end: end})
 			}
 		}
 	}
 	return out
+}
+
+// cueRun matches one cue's words starting at position i and reports where the run
+// ended, allowing up to cueRunFillers closed-set words between its words.
+//
+// The words themselves still have to match WHOLE and in order — this walks the
+// cue one word at a time and never skips a word that is not in the closed set, so
+// it cannot match "is wrong" inside "xis wrongy" any more than the exact form
+// could, and it cannot match a cue with a filler beyond the bound ("is very
+// obsolete"). The tolerance is on the words BETWEEN, which is the whole of #860's
+// claim: a closed-set word cannot hide a cue, it only fails to hide one.
+//
+// Reported as a span rather than a match so the binding downstream counts the same
+// positions this function matched, and a filler inside a run counts as inside the
+// cue — it is not what the cue is about, so it is not a candidate for being bound
+// (see insideCue).
+func cueRun(words, cue []string, i int) (int, bool) {
+	pos := i
+	for k := 0; k < len(cue); k++ {
+		for skipped := 0; pos < len(words) && words[pos] != cue[k]; skipped++ {
+			if skipped >= cueRunFillers || !cueFillers[words[pos]] {
+				break
+			}
+			pos++
+		}
+		if pos >= len(words) || words[pos] != cue[k] {
+			return 0, false
+		}
+		pos++
+	}
+	return pos - 1, true
 }
 
 // boundToCue reports whether the word at position i is what a cue in this
@@ -371,11 +482,30 @@ func cueSpans(words []string) []cueSpan {
 // end of it: this is not "is there a cue somewhere in this sentence" — the
 // segment already established that, and answering it a second time without the
 // distance is what filed an agent's agreement as a contradiction.
-func boundToCue(i int, cues []cueSpan) bool {
+//
+// The count is of a SLICE of the words strictly between, which is what makes the
+// two constants readable: up to cueGap of them however they are spelled, or up to
+// cueFillerGap of them if every one is in the closed set (cueFillers, #860). A
+// longer gap of arbitrary words is the false contradiction, and a gap of the
+// allowance's width with a word outside the set in it is the same sentence with an
+// extra noun in it.
+func boundToCue(i int, words []string, cues []cueSpan) bool {
 	for _, c := range cues {
-		// -1 and +1 for the cue's own extent, so cueGap counts the words BETWEEN
-		// rather than the positions either side of it (see cueGap).
-		if i >= c.start-cueGap-1 && i <= c.end+cueGap+1 {
+		// A position inside a cue is not a position between one, and the empty
+		// slice is the honest answer: an id cannot be one of a cue's own English
+		// words, so this branch exists only so that a position the cue already
+		// covers is not treated as being far away from it.
+		var between []string
+		switch {
+		case i < c.start:
+			between = words[i+1 : c.start]
+		case i > c.end:
+			between = words[c.end+1 : i]
+		}
+		if len(between) <= cueGap {
+			return true
+		}
+		if len(between) <= cueFillerGap && allCueFillers(between) {
 			return true
 		}
 	}
