@@ -17,7 +17,7 @@ import (
 //
 // That is the production shape of a reclassification: an endpoint was edited after
 // the edge was written, so the pass re-judges the pair, and a verdict other than
-// SUPERSEDES WITHDRAWS an edge rather than declining to write one.
+// SUPERSEDES reports an edge rather than declining to write one (#845).
 //
 // The two notes are deliberately about two different steps of one pipeline, so
 // neither states a rule the imperative veto would retire (#686) — the fixture has
@@ -51,24 +51,24 @@ func liveSupersedes(t *testing.T, store *memory.Store, projectID string) int {
 	return len(links)
 }
 
-// TestRunNamesTheEdgeAReclassificationWithdrew is #785 at the layer the pass
-// owns. A live 'supersedes' edge the pass re-judges and that comes back denied
-// is invalidated through the ordinary path — a real graph mutation, and a
-// `resolved_at` on its target that nothing else will clear. Every other
+// TestRunNamesTheEdgeAReclassificationWouldWithdraw is #785 at the layer the
+// pass owns, under #845. A live 'supersedes' edge the pass re-judges and that
+// comes back denied is now REPORTED, not invalidated — and every other
 // withdrawal path in the product names the edge it moved, with the ids and the
-// command that finishes the repair; this one reported a verdict and nothing
-// else, so a caller could not tell that pair from a fresh proposal the pass
-// merely declined.
+// command that finishes the repair, so this one has to keep naming it even now
+// that the graph it names is untouched. A row that reported a verdict and
+// nothing else could not tell that pair from a fresh proposal the pass merely
+// declined, and a row that claimed a withdrawal nobody made would send the
+// operator after a repair that had already happened.
 //
-// The row therefore has to say two separate things, and the tests below keep them
-// separate on purpose: that the edge WAS this pair's (Reclassified), and that
-// THIS call moved it (Withdrawn). A report that conflated them would either
-// claim a withdrawal for a dry run or hide one a concurrent pass had already
-// made.
-func TestRunNamesTheEdgeAReclassificationWithdrew(t *testing.T) {
+// The row therefore has to say three separate things, and the tests below keep
+// them apart on purpose: that the edge WAS this pair's (Reclassified), that THIS
+// call did NOT move it (Withdrawn), and that this call declined to move it
+// (WithdrawSuppressed).
+func TestRunNamesTheEdgeAReclassificationWouldWithdraw(t *testing.T) {
 	// All three verdicts that deny the replacement, and all three reach the
-	// same place: the live 'supersedes' edge goes. NEITHER and REVERSED also
-	// drop the 'causes' edge, and CAUSES writes one, but the withdrawal this
+	// same place: the live 'supersedes' edge is reported. NEITHER and REVERSED
+	// also sweep a 'causes' edge, and CAUSES writes one, but the withdrawal this
 	// report is about is the supersedes edge in every case.
 	for _, verdict := range []Relation{RelationNeither, RelationCauses, RelationReversed} {
 		t.Run(string(verdict), func(t *testing.T) {
@@ -80,9 +80,6 @@ func TestRunNamesTheEdgeAReclassificationWithdrew(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			if res.Reclassified != 1 {
-				t.Fatalf("Reclassified = %d, want 1: the fixture writes one live edge", res.Reclassified)
-			}
 			if len(classified) != 1 {
 				t.Fatalf("classified = %+v, want exactly the one pair", classified)
 			}
@@ -93,11 +90,28 @@ func TestRunNamesTheEdgeAReclassificationWithdrew(t *testing.T) {
 			if !row.Reclassified {
 				t.Error("the row does not say the pair carried a live edge, so a caller cannot tell this withdrawal from a fresh pair's silence")
 			}
-			if !row.Withdrawn {
-				t.Error("the row does not say the invalidation landed, although the edge is gone from the graph")
+			if row.Withdrawn {
+				t.Error("the row claims a withdrawal although the edge is still in the graph")
 			}
-			if got := liveSupersedes(t, store, "p"); got != 0 {
-				t.Errorf("live supersedes edge(s) = %d, want 0: the pass reported a %s verdict and left the edge live", got, verdict)
+			if !row.WithdrawSuppressed {
+				t.Error("the row does not say the withdrawal was DECLINED, so a caller cannot tell it from a concurrent pass that took the edge first — the same line of text, opposite advice")
+			}
+			if got := liveSupersedes(t, store, "p"); got != 1 {
+				t.Errorf("live supersedes edge(s) = %d, want 1: the pass reported a %s verdict and left the edge live", got, verdict)
+			}
+			// A CAUSES verdict writes an edge, so the pair's live claim really did
+			// change and Reclassified still counts it; the two denials write
+			// nothing and move nothing, so counting them would report a graph
+			// change over a pass that made none.
+			wantReclassified := 0
+			if verdict == RelationCauses {
+				wantReclassified = 1
+			}
+			if res.Reclassified != wantReclassified {
+				t.Errorf("Reclassified = %d, want %d", res.Reclassified, wantReclassified)
+			}
+			if res.WithdrawSuppressed != 1 {
+				t.Errorf("WithdrawSuppressed = %d, want 1", res.WithdrawSuppressed)
 			}
 		})
 	}
@@ -106,7 +120,10 @@ func TestRunNamesTheEdgeAReclassificationWithdrew(t *testing.T) {
 // TestRunReportsNoWithdrawalItHasNotMade: the marker is the report's tense, and
 // it can only be true if the pass wrote nothing. A dry run's job is to predict
 // --apply, and a row that claimed a withdrawal nobody could read in the graph
-// would send the operator to re-run a repair that had already happened.
+// would send the operator to re-run a repair that had already happened. Since
+// #845 the marker is false in BOTH modes — the withheld withdrawal is not a
+// withdrawal — while WithdrawSuppressed is the field that is true in both,
+// because the pass declines it either way.
 func TestRunReportsNoWithdrawalItHasNotMade(t *testing.T) {
 	store, db := seed(t)
 	seedReclassifyPair(t, store, db)
@@ -121,6 +138,9 @@ func TestRunReportsNoWithdrawalItHasNotMade(t *testing.T) {
 	}
 	if classified[0].Withdrawn {
 		t.Error("a dry run reported a withdrawal it did not make")
+	}
+	if !classified[0].WithdrawSuppressed {
+		t.Error("a dry run did not report the withdrawal it declined to make: the rule is the pass's and not --apply's, so both modes have to say so")
 	}
 	if got := liveSupersedes(t, store, "p"); got != 1 {
 		t.Errorf("live supersedes edge(s) = %d, want 1: the dry run wrote something", got)

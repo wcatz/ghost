@@ -44,17 +44,23 @@ func reclassRow(relation supersede.Relation, reclassified, withdrawn bool) super
 	}
 }
 
-// TestSupersedePairLinesNamesTheEdgeAPassWithdrew is #785 as the operator meets
-// it. The ordinary pass performs the identical InvalidateLink that --reassess
-// and --withdraw perform and leaves the identical orphaned `resolved_at`, so
-// its withdrawal is as much a repair as theirs — and it used to appear only as
-// the `N reclassified` total in the header. An unattended pass then withdrew a
-// correct edge, the target stayed `resolved_at`-stamped and out of every
-// session, and nobody was handed the command that finishes the repair.
+// TestSupersedePairLinesNamesTheEdgeAPassWouldWithdraw is #785 as the operator
+// meets it, after #845. #785 was that the ordinary pass performs the identical
+// InvalidateLink that --reassess and --withdraw perform and leaves the identical
+// orphaned `resolved_at`, so its withdrawal is as much a repair as theirs — and it
+// used to appear only as the `N reclassified` total in the header.
+//
+// #845 removed the withdrawal and kept the report, which is what this table is
+// now mostly about. Measured over a real store, 6 of 11 of these withdrawals were
+// wrong (a newer note retiring ONE claim of an older note whose other claims
+// still held), so the ordinary pass names the edge and declines to remove it. The
+// block is therefore the report of THREE states of a live 'supersedes' edge, not
+// one: it would be removed and was not (the suppressed row, in both modes), it
+// was removed, and it was already gone when this run got to it.
 //
 // Every row therefore carries the three things the other two paths carry: which
-// edge (both ids), which verdict withdrew it, and whether THIS run moved it.
-func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
+// edge (both ids), which verdict denied it, and whether THIS run moved it.
+func TestSupersedePairLinesNamesTheEdgeAPassWouldWithdraw(t *testing.T) {
 	rows := []struct {
 		name       string
 		apply      bool
@@ -66,46 +72,88 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			name:  "a dry run says it would withdraw, and claims no write",
 			apply: false,
 			classified: []supersede.Classified{
-				reclassRow(supersede.RelationNeither, true, false),
+				suppressedRow(reclassRow(supersede.RelationNeither, true, false)),
 			},
 			want: []string{
 				"would withdraw",
 				shortID(reclassNewer) + " -> " + shortID(reclassOlder),
 				"neither",
+				"STILL LIVE",
 			},
 			notWant: []string{"\nwithdrew", "\nalready gone"},
 		},
 		{
-			name:  "an applied run says it withdrew",
+			// The headline of #845: --apply is a WRITE flag and this removal is not
+			// a write, so the two modes print the SAME row. A row that gained the
+			// past tense under --apply would be the report claiming a deletion that
+			// the run did not make, and the deletion is the thing the whole change
+			// exists to stop.
+			name:  "an applied run reports the same withheld withdrawal as a dry run",
 			apply: true,
 			classified: []supersede.Classified{
-				reclassRow(supersede.RelationNeither, true, true),
+				suppressedRow(reclassRow(supersede.RelationNeither, true, false)),
 			},
-			want: []string{"withdrew", shortID(reclassNewer) + " -> " + shortID(reclassOlder), "neither"},
-			// The past tense, and only where the write landed. A row that said
-			// "withdrew" for an edge a concurrent pass had already taken is a
-			// report claiming a graph change this run did not make.
-			notWant: []string{"would withdraw", "already gone"},
+			want: []string{
+				"would withdraw",
+				shortID(reclassNewer) + " -> " + shortID(reclassOlder),
+				"neither",
+				"STILL LIVE",
+			},
+			notWant: []string{"withdrew", "already gone", "kept"},
+		},
+		{
+			// The clause that carries the finding, and it is the half a count
+			// cannot: `would withdraw` is what a dry run says about an edge --apply
+			// WOULD take, so under --apply it says the edge should be in a
+			// concurrent pass's hands rather than this run's.
+			name:  "a withheld row names the repair that does remove the edge",
+			apply: true,
+			classified: []supersede.Classified{
+				suppressedRow(reclassRow(supersede.RelationReversed, true, false)),
+			},
+			want:    []string{"reversed", "reassess", "--withdraw"},
+			notWant: []string{"withdrew", "already gone"},
+		},
+		{
+			// A CAUSES verdict on a live 'supersedes' edge leaves BOTH relations
+			// live now: the supersession is withheld and the 'causes' write is not
+			// (#823 kept the sweep). So the row is a re-link AND a withheld
+			// withdrawal at once, and one clause replacing the other would drop a
+			// graph change the run really made.
+			name:  "a causes verdict on a withheld supersedes edge names both",
+			apply: true,
+			classified: []supersede.Classified{
+				withCauses(suppressedRow(reclassRow(supersede.RelationCauses, true, false)), 1, 1),
+			},
+			want: []string{
+				"would withdraw", "STILL LIVE", "[+1 causes edge dropped]",
+				"re-linked as " + shortID(reclassOlder) + " causes -> " + shortID(reclassNewer),
+			},
+			notWant: []string{"withdrew", "already gone"},
+		},
+		{
+			// The live 'causes' withdrawal this pass really does make, and the
+			// only supersedes-shaped marker left in the block that means a
+			// deletion happened. `already gone` is reachable for a 'causes'-edge
+			// pair a concurrent pass invalidated first, so the fall-through
+			// marker is not dead — it is just no longer the answer for the
+			// supersedes row, which is what the withheld case above is for.
+			name:  "a causes edge this run really removed says withdrew",
+			apply: true,
+			classified: []supersede.Classified{
+				withCauses(causesRow(supersede.RelationNeither, true), 1, 1),
+			},
+			want:    []string{"withdrew", "[+1 causes edge dropped]"},
+			notWant: []string{"would withdraw", "already gone", "STILL LIVE"},
 		},
 		{
 			name:  "an edge a concurrent pass took first is not claimed",
 			apply: true,
 			classified: []supersede.Classified{
-				reclassRow(supersede.RelationNeither, true, false),
+				withCauses(causesRow(supersede.RelationNeither, false), 0, 0),
 			},
-			want:    []string{"already gone", shortID(reclassNewer) + " -> " + shortID(reclassOlder)},
-			notWant: []string{"would withdraw", "\nwithdrew"},
-		},
-		{
-			name:  "a causes verdict says the pair was re-linked too",
-			apply: true,
-			classified: []supersede.Classified{
-				reclassRow(supersede.RelationCauses, true, true),
-			},
-			// The pass wrote a second graph row here, and a report that only
-			// said "withdrew" would leave the operator deciding about a change
-			// they were never told about.
-			want: []string{"withdrew", "causes", "as " + shortID(reclassOlder) + " causes -> " + shortID(reclassNewer)},
+			want:    []string{"already gone", shortID(reclassCausesNewer) + " -> " + shortID(reclassCausesTarget)},
+			notWant: []string{"would withdraw", "\nwithdrew", "STILL LIVE"},
 		},
 		{
 			name:  "a fresh pair is still reported as the write it is",
@@ -143,14 +191,16 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			// the pair's live 'causes' edge, and a row that named only the
 			// supersedes edge would say the run moved one row when it moved two.
 			// `--reassess` marks the same thing, and these rows are printed in its
-			// shape.
-			name:  "a withdrawal that also dropped a causes edge says so",
+			// shape. It is reachable on a supersedes row under #845 because only
+			// the SUPERSEDES sweep is withheld — the 'causes' one is not, so this
+			// row really did delete a row while its withheld clause says it did not.
+			name:  "a withheld supersedes row that swept a causes edge says so",
 			apply: true,
 			classified: []supersede.Classified{
-				withCauses(reclassRow(supersede.RelationNeither, true, true), 1, 1),
+				withCauses(suppressedRow(reclassRow(supersede.RelationNeither, true, false)), 1, 1),
 			},
-			want:    []string{"withdrew", "[+1 causes edge dropped]"},
-			notWant: []string{"+0 causes", "would withdraw"},
+			want:    []string{"would withdraw", "[+1 causes edge dropped]", "STILL LIVE"},
+			notWant: []string{"+0 causes", "withdrew", "already gone"},
 		},
 		{
 			// The count is what the write returned, so a dry run has none — and a
@@ -162,9 +212,9 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			name:  "a dry run names the deletion it would make, in the future tense",
 			apply: false,
 			classified: []supersede.Classified{
-				withCauses(reclassRow(supersede.RelationNeither, true, false), 0, 1),
+				withCauses(suppressedRow(reclassRow(supersede.RelationNeither, true, false)), 0, 1),
 			},
-			want:    []string{"would withdraw", "[+1 causes edge would be dropped]"},
+			want:    []string{"would withdraw", "[+1 causes edge would be dropped]", "STILL LIVE"},
 			notWant: []string{"[+1 causes edge dropped]"},
 		},
 		{
@@ -174,9 +224,9 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			name:  "a dry run with no live causes edge to read forecasts nothing",
 			apply: false,
 			classified: []supersede.Classified{
-				withCauses(reclassRow(supersede.RelationNeither, true, false), 0, 0),
+				withCauses(suppressedRow(reclassRow(supersede.RelationNeither, true, false)), 0, 0),
 			},
-			want:    []string{"would withdraw"},
+			want:    []string{"would withdraw", "STILL LIVE"},
 			notWant: []string{"causes edge"},
 		},
 		{
@@ -214,13 +264,23 @@ func TestSupersedePairLinesNamesTheEdgeAPassWithdrew(t *testing.T) {
 			notWant: []string{"re-linked", "withdrew", "would withdraw", "already gone"},
 		},
 		{
-			name:  "a reversed reclassification is a withdrawal like any other",
+			// A reversal on a live 'supersedes' edge is the case whose withdrawal
+			// used to be the point: a backwards supersession is the harm #641 found,
+			// and this pass used to be the only way it left the graph. It is the one
+			// place #845's trade is visible — the row reports, and `--reassess` is
+			// now the only way a backwards edge leaves. The row must still name the
+			// reversal, and must NOT print the FRESH-pair refusal line either, which
+			// would claim the pair had no edge at all.
+			name:  "a reversed reclassification is reported, not withdrawn",
 			apply: true,
 			classified: []supersede.Classified{
-				reclassRow(supersede.RelationReversed, true, true),
+				suppressedRow(reclassRow(supersede.RelationReversed, true, false)),
 			},
-			want:    []string{"withdrew", "reversed", shortID(reclassNewer) + " -> " + shortID(reclassOlder)},
-			notWant: []string{"reversed, not written"},
+			want: []string{
+				"would withdraw", "reversed", "STILL LIVE",
+				shortID(reclassNewer) + " -> " + shortID(reclassOlder),
+			},
+			notWant: []string{"withdrew", "reversed, not written", "already gone"},
 		},
 	}
 	for _, tc := range rows {
@@ -262,6 +322,95 @@ func withCauses(row supersede.Classified, dropped, droppable int) supersede.Clas
 	return row
 }
 
+// suppressedRow marks the row as having a withheld 'supersedes' withdrawal, the
+// case #845 added: the denying verdict is reported, but the edge is left live.
+// Only a reclassified row that CARRIED the supersedes edge is affected, which is
+// why the guard is here rather than at each call site — a 'causes'-edge row is
+// swept for real and must not be dressed as withheld.
+func suppressedRow(row supersede.Classified) supersede.Classified {
+	if row.ReclassifiedFrom == supersede.RelationSupersedes {
+		row.WithdrawSuppressed = true
+		row.Withdrawn = false
+	}
+	return row
+}
+
+// causesRow is reclassRow for a pair whose live edge was a 'causes' edge, and it
+// uses the 'causes' pair's own ids so a row printed from it cannot be confused
+// with the supersedes pair's. It is the shape --apply really does mutate now: a
+// denying verdict sweeps the 'causes' edge rather than withholding it, because no
+// command in the product can reach one (see supersede.Reassess).
+func causesRow(relation supersede.Relation, withdrawn bool) supersede.Classified {
+	return supersede.Classified{
+		Candidate: supersede.Candidate{
+			NewerID: reclassCausesNewer, OlderID: reclassCausesTarget,
+		},
+		Relation:         relation,
+		Reclassified:     true,
+		ReclassifiedFrom: supersede.RelationCauses,
+		Withdrawn:        withdrawn,
+		TargetProjectID:  "proj",
+	}
+}
+
+// TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs is the CLI half of
+// the stale-row rule, and it is a separate test because the fix is in two files:
+// `internal/supersede` clears `Classified.WithdrawSuppressed` at the site that
+// learns an endpoint is gone (pinned there by
+// TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs), and this file holds
+// what the REPORT says once it has — the row falls back to `already gone`, and
+// the summary carries no withheld line.
+//
+// Both matter because the two are what the flag drives: `WithdrawSuppressed`
+// selects the `STILL LIVE` clause on the row and gates the `N pair(s) withheld`
+// count in the summary, and a stale row carries neither. A report that printed
+// the clause would assert an edge is still live and still demoting its target for
+// a memory the concurrent reflect pass had already deleted — and
+// `memory_links.source_id`/`target_id` are `ON DELETE CASCADE`, so the edge went
+// with it. Before #845 that row said `already gone`, which is the truth.
+//
+// The rows here are built by hand rather than driven from a pass, because the
+// pass cannot emit them: the stale shape is exactly the one the pass now refuses
+// to emit, so a fixture that reached it through `runSupersede` would be testing
+// the fix's absence. What is held is the renderer's rule over both shapes, and
+// the summary's count, so a future producer of a stale row cannot make the report
+// claim a live edge.
+func TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs(t *testing.T) {
+	// The shape the pass emits for a stale pair: classified, relation differs from
+	// the edge it carried, `Withdrawn` false because nothing here removed it, and
+	// `WithdrawSuppressed` FALSE because the edge is not there to withhold.
+	stale := reclassRow(supersede.RelationNeither, true, false)
+	rows := supersedePairLines(true, []supersede.Classified{stale})
+	if !strings.Contains(rows, "already gone") {
+		t.Errorf("a stale pair's row does not say its edge is gone:\n%s", rows)
+	}
+	for _, notWant := range []string{"STILL LIVE", "would withdraw", "withdrew"} {
+		if strings.Contains(rows, notWant) {
+			t.Errorf("a stale pair's row claims %q about an edge a concurrent pass cascade-deleted:\n%s", notWant, rows)
+		}
+	}
+	// The row is still REACHED: a verdict was reached and a classify call was
+	// spent, so dropping the row too would leave the run reporting less than it
+	// did, which is the other half of the same lie.
+	if !strings.Contains(rows, shortID(reclassNewer)+" -> "+shortID(reclassOlder)) {
+		t.Errorf("a stale pair's row is not reported at all:\n%s", rows)
+	}
+
+	// And the summary's withheld line is keyed on the SAME flag, so a pass whose
+	// only stale row contributed nothing to the count prints the stale line and not
+	// the withheld one — which is the compounding the review named, "still live and
+	// still demoting its target" over a memory that no longer exists.
+	summary := supersedeReport("projy", supersede.Result{
+		Reclassified: 1, StaleAtWrite: 1,
+	}, "linked", true, 1, 0)
+	if !strings.Contains(summary, "1 pair(s) not written") {
+		t.Errorf("the summary does not report the stale pair:\n%s", summary)
+	}
+	if strings.Contains(summary, "pair(s) withheld") || strings.Contains(summary, "STILL LIVE") {
+		t.Errorf("the summary counts a stale pair as a withheld withdrawal:\n%s", summary)
+	}
+}
+
 // TestSupersedePairLinesPrintsNothingForAnEmptyPass: the header line above says
 // how many pairs were considered, and a block that printed a header of its own
 // would be a second count of the same thing.
@@ -286,14 +435,22 @@ func TestSupersedePairLinesPrintsNothingForAnEmptyPass(t *testing.T) {
 // rows and only these rows — a fresh pair contributes none, because no edge ever
 // justified a resolution for it.
 //
-// Every withdrawal counts, INCLUDING one this run did not write: a concurrent
-// pass that took the edge first left the same state behind (no live edge, and a
-// resolved_at nothing defends), which is exactly the state the repair clears. The
-// reason is the same one withdrawnTargets gives.
+// Every REAL withdrawal counts, INCLUDING one this run did not write: a
+// concurrent pass that took the edge first left the same state behind (no live
+// edge, and a resolved_at nothing defends), which is exactly the state the repair
+// clears. The reason is the same one withdrawnTargets gives.
+//
+// A WITHHELD withdrawal is the case that must NOT count (#845), and it is here as
+// the sharpest row in the list: the pass denied the edge, the edge is still in the
+// graph, and the piggyback that stamped the `resolved_at` is still holding the
+// target down. Naming its target would send an operator to un-hide a memory a live
+// supersession is correctly hiding, and — in a dry run — would print "Re-run with
+// --apply to withdraw these edges." for an edge --apply will not touch.
 func TestReclassifiedWithdrawalsNamesEveryOrphanedTarget(t *testing.T) {
 	got := withdrawnTargets(reclassifiedWithdrawals([]supersede.Classified{
-		reclassRow(supersede.RelationNeither, true, true),
-		reclassRow(supersede.RelationReversed, true, false),
+		suppressedRow(reclassRow(supersede.RelationNeither, true, false)),
+		suppressedRow(reclassRow(supersede.RelationReversed, true, false)),
+		suppressedRow(reclassRow(supersede.RelationCauses, true, false)),
 		reclassRow(supersede.RelationSupersedes, true, false),
 		reclassRow(supersede.RelationCauses, false, false),
 		{
@@ -319,8 +476,8 @@ func TestReclassifiedWithdrawalsNamesEveryOrphanedTarget(t *testing.T) {
 			TargetProjectID:  "proj",
 		},
 	}))
-	if len(got) != 1 || len(got[0].Targets) != 1 || got[0].Targets[0] != reclassOlder {
-		t.Errorf("withdrawnTargets(reclassifiedWithdrawals(...)) = %+v, want just [%s]: the two supersedes withdrawals, deduplicated, and nothing from a fresh, confirmed or 'causes'-edge pair", got, reclassOlder)
+	if len(got) != 0 {
+		t.Errorf("withdrawnTargets(reclassifiedWithdrawals(...)) = %+v, want nothing: every supersedes withdrawal in that list was WITHHELD, so every edge is still live and nothing is orphaned", got)
 	}
 	for _, g := range got {
 		for _, target := range g.Targets {
@@ -330,14 +487,25 @@ func TestReclassifiedWithdrawalsNamesEveryOrphanedTarget(t *testing.T) {
 		}
 	}
 
-	// And the two withdrawals really do reach the SAME follow-up the other two
-	// repair paths print — a scoped resolve repair over the withdrawn targets,
-	// never the project-wide re-judge. This is the sentence the operator was
-	// never given. The command goes through the shared renderer, so the id is
-	// quoted the way a shell reads it as one argument.
-	one := withdrawnTargets(reclassifiedWithdrawals([]supersede.Classified{
-		reclassRow(supersede.RelationNeither, true, true),
-	}))
+	// The other half of the same function: a row that DID leave an orphaned
+	// `resolved_at` still reaches the SAME follow-up the two repair modes print —
+	// a scoped resolve repair over the withdrawn targets, never the project-wide
+	// re-judge. Without it, the exclusion above would read as "the follow-up is
+	// gone", and it is not: the projection is what carries it, and it is the
+	// WITHELD filter above that empties the list for an ordinary pass, not a
+	// removal of the path. The command goes through the shared renderer, so the id
+	// is quoted the way a shell reads it as one argument.
+	//
+	// The row is built as the pass itself would build it if
+	// ordinaryPassWithdrawsSupersedes were true — suppressed false, `Withdrawn`
+	// set — which is the point: the two are told apart by the suppression flag and
+	// not by the withdrawal flag, so a row can carry `Withdrawn` and still be
+	// withheld, and one without it can still have been withdrawn by a concurrent
+	// pass. Holding the invariant that `reclassifiedWithdrawals` excludes a
+	// withheld row WHATEVER its Withdrawn holds is what stops the flag being
+	// "cleaned up" into one call to Withdrawn later.
+	withdrawnRow := reclassRow(supersede.RelationNeither, true, true)
+	one := withdrawnTargets(reclassifiedWithdrawals([]supersede.Classified{withdrawnRow}))
 	if len(one) != 1 {
 		t.Fatalf("withdrawnTargets = %+v, want one project group", one)
 	}
@@ -347,27 +515,40 @@ func TestReclassifiedWithdrawalsNamesEveryOrphanedTarget(t *testing.T) {
 	}
 }
 
-// TestRunSupersedeReportsAndFollowsUpTheEdgeItWithdrew drives the real command,
-// because the formatters above are the report's WORDING and the thing #785
-// removed was the report's EXISTENCE: the ordinary pass ran the identical
-// InvalidateLink and printed neither the edge nor the repair, so a formatter
-// test of it would pass against a command that said nothing at all.
+// TestRunSupersedeReportsButDoesNotWithdrawTheEdgeItWouldRemove drives the real
+// command, because the formatters above are the report's WORDING and what #845
+// changed is the report's CLAIM — a formatter test would pass against a command
+// that removed the edge and printed a hopeful sentence about it.
 //
-// The fixture is a live 'supersedes'/'llm' edge over two notes, with the link
-// row backdated so skip-if-unchanged re-judges the pair — which is how a pair
-// whose endpoints moved reaches the classifier with no vector involved. The
-// fake harness answers NEITHER, so the edge is denied and withdrawn.
-func TestRunSupersedeReportsAndFollowsUpTheEdgeItWithdrew(t *testing.T) {
+// The fixture is a live 'supersedes'/'llm' edge over two notes, with the link row
+// backdated so skip-if-unchanged re-judges the pair — which is how a pair whose
+// endpoints moved reaches the classifier with no vector involved. The fake harness
+// answers NEITHER on every consensus pass, so the verdict is unanimous and the
+// edge is denied.
+//
+// Both modes must print the SAME thing and BOTH must leave the edge live:
+//
+//   - The row names the edge by both ids and the verdict, in the tense the pass
+//     really used — `would withdraw`, plus the clause saying the edge is STILL
+//     LIVE. Under --apply the old tense was `withdrew`, and that is the sentence
+//     this change withdraws its permission for.
+//   - The summary carries its own count and names the repair, through the one
+//     renderer that spells a project as a shell argument.
+//   - NO resolve follow-up, in either mode. The follow-up exists because a
+//     withdrawal orphans the `resolved_at` the edge's piggyback stamped on its
+//     target; the edge is live, so the piggyback is still holding that target
+//     down and there is nothing orphaned. An --apply run printing one would be
+//     running a repair against a supersession it just declined to remove.
+//   - And no "Re-run with --apply to withdraw these edges." — that hint is keyed
+//     off the same follow-up list, so it would tell the operator the flag is the
+//     repair when --apply is what was just run and changed nothing.
+func TestRunSupersedeReportsButDoesNotWithdrawTheEdgeItWouldRemove(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		apply bool
-		// The tense the row must carry, and the hint the run owes the operator
-		// when the answer is still to be given.
-		row  string
-		hint string
 	}{
-		{name: "dry run", apply: false, row: "would withdraw", hint: "Re-run with --apply to withdraw these edges."},
-		{name: "applied", apply: true, row: "withdrew", hint: ""},
+		{name: "dry run", apply: false},
+		{name: "applied", apply: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dataHome := isolatedLifecycleEnv(t)
@@ -388,7 +569,7 @@ func TestRunSupersedeReportsAndFollowsUpTheEdgeItWithdrew(t *testing.T) {
 			newer, older := seedLiveSupersedesEdge(t, dbPath)
 
 			origArgs := os.Args
-			args := []string{origArgs[0], "supersede", "projy", "--source", "opencode"}
+			args := []string{origArgs[0], "supersede", "projy", "--source", "opencode", "--consensus", "3"}
 			if tc.apply {
 				args = append(args, "--apply")
 			}
@@ -397,39 +578,33 @@ func TestRunSupersedeReportsAndFollowsUpTheEdgeItWithdrew(t *testing.T) {
 
 			out := captureStdout(t, runSupersede)
 
-			// The edge, by both ids, in the report's own eight-character form, and
-			// the verdict that withdrew it.
+			// The edge, by both ids, in the report's own eight-character form; the
+			// verdict that denied it; and the clause that says the edge is still
+			// there — the half a count cannot carry.
 			for _, want := range []string{
-				tc.row,
+				"would withdraw",
 				shortID(newer) + " -> " + shortID(older),
 				"neither",
+				"STILL LIVE",
 			} {
 				if !strings.Contains(out, want) {
 					t.Errorf("`ghost supersede` did not report %q:\n%s", want, out)
 				}
 			}
-			// And the second half of the repair, which only an --apply run owes.
-			// The command is scoped to the withdrawn target, never the
-			// project-wide re-judge: the block promises that nothing outside the
-			// list is judged, and an unscoped command under that heading would be
-			// the worst line in the report.
-			if tc.apply {
-				if !strings.Contains(out, "Follow-up:") {
-					t.Errorf("an --apply run withdrew an edge and printed no follow-up:\n%s", out)
-				}
-				if !strings.Contains(out, "ghost resolve projy --reassess --only") || !strings.Contains(out, older) {
-					t.Errorf("the follow-up is not the scoped resolve repair over the withdrawn target:\n%s", out)
-				}
-				if strings.Contains(out, "reassess --apply\n") {
-					t.Errorf("the follow-up fell back on the unscoped re-judge:\n%s", out)
-				}
-			} else {
-				if strings.Contains(out, "Follow-up:") {
-					t.Errorf("a dry run printed a follow-up for a repair it did not perform:\n%s", out)
-				}
-				if !strings.Contains(out, tc.hint) {
-					t.Errorf("a dry run that would withdraw an edge does not tell the operator to apply:\n%s", out)
-				}
+			// The summary's own line, and the repair through the shared renderer —
+			// so the project is spelled the way a shell reads it as one argument.
+			if !strings.Contains(out, "1 pair(s) withheld") {
+				t.Errorf("the summary does not count the withheld withdrawal:\n%s", out)
+			}
+			if !strings.Contains(out, "ghost supersede projy --reassess --apply") {
+				t.Errorf("the summary does not name the repair that removes the edge:\n%s", out)
+			}
+			// And the repair that is NOT owed.
+			if strings.Contains(out, "Follow-up:") || strings.Contains(out, "ghost resolve projy --reassess") {
+				t.Errorf("a run that left the edge live printed a resolve repair for it:\n%s", out)
+			}
+			if strings.Contains(out, "Re-run with --apply to withdraw these edges.") {
+				t.Errorf("the report tells the operator --apply withdraws the edge, and it does not:\n%s", out)
 			}
 
 			// The tense is a claim about the graph, so the graph is checked.
@@ -438,11 +613,8 @@ func TestRunSupersedeReportsAndFollowsUpTheEdgeItWithdrew(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LinksByRelationSource: %v", err)
 			}
-			if tc.apply && len(links) != 0 {
-				t.Errorf("the report says it withdrew the edge, and %d live edge(s) remain", len(links))
-			}
-			if !tc.apply && len(links) != 1 {
-				t.Errorf("a dry run left %d live edge(s), want 1: it wrote something", len(links))
+			if len(links) != 1 {
+				t.Errorf("live edge(s) = %d after a pass that reports the withdrawal instead of making it, want 1", len(links))
 			}
 		})
 	}
