@@ -24,9 +24,42 @@ package memory
 // machine, describing memories a portable artifact is not obliged to carry); and
 // `ghost history purge` DELETEs the rows naming the purged memory, because a
 // redaction is asked to remove a NAME and this table keeps one.
+//
+// A fourth delete is not optional, and it is the one this table's grain creates.
+// record_rowid points at a retrieval_record row, that table has no
+// AUTOINCREMENT, and so a rowid freed by ANY delete is handed to the next call —
+// which means a verdict left behind is not merely dangling but silently
+// re-attributed to a call that never admitted its memory, and RetrievalAudits
+// counts it in a report about precision. So every path that DELETEs
+// retrieval_record rows deletes the verdicts whose record_rowid names them, in the
+// SAME transaction: DeleteProject by project_id, `ghost history purge` by
+// SELECTing the doomed rowids with the record delete's own predicate, and the cap's
+// eviction by its own rowid bound. See purgeHistoryTx and RecordRetrieval, and
+// TestAPurgeDoesNotLeaveAVerdictThatTheNextCallCanInherit.
+//
+// The pairing is TWO-SIDED, and the delete side is not the half that finishes it.
+// A verdict is filed from a rowid a caller read BEFORE it began judging —
+// audit.Run reads the recent calls, judges them, and only then writes — so a
+// `ghost history purge` landing in that window deletes the call row, takes the
+// verdicts filed so far with it, and frees a rowid the very next RecordRetrieval
+// takes; the delete-side sweep cannot help the write that follows it, because by
+// then the rows it would have swept are the ones being written anew.
+//
+// So a verdict is filed only against a call that KEPT its memory, and the check is
+// on the CONTENT of the call rather than on the rowid: checking that the rowid
+// still EXISTS is not enough, because the window is wide enough for the freed
+// rowid to be RE-LET before the write lands, and a verdict filed against the
+// successor is the same wrong pair by another route. A verdict whose call did not
+// keep its memory becomes a HOLE in the report rather than a claim about a call
+// that never admitted the memory. What that costs is one lost (call, memory) pair;
+// what filing it would cost is a wrong one, counted in the denominator and
+// indistinguishable afterwards. See RecordRetrievalAudits and
+// retrievalRecordKeepingMemory, and the three tests named for each way the pairing
+// can be broken.
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,15 +163,94 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 
 	var maxRowID int64
 	for _, r := range rows {
-		if err := tx.QueryRowContext(ctx, `
+		// The pairing is TWO-SIDED, and this is its other side. A caller judged
+		// its calls and is filing the verdicts now, so every rowid in this batch
+		// was read BEFORE this transaction opened: audit.Run reads the recent
+		// calls, judges them (a GetByIDs, then a comparison against the
+		// transcript), and only then writes, keyed by the rowids it read at the
+		// top of the run. A `ghost history purge` landing in that window deletes
+		// the call row and — with the delete-side pairing — takes its verdicts
+		// with it, which is right; and then this write files them again against a
+		// rowid the store has already given away. When the purged call is the
+		// newest, its rowid IS the table's maximum, so the very next
+		// RecordRetrieval takes it and the re-filed verdict becomes a claim about
+		// a call that never admitted the memory.
+		//
+		// So a verdict is filed only against a call that KEPT its memory. The
+		// guard is in the statement rather than in a branch above it because this
+		// transaction already holds the write lock, so it cannot go stale between
+		// the check and the insert: a check outside the transaction would be a
+		// check-then-write and would lose to the same race it is here to close.
+		//
+		// It binds IDENTITY, not the KEY, and that is the half that matters. A
+		// plain `EXISTS (SELECT 1 FROM retrieval_record WHERE rowid = ?)` is not
+		// enough, because the window is wide enough for the rowid to be RE-LET
+		// before the pass writes: the purge that removed the newest call frees the
+		// table's maximum rowid, and the next RecordRetrieval takes it. The row
+		// then EXISTS, the existence check passes, and the dead call's verdict is
+		// filed under its successor — which is precisely the wrong pair. So the
+		// guard asks whether the call now on that rowid kept the memory THIS row
+		// is about, which is the one property a report about a call's admitted
+		// memories is actually entitled to assert.
+		//
+		// What that leaves is a row whose pair is TRUE but whose call INSTANCE may
+		// be a successor that admitted the same memory in the same session — the
+		// only imprecision left, and deliberately accepted: without a stable
+		// per-call identity (the table's key is a reusable rowid) it cannot be
+		// closed, and unlike the orphan it is not a claim about a memory a call
+		// never admitted. Closing THAT needs AUTOINCREMENT on retrieval_record,
+		// which is a table rebuild and a migration, and is out of scope here.
+		//
+		// `? <= 0 OR` is the unattributed verdict, which is accepted and needs no
+		// call: rowid 0 is the deliberate "not attributable to a call" value this
+		// same function refuses to replace, and a bare guard would drop every such
+		// row in the table the first time a pass filed one.
+		//
+		// What a dropped verdict costs is ONE (call, memory) pair from the
+		// report, and only when a purge lands in that window: the call is gone, so
+		// the pair is gone too and nothing is miscounted — the report is a hole,
+		// not a lie. The alternative is not a smaller cost, it is the defect:
+		// re-filed, the row is counted in the denominator under a call that never
+		// admitted the memory, and it is indistinguishable afterwards from a
+		// verdict this write was entitled to make. A whole-batch refusal was
+		// rejected for the same reason — it would lose the surviving calls'
+		// verdicts, which are still true, to avoid losing one that is not.
+		//
+		// What it costs per row is one seek on retrieval_record's own b-tree plus
+		// a walk of that ONE row's verdicts array: the rowid is its INTEGER
+		// PRIMARY KEY, so the row is found by primary key and never scanned for,
+		// and the array is a call's own kept set — tens of entries, not a table.
+		// It is O(one call) per row where the delete-side sweeps in this package
+		// are O(rows stored), which is also why it needs no index on
+		// record_rowid and why TestRetrievalAuditsCarryOneIndex is unaffected.
+		var filed int64
+		err := tx.QueryRowContext(ctx, `
 			INSERT INTO retrieval_audit
 				(project_id, record_rowid, session_id, source, memory_id, outcome, signal, degraded)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			SELECT ?, ?, ?, ?, ?, ?, ?, ?
+			WHERE ? <= 0 OR EXISTS (
+				SELECT 1 FROM retrieval_record
+				WHERE rowid = ? AND `+retrievalRecordKeepingMemory()+`
+			)
 			RETURNING rowid
 		`, r.ProjectID, r.RecordRowID, r.SessionID, r.Source, r.MemoryID,
-			r.Outcome, r.Signal, r.Degraded).Scan(&maxRowID); err != nil {
+			r.Outcome, r.Signal, r.Degraded, r.RecordRowID, r.RecordRowID, r.MemoryID).Scan(&filed)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The guard refused this row, so it wrote nothing and returned
+			// nothing. Not an error: see above.
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("record retrieval audits: %w", err)
 		}
+		// maxRowID stays the table's highest rowid, which is what the eviction
+		// below reads. A rowid this transaction was given is higher than every
+		// rowid already in the table (SQLite hands out max+1, not a freelist
+		// slot), and rowids rise within the transaction, so the LAST row filed
+		// is the highest — and a row this pass DROPPED took no rowid at all, so
+		// skipping one moves nothing. When every row was dropped, maxRowID stays
+		// 0, the table did not grow, and the eviction does not run.
+		maxRowID = filed
 	}
 
 	// Oldest first by rowid, bounded by the row just written, so the table settles
