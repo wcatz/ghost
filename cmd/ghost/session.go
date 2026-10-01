@@ -14,6 +14,7 @@ import (
 // handleHelp), so a help request never runs the SessionStart side effects the
 // context block mirrors (Obsidian sync, session-count bump).
 const contextUsage = `Usage: ghost context [--cwd <dir>] [--as-of <RFC3339>]
+       ghost context --audit [--project <name-or-id>] [--since <duration>]
 
 Prints the passive session-start context block for a directory. This is what
 the opencode adapter injects as instructions, because opencode does not
@@ -25,6 +26,31 @@ since, and without memories that did not exist yet. Tasks, decisions and
 learned context are not versioned, so they are omitted rather than shown as
 they are now, and no session is counted — a past reading is a diagnostic, not
 a session start.
+
+--audit reports on what retrieval ACTUALLY did (issue #646). It is the other
+mode of this command and shares almost nothing with the block above: it opens
+the store read-only, runs none of the side effects (no Obsidian sync, no
+session count), and prints per-source figures — calls, memories kept, used,
+ignored, superseded in session, contradicted, and searches that kept nothing.
+
+  --project <name-or-id>  The project to report on (default: the one this
+                          directory resolves to, via --cwd or your own)
+  --since <duration>      How far back to look, by the store's own recorded_at
+                          (Go duration: 168h, 7d is not a unit; default:
+                          everything the store still holds)
+
+The report is ALWAYS about one project. A name, an id or a directory that
+resolves to nothing is refused and says so, naming --project, because a
+mistyped project answered with every project's figures would be a report about
+a scope nobody asked for. Figures are per source and are never pooled — a
+search and an injection answer different questions — and a source with no rows
+says so rather than reporting 0%. "ignored" means the agent's own words never
+mentioned the memory; it is not a relevance or usefulness score. One half of
+"missed" (a fact the agent re-derived and was never shown) is not measured by
+anything and is reported as no figure, not as a zero.
+
+--as-of and --audit cannot be combined: one reports the store at an instant,
+the other reports retrieval over a window.
 `
 
 // contextAsOf reads the --as-of instant out of a `ghost context` argument list.
@@ -90,7 +116,18 @@ func contextAsOf(args []string) (*time.Time, error) {
 // unreadable value is refused at the boundary, with the argument in the message
 // and a non-zero status, rather than rendering the present under a request that
 // asked for a past instant.
+//
+// --audit is the other mode, and it is the opposite in every respect: read-only,
+// no side effects, and a report of retrieval verdicts rather than a block of
+// memories. It is dispatched FIRST and on the flag alone, so an audit run never
+// reaches the side effects below — those exist because this command backs a
+// session start, and a report is not one. See context_audit.go.
 func runContext() {
+	args := os.Args[2:]
+	if contextAuditRequested(args) {
+		runContextAudit(args)
+		return
+	}
 	cwd := ""
 	for i := 2; i < len(os.Args); i++ {
 		switch {

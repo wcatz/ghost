@@ -353,7 +353,9 @@ Commands:
                               projects that have no usable path and no remote)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
-  context [--cwd <dir>]       Print the passive session-start context block (for opencode)
+  context [--cwd <dir>] [--audit]  Print the passive session-start context block, or with
+                                  --audit what retrieval did, per source, for one
+                                  project (--project, --since)
   history <memory-id> [--limit N] [--json]
                               Print one memory's append-only history: every write,
                               what it changed, and which phase or agent made it

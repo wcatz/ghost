@@ -21,7 +21,7 @@ Ghost exposes 22 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Project | `ghost_project_delete` | Permanently delete a project and its child records |
 | Context | `ghost_project_context` | Load top memories and the learned-context summary (assembled, so a memory whose validity window has closed is withheld; tasks and decisions are separate tools and resources) |
 | Context | `ghost_list_projects` | List known projects and their IDs |
-| Context | `ghost_health` | Report store, embedding, Ollama, link, and `memory_history` growth health |
+| Context | `ghost_health` | Report store, embedding, Ollama, link, `memory_history` growth, and per-source retrieval health |
 | Tasks | `ghost_task_create` | Create a durable task |
 | Tasks | `ghost_task_list` | List tasks, optionally filtered by status |
 | Tasks | `ghost_task_update` | Change task status, priority, or description |
@@ -93,6 +93,88 @@ named memory is within 14 days of a retention cap at the current rate. The repai
 is `ghost history compact`, a CLI command with no MCP equivalent, and the warning
 names it — there is no tool here that removes history rows, because that is an
 operator's decision about a table the agent only reads.
+
+### Retrieval health
+
+`ghost_health` also reports what retrieval did, one line per source, below the
+history block. It is the same `audit` figures `ghost context --audit` prints, with the
+projects pooled **within** each source and shortened to one line — so a figure here and
+a figure there is the same number over the same rows. It is **store-wide**, which the
+header line states; the per-project report is named in the same line.
+
+```text
+**Retrieval audit** — store-wide, per source, every call this store has recorded; a search and an injection are never pooled; for one project run `ghost context --audit --project <name>`
+  search: 12 call(s), 30 kept, 40% used (12 of 30 scored), 15 ignored, 0 superseded in session, 2 contradicted, 3 kept nothing
+  ⚠ search: 2 of its 30 scored verdict(s) are degraded — judged against a partly-read transcript (scan transcript: truncated)
+  session_start: no rows — this source has recorded no calls
+  project_context: no rows — this source has recorded no calls
+  "ignored" is the residual, not a relevance or usefulness score: it means the agent's own words never mentioned the memory
+```
+
+That is one store's real block, cut at the retrieval part — the same rows
+[`ghost context --audit`](cli.md#ghost-context---audit) prints for one project,
+with the `⚠` line the compact form adds under the source it is about.
+
+An agent debugging "search returns things I did not use" is exactly who needs
+this, and it is here rather than in a twenty-third tool because every caller
+already fetches `ghost_health` — the tool count is 22 and this block does not
+change it.
+
+Five things the block is careful about, each because the cheaper version is a
+confident wrong answer:
+
+- **Per source, never pooled.** A search asks whether the agent used what it
+  looked up; an injection asks whether it used what it was handed. There is no
+  total, so there is nothing here that can be quoted as "the" precision.
+- **Empty sources are NAMED.** A source with no rows says so rather than
+  reporting 0% used, which would read as a verdict on a source that has never run
+  here. `session_start` and `project_context` record their own retrievals, so they
+  carry figures on a store whose sessions have run; they say `no rows` on a store
+  that has only ever searched.
+- **`ignored` is the residual, not a score.** It is the only field here that an
+  agent is likely to misread as a judgement about memory quality, and nothing in
+  this package ranks a memory. The sentence is printed whenever any verdict
+  exists to misread, and **only** then: a caveat attached to no figure is noise on
+  a fresh store, and a fresh store carrying a warning glyph is how an agent learns
+  to skip the warnings that matter.
+- **A degraded verdict is counted, not hidden.** A verdict filed under a partial
+  transcript read stays in the denominator, so the precision beside it is exact
+  about a transcript that stopped early — which is what the `⚠` line under that
+  source says, naming the reason.
+- **A verdict whose call is not counted is named, not dropped.** A call is stamped
+  when it happened and a verdict when the detached audit judged it, so the two
+  tables are two clocks and a window over both is two populations. The verdict
+  half is intersected with the calls the report counts, and a verdict naming any
+  other rowid — outside the window, or evicted by the call cap — is counted and
+  named as **detached** on a `⚠` line, because a report that quietly loses real
+  verdicts is indistinguishable from a report over a store where they were never
+  written. A verdict naming no call at all (`record_rowid = 0`) is
+  **unattributed**: counted, and named on its own `⚠` line, and in no figure —
+  because precision is a ratio over (call, memory) pairs and a verdict with no call
+  has no pair to belong to. So the printed precision is never a ratio of two
+  populations, and never reports a numerator above its denominator.
+
+The scope is the whole store, with projects pooled **within** a source and never
+sources with each other, and the header line says so, because every other number in
+`ghost_health` is store-wide and a source line sitting under them invites the reading
+that it describes the project the agent is working in. The header names the remedy
+beside it: `ghost context --audit --project <name>` is the per-project report, with
+the window filter and the list of contradicted memory ids. That report opens the store
+read-only, and this one does not open it at all.
+
+The figures are computed by **one aggregate per table**, not by building a per-project
+report for each project and merging. That is a cost property and not a detail:
+`OpenDB` pins the pool at one connection, so the per-project loop made a health check
+cost a number of full passes over both tables proportional to the number of checkouts
+on the machine — and health is the tool an agent calls precisely when something feels
+wrong. The arithmetic is the same one the per-project report performs, which is the
+property the two surfaces are tested against.
+
+A store that cannot answer prints `**Retrieval audit:** could
+not be read: …` rather than nothing, and a store with no project at all prints
+`**Retrieval audit:** no project is registered, so no retrieval has been measured`
+— because a header with no lines under it reads as a section that ran and had
+nothing to say, which is a different claim.
 
 Nothing an agent writes is excluded from `ghost reflect` by its `source`: seeds are `builtin`, agent saves are `mcp`, and reflection writes are `reflection`. `ghost_memory_save` therefore takes an optional `pin` so a memory can opt out of consolidation in the call that stores it, rather than in a second `ghost_memory_pin` call that a session might never make. On a near-duplicate save both rows are pinned — the copy just stored and the existing row the text folded into, which is the one a later consolidation is most likely to absorb — and the result message says so.
 

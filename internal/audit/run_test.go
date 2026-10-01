@@ -46,8 +46,15 @@ func seedMemory(t *testing.T, store *memory.Store, projectID, id, content string
 	}
 }
 
-// recordCall writes one retrieval record whose kept rows are the given ids.
-func recordCall(t *testing.T, store *memory.Store, projectID, source string, kept ...string) {
+// recordCall writes one retrieval record whose kept rows are the given ids, and returns
+// ITS OWN ROWID.
+//
+// The rowid comes back from the write rather than from a later read because #857's write
+// guard files a verdict only against a call that kept THAT memory, and it REFUSES the
+// rest by returning them rather than by erroring. So a fixture that reached for "the
+// newest row" instead of "the row this call is" would have its verdict silently dropped
+// and would then assert on zeroes that agree with each other for the wrong reason.
+func recordCall(t *testing.T, store *memory.Store, projectID, source string, kept ...string) int64 {
 	t.Helper()
 	verdicts := make([]memory.RowVerdict, 0, len(kept))
 	for _, id := range kept {
@@ -61,6 +68,34 @@ func recordCall(t *testing.T, store *memory.Store, projectID, source string, kep
 	}); err != nil {
 		t.Fatalf("RecordRetrieval: %v", err)
 	}
+	return newestCallRowID(t, store, projectID)
+}
+
+// newestCallRowID is the rowid of the call just written.
+func newestCallRowID(t *testing.T, store *memory.Store, projectID string) int64 {
+	t.Helper()
+	recs, err := store.RetrievalRecordsForProject(context.Background(), projectID, 0)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("RetrievalRecordsForProject(%s): %v (%d records)", projectID, err, len(recs))
+	}
+	return recs[0].RowID
+}
+
+// fileVerdict files verdicts and FAILS if the store refused any.
+//
+// A refusal is not an error — the rows simply are not stored — so only the fixture can
+// see it, and a fixture that ignored it would assert on a store missing the very rows
+// the test is about. The two return values are the whole reason: a report that already
+// counted these rows into its figures has to be able to take a refusal back out.
+func fileVerdict(t *testing.T, store *memory.Store, rows ...memory.RetrievalAuditRow) {
+	t.Helper()
+	refused, err := store.RecordRetrievalAudits(context.Background(), rows)
+	if err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+	if len(refused) > 0 {
+		t.Fatalf("the fixture's verdicts were REFUSED and never stored: %+v", refused)
+	}
 }
 
 // TestRunJudgesEveryVerdict is the end-to-end property the issue asks for: what
@@ -71,7 +106,7 @@ func TestRunJudgesEveryVerdict(t *testing.T) {
 	seedMemory(t, store, projectID, "SUPID", "Pinned versions come from the lockfile, never a floating tag")
 	seedMemory(t, store, projectID, "CONID", "The v20 migration runs before the pre-migration backup")
 	seedMemory(t, store, projectID, "IGNID", "Bench seeds restore content through the shared clamp helper")
-	recordCall(t, store, projectID, "search", "USEDID", "SUPID", "CONID", "IGNID")
+	_ = recordCall(t, store, projectID, "search", "USEDID", "SUPID", "CONID", "IGNID")
 
 	s := newTestSignals(t)
 	s.AddProse("as I read it, the opencode plugin materializes its transcript under mkdtemp")
@@ -106,7 +141,7 @@ func TestRunJudgesEveryVerdict(t *testing.T) {
 func TestRunSkipsMemoriesItCannotRead(t *testing.T) {
 	store, projectID := auditStore(t)
 	seedMemory(t, store, projectID, "HERE", memContent)
-	recordCall(t, store, projectID, "search", "HERE", "GONE")
+	_ = recordCall(t, store, projectID, "search", "HERE", "GONE")
 
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
@@ -168,8 +203,8 @@ func TestRunDoesNotJudgeDroppedRows(t *testing.T) {
 func TestRunFilesOneVerdictPerCallAndMemory(t *testing.T) {
 	store, projectID := auditStore(t)
 	seedMemory(t, store, projectID, "M1", memContent)
-	recordCall(t, store, projectID, "search", "M1")
-	recordCall(t, store, projectID, "session_start", "M1")
+	_ = recordCall(t, store, projectID, "search", "M1")
+	_ = recordCall(t, store, projectID, "session_start", "M1")
 
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
@@ -204,7 +239,7 @@ func TestRunFilesOneVerdictPerCallAndMemory(t *testing.T) {
 func TestRunIsIdempotentOverTheSameCall(t *testing.T) {
 	store, projectID := auditStore(t)
 	seedMemory(t, store, projectID, "M1", memContent)
-	recordCall(t, store, projectID, "search", "M1")
+	_ = recordCall(t, store, projectID, "search", "M1")
 
 	silent := newTestSignals(t)
 	silent.AddProse("worked on something unrelated entirely")
@@ -236,8 +271,8 @@ func TestRunReplacesOnlyTheCallsItJudged(t *testing.T) {
 	store, projectID := auditStore(t)
 	seedMemory(t, store, projectID, "M1", memContent)
 	seedMemory(t, store, projectID, "M2", memContent)
-	recordCall(t, store, projectID, "search", "M1")
-	recordCall(t, store, projectID, "search", "M2")
+	_ = recordCall(t, store, projectID, "search", "M1")
+	_ = recordCall(t, store, projectID, "search", "M2")
 
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
@@ -269,8 +304,8 @@ func TestRunReplacesOnlyTheCallsItJudged(t *testing.T) {
 func TestRunReportsSearchesAndSessionStartsSeparately(t *testing.T) {
 	store, projectID := auditStore(t)
 	seedMemory(t, store, projectID, "M1", memContent)
-	recordCall(t, store, projectID, "search", "M1")
-	recordCall(t, store, projectID, "session_start", "M1")
+	_ = recordCall(t, store, projectID, "search", "M1")
+	_ = recordCall(t, store, projectID, "session_start", "M1")
 
 	s := newTestSignals(t)
 	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
@@ -295,8 +330,8 @@ func TestRunReportsSearchesAndSessionStartsSeparately(t *testing.T) {
 // the summary says so rather than guessing.
 func TestRunCountsSearchesThatKeptNothing(t *testing.T) {
 	store, projectID := auditStore(t)
-	recordCall(t, store, projectID, "search")
-	recordCall(t, store, projectID, "search", "M1")
+	_ = recordCall(t, store, projectID, "search")
+	_ = recordCall(t, store, projectID, "search", "M1")
 	seedMemory(t, store, projectID, "M1", memContent)
 
 	res, err := Run(context.Background(), store, projectID, newTestSignals(t))
@@ -344,7 +379,7 @@ func TestRunStandsOnWhatItReads(t *testing.T) {
 	store, projectID := auditStore(t)
 	const secret = "the vacuum schedule runs at four in the morning"
 	seedMemory(t, store, projectID, "M1", secret)
-	recordCall(t, store, projectID, "search", "M1")
+	_ = recordCall(t, store, projectID, "search", "M1")
 
 	s := newTestSignals(t)
 	s.AddProse("unrelated")
@@ -366,7 +401,7 @@ func TestRunStandsOnWhatItReads(t *testing.T) {
 func TestRunStoresTheTranscriptDegradation(t *testing.T) {
 	store, projectID := auditStore(t)
 	seedMemory(t, store, projectID, "M1", memContent)
-	recordCall(t, store, projectID, "search", "M1")
+	_ = recordCall(t, store, projectID, "search", "M1")
 
 	s := newTestSignals(t)
 	s.MarkDegraded("scan transcript: read failure mid-transcript")
