@@ -10,8 +10,9 @@ package audit
 //     search and an injection is a number about neither question.
 //  2. A source with no rows says so, rather than reporting 0% — which would read
 //     as "nothing it showed was used" about a source that has never run.
-//  3. Precision is used / KEPT, and kept is the verdict count, not the call
-//     count: one call can keep twenty memories.
+//  3. Precision is used / SCORED, and scored is the verdict count — not the call
+//     count (one call can keep twenty memories) and not the kept count either (a
+//     kept memory no run has judged yet is not a denominator).
 //  4. The output carries ids and counts only. No memory content, no query text,
 //     no signal text — the same constraint part 1 and part 2 held to the rows,
 //     held to the report.
@@ -749,5 +750,186 @@ func TestSummaryQuotesItsOwnSourceLabel(t *testing.T) {
 	}
 	if strings.Contains(got, "\n") {
 		t.Errorf("Summary() broke the line: %q", got)
+	}
+}
+
+// backdateOnly moves ONE table's recorded_at for a project into the past.
+//
+// The pair of stamps is the whole problem this file's window has to survive:
+// retrieval_record is stamped when the CALL happened and retrieval_audit when the
+// detached run JUDGED it, and those are different instants that can be hours
+// apart. A window that filters each table by its own column is therefore not one
+// window over one population, and backdatingRetrievalRows (both tables at once)
+// cannot express the case that matters.
+func backdateOnly(t *testing.T, dbPath, table, projectID string, ago time.Duration) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s to backdate %s: %v", dbPath, table, err)
+	}
+	defer db.Close() //nolint:errcheck
+	stamp := time.Now().Add(-ago).UTC().Format(memory.StoredStampLayout)
+	if _, err := db.Exec(`UPDATE `+table+` SET recorded_at = ? WHERE project_id = ?`, stamp, projectID); err != nil {
+		t.Fatalf("backdate %s: %v", table, err)
+	}
+}
+
+// TestReportCountsAVerdictOnlyWhenItsCallIsCounted: the two tables are stamped at
+// two different instants, so one window filter applied to both columns is not one
+// population — it is two, and a verdict stamped after its call falls into a window
+// its call is not in.
+//
+// The failure is a figure nobody can read: `search: 0 call(s), 0 kept, 100% used
+// (1 of 1 scored)`, i.e. more verdicts than the window admits any memory for, with
+// nothing on the report to explain it. So the verdict half is intersected with the
+// calls this report actually counted, and the ones left out are counted and named
+// rather than dropped in silence.
+func TestReportCountsAVerdictOnlyWhenItsCallIsCounted(t *testing.T) {
+	store, projectID, dbPath := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID")
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, projectID, s)
+
+	// The call is 72 hours old. The verdict is five minutes old, because that is
+	// when the detached run judged it — which is the ordinary case, not an edge.
+	backdateOnly(t, dbPath, "retrieval_record", projectID, 72*time.Hour)
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID, Since: time.Hour})
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	search := rep.Source("search")
+	if search == nil {
+		t.Fatal("the report has no search figures")
+	}
+	if search.Scored != 0 || search.Used != 0 || search.Ignored != 0 {
+		t.Errorf("a verdict whose call fell out of the window is still counted: %+v", *search)
+	}
+	if search.Kept != 0 || search.Calls != 0 {
+		t.Errorf("the call is outside the window and is counted anyway: %+v", *search)
+	}
+	if search.Detached != 1 {
+		t.Errorf("Detached = %d, want 1 — the dropped verdict is counted and named, not lost in silence", search.Detached)
+	}
+	out := rep.String()
+	if !strings.Contains(out, "1 verdict(s) were not counted") {
+		t.Errorf("the report does not say a verdict was left out:\n%s", out)
+	}
+	// A source whose only rows are outside the window is a no-rows source, and the
+	// detached verdict must not turn it into a source with figures.
+	if !search.NoRows() {
+		t.Errorf("the source claims rows it does not have: %+v", *search)
+	}
+}
+
+// TestReportCountsAVerdictWhoseCallTheStoreNoLongerHolds: the same intersection
+// with no window in force. The verdict cap (50000 rows) outlives the call cap (5000
+// rows), and #857 exists because a history purge deletes a call and leaves its
+// verdicts — so on a busy store this is the NORMAL state, not a window's edge, and
+// a report that counted those verdicts would divide a numerator and a denominator
+// from two different populations.
+func TestReportCountsAVerdictWhoseCallTheStoreNoLongerHolds(t *testing.T) {
+	store, projectID, dbPath := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID")
+	s := newTestSignals(t)
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp")
+	judge(t, store, projectID, s)
+
+	// The call goes away, exactly as a history purge removes it, and its verdict
+	// stays — which is #852's orphan.
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`DELETE FROM retrieval_record WHERE project_id = ?`, projectID); err != nil {
+		t.Fatalf("delete the recorded call: %v", err)
+	}
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	search := rep.Source("search")
+	if search.Scored != 0 || search.Used != 0 {
+		t.Errorf("an orphaned verdict is counted as a use: %+v", *search)
+	}
+	if search.Detached != 1 {
+		t.Errorf("Detached = %d, want 1", search.Detached)
+	}
+}
+
+// TestReportCountsAVerdictThatNamesNoCallAndSaysSo: the other side of the
+// intersection. record_rowid = 0 is a value the write ACCEPTS, for a verdict about
+// a session rather than about one call, so it has no call to be in or out of a
+// window with. Counting it is right (it is a real verdict about real agent text)
+// and hiding it is not, so it is counted in the figures AND named, because it is the
+// only way Scored can exceed Kept and a reader who sees that needs to know why.
+func TestReportCountsAVerdictThatNamesNoCallAndSaysSo(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID")
+	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+		ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "IGNID",
+		Outcome: string(OutcomeIgnored), RecordRowID: 0,
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	search := rep.Source("search")
+	if search.Scored != 1 || search.Ignored != 1 {
+		t.Errorf("a verdict that names no call was not counted: %+v", *search)
+	}
+	if search.Detached != 0 {
+		t.Errorf("Detached = %d, want 0 — a verdict naming no call is unattributed, not detached", search.Detached)
+	}
+	if search.Unattributed != 1 {
+		t.Errorf("Unattributed = %d, want 1", search.Unattributed)
+	}
+	out := rep.String()
+	if !strings.Contains(out, "no call") {
+		t.Errorf("the report does not name the unattributed verdict:\n%s", out)
+	}
+}
+
+// TestTheDegradedNoteCountsVerdictsNotMemories: the note says how much of the
+// denominator rests on a partly-read transcript, so its denominator has to be the
+// verdicts. Kept is admitted memories, which is a larger number whenever an audit is
+// merely incomplete — and the health block already divides by Scored, so a report
+// dividing by Kept makes the two surfaces of one figure disagree.
+func TestTheDegradedNoteCountsVerdictsNotMemories(t *testing.T) {
+	store, projectID, _ := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID", "IGNID", "CONID")
+
+	recs, err := store.RetrievalRecordsForProject(context.Background(), projectID, 0)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("RetrievalRecordsForProject: %v (%d records)", err, len(recs))
+	}
+	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+		ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "USEDID",
+		Outcome: string(OutcomeUsed), Signal: "identifier", Degraded: "transcript truncated",
+		RecordRowID: recs[0].RowID,
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+	search := rep.Source("search")
+	if search.Kept != 3 || search.Scored != 1 || search.DegradedVerdicts != 1 {
+		t.Fatalf("fixture: %+v", *search)
+	}
+	out := rep.String()
+	if !strings.Contains(out, "1 of its 1 scored verdict(s)") {
+		t.Errorf("the degraded note divides by kept memories instead of verdicts:\n%s", out)
+	}
+	if strings.Contains(out, "1 of its 3 verdict(s)") {
+		t.Errorf("the degraded note reports a verdict count the store does not hold:\n%s", out)
 	}
 }

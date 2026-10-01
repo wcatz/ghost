@@ -125,6 +125,27 @@ func (s *Server) writeRetrievalAuditBlock(ctx context.Context, sb *strings.Build
 				assemble.Label(src.Source), src.DegradedVerdicts, src.Scored, labelReasons(src.DegradedReasons))
 		}
 	}
+	// The verdicts the figures above do not account for, from the report's own
+	// arithmetic rather than a second copy of it. An agent reading this block cannot
+	// see the tables, so a figure it cannot reconcile is a figure it reports
+	// upstream: a ⚠ here is a claim about the completeness of the numbers, and the
+	// numbers are what a caller of this tool acts on.
+	//
+	// Absent when both are zero — a fresh store, and every store whose verdicts are
+	// all attributed, must carry no warning glyph here (TestHealthOnAStoreWithNoHistorySaysSo).
+	if detached, unattributed := merged.AttributionTotals(); detached > 0 || unattributed > 0 {
+		if detached > 0 {
+			fmt.Fprintf(sb,
+				"  ⚠ %d verdict(s) were not counted: their call is outside the report's window, or the store no longer holds it\n",
+				detached)
+		}
+		if unattributed > 0 {
+			fmt.Fprintf(sb,
+				"  ⚠ %d verdict(s) name no call at all, so they are in the figures above and in neither calls nor kept\n",
+				unattributed)
+		}
+	}
+
 	// The sentence the numbers most invite the reader to get wrong. "80% ignored"
 	// read on its own is a judgement about the store's memory quality, and it is
 	// the one field here that is not a measurement of quality at all: it is the
