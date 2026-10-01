@@ -328,6 +328,18 @@ func TestRunCausesVerdictWritesCausesLinkOlderToNewer(t *testing.T) {
 	}
 }
 
+// TestRunReclassifiesExistingSupersedesToCauses is the #823 flip, and since #845
+// the 'supersedes' edge it reclassifies FROM survives while the 'causes' edge
+// really is written beside it. That is the whole of what #845 withholds and it is
+// not an accident: the withdrawal is the only part of the verdict that removes
+// graph history, and a pass that creates links does not delete them (#845). The
+// pair holds both relations until `ghost supersede --reassess --apply` withdraws
+// the one the current rules no longer support.
+//
+// It is not a contradiction the product cannot express: `pairDirection` reads the
+// 'supersedes' edge as the pair's direction whenever one is live, so the pair is
+// judged in the same orientation on the next pass and reported again rather than
+// flapping between the two relations.
 func TestRunReclassifiesExistingSupersedesToCauses(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -352,10 +364,13 @@ func TestRunReclassifiesExistingSupersedesToCauses(t *testing.T) {
 	if res.Reclassified != 1 {
 		t.Errorf("want Reclassified=1, got %d", res.Reclassified)
 	}
+	if res.WithdrawSuppressed != 1 {
+		t.Errorf("want WithdrawSuppressed=1, got %d", res.WithdrawSuppressed)
+	}
 
 	pairs, _ := store.SupersedesWithin(ctx, []string{newer, older})
-	if len(pairs) != 0 {
-		t.Errorf("stale supersedes link should be invalidated, found %d", len(pairs))
+	if len(pairs) != 1 {
+		t.Errorf("live supersedes edge(s) = %d, want 1: the ordinary pass reports that withdrawal instead of making it (#845)", len(pairs))
 	}
 
 	links, _ := store.GetLinks(ctx, older)
@@ -1345,6 +1360,14 @@ func TestResultWouldWriteLinks(t *testing.T) {
 // re-links the pair, because the CLI's dry-run hint keys on exactly that
 // difference (#649 review). Every verdict that leaves Reclassified without
 // leaving a link to write is a NEITHER or a reversal.
+//
+// The fixture carries a live 'causes' edge beside the 'supersedes' one, and it
+// has to. Since #845 a bare denial over a 'supersedes' edge moves nothing at all
+// — the withdrawal is reported, not made — so Reclassified is no longer the
+// finding that separates the two cases; a 'causes' edge the same verdict really
+// sweeps is. This therefore still pins the counter it was written for, and
+// TestTheOrdinaryPassReportsTheSupersedesWithdrawalItRefusesToMake pins the bare
+// denial, where the finding is WithdrawSuppressed.
 func TestRunCountsNoWriteReclassifications(t *testing.T) {
 	for _, verdict := range []Relation{RelationReversed, RelationNeither} {
 		t.Run(string(verdict), func(t *testing.T) {
@@ -1353,6 +1376,11 @@ func TestRunCountsNoWriteReclassifications(t *testing.T) {
 			newer := add(t, store, db, "kubernetes now on 1.31", []float32{1, 0, 0, 0}, "2026-07-01 00:00:00")
 			older := add(t, store, db, "kubernetes cluster runs 1.27", []float32{0, 1, 0, 0}, "2026-01-01 00:00:00")
 			if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+				t.Fatal(err)
+			}
+			// A live 'causes' edge the same verdict sweeps for real, so the
+			// reclassification this counts is a mutation the graph really took.
+			if err := store.CreateLink(ctx, older, newer, "causes", 0.9, "llm"); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := db.ExecContext(ctx,

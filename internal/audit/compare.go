@@ -192,31 +192,42 @@ func (s *Signals) matchesSaves(toks []string) bool {
 
 // contradicts reports whether the agent denied THIS memory, in one sentence.
 //
-// Two requirements, both STRONGER than the token arm, because contradiction
+// Three requirements, all STRONGER than the token arm, because contradiction
 // outranks every other verdict — a false contradiction reports ordinary use as a
-// memory the agent found wrong.
+// memory the agent found wrong, which is the first thing an operator acts on.
 //
-//  1. The denial must be about this memory. The cue lives in a sentence; the
-//     sentence must share at least the SAME token bar the `used` arm uses (>=3
-//     distinct fingerprints AND >= a third of the memory's tokens), not a lower
-//     threshold. Two shared tokens is too loose: a memory about "cache lockfile
-//     directory" would be contradicted by any sentence mentioning two of those
-//     three words in a denial context, even when the denial is about something
-//     else entirely.
+//  1. The denial must be in the SAME SEGMENT as the memory (see segments). A cue
+//     in one sentence cannot satisfy an id named in another, so a document that
+//     negates one memory and quotes three others does not contradict all four.
 //
-//  2. The id arm requires the cue to be present in a sentence naming the memory.
-//     Without the cue, naming an id is merely USING it (the identifier arm), not
-//     denying it. Requiring the cue prevents "per memory <id>, that applies" from
-//     being read as contradiction.
+//  2. The cue must be BOUND to the memory — beside the id, or beside the words of
+//     the memory it is denying (boundPositions and cueGap, in tokens.go).
+//     "Per memory <id>, that applies" names an id and agrees with it, and "Per
+//     <id>, I'll ignore the formatting" names it and agrees with it again: a cue
+//     ANYWHERE in a sentence is not a denial of the memory that sentence mentions,
+//     it is a denial of whatever the cue is next to (#854).
+//
+//  3. The denial must be about this memory's OWN WORDING, on the arm that reads
+//     wording: the sentence must share the SAME token bar the `used` arm uses
+//     (>=3 distinct fingerprints AND >= a third of the memory's tokens), not a
+//     lower threshold. Two shared tokens is too loose: a memory about "cache
+//     lockfile directory" would be contradicted by any sentence mentioning two of
+//     those three words in a denial context, even when the denial is about
+//     something else entirely.
+//
+// Requirement 2 is a tightening of both arms and requirement 3 is unchanged: a
+// cue alone is never enough, and neither is a shared word without a cue.
 func (s *Signals) contradicts(toks []string, memoryID string) bool {
 	for _, seg := range s.negated {
-		// The id arm: the sentence must both name the id AND carry a denial cue
-		// (seg.fps and seg.ids were only populated when HasNegationCue was true).
-		if seg.idsNamed(memoryID) {
+		// The id arm: a cue in this sentence bound to the id itself, so the
+		// sentence needs neither the memory's wording nor any particular wording
+		// beyond the words either side of the cue.
+		if seg.denies(memoryID) {
 			return true
 		}
-		// The fingerprint arm: the same threshold the `used` arm uses.
-		if clearsTokenBar(sharedTokens(seg.fps, toks), len(toks)) {
+		// The fingerprint arm: the same threshold the `used` arm uses, and one of
+		// the words clearing it bound to the cue.
+		if seg.deniesByWording(toks) {
 			return true
 		}
 	}

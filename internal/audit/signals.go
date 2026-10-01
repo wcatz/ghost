@@ -15,7 +15,16 @@ const (
 	// SidecarHeader marks a file this package wrote. Anything else at that
 	// offset is either a stale version or somebody else's file, so ReadSidecar
 	// refuses it rather than interpreting whatever bytes it happens to find.
-	SidecarHeader = "# ghost-audit-signals v1"
+	//
+	// v2 because the `neg` line grew a third field kind (#854): a cued sentence
+	// now carries which of its words a cue is BOUND to, not only which words it
+	// contains. A v1 line parses — its shapes are unchanged — and reads back with
+	// nothing bound to anything, so every contradiction in that one turn's file
+	// would silently go unfound; refusing the version says so out loud instead,
+	// and costs that turn's audit, which is what a sidecar this build cannot read
+	// is already worth.
+	SidecarHeader = "# ghost-audit-signals v2"
+	sidecarV1     = "# ghost-audit-signals v1"
 
 	// sidecarStaleAfter is how long an unclaimed sidecar survives before
 	// SweepSidecars reaps it. The detached lifecycle child deletes its own; this
@@ -84,33 +93,66 @@ func NewWithHasher(h Hasher) *Signals { return &Signals{h: h} }
 // whether a Signals it was given can fingerprint a memory at all.
 func (s *Signals) Hasher() Hasher { return s.h }
 
-// negSegment is ONE cued sentence: the fingerprints of its words and the ids it
-// names.
+// negSegment is ONE cued sentence: the fingerprints of its words, and the ones a
+// cue is bound to.
 //
-// Both, and in one entry, because the two arms of the negation rule ask the same
+// All of it in one entry, because the two arms of the negation rule ask the same
 // question of the same sentence — "did the agent deny this memory here" — by
 // wording for a memory whose text it repeated and by name for one it referred to.
 // Splitting them into two lists would let a cue in one sentence satisfy the id
 // arm for a memory named in another, which is the same leak the segment split
 // exists to close.
+//
+// What an id or a fingerprint is recorded FOR is the binding and never mere
+// presence, which is the whole of #854: an id a sentence names beside a cue it is
+// not about ("Per <id>, I'll ignore the formatting") is not evidence that the
+// memory was denied, and recording it as though it were is how an agent's
+// agreement became the audit's loudest finding. So cueFps and cueIDs are what the
+// cue is bound to (boundPositions and cueGap, in tokens.go) and fps is the
+// sentence's own vocabulary, which the token bar is measured against.
 type negSegment struct {
-	fps []string
-	ids []string
+	fps    []string
+	cueFps []string
+	cueIDs []string
 }
 
-// idsNamed reports whether this sentence named the given memory, upper-cased on
-// both sides for the reason AddID gives.
-func (n negSegment) idsNamed(id string) bool {
+// denies reports whether a cue in this sentence denies the memory named id, which
+// is the id arm's whole requirement: the id beside the cue, upper-cased on both
+// sides for the reason AddID gives.
+//
+// The empty id answers false rather than ranging over the list, because a memory
+// with no id has nothing to be denied by name — and because contradicts is called
+// with "" by the fingerprint-arm tests, where an empty comparison would otherwise
+// match an empty entry.
+func (n negSegment) denies(id string) bool {
 	if id == "" {
 		return false
 	}
 	upper := strings.ToUpper(id)
-	for _, ex := range n.ids {
+	for _, ex := range n.cueIDs {
 		if ex == upper {
 			return true
 		}
 	}
 	return false
+}
+
+// deniesByWording reports whether a cue in this sentence denies the memory by
+// repeating its wording: the token arm's own bar, AND at least one of the words
+// that clear it to be one the cue is bound to.
+//
+// Both conditions, and the bar is not replaced by the binding — it is a second
+// requirement on top of the SAME clearsTokenBar the `used` arm uses, so this arm
+// got stricter and never looser. Without the second condition a sentence could
+// deny something else and quote the memory verbatim ("ignore the formatter,
+// <the memory's wording>"), which is a claim about this memory the agent never
+// made; without the first, a cue would be enough on its own, which is the bar a
+// second, weaker threshold for negation was and must not become again.
+func (n negSegment) deniesByWording(toks []string) bool {
+	if !clearsTokenBar(sharedTokens(n.fps, toks), len(toks)) {
+		return false
+	}
+	return sharedTokens(n.cueFps, toks) > 0
 }
 
 // AddID records a memory id the agent named, upper-cased and de-duplicated: the
@@ -132,7 +174,7 @@ func (s *Signals) AddID(id string) {
 // the token arm's floor of three is what stops a lone id from standing in for a
 // memory's own wording — TestAddProseKeepsIDsOutOfTheTokenSet pins that.
 func (s *Signals) addWords(text string) {
-	s.addFingerprints(&s.prose, s.h.DistinctTokens(text))
+	addUnseen(&s.prose, s.h.DistinctTokens(text))
 	for _, id := range memoryIDs(text) {
 		s.AddID(id)
 	}
@@ -149,12 +191,40 @@ func (s *Signals) addWords(text string) {
 func (s *Signals) AddProse(text string) {
 	s.addWords(text)
 	for _, seg := range segments(text) {
-		if HasNegationCue(seg) {
-			s.negated = append(s.negated, negSegment{
-				fps: s.h.distinctTokens(splitWords(seg)),
-				ids: memoryIDs(seg),
-			})
+		words := splitWords(seg)
+		cues := cueSpans(words)
+		if len(cues) == 0 {
+			continue
 		}
+		// The cue is what makes this a negation SEGMENT; what the cue is bound to
+		// is what the arms get to compare a memory against, so both are taken here
+		// rather than in the comparison — the hook knows the sentence, and the
+		// detached child never sees it again.
+		//
+		// Two bindings, and they are not the same rule: an id is bound by counting
+		// the words between it and the cue, because an id is always a token and a
+		// rule that skipped to the nearest token would reach across a subject
+		// clause; the fingerprints are bound by skipping to the nearest word that
+		// could BE a token, because a clause boundary is not a word and the
+		// denial-then-restatement shape puts one between a cue and what it denies.
+		var boundWords []string
+		for _, i := range boundPositions(words, cues) {
+			boundWords = append(boundWords, words[i])
+		}
+		var boundIDs []string
+		for i, w := range words {
+			if boundToCue(i, cues) {
+				if id, ok := memoryIDWord(w); ok {
+					boundIDs = append(boundIDs, id)
+				}
+			}
+		}
+		n := negSegment{
+			fps:    s.h.distinctTokens(words),
+			cueFps: s.h.distinctTokens(boundWords),
+		}
+		addUnseen(&n.cueIDs, boundIDs)
+		s.negated = append(s.negated, n)
 	}
 }
 
@@ -165,7 +235,7 @@ func (s *Signals) AddProse(text string) {
 // not a use — and if save text counted as usage, that bucket could never be
 // non-empty.
 func (s *Signals) AddSaveArgs(text string) {
-	s.addFingerprints(&s.saves, s.h.DistinctTokens(text))
+	addUnseen(&s.saves, s.h.DistinctTokens(text))
 	for _, id := range memoryIDs(text) {
 		s.AddID(id)
 	}
@@ -236,12 +306,18 @@ func (s *Signals) HasID(id string) bool {
 	return false
 }
 
-func (s *Signals) addFingerprints(dst *[]string, fps []string) {
-	seen := make(map[string]bool, len(*dst)+len(fps))
+// addUnseen appends the values dst does not already hold, in order.
+//
+// The invariant every list of tokens and ids in this type keeps, and it is a
+// duplicate per OCCURRENCE that would break it: a sentence that names an id twice
+// while a cue sits between them would otherwise carry it twice into the sidecar
+// and into a count.
+func addUnseen(dst *[]string, vals []string) {
+	seen := make(map[string]bool, len(*dst)+len(vals))
 	for _, f := range *dst {
 		seen[f] = true
 	}
-	for _, f := range fps {
+	for _, f := range vals {
 		if !seen[f] {
 			seen[f] = true
 			*dst = append(*dst, f)
@@ -320,7 +396,12 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 	}
 	rest, ok := bytes.CutPrefix(raw, []byte(SidecarHeader+"\n"))
 	if !ok {
-		return nil, errors.New("audit: sidecar header is not " + SidecarHeader)
+		// The versions, not the bytes: the path arrived on a command line and the
+		// file beside it is not necessarily one this package wrote, so the error
+		// names the formats rather than echoing whatever the file's first line
+		// says.
+		return nil, fmt.Errorf("audit: sidecar header is not %s (%s is a previous format this build cannot read)",
+			SidecarHeader, sidecarV1)
 	}
 	s := &Signals{h: h}
 	for i, line := range bytes.Split(rest, []byte("\n")) {
@@ -365,40 +446,62 @@ func ReadSidecar(path string, h Hasher) (*Signals, error) {
 	return s, nil
 }
 
-// field renders one cued sentence for the sidecar: its fingerprints and the ids
-// it named, in one space-separated run.
+// cueMark prefixes a fingerprint a cue is bound to on the `neg` line.
 //
-// Order is the segment's own, and both halves are de-duplicated the way prose and
-// saves are, because the reader re-adds them through addFingerprints and the
+// The one field kind shape cannot tell apart, and the reason there is a mark
+// rather than a third vocabulary: a fingerprint and a CUE-BOUND fingerprint are
+// the same sixteen characters, and the difference between them is the difference
+// between "in this sentence" and "beside a cue in it" — which is what stops an
+// agent quoting a memory while denying something else from being filed as having
+// denied the memory (#854). Not a hex character, so an unmarked field can never be
+// one by accident, and a marked field that is not a fingerprint is refused.
+const cueMark = "~"
+
+// field renders one cued sentence for the sidecar: its fingerprints, the ones a
+// cue is bound to, and the ids a cue is bound to, in one space-separated run.
+//
+// Order is the segment's own, and each half is de-duplicated the way prose and
+// saves are, because the reader re-adds them through addUnseen and the
 // no-duplicates invariant has to hold on BOTH paths — a file written by one build
 // and read by another must not be distinguishable from one written and read by
 // the same.
 func (n negSegment) field() string {
-	parts := make([]string, 0, len(n.fps)+len(n.ids))
+	parts := make([]string, 0, len(n.fps)+len(n.cueFps)+len(n.cueIDs))
 	parts = append(parts, n.fps...)
-	parts = append(parts, n.ids...)
+	for _, fp := range n.cueFps {
+		parts = append(parts, cueMark+fp)
+	}
+	parts = append(parts, n.cueIDs...)
 	return strings.Join(parts, " ")
 }
 
 // parseNegSegment reads one line's field run back.
 //
-// The two kinds are told apart by SHAPE rather than by position or a prefix,
-// which is what makes the line self-describing: a fingerprint is sixteen
+// Two of the three kinds are told apart by SHAPE rather than by position or a
+// prefix, which is what makes the line self-describing: a fingerprint is sixteen
 // lower-case hex characters and an id is thirty-two upper-case ones, so the two
 // vocabularies do not overlap and a field that is neither is refused rather than
-// guessed at. A prefix would have worked too, but it would have made the sidecar
-// format carry a third thing to keep in step with the two it already has.
+// guessed at. The third — a cue-bound fingerprint — has the shape of the first, so
+// it is marked (cueMark) instead; a prefix for all three would have carried the
+// same information and made the two existing rules harder to read than they are.
 func parseNegSegment(s string) (negSegment, error) {
 	var seg negSegment
 	if s == "" {
 		return seg, nil
 	}
 	for _, f := range strings.Split(s, " ") {
+		if bound, marked := strings.CutPrefix(f, cueMark); marked {
+			if !isFingerprintField(bound) {
+				return negSegment{}, fmt.Errorf("%q is a %s-marked field over %q, which is not a token fingerprint", f, cueMark, bound)
+			}
+			seg.cueFps = append(seg.cueFps, bound)
+			continue
+		}
 		switch {
 		case isFingerprintField(f):
 			seg.fps = append(seg.fps, f)
 		case isIDField(f):
-			seg.ids = append(seg.ids, f)
+			seg.cueIDs = append(seg.cueIDs, f)
 		default:
 			return negSegment{}, fmt.Errorf("%q is neither a token fingerprint nor a memory id", f)
 		}

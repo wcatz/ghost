@@ -271,11 +271,19 @@ func TestRunReversedVerdictLeavesPairOpenForReclassification(t *testing.T) {
 	}
 }
 
-// TestRunReversedVerdictInvalidatesBackwardsLink: a reclassify pair arrives
-// carrying the backwards link #641 found on real data. The current verdict
-// contradicts it, so the link goes — the same self-healing the NEITHER verdict
-// already does, and the only way a wrong-direction link ever leaves the graph.
-func TestRunReversedVerdictInvalidatesBackwardsLink(t *testing.T) {
+// TestRunReversedVerdictReportsTheBackwardsLinkAndSweepsTheCausesEdge: a
+// reclassify pair arrives carrying the backwards link #641 found on real data,
+// and the current verdict contradicts it.
+//
+// The 'causes' edge beside it goes — that sweep is not withheld, because no
+// command in the product can reach a 'causes' edge (see
+// ordinaryPassWithdrawsSupersedes) — and the 'supersedes' edge is REPORTED
+// rather than removed (#845). This is the trade #845 makes: a backwards
+// supersession no longer self-heals in the ordinary pass, and `ghost supersede
+// --reassess --apply` is what withdraws it. #641's harm is therefore reported
+// every pass instead of silently deleted on a verdict measured to be wrong more
+// often than right.
+func TestRunReversedVerdictReportsTheBackwardsLinkAndSweepsTheCausesEdge(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
@@ -310,13 +318,21 @@ func TestRunReversedVerdictInvalidatesBackwardsLink(t *testing.T) {
 	if res.Reversed != 1 {
 		t.Errorf("Reversed = %d, want 1", res.Reversed)
 	}
-	// This pair carried both relations, so the drop is a real graph change and
-	// has to be visible at Info in lifecycle.log.
+	if res.WithdrawSuppressed != 1 {
+		t.Errorf("WithdrawSuppressed = %d, want 1: a backwards supersession the ordinary pass declines to remove has to be counted somewhere the operator reads it", res.WithdrawSuppressed)
+	}
+	// The 'causes' sweep really ran, so it is a real graph change and has to be
+	// visible at Info in lifecycle.log.
 	if !strings.Contains(buf.String(), "dropped the links of a reversed pair") {
 		t.Errorf("a real link drop must be logged at Info:\n%s", buf.String())
 	}
-	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 0 {
-		t.Errorf("backwards link survived a reversed verdict: %d supersedes pair(s) remain", len(pairs))
+	// And the withheld withdrawal is visible at the same level, so a lifecycle log
+	// names the edge that is still demoting a note the verdict just denied.
+	if !strings.Contains(buf.String(), "reported, not applied") {
+		t.Errorf("a withheld withdrawal must be logged:\n%s", buf.String())
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 1 {
+		t.Errorf("live supersedes pair(s) = %d, want 1: the backwards edge is reported under #845, not withdrawn by the ordinary pass", len(pairs))
 	}
 	links, err := store.GetLinks(ctx, older)
 	if err != nil {
