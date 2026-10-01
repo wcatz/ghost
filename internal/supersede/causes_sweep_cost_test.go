@@ -67,7 +67,7 @@ func TestTheCausesSweepIsSkippedWhereThereIsNothingToSweep(t *testing.T) {
 	}
 	// And both endpoints move, so nothing but the sweep's own gate can keep the
 	// reverse invalidation out of the write path.
-	retagBoth(t, store, newer, older)
+	retagBoth(t, store, db, newer, older)
 
 	spy := &countingCausesStore{Store: store}
 	cls := &recordingCauses{}

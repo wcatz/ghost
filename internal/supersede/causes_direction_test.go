@@ -64,16 +64,41 @@ func (c *recordingCauses) ClassifyBatch(_ context.Context, pairs []Candidate) ([
 	return out, nil
 }
 
+// retagStamp is the ONE updated_at every retagged endpoint carries here. It is
+// later than both fixtures' created_at and later than the '2020-01-01' stamp
+// these pairs' edges are seeded with, so the only thing it has to be is THE SAME
+// on both endpoints — which is what makes `orient`'s tie fall to created_at, the
+// chronology the caller seeded on purpose (see retagBoth).
+const retagStamp = "2026-10-01 00:00:00"
+
 // retagBoth moves both endpoints' updated_at through the REAL writer, which is
 // what an operator's edit through a live `ghost mcp` does and what re-arms
-// skip-if-unchanged. A fixture that poked the column directly would be asserting
-// something about the column rather than about the pass's freshness test — and
-// the tag is a real change, so the write is a real one.
-func retagBoth(t *testing.T, store *memory.Store, ids ...string) {
+// skip-if-unchanged. A fixture that only poked the column directly would be
+// asserting something about the column rather than about the pass's freshness
+// test — and the tag is a real change, so the write is a real one.
+//
+// It then PINS both endpoints to one stamp. UpdateMemory stamps
+// updated_at = datetime('now') at SECOND resolution, so two of them a second
+// apart leave `older` holding the later stamp, and `orient` — which orders a pair
+// by updated_at and only then by created_at — asks the pair the other way round.
+// That is #847: the pair's direction became a function of whether the wall clock
+// ticked between two writes a fixture made microseconds apart, so these tests
+// failed on a slow runner for reasons that have nothing to do with what they
+// assert. Pinning after the real writes keeps the writer honest about what moved
+// (the text is unchanged, so the content cache is still a hit, which
+// TestALiveCausesEdgeIsNeverCacheSkipped depends on) and makes the direction a
+// property of the fixture.
+func retagBoth(t *testing.T, store *memory.Store, db *sql.DB, ids ...string) {
 	t.Helper()
+	ctx := context.Background()
 	for _, id := range ids {
-		if err := store.UpdateMemory(context.Background(), "p", id, nil, nil, nil, []string{"retagged-mid-pass"}); err != nil {
+		if err := store.UpdateMemory(ctx, "p", id, nil, nil, nil, []string{"retagged-mid-pass"}); err != nil {
 			t.Fatalf("retag %s: %v", id, err)
+		}
+	}
+	for _, id := range ids {
+		if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = ? WHERE id = ?`, retagStamp, id); err != nil {
+			t.Fatalf("pin updated_at %s: %v", id, err)
 		}
 	}
 }
@@ -171,7 +196,7 @@ func TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps(t *
 	}
 	// Both endpoints move, so nothing about the quiet can be the reason the
 	// assertions below hold.
-	retagBoth(t, store, newer, older)
+	retagBoth(t, store, db, newer, older)
 
 	cls := &recordingCauses{}
 	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
@@ -246,7 +271,7 @@ func TestACausesVerdictReAffirmsALiveCausesEdgeThatAgreesWithTheTimestamps(t *te
 	if err := store.CreateLinkJudged(ctx, older, newer, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
 		t.Fatal(err)
 	}
-	retagBoth(t, store, newer, older)
+	retagBoth(t, store, db, newer, older)
 
 	cls := &recordingCauses{}
 	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
@@ -369,7 +394,7 @@ func TestACausesVerdictReportsTheRelationItReplaced(t *testing.T) {
 	if err := store.CreateLinkJudged(ctx, older, newer, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {
 		t.Fatal(err)
 	}
-	retagBoth(t, store, newer, older)
+	retagBoth(t, store, db, newer, older)
 
 	res, classified, err := Run(ctx, store, &supersedesEverything{}, "p", 0.9, true, nil)
 	if err != nil {
@@ -452,7 +477,7 @@ func TestALiveCausesEdgeIsNeverCacheSkipped(t *testing.T) {
 	}
 	// Both endpoints have moved since, so nothing but the cache could hold this
 	// pair quiet.
-	retagBoth(t, store, newer, older)
+	retagBoth(t, store, db, newer, older)
 
 	cls := &recordingCauses{}
 	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
@@ -905,7 +930,7 @@ func TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn(t *testin
 	}
 	// Both endpoints move, so nothing about the quiet can be the reason the
 	// assertions below hold.
-	retagBoth(t, store, newer, older)
+	retagBoth(t, store, db, newer, older)
 
 	cls := &recordingDirections{}
 	_, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
