@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -130,6 +131,215 @@ func TestAGenuineDenialIsStillAContradiction(t *testing.T) {
 				t.Fatalf("outcome = %s, want contradicted for %q", v.Outcome, tc.prose)
 			}
 		})
+	}
+}
+
+// TestACueIsBoundToTheMemoryItDenies: #854. A cue denies SOMETHING, and the
+// something has to be the memory it is filed against — which is a second
+// requirement on top of the cue being a denial of a claim at all, and the one the
+// old rule did not have.
+//
+// The id arm fired on any sentence that both named an id and carried a cue
+// somewhere, so "Per <id>, I'll ignore the formatting" — an agent agreeing with
+// the memory while talking about its own prose — was filed as contradicted, and
+// because the cue list was matched as plain substrings, "ignore" also fired on
+// "ignored" and "ignores" for the same reason. Contradiction outranks every other
+// verdict, so both report ordinary use as the one finding an operator acts on
+// first.
+//
+// The four cases are the rule from both sides, on both arms: a cue beside the id
+// denies THAT memory, and a cue two words away denies something else.
+func TestACueIsBoundToTheMemoryItDenies(t *testing.T) {
+	const id = "4F3A9C1E7B2D8A6F5C0E1234AB5678EF"
+
+	cases := []struct {
+		name  string
+		prose string
+		want  Outcome
+		sig   Signal
+	}{
+		{
+			name:  "a cue about the agent's formatting, in a sentence naming the id",
+			prose: "Per " + id + ", I'll ignore the formatting.",
+			want:  OutcomeUsed,
+			sig:   SignalIdentifier,
+		},
+		{
+			name:  "a word that merely contains the cue, in a sentence naming the id",
+			prose: "the ignored files stay ignored, per " + id,
+			want:  OutcomeUsed,
+			sig:   SignalIdentifier,
+		},
+		{
+			name:  "the cue on the id it denies, before it",
+			prose: "ignore " + id + ", it is outdated",
+			want:  OutcomeContradicted,
+			sig:   SignalNegation,
+		},
+		{
+			name:  "the cue on the id it denies, after it",
+			prose: id + " is false: the port is 8080",
+			want:  OutcomeContradicted,
+			sig:   SignalNegation,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestSignals(t)
+			s.AddProse(tc.prose)
+
+			j := Judged{MemoryID: id, Content: negMemoryContent}
+			v, ok := CompareAgainst(s, j)
+			if !ok {
+				t.Fatal("CompareAgainst refused to judge")
+			}
+			if v.Outcome != tc.want {
+				t.Fatalf("outcome = %s (%s) for %q, want %s", v.Outcome, v.Signal, tc.prose, tc.want)
+			}
+			if v.Signal != tc.sig {
+				t.Errorf("signal = %q, want %q", v.Signal, tc.sig)
+			}
+		})
+	}
+}
+
+// TestACueIsMatchedAsWholeWords: every cue is a run of WORDS, and the two that
+// read as words — "ignore" and "is false" — are also the two a substring match
+// finds inside ordinary ones ("ignored", "ignores", "falsehood", "falsely").
+//
+// That is a whole sentence's worth of false contradictions: an agent that names an
+// id and then talks about its own ignored files has agreed with the memory, and
+// the audit filed it as the agent having found the memory wrong.
+//
+// The check is per-cue in both directions. A list whose entries are matched as
+// substrings passes "some cue works" for every one of them, and a fix that made
+// the matcher stricter must not have made one of the real constructions
+// unreachable, so each entry is asserted both as a run and inside a longer word.
+func TestACueIsMatchedAsWholeWords(t *testing.T) {
+	for _, cue := range negationCues {
+		words := splitWords(cue)
+		if strings.Join(words, " ") != cue {
+			t.Errorf("cue %q is not a run of words (%q), so it cannot be matched as one", cue, words)
+			continue
+		}
+		if !HasNegationCue("the " + cue + " of that thing") {
+			t.Errorf("HasNegationCue(%q) = false: %q is a denial construction and must still match", cue, cue)
+		}
+		glued := "x" + cue + "y"
+		if HasNegationCue("the " + glued + " of that thing") {
+			t.Errorf("HasNegationCue matched %q inside %q, which denies nothing", cue, glued)
+		}
+	}
+}
+
+// TestTheFingerprintArmNeedsTheCueBesideTheMemorysOwnWords: the binding is this
+// arm's rule too, and in the same direction. A cued sentence can clear the token
+// bar and still be denying something else: the fixture below denies a formatter
+// and then quotes the memory verbatim, and the memory's own wording is not what
+// the cue is bound to — a claim about this memory the agent never made.
+//
+// The second half is the other edge of the same rule, and the reason the binding
+// is a named rule rather than "the same sentence": the identical words with the
+// cue beside them ARE a denial.
+//
+// The first fixture's cue is bound to "formatter", which is why it reads the way
+// it does. A cue followed by a colon or a dash and then the restatement ("is
+// wrong: <the memory's wording>") IS a denial — splitWords drops the punctuation,
+// so a clause boundary is not a word to be counted, and those are pinned by the
+// pre-existing tests that quote the cue at the head of the sentence.
+func TestTheFingerprintArmNeedsTheCueBesideTheMemorysOwnWords(t *testing.T) {
+	toks := memTokens(t)
+
+	far := newTestSignals(t)
+	far.AddProse("ignore the formatter entirely, " + memContent)
+	if !far.matches(toks) {
+		t.Fatal("the fixture does not clear the token arm's bar, so it proves nothing about the binding")
+	}
+	if far.contradicts(toks, "") {
+		t.Error("a cue bound to another subject contradicted a memory the sentence only quoted")
+	}
+
+	near := newTestSignals(t)
+	near.AddProse("the opencode plugin materializes its transcript under mkdtemp is wrong")
+	if !near.contradicts(toks, "") {
+		t.Error("the same words with the cue beside them are not a denial")
+	}
+}
+
+// TestTheBindingSurvivesTheSidecar: the hook and the child are separate
+// processes, so what the comparison asks about a cue has to be on the wire like
+// everything else it needs. Both halves of it are new — the ids a cue is bound
+// to, and the fingerprints of the words it is bound to — and the second is a
+// third field kind on the `neg` line, which is why the line is marked rather than
+// read by shape alone.
+//
+// The third case is the one a round trip could plausibly get wrong in the
+// permissive direction: a sentence naming an id its cue is NOT bound to must come
+// back without that id attached to a denial.
+func TestTheBindingSurvivesTheSidecar(t *testing.T) {
+	const (
+		denied = "4F3A9C1E7B2D8A6F5C0E1234AB5678EF"
+		quoted = "5A2B4C6D8E0F1A3B5C7D9E0F1A2B3C4D"
+		// Words no sentence below shares, so the id arm is the only one that can
+		// reach a verdict in these two assertions.
+		unshared = "a memory whose wording the agent never repeated"
+	)
+
+	s := newTestSignals(t)
+	s.AddProse("ignore " + denied + ", it is outdated")
+	s.AddProse("the opencode plugin materializes its transcript under mkdtemp is wrong")
+	s.AddProse("Per " + quoted + ", I'll ignore the formatting.")
+
+	path, err := WriteSidecar(t.TempDir(), s)
+	if err != nil {
+		t.Fatalf("WriteSidecar: %v", err)
+	}
+	got, err := ReadSidecar(path, testHasher)
+	if err != nil {
+		t.Fatalf("ReadSidecar: %v", err)
+	}
+
+	if !got.contradicts(testTokens(unshared), denied) {
+		t.Error("the id the cue was bound to did not survive the sidecar")
+	}
+	if !got.contradicts(memTokens(t), "") {
+		t.Error("the words the cue was bound to did not survive the sidecar")
+	}
+	if got.contradicts(testTokens(unshared), quoted) {
+		t.Error("an id the cue was NOT bound to came back as a denial")
+	}
+}
+
+// TestTheSidecarVersionIsBumpedRatherThanReused: the binding is a THIRD field kind
+// on the `neg` line, so a file written before it is missing the field the
+// comparison now asks about — and it would parse all the same, because the two
+// shapes it already had did not move. Read back, it carries fingerprints and
+// nothing bound to any cue, so every contradiction in that turn's file goes
+// unfound and the audit reports clean.
+//
+// That is why the header is bumped rather than reused: an unreadable format says
+// so out loud and costs one turn's audit, which is what a sidecar this build
+// cannot read is already worth. The two headers must differ and the refusal must
+// name BOTH, because the path arrived on a command line and a reader holding only
+// the new format would otherwise have nothing to go on.
+func TestTheSidecarVersionIsBumpedRatherThanReused(t *testing.T) {
+	if SidecarHeader == sidecarV1 {
+		t.Fatalf("SidecarHeader and sidecarV1 are both %q, so a file written before the binding was introduced parses as one this build wrote", SidecarHeader)
+	}
+
+	path := t.TempDir() + "/ghost-audit-old.signals"
+	if err := writeFileString(path, sidecarV1+"\n"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := ReadSidecar(path, testHasher)
+	if err == nil {
+		t.Fatal("ReadSidecar accepted a file written before the cue binding existed; every contradiction in it would be silently unfound")
+	}
+	for _, want := range []string{SidecarHeader, sidecarV1} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ReadSidecar error %q does not name %q, so a reader cannot tell which format it was refused against", err, want)
+		}
 	}
 }
 

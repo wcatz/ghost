@@ -2,6 +2,8 @@ package audit
 
 import (
 	"encoding/hex"
+	"slices"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -141,13 +143,24 @@ const idLen = 32
 func memoryIDs(text string) []string {
 	var out []string
 	for _, word := range splitWords(text) {
-		// splitWords lower-cases, so a 32-character hex run arrives here as 32
-		// lower-case characters; the length test is over the word as written.
-		if len(word) == idLen && isHex(word) {
-			out = append(out, strings.ToUpper(word))
+		if id, ok := memoryIDWord(word); ok {
+			out = append(out, id)
 		}
 	}
 	return out
+}
+
+// memoryIDWord is one id-shaped word and its canonical spelling, so the shape rule
+// is written once: memoryIDs asks it of a whole text, and the negation arm asks
+// it of the single words a cue is bound to (#854), which is a different question
+// about the same shape.
+func memoryIDWord(word string) (string, bool) {
+	// splitWords lower-cases, so a 32-character hex run arrives here as 32
+	// lower-case characters; the length test is over the word as written.
+	if len(word) == idLen && isHex(word) {
+		return strings.ToUpper(word), true
+	}
+	return "", false
 }
 
 // isHex reports whether s is hex, which is what distinguishes an id-shaped token
@@ -178,6 +191,20 @@ func isHex(s string) bool {
 // outdated", "is obsolete", "is stale"), and explicit withdrawal ("ignore",
 // "disregard"). A sentence containing one of these is denying something, and
 // the contradicts arm then requires that the denial be ABOUT this memory.
+//
+// Each entry is a run of WORDS and is matched AS ONE (#854). Matched as plain
+// substrings — which is what this list was, and what two of its entries could
+// not survive being — a cue fires inside a word that merely contains it:
+// "ignored", "ignores" and "ignored files" all contain "ignore", and "falsehood"
+// contains "is false". An agent naming an id and then talking about its own
+// ignored files agrees with the memory and was filed as having found it wrong.
+//
+// The matching is therefore over splitWords, the ONE tokenizer both sides of the
+// comparison already use: a cue is a run of CONSECUTIVE words, so nothing shorter
+// than the cue and nothing longer than the cue satisfies it. Both properties are
+// pinned per entry by TestACueIsMatchedAsWholeWords, because the defect was
+// EVERY entry and a test that asserted only "some cue still matches" would have
+// passed with all fifteen still substring-matched.
 var negationCues = []string{
 	"is wrong", "is incorrect", "is false", "is not true", "is not correct",
 	"is obsolete", "is outdated", "is stale", "is deprecated", "is superseded",
@@ -185,17 +212,154 @@ var negationCues = []string{
 	"disregard", "ignore",
 }
 
-// HasNegationCue reports whether a single sentence denies something.
-func HasNegationCue(segment string) bool {
-	// Padded so a cue that ends in a space ("not ") can be found at either end of
-	// the segment without the padding changing what the cue is.
-	padded := " " + strings.ToLower(segment) + " "
+// negationCueWords is negationCues as the word runs they are matched as.
+//
+// Derived once rather than split per sentence: a comparison scans a whole
+// transcript, and the split is a pure function of a list that cannot change at
+// run time.
+var negationCueWords = func() [][]string {
+	out := make([][]string, 0, len(negationCues))
 	for _, cue := range negationCues {
-		if strings.Contains(padded, cue) {
+		out = append(out, splitWords(cue))
+	}
+	return out
+}()
+
+// cueGap is how many WORDS may stand between a cue and the id it denies, which is
+// the id arm's whole binding rule.
+//
+// A gap rather than exact adjacency because both constructions a denial takes put
+// a word in between: "ignore memory <id>" has a noun between the cue and the id,
+// and "<id> is wrong" has the determiners between the id and the cue. One is where
+// it has to stop, because that is the sentence this rule exists for — "Per <id>,
+// I'll ignore the formatting" names the memory, agrees with it, and then uses the
+// word "ignore" about the agent's own prose, two words away. English puts a
+// subject between a comma and its clause's verb, so the distance holds for "I will
+// ignore" and "I'll ignore" alike rather than turning on how a contraction happens
+// to tokenise.
+//
+// One word is the whole of the rule on this side, and it is deliberately tight: a
+// denial it misses is a contradiction that is not filed, which is the honest
+// direction (see splitWords), while one it admits is ordinary use reported to an
+// operator as a finding.
+const cueGap = 1
+
+// isDistinctive is whether a word is one this package would fingerprint.
+//
+// The length floor and the stopword list, which is the same pair distinctTokens
+// applies — and it is named rather than inlined because the binding below has to
+// skip exactly the words a fingerprint skips. A cue is found over RAW words (its
+// own words are mostly too short or too common to be tokens: "is wrong" is one
+// token), so what it binds to is found over the words that survive as tokens.
+func isDistinctive(word string) bool {
+	return len(word) >= minTokenLen && !stopWords[word]
+}
+
+// boundPositions is where a cue's object is, in the sentence's word positions: the
+// cue's OWN words plus, on each side, the nearest word a fingerprint would keep.
+//
+// Skipping the words between is the point, and the skip is sound rather than
+// generous: splitWords drops punctuation, so a clause boundary is not a word and
+// cannot separate a cue from what follows it. "that is wrong — the opencode plugin
+// materializes its transcript" and "that is wrong: the v20 migration runs" are the
+// denial-then-restatement shape, and in both the cue's object is the next word
+// with a token in it. What stops the sentence this rule exists for is that the
+// words in between are words — "Per <id>, I'll ignore the formatting" reaches its
+// object across a subject and a possessive, not across punctuation.
+//
+// The id arm does NOT use this: an id is 32 characters and so always survives the
+// token filter, which would let this skip straight over a subject clause and bind
+// "ignore" to any id the sentence named. Ids are bound by cueGap instead, where
+// the words in between are counted rather than skipped.
+//
+// On this arm the same skip DOES put an id beside a cue, and that is harmless
+// rather than by luck: an id is never one of a memory's tokens (addWords keeps ids
+// out of the token set, and the token arm's floor of three is what depends on
+// that), so an id in cueFps can never match anything the comparison asks about.
+func boundPositions(words []string, cues []cueSpan) []int {
+	var out []int
+	seen := make(map[int]bool, len(cues)*3)
+	mark := func(i int) {
+		if i < 0 || i >= len(words) || seen[i] {
+			return
+		}
+		seen[i] = true
+		out = append(out, i)
+	}
+	for _, c := range cues {
+		for i := c.start; i <= c.end; i++ {
+			mark(i)
+		}
+		for i := c.start - 1; i >= 0; i-- {
+			if isDistinctive(words[i]) {
+				mark(i)
+				break
+			}
+		}
+		for i := c.end + 1; i < len(words); i++ {
+			if isDistinctive(words[i]) {
+				mark(i)
+				break
+			}
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// cueSpan is where one cue sits in a sentence: the range of word positions it
+// occupies, inclusive at both ends.
+//
+// Positions rather than text, because the sentence has already been split and the
+// binding rule is about DISTANCE between two things in it.
+type cueSpan struct {
+	start int
+	end   int
+}
+
+// cueSpans reports every denial cue in words.
+//
+// Every occurrence and every cue, so the binding below is the union of what they
+// each deny rather than the first one's guess: a sentence can carry a cue per
+// memory id, which is the case a document listing several retractions takes.
+func cueSpans(words []string) []cueSpan {
+	var out []cueSpan
+	for _, cue := range negationCueWords {
+		for i := 0; i+len(cue) <= len(words); i++ {
+			if slices.Equal(words[i:i+len(cue)], cue) {
+				out = append(out, cueSpan{start: i, end: i + len(cue) - 1})
+			}
+		}
+	}
+	return out
+}
+
+// boundToCue reports whether the word at position i is what a cue in this
+// sentence denies, by counting the words between them.
+//
+// This is the ID arm's binding rule and only that arm's, because an id is a
+// 32-character token that survives any filter — a rule that skipped to the
+// nearest word which could be a fingerprint would step straight over the subject
+// clause in "Per <id>, I'll ignore the formatting" and bind the cue to the id
+// anyway, which is the false contradiction #854 is about. The cue is at the other
+// end of it: this is not "is there a cue somewhere in this sentence" — the
+// segment already established that, and answering it a second time without the
+// distance is what filed an agent's agreement as a contradiction.
+func boundToCue(i int, cues []cueSpan) bool {
+	for _, c := range cues {
+		if i >= c.start-cueGap && i <= c.end+cueGap {
 			return true
 		}
 	}
 	return false
+}
+
+// HasNegationCue reports whether a single sentence denies something.
+//
+// A denial of SOMETHING, not of a particular memory: what it denies is decided per
+// memory, against that memory's id and its own wording, by the arms in compare.go.
+func HasNegationCue(segment string) bool {
+	return len(cueSpans(splitWords(segment))) > 0
 }
 
 // sentenceSplit is where one sentence ends. Sentence-final punctuation and the
