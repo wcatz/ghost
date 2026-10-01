@@ -76,8 +76,25 @@ func (b *lockedBuffer) Reset() {
 // budget warnings and the probe warnings both go to slog.Default(). The cost is
 // that the sink outlives nothing — a goroutine the test abandoned can still be
 // writing here after the test's last assertion, so the buffer is locked rather
-// than bare, and see lockedBuffer plus waitForAbandonedCodexProbe for the two
-// halves of that.
+// than bare, and see lockedBuffer plus settleAbandonedProbes for the two halves
+// of that.
+//
+// Settling the probes this test abandoned belongs HERE rather than in each test
+// that abandons one, because a test cannot know it abandoned a probe at all — the
+// flight belongs to codexFeaturesFor or claudeCapabilitiesFor, which walk away
+// from it on purpose — so a rule every capture-installing test follows by
+// construction is the only version of this that covers all of them.
+//
+// The ORDER inside the cleanup is the point, and settling first is the order that
+// counts: a straggler's last warnings land in the capture this test is still
+// holding rather than in a handler the next test has installed. Sequencing the
+// settle and the restore in ONE closure is what makes that a fact about this
+// function — registering them as two cleanups would make it a fact about which
+// line of a test ran first, since t.Cleanup runs LIFO, and the two halves are
+// registered from different helpers. A test that reads no log still settles, from
+// the fake-binary helper's own registration; see registerProbeIdentity and
+// markCaptureInstalled, which between them keep a test with both helpers to one
+// settle.
 //
 // This is the same helper the codex policy tests reach through
 // captureCodexWarnings, which names the verdicts those tests are actually
@@ -87,6 +104,12 @@ func captureProcessLogs(t *testing.T) *lockedBuffer {
 	var logs lockedBuffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	// Claims the settle for this test, and takes it over from a fake that claimed
+	// it first — see markCaptureInstalled for why the capture is the better owner.
+	markCaptureInstalled(t)
+	t.Cleanup(func() {
+		settleAbandonedProbes(t)
+		slog.SetDefault(prev)
+	})
 	return &logs
 }

@@ -17,6 +17,10 @@ import (
 	"time"
 )
 
+// A codex or claude fake also registers its probe identity here, which is what
+// makes the end-of-test settle happen for the probe tests that install no capture
+// and read no log at all: see registerProbeIdentity, and captureProcessLogs for
+// the tests that do install one.
 func fakeHarnessPolicyBinary(t *testing.T, name, script string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -26,6 +30,16 @@ func fakeHarnessPolicyBinary(t *testing.T, name, script string) string {
 	path := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -e\n"+script), 0o755); err != nil {
 		t.Fatalf("write fake %s: %v", name, err)
+	}
+	// Only the two harnesses that HAVE a probe are registered: an opencode or
+	// goose fake never reaches a probe group, and settling one would be a no-op
+	// that reads like a guarantee it does not give. The switch is on the NAME
+	// rather than on whether a probe was reached, because the registration has to
+	// happen at fake-creation time — that is the only moment the file exists, and
+	// a path is all a settle can name a flight by.
+	switch name {
+	case "codex", "claude":
+		registerProbeIdentity(t, path)
 	}
 	return path
 }
