@@ -51,7 +51,7 @@ func TestOpenReadOnlyTransferStoreRefusesAnUnmigratedDatabase(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	store, err := openReadOnlyTransferStore(dataDir)
+	store, err := openReadOnlyTransferStore(dataDir, exportOperation)
 	if err == nil {
 		store.Close() //nolint:errcheck
 		t.Fatal("a read-only transfer store opened a database behind the current schema")
@@ -95,7 +95,7 @@ func TestOpenReadOnlyTransferStoreAcceptsACurrentDatabase(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	store, err := openReadOnlyTransferStore(dataDir)
+	store, err := openReadOnlyTransferStore(dataDir, exportOperation)
 	if err != nil {
 		t.Fatalf("openReadOnlyTransferStore on a current database: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestReadOnlyTransferStoreIsStrictAboutTheSchemaVersionNotAFloor(t *testing.
 	}
 	probe.Close() //nolint:errcheck
 
-	_, err = openReadOnlyTransferStore(dir)
+	_, err = openReadOnlyTransferStore(dir, exportOperation)
 	if err == nil {
 		t.Fatal("a v15 store was accepted; the check is a floor, not strict equality — if that is intended, this test is the thing to delete deliberately")
 	}
@@ -195,7 +195,7 @@ func TestReadOnlyTransferStoreStillRefusesAWrongVersionDirection(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	_, err = openReadOnlyTransferStore(dir)
+	_, err = openReadOnlyTransferStore(dir, exportOperation)
 	if err == nil {
 		t.Fatal("a read-only transfer store opened a database from a newer Ghost")
 	}
@@ -227,4 +227,53 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// TestReadOnlyTransferStoreNamesTheOperationItWasAskedFor: the refusal ends with what
+// the user was trying to do, and `ghost context --audit` is not "exporting it or
+// previewing an import into it" — those are two commands the user did not run, in a
+// sentence whose only job is to tell them what to do next.
+//
+// The export and dry-run-import wordings are asserted byte-identical, because those two
+// ARE one operation as far as a reader is concerned and their sentence is documented
+// prose: a change there is a docs change, not a drive-by improvement.
+func TestReadOnlyTransferStoreNamesTheOperationItWasAskedFor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 15`); err != nil {
+		t.Fatalf("set user_version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// The audit's own wording, through the same seam buildContextAudit opens.
+	_, err = openReadOnlyTransferStore(dir, auditOperation)
+	if err == nil {
+		t.Fatal("a v15 store was accepted by the read-only opener")
+	}
+	for _, want := range []string{"ghost context --audit", "migrate it"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the audit's refusal does not mention %q, so a user who ran the audit is told what to do next in terms of two commands they did not run: %v", want, err)
+		}
+	}
+	for _, unwanted := range []string{"exporting it", "previewing an import"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("the audit's refusal still names %q: %v", unwanted, err)
+		}
+	}
+
+	// And the export's wording is unchanged, to the character.
+	_, exportErr := openReadOnlyTransferStore(dir, exportOperation)
+	if exportErr == nil {
+		t.Fatal("a v15 store was accepted by the read-only opener")
+	}
+	const wantSuffix = "to migrate it before exporting it or previewing an import into it"
+	if !strings.HasSuffix(exportErr.Error(), wantSuffix) {
+		t.Errorf("the export's refusal changed shape.\n got: %v\nwant it to end: %q", exportErr, wantSuffix)
+	}
 }

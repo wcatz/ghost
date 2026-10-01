@@ -10,9 +10,8 @@ package mcpserver
 //
 // So this asserts four things. That each source gets its own line and the lines do
 // not pool. That a source this build knows about but that has recorded nothing is
-// NAMED, because before #850's passive injections write their records
-// session_start and project_context have no rows and silence would read as
-// health. That the block says on its face that "ignored" is not a score — the one
+// NAMED, because a source that has recorded no call on this machine
+// otherwise reads as a source this build cannot see. That the block says on its face that "ignored" is not a score — the one
 // word in it that an agent is most likely to misread as a judgement about a
 // memory's quality. And that the whole thing is additive: no new tool, and every
 // line ghost_health already printed keeps its name and its place.
@@ -322,9 +321,19 @@ func TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor(t *testing.T) {
 	if !strings.Contains(text, "name no call at all") {
 		t.Errorf("ghost_health does not name the unattributed verdict:\n%s", text)
 	}
-	// The unattributed one is counted, so it appears in the figures AND in the note.
-	if !strings.Contains(text, "(1 of 2 scored)") {
-		t.Errorf("ghost_health did not count the unattributed verdict in the denominator:\n%s", text)
+	// The unattributed one is COUNTED and NAMED, and in no figure — so the precision
+	// beside it is over one attributed verdict, not two. A denominator holding a
+	// verdict with no call in it is a ratio of two populations, which is the thing
+	// this whole attribution split exists to prevent.
+	if !strings.Contains(text, "100% used (1 of 1 scored)") {
+		t.Errorf("ghost_health put the unattributed verdict into the precision denominator:\n%s", text)
+	}
+	if strings.Contains(text, "(1 of 2 scored)") || strings.Contains(text, "(2 of 2 scored)") {
+		t.Errorf("ghost_health reported two scored verdicts where only one names a call:\n%s", text)
+	}
+	// And the note says so in words, not merely by printing a different number.
+	if !strings.Contains(text, "no call to be one of") {
+		t.Errorf("ghost_health does not say the unattributed verdict is out of the figures rather than lost:\n%s", text)
 	}
 }
 

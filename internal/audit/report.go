@@ -26,10 +26,10 @@ package audit
 //     about a source that has never run is a measurement of nothing, and it is
 //     the reading a fresh install gets first.
 //   - Every known source is named even when it is empty, so a source this build
-//     knows about and a source it does not can be told apart. That is #850's
-//     case: before the passive injections write their records, session_start and
-//     project_context have no rows, and a silent report would look like a healthy
-//     one.
+//     knows about and a source it does not can be told apart. A project that has
+//     only ever searched has no session_start or project_context row at all, and a
+//     report built only from the rows present would look like a healthy one rather
+//     than like two sources that have never been measured.
 //   - The undetectable half of "missed" prints as NOT MEASURED, spelled out in
 //     those words. It is never 0: no heuristic here can tell a fact the agent
 //     re-derived in-session from one it worked out, so printing a zero would be the
@@ -76,11 +76,10 @@ var errNoReportProject = fmt.Errorf("audit: a project id is required to report o
 // report prints them.
 //
 // A closed list rather than whatever the rows happen to contain, for the reason
-// the empty state matters most: before #850's passive injections write their
-// records, those two sources have no rows at all, and a report built only from
-// the rows present would say nothing about them. Naming them with "no rows" is
-// what distinguishes "this source has never run here" from "this build cannot
-// see it".
+// the empty state matters most: a project that has only ever searched records no
+// session_start or project_context call, and a report built only from the rows
+// present would say nothing about them. Naming them with "no rows" is what
+// distinguishes "this source has never run here" from "this build cannot see it".
 //
 // Drawn from assemble.Source because that is where the vocabulary is defined, and
 // a copy of it here would be a list free to drift from the writers that fill it.
@@ -188,10 +187,13 @@ type SourceReport struct {
 	//
 	// Counted rather than dropped, because there is no call to be in or out of a
 	// window with and the verdict is real evidence about real agent text — and NAMED
-	// rather than counted quietly, because it is the only way Scored can exceed
-	// Kept, and a reader who sees the numerator above the denominator has to be told
-	// which figure is the odd one out rather than left to conclude the report is
-	// wrong.
+	// rather than counted quietly, because it is in NO other figure: precision is a
+	// ratio over (call, memory) pairs, and a verdict with no call has no pair to
+	// belong to, so putting it in Scored would make the numerator and the
+	// denominator two different populations.
+	//
+	// It is therefore NOT a way Scored can exceed Kept — the report never reports a
+	// numerator above its denominator.
 	Unattributed int
 	// Detached is how many of this source's verdicts were LEFT OUT because the call
 	// they belong to is not one this report counts: outside the window, or no longer
@@ -375,9 +377,17 @@ func BuildReport(ctx context.Context, store *memory.Store, opts ReportOptions) (
 		// the window is NOT enough: the two tables are stamped at different instants,
 		// so a verdict judged minutes after its call falls into a window its call is
 		// not in (see SourceReport.Detached).
+		//
+		// And an UNATTRIBUTED verdict is counted and named but is in NO figure below.
+		// It used to land in Scored, which put it in the numerator and the
+		// denominator of a precision whose other term is a count of (call, memory)
+		// pairs — a ratio of two populations under one name, so a store with sessions
+		// that filed session-level verdicts reported a precision about a
+		// (call, memory) corpus that its own numerator was not part of.
 		switch {
 		case row.RecordRowID <= 0:
 			s.Unattributed++
+			continue
 		case !counted[row.RecordRowID]:
 			s.Detached++
 			continue
@@ -530,43 +540,76 @@ func mergeNames(a, b []string) []string {
 	return out
 }
 
-// MergeProjects combines per-project reports into one per-source view, for a
-// caller reporting over the whole store.
+// BuildStoreReport is BuildReport's whole-store sibling: the same figures, over every
+// project at once, for the surfaces that report the store rather than a project.
 //
-// It pools PROJECTS, never SOURCES, and that is the only difference from the rule
-// above: a search is a search whichever project ran it, so summing two projects'
-// search figures answers the question the per-source line is asking. The returned
-// Report carries an empty ProjectID on purpose — it is not a report about any
-// project, so nothing may print it as one — and its Sources are still one entry per
-// source, in the same order, with the same known-source entries even when empty.
-// Report.Pooled still returns nil.
+// It exists because the obvious composition — BuildReport per project, summed in Go —
+// makes the cost of a health check grow with the number of checkouts on the machine,
+// over a pool of exactly one connection. This is one aggregate per table instead (see
+// memory.RetrievalSourceTotals), so the work does not depend on how many projects are
+// registered, and it REPLACED the summing function rather than joining it: a shipped
+// combiner with no caller is how the next reader concludes it is the sanctioned way to
+// pool, which is exactly the thing this package refuses to be able to do.
 //
-// A source named only by some of the reports is still reported: a closed list must
-// not hide rows, so an unrecognised source in any input survives the merge.
-func MergeProjects(reports []Report) Report {
-	bySource := map[string]*SourceReport{}
-	for _, rep := range reports {
-		for _, src := range rep.Sources {
-			cur := bySource[src.Source]
-			if cur == nil {
-				// Copied, not aliased: the merge must not be able to reach back into
-				// a caller's report and change it.
-				entry := src
-				entry.DegradedReasons = mergeNames(nil, src.DegradedReasons)
-				entry.ContradictedIDs = mergeNames(nil, src.ContradictedIDs)
-				bySource[src.Source] = &entry
-				continue
-			}
-			cur.AddInto(src)
+// It pools PROJECTS within a source, never sources with each other, and the arithmetic
+// is SUM-of-counts and never an average of percentages — a project with one verdict
+// counts as much as one with three hundred.
+//
+// The scope is the whole store and the returned Report says so on its face: it carries
+// no project id, because there is no project to name. What the caller renders with it
+// is the caller's decision — Summary() for the compact health line, String() for a
+// report a human reads.
+func BuildStoreReport(ctx context.Context, store *memory.Store, opts ReportOptions) (Report, error) {
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var floor time.Time
+	if opts.Since > 0 {
+		floor = now.Add(-opts.Since).UTC()
+	}
+	totals, err := store.RetrievalSourceTotals(ctx, floor)
+	if err != nil {
+		return Report{}, fmt.Errorf("audit: read the retrieval totals: %w", err)
+	}
+
+	rep := Report{Since: opts.Since}
+	// Every known source gets an entry before any row is counted, so an empty one is
+	// REPORTED rather than absent — the same rule the per-project path holds, and for
+	// the same reason.
+	for _, name := range KnownSources {
+		rep.Sources = append(rep.Sources, SourceReport{Source: name})
+	}
+	index := map[string]int{}
+	for i := range rep.Sources {
+		index[rep.Sources[i].Source] = i
+	}
+	for _, t := range totals {
+		i, seen := index[t.Source]
+		if !seen {
+			index[t.Source] = len(rep.Sources)
+			rep.Sources = append(rep.Sources, SourceReport{Source: t.Source})
+			i = len(rep.Sources) - 1
+		}
+		rep.Sources[i] = SourceReport{
+			Source:           t.Source,
+			Calls:            t.Calls,
+			Kept:             t.Kept,
+			KeptNothing:      t.KeptNothing,
+			Scored:           t.Scored,
+			Used:             t.Used,
+			Ignored:          t.Ignored,
+			Superseded:       t.Superseded,
+			Contradicted:     t.Contradicted,
+			ContradictedIDs:  t.ContradictedIDs,
+			DegradedVerdicts: t.DegradedVerdicts,
+			DegradedReasons:  t.DegradedReasons,
+			Unattributed:     t.Unattributed,
+			Detached:         t.Detached,
 		}
 	}
-	merged := Report{}
-	for _, name := range sortedKeys(bySource) {
-		merged.Sources = append(merged.Sources, *bySource[name])
-	}
-	// The same ordering the single-project path uses, so a merged block and a
-	// per-project report read identically and a known source stays first.
-	return Report{Sources: orderSources(merged.Sources)}
+	rep.Sources = orderSources(rep.Sources)
+	return rep, nil
 }
 
 // Summary renders one source as a SINGLE line, for a compact per-source block.
@@ -600,7 +643,7 @@ func (s SourceReport) Summary() string {
 //
 // It does NOT name the project, and that is a rule rather than an omission: the
 // scope is the caller's to state, because a merged store-wide report (see
-// MergeProjects) carries no project id at all, and a renderer that printed
+// BuildStoreReport) carries no project id at all, and a renderer that printed
 // `r.ProjectID` unconditionally would label that one "retrieval audit for " — a
 // line that reads as a report whose subject failed to load. The CLI states it
 // (`ghost context --audit` prints "retrieval audit report for project …") and the
@@ -721,7 +764,7 @@ func (s SourceReport) attributionNotes() string {
 	}
 	if s.Unattributed > 0 {
 		fmt.Fprintf(&b,
-			"    %d verdict(s) name no call at all, so they are counted in the figures above and in neither calls nor kept\n",
+			"    %d verdict(s) name no call at all, so they are counted here and in no figure above: precision is a ratio over (call, memory) pairs, and these have no call to be one of\n",
 			s.Unattributed)
 	}
 	return b.String()

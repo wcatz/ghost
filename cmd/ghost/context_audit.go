@@ -238,7 +238,9 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 // corpus, with no indication that the scope they asked for was not the scope they
 // got.
 func buildContextAudit(ctx context.Context, opts contextAuditOptions, dataDir string) (audit.Report, error) {
-	store, err := openReadOnlyTransferStore(dataDir)
+	// auditOperation, so a user whose store is behind is told to migrate before
+	// REPORTING rather than before two transfer commands they did not run.
+	store, err := openReadOnlyTransferStore(dataDir, auditOperation)
 	if err != nil {
 		return audit.Report{}, err
 	}
@@ -284,7 +286,7 @@ func buildContextAudit(ctx context.Context, opts contextAuditOptions, dataDir st
 // printContextAudit renders the report.
 //
 // The scope line is here rather than on Report because Report is not always about
-// one project — audit.MergeProjects returns a store-wide view whose ProjectID is
+// one project — audit.BuildStoreReport returns a store-wide view whose ProjectID is
 // empty on purpose, so a renderer that printed the field unconditionally would
 // label that one "retrieval audit for ". This command is always about one project,
 // so this is where the scope is stated. The figures are identical whichever way the
