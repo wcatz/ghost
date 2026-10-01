@@ -161,6 +161,24 @@ func TestParseContextAuditArgs(t *testing.T) {
 			wantFail: "twice",
 		},
 		{
+			// --since is a scope too, and the silent half of a duplicate window is
+			// the one a reader cannot catch: the report echoes the window it used,
+			// so `--since 24h --since 168h` prints a confident "the last 24h" and
+			// answers a different question from the one the command line asked
+			// twice. A flag that cannot be said twice is a flag whose two values
+			// the reader has to reconcile themselves.
+			name:     "a window given twice is refused, not silently narrowed",
+			args:     []string{"--audit", "--since", "24h", "--since=168h"},
+			wantFail: "twice",
+		},
+		{
+			// Both forms, because --project and --cwd are each held by two spellings
+			// and a guard on one of them is a guard on half the flag.
+			name:     "a window given twice, attached first, is refused too",
+			args:     []string{"--audit", "--since=24h", "--since", "168h"},
+			wantFail: "twice",
+		},
+		{
 			name:     "an unknown flag is an error, not something ignored",
 			args:     []string{"--audit", "--json"},
 			wantFail: "unknown flag",

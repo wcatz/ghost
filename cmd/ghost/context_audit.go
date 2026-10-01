@@ -101,7 +101,7 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 	// seenProject and seenCwd count OCCURRENCES, which the options struct cannot:
 	// it has no place to record that an empty value was already refused, and an
 	// empty value is exactly the one a `!= ""` duplicate guard cannot see.
-	var seenProject, seenCwd bool
+	var seenProject, seenCwd, seenSince bool
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -159,6 +159,20 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			} else {
 				value = strings.TrimPrefix(arg, "--since=")
 			}
+			// --since is a SCOPE like the other two, and the silent half of a duplicate
+			// window is the one a reader cannot catch: the report echoes the window it
+			// used, so `--since 24h --since=168h` prints a confident "the last 24h"
+			// having answered a different question from the one the command line asked
+			// twice. Duplicate first, before the value is judged a duration, so the
+			// answer names the two windows rather than the second one's spelling. There
+			// is no empty-value check here because there cannot be one to add:
+			// time.ParseDuration already refuses "", naming the value, and that error
+			// is about the value rather than about a scope silently becoming the whole
+			// store.
+			if seenSince {
+				return opts, fmt.Errorf("--since was given twice (%s and %s)", opts.Since, value)
+			}
+			seenSince = true
 			// The value is the next token whatever it looks like, and time.Parse is
 			// left to reject it: a guard that only accepted a token which does not
 			// look like a flag would have to guess, and the resulting error names

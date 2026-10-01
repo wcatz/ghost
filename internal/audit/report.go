@@ -653,9 +653,12 @@ func (r Report) String() string {
 		// store does not hold, on the one line whose job is to say how much of the
 		// denominator is trustworthy. health_retrieval.go divides by Scored for the
 		// same reason, and two surfaces of one figure may not disagree.
+		// labelDegraded mirrors health_retrieval.labelReasons: each stored reason goes
+		// through assemble.Label so a newline in the column forges a token, not a
+		// line of output.
 		fmt.Fprintf(&b,
 			"  %s: %d of its %d scored verdict(s) were judged against a partly-read transcript (%s), so an ignored verdict there is a claim about the text that was read\n",
-			assemble.Label(src.Source), src.DegradedVerdicts, src.Scored, strings.Join(src.DegradedReasons, ", "))
+			assemble.Label(src.Source), src.DegradedVerdicts, src.Scored, labelDegraded(src.DegradedReasons))
 	}
 	return b.String()
 }
@@ -695,7 +698,7 @@ func (s SourceReport) line() string {
 	}
 	if s.DegradedVerdicts > 0 {
 		fmt.Fprintf(&b, "    %d of those verdicts are degraded (%s)\n",
-			s.DegradedVerdicts, strings.Join(s.DegradedReasons, ", "))
+			s.DegradedVerdicts, labelDegraded(s.DegradedReasons))
 	}
 	b.WriteString(s.attributionNotes())
 	return b.String()
@@ -737,4 +740,17 @@ func (r Report) AttributionTotals() (detached, unattributed int) {
 		unattributed += src.Unattributed
 	}
 	return detached, unattributed
+}
+
+// labelDegraded mirrors health_retrieval.labelReasons: each stored reason goes
+// through assemble.Label so a newline in the column forges a token, not a line
+// of output. The reasons come from the scanner's fail-open vocabulary, not from
+// a transcript, but the column behind them is TEXT and this block is a warning
+// line that another line could be forged under.
+func labelDegraded(reasons []string) string {
+	out := make([]string, 0, len(reasons))
+	for _, r := range reasons {
+		out = append(out, assemble.Label(r))
+	}
+	return strings.Join(out, ", ")
 }
