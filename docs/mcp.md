@@ -139,6 +139,15 @@ confident wrong answer:
   transcript read stays in the denominator, so the precision beside it is exact
   about a transcript that stopped early — which is what the `⚠` line under that
   source says, naming the reason.
+- **A verdict whose call is not counted is named, not dropped.** A call is stamped
+  when it happened and a verdict when the detached audit judged it, so the two
+  tables are two clocks and a window over both is two populations. The verdict
+  half is intersected with the calls the report counts, and a verdict naming any
+  other rowid — outside the window, or evicted by the call cap — is counted and
+  named as **detached** on a `⚠` line, because a report that quietly loses real
+  verdicts is indistinguishable from a report over a store where they were never
+  written. A verdict naming no call at all (`record_rowid = 0`) is **unattributed**,
+  and is the only other way the numerator can outrun the denominator.
 
 The scope is the whole store, with projects pooled **within** a source and never
 sources with each other. It is a store-wide view rather than a per-project one

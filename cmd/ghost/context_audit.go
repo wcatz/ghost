@@ -40,6 +40,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -97,6 +98,10 @@ func contextAuditRequested(args []string) bool {
 // block ignores the audit request, or the report silently ignores the instant.
 func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 	opts := contextAuditOptions{Audit: true}
+	// seenProject and seenCwd count OCCURRENCES, which the options struct cannot:
+	// it has no place to record that an empty value was already refused, and an
+	// empty value is exactly the one a `!= ""` duplicate guard cannot see.
+	var seenProject, seenCwd bool
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -125,9 +130,23 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			} else {
 				value = strings.TrimPrefix(arg, "--project=")
 			}
-			if opts.Project != "" {
+			// Two questions, and neither is the other. An empty value is not "no
+			// value": it is what a script with an unset variable produces, and
+			// treating it as no scope would silently report on the directory's
+			// project instead. And a second occurrence is a second occurrence
+			// whatever it holds, so the count is a BOOL rather than a test on the
+			// value — `opts.Project != ""` alone cannot see `--project ghost
+			// --project=`, because the second value is empty and the guard reads
+			// it as the first being unset. Duplicate first, so `--project=
+			// --project=` is named as the two values it is rather than as one bad
+			// one.
+			if seenProject {
 				return opts, fmt.Errorf("--project was given twice (%q and %q)", opts.Project, value)
 			}
+			if value == "" {
+				return opts, errors.New("--project was given an empty value (drop it to report on the project this directory resolves to, or name one explicitly)")
+			}
+			seenProject = true
 			opts.Project = value
 		case arg == "--since" || strings.HasPrefix(arg, "--since="):
 			value := ""
@@ -163,9 +182,17 @@ func parseContextAuditArgs(args []string) (contextAuditOptions, error) {
 			} else {
 				value = strings.TrimPrefix(arg, "--cwd=")
 			}
-			if opts.Cwd != "" {
+			// The same two questions as --project, and for the same reason: an
+			// empty --cwd would otherwise become the process's own directory, which
+			// is a scope the reader did not ask about and cannot see in the command
+			// they ran.
+			if seenCwd {
 				return opts, fmt.Errorf("--cwd was given twice (%q and %q)", opts.Cwd, value)
 			}
+			if value == "" {
+				return opts, errors.New("--cwd was given an empty value (drop it to use the directory you are standing in, or name one explicitly)")
+			}
+			seenCwd = true
 			opts.Cwd = value
 		case arg == "--as-of" || strings.HasPrefix(arg, "--as-of="):
 			return opts, errors.New("--as-of prints the session-start block as the store stood at an instant; it cannot be combined with --audit, which reports retrieval verdicts over a window instead (`ghost context --as-of ...` or `ghost context --audit`, not both)")
@@ -250,7 +277,14 @@ func buildContextAudit(ctx context.Context, opts contextAuditOptions, dataDir st
 // scope was chosen; only the reader's certainty about which project they asked
 // about differs.
 func printContextAudit(w io.Writer, rep audit.Report) error {
-	if _, err := fmt.Fprintf(w, "retrieval audit report for project %s\n\n", rep.ProjectID); err != nil {
+	// assemble.Label, not %s raw and not assemble.Token: the field is a project ID
+	// (so it is stored text a store may hold from before CheckImportedProject
+	// guarded the write), but the id came out of ResolveProject against a scope
+	// that may be a name or a path, so it is a LABEL — often full of spaces, which
+	// Token would quote on every ordinary report. This is the line an operator
+	// pastes into an issue, so a newline in it must not start a line they read as
+	// Ghost's own.
+	if _, err := fmt.Fprintf(w, "retrieval audit report for project %s\n\n", assemble.Label(rep.ProjectID)); err != nil {
 		return err
 	}
 	_, err := io.WriteString(w, rep.String())

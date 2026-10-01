@@ -117,6 +117,50 @@ func TestParseContextAuditArgs(t *testing.T) {
 			wantFail: "twice",
 		},
 		{
+			// An empty value is not "no value": `--project=` is what a script with
+			// an unset variable produces, and the reader's scope would silently
+			// become the directory's project — a confident report about a project
+			// they did not name.
+			name:     "an empty attached --project is refused, not read as no scope",
+			args:     []string{"--audit", "--project="},
+			wantFail: "empty",
+		},
+		{
+			name:     "an empty --project value is refused",
+			args:     []string{"--audit", "--project", ""},
+			wantFail: "empty",
+		},
+		{
+			name:     "an empty attached --cwd is refused, not read as this directory",
+			args:     []string{"--audit", "--cwd="},
+			wantFail: "empty",
+		},
+		{
+			name:     "an empty --cwd value is refused",
+			args:     []string{"--audit", "--cwd", ""},
+			wantFail: "empty",
+		},
+		{
+			name:     "a named scope followed by an empty one is still twice",
+			args:     []string{"--audit", "--project", "ghost", "--project="},
+			wantFail: "twice",
+		},
+		{
+			// Two empties stop at the FIRST one, and that is the better of the two
+			// answers: there is no scope in the command line at all, so the thing to
+			// tell the reader is the empty value rather than a duplicate they cannot
+			// see either. The duplicate guard is for the case where there IS a first
+			// value — the one above.
+			name:     "two empty scopes stop at the first, which is empty",
+			args:     []string{"--audit", "--project=", "--project="},
+			wantFail: "empty",
+		},
+		{
+			name:     "a directory followed by an empty one is still twice",
+			args:     []string{"--audit", "--cwd", "/tmp", "--cwd="},
+			wantFail: "twice",
+		},
+		{
 			name:     "an unknown flag is an error, not something ignored",
 			args:     []string{"--audit", "--json"},
 			wantFail: "unknown flag",

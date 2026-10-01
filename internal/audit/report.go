@@ -17,8 +17,11 @@ package audit
 //     why. That is deliberately a function that CANNOT be wrong, because the one
 //     test that matters is whether a future caller can get a pooled figure out of
 //     this package at all.
-//   - Precision is used / KEPT, and kept counts MEMORIES, not calls. One call can
-//     keep twenty, so a call denominator would understate every figure.
+//   - Precision is used / SCORED, and scored counts VERDICTS, not calls and not
+//     kept memories. One call can keep twenty, so a call denominator would
+//     understate every figure; and a kept memory no run has judged yet is not a
+//     denominator either, because a fresh install with searches but no lifecycle
+//     run would then report 0% used and read as a verdict on its corpus.
 //   - A source with no rows says "no rows" and reports no percentage. "0% used"
 //     about a source that has never run is a measurement of nothing, and it is
 //     the reading a fresh install gets first.
@@ -37,12 +40,15 @@ package audit
 //     because the rows this reads do not hold any and the renderer has no other
 //     source to draw them from.
 //
-// --since has only recorded_at to work with, on BOTH tables, and it is applied to
-// both halves of every figure. A window that filtered the verdicts but not the
-// calls would report calls that kept nothing under a source whose memory figures
-// were computed over a different window, and the resulting "this source admits
-// memories nothing used" is precisely the wrong reading this file is built to
-// prevent.
+// --since has only recorded_at to work with, on BOTH tables, and the two columns
+// are NOT the same instant: retrieval_record is stamped when the call happened and
+// retrieval_audit when the detached run judged it, so a call at 23:50 judged at
+// 00:05 splits across any window boundary. Filtering both by one floor is
+// therefore two populations and not one, and the report divides a numerator from
+// one clock by a denominator from the other — a source line reading "0 kept, 100%
+// used (1 of 1 scored)". So the verdict half is intersected with the rowids of
+// the calls this report COUNTS, and a verdict naming any other rowid is counted
+// and named as Detached rather than dropped in silence.
 
 import (
 	"context"
@@ -176,6 +182,34 @@ type SourceReport struct {
 	// contradict, deduplicated and sorted. Ids only: the renderer has no content
 	// to print and no other field could reach it.
 	ContradictedIDs []string
+	// Unattributed is how many of this source's verdicts name NO CALL at all
+	// (record_rowid = 0, a value the write accepts for a verdict about a session
+	// rather than about one call).
+	//
+	// Counted rather than dropped, because there is no call to be in or out of a
+	// window with and the verdict is real evidence about real agent text — and NAMED
+	// rather than counted quietly, because it is the only way Scored can exceed
+	// Kept, and a reader who sees the numerator above the denominator has to be told
+	// which figure is the odd one out rather than left to conclude the report is
+	// wrong.
+	Unattributed int
+	// Detached is how many of this source's verdicts were LEFT OUT because the call
+	// they belong to is not one this report counts: outside the window, or no longer
+	// held (the call cap evicts at 5000 rows while the verdict cap holds 50000, and
+	// a history purge removes a call's rows without every path removing its verdicts
+	// — #857).
+	//
+	// The two tables are stamped at TWO different instants — retrieval_record when
+	// the call happened, retrieval_audit when the detached run judged it — so one
+	// window filter over both columns is two populations and not one. Without this
+	// intersection the report divides a numerator from one clock by a denominator
+	// from another, and prints a source line reading "0 kept, 100% used (1 of 1
+	// scored)".
+	//
+	// Counted and named rather than dropped in silence: these are real verdicts, and
+	// a report that quietly loses them is indistinguishable from a report over a
+	// store where they were never written.
+	Detached int
 }
 
 // NoRows reports whether this source has nothing to report at all.
@@ -276,6 +310,11 @@ func BuildReport(ctx context.Context, store *memory.Store, opts ReportOptions) (
 		return Report{}, fmt.Errorf("audit: read the recorded calls: %w", err)
 	}
 	bySource := map[string]*SourceReport{}
+	// The rowids of the calls this report COUNTS, which is what the verdict half is
+	// intersected with below. Collected here rather than in the verdict loop because
+	// it is a property of the records read, and a verdict naming any other rowid is a
+	// verdict about a call this report is not reporting on.
+	counted := map[int64]bool{}
 	source := func(name string) *SourceReport {
 		s := bySource[name]
 		if s == nil {
@@ -295,6 +334,9 @@ func BuildReport(ctx context.Context, store *memory.Store, opts ReportOptions) (
 		}
 		s := source(rec.Source)
 		s.Calls++
+		if rec.RowID > 0 {
+			counted[rec.RowID] = true
+		}
 		// De-duplicated WITHIN the call, for the same reason Run does it: one
 		// memory kept by two stages of one call is one (call, memory) pair, and
 		// this table's grain is the pair.
@@ -329,6 +371,17 @@ func BuildReport(ctx context.Context, store *memory.Store, opts ReportOptions) (
 			continue
 		}
 		s := source(row.Source)
+		// The intersection, and the two ways a verdict does not survive it. Being in
+		// the window is NOT enough: the two tables are stamped at different instants,
+		// so a verdict judged minutes after its call falls into a window its call is
+		// not in (see SourceReport.Detached).
+		switch {
+		case row.RecordRowID <= 0:
+			s.Unattributed++
+		case !counted[row.RecordRowID]:
+			s.Detached++
+			continue
+		}
 		s.Scored++
 		switch Outcome(row.Outcome) {
 		case OutcomeUsed:
@@ -454,6 +507,8 @@ func (s *SourceReport) AddInto(other SourceReport) {
 	s.Contradicted += other.Contradicted
 	s.KeptNothing += other.KeptNothing
 	s.DegradedVerdicts += other.DegradedVerdicts
+	s.Unattributed += other.Unattributed
+	s.Detached += other.Detached
 	s.DegradedReasons = mergeNames(s.DegradedReasons, other.DegradedReasons)
 	s.ContradictedIDs = mergeNames(s.ContradictedIDs, other.ContradictedIDs)
 }
@@ -592,9 +647,15 @@ func (r Report) String() string {
 		if src.DegradedVerdicts == 0 {
 			continue
 		}
+		// The denominator is SCORED, not Kept. This sentence is about the verdicts
+		// carrying the degraded caveat, and Kept is the larger number on every store
+		// whose audit is merely incomplete — which would report a verdict count the
+		// store does not hold, on the one line whose job is to say how much of the
+		// denominator is trustworthy. health_retrieval.go divides by Scored for the
+		// same reason, and two surfaces of one figure may not disagree.
 		fmt.Fprintf(&b,
-			"  %s: %d of its %d verdict(s) were judged against a partly-read transcript (%s), so an ignored verdict there is a claim about the text that was read\n",
-			assemble.Label(src.Source), src.DegradedVerdicts, src.Kept, strings.Join(src.DegradedReasons, ", "))
+			"  %s: %d of its %d scored verdict(s) were judged against a partly-read transcript (%s), so an ignored verdict there is a claim about the text that was read\n",
+			assemble.Label(src.Source), src.DegradedVerdicts, src.Scored, strings.Join(src.DegradedReasons, ", "))
 	}
 	return b.String()
 }
@@ -611,7 +672,12 @@ func (r Report) String() string {
 func (s SourceReport) line() string {
 	label := assemble.Label(s.Source)
 	if s.NoRows() {
-		return fmt.Sprintf("  %s: no rows — this source has recorded no calls in this window\n", label)
+		// The attribution notes still print under a no-rows source: a verdict left
+		// out of the figures is exactly what a reader of "no rows" needs to be told,
+		// or the source reads as never having been measured when in fact it was
+		// judged outside the window.
+		return fmt.Sprintf("  %s: no rows — this source has recorded no calls in this window\n%s",
+			label, s.attributionNotes())
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "  %s: %d call(s), %d kept, ", label, s.Calls, s.Kept)
@@ -631,5 +697,44 @@ func (s SourceReport) line() string {
 		fmt.Fprintf(&b, "    %d of those verdicts are degraded (%s)\n",
 			s.DegradedVerdicts, strings.Join(s.DegradedReasons, ", "))
 	}
+	b.WriteString(s.attributionNotes())
 	return b.String()
+}
+
+// attributionNotes says what became of this source's verdicts that the figures above
+// do not account for, so no row is lost without a word and no figure is left to
+// explain itself.
+//
+// Both notes are ABSENT rather than zero by default. A source whose verdicts are all
+// attributed and counted has nothing to report about them, and two lines of "0
+// verdicts were dropped" under every source of every store is noise that teaches a
+// reader to skip the lines which matter.
+func (s SourceReport) attributionNotes() string {
+	var b strings.Builder
+	if s.Detached > 0 {
+		fmt.Fprintf(&b,
+			"    %d verdict(s) were not counted: their call is outside this window, or the store no longer holds it (a history purge, or the call cap)\n",
+			s.Detached)
+	}
+	if s.Unattributed > 0 {
+		fmt.Fprintf(&b,
+			"    %d verdict(s) name no call at all, so they are counted in the figures above and in neither calls nor kept\n",
+			s.Unattributed)
+	}
+	return b.String()
+}
+
+// AttributionTotals is the count of the verdicts a report's figures do not account
+// for, summed over its sources.
+//
+// Exported so the health block can state the same two facts from the same arithmetic
+// rather than keeping its own copy — a second renderer is how two surfaces of one
+// figure come to disagree, which is how this report already had one (the degraded
+// note's denominator).
+func (r Report) AttributionTotals() (detached, unattributed int) {
+	for _, src := range r.Sources {
+		detached += src.Detached
+		unattributed += src.Unattributed
+	}
+	return detached, unattributed
 }

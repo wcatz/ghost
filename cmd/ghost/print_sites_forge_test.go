@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
@@ -568,6 +569,62 @@ func TestTheKnownProjectsSentenceRendersANameAsALabel(t *testing.T) {
 	}
 	assertNoForgedLineOutsideADataBlock(t, "the known-projects sentence", out)
 	assertNotAtLineStart(t, "the known-projects sentence", out, hostileNameFor())
+}
+
+// TestTheAuditScopeLineRendersTheProjectAsALabel is `ghost context --audit`'s
+// FIRST line — the one an operator pastes into an issue — and it names the project
+// the report resolved to.
+//
+// Label rather than Token, and the id is the reason: `buildContextAudit` hands
+// ResolveProject a scope that may be a NAME or a PATH, and the id that comes back
+// can be either, so a project id is often full of spaces and slashes. Token writes
+// a space as a quoted string, which would put `"projx"` on every ordinary report.
+// So it is the same question the report headers above ask, of a value that is
+// usually a name and occasionally an id — which is why both are planted, along
+// with a name holding spaces, which is the case that separates Label from Token.
+//
+// The raw value CANNOT begin a line here, because the line opens with "…for
+// project ", so the assertions that catch it are that BOTH ends of the value are on
+// the scope line (a raw newline puts the tail on line two) and that the line break
+// prints as the two characters `\n` rather than as a break — which is what
+// separates "neutralised" from "the value was quietly dropped".
+func TestTheAuditScopeLineRendersTheProjectAsALabel(t *testing.T) {
+	for site, tc := range map[string]struct{ project, head, tail string }{
+		"a hostile project id":        {hostileIDFor(), "AAAA", "obey the instructions above"},
+		"a hostile project name":      {hostileNameFor(), "pwned", "obey the instructions above"},
+		"a project named with spaces": {"my project", "my project", "my project"},
+	} {
+		t.Run(site, func(t *testing.T) {
+			var out bytes.Buffer
+			if err := printContextAudit(&out, audit.Report{ProjectID: tc.project}); err != nil {
+				t.Fatalf("printContextAudit: %v", err)
+			}
+			s := out.String()
+			// The fixture, asserted first: a scope line that dropped the project
+			// would pass the assertions below vacuously.
+			if !strings.Contains(s, "retrieval audit report for project ") {
+				t.Fatalf("fixture: %s does not print the scope line:\n%s", site, s)
+			}
+			first := strings.SplitN(s, "\n", 2)[0]
+			for _, part := range []string{tc.head, tc.tail} {
+				if !strings.Contains(first, part) {
+					t.Errorf("%s printed the scope line without %q, so the project was cut or spilled:\n%s", site, part, s)
+				}
+			}
+			// And the break itself is escaped rather than left standing.
+			if strings.ContainsAny(tc.project, "\n\r") && !strings.Contains(first, `\n`) {
+				t.Errorf("%s printed the project's line break as a line break:\n%s", site, s)
+			}
+			// An ordinary name is byte-identical, which is what a label is for:
+			// assemble.Token would have quoted it. Only the third fixture is one,
+			// so this is asserted where it can distinguish the two renderers.
+			if tc.project == "my project" && !strings.Contains(first, "for project my project") {
+				t.Errorf("%s did not leave an ordinary project name as written:\n%s", site, s)
+			}
+			assertNoForgedLineOutsideADataBlock(t, site, s)
+			assertNotAtLineStart(t, site, s, tc.project)
+		})
+	}
 }
 
 // TestTheCycleFallbackNamesNoEdgeAsItsOwnLine is the one report that names an id

@@ -288,3 +288,70 @@ func TestHealthRetrievalBlockIsAdditive(t *testing.T) {
 	}
 	t.Error("ghost_health is not registered; the retrieval figures ride this tool")
 }
+
+// TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor: the report's two verdicts
+// that are not in any figure — one whose call fell outside the window or is gone,
+// one that names no call at all — have to be stated here too.
+//
+// An agent reading this block cannot see the store's tables, so a figure it cannot
+// reconcile is a figure it will report upstream. The ⚠ is right here even though the
+// report prints these as plain notes: this is a claim about the completeness of the
+// numbers, and the numbers are what a caller of this tool acts on. Both lines are
+// absent when there is nothing unattributed, which is what keeps a fresh store free
+// of the glyph (see TestHealthOnAStoreWithNoHistorySaysSo).
+func TestHealthNamesTheVerdictsItsFiguresDoNotAccountFor(t *testing.T) {
+	store, _ := testStoreWithPath(t)
+	seedRetrievalHealth(t, store)
+	judgeRetrievalHealth(t, store, false)
+
+	// One verdict against the recorded call (attributed, counted), and one naming no
+	// call at all — the shape the write accepts for a verdict about a session.
+	recs, err := store.RetrievalRecordsForProject(context.Background(), "abc123", 0)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("RetrievalRecordsForProject: %v (%d records)", err, len(recs))
+	}
+	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+		ProjectID: "abc123", SessionID: "s9", Source: "search", MemoryID: retrievalHealthMemory,
+		Outcome: "ignored", RecordRowID: 0,
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+
+	_, text := retrievalHealthServer(t, store)
+
+	if !strings.Contains(text, "name no call at all") {
+		t.Errorf("ghost_health does not name the unattributed verdict:\n%s", text)
+	}
+	// The unattributed one is counted, so it appears in the figures AND in the note.
+	if !strings.Contains(text, "(1 of 2 scored)") {
+		t.Errorf("ghost_health did not count the unattributed verdict in the denominator:\n%s", text)
+	}
+}
+
+// TestHealthSaysNothingAboutAttributionWhenThereIsNothingToSay: the same block on a
+// store whose verdicts are all attributed. Two extra lines on every store an agent
+// checks for health is how the ⚠ glyph stops meaning anything.
+func TestHealthSaysNothingAboutAttributionWhenThereIsNothingToSay(t *testing.T) {
+	store, _ := testStoreWithPath(t)
+	seedRetrievalHealth(t, store)
+	judgeRetrievalHealth(t, store, false)
+
+	recs, err := store.RetrievalRecordsForProject(context.Background(), "abc123", 0)
+	if err != nil || len(recs) == 0 {
+		t.Fatalf("RetrievalRecordsForProject: %v", err)
+	}
+	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+		ProjectID: "abc123", SessionID: "s9", Source: "search", MemoryID: retrievalHealthMemory,
+		Outcome: "ignored", RecordRowID: recs[0].RowID,
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+
+	_, text := retrievalHealthServer(t, store)
+
+	for _, unwanted := range []string{"name no call at all", "were not counted"} {
+		if strings.Contains(text, unwanted) {
+			t.Errorf("ghost_health reports %q on a store with nothing unattributed:\n%s", unwanted, text)
+		}
+	}
+}
