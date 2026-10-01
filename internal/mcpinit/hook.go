@@ -728,7 +728,17 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	// summary, no tasks and no decisions to report; the renderer's unmatched
 	// branch is written for exactly this shape.
 	if projectID == "" {
-		_, globals = loadSessionPassive(context.Background(), store, cfg, "", time.Now())
+		// nil sink, and this is the branch where that is the honest value rather than a
+		// convenience (#850). The block below is a real retrieval — it shows this
+		// directory's cross-project rows — but there is no project to attribute the
+		// record to, and memory.RecordRetrieval refuses an empty project id anyway. The
+		// two alternatives are both worse: a row under `_global` would put an injection
+		// that was never that bucket's into its denominator, and a row under a
+		// placeholder id would name a project no report can resolve. So this session
+		// start records nothing — and silently, because a store that cannot record must
+		// not print a refusal on every session a user opens in a directory Ghost has
+		// never seen. The block still renders, which is the half that must not change.
+		_, globals = loadSessionPassive(context.Background(), store, cfg, "", time.Now(), nil)
 		totalGlobalCount, totalGlobalCountKnown = globalCount(db)
 		return
 	}
@@ -771,7 +781,16 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 	// selects, and splitting the two buckets across two entry points left each
 	// half of the same decision in a different file.
 	now := time.Now()
-	memories, globals = loadSessionPassive(context.Background(), store, cfg, projectID, now)
+
+	// The retrieval record's handle (#850), opened and closed around the one call
+	// that writes it rather than around this whole function: the write happens
+	// inside loadSessionPassive, so holding a second read-write connection — plus
+	// the -wal and -shm files it creates — for the tasks and decisions reads below
+	// would be a cost this function pays for nothing. A missing store makes it a nil
+	// sink with a no-op close, so there is no error path here to write.
+	record, closeRecord := sessionRecordSink(dbPath)
+	memories, globals = loadSessionPassive(context.Background(), store, cfg, projectID, now, record)
+	closeRecord()
 	totalGlobalCount, totalGlobalCountKnown = globalCount(db)
 
 	// Get open tasks

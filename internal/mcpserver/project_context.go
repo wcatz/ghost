@@ -160,6 +160,44 @@ func assembleProjectContext(ctx context.Context, s *Server, req assemble.Request
 	if req.Now.IsZero() {
 		req.Now = time.Now().UTC()
 	}
+
+	// The retrieval record (#850, on the seam #646 built). The same two fields
+	// ghost_memory_search sets and the same sink: the assembler writes the row, so
+	// nothing about its shape is duplicated here, and the verdicts it carries are
+	// this surface's own selection rather than a re-derivation of it.
+	//
+	// Set in THIS function rather than at the call sites, because all three
+	// project-context surfaces — the tool, the resource and the prompt — reach the
+	// assembler through here. A sink wired at the two callers would record the tool
+	// and leave the other two unaudited, and a resource read is a retrieval an agent
+	// acted on exactly as much as a tool call is.
+	//
+	// nil when the store cannot record, which the assembler treats as "record
+	// nothing": a provider that cannot be audited still answers a listing, and the
+	// missing row is a gap in a report rather than a failed call.
+	req.Record = s.recordSink()
+	// The server's own logger, and for the reason the search path passes it rather
+	// than falling back to the process default: nothing in Ghost calls
+	// slog.SetDefault, so a refusal sent there would reach a handler nobody reads,
+	// and a dropped record would be silent in production while looking logged in a
+	// test.
+	req.Logger = s.logger
+	// SuppressRecordWhenLegsFailed is deliberately NOT set here, which is the
+	// opposite of the search handler's choice and reads the other way round for one
+	// reason: that handler turns a leg failure with nothing admitted into an ERROR,
+	// so the call never reached the caller as an answer and a row would put a
+	// denominator in the audit for a call that delivered nothing. This surface
+	// answers — a block, an abstention sentence, or the census — so the call DID
+	// reach the agent, and the record carries the outcome the assembler actually
+	// reached. The leg failure itself is in the trace, which the record does not
+	// carry; that is the same division of labour the search path relies on.
+	//
+	// SessionID is left empty on purpose. The column is the transport's own id, and
+	// over stdio — the transport Ghost ships — it is "" here and on the search path
+	// alike, so the two agree; what tells a listing from a search in the audit is
+	// `source`, which is exact. Threading an *mcp.CallToolRequest down to reach it
+	// would also have to invent a value for the resource and prompt callers, which
+	// have none — and a session id on two of three surfaces is worse than none.
 	return assemble.Run(ctx, candidates, req)
 }
 

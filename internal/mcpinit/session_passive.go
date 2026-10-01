@@ -128,7 +128,15 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 // printed by the surrounding handler and an empty block under it reads as
 // "nothing was ever saved" — so the failure is reported on stderr with its reason
 // attached, and the block still renders.
-func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time) (memories, globals []sessionMemory) {
+//
+// `record` is the retrieval record's own sink and the reason this function takes
+// one: the block a session is OPENED with is a retrieval like any other, and until
+// #850 it was the one the audit could not see. It is a PARAMETER rather than
+// something this package opens for itself, because the handle it needs cannot be
+// the one the reads use — those are read-only (memory.OpenReadDB, mode=ro) — and
+// because the branch with no project to attribute the call to must pass nil and
+// record nothing. See sessionRecordSink.
+func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Config, projectID string, now time.Time, record assemble.RecordSink) (memories, globals []sessionMemory) {
 	res, err := assemble.Run(ctx, store, assemble.Request{
 		ProjectID: projectID,
 		// The empty Query IS the passive shape. It is not a placeholder: it is
@@ -140,6 +148,36 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		Now:       now,
 		Scope:     cfg.Injection.SessionScope,
 		Budget:    sessionPassiveBudget(cfg, projectID),
+		// The retrieval record (#850), on the seam #646 built, and the same fields
+		// ghost_memory_search sets. It is the ASSEMBLER that writes the row, so
+		// nothing about its shape is re-derived here and the verdicts it carries
+		// are this surface's own selection rather than a second reading of it.
+		//
+		// nil on the branch with no project to attribute the call to (see
+		// loadSessionContext), and the assembler treats nil as "record nothing".
+		Record: record,
+		// The hook's own stderr logger, and for the reason the search path passes
+		// one rather than letting emit fall back to the process default: nothing in
+		// Ghost calls slog.SetDefault, so a dropped record would be routed to a
+		// handler nobody reads — "logged, not silent" would be true only in a test.
+		// The block below renders either way; what must not happen is a record
+		// quietly ceasing to be written.
+		Logger: sessionLog(),
+		// SuppressRecordWhenLegsFailed is deliberately NOT set, which reads the
+		// opposite way round from the search handler's choice for one reason:
+		// that handler turns a leg failure with nothing admitted into an ERROR, so
+		// the call never reached its caller as an answer. This surface always
+		// answers — a block, an abstention sentence, or the unmatched-directory
+		// form — so the call DID reach the agent and the row belongs in the
+		// denominator. The leg failure itself lives in the trace, which the record
+		// does not carry; that is the same division of labour the search path
+		// relies on.
+		//
+		// SessionID is left empty on purpose. The column is the transport's own id,
+		// and over stdio — the transport Ghost ships — it is "" here and on the
+		// search path alike, so the two agree. `source` is the exact discriminator:
+		// it is what puts this row in the session_start denominator instead of the
+		// search one, which is the whole of what #850 asks for.
 	})
 	if err != nil {
 		// Warn, not Debug, and the reason the default handler is enough: nothing
@@ -212,7 +250,81 @@ func globalCount(db *sql.DB) (total int, known bool) {
 // session. The three failure sites are Warn in internal/memory for the same
 // reason: a real failure is loud, an expected state is not.
 func sessionStore(db *sql.DB) *memory.Store {
-	return memory.NewStoreWithRead(db, db, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+	return memory.NewStoreWithRead(db, db, sessionLog())
+}
+
+// sessionLog is the ONE logger the session-start path hands out, and the level is
+// the point.
+//
+// Warn, not Info: the store logs its own expected states at Debug — a
+// pre-provenance store skipping an evidence read is normal, not a fault — and an
+// Info handler would turn a per-session-start no-op into a line on every session.
+// The three failure sites it covers are Warn in internal/memory for the same
+// reason: a real failure is loud, an expected state is not.
+//
+// It is built per call rather than cached in a package variable because the
+// destination is os.Stderr READ AT CONSTRUCTION TIME, and a hook is a
+// short-lived process: a cached handler would outlive whatever the caller did to
+// the variable (a test's redirect, a host's redirection) and quietly keep
+// writing to the old descriptor.
+func sessionLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
-	})))
+	}))
+}
+
+// sessionRecordSink opens the ONE handle the session-start record write needs, and
+// returns nil when there is no store to record into.
+//
+// Why a second handle at all, since the reads above already have one: that handle
+// is read-only. `loadSessionContext` opens memory.OpenReadDB, whose DSN is
+// mode=ro, so wiring the record to it would compile, satisfy
+// assemble.RecordSink, and fail on every session — with the failure swallowed by
+// the very fail-open contract the record is written under, which is the worst
+// combination available: every behavioural test stays green and the audit is
+// simply never written. TestTheSessionStoreCarriesTheRecordToo is the source
+// assertion that pins the difference.
+//
+// So this is the same construction bumpSessionCount uses, and deliberately not a
+// near-copy of it:
+//
+//   - the SAME rwDSN, so `_txlock=immediate` and busy_timeout(5000) are the ones
+//     the store's own guards were reasoned about — in particular the one this
+//     write actually relies on, because the newer-store check runs INSIDE the
+//     write transaction and a deferred BEGIN would leave the pre-BEGIN race
+//     (#746). That guard is free here: the write goes through
+//     memory.Store.RecordRetrieval, which runs it.
+//   - the SAME os.Stat guard, so a missing database is never CREATED by the write
+//     meant to describe it, and the permission pass stays after it for the same
+//     reason.
+//   - the same second TightenPermissions pass on close, because a clean close
+//     checkpoints the -wal and -shm files away but a live `ghost mcp` holds the
+//     same database, so those files outlive this function and have to be tightened
+//     while it still can.
+//
+// It goes through sessionStore rather than memory.OpenDB on purpose: OpenDB is the
+// constructor that MIGRATES, and a session hook must not migrate a store behind a
+// live server's back — nor pin MaxOpenConns(1), which would serialise this pool
+// against the record write's own connection.
+//
+// The returned close func is never nil, so the caller needs no error path: a nil
+// sink with a no-op close is the whole of the "no store here" case, which is what
+// an unmatched directory and a first-ever session both look like.
+func sessionRecordSink(dbPath string) (assemble.RecordSink, func()) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, func() {}
+	}
+	// Best-effort and before the open, for the reason bumpSessionCount says: the
+	// hook is often the only Ghost process to touch a database between two
+	// sessions, so a mode left loose by an older build is still loose when this
+	// connection lands.
+	memory.TightenPermissions(dbPath)
+	db, err := sql.Open("sqlite", rwDSN(dbPath))
+	if err != nil {
+		return nil, func() {}
+	}
+	return sessionStore(db), func() {
+		_ = db.Close()
+		memory.TightenPermissions(dbPath)
+	}
 }

@@ -219,7 +219,10 @@ func TestAFailedSessionStartReadIsReportedNotSilent(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&got, nil)))
 	t.Cleanup(func() { slog.SetDefault(restore) })
 
-	memories, globals := loadSessionPassive(context.Background(), store, mustHookConfig(t), "psomeproj", time.Now())
+	// nil sink: this test asserts on the block a FAILED read produces, and a record
+	// is not written for an errored Run in the first place. See passive_record_test.go
+	// for the recording path.
+	memories, globals := loadSessionPassive(context.Background(), store, mustHookConfig(t), "psomeproj", time.Now(), nil)
 
 	if len(memories) != 0 || len(globals) != 0 {
 		t.Errorf("a failed read returned %d project and %d global rows, want none — the block is "+
