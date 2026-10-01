@@ -933,3 +933,68 @@ func TestTheDegradedNoteCountsVerdictsNotMemories(t *testing.T) {
 		t.Errorf("the degraded note reports a verdict count the store does not hold:\n%s", out)
 	}
 }
+
+// TestTheDegradedReasonIsRenderedAsALabel: the degraded reason is a stored TEXT
+// column, and the report already labels the source label on the very same line -- so a
+// reason carrying a newline forges a line of the report, and a forged line here is a
+// FIGURE, not a message: the next line of a report is another source's numbers.
+//
+// The report is the surface where a mistake is hardest to catch, which is the whole
+// reason it labels what it stores. This pins the other half of that rule, on both
+// places the reason is printed.
+func TestTheDegradedReasonIsRenderedAsALabel(t *testing.T) {
+	store, projectID, dbPath := reportStore(t)
+	recordCall(t, store, projectID, "search", "USEDID", "IGNID")
+
+	recs, err := store.RetrievalRecordsForProject(context.Background(), projectID, 0)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("RetrievalRecordsForProject: %v (%d records)", err, len(recs))
+	}
+	if err := store.RecordRetrievalAudits(context.Background(), []memory.RetrievalAuditRow{{
+		ProjectID: projectID, SessionID: "s1", Source: "search", MemoryID: "USEDID",
+		Outcome: string(OutcomeUsed), Signal: "identifier",
+		RecordRowID: recs[0].RowID,
+	}}); err != nil {
+		t.Fatalf("RecordRetrievalAudits: %v", err)
+	}
+
+	// The reason is written the way a hand-edited or newer row would carry it: a
+	// newline, then a line that reads exactly like the report's own figures. It is
+	// planted through the column rather than through MarkDegraded because that is
+	// the point -- nothing in this package constrains what the column holds.
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dbPath)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open %s: %v", dbPath, err)
+	}
+	defer db.Close() //nolint:errcheck
+	hostile := "scan transcript: truncated\n  project_context: 99 call(s), 100% used (99 of 99 scored)"
+	if _, err := db.Exec(`UPDATE retrieval_audit SET degraded = ? WHERE project_id = ?`, hostile, projectID); err != nil {
+		t.Fatalf("plant the hostile reason: %v", err)
+	}
+
+	rep, err := BuildReport(context.Background(), store, ReportOptions{ProjectID: projectID})
+	if err != nil {
+		t.Fatalf("BuildReport: %v", err)
+	}
+
+	// Both surfaces: the per-source line() and the report-level String(). A fix to
+	// one of them is the bug this test is about.
+	for name, out := range map[string]string{"String()": rep.String(), "SourceReport.line()": rep.Source("search").line()} {
+		// The fix ensures the newline is escaped (as \n) so the output remains
+		// a single logical line per source -- no new line is forged. We verify
+		// that the hostile line does not appear as a SEPARATE line in the output.
+		lines := strings.Split(out, "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "project_context: 99 call(s)") {
+				t.Errorf("%s: the degraded reason forged a new line: %q", name, line)
+			}
+		}
+		// Also verify the store doesn't hold this figure at all -- it should only
+		// appear escaped on the degraded line, not as a standalone line.
+		for _, line := range lines {
+			if strings.Contains(line, "99 of 99 scored") && !strings.Contains(line, "partly-read") && !strings.Contains(line, "degraded") {
+				t.Errorf("%s printed a standalone figure the store does not hold: %q", name, line)
+			}
+		}
+	}
+}
