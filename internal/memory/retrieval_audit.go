@@ -56,6 +56,20 @@ package memory
 // indistinguishable afterwards. See RecordRetrievalAudits and
 // retrievalRecordKeepingMemory, and the three tests named for each way the pairing
 // can be broken.
+//
+// AND THE HOLE IS REPORTED, which is what makes it honest rather than merely
+// defensible. The caller counted every row it handed over into the figures it is
+// about to print, before this write refused any of them, so a refusal the caller
+// cannot see leaves the report claiming a number this table does not hold — and a
+// branch that stored nothing is then indistinguishable from a branch that stored
+// everything, which is the one property a partial write cannot be allowed to lose.
+// Hence the return value: the refused ROWS rather than a count, because the caller
+// takes each one out of its per-source and per-outcome figures as well as its
+// total. audit.Run reconciles them into Summary.Unfiled and prints the loss BESIDE
+// the figures rather than folding it into them, so both numbers a reader needs —
+// what the run judged, and what the table holds — are stated.
+// TestTheAuditWriteReportsTheVerdictsItRefused holds the store's half and
+// TestRunReconcilesWhatTheStoreRefused the call site's.
 
 import (
 	"context"
@@ -130,22 +144,34 @@ var (
 // signals is this build's, and a store that may since have added a bucket would
 // have this build's rows filed beside it. It goes through beginWrite, so the check
 // runs in the same transaction as the write it guards.
-func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAuditRow) error {
+//
+// It RETURNS THE ROWS THE GUARD REFUSED, and that is the point of the signature.
+// A refusal is not an error — the write did what it was asked and declined to
+// store one pair it could not vouch for — but it is also not nothing, because the
+// caller has already counted every row it handed over into the report it is about
+// to print. A caller that cannot see the refusal prints figures describing a
+// table it does not match, and a branch that stored nothing is then
+// indistinguishable from one that stored everything, which is the one property a
+// partial write cannot be allowed to lose. The rows and not a count, because the
+// caller has to take each one out of its own per-source and per-outcome figures
+// as well as from its total, and a bare number cannot say which. Empty when
+// nothing was refused, so a caller that ignores the return is unaffected.
+func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAuditRow) ([]RetrievalAuditRow, error) {
 	if len(rows) == 0 {
-		return nil
+		return nil, nil
 	}
 	for _, r := range rows {
 		if r.MemoryID == "" {
-			return errRetrievalAuditNoMemory
+			return nil, errRetrievalAuditNoMemory
 		}
 		if r.ProjectID == "" {
-			return errRetrievalAuditNoProject
+			return nil, errRetrievalAuditNoProject
 		}
 	}
 
 	tx, lock, err := s.beginWrite(ctx, "record-retrieval-audits")
 	if err != nil {
-		return fmt.Errorf("record retrieval audits: %w", err)
+		return nil, fmt.Errorf("record retrieval audits: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
@@ -157,11 +183,15 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 		seen[r.RecordRowID] = true
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM retrieval_audit WHERE record_rowid = ?`, r.RecordRowID); err != nil {
-			return fmt.Errorf("record retrieval audits: replace the verdicts of call %d: %w", r.RecordRowID, err)
+			return nil, fmt.Errorf("record retrieval audits: replace the verdicts of call %d: %w", r.RecordRowID, err)
 		}
 	}
 
 	var maxRowID int64
+	// The rows the guard below refused, returned so the caller can take them out
+	// of its own figures. Declared here rather than at the signature so the write
+	// loop reads as the write loop.
+	var refused []RetrievalAuditRow
 	for _, r := range rows {
 		// The pairing is TWO-SIDED, and this is its other side. A caller judged
 		// its calls and is filing the verdicts now, so every rowid in this batch
@@ -237,11 +267,19 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 			r.Outcome, r.Signal, r.Degraded, r.RecordRowID, r.RecordRowID, r.MemoryID).Scan(&filed)
 		if errors.Is(err, sql.ErrNoRows) {
 			// The guard refused this row, so it wrote nothing and returned
-			// nothing. Not an error: see above.
+			// nothing. Not an error: see above. It IS reported, because a
+			// refusal the caller cannot see is indistinguishable from a row that
+			// was written — the caller has already counted this verdict into every
+			// figure it will print, and a branch that stores nothing has to be
+			// distinguishable from one that stored everything, all the way out to
+			// whatever the command records about it. The ROW and not a count,
+			// because the caller subtracts per source and per outcome as well as
+			// from the total, and a bare count cannot say which.
+			refused = append(refused, r)
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("record retrieval audits: %w", err)
+			return nil, fmt.Errorf("record retrieval audits: %w", err)
 		}
 		// maxRowID stays the table's highest rowid, which is what the eviction
 		// below reads. A rowid this transaction was given is higher than every
@@ -261,14 +299,14 @@ func (s *Store) RecordRetrievalAudits(ctx context.Context, rows []RetrievalAudit
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM retrieval_audit WHERE rowid <= ?`,
 			maxRowID-int64(retrievalAuditRowsCap)); err != nil {
-			return fmt.Errorf("record retrieval audits: cap table size: %w", err)
+			return nil, fmt.Errorf("record retrieval audits: cap table size: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("record retrieval audits: %w", err)
+		return nil, fmt.Errorf("record retrieval audits: %w", err)
 	}
 	lock.reportHold("record-retrieval-audits", time.Now())
-	return nil
+	return refused, nil
 }
 
 // RetrievalAudits returns stored verdicts, oldest row first.
