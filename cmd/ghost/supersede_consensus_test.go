@@ -41,6 +41,14 @@ func TestParseSupersedeArgsConsensus(t *testing.T) {
 		{"before apply", []string{"myproj", "--consensus", "4", "--apply"}, 4},
 		{"last wins", []string{"myproj", "--consensus", "2", "--consensus", "7"}, 7},
 		{"project before flag", []string{"--project", "myproj", "--consensus", "3", "--apply"}, 3},
+		// #862: the gate reaches the repair. --reassess deletes a live supersedes
+		// edge, and since #845 it is the only command in the product that does,
+		// so refusing --consensus beside it left the one deletion path with the
+		// fewest answers behind it. These two are here because the REFUSAL was
+		// the tested behaviour until #862: a table that kept the old rows would
+		// still pass if the parser went back to refusing.
+		{"with reassess", []string{"myproj", "--reassess", "--consensus", "3"}, 3},
+		{"with reassess and apply", []string{"myproj", "--reassess", "--consensus", "3", "--apply"}, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, apply, _, _, consensus, _, _, err := parseSupersedeArgs(tc.args)
@@ -61,11 +69,17 @@ func TestParseSupersedeArgsConsensus(t *testing.T) {
 }
 
 // TestParseSupersedeArgsConsensusErrors: the refusals. A value below 2 is the
-// load-bearing one — a gate of 1 runs the ordinary pass and writes whatever it
-// proposed, which is the ungated pass wearing the flag of a safety control, and
-// an operator who typed the flag meant to gate something. The two repair modes
-// are refused because they judge edges already in the graph, where a split
-// verdict would refuse the withdrawal the repair exists to perform.
+// load-bearing one — a gate of 1 runs the pass again and acts on whatever the
+// first answer proposed, which is the ungated pass wearing the flag of a safety
+// control, and an operator who typed the flag meant to gate something.
+//
+// --withdraw is the one repair mode still refused, and for the reason that never
+// changed: it judges NOTHING. N passes would spend N classify calls to reach a
+// decision the operator has already made by naming the edge, so accepting the
+// flag there would buy agreement about a question nobody asked. --reassess is no
+// longer refused (#862): it judges a live edge on a model's verdict, and a split
+// keeps the edge rather than deleting a correct one, which is the trade the gate
+// exists to make.
 func TestParseSupersedeArgsConsensusErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -79,8 +93,7 @@ func TestParseSupersedeArgsConsensusErrors(t *testing.T) {
 		{"not a number", []string{"myproj", "--consensus", "three"}, "whole number"},
 		{"not a number equals form", []string{"myproj", "--consensus=many"}, "whole number"},
 		{"missing value", []string{"myproj", "--consensus"}, `unknown flag "--consensus"`},
-		{"with reassess", []string{"myproj", "--reassess", "--consensus", "3"}, "--consensus applies to the creation pass"},
-		{"with withdraw", []string{"myproj", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--consensus", "3"}, "--consensus applies to the creation pass"},
+		{"with withdraw", []string{"myproj", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--consensus", "3"}, "--withdraw judges nothing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, _, _, _, _, _, _, err := parseSupersedeArgs(tc.args)

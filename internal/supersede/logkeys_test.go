@@ -539,9 +539,13 @@ func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 			"skipping pair with an unclassifiable verdict",
 			"supersede classified",
 		}},
-		{name: "Reassess", covers: []string{"Reassess"}, run: reassessPassesLogKeys, wants: []string{
+		// `Reassess` is a one-line wrapper since #862 added the consensus gate
+		// (ReassessWith), the same shape Run has had since #799 — so the
+		// function that logs is ReassessWith, which is the name the scan reports.
+		{name: "Reassess", covers: []string{"Reassess", "ReassessWith"}, run: reassessPassesLogKeys, wants: []string{
 			"a cyclic pair whose two rows share both timestamps",
 			"the older note states a rule this edge does not retire",
+			"the passes did not agree; no edge withdrawn", // the #862 gate
 			"supersede reassess", // the summary line — the longest in the package
 		}},
 		{name: "Withdraw", covers: []string{"Withdraw"}, run: withdrawPassesLogKeys, wants: []string{
@@ -694,6 +698,23 @@ func reassessPassesLogKeys(t *testing.T, log *capturedLog) {
 	cls.SetRetryDelay(0)
 	if _, _, err := Reassess(ctx, store, cls, "p", true, log.logger()); err != nil {
 		t.Fatalf("Reassess: %v", err)
+	}
+
+	// A third edge, and the gated run that reaches #862's split line: two passes
+	// say NEITHER and one says SUPERSEDES, so nothing is withdrawn and the
+	// disagreement is logged with the tally. The ungated run above cannot reach
+	// that line at all — with one pass there is nothing to disagree with — so
+	// without this the guard's coverage claim for it would be aspirational.
+	splitNewer := add(t, store, db, "the nightly export job writes to the vault bucket", []float32{0, 0, 1}, "2026-09-02 09:00:00")
+	splitOlder := add(t, store, db, "the nightly export job writes to the shared volume", []float32{0, 0, 0.99}, "2026-02-02 09:00:00")
+	if err := store.CreateLink(ctx, splitNewer, splitOlder, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	gated := &perPassClassifier{script: []func(string, string) Relation{
+		neitherEverywhere, neitherEverywhere, supersedesEverywhere,
+	}}
+	if _, _, err := ReassessWith(ctx, store, gated, "p", ReassessOptions{Apply: true, Consensus: 3}, log.logger()); err != nil {
+		t.Fatalf("ReassessWith: %v", err)
 	}
 }
 

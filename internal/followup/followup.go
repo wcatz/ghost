@@ -22,8 +22,9 @@
 // The two SUPERSEDE-side commands live here for that same reason rather than
 // beside their callers, and they are the reason this is a package and not a
 // helper file: `ReassessCommand` is printed by the creation pass (a pair the
-// graph claims in both directions) and by the repair pass (a cycle it could not
-// settle), and `WithdrawCommand` is printed per cycle edge. Three print sites
+// graph claims in both directions, and an edge it withheld a withdrawal for), by
+// the repair pass (a cycle it could not settle), and by the note that recommends
+// the gate, and `WithdrawCommand` is printed per cycle edge. Several print sites
 // between two reports, one spelling, and a project name that has to be rendered
 // as a single shell argument or the pasted command runs against the wrong
 // project.
@@ -67,20 +68,29 @@ func shellQuote(s string) string {
 }
 
 // ReassessCommand renders the project-wide supersede repair:
-// `ghost supersede <project> --reassess --apply`, with the project spelled the
-// way ResolveCommand spells it — a positional when that is one shell word, and
-// --project in single quotes when it is not.
+// `ghost supersede <project> --reassess --consensus N --apply`, with the project
+// spelled the way ResolveCommand spells it — a positional when that is one shell
+// word, and --project in single quotes when it is not.
 //
-// It exists beside ResolveCommand because the quoting is the whole risk in a
-// command that is about to be RUN, and it is decided in this package for exactly
-// that reason. Two callers need it and neither may spell it differently: the
-// creation pass's report, for a pair the graph claims in BOTH directions (#778),
-// and the repair pass's own report, for a cycle whose two edges it could not
-// settle. Both quote the APPLIED form, because --reassess without --apply is a
-// dry run that withdraws nothing, and a report that named it would advertise a
-// repair its own command cannot perform.
-func ReassessCommand(projectName string) string {
-	return "ghost supersede " + projectArg(projectName) + " --reassess --apply"
+// It is the ONLY renderer of that command, and it is not a second function beside
+// an ungated one because there is no ungated form any surface may print: #862
+// made this repair the only path in the product that deletes a live 'supersedes'
+// edge (the creation pass reports that withdrawal instead of making it), so every
+// report that names the repair names the harder-to-get-wrong form of it. The
+// ungated spelling is the command an operator types, not the one a report prints,
+// and a report that printed it would be recommending the weakest version of the
+// command that exists to repair their graph.
+//
+// The APPLIED form is here for the same reason it is on ResolveCommand:
+// --reassess without --apply is a dry run that withdraws nothing, and a report
+// that named it would advertise a repair its own command cannot perform. It was
+// once spelled by APPENDING to this renderer, which printed `--reassess --apply
+// --consensus 3 --apply`; that still PARSES (both flags are boolean), so only the
+// rendered text catches it — the reason the quoting and the flag order are
+// decided here rather than at a call site.
+func ReassessCommand(projectName string, consensus int) string {
+	return fmt.Sprintf("ghost supersede %s --reassess --consensus %d --apply",
+		projectArg(projectName), consensus)
 }
 
 // WithdrawCommand renders the withdrawal of ONE named edge:
