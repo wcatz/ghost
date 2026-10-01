@@ -3060,7 +3060,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_health",
 		Title:       "System Health",
-		Description: "Get Ghost system health: project count, memory counts, embedding coverage (Ollama reachability, model presence), memory-link stats, and memory_history growth (rows written per day, how many restate the version before them, how close the table is to the store cap, and which named memory is closest to the per-memory cap). Use when search results seem incomplete or memory features appear inactive.",
+		Description: "Get Ghost system health: project count, memory counts, embedding coverage (Ollama reachability, model presence), memory-link stats, memory_history growth (rows written per day, how many restate the version before them, how close the table is to the store cap, and which named memory is closest to the per-memory cap), and per-source retrieval figures (calls, memories kept, share of them the agent's own words used, and how many searches returned nothing). Use when search results seem incomplete or memory features appear inactive.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -3179,6 +3179,12 @@ func (s *Server) registerTools() {
 				fmt.Fprintf(&sb, "  ⚠ %s\n", warn.Detail)
 			}
 		}
+
+		// Retrieval figures (#646), additive like the block above: what was
+		// retrieved, and what the agent did with it. It goes LAST because every
+		// line above it is already something an agent or a script reads by name,
+		// and a block inserted above them would move their anchor.
+		s.writeRetrievalAuditBlock(ctx, &sb)
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},

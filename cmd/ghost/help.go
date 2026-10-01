@@ -43,7 +43,7 @@ import (
 // project named "-h".
 var helpValueFlagsByCommand = map[string]map[string]bool{
 	"backup":                    {"--out": true},
-	"context":                   {"--cwd": true, "--as-of": true},
+	"context":                   {"--cwd": true, "--as-of": true, "--project": true, "--since": true},
 	"export":                    {"--out": true, "--project": true},
 	"history":                   {"--limit": true, "--project": true, "--before": true},
 	"prune":                     {"--grace": true, "--project": true},
