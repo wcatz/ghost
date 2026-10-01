@@ -295,12 +295,18 @@ func runLifecycle() {
 // point; a `return` here is a hole in a report, and the report is read by
 // somebody deciding whether to trust what Ghost put in front of an agent.
 //
-// The file goes in a defer BEFORE the read, because it is consumed either way: a
-// refusal has read the bytes too, and leaving them for the next turn would have
-// this run compare a second session against a transcript that has been swept.
-// Unclaimed files — a child that crashed before it got here — are the sweep's
-// job instead, which is why that is a separate step above rather than a fallback
-// in here.
+// The file is removed ONLY after a read that succeeded, and only once it is known
+// to be named like a sidecar. The remove used to sit in a defer BEFORE the read,
+// on the reasoning that a refusal has read the bytes too — which meant
+// `--signals <any path>` deleted whatever it was handed, and kept deleting it
+// even when the read then refused the file as unreadable. A file this phase
+// declines to claim is left where it lies, and reclaiming it is
+// SweepSidecars' job — the separate step above, which applies the SAME name and
+// header tests plus a staleness bound, so a file neither of them claims survives
+// to the next sweep rather than being destroyed on the way past. Deleting a file
+// you have not identified is not cleanup, and this is the only destructive
+// statement in the function, which is why it carries two conditions instead of
+// one.
 func runAuditPhase(projectName, signalsPath string) {
 	skip := func(reason string) {
 		fmt.Fprintf(os.Stderr, "lifecycle: retrieval audit skipped: %s\n", reason)

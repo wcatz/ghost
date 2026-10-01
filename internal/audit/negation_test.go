@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// A memory long enough that the three-token floor and the 3/4 fraction are both
+// A memory long enough that the three-token floor and the one-third fraction are both
 // satisfiable by a sentence that genuinely discusses it, and distinctive enough
 // that a sentence about something else cannot clear the bar by accident.
 const negMemoryContent = "the go build cache lockfile directory lives under GOCACHE " +

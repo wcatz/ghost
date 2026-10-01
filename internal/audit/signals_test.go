@@ -229,7 +229,7 @@ func TestSignalsRoundTripThroughTheSidecar(t *testing.T) {
 	// Enough of the memory's own words to clear the negation arm's bar rather than
 	// merely carrying a cue — the point of the case is that the cued segment
 	// survives the round trip, and a segment under the bar would not. The bar is
-	// the SAME one the used arm applies (>=3 fingerprints and >=3/4 of the memory),
+	// the SAME one the used arm applies (>=3 fingerprints and >=a third of the memory),
 	// because a denial needs to be about the memory for the same reason a use does.
 	s.AddProse("that is wrong, the opencode plugin does not materialize its transcript under mkdtemp")
 	s.AddSaveArgs("the opencode plugin materializes its transcript under mkdtemp")

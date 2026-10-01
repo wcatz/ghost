@@ -198,7 +198,7 @@ func (s *Signals) matchesSaves(toks []string) bool {
 //
 //  1. The denial must be about this memory. The cue lives in a sentence; the
 //     sentence must share at least the SAME token bar the `used` arm uses (>=3
-//     distinct fingerprints AND >= 3/4 of the memory's tokens), not a lower
+//     distinct fingerprints AND >= a third of the memory's tokens), not a lower
 //     threshold. Two shared tokens is too loose: a memory about "cache lockfile
 //     directory" would be contradicted by any sentence mentioning two of those
 //     three words in a denial context, even when the denial is about something
