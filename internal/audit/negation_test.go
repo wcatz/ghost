@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -239,12 +240,22 @@ func TestTheGapIsAWordGapAndNotAdjacency(t *testing.T) {
 			want:  true,
 		},
 		{
-			// Two words stand between, which is one too many. A wider gap belongs to
-			// #860 rather than here — the constant is one word and this pins that it
-			// stays one word, so a later widening is a deliberate change rather than
-			// an accident nobody noticed.
-			name:  "two words between, beyond this rule's gap",
-			prose: "disregard the memory " + id,
+			// Two words stand between, which is one too many for ARBITRARY words —
+			// and these two are arbitrary, which is what this case is for. A wider gap
+			// that does admit determiners and nouns is #860 and is held by
+			// TestTheGapWidensOnlyAcrossAClosedSetOfWords, so that the constant here
+			// still pins what it pinned: one word, for anything the closed set does not
+			// name.
+			name:  "two words between, neither of them a closed-set word",
+			prose: "disregard the formatter config " + id,
+			want:  false,
+		},
+		{
+			// And the same sentence from the other side, where a THREE-word gap of
+			// arbitrary words still must not bind: the widening is worth a named set
+			// of words, not a longer distance.
+			name:  "three arbitrary words between, beyond this rule's gap",
+			prose: "ignore the formatter config entirely " + id,
 			want:  false,
 		},
 		{
@@ -281,6 +292,255 @@ func TestTheGapIsAWordGapAndNotAdjacency(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTheGapWidensOnlyAcrossAClosedSetOfWords: #860, following #858. cueGap is one
+// word, which is the right side of the trade to be on — a denial it misses is a
+// contradiction not filed, the honest direction — but one word is narrower than
+// English, because a denial routinely puts a determiner and a noun between the cue
+// and the memory it denies:
+//
+//	"Memory <id> is now obsolete"
+//	"disregard the memory <id>"
+//	"ignore the advice in <id>"
+//
+// Each of those is a genuine denial that came back `used`.
+//
+// So the gap widens, and what it widens ACROSS is the whole of the fix: a small
+// CLOSED set of words, or none at all. Widening cueGap for arbitrary words would
+// trade the miss for the false contradiction #858 exists to stop — "Per <id>, I'll
+// ignore the formatting" puts two ordinary words between an id and a cue, and they
+// are not in the set, so it stays unbound however wide the distance is.
+//
+// The fixtures carry NO memory wording, so the id arm is the only one that can
+// reach a verdict, and the negatives use the same memory as the #858 cases they
+// came from: a fixture that could pass on the fingerprint arm proves nothing about
+// a gap.
+func TestTheGapWidensOnlyAcrossAClosedSetOfWords(t *testing.T) {
+	const id = "4F3A9C1E7B2D8A6F5C0E1234AB5678EF"
+
+	// A memory whose wording appears in none of the sentences below.
+	unshared := "a memory whose wording the agent never repeated"
+
+	t.Run("a denial the closed set reaches", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			prose string
+		}{
+			{
+				// Two words between the cue and the id, both of them in the set.
+				name:  "a determiner and a noun between the cue and the id",
+				prose: "disregard the memory " + id,
+			},
+			{
+				// Three, and this is the sentence that fixes the width of the
+				// allowance: a determiner, the noun an agent actually reaches for
+				// when it means the memory, and a preposition. Two closed-set words
+				// is one too few for it, so the constant is not a rounder number.
+				name:  "a determiner, a noun and a preposition between them",
+				prose: "ignore the advice in " + id,
+			},
+			{
+				// The other direction, and the shape whose miss is on the CUE side:
+				// the cue is "is obsolete" with an adverb inside it, so it is not a
+				// run of consecutive words at all until the closed set is transparent
+				// inside a cue as well as around one. The id is adjacent here, so
+				// this isolates the cue run from the gap.
+				name:  "the cue split by a closed-set word, then the id",
+				prose: "Memory " + id + " is now obsolete",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				s := newTestSignals(t)
+				s.AddProse(tc.prose)
+				if !s.contradicts(testTokens(unshared), id) {
+					t.Errorf("contradicts = false for %q: a denial with only closed-set words between the cue and the id is not bound", tc.prose)
+				}
+			})
+		}
+	})
+
+	t.Run("a cue whose own words are not adjacent", func(t *testing.T) {
+		// "Memory <id> is now obsolete" misses on the CUE side of the same problem:
+		// the cue is "is obsolete", and an adverb stands inside it. So the closed
+		// set is transparent inside a cue run as well as around it, and the run
+		// still cannot be a word apart from any shape.
+		if !HasNegationCue("the memory is now obsolete") {
+			t.Error(`HasNegationCue("the memory is now obsolete") = false: a closed-set word inside a cue must not stop the cue matching`)
+		}
+		if HasNegationCue("the memory is very obsolete") {
+			t.Error(`HasNegationCue("the memory is very obsolete") = true, but "very" is not a closed-set word and this is not a denial construction`)
+		}
+		// And the bound itself, from the side past it: TWO closed-set words inside
+		// one cue run is more than the rule allows, so the allowance is one word
+		// rather than a run of anything in the set.
+		if HasNegationCue("the memory is now also obsolete") {
+			t.Error(`HasNegationCue("the memory is now also obsolete") = true: two closed-set words inside one cue is beyond the allowance`)
+		}
+
+		// And through to a verdict, on the fingerprint arm: the same closed-set
+		// word, with the memory's own wording beside the cue.
+		s := newTestSignals(t)
+		s.AddProse("the opencode plugin materializes its transcript under mkdtemp is now obsolete")
+		if !s.contradicts(memTokens(t), "") {
+			t.Error("a cue split by a closed-set word did not bind to the memory's own wording beside it")
+		}
+	})
+
+	t.Run("a gap the closed set does not reach", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			prose string
+		}{
+			{
+				// #858's sentence, unchanged. Two ordinary words stand between the
+				// id and the cue and neither is in the set, so the widening does not
+				// reach it.
+				name:  "a subject clause between the id and the cue",
+				prose: "Per " + id + ", I'll ignore the formatting.",
+			},
+			{
+				// The same sentence at the width of the new allowance: the cue is
+				// bound to "formatter", so the gap between the cue and the id is two
+				// words long and one of them is not in the set.
+				name:  "a determiner and a word the set does not name",
+				prose: "ignore the formatter, " + id + " covers the build",
+			},
+			{
+				// One word past the allowance, every one of them in the set. This is
+				// the case that pins the constant: a set is not an unlimited run.
+				name:  "one word past the allowance",
+				prose: "ignore the memory note in " + id,
+			},
+			{
+				// And the far side of the same edge: a gap inside the allowance that
+				// contains a word outside it is not an allowance at all.
+				name:  "inside the allowance, with a word outside the set",
+				prose: "ignore the linter advice in " + id,
+			},
+			{
+				// A subject clause is still a subject clause when a filler sits in
+				// it, which is what keeps this from being "the gap is a filler's
+				// excuse to reach anything nearby".
+				name:  "a filler and a subject between the id and the cue",
+				prose: "Per the " + id + ", I'll ignore the formatting.",
+			},
+			{
+				// THE SAME SENTENCE WITHOUT THE CONTRACTION, and the case the closed
+				// set opens on this side. "I'll" tokenises to two words and was never
+				// adjacent to the cue, so the pre-existing fixture passed the gap for a
+				// reason that had nothing to do with the rule: the words between the id
+				// and the cue were "i" and "ll", and neither is a filler. "I" is ONE
+				// word, so this sentence has exactly one word between, and whether it
+				// binds turns entirely on "now" — which is in the set, so nothing may
+				// consume it before the cue and shorten the measured distance.
+				name:  "a filler beside the cue and a subject before it",
+				prose: "Per " + id + ", I now ignore the formatting.",
+			},
+			{
+				// The same reach from the other side of the cue, and the sharpest form
+				// of it: a filler sits IMMEDIATELY before the cue, one word after a
+				// word the set does not name. Absorbing that filler moves the span's
+				// leading edge onto "memory", the gap becomes just "my", and this
+				// binds — which is why the rule is that nothing may be consumed ahead
+				// of a cue's first word, not merely that the set is small.
+				name:  "a filler immediately before the cue, past a word outside the set",
+				prose: "Per " + id + ", my memory is obsolete.",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				s := newTestSignals(t)
+				s.AddProse(tc.prose)
+				if s.contradicts(testTokens(unshared), id) {
+					t.Errorf("contradicts = true for %q: the gap between the cue and the id is not the closed set", tc.prose)
+				}
+			})
+		}
+	})
+}
+
+// TestANAdjacentFillerIsStillApartOfTheDistance: cueRun tolerates closed-set words
+// BETWEEN a cue's own words, and it must not reach round the FRONT of a cue. A
+// filler ahead of a cue is part of the distance the cue's object is measured over,
+// so consuming it moves the span's leading edge onto the filler and both consumers
+// of a span then read from the wrong position:
+//
+//   - boundToCue measures the gap to c.start, so a consumed filler shortens the gap
+//     by one word and an agreeing sentence binds. "Per <id>, I now ignore the
+//     formatting" is #858's own sentence with a contraction expanded, and it came
+//     back contradicted.
+//   - insideCue reports the filler as cue text, so boundPositions' sideward skip
+//     steps over it — and when the memory's own word IS that filler, the binding no
+//     longer reaches anything the memory holds.
+//
+// The second is the shape the closed set exists for: a memory written in Ghost's
+// own vocabulary, whose distinctive word sits beside the cue. That denial quotes
+// the memory and clears the token bar by itself, so the binding is the only thing
+// that can file it, and a filler absorbed into the cue stops exactly that. It is
+// asserted as a POSITIVE because it is one — the right answer is to deny it — and
+// it is kept here rather than filed as its own bug because both halves are the one
+// mechanism: a fix for either alone must not be allowed to look like a fix for the
+// other.
+//
+// The first half is checked on the SPANS rather than on a verdict, because that is
+// the mechanism and a verdict can be reached by the other arm: each of these has
+// exactly one cue, and it is on the cue's own first word.
+func TestANAdjacentFillerIsStillApartOfTheDistance(t *testing.T) {
+	const id = "4F3A9C1E7B2D8A6F5C0E1234AB5678EF"
+	unshared := "a memory whose wording the agent never repeated"
+
+	t.Run("the span starts on the cue, not on the filler", func(t *testing.T) {
+		cases := []struct {
+			prose string
+			want  []cueSpan
+		}{
+			// A single-word cue behind a filler. Before the fix this produced TWO
+			// spans, one of them starting on "now".
+			{prose: "now ignore the formatting", want: []cueSpan{{start: 1, end: 1}}},
+			// And a multi-word cue behind one, which is the shape that swallowed the
+			// memory's own word.
+			{prose: "in is obsolete", want: []cueSpan{{start: 1, end: 2}}},
+			{prose: "the note is stale", want: []cueSpan{{start: 2, end: 3}}},
+		}
+		for _, tc := range cases {
+			got := cueSpans(splitWords(tc.prose))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("cueSpans(%q) = %v, want %v: the span's leading edge is the cue's first word, never a filler ahead of it",
+					tc.prose, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("and it does not shorten the gap", func(t *testing.T) {
+		// #858's own sentence with the contraction expanded. One word stands
+		// between the id and the cue and it is not a filler, so this is unbound.
+		s := newTestSignals(t)
+		s.AddProse("Per " + id + ", I now ignore the formatting.")
+		if s.contradicts(testTokens(unshared), id) {
+			t.Error("a filler before the cue was consumed, shortening the gap to one word and filing agreement as a contradiction")
+		}
+	})
+
+	t.Run("nor hide the word the memory's own wording supplies", func(t *testing.T) {
+		// A memory written in Ghost's own vocabulary, so the word beside the cue IS
+		// one of the memory's tokens. The denial quotes the memory and clears the
+		// token bar on its own; the binding is what carries it.
+		mem := "the entry that records weekly releases"
+		toks := testTokens(mem)
+
+		s := newTestSignals(t)
+		s.AddProse("that entry is obsolete, we discussed weekly releases earlier")
+		if !s.matches(toks) {
+			t.Fatal("the fixture does not clear the token arm's bar, so it proves nothing about the binding")
+		}
+		if !s.contradicts(toks, "") {
+			t.Error("the memory's own word beside the cue was stepped over, so a genuine denial of it was not filed")
+		}
+	})
 }
 
 // TestACueIsMatchedAsWholeWords: every cue is a run of WORDS, and the two that
