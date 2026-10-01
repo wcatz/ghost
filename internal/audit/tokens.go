@@ -242,6 +242,13 @@ var negationCueWords = func() [][]string {
 // denial it misses is a contradiction that is not filed, which is the honest
 // direction (see splitWords), while one it admits is ordinary use reported to an
 // operator as a finding.
+//
+// The count is of words STANDING BETWEEN, so boundToCue tests c.start-cueGap-1 and
+// c.end+cueGap+1. The extra 1 on each side is the cue's own edge, not slack: a
+// bound written as c.end+cueGap reads as "cueGap words may separate them" and
+// admits none, which silently drops "ignore memory <id>" — the construction this
+// constant exists for — while the comment above still claims it.
+// TestTheGapIsAWordGapAndNotAdjacency holds the sentence rather than the formula.
 const cueGap = 1
 
 // isDistinctive is whether a word is one this package would fingerprint.
@@ -287,17 +294,21 @@ func boundPositions(words []string, cues []cueSpan) []int {
 		out = append(out, i)
 	}
 	for _, c := range cues {
-		for i := c.start; i <= c.end; i++ {
-			mark(i)
-		}
+		// Only what lies BESIDE the cue, never the cue's own words: they are
+		// ordinary tokens ("ignore", "stale", "wrong", "superseded" all clear
+		// minTokenLen and none is a stopword), so recording them lets a memory whose
+		// wording happens to contain one of them satisfy the binding while the cue
+		// is bound to something else entirely — the agent denied the changelog and
+		// quoted the memory, and the memory was filed contradicted for agreeing
+		// (TestTheCuesOwnWordsAreNotWhatACueIsBoundTo).
 		for i := c.start - 1; i >= 0; i-- {
-			if isDistinctive(words[i]) {
+			if isDistinctive(words[i]) && !insideCue(i, cues) {
 				mark(i)
 				break
 			}
 		}
 		for i := c.end + 1; i < len(words); i++ {
-			if isDistinctive(words[i]) {
+			if isDistinctive(words[i]) && !insideCue(i, cues) {
 				mark(i)
 				break
 			}
@@ -305,6 +316,21 @@ func boundPositions(words []string, cues []cueSpan) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// insideCue reports whether the word at position i is part of one of these cues.
+//
+// Distinct from boundToCue, which asks how far a cue reaches: this asks only
+// whether the position is a cue's own text, so a sideward skip can step over a
+// second cue in the same sentence ("the changelog is wrong, ignore the docs") and
+// land on the word that cue is actually about.
+func insideCue(i int, cues []cueSpan) bool {
+	for _, c := range cues {
+		if i >= c.start && i <= c.end {
+			return true
+		}
+	}
+	return false
 }
 
 // cueSpan is where one cue sits in a sentence: the range of word positions it
@@ -347,7 +373,9 @@ func cueSpans(words []string) []cueSpan {
 // distance is what filed an agent's agreement as a contradiction.
 func boundToCue(i int, cues []cueSpan) bool {
 	for _, c := range cues {
-		if i >= c.start-cueGap && i <= c.end+cueGap {
+		// -1 and +1 for the cue's own extent, so cueGap counts the words BETWEEN
+		// rather than the positions either side of it (see cueGap).
+		if i >= c.start-cueGap-1 && i <= c.end+cueGap+1 {
 			return true
 		}
 	}

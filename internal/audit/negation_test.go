@@ -204,6 +204,85 @@ func TestACueIsBoundToTheMemoryItDenies(t *testing.T) {
 	}
 }
 
+// TestTheGapIsAWordGapAndNotAdjacency: cueGap is documented as how many WORDS may
+// stand between a cue and the id it denies, and named for "ignore memory <id>" —
+// a noun between the cue and the id. A bound test that reads the formula rather
+// than the sentence lets the constant mean adjacency instead, and then the id arm
+// silently loses that denial while the comment still claims it.
+//
+// The fixtures carry NO memory wording on purpose. With wording in them the
+// fingerprint arm reaches the verdict too, so the test would pass on an id arm
+// that binds nothing at all — which is exactly how the pre-existing fixture kept
+// passing while this was broken.
+func TestTheGapIsAWordGapAndNotAdjacency(t *testing.T) {
+	const id = "4F3A9C1E7B2D8A6F5C0E1234AB5678EF"
+
+	// A memory whose wording appears in none of these sentences, so the id arm is
+	// the only one that can reach a verdict.
+	unshared := "a memory whose wording the agent never repeated"
+
+	cases := []struct {
+		name  string
+		prose string
+		want  bool
+	}{
+		{
+			name:  "a noun between the cue and the id",
+			prose: "Ignore memory " + id + ".",
+			want:  true,
+		},
+		{
+			// The same gap on the other side of the cue: "is obsolete" is the cue
+			// and one word stands between it and the id.
+			name:  "a noun between the id and the cue",
+			prose: id + " memory is obsolete",
+			want:  true,
+		},
+		{
+			// Two words stand between, which is one too many. A wider gap belongs to
+			// #860 rather than here — the constant is one word and this pins that it
+			// stays one word, so a later widening is a deliberate change rather than
+			// an accident nobody noticed.
+			name:  "two words between, beyond this rule's gap",
+			prose: "disregard the memory " + id,
+			want:  false,
+		},
+		{
+			name:  "the cue beside the id",
+			prose: "ignore " + id,
+			want:  true,
+		},
+		{
+			name:  "the cue after the id",
+			prose: id + " is false",
+			want:  true,
+		},
+		{
+			name:  "a determiner between the id and the cue",
+			prose: "memory " + id + " is wrong",
+			want:  true,
+		},
+		{
+			// The sentence the whole rule exists for. Two words stand between the
+			// id and the cue, and the gap is one, so this must stay unbound however
+			// the constant is spelled.
+			name:  "two words between, an agreeing subject",
+			prose: "Per " + id + ", I'll ignore the formatting.",
+			want:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestSignals(t)
+			s.AddProse(tc.prose)
+			if got := s.contradicts(testTokens(unshared), id); got != tc.want {
+				t.Errorf("contradicts = %v for %q, want %v", got, tc.prose, tc.want)
+			}
+		})
+	}
+}
+
 // TestACueIsMatchedAsWholeWords: every cue is a run of WORDS, and the two that
 // read as words — "ignore" and "is false" — are also the two a substring match
 // finds inside ordinary ones ("ignored", "ignores", "falsehood", "falsely").
@@ -230,6 +309,109 @@ func TestACueIsMatchedAsWholeWords(t *testing.T) {
 		if HasNegationCue("the " + glued + " of that thing") {
 			t.Errorf("HasNegationCue matched %q inside %q, which denies nothing", cue, glued)
 		}
+	}
+}
+
+// TestTheCuesOwnWordsAreNotWhatACueIsBoundTo: a cue's own words are ordinary
+// tokens — "ignore", "stale", "wrong", "superseded" all clear minTokenLen and none
+// is a stopword — so holding them beside the memory's wording lets the memory's
+// OWN CUE WORDS satisfy the binding. The agent then denies the changelog, quotes
+// the memory, and the memory is filed contradicted for agreeing.
+//
+// The memory below contains "is false", which is why it is the right fixture: the
+// sentence's cue and the memory's wording are the same two words, and nothing about
+// the sentence binds the cue to the memory. The intervening words are what make the
+// bar reachable at all — three-plus memory tokens and a third of them — so removing
+// the binding has to be what stops this, and it has to stop it while the bar still
+// holds.
+func TestTheCuesOwnWordsAreNotWhatACueIsBoundTo(t *testing.T) {
+	// One case per cue the reviewer named. Each memory's wording CONTAINS the cue
+	// the sentence uses, and in each the sentence's cue is about something else, so
+	// the only thing that could bind the two is the cue's own text.
+	//
+	// "notes aside" is what makes these the case they claim to be: it puts a word
+	// the memory does not contain on the far side of the cue, so the sideward skip
+	// settles there and NOTHING else in the sentence is bound to the cue. Without
+	// it the skip reaches a memory word on its own, the cue really is bound to the
+	// memory, and the fixture would pass on a binding that is too loose.
+	//
+	// The rest of each sentence quotes enough of the memory to clear the bar —
+	// three-plus tokens and a third of them — so removing the binding has to be
+	// what stops them, and it has to stop them while the bar still holds.
+	cases := []struct {
+		name  string
+		mem   string
+		prose string
+	}{
+		{
+			name:  "the memory says is false, the sentence denies the summary with it",
+			mem:   "the ghostctl stale lockfile directory is false weekly",
+			prose: "the summary is false, notes aside ghostctl stale lockfile directory weekly entries",
+		},
+		{
+			name:  "the memory says is obsolete, the sentence denies the summary with it",
+			mem:   "the ghostctl lockfile directory is obsolete weekly",
+			prose: "the summary is obsolete, notes aside ghostctl lockfile directory weekly entries",
+		},
+		{
+			name:  "the memory says wrong, the sentence denies it with wrong",
+			mem:   "the changelog entry that says wrong weekly",
+			prose: "that is wrong, notes aside the changelog entry weekly lines",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			toks := testTokens(tc.mem)
+			s := newTestSignals(t)
+			s.AddProse(tc.prose)
+			if !s.matches(toks) {
+				t.Fatal("the fixture does not clear the token arm's bar, so it proves nothing about the binding")
+			}
+			if s.contradicts(toks, "") {
+				t.Error("the memory's own cue word satisfied the binding; the cue was bound to the summary")
+			}
+		})
+	}
+
+	// The other edge, on one of them: the same words with a memory word actually
+	// beside the cue ARE a denial, so the fix cannot be "drop the condition".
+	const mem = "the ghostctl stale lockfile directory is false weekly, vendored packaging needs it"
+	toks := testTokens(mem)
+	near := newTestSignals(t)
+	near.AddProse("the ghostctl stale lockfile directory is false weekly")
+	if !near.contradicts(toks, "") {
+		t.Error("a memory's own wording beside the cue is not a denial")
+	}
+}
+
+// TestASidewardSkipStepsOverASecondCue: a sentence can carry two cues, and the
+// skip that finds what the first one is about lands on the second one's own text
+// ("the changelog is wrong, ignore the vendored docs" — "is wrong" is about the
+// changelog, and the first distinctive word after it is "ignore"). "ignore" is a
+// token like any other, so recording it binds the first cue to a memory whose
+// wording happens to say "ignore", which is the same false contradiction as
+// TestTheCuesOwnWordsAreNotWhatACueIsBoundTo reached by a different route.
+//
+// The memory says "ignore" and the sentence says "ignore", and neither is about the
+// other — which is why this is checked separately from the cue's own words: the
+// skip has to step over a cue it finds, not merely start after one.
+func TestASidewardSkipStepsOverASecondCue(t *testing.T) {
+	// The memory's first token is "ignore", and the sentence's SECOND cue is
+	// "ignore" — so a skip that stops there binds the first cue to a word it is not
+	// about, and nothing else in the sentence binds it at all ("changelog" and
+	// "vendored" are in no memory).
+	const mem = "ignore the stale ghostctl cache directory weekly"
+	toks := testTokens(mem)
+
+	s := newTestSignals(t)
+	s.AddProse("the changelog is wrong, ignore the vendored docs, " +
+		"and the stale ghostctl cache directory weekly is fine")
+	if !s.matches(toks) {
+		t.Fatal("the fixture does not clear the token arm's bar, so it proves nothing about the skip")
+	}
+	if s.contradicts(toks, "") {
+		t.Error("a sideward skip landed on a second cue's own word and bound the first cue to the memory")
 	}
 }
 
