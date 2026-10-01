@@ -261,7 +261,7 @@ func TestSweepOnce_AProjectWithNoWorkDoesNotEndTheTick(t *testing.T) {
 	worker.SweepOnce(context.Background())
 
 	if len(store.embeddings["proj-b-mem"]) == 0 {
-		t.Errorf("a project with nothing pending ended the tick: proj-b was never embedded, "+
+		t.Errorf("a project with nothing pending ended the tick: proj-b was never embedded, " +
 			"because a probe that missed its deadline on an empty project was read as a dead endpoint")
 	}
 }
@@ -355,6 +355,7 @@ func TestProbe_DistinguishesAnOutageFromASlowMachine(t *testing.T) {
 //     is ~100x a loopback round trip and 4x under the shipped 2s (a value this
 //     repository itself documents as routinely missed under load), so the suite
 //     stays seconds rather than minutes.
+//
 // A value left behind is a value inherited: aliveProbeTimeout is
 // package-global, so a test that lowers it and does not put it back narrows every
 // LATER test in the package too, and `-shuffle=on` would make that a coin toss
